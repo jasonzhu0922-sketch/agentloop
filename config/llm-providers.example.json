@@ -1,0 +1,19 @@
+{
+  "defaultProvider": "my-provider",
+  "providers": {
+    "my-provider": {
+      "kind": "openai-compatible",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKeyEnv": "MY_LLM_API_KEY",
+      "defaultModel": "deepseek-v4-flash",
+      "contextWindowTokens": 128000,
+      "maxOutputTokens": 8192,
+      "timeoutMs": 120000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
+      "toolChoiceMode": "constrained-as-auto",
+      "runtimeContextPlacement": "system",
+      "protocol": "chat-completions"
+    }
+  }
+}

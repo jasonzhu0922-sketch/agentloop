@@ -1,0 +1,53 @@
+{
+  "schema_version": "role-contract-showcase-v1",
+  "passed": true,
+  "topic": "Cooling the Last 5 Degrees: Urban Heat Resilience Pilot",
+  "gallery": "examples/v0.9_full_deck_taste_grammar_gallery.pptx",
+  "editable_slide_count": 64,
+  "grammars": [
+    {
+      "label": "Answer Pyramid",
+      "preset": "arctic-minimal"
+    },
+    {
+      "label": "Evidence Plate",
+      "preset": "lab-report"
+    },
+    {
+      "label": "Care Pathway",
+      "preset": "executive-clinical"
+    },
+    {
+      "label": "Editorial Spread",
+      "preset": "editorial-minimal"
+    },
+    {
+      "label": "Thesis Stage",
+      "preset": "sunset-investor"
+    },
+    {
+      "label": "Operating Grid",
+      "preset": "lavender-ops"
+    },
+    {
+      "label": "Public Docket",
+      "preset": "warm-terracotta"
+    },
+    {
+      "label": "Telemetry Canvas",
+      "preset": "midnight-neon"
+    }
+  ],
+  "contact_sheets": {
+    "narrative_structures": "examples/v0.9_narrative_structures.jpg",
+    "evidence_data_structures": "examples/v0.9_evidence_data_structures.jpg",
+    "decisions_sources": "examples/v0.9_decisions_sources.jpg"
+  },
+  "design_qa": "transient-build/design_rules_qa.json",
+  "design_issue_count": 0,
+  "placeholder_hits": [],
+  "visual_review": "examples/v0.9_full_deck_taste_grammar_visual_review.json",
+  "visual_review_passed": true,
+  "visual_review_warning_count": 0,
+  "contact_sheet_warning_count": 0
+}

@@ -1,0 +1,13 @@
+.env
+config/llm-providers.json
+coverage/
+data/
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.agentloop/
+.workspace/
+outputs/
+pkcs11.txt
