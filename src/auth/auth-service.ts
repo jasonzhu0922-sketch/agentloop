@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import type { AppDatabase } from "../storage/database.ts";
+import type { SqlConnection } from "../storage/connection.ts";
+import { AuthRepository } from "../storage/repositories/auth-repository.ts";
 import { badRequest, conflict, unauthenticated } from "../shared/errors.ts";
 
 const scrypt = promisify(scryptCallback);
@@ -20,23 +21,12 @@ export interface AuthResult {
   readonly expiresAt: number;
 }
 
-interface UserRow {
-  id: string;
-  email: string;
-  password_hash: string;
-}
-
-interface SessionUserRow {
-  id: string;
-  email: string;
-}
-
 export class AuthService {
-  private readonly database: AppDatabase;
+  private readonly repository: AuthRepository;
   private readonly sessionTtlMs: number;
 
-  constructor(database: AppDatabase, sessionTtlMs = 7 * 24 * 60 * 60 * 1000) {
-    this.database = database;
+  constructor(database: SqlConnection, sessionTtlMs = 7 * 24 * 60 * 60 * 1000) {
+    this.repository = new AuthRepository(database);
     this.sessionTtlMs = sessionTtlMs;
   }
 
@@ -47,9 +37,7 @@ export class AuthService {
     const id = randomUUID();
     const now = Date.now();
     try {
-      this.database.raw
-        .prepare("INSERT INTO users(id, email, password_hash, created_at) VALUES (?, ?, ?, ?)")
-        .run(id, email, passwordHash, now);
+      this.repository.insertUser({ id, email, passwordHash, createdAt: now });
     } catch (error) {
       if (String(error).includes("UNIQUE constraint failed")) throw conflict("Email is already registered");
       throw error;
@@ -60,9 +48,7 @@ export class AuthService {
   async login(emailInput: unknown, passwordInput: unknown): Promise<AuthResult> {
     const email = normalizeEmail(emailInput);
     if (typeof passwordInput !== "string") throw unauthenticated("Invalid email or password");
-    const row = this.database.raw
-      .prepare("SELECT id, email, password_hash FROM users WHERE email = ?")
-      .get(email) as UserRow | undefined;
+    const row = this.repository.findByEmail(email);
     if (row === undefined || !(await verifyPassword(passwordInput, row.password_hash))) {
       throw unauthenticated("Invalid email or password");
     }
@@ -72,32 +58,26 @@ export class AuthService {
   authenticate(token: string | undefined): AuthenticatedUser {
     if (token === undefined || token.length < 20) throw unauthenticated();
     const tokenHash = hashToken(token);
-    const row = this.database.raw
-      .prepare(`
-        SELECT users.id, users.email
-        FROM auth_sessions
-        JOIN users ON users.id = auth_sessions.user_id
-        WHERE auth_sessions.token_hash = ? AND auth_sessions.expires_at > ?
-      `)
-      .get(tokenHash, Date.now()) as SessionUserRow | undefined;
+    const row = this.repository.findSessionUser(tokenHash, Date.now());
     if (row === undefined) throw unauthenticated("Session is invalid or expired");
     return { id: row.id, email: row.email };
   }
 
   revoke(token: string): void {
-    this.database.raw.prepare("DELETE FROM auth_sessions WHERE token_hash = ?").run(hashToken(token));
+    this.repository.deleteSessionByTokenHash(hashToken(token));
   }
 
   private issueSession(user: AuthenticatedUser): AuthResult {
     const token = randomBytes(SESSION_TOKEN_BYTES).toString("base64url");
     const now = Date.now();
     const expiresAt = now + this.sessionTtlMs;
-    this.database.raw
-      .prepare(`
-        INSERT INTO auth_sessions(id, user_id, token_hash, expires_at, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `)
-      .run(randomUUID(), user.id, hashToken(token), expiresAt, now);
+    this.repository.insertSession({
+      id: randomUUID(),
+      userId: user.id,
+      tokenHash: hashToken(token),
+      expiresAt,
+      createdAt: now,
+    });
     return { user, token, expiresAt };
   }
 }

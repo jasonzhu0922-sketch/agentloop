@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AppDatabase } from "../storage/database.ts";
+import type { SqlConnection } from "../storage/connection.ts";
 import { AppError } from "../shared/errors.ts";
 import type { PlanProposal, PlanRevisionAssessment } from "../planning/contracts.ts";
 import type { RecoveryDecisionKind, RecoveryDecisionProposal } from "./recovery-planning.ts";
@@ -64,20 +64,20 @@ interface RecoveryStateRow {
 }
 
 export class RecoveryRepository {
-  private readonly database: AppDatabase;
+  private readonly database: SqlConnection;
 
-  constructor(database: AppDatabase) {
+  constructor(database: SqlConnection) {
     this.database = database;
   }
 
   state(runId: string): RunRecoveryState | undefined {
-    const row = this.database.raw.prepare("SELECT * FROM run_recovery_states WHERE run_id = ?")
+    const row = this.database.prepare("SELECT * FROM run_recovery_states WHERE run_id = ?")
       .get(runId) as RecoveryStateRow | undefined;
     return row === undefined ? undefined : toRecoveryState(row);
   }
 
   list(runId: string): RecoveryDecisionRecord[] {
-    const rows = this.database.raw.prepare(`
+    const rows = this.database.prepare(`
       SELECT * FROM recovery_decisions WHERE run_id = ? ORDER BY created_at, id
     `).all(runId) as unknown as DecisionRow[];
     return rows.map(toDecisionRecord);
@@ -87,7 +87,7 @@ export class RecoveryRepository {
     const now = Date.now();
     const id = randomUUID();
     this.database.transaction(() => {
-      const action = this.database.raw.prepare(`
+      const action = this.database.prepare(`
         SELECT run_id, state, revision FROM runtime_actions WHERE id = ?
       `).get(proposal.actionId) as { run_id: string; state: string; revision: number } | undefined;
       if (action === undefined || action.run_id !== runId) throw new AppError("NOT_FOUND", "Recovery Action not found", 404);
@@ -97,11 +97,11 @@ export class RecoveryRepository {
       if (action.revision !== proposal.expectedActionRevision) {
         throw new AppError("CONFLICT", "Recovery Action revision changed before decision submission", 409);
       }
-      const unresolved = this.database.raw.prepare(`
+      const unresolved = this.database.prepare(`
         SELECT id FROM recovery_decisions WHERE action_id = ? AND state = 'submitted' LIMIT 1
       `).get(proposal.actionId) as { id: string } | undefined;
       if (unresolved !== undefined) throw new AppError("CONFLICT", "Recovery Action already has a current decision", 409);
-      this.database.raw.prepare(`
+      this.database.prepare(`
         INSERT INTO recovery_decisions(
           id, run_id, action_id, expected_action_revision, decision, rationale,
           evidence_refs_json, plan_revision_json, question, state, created_at
@@ -133,7 +133,7 @@ export class RecoveryRepository {
     const now = Date.now();
     this.database.transaction(() => {
       const decision = this.requireRow(decisionId);
-      const action = this.database.raw.prepare(`SELECT state, revision FROM runtime_actions WHERE id = ?`)
+      const action = this.database.prepare(`SELECT state, revision FROM runtime_actions WHERE id = ?`)
         .get(decision.action_id) as { state: string; revision: number } | undefined;
       if (
         decision.state !== "submitted"
@@ -142,14 +142,14 @@ export class RecoveryRepository {
       ) {
         throw new AppError("CONFLICT", "Recovery facts changed before decision admission", 409);
       }
-      this.database.raw.prepare(`
+      this.database.prepare(`
         UPDATE recovery_decisions SET state = 'admitted', resolved_at = ? WHERE id = ? AND state = 'submitted'
       `).run(now, decisionId);
       if (state === undefined) {
-        this.database.raw.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
+        this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
           .run(decision.run_id, decision.action_id);
       } else {
-        this.database.raw.prepare(`
+        this.database.prepare(`
           INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
           VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(run_id) DO UPDATE SET
@@ -170,7 +170,7 @@ export class RecoveryRepository {
     const now = Date.now();
     this.database.transaction(() => {
       const decision = this.requireRow(decisionId);
-      const result = this.database.raw.prepare(`
+      const result = this.database.prepare(`
         UPDATE recovery_decisions
         SET state = 'rejected', rejection_code = ?, resolved_at = ?
         WHERE id = ? AND state = 'submitted'
@@ -192,24 +192,24 @@ export class RecoveryRepository {
     const now = Date.now();
     let actionId = "";
     this.database.transaction(() => {
-      const state = this.database.raw.prepare(`
+      const state = this.database.prepare(`
         SELECT state, action_id FROM run_recovery_states WHERE run_id = ?
       `).get(runId) as { state: RunRecoveryStateKind; action_id: string } | undefined;
       if (state?.state !== "waiting_user") {
         throw new AppError("CONFLICT", "Run is not waiting for a user recovery response", 409);
       }
-      const action = this.database.raw.prepare(`
+      const action = this.database.prepare(`
         SELECT state FROM runtime_actions WHERE id = ? AND run_id = ?
       `).get(state.action_id, runId) as { state: string } | undefined;
       if (action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Recovery Action is no longer available", 409);
       }
       actionId = state.action_id;
-      this.database.raw.prepare(`
+      this.database.prepare(`
         INSERT INTO recovery_user_responses(id, run_id, action_id, response, created_at)
         VALUES (?, ?, ?, ?, ?)
       `).run(id, runId, actionId, response, now);
-      this.database.raw.prepare(`
+      this.database.prepare(`
         UPDATE run_recovery_states
         SET state = 'waiting_recovery', question = NULL, updated_at = ?
         WHERE run_id = ? AND state = 'waiting_user' AND action_id = ?
@@ -222,16 +222,16 @@ export class RecoveryRepository {
   beginResume(runId: string, actionId: string): void {
     const now = Date.now();
     this.database.transaction(() => {
-      const state = this.database.raw.prepare(`
+      const state = this.database.prepare(`
         SELECT state, action_id FROM run_recovery_states WHERE run_id = ?
       `).get(runId) as { state: RunRecoveryStateKind; action_id: string } | undefined;
-      const action = this.database.raw.prepare(`
+      const action = this.database.prepare(`
         SELECT state FROM runtime_actions WHERE id = ? AND run_id = ?
       `).get(actionId, runId) as { state: string } | undefined;
       if (state?.state !== "ready_to_resume" || state.action_id !== actionId || action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Run is not ready to resume this Recovery Action", 409);
       }
-      this.database.raw.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
+      this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
         .run(runId, actionId);
       this.appendEvent(runId, "recovery.resume_started", { actionId }, now);
     });
@@ -240,13 +240,13 @@ export class RecoveryRepository {
   restoreRecovery(runId: string, actionId: string, reason: string): void {
     const now = Date.now();
     this.database.transaction(() => {
-      const action = this.database.raw.prepare(`
+      const action = this.database.prepare(`
         SELECT state FROM runtime_actions WHERE id = ? AND run_id = ?
       `).get(actionId, runId) as { state: string } | undefined;
       if (action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Recovery Action is no longer available", 409);
       }
-      this.database.raw.prepare(`
+      this.database.prepare(`
         INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
         VALUES (?, 'waiting_recovery', ?, NULL, ?)
         ON CONFLICT(run_id) DO UPDATE SET
@@ -258,7 +258,7 @@ export class RecoveryRepository {
   }
 
   userResponses(runId: string): RecoveryUserResponse[] {
-    const rows = this.database.raw.prepare(`
+    const rows = this.database.prepare(`
       SELECT id, run_id, action_id, response, created_at
       FROM recovery_user_responses WHERE run_id = ? ORDER BY created_at, id
     `).all(runId) as unknown as Array<{
@@ -285,7 +285,7 @@ export class RecoveryRepository {
       if (decision.state !== "submitted" || decision.decision !== "revise_plan") {
         throw new AppError("CONFLICT", "Plan revision assessment requires a submitted revise_plan decision", 409);
       }
-      this.database.raw.prepare(`
+      this.database.prepare(`
         INSERT INTO plan_revision_assessments(
           id, recovery_decision_id, plan_id, approved, feedback, evidence_refs_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -317,7 +317,7 @@ export class RecoveryRepository {
   }
 
   planRevisionAssessments(runId: string): PlanRevisionAssessmentRecord[] {
-    const rows = this.database.raw.prepare(`
+    const rows = this.database.prepare(`
       SELECT assessments.id, assessments.recovery_decision_id, assessments.plan_id,
              assessments.approved, assessments.feedback, assessments.evidence_refs_json,
              assessments.created_at
@@ -345,17 +345,17 @@ export class RecoveryRepository {
   }
 
   private requireRow(id: string): DecisionRow {
-    const row = this.database.raw.prepare("SELECT * FROM recovery_decisions WHERE id = ?")
+    const row = this.database.prepare("SELECT * FROM recovery_decisions WHERE id = ?")
       .get(id) as DecisionRow | undefined;
     if (row === undefined) throw new AppError("NOT_FOUND", "Recovery decision not found", 404);
     return row;
   }
 
   private appendEvent(runId: string, type: string, data: Readonly<Record<string, unknown>>, createdAt: number): void {
-    const sequence = this.database.raw.prepare(
+    const sequence = this.database.prepare(
       "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?",
     ).get(runId) as { seq: number };
-    this.database.raw.prepare(`
+    this.database.prepare(`
       INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(runId, sequence.seq, type, JSON.stringify(data), createdAt);

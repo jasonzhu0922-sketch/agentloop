@@ -3,7 +3,8 @@ import { AppError, badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
-import { formatAvailableSkills, formatLoadedSkill } from "../skills/skill-context.ts";
+import { operationProfileCatalogForPlanning } from "../runtime/operation-profiles.ts";
+import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type {
   PlanProposal,
   PlanStepProposal,
@@ -53,22 +54,46 @@ const SUBMIT_PLAN_TOOL = {
   },
 } as const;
 
-const LOAD_SKILL_TOOL = {
-  name: "load_skill",
-  description: [
-    "Load the exact authorized Skill instructions when the task matches an entry in available_skills.",
-    "The returned Skill body and its relative-path base become the authoritative workflow context for planning.",
-  ].join(" "),
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["name"],
-    properties: { name: { type: "string" } },
-  },
+const MAX_PLANNING_ATTEMPTS = 2;
+const PLANNING_MAX_OUTPUT_TOKENS = 8_192;
+const STEP_GRANULARITY_GUIDANCE = {
+  stepContract: [
+    "One Plan step is one assessable operation unit with one dominant work phase.",
+    "A step may use multiple tools only when they serve the same phase and produce the same evidence boundary.",
+    "Every step must be small enough that its success criteria can be assessed without continuing into a different phase.",
+  ],
+  splitWhen: [
+    "Discovery, extraction, or reverse engineering is needed before production.",
+    "Data source profiling, extraction-program authoring, extraction execution, report writing, or verification each needs its own success evidence.",
+    "The task creates or modifies a reusable artifact and then verifies it.",
+    "Different success evidence is needed for source understanding, artifact creation, and verification.",
+    "The objective contains a chain such as read/reconstruct/confirm/write/verify or inspect/build/test.",
+  ],
+  mergeOnlyWhen: [
+    "The work is a tiny one-off direct answer or direct deliverable and verification is a local check of that same artifact.",
+    "No intermediate evidence, script, source profile, or downstream deliverable needs to be reused by another step.",
+  ],
+  recommendedPatterns: [
+    {
+      when: "turn prior evidence or analysis into a reusable script, workflow, or tool",
+      steps: [
+        "extract_contract_or_spec",
+        "author_reusable_artifact",
+        "verify_reusable_artifact",
+      ],
+    },
+    {
+      when: "analyze data and write a report from reusable evidence",
+      steps: [
+        "profile_data_source",
+        "author_extraction_program",
+        "run_extraction_program",
+        "write_report_from_evidence",
+        "verify_report_or_outputs",
+      ],
+    },
+  ],
 } as const;
-
-const MAX_PLANNING_ATTEMPTS = 3;
-const MAX_PLANNING_TURNS = 8;
 
 export class ModelPlanner implements Planner {
   private readonly model: ModelAdapter;
@@ -79,37 +104,69 @@ export class ModelPlanner implements Planner {
 
   async plan(task: TaskSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanProposal> {
     const messages: ModelInvocation["messages"] = [
+      ...(task.conversationHistory ?? []),
       { role: "user", content: task.input },
     ];
-    const availableByName = new Map(task.availableSkills.map((skill) => [skill.name, skill]));
-    const loadedSkillIds = new Set<string>();
-    const tools = task.availableSkills.length === 0
-      ? [SUBMIT_PLAN_TOOL]
-      : [LOAD_SKILL_TOOL, SUBMIT_PLAN_TOOL];
     const systemPrompt = [
       "You are the planning phase of a plan-first agent runtime.",
       "You do not execute the task and you cannot declare completion.",
-      "Only the Skill catalog is initially visible. When a Skill matches the task, call load_skill and read its exact body before selecting or binding it.",
-      "Do not call load_skill and submit_plan in the same response: Skill instructions must be observed before the Plan is authored.",
-      "After all relevant Skills are loaded, return exactly one submit_plan tool call and no other tool call.",
+      "Use only the Skill catalog summaries to choose relevant Skills or none.",
+      "Use the available Tool descriptions to decide whether requested artifacts can actually be produced in this Run.",
+      "Return exactly one submit_plan tool call and no other tool call.",
       "Select only relevant Skills. Bind every selected Skill to at least one concrete step.",
       "Build an acyclic dependency graph. Tool names and IDs must come from the supplied catalogs.",
       "Each step needs observable success criteria. Do not copy the Skill body into step prose and do not put the Plan in prose.",
-      "Every step must include the tools needed to prove its own success criteria. Do not defer a written artifact's required read-back or content verification to a later step, because a later step cannot retroactively make the current step admissible.",
+      "Every step must include the tools needed to prove its own success criteria.",
+      "Use the operation profile catalog in the planning context to shape each step's working method. Profiles are generic operation disciplines, not business-domain instructions.",
+      "Before calling submit_plan, choose the smallest dependency-linked operation units using the stepGranularity guidance in the planning context.",
+      "Keep each step as one bounded operation unit. Split discovery/extraction, production/writing, and verification/comparison into dependency-linked steps when they need different evidence or tool phases.",
+      "When the task asks to convert prior work, analysis evidence, or source material into a reusable script, workflow, or tool, plan separate steps for extracting the reusable contract, authoring the artifact, and verifying it.",
+      "For data-analysis work, plan for structured extraction evidence rather than repeated raw stdout dumps or a success criterion that requires all raw cells/rows.",
+      "For data-to-report work over files or bulk data, default to separate steps for source profiling, extraction-program authoring when needed, extraction execution, report writing, and verification.",
+      "Keep extraction and writing boundaries explicit: an extraction step must not produce the final report, and the writing step must consume the extraction artifact rather than re-read or re-dump the source data.",
+      "A source-profiling step should identify files/sheets/tables/fields/ranges/counts only; a later extraction execution step should produce the reusable evidence artifact.",
+      "Do not plan file, image, PDF, or other artifact creation unless a writable, render, generation, or command Tool is available.",
+      "Do not create a Plan step whose objective is only to load, activate, fetch, retrieve, or read a Skill.",
+      "Skill loading is Runtime preparation for a Skill-bound user-deliverable step; bind the Skill to the concrete work step that uses it.",
       "Keep the Plan scoped to the user's requested deliverable. Do not add optional polish, critique, or follow-up work as a separate terminal step unless the user explicitly requested it or it is necessary to prove a stated success criterion. Fold required quality checks into the step that produces the deliverable.",
+      "Prefer the smallest valid Plan. Fold one-off discovery or verification into a production step instead of creating a separate exploration-only step unless the discovery itself is the deliverable.",
+      ...(task.responseOnly ? [
+        "This is a conversational reply, not an execution request. Create exactly one response step.",
+        "The response step must select no Skills and require no Tools. It answers only the latest user message and must not resume, modify, or repeat prior work.",
+      ] : []),
     ].filter(Boolean).join("\n\n");
     let lastError = new AppError("PLANNING_ERROR", "Planner did not produce a valid Plan", 422);
     let planningAttempts = 0;
     let runtimeDirective: string | undefined;
-    for (let turn = 1; turn <= MAX_PLANNING_TURNS; turn += 1) {
+    await emit?.({
+      type: "planning.started",
+      data: {
+        availableSkillCount: task.availableSkills.length,
+        availableToolCount: task.availableToolNames.length,
+      },
+    });
+    for (let turn = 1; turn <= MAX_PLANNING_ATTEMPTS; turn += 1) {
+      const turnRuntimeDirective = runtimeDirective;
+      await emit?.({
+        type: "planning.turn.started",
+        data: {
+          turn,
+          loadedSkillCount: 0,
+          pendingSkillCount: 0,
+          hasRuntimeDirective: turnRuntimeDirective !== undefined,
+          toolCount: 1,
+          messageCount: messages.length,
+        },
+      });
       const invocation: ModelInvocation = {
         runId: task.runId,
         systemPrompt,
         phase: "planning",
-        runtimeContext: planningRuntimeContext(task, turn, runtimeDirective),
+        runtimeContext: planningRuntimeContext(task, turn, turnRuntimeDirective),
         messages,
-        tools,
-        toolChoice: "required",
+        tools: [SUBMIT_PLAN_TOOL],
+        toolChoice: { name: SUBMIT_PLAN_TOOL.name },
+        maxOutputTokens: Math.min(PLANNING_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
       };
       const response = emit === undefined
         ? await this.model.complete(invocation, signal)
@@ -120,50 +177,19 @@ export class ModelPlanner implements Planner {
           signal,
           base: { phase: "planning", turn },
         });
-      const loadCalls = response.toolCalls.filter((call) => call.name === LOAD_SKILL_TOOL.name);
       const planCalls = response.toolCalls.filter((call) => call.name === SUBMIT_PLAN_TOOL.name);
-
-      if (
-        response.finishReason !== "length"
-        && loadCalls.length > 0
-        && loadCalls.length === response.toolCalls.length
-      ) {
-        messages.push({
-          role: "assistant",
-          content: response.content,
-          toolCalls: response.toolCalls,
-        });
-        for (const call of loadCalls) {
-          try {
-            const name = parseSkillLoadName(call.arguments);
-            const skill = availableByName.get(name);
-            if (skill === undefined) {
-              throw new AppError(
-                "PLANNING_ERROR",
-                `Skill \"${name}\" is not in available_skills`,
-                422,
-              );
-            }
-            loadedSkillIds.add(skill.id);
-            messages.push({
-              role: "tool",
-              toolCallId: call.id,
-              name: call.name,
-              content: formatLoadedSkill(skill),
-              isError: false,
-            });
-          } catch (error) {
-            messages.push({
-              role: "tool",
-              toolCallId: call.id,
-              name: call.name,
-              content: error instanceof Error ? error.message : "Invalid load_skill call",
-              isError: true,
-            });
-          }
-        }
-        continue;
-      }
+      await emit?.({
+        type: "planning.turn.completed",
+        data: {
+          turn,
+          finishReason: response.finishReason,
+          toolCallCount: response.toolCalls.length,
+          loadSkillCallCount: 0,
+          submitPlanCallCount: planCalls.length,
+          loadedSkillCount: 0,
+          contentLength: response.content.length,
+        },
+      });
 
       try {
         if (response.finishReason === "length") {
@@ -174,26 +200,10 @@ export class ModelPlanner implements Planner {
           );
         }
         if (response.toolCalls.length !== 1 || planCalls.length !== 1) {
-          throw planningResponseError(
-            loadCalls.length > 0
-              ? "Planner must load Skills in a separate response before submitting the Plan"
-              : "Planner must submit exactly one structured submit_plan call",
-            turn,
-            response,
-          );
+          throw planningResponseError("Planner must submit exactly one structured submit_plan call", turn, response);
         }
         const proposal = parsePlanProposal(planCalls[0]);
-        const unloaded = proposal.selectedSkillIds.filter((skillId) => !loadedSkillIds.has(skillId));
-        if (unloaded.length > 0) {
-          const names = unloaded.map((skillId) =>
-            task.availableSkills.find((skill) => skill.id === skillId)?.name ?? skillId
-          );
-          throw new AppError(
-            "PLANNING_ERROR",
-            `Load every selected Skill before submitting the Plan. Not loaded: ${names.join(", ")}`,
-            422,
-          );
-        }
+        if (task.responseOnly) assertResponseOnlyPlan(proposal);
         admitPlan({
           runId: task.runId,
           proposal,
@@ -210,10 +220,10 @@ export class ModelPlanner implements Planner {
         runtimeDirective = JSON.stringify({
           planningRepair: {
             attempt: planningAttempts + 1,
-            validationError: lastError.message,
-            instruction: lastError.message.startsWith("Load every selected Skill")
-              ? "Call load_skill for the named Skills, read the results, then submit the complete Plan in a later response."
-              : "Resubmit the entire Plan as exactly one valid submit_plan tool call.",
+            validationError: summarizePlanningError(lastError.message),
+            instruction: response.finishReason === "length"
+              ? "Return only one compact submit_plan call. Do not explain or repeat the task. Keep the plan as small as possible."
+              : "Resubmit the entire Plan as exactly one valid submit_plan tool call. If a step is too broad, split discovery/extraction, production/writing, and verification/comparison into smaller dependency-linked steps with their own success criteria. If the invalid step only loads or activates a Skill, remove that infrastructure step and bind the Skill to the concrete user-deliverable step.",
           },
         });
       }
@@ -221,11 +231,21 @@ export class ModelPlanner implements Planner {
     if (planningAttempts < MAX_PLANNING_ATTEMPTS) {
       lastError = new AppError(
         "PLANNING_ERROR",
-        `Planner exceeded its ${MAX_PLANNING_TURNS}-turn Skill loading and Plan submission limit`,
+        `Planner exceeded its ${MAX_PLANNING_ATTEMPTS}-attempt Plan submission limit`,
         422,
       );
     }
     throw lastError;
+  }
+}
+
+function assertResponseOnlyPlan(proposal: PlanProposal): void {
+  if (proposal.selectedSkillIds.length !== 0 || proposal.steps.length !== 1) {
+    throw new AppError("PLANNING_ERROR", "A conversational reply must contain exactly one no-Skill response step", 422);
+  }
+  const [step] = proposal.steps;
+  if (step.skillIds.length !== 0 || step.requiredToolNames.length !== 0) {
+    throw new AppError("PLANNING_ERROR", "A conversational reply step cannot use Skills or Tools", 422);
   }
 }
 
@@ -256,8 +276,10 @@ function planningRuntimeContext(
     content: [
       "<planning_context source=\"server\">",
       JSON.stringify({
-        agent: { id: task.agent.id, name: task.agent.name },
         availableToolNames: task.availableToolNames,
+        availableTools: task.availableTools ?? task.availableToolNames.map((name) => ({ name })),
+        stepGranularity: STEP_GRANULARITY_GUIDANCE,
+        operationProfiles: operationProfileCatalogForPlanning(),
       }),
       "</planning_context>",
       formatAvailableSkills(task.availableSkills),
@@ -270,8 +292,8 @@ function planningRuntimeContext(
   };
 }
 
-function parseSkillLoadName(value: unknown): string {
-  return requireString(requireRecord(value, "load_skill arguments").name, "load_skill name", { max: 80 });
+function summarizePlanningError(message: string): string {
+  return message.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
 function parsePlanProposal(call: ModelToolCall): PlanProposal {

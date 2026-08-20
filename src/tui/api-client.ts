@@ -37,22 +37,6 @@ export interface TuiProvider {
   readonly defaultModel: string;
 }
 
-export interface TuiSkill {
-  readonly id: string;
-  readonly name: string;
-  readonly description: string;
-  readonly sourceKind: string;
-}
-
-export interface TuiAgent {
-  readonly id: string;
-  readonly name: string;
-  readonly providerKey: string;
-  readonly modelId: string;
-  readonly skillIds: readonly string[];
-  readonly toolNames: readonly string[];
-}
-
 export interface TuiTool {
   readonly name: string;
   readonly dangerous: boolean;
@@ -61,7 +45,6 @@ export interface TuiTool {
 
 export interface TuiRun {
   readonly id: string;
-  readonly agentId: string;
   readonly status: string;
   readonly input: string;
   readonly output?: string;
@@ -151,31 +134,11 @@ export class TuiApiClient {
     return this.request("/v1/providers");
   }
 
-  skills(): Promise<{ skills: TuiSkill[] }> {
-    return this.request("/v1/skills");
-  }
-
-  agents(): Promise<{ agents: TuiAgent[] }> {
-    return this.request("/v1/agents");
-  }
-
   tools(): Promise<{ tools: TuiTool[] }> {
     return this.request("/v1/tools");
   }
 
-  createAgent(input: {
-    readonly name: string;
-    readonly systemPrompt: string;
-    readonly providerKey: string;
-    readonly modelId: string;
-    readonly skillIds: readonly string[];
-    readonly toolNames: readonly string[];
-  }): Promise<{ agent: TuiAgent }> {
-    return this.request("/v1/agents", { method: "POST", body: { ...input, childAgentIds: [] } });
-  }
-
   executeRun(input: {
-    readonly agentId: string;
     readonly input: string;
     readonly allowDangerousTools: boolean;
   }): Promise<{ run: TuiRun }> {

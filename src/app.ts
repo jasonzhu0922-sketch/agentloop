@@ -1,6 +1,5 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { AgentService } from "./agents/agent-service.ts";
 import { AuthService } from "./auth/auth-service.ts";
 import { BatchService } from "./batch/batch-service.ts";
 import { createAgentLoopServer } from "./http/server.ts";
@@ -8,9 +7,12 @@ import { LlmProviderRegistry } from "./runtime/provider-registry.ts";
 import { RunService } from "./runtime/run-service.ts";
 import { SkillService } from "./skills/skill-service.ts";
 import { AppDatabase } from "./storage/database.ts";
+import { createWebTools } from "./web/web-tools.ts";
 
 const port = parseInteger(process.env.PORT, 8787, 1, 65_535);
+const host = process.env.HOST ?? "127.0.0.1";
 const sessionTtlHours = parseInteger(process.env.SESSION_TTL_HOURS, 168, 1, 24 * 365);
+const webOrigins = parseStringArray(process.env.WEB_ORIGINS_JSON, "WEB_ORIGINS_JSON");
 const configuredPath = process.env.DATABASE_PATH ?? "./data/agentloop.db";
 const databasePath = configuredPath === ":memory:" ? configuredPath : resolve(configuredPath);
 const workspaceRoot = resolve(process.env.WORKSPACE_ROOT ?? process.cwd());
@@ -33,29 +35,36 @@ const skills = new SkillService(database, {
   skillDirectory,
 });
 const discoveredSkills = await skills.refreshSkillDirectory();
-const agents = new AgentService(database, skills, {
-  allowedProviderKeys: providers.keys(),
-  defaultProviderKey: providers.defaultProviderKey,
-});
 const runs = new RunService({
   database,
   skills,
-  agents,
-  modelFactory: (agent) => providers.create(agent),
+  modelFactory: (onRetry, modelKey) => providers.create(modelKey, onRetry),
+  defaultModelKey: providers.defaultModelKey,
+  modelKeys: providers.modelKeys(),
   workspaceRoot,
   computerExecutableAliases: parseExecutableAliases(process.env.TRUSTED_EXECUTABLE_ALIASES_JSON),
   computerCommandEnvironment: parseCommandEnvironment(process.env.TRUSTED_COMMAND_ENV_JSON),
+  tools: process.env.WEB_SEARCH_DISABLED === "1"
+    ? []
+    : createWebTools({
+        ...(process.env.WEB_SEARCH_PROVIDER === undefined ? {} : { searchProvider: parseSearchProvider(process.env.WEB_SEARCH_PROVIDER) }),
+        ...(process.env.WEB_SEARCH_ENDPOINT === undefined ? {} : { searchEndpoint: process.env.WEB_SEARCH_ENDPOINT }),
+        ...(process.env.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: process.env.WEB_SEARCH_API_KEY }),
+      }),
+  ...(process.env.AGENTLOOP_RUN_EVENT_LOGS === "0"
+    ? {}
+    : { runEventLogSink: (line) => process.stdout.write(`${line}\n`) }),
 });
 const reconciledRunCount = runs.reconcileInterruptedRuns();
 const recoveryMonitor = setInterval(() => {
   runs.reconcileInterruptedRuns();
 }, 10_000);
-const batches = new BatchService(database, agents, runs);
+const batches = new BatchService(database, runs);
 
-const server = createAgentLoopServer({ auth, skills, agents, runs, batches, providers });
-server.listen(port, "127.0.0.1", () => {
+const server = createAgentLoopServer({ auth, skills, runs, batches, providers }, { webOrigins });
+server.listen(port, host, () => {
   process.stdout.write(
-    `AgentLoop API listening on http://127.0.0.1:${port}; discovered ${discoveredSkills.length} Skill package(s) from ${skillDirectory}; queued ${reconciledRunCount} recovery review(s)\n`,
+    `AgentLoop API listening on http://${host}:${port}; discovered ${discoveredSkills.length} Skill package(s) from ${skillDirectory}; queued ${reconciledRunCount} recovery review(s)\n`,
   );
 });
 
@@ -141,4 +150,9 @@ function parseStringArray(value: string | undefined, label: string): readonly st
     throw new Error(`${label} must be a JSON array of non-empty strings`);
   }
   return parsed;
+}
+
+function parseSearchProvider(value: string): "baidu" | "bing" {
+  if (value === "baidu" || value === "bing") return value;
+  throw new Error("WEB_SEARCH_PROVIDER must be either \"baidu\" or \"bing\"");
 }

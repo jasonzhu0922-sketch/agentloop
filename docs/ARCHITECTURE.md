@@ -1,21 +1,22 @@
 # AgentLoop 智能体框架设计方案
 
-版本：v0.3  
-日期：2026-08-17  
-状态：Plan-first + Package Skill 本地参考实现
+版本：v0.4
+日期：2026-08-19
+状态：单 Agent + Plan-first + Package Skill 本地参考实现
 
 ## 1. 设计结论
 
 本项目采用“多租户控制面 + Plan-first 运行面”的双平面架构：
 
-- 控制面拥有用户登录、Workspace、成员角色、私有 Skill、Agent 定义、模型 Provider 配置和审计。
-- 运行面拥有不可变能力凭证、Agent Loop、Tool Registry、上下文组装、模型适配器、子 Agent Supervisor、事件持久化和预算。
-- LLM 只负责生成内容、选择已暴露工具、填写参数、读取结果并继续推理。它不能决定自己能访问哪个 Skill、能委派哪个 Agent、是否绕过预算，或宣告一个失败的运行已完成。
+- 控制面拥有用户登录、Workspace、成员角色、私有 Skill、模型 Provider 配置和审计。
+- 运行面拥有不可变能力凭证、Agent Loop、Tool Registry、上下文组装、模型适配器、事件持久化和预算。
+- LLM 只负责生成内容、选择已暴露工具、填写参数、读取结果并继续推理。它不能决定自己能访问哪个 Skill、是否绕过预算，或宣告一个失败的运行已完成。
 - 顶层 `skills/` 是服务端正式发现源；每个结构有效的第三方 Package 在使用前原样物化到当前用户隔离的只读 Store。来源锁仅在存在且匹配时提供可选溯源信息；显式 `.disabled.json` 可隔离不能进入 Runtime 的用户侧目录。Skill 目录 API 与 Skill 正文分离；Planner 和已绑定 Step 初始只接收授权目录，必须通过 `load_skill` 激活当前 Run 的精确版本。`load_skill` 不能成为越权入口。
-- 每个子 Agent 都是独立 Run，具有独立上下文和能力凭证。子能力必须满足 `child grant ⊆ parent grant ∩ child profile`，不能因为递归或恢复而放大权限。
+- 运行是单 Agent 的：服务端使用固定 persona 驱动每个 Run，没有 Agent 定义、Skill 绑定或委派概念。Run 的 Skills 由用户身份决定（私有 + 官方发现），执行工具集只由 `allowDangerousTools` 门控；模型不能要求、交换或提升工具。
+- 会话是单 Agent 的会话：后续轮次通过 `conversationId` 继承同一会话的上下文，`parent_run_id` 只表达同一会话内的轮次先后，不构成委派谱系。
 - 批次是 `Batch → BatchItem → Run → Plan`，并发和失败策略只调度独立 Run，不能绕过单 Run 的规划、Skill 和终态提交链。
 
-真实契约是：从登录身份进入 Worker 后，所有模型调用、Skill 加载、Tool 执行和子 Agent 委派都必须服从同一份持久、可审计、不可由模型修改的授权事实；Run 只有在 Plan 全部步骤的成功标准与 Skill Compliance 都通过后，才能由 Terminal Committer 提交完成。
+真实契约是：从登录身份进入 Worker 后，所有模型调用、Skill 加载和 Tool 执行都必须服从同一份持久、可审计、不可由模型修改的授权事实；Run 只有在 Plan 全部步骤的成功标准与 Skill Compliance 都通过后，才能由 Terminal Committer 提交完成。
 
 ## 2. 范围与非目标
 
@@ -23,10 +24,8 @@
 
 - 邮箱密码登录；后续可接企业 OIDC。
 - 用户或 Workspace 私有 Skill，版本化、按需加载、默认不公开正文。
-- Agent 定义、Agent-Skill 绑定、允许委派的 Agent 白名单。
 - 支持 Function Calling 的通用 Agent Loop。
 - 单 Agent 多轮工具调用，以及多个 Run 的并行执行。
-- 子 Agent spawn/await/list/cancel，父子谱系、深度和并发预算。
 - 会话、消息、工具调用/结果、用量和状态的持久化。
 - SSE 实时事件、取消、失败恢复、可观测性和审计。
 
@@ -54,10 +53,8 @@ flowchart LR
   LOOP --> CTX["Context Assembler"]
   LOOP --> MODELS["Model Gateway"]
   LOOP --> TOOLS["Authorized Tool Registry"]
-  LOOP --> SUP["Agent Supervisor"]
   TOOLS --> SANDBOX["Sandbox / Connectors"]
   TOOLS --> VAULT
-  SUP --> Q
   LOOP --> EVENTS[("Run Event Store")]
   EVENTS --> SSE["SSE Projection"]
   SSE --> U
@@ -81,14 +78,12 @@ erDiagram
   WORKSPACE ||--o{ MEMBERSHIP : contains
   WORKSPACE ||--o{ SKILL : owns
   SKILL ||--o{ SKILL_VERSION : versions
-  WORKSPACE ||--o{ AGENT_DEFINITION : owns
-  AGENT_DEFINITION }o--o{ SKILL : binds
-  AGENT_DEFINITION }o--o{ AGENT_DEFINITION : may_delegate
+  USER ||--o{ CONVERSATION : starts
   USER ||--o{ RUN : starts
   WORKSPACE ||--o{ RUN : owns
-  AGENT_DEFINITION ||--o{ RUN : executes
+  CONVERSATION ||--o{ RUN : groups
   RUN ||--o{ RUN_EVENT : records
-  RUN ||--o{ RUN : parent_of
+  RUN ||--o{ RUN : precedes_in_conversation
 ```
 
 主要实体：
@@ -98,15 +93,13 @@ erDiagram
 | User | `id, email, status` | email 规范化后唯一 |
 | AuthSession | `tokenHash, expiresAt, userId` | 数据库不保存明文 Token |
 | Workspace | `id, owner, policy` | 生产租户边界 |
+| Conversation | `ownerUserId, title` | 单 Agent 会话容器，轮次按 `created_at` 排序 |
 | Skill | `workspaceId, visibility, activeVersion` | 默认 private；不可跨 Workspace 引用 |
 | SkillVersion | `contentHash, objectKey, createdBy` | 内容不可变；新修改产生新版本 |
-| AgentDefinition | `persona, providerKey, modelId, budgets` | 不保存 Provider 密钥 |
-| AgentSkillBinding | `agentId, skillId, versionPolicy` | 绑定时和运行时双重鉴权 |
-| AgentDelegateEdge | `parentAgentId, childAgentId` | 显式白名单；禁止跨租户边 |
-| Run | `actor, agent, parent, depth, status` | 一个时刻只有一个驱动 Lease |
+| Run | `actor, conversationId, status` | 一个时刻只有一个驱动 Lease；`parent_run_id` 仅表示会话内先后轮次 |
 | RunEvent | `runId, seq, type, payload` | 每 Run 单调序号、追加写 |
 
-当前原型先实现 `owner_user_id` 隔离；这已经能保证用户之间的私有 Skill、Agent 和 Run 不互见。迁移到 Workspace 时，所有权谓词从 `owner_user_id = actor` 升级为 `workspace_id + membership + visibility`，运行时能力凭证结构不变。
+当前原型先实现 `owner_user_id` 隔离；这已经能保证用户之间的私有 Skill、Conversation 和 Run 不互见。迁移到 Workspace 时，所有权谓词从 `owner_user_id = actor` 升级为 `workspace_id + membership + visibility`，运行时能力凭证结构不变。
 
 ## 5. 身份与会话
 
@@ -122,7 +115,7 @@ erDiagram
 - 浏览器使用 `HttpOnly; Secure; SameSite=Lax` 会话 Cookie；写请求采用 Origin/CSRF 防护。
 - 企业部署增加 OIDC Authorization Code + PKCE，账号与企业主体显式绑定。
 - Session 支持设备列表、强制吊销、短期 Access + 滚动续期。
-- 管理操作、Skill 正文读取、Agent 绑定、Run 启动和子 Agent 委派写入不可篡改审计流。
+- 管理操作、Skill 正文读取、Run 启动与会话轮次写入不可篡改审计流。
 - 登录限速、密码泄漏字典检查、MFA 和异常登录告警属于 Identity 服务，不放入 Loop。
 
 ## 6. 私有 Skill
@@ -168,7 +161,7 @@ sequenceDiagram
 
 必须同时通过三道门：
 
-1. 创建/更新 Agent 时，调用者有权读取并绑定 Skill。
+1. 调用者（Skill 的所有者或有权读取该 Skill 的用户）是技能加载的唯一来源；跨用户 Skill ID 不可读取正文或绑定。
 2. 手工 Package 安装目录必须位于服务端白名单，并要求 HTTPS 来源、完整提交 SHA 和预期全包 hash 与实测一致；正式 `skills/` 目录只要求每个 Package 结构和完整性有效，可选来源锁不会影响准入。
 3. Run 创建时 Skill 身份进入不可变 Grant；Planner、Step、Assessment、Terminal Commit 使用同一版本，Package 每个阶段复核完整性，Computer Executor 禁止写入托管目录。
 
@@ -237,48 +230,31 @@ stateDiagram-v2
 
 当前原型已经记录 `assistant.committed → tool.planned → tool.effect_pending → tool.completed/failed`，但尚未实现 Worker 重启后的自动恢复器；这属于里程碑 M2。
 
-## 8. 多 Agent
+## 8. 单 Agent 与会话
 
-### 8.1 不是共享一份可变上下文
+### 8.1 固定的服务端 persona
 
-父 Agent 通过 `delegate_task(agentId, task)` 提交一个有边界的任务。Runtime 创建子 Run：
-
-- 新的 `runId`、消息历史、上下文窗口和事件序列。
-- 持久 `parentRunId`、`depth` 和调用者身份。
-- 子 Agent 自己的 persona、Skill 绑定和 Tool Profile。
-- 父 Agent 只接收结构化终止结果，不直接拼接子 Agent 的全部内部历史。
-
-### 8.2 能力不扩张
+当前实现没有 Agent 定义、Agent-Skill 绑定或委派白名单。每个 Run 都由同一份服务端 persona（`DEFAULT_RUNNER_SYSTEM_PROMPT`）驱动：模型不能更换 persona、换取 Skill 或扩张工具。所有工具能力只由单份 `CapabilityGrant` 决定，其边界是：
 
 ```text
-childGrant = intersect(
-  parentDelegableCapabilities,
-  childAgentProfile,
-  workspacePolicy,
-  runBudget
-)
+allowedTools  = 全部已注册工具
+             − 危险 Computer 工具（除非 allowDangerousTools）
+rootGrant     = { actor, workspace, allowedTools, allowedSkillIds }
+stepTools     = step.requiredToolNames ∩ rootGrant.allowedToolNames
+             ∪ { load_skill }  // 仅当 step 绑定 Skill 时
 ```
 
-深度必须单调：持久值是权威值，恢复时只能保持或加深，不能重置为 0。当前原型还把子树深度上限设置为 `min(root ceiling, child depth + child maxDepth)`，因此子 Agent 即使配置更大的数字也不能突破父树上限。
+### 8.2 会话与轮次
 
-### 8.3 目标生产运行协议
+同一会话的后续输入通过 `conversationId` 绑定：
 
-目标生产 Supervisor 操作：
+- 新 Run 继承会话内先前轮次的规范消息作为 Planner 上下文。
+- 信息性追问（`responseOnly`）不继承 Skills 或执行 Tool：该轮不物化任何工具，模型只能基于既有事实作答。
+- 对话删除会级联移除其轮次与事件；工作区写入按会话隔离。
 
-- `spawn(agentId, task, mode)`：创建子 Run，返回 handle。
-- `await(childRunId)`：等待完成并取得结构化结果。
-- `listChildren(parentRunId)`：返回当前父节点直接子级。
-- `cancel(childRunId)`：父级只能取消自己的直接/传递子级。
-- `send(childRunId, message)`：后续阶段支持 continuable child；消息写入持久 inbox。
+### 8.3 能力不扩张
 
-当前单节点实现提供同步 `delegate_task`：每次委派仍创建独立、完整的 Plan-first 子 Run，并从子 Run 自己的持久 Outcome 返回结果；后台 handle、continuation 和父级取消属于 M4。
-
-配额：
-
-- 全局最大深度、Agent 最大后代深度。
-- 每父 Run 最大子节点数和最大活跃子节点数。
-- 每用户/Workspace 最大并行 Run。
-- 子树共享 Token、成本和墙钟预算；不能每 spawn 一次就重新获得满额预算。
+单 Agent 模型不存在委派谱系，因此无需深度约束或 `child grant ⊆ parent grant` 求交。任何一轮的可见工具都不可能超过 `rootGrant`；`load_skill` 只激活已授权 Skill 的精确版本，不能发现未授权 Skill 或换取新工具。
 
 ## 9. Tool 与插件系统
 
@@ -316,7 +292,7 @@ interface RuntimeTool<Input> {
 请求按稳定到动态排序：
 
 1. 框架协议与工具规范。
-2. Agent persona。
+2. 服务端固定 persona（`DEFAULT_RUNNER_SYSTEM_PROMPT`）。
 3. Skill 摘要目录和 Tool Schema。
 4. 持久结构化摘要。
 5. 最近消息和工具结果。
@@ -429,7 +405,7 @@ GET  /v1/runs/:id              -> authoritative status
 GET  /v1/runs/:id/events       -> SSE with Last-Event-ID
 POST /v1/runs/:id/messages     -> followup / steer
 POST /v1/runs/:id/cancel       -> cooperative cancellation
-GET  /v1/runs/:id/children     -> lineage
+GET  /v1/conversations         -> session grouping
 ```
 
 SSE 只做事件投影，不作为权威存储。客户端断线后带 `Last-Event-ID` 从 PostgreSQL/事件流补发；慢客户端不会阻塞 Worker。
@@ -443,7 +419,6 @@ step.started / assistant.delta / assistant.committed / step.completed
 tool.planned / tool.effect_pending / tool.progress / tool.completed / tool.failed
 loop.convergence_requested / loop.completed / loop.limit_exceeded
 skill.package.verified / skill.activation.required / skill.activated / skill.activation.expired / skill.compliance.assessed
-child.started / child.completed
 usage.recorded / context.compacted
 ```
 
@@ -467,14 +442,14 @@ usage.recorded / context.compacted
 
 ## 13. 可观测性与安全指标
 
-每个日志/Trace 至少带：`traceId, workspaceId, userId, runId, parentRunId, agentId, step, toolCallId`。密钥、密码、Cookie、完整 Skill 正文默认不进入普通日志。
+每个日志/Trace 至少带：`traceId, workspaceId, userId, runId, conversationId, step, toolCallId`。密钥、密码、Cookie、完整 Skill 正文默认不进入普通日志。
 
 关键指标：
 
 - Run 成功率、取消收敛时长、每步模型延迟、首 Token 延迟。
 - Tool 成功率、权限拒绝率、未知/陈旧工具调用数。
-- Prompt/Completion/Cache Token、每 Run 成本、子树总成本。
-- 活跃子 Agent 数、深度拒绝、并发预算拒绝。
+- Prompt/Completion/Cache Token、每 Run 成本。
+- 活跃 Run 数、并发预算拒绝。
 - Compaction 次数、压缩前后 Token、Artifact 读取率。
 - Worker lease 冲突、恢复次数、不安全副作用待确认数。
 
@@ -482,23 +457,23 @@ usage.recorded / context.compacted
 
 ### M0–M1：Plan-first 单节点参考内核（已完成）
 
-- 可运行登录 API、私有 Skill、Agent 定义、Run 与事件。
+- 可运行登录 API、私有 Skill、Run 与事件。
 - 结构化 Planner、DAG Admission、Step Scheduler、动态 Tool Registry、截断保护和步数预算。
 - Skill 目录/正文渐进披露、Planner 与 Step 的强制激活、Compliance Assessment 和 Terminal Committer；Runtime 不复制 Skill 的 Tool 清单或完成标准。
 - 第三方 Skill Package 的来源提交锁定、预期 hash 校验、原样只读托管、Run 多阶段完整性复核和篡改失败关闭。
-- 受控 Computer Tool、危险能力显式授权、同步子 Agent 委派、谱系和能力向下求交。
+- 受控 Computer Tool、危险能力显式授权、会话隔离的 Workspace 写入和单 Agent 会话轮次。
 - Batch 并发、幂等、continue/fail-fast、逐项 Run/Plan，以及单文件 Web 控制台。
 - 回归测试覆盖跨用户越权和运行时安全边界。
 - Agent Loop 在最后预算回合隐藏执行 Tool，要求模型基于已持久化 ToolResult 提交一次受控完成候选；该候选仍须经过 Step/Skill Assessment，不能绕过 Terminal Committer。
 - Presentation E2E 在 Skill QA 之外记录渲染引擎/版本、光栅器、平台和声明字体的实际匹配，将字体替代标记为环境受限证据，不把渲染环境差异改写成 Skill 逻辑。
 
-验收：`npm test` 全部通过；跨用户 Skill ID 不能用于读取或 Agent 绑定。
+验收：`npm test` 全部通过；跨用户 Skill ID 不能用于读取或绑定。
 
 ### M1.5：生产身份与 Workspace（1–2 周）
 
 - React/Next Web、Cookie Session、CSRF、邮箱验证、找回密码。
 - Workspace/Member/Role 数据模型与迁移。
-- Skill/Agent 管理 UI、版本发布和审计页面。
+- Skill 管理 UI、版本发布和审计页面。
 
 验收：两个 Workspace 的用户在 API、UI、事件和搜索上均不可互见。
 
@@ -518,13 +493,12 @@ usage.recorded / context.compacted
 
 验收：恶意压缩包不能目录穿越；未授权 Run 即使猜中对象键也无法解密正文。
 
-### M4：完整多 Agent Supervisor（2 周）
+### M4：会话与并发运营（2 周）
 
-- spawn/await/list/cancel/send，后台子 Agent 和 continuable child。
-- 子树共享预算、并发限流、终止结果协议和 UI 树。
-- 模型/工具/Skill 能力向下求交，不可扩张。
+- 会话列表/重命名/删除、消息回溯和 UI 树。
+- 每用户/Workspace 并行 Run 限流与共享 Token/成本预算。
 
-验收：循环委派、恢复和父级取消的性质测试；深度永不降低，子级不能获得父级没有的能力。
+验收：会话隔离、并行限流与成本预算的性质测试；任意 Run 的工具集都不超过其 Capability Grant。
 
 ### M5：Provider、Compaction 与运营（持续）
 
@@ -538,12 +512,12 @@ usage.recorded / context.compacted
 |---|---|---|
 | Identity | `src/auth/auth-service.ts` | 已有 API 原型；待 Cookie/OIDC |
 | Private Skill | `src/skills/skill-service.ts`, `src/skills/skill-context.ts` | 已有用户隔离、Package 完整性和目录/正文渐进披露；待 Workspace/Vault/版本表 |
-| Agent Definition | `src/agents/agent-service.ts` | 已有绑定和委派白名单 |
+| Conversation | `src/runtime/run-service.ts`, `src/http/server.ts` | 已有会话容器与轮次分组；待列表/重命名/删除 UI |
 | Planning | `src/planning/*` | 已有结构化 Planner、Admission、DAG Scheduler、Assessment、Repository |
 | Agent Loop | `src/runtime/agent-loop.ts`, `src/runtime/context-assembler.ts` | 已有有界 Tool 结算、候选完成、投影式 prune/compaction 和 Skill 重激活；待 streaming/恢复 |
 | Tool Registry | `src/runtime/tool-registry.ts` | 已按 Grant 动态物化 |
 | Computer | `src/computer/*` | 文件/搜索/命令已实现；GUI 通过 Driver 插件；生产待容器沙箱 |
-| Multi-Agent | `src/runtime/run-service.ts` | 独立 Plan-first 子 Run、能力向下求交；待后台 handle/inbox |
+| Single-Agent Run | `src/runtime/run-service.ts` | 固定 persona、用户级 Skill 解析、`allowDangerousTools` 门控、会话轮次；待后台 handle/inbox |
 | Batch | `src/batch/batch-service.ts` | 已有并发/幂等/失败策略和逐项状态 |
 | Model Gateway | `src/runtime/contracts.ts`, `src/runtime/prompt-protocol.ts`, `src/runtime/models.ts`, `src/runtime/provider-registry.ts` | Provider-neutral Invocation、OpenAI-compatible Prompt Encoder、wire 预算估算、结构化 Tool Choice 和有界传输重试 |
 | Event Store | `src/storage/database.ts` | SQLite Plan/Evidence/Assessment/Outcome/Event；待 PostgreSQL/lease |

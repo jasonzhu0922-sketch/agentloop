@@ -75,5 +75,6 @@ function toProviderMessage(message: ModelMessage): Record<string, unknown> {
             function: { name: call.name, arguments: JSON.stringify(call.arguments) },
           })),
         }),
+    ...(message.reasoningContent === undefined ? {} : { reasoning_content: message.reasoningContent }),
   };
 }

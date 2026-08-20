@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { AgentService } from "../agents/agent-service.ts";
 import type { RunService } from "../runtime/run-service.ts";
-import type { AppDatabase } from "../storage/database.ts";
+import type { SqlConnection } from "../storage/connection.ts";
+import { BatchRepository, type BatchRow } from "../storage/repositories/batch-repository.ts";
 import { AppError, conflict, notFound } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 
@@ -11,7 +11,6 @@ export type BatchItemStatus = "pending" | "running" | "completed" | "failed" | "
 export interface BatchRecord {
   readonly id: string;
   readonly ownerUserId: string;
-  readonly agentId: string;
   readonly idempotencyKey: string;
   readonly status: BatchStatus;
   readonly concurrency: number;
@@ -39,27 +38,17 @@ export interface BatchItemRecord {
   readonly finishedAt?: number;
 }
 
-interface BatchRow {
-  id: string; owner_user_id: string; agent_id: string; idempotency_key: string;
-  status: BatchStatus; concurrency: number; failure_policy: "continue" | "fail-fast";
-  allow_dangerous_tools: number; created_at: number; finished_at: number | null;
-  total: number; completed: number; failed: number; cancelled: number;
-}
-
 export class BatchService {
-  private readonly database: AppDatabase;
-  private readonly agents: AgentService;
+  private readonly batches: BatchRepository;
   private readonly runs: RunService;
 
-  constructor(database: AppDatabase, agents: AgentService, runs: RunService) {
-    this.database = database;
-    this.agents = agents;
+  constructor(database: SqlConnection, runs: RunService) {
+    this.batches = new BatchRepository(database);
     this.runs = runs;
   }
 
   async create(actorUserId: string, inputValue: unknown): Promise<BatchRecord> {
     const input = parseBatchInput(inputValue);
-    this.agents.get(actorUserId, input.agentId);
     const existing = this.findByIdempotencyKey(actorUserId, input.idempotencyKey);
     if (existing !== undefined) {
       this.assertSameRequest(existing, input);
@@ -68,29 +57,15 @@ export class BatchService {
     const batchId = randomUUID();
     const now = Date.now();
     try {
-      this.database.transaction(() => {
-        this.database.raw.prepare(`
-          INSERT INTO batches(
-            id, owner_user_id, agent_id, idempotency_key, status, concurrency,
-            failure_policy, allow_dangerous_tools, created_at
-          ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)
-        `).run(
-          batchId,
-          actorUserId,
-          input.agentId,
-          input.idempotencyKey,
-          input.concurrency,
-          input.failurePolicy,
-          input.allowDangerousTools ? 1 : 0,
-          now,
-        );
-        const insertItem = this.database.raw.prepare(`
-          INSERT INTO batch_items(id, batch_id, item_key, position, input, status)
-          VALUES (?, ?, ?, ?, ?, 'pending')
-        `);
-        for (const [position, item] of input.items.entries()) {
-          insertItem.run(randomUUID(), batchId, item.key, position, item.input);
-        }
+      this.batches.createBatch({
+        id: batchId,
+        ownerUserId: actorUserId,
+        idempotencyKey: input.idempotencyKey,
+        concurrency: input.concurrency,
+        failurePolicy: input.failurePolicy,
+        allowDangerousTools: input.allowDangerousTools,
+        items: input.items.map((item, position) => ({ id: randomUUID(), key: item.key, input: item.input, position })),
+        now,
       });
     } catch (error) {
       if (String(error).includes("UNIQUE constraint failed")) {
@@ -111,70 +86,54 @@ export class BatchService {
         nextIndex += 1;
         if (index >= items.length) return;
         const item = items[index];
-        this.database.raw.prepare(`
-          UPDATE batch_items SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending'
-        `).run(Date.now(), item.id);
+        this.batches.claimItem(item.id, Date.now());
         try {
-          const run = await this.runs.execute(actorUserId, input.agentId, item.input, {
+          const run = await this.runs.execute(actorUserId, item.input, {
             allowDangerousTools: input.allowDangerousTools,
           });
-          this.database.raw.prepare(`
-            UPDATE batch_items
-            SET status = 'completed', run_id = ?, output = ?, finished_at = ? WHERE id = ?
-          `).run(run.id, run.output ?? "", Date.now(), item.id);
+          this.batches.markItemCompleted({
+            itemId: item.id,
+            runId: run.id,
+            output: run.output ?? "",
+            finishedAt: Date.now(),
+          });
         } catch (error) {
           const appError = error instanceof AppError
             ? error
             : new AppError("INTERNAL_ERROR", "Batch item failed", 500);
           const runId = typeof appError.details?.runId === "string" ? appError.details.runId : null;
-          this.database.raw.prepare(`
-            UPDATE batch_items
-            SET status = 'failed', run_id = ?, error_code = ?, finished_at = ? WHERE id = ?
-          `).run(runId, appError.code, Date.now(), item.id);
+          this.batches.markItemFailed({
+            itemId: item.id,
+            runId,
+            errorCode: appError.code,
+            finishedAt: Date.now(),
+          });
           if (input.failurePolicy === "fail-fast") halt = true;
         }
       }
     });
     await Promise.all(workers);
     if (halt) {
-      this.database.raw.prepare(`
-        UPDATE batch_items SET status = 'cancelled', finished_at = ?
-        WHERE batch_id = ? AND status = 'pending'
-      `).run(Date.now(), batchId);
+      this.batches.cancelPendingItems(batchId, Date.now());
     }
-    const failed = (this.database.raw.prepare(`
-      SELECT COUNT(*) AS count FROM batch_items WHERE batch_id = ? AND status = 'failed'
-    `).get(batchId) as { count: number }).count;
-    this.database.raw.prepare("UPDATE batches SET status = ?, finished_at = ? WHERE id = ?")
-      .run(failed > 0 ? "failed" : "completed", Date.now(), batchId);
+    const failed = this.batches.countFailed(batchId);
+    this.batches.finishBatch({
+      batchId,
+      status: failed > 0 ? "failed" : "completed",
+      finishedAt: Date.now(),
+    });
     return this.get(actorUserId, batchId);
   }
 
   get(actorUserId: string, batchId: string): BatchRecord {
-    const row = this.database.raw.prepare(`
-      SELECT b.*,
-        COUNT(i.id) AS total,
-        SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-        SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN i.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
-      FROM batches b LEFT JOIN batch_items i ON i.batch_id = b.id
-      WHERE b.id = ? AND b.owner_user_id = ? GROUP BY b.id
-    `).get(batchId, actorUserId) as BatchRow | undefined;
+    const row = this.batches.findByIdAndOwner(batchId, actorUserId);
     if (row === undefined) throw notFound("Batch");
     return toBatchRecord(row);
   }
 
   items(actorUserId: string, batchId: string): BatchItemRecord[] {
     this.get(actorUserId, batchId);
-    const rows = this.database.raw.prepare(`
-      SELECT id, batch_id, item_key, position, input, status, run_id, output,
-             error_code, started_at, finished_at
-      FROM batch_items WHERE batch_id = ? ORDER BY position
-    `).all(batchId) as unknown as Array<{
-      id: string; batch_id: string; item_key: string; position: number; input: string;
-      status: BatchItemStatus; run_id: string | null; output: string | null; error_code: string | null;
-      started_at: number | null; finished_at: number | null;
-    }>;
+    const rows = this.batches.itemsByBatch(batchId);
     return rows.map((row) => ({
       id: row.id,
       batchId: row.batch_id,
@@ -191,16 +150,13 @@ export class BatchService {
   }
 
   private findByIdempotencyKey(actorUserId: string, key: string): BatchRecord | undefined {
-    const row = this.database.raw.prepare(`
-      SELECT id FROM batches WHERE owner_user_id = ? AND idempotency_key = ?
-    `).get(actorUserId, key) as { id: string } | undefined;
+    const row = this.batches.findIdByIdempotencyKey(actorUserId, key);
     return row === undefined ? undefined : this.get(actorUserId, row.id);
   }
 
   private assertSameRequest(existing: BatchRecord, input: ParsedBatchInput): void {
     const existingItems = this.items(existing.ownerUserId, existing.id);
-    const same = existing.agentId === input.agentId
-      && existing.concurrency === input.concurrency
+    const same = existing.concurrency === input.concurrency
       && existing.failurePolicy === input.failurePolicy
       && existing.allowDangerousTools === input.allowDangerousTools
       && existingItems.length === input.items.length
@@ -212,7 +168,6 @@ export class BatchService {
 }
 
 interface ParsedBatchInput {
-  agentId: string;
   idempotencyKey: string;
   concurrency: number;
   failurePolicy: "continue" | "fail-fast";
@@ -247,7 +202,6 @@ function parseBatchInput(value: unknown): ParsedBatchInput {
     throw conflict("Batch item keys must be unique");
   }
   return {
-    agentId: requireString(record.agentId, "agentId", { max: 128 }),
     idempotencyKey: record.idempotencyKey === undefined
       ? randomUUID()
       : requireString(record.idempotencyKey, "idempotencyKey", { max: 200 }),
@@ -262,7 +216,6 @@ function toBatchRecord(row: BatchRow): BatchRecord {
   return {
     id: row.id,
     ownerUserId: row.owner_user_id,
-    agentId: row.agent_id,
     idempotencyKey: row.idempotency_key,
     status: row.status,
     concurrency: row.concurrency,

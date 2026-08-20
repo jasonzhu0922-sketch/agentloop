@@ -3,7 +3,6 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { TuiApiClient, TuiApiError } from "../src/tui/api-client.ts";
-import { parseSelection } from "../src/tui/selection.ts";
 
 test("TUI API client uses the existing authenticated HTTP API and keeps the token in memory", async () => {
   const requests: Array<{ url?: string; authorization?: string; body: string }> = [];
@@ -19,7 +18,7 @@ test("TUI API client uses the existing authenticated HTTP API and keeps the toke
     if (request.url === "/v1/auth/login") {
       return send(response, 200, { user: { id: "user-1", email: "owner@example.com" }, token: "session-token", expiresAt: 1 });
     }
-    if (request.url === "/v1/agents") return send(response, 200, { agents: [] });
+    if (request.url === "/v1/tools") return send(response, 200, { tools: [] });
     return send(response, 404, { error: { code: "NOT_FOUND", message: "Route", traceId: "trace-1" } });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -30,24 +29,18 @@ test("TUI API client uses the existing authenticated HTTP API and keeps the toke
     const result = await client.login("owner@example.com", "correct horse battery staple");
     assert.equal(result.user.email, "owner@example.com");
     assert.equal(client.authenticated, true);
-    await client.agents();
+    await client.tools();
     assert.deepEqual(JSON.parse(requests[1].body), { email: "owner@example.com", password: "correct horse battery staple" });
     assert.equal(requests[2].authorization, "Bearer session-token");
     client.clearToken();
     assert.equal(client.authenticated, false);
     await assert.rejects(
-      () => client.agents(),
+      () => client.tools(),
       (error: unknown) => error instanceof TuiApiError && error.status === 401,
     );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
-});
-
-test("TUI selection parsing preserves user order, removes duplicates, and rejects invalid choices", () => {
-  assert.deepEqual(parseSelection("3, 1, 3", ["one", "two", "three"]), ["three", "one"]);
-  assert.deepEqual(parseSelection("", ["one"]), []);
-  assert.throws(() => parseSelection("0", ["one"]), /1 到 1/);
 });
 
 function send(response: import("node:http").ServerResponse, status: number, body: unknown): void {

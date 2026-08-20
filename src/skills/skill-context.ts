@@ -18,7 +18,7 @@ export function formatAvailableSkills(
   if (skills.length === 0) return "";
   return [
     "Skills provide specialized instructions and workflows for matching tasks.",
-    "Use load_skill to load every Skill bound to the current planning or execution scope before applying it.",
+    "Use load_skill to load the exact body of a Skill before applying that Skill; do not load unrelated catalog entries.",
     "The content returned by load_skill is authoritative; do not reconstruct or expand it from the catalog.",
     "<available_skills>",
     ...skills.flatMap((skill) => [

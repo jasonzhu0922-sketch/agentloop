@@ -63,7 +63,7 @@ test("every checked-in Skill package is discoverable, private, exact, and progre
     assert.deepEqual(available.map((skill) => skill.name), EXPECTED_SKILL_NAMES);
     assert.equal(available.every((skill) => skill.sourceKind === "package"), true);
 
-    const installed = await skills.resolveForAgent(owner.user.id, []);
+    const installed = await skills.resolveForConversation(owner.user.id);
     assert.deepEqual(installed.map((skill) => skill.name), EXPECTED_SKILL_NAMES);
     const catalogContext = formatAvailableSkills(installed);
     for (const skill of installed) {

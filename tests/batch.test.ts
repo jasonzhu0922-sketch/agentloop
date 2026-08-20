@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import { BatchService } from "../src/batch/batch-service.ts";
 import { AppError } from "../src/shared/errors.ts";
@@ -15,20 +14,15 @@ test("Batch enforces concurrency, idempotency, continue, and fail-fast policies"
   try {
     const auth = new AuthService(database);
     const skills = new SkillService(database);
-    const agents = new AgentService(database, skills);
     const owner = await auth.register("batch@example.com", "batch secure password");
-    const agent = agents.create(owner.user.id, {
-      name: "batch-worker", systemPrompt: "Process one batch item.", providerKey: "scenario",
-    });
     const tracker = { active: 0, maximum: 0, calls: 0 };
     const runs = new RunService({
-      database, skills, agents, modelFactory: () => new BatchModel(tracker),
+      database, skills, modelFactory: () => new BatchModel(tracker),
       plannerFactory: () => singleStepTestPlanner(),
       assessorFactory: () => approvingTestAssessor(),
     });
-    const batches = new BatchService(database, agents, runs);
+    const batches = new BatchService(database, runs);
     const request = {
-      agentId: agent.id,
       idempotencyKey: "continue-1",
       concurrency: 2,
       failurePolicy: "continue",
@@ -50,7 +44,6 @@ test("Batch enforces concurrency, idempotency, continue, and fail-fast policies"
     assert.equal(tracker.calls, 3);
 
     const failFast = await batches.create(owner.user.id, {
-      agentId: agent.id,
       idempotencyKey: "fail-fast-1",
       concurrency: 1,
       failurePolicy: "fail-fast",

@@ -1,4 +1,4 @@
-import type { AppDatabase } from "../storage/database.ts";
+import type { SqlConnection } from "../storage/connection.ts";
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 
@@ -63,14 +63,14 @@ interface RuntimeActionRow {
 }
 
 export class RuntimeActionRepository {
-  private readonly database: AppDatabase;
+  private readonly database: SqlConnection;
 
-  constructor(database: AppDatabase) {
+  constructor(database: SqlConnection) {
     this.database = database;
   }
 
   list(runId: string): RuntimeActionRecord[] {
-    const rows = this.database.raw.prepare(`
+    const rows = this.database.prepare(`
       SELECT * FROM runtime_actions WHERE run_id = ? ORDER BY created_at, id
     `).all(runId) as unknown as RuntimeActionRow[];
     return rows.map(toRuntimeActionRecord);
@@ -113,7 +113,7 @@ export class RuntimeActionRepository {
     const deadlineAt = now + input.deadlineMs;
     const metadata = input.metadata ?? {};
     this.database.transaction(() => {
-      this.database.raw.prepare(`
+      this.database.prepare(`
         INSERT INTO runtime_actions(
           id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
           replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
@@ -150,7 +150,7 @@ export class RuntimeActionRepository {
     const now = Date.now();
     let reconciled = 0;
     this.database.transaction(() => {
-      const legacyRuns = this.database.raw.prepare(`
+      const legacyRuns = this.database.prepare(`
         SELECT id FROM runs
         WHERE status = 'running'
           AND NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
@@ -160,17 +160,20 @@ export class RuntimeActionRepository {
         reconciled += 1;
       }
 
-      const expired = this.database.raw.prepare(`
-        SELECT id, run_id, fence, deadline_at, lease_until, revision
-        FROM runtime_actions
-        WHERE state = 'dispatched'
-          AND (deadline_at <= ? OR lease_until <= ?)
+      const expired = this.database.prepare(`
+        SELECT actions.id, actions.run_id, actions.fence, actions.deadline_at,
+               actions.lease_until, actions.revision
+        FROM runtime_actions AS actions
+        JOIN runs ON runs.id = actions.run_id
+        WHERE runs.status = 'running'
+          AND actions.state = 'dispatched'
+          AND (actions.deadline_at <= ? OR actions.lease_until <= ?)
       `).all(now, now) as unknown as Array<{
         id: string; run_id: string; fence: number; deadline_at: number; lease_until: number; revision: number;
       }>;
       for (const action of expired) {
         const reason = action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired";
-        const result = this.database.raw.prepare(`
+        const result = this.database.prepare(`
           UPDATE runtime_actions
           SET state = 'recovery_required', lease_until = NULL, revision = revision + 1, updated_at = ?
           WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
@@ -192,7 +195,7 @@ export class RuntimeActionRepository {
     const now = Date.now();
     this.database.transaction(() => {
       const row = this.requireRow(actionId);
-      const result = this.database.raw.prepare(`
+      const result = this.database.prepare(`
         UPDATE runtime_actions
         SET state = 'succeeded', lease_until = NULL, revision = revision + 1,
             updated_at = ?, closed_at = ?
@@ -207,7 +210,7 @@ export class RuntimeActionRepository {
     const now = Date.now();
     this.database.transaction(() => {
       const row = this.requireRow(actionId);
-      const result = this.database.raw.prepare(`
+      const result = this.database.prepare(`
         UPDATE runtime_actions
         SET state = 'failed', lease_until = NULL, error_code = ?, revision = revision + 1,
             updated_at = ?, closed_at = ?
@@ -220,7 +223,7 @@ export class RuntimeActionRepository {
 
   private createRecoveryReview(runId: string, reason: string, now: number): void {
     const id = randomUUID();
-    this.database.raw.prepare(`
+    this.database.prepare(`
       INSERT INTO runtime_actions(
         id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
         replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
@@ -240,7 +243,7 @@ export class RuntimeActionRepository {
     question: string | undefined,
     now: number,
   ): void {
-    this.database.raw.prepare(`
+    this.database.prepare(`
       INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(run_id) DO UPDATE SET
@@ -256,17 +259,17 @@ export class RuntimeActionRepository {
   }
 
   private requireRow(actionId: string): RuntimeActionRow {
-    const row = this.database.raw.prepare("SELECT * FROM runtime_actions WHERE id = ?")
+    const row = this.database.prepare("SELECT * FROM runtime_actions WHERE id = ?")
       .get(actionId) as RuntimeActionRow | undefined;
     if (row === undefined) throw new AppError("NOT_FOUND", "Runtime Action not found", 404);
     return row;
   }
 
   private appendEvent(runId: string, type: string, data: Readonly<Record<string, unknown>>, createdAt: number): void {
-    const sequence = this.database.raw.prepare(
+    const sequence = this.database.prepare(
       "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?",
     ).get(runId) as { seq: number };
-    this.database.raw.prepare(`
+    this.database.prepare(`
       INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(runId, sequence.seq, type, JSON.stringify(data), createdAt);

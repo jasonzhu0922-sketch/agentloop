@@ -3,7 +3,6 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import type { StepAssessor } from "../src/planning/contracts.ts";
@@ -227,27 +226,19 @@ test("the admitted step receives the unchanged package Skill and persists packag
       sourceRevision: SOURCE_REVISION,
       expectedPackageHash: expected.packageHash,
     });
-    const agents = new AgentService(database, skills);
-    const agent = agents.create(owner.user.id, {
-      name: "package-agent",
-      systemPrompt: "Follow the admitted package Skill.",
-      providerKey: "scenario",
-      skillIds: [installed.id],
-    });
     const model = new InspectPackageModel(
-      relative(await fs.realpath(workspace), installed.package!.root),
+      installed.package!.root,
       installed.package!.packageHash,
     );
     const runs = new RunService({
       database,
       skills,
-      agents,
       modelFactory: () => model,
       plannerFactory: () => singleStepTestPlanner(),
       assessorFactory: () => approvingAssessor(),
       workspaceRoot: workspace,
     });
-    const run = await runs.execute(owner.user.id, agent.id, "use installed package");
+    const run = await runs.execute(owner.user.id, "use installed package");
 
     assert.equal(run.status, "completed");
     assert.equal(model.sawUnchangedInstruction, true);
@@ -278,7 +269,7 @@ class InspectPackageModel implements ModelAdapter {
     this.calls += 1;
     if (this.calls === 1) {
       assert.doesNotMatch(request.systemPrompt, /PACKAGE-INSTRUCTION-MUST-STAY-EXACT/);
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["load_skill"]);
+      assert.ok(request.tools.some((tool) => tool.name === "load_skill"));
       return {
         content: "",
         finishReason: "tool_calls",

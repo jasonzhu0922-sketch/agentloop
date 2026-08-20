@@ -4,7 +4,6 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import type { Planner, StepAssessor } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
@@ -41,24 +40,15 @@ test("Agent Loop discovers an unlocked Skill directory and privately provisions 
     assert.equal(ownerSkills[0].package?.packageHash, fixture.packageHash);
     assert.equal((await fs.stat(resolve(ownerSkills[0].package!.root, "SKILL.md"))).mode & 0o222, 0);
 
-    const agents = new AgentService(database, skills);
-    const agent = agents.create(owner.user.id, {
-      name: "directory-agent",
-      systemPrompt: "Follow Runtime Skill activation gates.",
-      maxSteps: 3,
-      skillIds: [],
-      toolNames: [],
-    });
     const runs = new RunService({
       database,
       skills,
-      agents,
       workspaceRoot: fixture.root,
       modelFactory: () => new DirectorySkillModel(),
       plannerFactory: () => directoryPlanner(),
       assessorFactory: () => approvingAssessor(),
     });
-    const run = await runs.execute(owner.user.id, agent.id, "apply the discovered workflow");
+    const run = await runs.execute(owner.user.id, "apply the discovered workflow");
     assert.equal(run.status, "completed");
     assert.equal(run.output, "directory Skill loaded and followed");
     const plan = runs.plan(owner.user.id, run.id).plan;
@@ -235,7 +225,8 @@ class DirectorySkillModel implements ModelAdapter {
     if (this.calls === 1) {
       assert.match(request.runtimeContext?.content ?? "", /directory-demo/);
       assert.doesNotMatch(request.runtimeContext?.content ?? "", /DIRECTORY-SKILL-SECRET-BODY/);
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["load_skill"]);
+      assert.ok(request.tools.some((tool) => tool.name === "load_skill"));
+      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), false);
       return {
         content: "",
         finishReason: "tool_calls",

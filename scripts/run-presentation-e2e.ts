@@ -6,7 +6,6 @@ import {
   collectRenderEnvironmentEvidence,
   type RenderEnvironmentEvidence,
 } from "../src/acceptance/render-environment.ts";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { OpenAICompatibleModel } from "../src/runtime/models.ts";
@@ -164,7 +163,7 @@ function defaultPresentationTask(paths: PresentationTaskPaths, expectedSlideCoun
     "必须使用并严格遵循已安装的原始 presentation-skill Package，不能修改、包装或补充该 Skill。",
     `创建一份 ${expectedSlideCount} 页中文可编辑 PPTX，主题为“AgentLoop Plan-first 智能体框架”，面向企业技术决策者。`,
     "内容只允许来自本地 README.md 与 docs/ARCHITECTURE.md，不得虚构客户、效果指标、部署结果或上游事实。",
-    "叙事需覆盖核心 Agent Loop、Plan/Admission、私有 Skill 遵循、Computer Tool、多 Agent、Batch 与安全边界。",
+    "叙事需覆盖核心 Agent Loop、Plan/Admission、私有 Skill 遵循、Computer Tool、会话式单 Agent 执行、Batch 与安全边界。",
     `将唯一 outline.json 写到 ${paths.outlinePath}，最终 PPTX 写到 ${paths.finalPptx}，QA 输出目录固定为 ${paths.qaDir}。`,
     "选择原始 Skill 支持的 Quick Deck 路径与合适的 style preset；使用原始 Package 自带 builder 和 qa_gate.py。",
     `最终自动化 QA 必须实际渲染全部 ${expectedSlideCount} 页，不得以 --skip-render 作为最终证据；可以明确跳过人工复核门槛，但不得声称人工视觉检查已完成。`,
@@ -204,7 +203,6 @@ async function main(): Promise<void> {
   let database: AppDatabase | undefined;
   let runs: RunService | undefined;
   let actorUserId: string | undefined;
-  let agentId: string | undefined;
   let runId: string | undefined;
   let sourceBefore: Awaited<ReturnType<typeof inspectSkillPackage>> | undefined;
   let sourceLock: Record<string, unknown> | undefined;
@@ -235,14 +233,13 @@ async function main(): Promise<void> {
       skillDirectory: resolve(ROOT, "skills"),
     });
     await skills.refreshSkillDirectory();
-    const agents = new AgentService(database, skills);
     const user = await auth.register(
       `ppt-e2e-${randomUUID()}@example.invalid`,
       `E2E-${randomUUID()}-strong-password`,
     );
     actorUserId = user.user.id;
     stage = "discover-and-provision-upstream-package";
-    const currentInstalledSkill = (await skills.resolveForAgent(user.user.id, []))
+    const currentInstalledSkill = (await skills.resolveForConversation(user.user.id))
       .find((skill) => skill.name === "presentation-skill");
     if (currentInstalledSkill === undefined) {
       throw new Error("AgentLoop did not discover presentation-skill from the configured Skill directory");
@@ -256,28 +253,7 @@ async function main(): Promise<void> {
       throw new Error("Installed Skill package differs from the upstream source snapshot");
     }
 
-    stage = "create-agent";
-    const agent = agents.create(user.user.id, {
-      name: "upstream-presentation-skill-agent",
-      systemPrompt: [
-        "You are a disciplined Plan-first agent.",
-        "Load the Skills bound to each admitted step, use only the currently admitted Tools, and base completion candidates on concrete Tool evidence.",
-      ].join("\n"),
-      providerKey: "openai-compatible",
-      modelId: "deepseek-chat",
-      maxSteps: cli.maxSteps,
-      maxDepth: 1,
-      skillIds: [],
-      childAgentIds: [],
-      toolNames: [
-        "computer_list_directory",
-        "computer_read_file",
-        "computer_search_text",
-        "computer_write_file",
-        "computer_run_command",
-      ],
-    });
-    agentId = agent.id;
+    stage = "initialize-model";
     const model = new OpenAICompatibleModel({
       baseUrl: "https://api.deepseek.com/v1",
       apiKey,
@@ -289,7 +265,6 @@ async function main(): Promise<void> {
     runs = new RunService({
       database,
       skills,
-      agents,
       modelFactory: () => model,
       workspaceRoot: ROOT,
       computerExecutableAliases: {
@@ -304,7 +279,7 @@ async function main(): Promise<void> {
     stage = "execute-run";
     let run: Awaited<ReturnType<RunService["execute"]>>;
     try {
-      run = await runs.execute(user.user.id, agent.id, task, { allowDangerousTools: true });
+      run = await runs.execute(user.user.id, task, { allowDangerousTools: true });
       runId = run.id;
     } catch (error) {
       runId = extractRunId(error);
@@ -313,7 +288,7 @@ async function main(): Promise<void> {
     stage = "collect-run-evidence";
     const plan = runs.plan(user.user.id, run.id);
     const events = runs.events(user.user.id, run.id);
-    const outcome = database.raw.prepare(
+    const outcome = database.prepare(
       "SELECT run_id, plan_id, status, output, reason_code, committed_at FROM run_outcomes WHERE run_id = ?",
     ).get(run.id) as Record<string, unknown> | undefined;
 
@@ -412,7 +387,6 @@ async function main(): Promise<void> {
         database,
         runs,
         actorUserId,
-        agentId,
         runId,
         sourceBefore,
         sourceLock,
@@ -534,7 +508,6 @@ export async function writeFailureEvidence(input: {
   database?: AppDatabase;
   runs?: RunService;
   actorUserId?: string;
-  agentId?: string;
   runId?: string;
   sourceBefore?: Awaited<ReturnType<typeof inspectSkillPackage>>;
   sourceLock?: Record<string, unknown>;
@@ -560,7 +533,7 @@ export async function writeFailureEvidence(input: {
   }) ?? [];
   const outcome = collectPersisted(() => {
     if (detectedRunId === undefined || input.database === undefined) return undefined;
-    return input.database.raw.prepare(
+    return input.database.prepare(
       "SELECT run_id, plan_id, status, output, reason_code, committed_at FROM run_outcomes WHERE run_id = ?",
     ).get(detectedRunId) as Record<string, unknown> | undefined;
   });
@@ -634,14 +607,13 @@ function extractRunId(error: unknown): string | undefined {
 function findLatestRunId(input: {
   database?: AppDatabase;
   actorUserId?: string;
-  agentId?: string;
 }): string | undefined {
-  if (input.database === undefined || input.actorUserId === undefined || input.agentId === undefined) return undefined;
-  const row = input.database.raw.prepare(`
+  if (input.database === undefined || input.actorUserId === undefined) return undefined;
+  const row = input.database.prepare(`
     SELECT id FROM runs
-    WHERE owner_user_id = ? AND agent_id = ?
+    WHERE owner_user_id = ?
     ORDER BY created_at DESC LIMIT 1
-  `).get(input.actorUserId, input.agentId) as { id: string } | undefined;
+  `).get(input.actorUserId) as { id: string } | undefined;
   return row?.id;
 }
 

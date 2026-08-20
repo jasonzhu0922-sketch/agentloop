@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import { BatchService } from "../src/batch/batch-service.ts";
-import { CONSOLE_JS } from "../src/http/console.ts";
 import { createAgentLoopServer } from "../src/http/server.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
@@ -21,10 +19,10 @@ test("registration stores only password and session digests", async () => {
     assert.equal(result.user.email, "owner@example.com");
     assert.equal(auth.authenticate(result.token).id, result.user.id);
 
-    const userRow = database.raw.prepare("SELECT password_hash FROM users WHERE id = ?").get(result.user.id) as {
+    const userRow = database.prepare("SELECT password_hash FROM users WHERE id = ?").get(result.user.id) as {
       password_hash: string;
     };
-    const sessionRow = database.raw.prepare("SELECT token_hash FROM auth_sessions WHERE user_id = ?").get(result.user.id) as {
+    const sessionRow = database.prepare("SELECT token_hash FROM auth_sessions WHERE user_id = ?").get(result.user.id) as {
       token_hash: string;
     };
     assert.match(userRow.password_hash, /^scrypt\$/);
@@ -47,12 +45,11 @@ test("registration stores only password and session digests", async () => {
   }
 });
 
-test("private skill ownership is enforced at query and agent-binding boundaries", async () => {
+test("private skill ownership is enforced at query boundaries", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const auth = new AuthService(database);
     const skills = new SkillService(database);
-    const agents = new AgentService(database, skills);
     const owner = await auth.register("owner@example.com", "owner secure password");
     const stranger = await auth.register("stranger@example.com", "stranger secure password");
     const skill = skills.create(owner.user.id, {
@@ -67,21 +64,7 @@ test("private skill ownership is enforced at query and agent-binding boundaries"
       () => skills.get(stranger.user.id, skill.id),
       (error: unknown) => hasErrorCode(error, "NOT_FOUND"),
     );
-    assert.throws(
-      () => agents.create(stranger.user.id, {
-        name: "stolen-agent",
-        systemPrompt: "Try to bind a foreign skill",
-        skillIds: [skill.id],
-      }),
-      (error: unknown) => hasErrorCode(error, "NOT_FOUND"),
-    );
-
-    const agent = agents.create(owner.user.id, {
-      name: "researcher",
-      systemPrompt: "Use approved private research skills.",
-      skillIds: [skill.id],
-    });
-    assert.deepEqual(agent.skillIds, [skill.id]);
+    assert.deepEqual(skills.list(owner.user.id).map((entry) => entry.id), [skill.id]);
   } finally {
     database.close();
   }
@@ -91,16 +74,14 @@ test("HTTP login and private skill APIs form a runnable vertical slice", async (
   const database = new AppDatabase(":memory:");
   const auth = new AuthService(database);
   const skills = new SkillService(database);
-  const agents = new AgentService(database, skills);
   const runs = new RunService({
     database,
     skills,
-    agents,
     modelFactory: () => {
       throw new Error("Model is not used by this API-only test");
     },
   });
-  const batches = new BatchService(database, agents, runs);
+  const batches = new BatchService(database, runs);
   const providers = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({
       defaultProvider: "test-provider",
@@ -115,15 +96,22 @@ test("HTTP login and private skill APIs form a runnable vertical slice", async (
     }),
     TEST_PROVIDER_API_KEY: "test-secret",
   });
-  const server = createAgentLoopServer({ auth, skills, agents, runs, batches, providers });
+  const server = createAgentLoopServer({ auth, skills, runs, batches, providers }, { webOrigins: ["http://localhost:5173"] });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${address.port}`;
-    const consolePage = await fetch(`${baseUrl}/`);
-    assert.equal(consolePage.status, 200);
-    assert.match(await consolePage.text(), /DeepSeek Harness/);
-    assert.match(consolePage.headers.get("content-security-policy") ?? "", /script-src 'self'/);
+    for (const retiredPath of ["/", "/console", "/assets/console.css", "/assets/console.js", "/assets/app.js"]) {
+      const retired = await fetch(`${baseUrl}${retiredPath}`);
+      assert.equal(retired.status, 404, `${retiredPath} must not be served by the API`);
+    }
+    const allowedPreflight = await fetch(`${baseUrl}/v1/runs`, { method: "OPTIONS", headers: { origin: "http://localhost:5173" } });
+    assert.equal(allowedPreflight.status, 204);
+    assert.equal(allowedPreflight.headers.get("access-control-allow-origin"), "http://localhost:5173");
+    assert.match(allowedPreflight.headers.get("access-control-allow-methods") ?? "", /GET/);
+    const deniedPreflight = await fetch(`${baseUrl}/v1/runs`, { method: "OPTIONS", headers: { origin: "http://evil.example" } });
+    assert.equal(deniedPreflight.status, 404);
+    assert.equal(deniedPreflight.headers.get("access-control-allow-origin"), null);
     const registration = await fetch(`${baseUrl}/v1/auth/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -165,7 +153,15 @@ test("HTTP login and private skill APIs form a runnable vertical slice", async (
     assert.equal(providerCatalog.status, 200);
     assert.deepEqual(await providerCatalog.json(), {
       defaultProviderKey: "test-provider",
+      defaultModelKey: "test-model",
       providers: [{ key: "test-provider", kind: "openai-compatible", defaultModel: "test-model" }],
+      models: [{
+        key: "test-model",
+        displayName: "test-model",
+        providerKey: "test-provider",
+        providerModel: "test-model",
+        kind: "openai-compatible",
+      }],
     });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -177,28 +173,19 @@ test("HTTP async Run start returns a trackable running Run before model completi
   const database = new AppDatabase(":memory:");
   const auth = new AuthService(database);
   const skills = new SkillService(database);
-  const agents = new AgentService(database, skills);
   const release = deferred<void>();
   const runs = new RunService({
     database,
     skills,
-    agents,
     modelFactory: () => new DeferredRunModel(release.promise),
   });
-  const batches = new BatchService(database, agents, runs);
-  const server = createAgentLoopServer({ auth, skills, agents, runs, batches });
+  const batches = new BatchService(database, runs);
+  const server = createAgentLoopServer({ auth, skills, runs, batches });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${address.port}`;
     const owner = await auth.register("async-run@example.com", "async run secure password");
-    const agent = agents.create(owner.user.id, {
-      name: "async-tracker",
-      systemPrompt: "Produce a trackable answer.",
-      skillIds: [],
-      childAgentIds: [],
-      toolNames: [],
-    });
 
     const started = await fetch(`${baseUrl}/v1/runs/async`, {
       method: "POST",
@@ -207,7 +194,6 @@ test("HTTP async Run start returns a trackable running Run before model completi
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        agentId: agent.id,
         input: "Return an async tracked result.",
         allowDangerousTools: false,
       }),
@@ -262,23 +248,20 @@ test("Recovery APIs expose only the owner state and advance a structured planner
   const database = new AppDatabase(":memory:");
   const auth = new AuthService(database);
   const skills = new SkillService(database);
-  const agents = new AgentService(database, skills);
   const owner = await auth.register("recovery-api-owner@example.com", "recovery api owner secure password");
   const stranger = await auth.register("recovery-api-stranger@example.com", "recovery api stranger secure password");
-  const agent = agents.create(owner.user.id, { name: "recovery-api-agent", systemPrompt: "Recover.", providerKey: "scenario" });
   const runId = "recovery-api-run";
-  database.raw.prepare(`
-    INSERT INTO runs(id, owner_user_id, agent_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
-    VALUES (?, ?, ?, NULL, 0, 0, 'running', ?, ?)
-  `).run(runId, owner.user.id, agent.id, "confirm delivery", Date.now());
+  database.prepare(`
+    INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+    VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+  `).run(runId, owner.user.id, "confirm delivery", Date.now());
   const actions = new RuntimeActionRepository(database);
   const action = actions.dispatch({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 });
-  database.raw.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
+  database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
   actions.reconcileRunningRuns();
   const runs = new RunService({
     database,
     skills,
-    agents,
     modelFactory: () => new DeferredRunModel(Promise.resolve()),
     recoveryPlannerFactory: () => ({
       decide: async () => ({
@@ -291,8 +274,8 @@ test("Recovery APIs expose only the owner state and advance a structured planner
       }),
     }),
   });
-  const batches = new BatchService(database, agents, runs);
-  const server = createAgentLoopServer({ auth, skills, agents, runs, batches });
+  const batches = new BatchService(database, runs);
+  const server = createAgentLoopServer({ auth, skills, runs, batches });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address() as AddressInfo;
@@ -339,16 +322,6 @@ test("Recovery APIs expose only the owner state and advance a structured planner
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     database.close();
   }
-});
-
-test("browser console auth form submits the clicked login or register mode", () => {
-  assert.match(CONSOLE_JS, /function authMode\(submitter\)/);
-  assert.match(CONSOLE_JS, /const mode=authMode\(event\.submitter\)/);
-  assert.match(CONSOLE_JS, /\/v1\/auth\/'\+mode/);
-  assert.doesNotMatch(CONSOLE_JS, /\/v1\/auth\/'\+data\.get\('mode'\)/);
-  assert.match(CONSOLE_JS, /minlength="12"/);
-  assert.match(CONSOLE_JS, /\/v1\/runs\/async/);
-  assert.match(CONSOLE_JS, /function pollRun\(runId\)/);
 });
 
 class DeferredRunModel implements ModelAdapter {

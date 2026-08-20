@@ -1,21 +1,35 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { promises as fs, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { AppError, badRequest, forbidden } from "../shared/errors.ts";
+import { AppError, badRequest, conflict, forbidden } from "../shared/errors.ts";
 
 const DEFAULT_OUTPUT_LIMIT = 100_000;
+const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
+const COMMAND_OUTPUT_REFERENCE_PREVIEW = 2_000;
 const EXECUTABLE_NAME_PATTERN = /^[A-Za-z0-9._+-]+$/;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const SENSITIVE_ENVIRONMENT_NAME_PATTERN = /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|AUTH|CREDENTIAL)/;
 const SEARCH_BINARY_TIMEOUT_MS = 30_000;
 const SEARCH_FILE_CONCURRENCY = 8;
 const SEARCH_MAX_FILE_BYTES = 1_000_000;
+const FIND_FILE_CONCURRENCY = 8;
+const FIND_DEFAULT_LIMIT = 1_000;
+const FIND_MAX_LIMIT = 10_000;
 
 interface SearchMatch {
   readonly path: string;
   readonly line: number;
   readonly text: string;
+}
+
+interface CommandOutputReference {
+  readonly path: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly characters: number;
+  readonly previewCharacters: number;
 }
 
 export interface ComputerExecutorOptions {
@@ -70,6 +84,14 @@ export class ComputerExecutor {
     this.readOnlyRoots = Object.freeze((options.readOnlyRoots ?? []).map((root) => realpathSync(resolve(root))));
   }
 
+  withWorkspaceRoot(workspaceRoot: string): ComputerExecutor {
+    return new ComputerExecutor(workspaceRoot, {
+      executableAliases: Object.fromEntries(this.executableAliases),
+      commandEnvironment: this.commandEnvironment,
+      readOnlyRoots: this.readOnlyRoots,
+    });
+  }
+
   async listDirectory(path: string): Promise<Array<{ name: string; type: string }>> {
     const target = await this.resolveExisting(path);
     const entries = await fs.readdir(target, { withFileTypes: true });
@@ -79,7 +101,19 @@ export class ComputerExecutor {
     }));
   }
 
-  async readFile(path: string, maximumBytes = 200_000): Promise<{ content: string; bytes: number; truncated: boolean }> {
+  async readFile(
+    path: string,
+    maximumBytes = 200_000,
+    options: { offset?: number; limit?: number } = {},
+  ): Promise<{
+    content: string;
+    bytes: number;
+    truncated: boolean;
+    offset?: number;
+    limit?: number;
+    totalLines?: number;
+    nextOffset?: number;
+  }> {
     const target = await this.resolveExisting(path);
     const stat = await fs.stat(target);
     if (!stat.isFile()) throw badRequest("path must identify a regular file");
@@ -88,10 +122,96 @@ export class ComputerExecutor {
       const length = Math.min(stat.size, maximumBytes);
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, 0);
-      return { content: buffer.toString("utf8"), bytes: stat.size, truncated: stat.size > maximumBytes };
+      const content = buffer.toString("utf8");
+      if (options.offset === undefined && options.limit === undefined) {
+        return { content, bytes: stat.size, truncated: stat.size > maximumBytes };
+      }
+      const offset = options.offset ?? 1;
+      const lines = content.split("\n");
+      const start = Math.max(0, offset - 1);
+      if (start >= lines.length) {
+        throw badRequest(`offset ${offset} is beyond the readable file prefix (${lines.length} lines)`);
+      }
+      const end = options.limit === undefined ? lines.length : Math.min(lines.length, start + options.limit);
+      const selected = lines.slice(start, end).join("\n");
+      const nextOffset = end < lines.length ? end + 1 : undefined;
+      return {
+        content: [
+          selected,
+          nextOffset === undefined ? "" : `\n[More readable content available. Use offset=${nextOffset} to continue.]`,
+          stat.size > maximumBytes
+            ? `\n[File read was capped at ${maximumBytes} bytes of ${stat.size}; use narrower offset/limit or a purpose-built extraction command for later content.]`
+            : "",
+        ].join("").trimEnd(),
+        bytes: stat.size,
+        truncated: stat.size > maximumBytes || nextOffset !== undefined,
+        offset,
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+        totalLines: lines.length,
+        ...(nextOffset === undefined ? {} : { nextOffset }),
+      };
     } finally {
       await handle.close();
     }
+  }
+
+  async findFiles(
+    path: string,
+    pattern: string,
+    options: { limit?: number } = {},
+  ): Promise<{
+    matches: string[];
+    limit: number;
+    truncated: boolean;
+  }> {
+    if (pattern.trim().length === 0) throw badRequest("pattern must be non-empty");
+    const root = await this.resolveExisting(path);
+    const rootStat = await fs.stat(root);
+    const limit = Math.min(Math.max(1, options.limit ?? FIND_DEFAULT_LIMIT), FIND_MAX_LIMIT);
+    const matcher = globMatcher(pattern);
+    const matches: string[] = [];
+    let truncated = false;
+    const addMatch = (absolutePath: string): void => {
+      const rel = relative(root, absolutePath).split(sep).join("/") || ".";
+      const workspaceRel = relative(this.workspaceRoot, absolutePath).split(sep).join("/") || ".";
+      if (matcher(rel) || matcher(workspaceRel)) {
+        if (matches.length >= limit) {
+          truncated = true;
+          return;
+        }
+        matches.push(workspaceRel);
+      }
+    };
+    if (rootStat.isFile()) {
+      addMatch(root);
+      return { matches: matches.sort(), limit, truncated };
+    }
+    if (!rootStat.isDirectory()) throw badRequest("path must identify a file or directory");
+    const queue: string[] = [root];
+    while (queue.length > 0 && !truncated) {
+      const batch = queue.splice(0, FIND_FILE_CONCURRENCY);
+      const scanned = await Promise.all(batch.map(async (directory) => {
+        const entries = await fs.readdir(directory, { withFileTypes: true });
+        const directories: string[] = [];
+        const files: string[] = [];
+        for (const entry of entries) {
+          if (entry.isSymbolicLink() || entry.name === ".git" || entry.name === "node_modules") continue;
+          const child = resolve(directory, entry.name);
+          if (entry.isDirectory()) directories.push(child);
+          else if (entry.isFile()) files.push(child);
+        }
+        return { directories, files };
+      }));
+      for (const { directories, files } of scanned) {
+        for (const file of files) {
+          addMatch(file);
+          if (truncated) break;
+        }
+        if (truncated) break;
+        for (const directory of directories) queue.push(directory);
+      }
+    }
+    return { matches: matches.sort(), limit, truncated };
   }
 
   async searchText(
@@ -267,7 +387,14 @@ export class ComputerExecutor {
 
   async writeFile(path: string, content: string, overwrite: boolean): Promise<{ path: string; bytes: number }> {
     const target = await this.resolveWritable(path);
-    await fs.writeFile(target, content, { encoding: "utf8", flag: overwrite ? "w" : "wx", mode: 0o600 });
+    try {
+      await fs.writeFile(target, content, { encoding: "utf8", flag: overwrite ? "w" : "wx", mode: 0o600 });
+    } catch (error) {
+      if (!overwrite && isFileAlreadyExistsError(error)) {
+        throw conflict("File already exists; set overwrite=true to replace it");
+      }
+      throw error;
+    }
     return { path: relative(this.workspaceRoot, target), bytes: Buffer.byteLength(content) };
   }
 
@@ -282,6 +409,8 @@ export class ComputerExecutor {
     signal: string | null;
     stdout: string;
     stderr: string;
+    stdoutRef?: CommandOutputReference;
+    stderrRef?: CommandOutputReference;
     truncated: boolean;
     timedOut: boolean;
   }> {
@@ -346,16 +475,60 @@ export class ComputerExecutor {
           rejectPromise(new AppError("TOOL_EXECUTION_ERROR", "Command execution timed out", 409));
           return;
         }
-        resolvePromise({
-          exitCode,
-          signal,
-          stdout: stdout.toString("utf8"),
-          stderr: stderr.toString("utf8"),
-          truncated,
-          timedOut,
-        });
+        void (async () => {
+          try {
+            const stdoutProjection = await this.projectCommandOutput("stdout", stdout.toString("utf8"));
+            const stderrProjection = await this.projectCommandOutput("stderr", stderr.toString("utf8"));
+            resolvePromise({
+              exitCode,
+              signal,
+              stdout: stdoutProjection.content,
+              stderr: stderrProjection.content,
+              ...(stdoutProjection.reference === undefined ? {} : { stdoutRef: stdoutProjection.reference }),
+              ...(stderrProjection.reference === undefined ? {} : { stderrRef: stderrProjection.reference }),
+              truncated,
+              timedOut,
+            });
+          } catch (error) {
+            rejectPromise(error);
+          }
+        })();
       });
     });
+  }
+
+  private async projectCommandOutput(kind: "stdout" | "stderr", content: string): Promise<{
+    content: string;
+    reference?: CommandOutputReference;
+  }> {
+    if (content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD) return { content };
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    const directory = resolve(this.workspaceRoot, ".agentloop", "tool-results", sha256.slice(0, 2));
+    this.assertContained(directory);
+    this.assertNotReadOnly(directory);
+    await this.ensureWritableDirectory(directory);
+    const target = resolve(directory, `${sha256}.${kind}.txt`);
+    this.assertContained(target);
+    this.assertNotReadOnly(target);
+    await fs.writeFile(target, content, { encoding: "utf8", flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+    const path = relative(this.workspaceRoot, target);
+    const bytes = Buffer.byteLength(content);
+    return {
+      content: [
+        content.slice(0, COMMAND_OUTPUT_REFERENCE_PREVIEW),
+        "",
+        `[${kind} stored as content-addressed evidence; path=${path}; sha256=${sha256}; originalCharacters=${content.length}; bytes=${bytes}. Reuse this path/hash instead of rerunning the command solely to recover this output.]`,
+      ].join("\n"),
+      reference: {
+        path,
+        sha256,
+        bytes,
+        characters: content.length,
+        previewCharacters: COMMAND_OUTPUT_REFERENCE_PREVIEW,
+      },
+    };
   }
 
   private lexicalPath(path: string): string {
@@ -426,6 +599,46 @@ export class ComputerExecutor {
     if (offset === "" || (!offset.startsWith(`..${sep}`) && offset !== ".." && !isAbsolute(offset))) return;
     throw forbidden("Computer path escapes the configured workspace root");
   }
+}
+
+function isFileAlreadyExistsError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST";
+}
+
+function globMatcher(pattern: string): (path: string) => boolean {
+  const normalized = pattern.replace(/\\/g, "/");
+  const expression = globToRegExp(normalized);
+  return (path) => expression.test(path.replace(/\\/g, "/"));
+}
+
+function globToRegExp(pattern: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        index += 1;
+        if (pattern[index + 1] === "/") {
+          index += 1;
+          source += "(?:.*/)?";
+        } else {
+          source += ".*";
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (character === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegExp(character);
+    }
+  }
+  source += "$";
+  return new RegExp(source);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**

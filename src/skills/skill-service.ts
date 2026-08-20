@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
-import type { AppDatabase } from "../storage/database.ts";
+import type { SqlConnection } from "../storage/connection.ts";
+import { SkillRepository, type SkillRow } from "../storage/repositories/skill-repository.ts";
 import { AppError, badRequest, conflict, forbidden, notFound } from "../shared/errors.ts";
 import { requireString } from "../shared/validation.ts";
 import {
@@ -64,42 +65,16 @@ export interface DiscoveredSkillSummary {
   readonly totalBytes: number;
 }
 
-interface SkillRow {
-  id: string;
-  owner_user_id: string;
-  name: string;
-  description: string;
-  instructions: string;
-  source_kind: string;
-  source_url: string | null;
-  source_revision: string | null;
-  package_root: string | null;
-  entrypoint_path: string | null;
-  package_hash: string | null;
-  package_file_count: number | null;
-  package_total_bytes: number | null;
-  content_hash: string;
-  version: number;
-  updated_at: number;
-}
-
-const SKILL_COLUMNS = `
-  id, owner_user_id, name, description, instructions, source_kind,
-  source_url, source_revision, package_root, entrypoint_path,
-  package_hash, package_file_count, package_total_bytes,
-  content_hash, version, updated_at
-`;
-
 export class SkillService {
-  private readonly database: AppDatabase;
+  private readonly skills: SkillRepository;
   private readonly packageStore?: string;
   private readonly allowedImportRoots: readonly string[];
   private readonly configuredSkillDirectory?: string;
   private directoryEntries: readonly SkillDirectoryEntry[] = [];
   private readonly activeProvisioning = new Map<string, Promise<PrivateSkill[]>>();
 
-  constructor(database: AppDatabase, options: SkillServiceOptions = {}) {
-    this.database = database;
+  constructor(database: SqlConnection, options: SkillServiceOptions = {}) {
+    this.skills = new SkillRepository(database);
     if (options.packageStoreRoot !== undefined) {
       mkdirSync(resolve(options.packageStoreRoot), { recursive: true, mode: 0o700 });
       this.packageStore = realpathSync(resolve(options.packageStoreRoot));
@@ -158,6 +133,17 @@ export class SkillService {
       names.add(skill.name);
     }
     return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name, "en"));
+  }
+
+  /**
+   * A conversation belongs to its user, not to the Skill that happened to
+   * start it. Conversation Runs can therefore consider the user's complete
+   * private catalog; Plan admission still selects and binds only the Skills
+   * needed by the current request.
+   */
+  async resolveForConversation(ownerUserId: string): Promise<PrivateSkill[]> {
+    await this.provisionDiscovered(ownerUserId);
+    return this.getMany(ownerUserId, this.list(ownerUserId).map((skill) => skill.id));
   }
 
   create(
@@ -245,9 +231,7 @@ export class SkillService {
         { expectedPackageHash, actualPackageHash: source.packageHash },
       );
     }
-    const existing = this.database.raw.prepare(
-      "SELECT id FROM skills WHERE owner_user_id = ? AND name = ?",
-    ).get(ownerUserId, source.name);
+    const existing = this.skills.findIdByOwnerAndName(ownerUserId, source.name);
     if (existing !== undefined) throw conflict(`A private skill named "${source.name}" already exists`);
 
     const id = randomUUID();
@@ -284,16 +268,12 @@ export class SkillService {
   }
 
   list(ownerUserId: string): SkillSummary[] {
-    const rows = this.database.raw
-      .prepare(`SELECT ${SKILL_COLUMNS} FROM skills WHERE owner_user_id = ? ORDER BY name`)
-      .all(ownerUserId) as unknown as SkillRow[];
+    const rows = this.skills.listByOwner(ownerUserId);
     return rows.map(toSummary);
   }
 
   get(ownerUserId: string, skillId: string): PrivateSkill {
-    const row = this.database.raw
-      .prepare(`SELECT ${SKILL_COLUMNS} FROM skills WHERE id = ? AND owner_user_id = ?`)
-      .get(skillId, ownerUserId) as SkillRow | undefined;
+    const row = this.skills.findByIdAndOwner(skillId, ownerUserId);
     // Return the same response for a missing and a foreign-owned skill to avoid
     // turning identifiers into an ownership oracle.
     if (row === undefined) throw notFound("Skill");
@@ -352,9 +332,7 @@ export class SkillService {
     }
     const provisioned: PrivateSkill[] = [];
     for (const entry of this.directoryEntries) {
-      const existing = this.database.raw.prepare(
-        "SELECT id FROM skills WHERE owner_user_id = ? AND name = ?",
-      ).get(ownerUserId, entry.inspection.name) as { id: string } | undefined;
+      const existing = this.skills.findIdByOwnerAndName(ownerUserId, entry.inspection.name);
       if (existing !== undefined) {
         const skill = this.get(ownerUserId, existing.id);
         if (
@@ -434,38 +412,7 @@ export class SkillService {
     contentHash: string;
     now: number;
   }): void {
-    try {
-      this.database.raw.prepare(`
-        INSERT INTO skills(
-          id, owner_user_id, name, description, instructions, source_kind,
-          source_url, source_revision, package_root, entrypoint_path,
-          package_hash, package_file_count, package_total_bytes,
-          content_hash, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-      `).run(
-        input.id,
-        input.ownerUserId,
-        input.name,
-        input.description,
-        input.instructions,
-        input.sourceKind,
-        input.sourceUrl ?? null,
-        input.sourceRevision ?? null,
-        input.packageRoot ?? null,
-        input.entrypointPath ?? null,
-        input.packageHash ?? null,
-        input.packageFileCount ?? null,
-        input.packageTotalBytes ?? null,
-        input.contentHash,
-        input.now,
-        input.now,
-      );
-    } catch (error) {
-      if (String(error).includes("UNIQUE constraint failed")) {
-        throw conflict(`A private skill named "${input.name}" already exists`);
-      }
-      throw error;
-    }
+    this.skills.insert(input);
   }
 }
 

@@ -3,7 +3,6 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
@@ -108,29 +107,16 @@ test("presentation E2E failure persists its canonical Run evidence before exitin
   try {
     const auth = new AuthService(database);
     const skills = new SkillService(database);
-    const agents = new AgentService(database, skills);
     const owner = await auth.register("ppt-evidence@example.com", "ppt evidence secure password");
-    const agent = agents.create(owner.user.id, {
-      name: "local-failure-agent",
-      systemPrompt: "Fail locally for evidence testing.",
-      providerKey: "openai-compatible",
-      modelId: "local-failure",
-      maxSteps: 2,
-      maxDepth: 1,
-      skillIds: [],
-      childAgentIds: [],
-      toolNames: [],
-    });
     const runs = new RunService({
       database,
       skills,
-      agents,
       modelFactory: () => new LocalFailureModel(),
       workspaceRoot: workspace,
     });
     let runFailure: unknown;
     try {
-      await runs.execute(owner.user.id, agent.id, "trigger a local planner failure");
+      await runs.execute(owner.user.id, "trigger a local planner failure");
     } catch (error) {
       runFailure = error;
     }
@@ -154,7 +140,6 @@ test("presentation E2E failure persists its canonical Run evidence before exitin
       database,
       runs,
       actorUserId: owner.user.id,
-      agentId: agent.id,
       finalPptx: join(workspace, "missing.pptx"),
       outlinePath: join(workspace, "missing-outline.json"),
       qaReport,

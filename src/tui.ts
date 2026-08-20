@@ -3,13 +3,9 @@ import { stdin as input, stdout as output } from "node:process";
 import {
   TuiApiClient,
   TuiApiError,
-  type TuiAgent,
-  type TuiProvider,
   type TuiRun,
-  type TuiSkill,
   type TuiTool,
 } from "./tui/api-client.ts";
-import { parseSelection } from "./tui/selection.ts";
 import { readMaskedSecret, setTerminalEcho, supportsMaskedSecretInput } from "./tui/secret-input.ts";
 
 const COLORS = {
@@ -100,17 +96,13 @@ class AgentLoopTui {
 
   private async mainMenu(): Promise<void> {
     for (;;) {
-      this.write("\n1) 运行已有 Agent\n2) 快速测试已有 Skill\n3) 查看 Agent\n4) 查看 Skill\n5) 查看 Tool\n6) 查看 Run 详情\n7) 高级：创建 Agent\n8) 注销\nq) 退出\n");
+      this.write("\n1) 运行任务\n2) 查看 Tool\n3) 查看 Run 详情\n4) 注销\nq) 退出\n");
       const choice = (await this.ask("选择: ")).toLowerCase();
       try {
         if (choice === "1") await this.runTask();
-        else if (choice === "2") await this.quickRunSkill();
-        else if (choice === "3") await this.listAgents();
-        else if (choice === "4") await this.listSkills();
-        else if (choice === "5") await this.listTools();
-        else if (choice === "6") await this.showRun(await this.askRequired("Run ID: "));
-        else if (choice === "7") await this.createAgent();
-        else if (choice === "8") {
+        else if (choice === "2") await this.listTools();
+        else if (choice === "3") await this.showRun(await this.askRequired("Run ID: "));
+        else if (choice === "4") {
           await this.client.logout();
           this.info("已注销。本次会话未在磁盘保存 Token。");
           await this.authenticate();
@@ -124,89 +116,24 @@ class AgentLoopTui {
   }
 
   private async runTask(): Promise<void> {
-    const { agents } = await this.client.agents();
-    if (agents.length === 0) {
-      this.fail("还没有 Agent，请先使用菜单 7 创建，或使用菜单 2 直接测试已有 Skill。\n");
-      return;
-    }
-    const agent = await this.choose("选择 Agent", agents, (item) => `${item.name}  [${item.providerKey}/${item.modelId}]`);
     const task = await this.askMultiline("任务内容");
     const { tools } = await this.client.tools();
-    await this.executeTask(agent, task, tools);
+    await this.executeTask(task, tools);
   }
 
-  private async quickRunSkill(): Promise<void> {
-    const [{ skills }, { agents }, { providers, defaultProviderKey }, { tools }] = await Promise.all([
-      this.client.skills(),
-      this.client.agents(),
-      this.client.providers(),
-      this.client.tools(),
-    ]);
-    if (skills.length === 0) {
-      this.fail("服务端尚未发现可测试的 Skill Package。请检查 SKILL_DIRECTORY。\n");
-      return;
-    }
-    if (providers.length === 0) throw new Error("当前服务没有已配置的 Provider");
-    const skill = await this.choose("选择已有 Skill", skills, (item) => `${item.name} — ${item.description}`);
-    const runnerName = `TUI Skill Runner: ${skill.name}`;
-    const allToolNames = tools.map((tool) => tool.name);
-    let agent = agents.find((item) => item.name === runnerName);
-    if (agent === undefined) {
-      const provider = providers.find((item) => item.key === defaultProviderKey) ?? providers[0];
-      agent = (await this.client.createAgent({
-        name: runnerName,
-        systemPrompt: [
-          "You are a test runner for one bound Skill in a plan-first runtime.",
-          "Follow the exact loaded Skill instructions and do not claim completion without persisted evidence and assessment.",
-        ].join(" "),
-        providerKey: provider.key,
-        modelId: "default",
-        skillIds: [skill.id],
-        toolNames: allToolNames,
-      })).agent;
-      this.info(`已创建并绑定 ${skill.name} 的测试 Agent；未创建新的 Skill。`);
-    } else if (!agent.skillIds.includes(skill.id)) {
-      throw new Error(`同名测试 Agent 未绑定当前 ${skill.name} Package；请在高级菜单中使用另一个名称创建 Agent`);
-    } else {
-      this.info(`复用 ${skill.name} 的已有测试 Agent。`);
-    }
-    const task = await this.askMultiline(`${skill.name} 测试任务`);
-    await this.executeTask(agent, task, tools);
-  }
-
-  private async executeTask(agent: TuiAgent, task: string, tools: readonly TuiTool[]): Promise<void> {
+  private async executeTask(task: string, tools: readonly TuiTool[]): Promise<void> {
     const selectedDangerousTools = new Set(tools.filter((tool) => tool.dangerous).map((tool) => tool.name));
-    const needsConsent = agent.toolNames.some((name) => selectedDangerousTools.has(name));
-    const allowDangerousTools = needsConsent
-      ? await this.confirm("这个 Agent 包含危险 Tool；本次允许写文件、运行命令或 GUI 操作吗？", false)
+    const allowDangerousTools = selectedDangerousTools.size > 0
+      ? await this.confirm("当前服务包含危险 Tool；本次允许写文件、运行命令或 GUI 操作吗？", false)
       : false;
 
     this.info("任务运行中；服务端会在 Plan、工具证据和 Assessment 完成后返回结果…");
     const { run } = await this.client.executeRun({
-      agentId: agent.id,
       input: task,
       allowDangerousTools,
     });
     this.showRunSummary(run);
     await this.showRunDetails(run.id, false);
-  }
-
-  private async listAgents(): Promise<void> {
-    const { agents } = await this.client.agents();
-    if (agents.length === 0) return this.info("没有 Agent。\n");
-    this.write("\nAgent\n");
-    for (const agent of agents) {
-      this.write(`- ${agent.name}\n  ${agent.id}\n  Provider: ${agent.providerKey}/${agent.modelId}; Skills: ${agent.skillIds.length}; Tools: ${agent.toolNames.length}\n`);
-    }
-  }
-
-  private async listSkills(): Promise<void> {
-    const { skills } = await this.client.skills();
-    if (skills.length === 0) return this.info("没有可用 Skill。\n");
-    this.write("\nSkill\n");
-    for (const skill of skills) {
-      this.write(`- ${skill.name} (${skill.sourceKind})\n  ${skill.description}\n  ${skill.id}\n`);
-    }
   }
 
   private async listTools(): Promise<void> {
@@ -244,62 +171,9 @@ class AgentLoopTui {
   }
 
   private showRunSummary(run: TuiRun): void {
-    this.write(`\nRun ${run.id}\n状态: ${run.status}\nAgent: ${run.agentId}\n`);
+    this.write(`\nRun ${run.id}\n状态: ${run.status}\n`);
     if (run.errorCode !== undefined) this.fail(`错误码: ${run.errorCode}`);
     if (run.output !== undefined && run.output.length > 0) this.write(`输出:\n${run.output}\n`);
-  }
-
-  private async createAgent(): Promise<void> {
-    const [{ providers }, { skills }, { tools }] = await Promise.all([
-      this.client.providers(),
-      this.client.skills(),
-      this.client.tools(),
-    ]);
-    if (providers.length === 0) throw new Error("当前服务没有已配置的 Provider");
-    const name = await this.askRequired("Agent 名称: ");
-    const systemPrompt = await this.askMultiline("System Prompt");
-    const provider = await this.choose("选择 Provider", providers, (item) => `${item.key} / ${item.defaultModel}`);
-    const modelId = (await this.ask("模型 ID（留空使用 Provider 默认模型）: ")).trim() || "default";
-    const skillIds = await this.chooseMany("绑定 Skill（输入序号，以逗号分隔；留空不绑定）", skills, (item) => item.name);
-    const toolNames = await this.chooseMany(
-      "启用 Tool（输入序号，以逗号分隔；留空不启用）",
-      tools,
-      (item) => `${item.name}${item.dangerous ? " [危险]" : ""}`,
-    );
-    const { agent } = await this.client.createAgent({
-      name,
-      systemPrompt,
-      providerKey: provider.key,
-      modelId,
-      skillIds: skillIds.map((skill) => skill.id),
-      toolNames: toolNames.map((tool) => tool.name),
-    });
-    this.info(`已创建 Agent ${agent.name} (${agent.id})。`);
-  }
-
-  private async choose<T>(title: string, values: readonly T[], label: (value: T) => string): Promise<T> {
-    this.write(`\n${title}\n`);
-    values.forEach((value, index) => this.write(`${index + 1}) ${label(value)}\n`));
-    for (;;) {
-      const answer = await this.ask("选择序号: ");
-      const index = Number(answer) - 1;
-      if (Number.isSafeInteger(index) && index >= 0 && index < values.length) return values[index];
-      this.fail(`请输入 1 到 ${values.length} 之间的整数。`);
-    }
-  }
-
-  private async chooseMany<T>(title: string, values: readonly T[], label: (value: T) => string): Promise<T[]> {
-    if (values.length === 0) return [];
-    this.write(`\n${title}\n`);
-    values.forEach((value, index) => this.write(`${index + 1}) ${label(value)}\n`));
-    for (;;) {
-      const answer = await this.ask("选择: ");
-      try {
-        return parseSelection(answer, values);
-      } catch (error) {
-        this.fail(error instanceof Error ? error.message : "选择无效");
-      }
-    }
   }
 
   private async askMultiline(title: string): Promise<string> {

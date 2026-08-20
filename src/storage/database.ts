@@ -1,34 +1,37 @@
-import { DatabaseSync } from "node:sqlite";
+import type { SqlConnection, SqlStatement } from "./connection.ts";
+import { SqliteConnection } from "./sqlite-connection.ts";
 
-export class AppDatabase {
-  readonly raw: DatabaseSync;
+/**
+ * Schema owner and connection facade. Implements the `SqlConnection` data-access
+ * boundary on top of SQLite; a future Postgres deployment swaps in a different
+ * connection adapter and keeps this schema/evolution logic.
+ */
+export class AppDatabase implements SqlConnection {
+  private readonly connection: SqliteConnection;
 
   constructor(filename: string) {
-    this.raw = new DatabaseSync(filename);
-    this.raw.exec("PRAGMA foreign_keys = ON");
-    this.raw.exec("PRAGMA journal_mode = WAL");
-    this.raw.exec("PRAGMA busy_timeout = 5000");
+    this.connection = new SqliteConnection(filename);
     this.migrate();
   }
 
-  close(): void {
-    this.raw.close();
+  exec(sql: string): void {
+    this.connection.exec(sql);
+  }
+
+  prepare(sql: string): SqlStatement {
+    return this.connection.prepare(sql);
   }
 
   transaction<T>(operation: () => T): T {
-    this.raw.exec("BEGIN IMMEDIATE");
-    try {
-      const result = operation();
-      this.raw.exec("COMMIT");
-      return result;
-    } catch (error) {
-      this.raw.exec("ROLLBACK");
-      throw error;
-    }
+    return this.connection.transaction(operation);
+  }
+
+  close(): void {
+    this.connection.close();
   }
 
   private migrate(): void {
-    this.raw.exec(`
+    this.connection.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL UNIQUE,
@@ -68,47 +71,24 @@ export class AppDatabase {
       );
       CREATE INDEX IF NOT EXISTS skills_owner_idx ON skills(owner_user_id);
 
-      CREATE TABLE IF NOT EXISTS agents (
+      CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        system_prompt TEXT NOT NULL,
-        provider_key TEXT NOT NULL,
-        model_id TEXT NOT NULL,
-        max_steps INTEGER NOT NULL,
-        max_depth INTEGER NOT NULL,
+        title TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(owner_user_id, name)
+        updated_at INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS agents_owner_idx ON agents(owner_user_id);
-
-      CREATE TABLE IF NOT EXISTS agent_skills (
-        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE RESTRICT,
-        PRIMARY KEY(agent_id, skill_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS agent_delegates (
-        parent_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-        child_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
-        PRIMARY KEY(parent_agent_id, child_agent_id),
-        CHECK(parent_agent_id <> child_agent_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS agent_tools (
-        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-        tool_name TEXT NOT NULL,
-        PRIMARY KEY(agent_id, tool_name)
-      );
+      CREATE INDEX IF NOT EXISTS conversations_owner_idx
+        ON conversations(owner_user_id, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
         parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
         depth INTEGER NOT NULL,
         allow_dangerous_tools INTEGER NOT NULL DEFAULT 0,
+        model_key TEXT,
         status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
         input TEXT NOT NULL,
         output TEXT,
@@ -281,7 +261,6 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS batches (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
         idempotency_key TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
         concurrency INTEGER NOT NULL,
@@ -334,11 +313,14 @@ export class AppDatabase {
     this.ensureColumn("skills", "package_file_count", "INTEGER");
     this.ensureColumn("skills", "package_total_bytes", "INTEGER");
     this.ensureColumn("runs", "allow_dangerous_tools", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("runs", "conversation_id", "TEXT REFERENCES conversations(id) ON DELETE SET NULL");
+    this.ensureColumn("runs", "model_key", "TEXT");
+    this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
-    const columns = this.raw.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+    const columns = this.connection.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
     if (columns.some((item) => item.name === column)) return;
-    this.raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    this.connection.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }

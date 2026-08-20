@@ -69,6 +69,25 @@ test("computer command execution uses an enforced timeout instead of an unbounde
   }
 });
 
+test("computer_write_file reports an existing target as an actionable conflict", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-write-conflict-"));
+  try {
+    const executor = new ComputerExecutor(root);
+    await fs.writeFile(join(root, "measure.py"), "original\n");
+    await assert.rejects(
+      () => executor.writeFile("measure.py", "replacement\n", false),
+      (error: unknown) => hasCode(error, "CONFLICT")
+        && error instanceof Error
+        && error.message === "File already exists; set overwrite=true to replace it",
+    );
+    assert.equal(await fs.readFile(join(root, "measure.py"), "utf8"), "original\n");
+    await executor.writeFile("measure.py", "replacement\n", true);
+    assert.equal(await fs.readFile(join(root, "measure.py"), "utf8"), "replacement\n");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("server-owned executable aliases expose a safe name instead of an arbitrary binary path", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-alias-"));
   try {
@@ -144,6 +163,70 @@ test("computer command arguments preserve long absolute paths while remaining bo
   }
 });
 
+test("computer_run_command stores large stdout as reusable content-addressed evidence", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-output-ref-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(grant(["computer_run_command"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_run_command");
+    assert.match(definition?.description ?? "", /stdoutRef\/stderrRef/);
+    const prepared = allowed.prepare({
+      id: "large-output",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["-e", "process.stdout.write('row-data\\n'.repeat(1200))"],
+        cwd: ".",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as {
+      exitCode: number | null;
+      stdout: string;
+      stdoutRef?: { path: string; sha256: string; characters: number; bytes: number; previewCharacters: number };
+    };
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.stdoutRef !== undefined);
+    assert.equal(result.stdoutRef.characters, "row-data\n".repeat(1200).length);
+    assert.ok(result.stdout.length < result.stdoutRef.characters);
+    assert.match(result.stdout, /stored as content-addressed evidence/);
+    assert.match(result.stdout, new RegExp(result.stdoutRef.sha256));
+    assert.equal(await fs.readFile(join(root, result.stdoutRef.path), "utf8"), "row-data\n".repeat(1200));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command accepts the provider-sized timeout and exposes its bounds", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-timeout-bounds-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_run_command"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_run_command");
+    assert.deepEqual((definition?.inputSchema as { properties: { timeoutMs: unknown } }).properties.timeoutMs, {
+      type: "integer", minimum: 100, maximum: 300_000,
+    });
+    const prepared = allowed.prepare({
+      id: "long-timeout",
+      name: "computer_run_command",
+      arguments: { command: "node", args: ["--version"], timeoutMs: 180_000 },
+    });
+    assert.equal((prepared.input as { timeoutMs: number }).timeoutMs, 180_000);
+    assert.throws(
+      () => allowed.prepare({
+        id: "too-long-timeout",
+        name: "computer_run_command",
+        arguments: { command: "node", args: ["--version"], timeoutMs: 300_001 },
+      }),
+      /timeoutMs must be an integer between 100 and 300000/,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer command names remain bare executable names", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-name-"));
   try {
@@ -173,6 +256,60 @@ test("computer_search_text walks recursively and skips .git/node_modules", async
       { path: "a.txt", line: 1, text: "hello world" },
       { path: "sub/b.txt", line: 1, text: "hello again" },
     ]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file supports small line windows", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-window-"));
+  try {
+    await fs.writeFile(join(root, "profile.json"), ["one", "two", "three", "four"].join("\n"));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_file"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_read_file");
+    assert.deepEqual((definition?.inputSchema as { properties: Record<string, unknown> }).properties.offset, {
+      type: "integer", minimum: 1,
+    });
+    const prepared = allowed.prepare({
+      id: "read-window",
+      name: "computer_read_file",
+      arguments: { path: "profile.json", offset: 2, limit: 2 },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_read_file"]), prepared.input) as {
+      content: string;
+      nextOffset?: number;
+      truncated: boolean;
+    };
+    assert.match(result.content, /^two\nthree/);
+    assert.equal(result.nextOffset, 4);
+    assert.equal(result.truncated, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_find_files finds files by glob without dumping directory trees", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-find-files-"));
+  try {
+    await fs.mkdir(join(root, "reports"), { recursive: true });
+    await fs.mkdir(join(root, "node_modules"), { recursive: true });
+    await fs.writeFile(join(root, "reports", "scenario.json"), "{}");
+    await fs.writeFile(join(root, "reports", "scenario.md"), "# report\n");
+    await fs.writeFile(join(root, "node_modules", "ignored.json"), "{}");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_find_files"]));
+    const prepared = allowed.prepare({
+      id: "find-json",
+      name: "computer_find_files",
+      arguments: { pattern: "**/*.json", limit: 10 },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_find_files"]), prepared.input) as {
+      matches: string[];
+      truncated: boolean;
+    };
+    assert.deepEqual(result.matches, ["reports/scenario.json"]);
+    assert.equal(result.truncated, false);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -261,8 +398,8 @@ async function findGrep(): Promise<string | undefined> {
 
 function grant(toolNames: readonly string[]) {
   return createCapabilityGrant({
-    actorUserId: "user", runId: "run", agentId: "agent", depth: 0,
-    allowedToolNames: toolNames, allowedSkillIds: [], allowedChildAgentIds: [],
+    actorUserId: "user", runId: "run", depth: 0,
+    allowedToolNames: toolNames, allowedSkillIds: [],
   });
 }
 

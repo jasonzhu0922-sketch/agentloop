@@ -1,6 +1,6 @@
 # AgentLoop
 
-AgentLoop 是一个从 PI Agent、OpenCode 和 DeepSeek Harness 固定提交进行源码级移植，并加入 Plan-first、私有 Skill、多用户登录、多 Agent、Computer Tool 与批次调度的智能体框架。
+AgentLoop 是一个从 PI Agent、OpenCode 和 DeepSeek Harness 固定提交进行源码级移植，并加入 Plan-first、私有 Skill、多用户登录、会话式单 Agent 执行、Computer Tool 与批次调度的智能体框架。
 
 当前主链不是“模型一直 ReAct，直到它说完成”，而是：
 
@@ -11,7 +11,7 @@ AgentLoop 是一个从 PI Agent、OpenCode 和 DeepSeek Harness 固定提交进�
 → Admission / Skill-Step Binding
 → 依赖调度
 → 当前 Step Agent Loop
-→ Computer / Plugin / Child-Agent Tools
+→ Computer / Plugin Tools
 → Canonical Evidence
 → Success Criteria + Skill Compliance Assessment
 → 同一步修复或继续下一步
@@ -29,12 +29,12 @@ Tool 成功、模型文本、Artifact 或事件 Trace 都不能单独建立完�
 - 依赖感知调度；每个 Step 单独物化 Capability Grant、Skill 目录和 Tool Schema，Skill 正文只能经 `load_skill` ToolResult 进入当前对话。
 - 候选完成评估、Skill Compliance 持久化、评估不通过后的同一步修复循环。
 - Terminal Committer 唯一提交完成或失败 Outcome。
-- 多 Agent 委派、独立子 Run、父子谱系、单调深度和 Tool/Skill/子 Agent 能力向下求交。
-- Computer Tool：目录、读文件、文本搜索、写文件、无 Shell 命令执行；GUI/浏览器通过 `ComputerDriver` 插件接入。
-- Workspace containment、符号链接逃逸防护、命令参数数组、超时/强杀、输出上限。
+- 单 Agent 会话执行：服务端使用固定 persona 驱动每个 Run，没有 Agent 定义、Skill 绑定或委派；后续轮次通过 `conversationId` 继承同一会话上下文，工具集只由 `allowDangerousTools` 门控。
+- Computer Tool：目录、读文件、文本搜索、写文件、无 Shell 命令执行；每个会话固定使用 `WORKSPACE_ROOT/conversations/<conversationId>`，同会话多轮复用该目录，不同会话物理隔离；GUI/浏览器通过 `ComputerDriver` 插件接入。
+- Workspace containment、会话目录隔离、符号链接逃逸防护、命令参数数组、超时/强杀、输出上限。
 - 写文件、命令执行、点击/输入/导航等危险 Tool 默认不授权，Run/Batch 必须显式 `allowDangerousTools`。
 - Batch 一等实体：`Batch → BatchItem → Run → Plan`，支持 1–32 并发、幂等键、`continue`/`fail-fast` 和逐项结果。
-- 登录后 DeepSeek Harness 风格 Web 工作台：从服务端已发现的 Skill Package 直接发起任务，自动复用测试 Agent，并在同一界面查看 Plan、事件、Compliance Assessment 与终态。
+- 登录后用户级 Web 前端（独立 React + Vite 应用，位于 `web/`）：对话式智能助手（聊天、实时进度、计划与最终结果），支持在同一个对话流里连续下达多轮指令（后续 Run 会把此前轮次作为上下文喂给 Planner 与执行模型）。后端作为纯 HTTP API 对外服务。
 - OpenAI-compatible Model；所有 Provider Adapter 进入同一条结构化 Plan-first 主链。
 - SQLite 权威 Plan/Step/Evidence/Assessment/Outcome/Batch/Event 存储。
 
@@ -55,15 +55,27 @@ npm test
 npm start
 ```
 
-打开 `http://127.0.0.1:8787/` 即可使用 DeepSeek Harness 风格工作台。它不会要求先创建新 Skill：登录后选择服务端已发现的 Package，输入任务并启动 Run；Run 证据页可按 ID 载入权威 Plan、Assessment 与事件。默认数据库是 `./data/agentloop.db`，Computer Tool 根目录默认是启动目录，可通过 `WORKSPACE_ROOT` 固定：
+后端现在只暴露纯 HTTP API（`/healthz` 与 `/v1/*`），不再托管前端页面。面向用户的对话式智能助手是独立的 React + Vite 前端，位于 `web/`。开发模式分两个进程启动：
+
+```bash
+# 终端 1：启动 API
+npm start
+
+# 终端 2：启动前端开发服务器（自动代理 /v1/* 到 8787）
+cd web && npm install && npm run dev
+```
+
+然后打开 `http://localhost:5173/` 即可使用。登录后输入任务即可开始对话，界面展示实时进度、Plan 与最终结果。默认数据库是 `./data/agentloop.db`。`WORKSPACE_ROOT` 默认是启动目录，服务会为每个会话创建独立的 Computer Tool 根目录 `WORKSPACE_ROOT/conversations/<conversationId>`：
 
 ```bash
 WORKSPACE_ROOT=/absolute/workspace DATABASE_PATH=./data/agentloop.db npm start
 ```
 
+生产部署时，先 `cd web && npm run build` 产出 `web/dist`，再用任意静态服务器托管该目录，并把 `WEB_ORIGINS_JSON`（后端 `.env`）配置为前端的 Origin 以允许跨域 API 调用；或通过反向代理把 `dist/` 与 `/v1/*` 放在同一 Origin 下。
+
 ### 终端交互界面（TUI）
 
-TUI 是 HTTP 客户端，复用同一套登录、Agent、Skill、Run 和审计 API，不会直接读取数据库或绕过 Plan-first Runtime。先在一个终端启动服务，再在另一个终端启动 TUI：
+TUI 是 HTTP 客户端，复用同一套登录、Skill、Run 和审计 API，不会直接读取数据库或绕过 Plan-first Runtime。先在一个终端启动服务，再在另一个终端启动 TUI：
 
 ```bash
 npm start
@@ -73,14 +85,14 @@ npm start
 npm run tui
 ```
 
-它提供登录/注册、Agent 与 Skill/Tool 查看、Agent 创建、任务运行及 Plan/Assessment/事件查看。会话 Token 仅存在当前进程内；也可仅在当前命令环境中传入已有 Token。远端地址可通过 `AGENTLOOP_URL` 或参数指定：
+它提供登录/注册、Skill/Tool 查看、任务运行、快速测试已有 Skill 及 Plan/Assessment/事件查看。会话 Token 仅存在当前进程内；也可仅在当前命令环境中传入已有 Token。远端地址可通过 `AGENTLOOP_URL` 或参数指定：
 
 ```bash
 AGENTLOOP_URL=http://127.0.0.1:8787 npm run tui
 npm run tui -- --url http://127.0.0.1:8787
 ```
 
-LLM Provider 由服务端 JSON 注册表配置，Agent 只可选择已声明的 `providerKey`，模型 ID 可覆盖该 Provider 的默认模型；Run API 不能传任意 Base URL、密钥或超时参数。当前注册表支持 `openai-compatible` Adapter（例如 DeepSeek、OpenAI-compatible 网关和本地兼容服务），后续 Provider 以新的 Adapter 接入，不改变 Runtime 主链。
+LLM Provider 由服务端 JSON 注册表配置，服务端按注册表决定 Run 使用的默认 Provider，模型 ID 可覆盖该 Provider 的默认模型；Run API 不能传任意 Base URL、密钥或超时参数。当前注册表支持 `openai-compatible` Adapter（例如 DeepSeek、OpenAI-compatible 网关和本地兼容服务），后续 Provider 以新的 Adapter 接入，不改变 Runtime 主链。
 
 先复制 [llm-providers.example.json](config/llm-providers.example.json) 为被 `.gitignore` 排除的 `config/llm-providers.json`，填写 Provider 类型、地址和默认模型；再把 `apiKeyEnv` 指向的 Key 写入本机 `.env` 或部署环境。`npm start` 会在 `.env` 存在时自动加载它，部署环境已注入的同名变量保持优先。模板不包含任何密钥：
 
@@ -92,7 +104,9 @@ LLM_PROVIDER_CONFIG_PATH=./config/llm-providers.json \
 npm start
 ```
 
-每个 Provider 的 `apiKeyEnv` 只保存环境变量名，密钥本身不进入 JSON 配置、SQLite、Agent 或 Run 记录。可选字段 `maxAttempts`（1–5）和 `retryDelayMs`（0–30000）控制单个模型请求的重试；其余省略项采用 `128000 / 8192 / 120000 / 3 / 250` 的默认值。默认 `toolChoiceMode` 为 `native`；对于 DeepSeek Thinking 一类会拒绝 `required` 或命名函数选择、但支持 `auto` 的 Provider，设为 `constrained-as-auto`。该策略只转换上游 wire-protocol；Runtime 仍然拒绝遗漏的必需 Skill 加载、Plan 或 Assessment。
+每个 Provider 的 `apiKeyEnv` 只保存环境变量名，密钥本身不进入 JSON 配置、SQLite 或 Run 记录。可选字段 `maxAttempts`（1–5）和 `retryDelayMs`（0–30000）控制单个模型请求的重试；其余省略项采用 `128000 / 8192 / 120000 / 3 / 250` 的默认值。HTTP `400` 与 `408/429/5xx` 一样按同一预算重试（默认最多 3 次尝试），每次重试都会持久化为 `model.retry` 事件并在 Web 前端实时显示「正在重试（N/M）」。默认 `toolChoiceMode` 为 `native`；对于 DeepSeek Thinking 一类会拒绝 `required` 或命名函数选择、但支持 `auto` 的 Provider，设为 `constrained-as-auto`。该策略只转换上游 wire-protocol；Runtime 仍然拒绝遗漏的必需 Skill 加载、Plan 或 Assessment。
+
+模型 profile 可以覆盖 Provider 的默认协议与上限。需要使用 GPT5.6 时，在 `models` 中注册 `gpt-5.6`，把 `providerModel` 设为 `gpt-5.6`，并声明 `protocol: "responses"`；Adapter 会使用该模型 profile 调用 Provider 的 `/responses` 端点，Run 只需要选择公开的 `modelKey`。
 
 `runtimeContextPlacement` 默认是 `system`：Adapter 会保留真实的 `user / assistant / tool` transcript，并把服务端产生的 Plan、当前 Step、Skill 目录、压缩摘要与修复指令包进带 `source="server"`、snapshot ID 和 phase 的 `<runtime_context>`，追加到 Provider 的 `system` message。这是 DeepSeek/OpenAI-compatible Provider 的推荐设置。只有某个 Provider 明确不接受动态 System 内容时才设为 `user-envelope`；它只是最后一公里兼容编码，内部仍然保持 Runtime Context 与用户消息分离，且 Runtime 不会根据模型文本授予权限或判定完成。控制台通过 `/v1/providers` 读取无密钥 Provider 目录。
 
@@ -118,7 +132,7 @@ TRUSTED_COMMAND_ENV_JSON='{"RUNTIME_NODE":"/absolute/path/to/trusted/node"}' npm
 }
 ```
 
-Skill 原文是唯一领域工作流权威，不再有框架侧的规划提示、Tool 清单、完成标准或绑定模式副本。Planner 初始只看到 Agent 显式绑定的私有 Skill，以及正式 `skills/` 目录自动发现并为当前用户私有物化的 Skill；目录只含名称、描述、版本和位置。选中前必须通过 `load_skill` 取得精确原文，再据此提交结构化 Plan。每个 Skill-bound Step 开始时也只开放 `load_skill`，原文进入该 Step 的 ToolResult 后才开放 Plan 授权的执行 Tool。Assessment 直接对照同一版本 Skill 原文和运行证据，Skill 仍不能扩张 Capability Grant。
+Skill 原文是唯一领域工作流权威，不再有框架侧的规划提示、Tool 清单、完成标准或绑定模式副本。Planner 初始只看到当前用户的私有 Skill 与正式 `skills/` 目录自动发现并物化的 Skill 目录；目录只含名称、描述、版本和位置。Planner 依据这些元数据直接提交结构化 Plan，不在规划阶段加载 Skill 正文。每个 Skill-bound Step 开始时才开放 `load_skill`，原文进入该 Step 的 ToolResult 后再开放 Plan 授权的执行 Tool。Assessment 直接对照同一版本 Skill 原文和运行证据，Skill 仍不能扩张 Capability Grant。
 
 正式发现目录可通过 `SKILL_DIRECTORY` 指定，默认是启动目录下的 `skills/`。每个直接子目录只要以自己的 Skill 名命名并包含标准 `SKILL.md`，即可进入 Agent Loop；不要求同级 `.source.json`。若提供合法的 `<skill-name>.source.json`，其中的 HTTPS 来源、提交和 Package 指纹会作为可选溯源元数据记录，且始终放在 Package 外部，不改变第三方包的字节和 hash：
 
@@ -130,7 +144,7 @@ npm start
 
 ### 原样安装现成 Skill Package
 
-Package 模式用于验证现成 Skill 本身；安装过程只提取标准 `SKILL.md` 的名称、描述和完整原文，不叠加框架自定义语义。服务端先配置导入白名单与托管目录；托管目录必须位于 `WORKSPACE_ROOT` 内，Run 才能通过 Computer Tool 只读访问其中的脚本和资源：
+Package 模式用于验证现成 Skill 本身；安装过程只提取标准 `SKILL.md` 的名称、描述和完整原文，不叠加框架自定义语义。服务端先配置导入白名单与只读托管目录。托管目录由服务端统一管理，不能作为 Computer Tool 的可写会话目录；`load_skill` 只向当前 Step 注入已授权的包内容和服务端包路径：
 
 ```bash
 WORKSPACE_ROOT=/srv/agentloop-workspace \
@@ -154,7 +168,7 @@ npm start
 
 ### 原始 presentation-skill 真实 E2E
 
-仓库顶层 `skills/` 是正式的 Skill 发现目录。Runtime 启动时扫描每个直接子目录的标准 `SKILL.md`，并在用户首次列出 Skill 或运行 Agent 时原样物化到该用户隔离的只读 Package Store；Planner 随后只看到元数据目录，仍须通过 `load_skill` 读取精确正文。`skills/presentation-skill` 的 Package 内容、文件数和 Package hash 都在复制及每个运行关键点重新核验；若同级来源锁存在且匹配，才额外显示来源与提交。`scripts/run-presentation-e2e.ts` 通过这条正式发现链路调用 Package 自带的 builder 与 QA，不包含框架定制 renderer。
+仓库顶层 `skills/` 是正式的 Skill 发现目录。Runtime 启动时扫描每个直接子目录的标准 `SKILL.md`，并在用户首次列出 Skill 或发起 Run 时原样物化到该用户隔离的只读 Package Store；Planner 只看元数据并据此出 Plan，真正的 `load_skill` 发生在对应 Step 的执行阶段。`skills/presentation-skill` 的 Package 内容、文件数和 Package hash 都在复制及每个运行关键点重新核验；若同级来源锁存在且匹配，才额外显示来源与提交。`scripts/run-presentation-e2e.ts` 通过这条正式发现链路调用 Package 自带的 builder 与 QA，不包含框架定制 renderer。
 
 同一目录还收录了来自 Anthropic Skills 的多个 Apache-2.0 Package。来源锁并非准入条件：任何结构有效的直接子目录均会被发现；部署方须只放入有权运行和复制的 Package。如需从目录中隔离某个 Package，可在同级提供有效的 `<skill-name>.disabled.json`；该显式隔离优先于 Package 发现。
 
@@ -172,15 +186,15 @@ npm start
 
 | Tool | 风险 | 作用 |
 |---|---:|---|
-| `computer_list_directory` | 只读 | 列出 Workspace 目录 |
-| `computer_read_file` | 只读 | 有上限地读取 UTF-8 文件 |
-| `computer_search_text` | 只读 | 递归字面量搜索 |
-| `computer_write_file` | 危险 | 创建/覆盖文件 |
-| `computer_run_command` | 危险 | `spawn(command, args)`，不使用 Shell 字符串 |
+| `computer_list_directory` | 只读 | 列出当前会话 Workspace 目录 |
+| `computer_read_file` | 只读 | 有上限地读取当前会话目录中的 UTF-8 文件 |
+| `computer_search_text` | 只读 | 在当前会话目录中递归字面量搜索 |
+| `computer_write_file` | 危险 | 在当前会话目录创建/覆盖文件 |
+| `computer_run_command` | 危险 | 在当前会话目录中 `spawn(command, args)`，不使用 Shell 字符串 |
 | `computer_snapshot` | 只读 | 由 ComputerDriver 截屏 |
 | `computer_click/type_text/press_key/navigate` | 危险 | 由 ComputerDriver 控制 GUI/浏览器 |
 
-一个 Tool 只有同时满足“已注册、Agent Profile 已勾选、当前 Plan Step 已声明、Run 已授权风险”才会出现在模型 Tool Schema 中。
+一个 Tool 只有同时满足“已注册、当前 Plan Step 已声明、Run 已授权危险工具”才会出现在模型 Tool Schema 中。
 
 ## API
 
@@ -194,9 +208,11 @@ npm start
 | `GET` | `/v1/skills/discovered` | 已核验的服务端 Skill 发现目录 |
 | `POST` | `/v1/skills/import-directory` | 从服务端批准目录原样安装并锁定 Skill Package |
 | `GET` | `/v1/skills/:id` | 读取自己的 Skill 正文 |
-| `GET/POST` | `/v1/agents` | Agent 目录/创建 |
 | `GET` | `/v1/tools` | 当前部署的 Computer/Plugin Tool 目录 |
-| `POST` | `/v1/runs` | 执行一个 Plan-first Run |
+| `POST` | `/v1/runs` | 执行一个 Plan-first Run（可选 `conversationId` 追加到既有对话） |
+| `GET` | `/v1/runs` | 当前用户顶级 Run 历史（新→旧，供会话列表） |
+| `GET` | `/v1/conversations` | 当前用户对话列表（新→旧，含轮数/终态） |
+| `GET` | `/v1/conversations/:id` | 单个对话及其按时间排序的 Run 轮次 |
 | `GET` | `/v1/runs/:id` | Run 权威状态 |
 | `GET` | `/v1/runs/:id/plan` | Plan、Step、Evidence、Compliance |
 | `GET` | `/v1/runs/:id/events` | Run 事件日志 |

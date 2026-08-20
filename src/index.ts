@@ -1,5 +1,3 @@
-export { AgentService } from "./agents/agent-service.ts";
-export type { AgentDefinition } from "./agents/agent-service.ts";
 export { AuthService } from "./auth/auth-service.ts";
 export type { AuthResult, AuthenticatedUser } from "./auth/auth-service.ts";
 export { BatchService } from "./batch/batch-service.ts";
@@ -7,13 +5,15 @@ export type { BatchItemRecord, BatchRecord } from "./batch/batch-service.ts";
 export { ComputerExecutor } from "./computer/computer-executor.ts";
 export type { ComputerDriver, ComputerSnapshot } from "./computer/computer-driver.ts";
 export { createComputerTools, DANGEROUS_COMPUTER_TOOL_NAMES } from "./computer/computer-tools.ts";
+export { createWebTools } from "./web/web-tools.ts";
+export type { WebToolsOptions } from "./web/web-tools.ts";
 export { createAgentLoopServer } from "./http/server.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";
 export type * from "./runtime/contracts.ts";
 export { OpenAICompatibleModel } from "./runtime/models.ts";
 export { LlmProviderRegistry } from "./runtime/provider-registry.ts";
-export type { LlmProviderSummary } from "./runtime/provider-registry.ts";
+export type { LlmModelSummary, LlmProviderSummary } from "./runtime/provider-registry.ts";
 export { RunService } from "./runtime/run-service.ts";
 export type {
   AssessorFactory,
@@ -47,6 +47,13 @@ export type { SkillDirectoryEntry } from "./skills/skill-directory.ts";
 export { inspectSkillPackage } from "./skills/skill-package.ts";
 export type { SkillPackageInspection } from "./skills/skill-package.ts";
 export { AppDatabase } from "./storage/database.ts";
+export { SqliteConnection } from "./storage/sqlite-connection.ts";
+export type { SqlConnection, SqlRunResult, SqlStatement, SqlValue } from "./storage/connection.ts";
+export { AuthRepository } from "./storage/repositories/auth-repository.ts";
+export { BatchRepository } from "./storage/repositories/batch-repository.ts";
+export { RunOutcomeRepository } from "./storage/repositories/outcome-repository.ts";
+export { RunRepository } from "./storage/repositories/run-repository.ts";
+export { SkillRepository } from "./storage/repositories/skill-repository.ts";
 export { admitPlan } from "./planning/admission.ts";
 export { ModelPlanner } from "./planning/planner.ts";
 export { ModelStepAssessor, RuleBasedStepAssessor } from "./planning/assessor.ts";

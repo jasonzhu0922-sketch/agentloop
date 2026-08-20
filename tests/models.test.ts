@@ -146,6 +146,44 @@ test("OpenAI-compatible adapter preserves the canonical transcript and encodes s
   }
 });
 
+test("OpenAI-compatible adapter returns and replays DeepSeek reasoning_content", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          content: "",
+          reasoning_content: "opaque-thinking",
+          tool_calls: [{ id: "call-1", function: { name: "lookup", arguments: "{}" } }],
+        },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1", apiKey: "server-secret", model: "deepseek",
+      contextWindowTokens: 128_000, maxOutputTokens: 8_192,
+    });
+    const first = await model.complete({ runId: "reasoning", systemPrompt: "System", messages: [{ role: "user", content: "Check" }], tools: [] });
+    assert.equal(first.reasoningContent, "opaque-thinking");
+    await model.complete({
+      runId: "reasoning", systemPrompt: "System", tools: [],
+      messages: [
+        { role: "user", content: "Check" },
+        { role: "assistant", content: first.content, toolCalls: first.toolCalls, reasoningContent: first.reasoningContent },
+        { role: "tool", toolCallId: "call-1", name: "lookup", content: "ok", isError: false },
+      ],
+    });
+    const messages = requests[1].messages as Array<Record<string, unknown>>;
+    assert.equal(messages[2].reasoning_content, "opaque-thinking");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible adapter can use a server-labelled user envelope only when a Provider requires it", async () => {
   const originalFetch = globalThis.fetch;
   let capturedBody: Record<string, unknown> | undefined;
@@ -272,7 +310,7 @@ test("OpenAI-compatible adapter can lower constrained tool choice for reasoning-
   }
 });
 
-test("OpenAI-compatible adapter exposes status and request id, not provider body", async () => {
+test("OpenAI-compatible adapter exposes status, request id, and a provider body preview", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response("sensitive upstream body", {
     status: 429,
@@ -288,12 +326,26 @@ test("OpenAI-compatible adapter exposes status and request id, not provider body
       maxAttempts: 1,
     });
     await assert.rejects(
-      () => model.complete({ runId: "run-1", systemPrompt: "System", messages: [], tools: [] }),
+      () => model.complete({ runId: "run-1", systemPrompt: "System", phase: "assessment", messages: [], tools: [] }),
       (error: unknown) => {
         assert.equal((error as { code?: string }).code, "MODEL_ERROR");
         assert.equal((error as { message?: string }).message, "Model provider returned HTTP 429");
-        assert.deepEqual((error as { details?: unknown }).details, { providerRequestId: "provider-request-1" });
-        assert.doesNotMatch(String((error as { message?: string }).message), /sensitive upstream body/);
+        assert.deepEqual((error as { details?: unknown }).details, {
+          status: 429,
+          providerRequestId: "provider-request-1",
+          providerErrorBody: "sensitive upstream body",
+          request: {
+            protocol: "chat-completions",
+            model: "example-model",
+            phase: "assessment",
+            stream: false,
+            canonicalMessageCount: 0,
+            providerMessageCount: 1,
+            toolCount: 0,
+            toolChoice: "none",
+            runtimeContextPlacement: "system",
+          },
+        });
         return true;
       },
     );
@@ -377,10 +429,57 @@ test("OpenAI-compatible adapter classifies exhausted response-body failures as M
         assert.deepEqual((error as { details?: unknown }).details, {
           attempts: 2,
           causeCode: "ECONNRESET",
+          request: {
+            protocol: "chat-completions",
+            model: "example-model",
+            phase: "unknown",
+            stream: false,
+            canonicalMessageCount: 0,
+            providerMessageCount: 1,
+            toolCount: 0,
+            toolChoice: "none",
+            runtimeContextPlacement: "system",
+          },
         });
         return true;
       },
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter retries HTTP 400 within its attempt budget and reports each retry", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts <= 2) return new Response("bad request", { status: 400 });
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "recovered-400" } }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 3,
+      retryDelayMs: 0,
+      onRetry: (info) => {
+        retries.push({ attempt: info.attempt, maxAttempts: info.maxAttempts, status: info.status ?? 0 });
+      },
+    });
+    const result = await model.complete({ runId: "run-400-retry", systemPrompt: "System", messages: [], tools: [] });
+    assert.equal(attempts, 3);
+    assert.equal(result.content, "recovered-400");
+    assert.deepEqual(retries, [
+      { attempt: 1, maxAttempts: 3, status: 400 },
+      { attempt: 2, maxAttempts: 3, status: 400 },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -393,6 +492,8 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
     capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return sseResponse([
       'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"opaque-"},"finish_reason":null}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":null}]}\n\n',
       'data: {"choices":[{"delta":{"content":" world"},"finish_reason":null}]}\n\n',
       'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"lookup","arguments":"{\\"q\\":"}}]},"finish_reason":null}]}\n\n',
       'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"status\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
@@ -427,6 +528,7 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
 
     assert.equal(capturedBody?.stream, true);
     assert.equal(result.content, "Hello world");
+    assert.equal(result.reasoningContent, "opaque-thinking");
     assert.equal(result.finishReason, "tool_calls");
     assert.deepEqual(result.toolCalls[0].arguments, { q: "status" });
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 3 });
@@ -496,11 +598,335 @@ test("Responses adapter maps input items and emits per-item tool_call_ready befo
   }
 });
 
+test("Responses streaming adapter preserves function calls when final response omits output", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return sseResponse([
+      'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_plan","call_id":"call-plan","name":"submit_plan","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"{\\"goal\\":\\"analyze\\",\\"selectedSkillIds\\":[],"}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"steps\\":[{\\"id\\":\\"extract\\",\\"objective\\":\\"extract evidence\\",\\"dependencies\\":[],"}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"skillIds\\":[],\\"requiredToolNames\\":[],\\"successCriteria\\":[{\\"id\\":\\"done\\",\\"description\\":\\"evidence exists\\"}]}]}"}\n\n',
+      'data: {"type":"response.function_call_arguments.done","item_id":"fc_plan","output_index":1}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":12,"output_tokens":4}}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6",
+      contextWindowTokens: 400_000,
+      maxOutputTokens: 32_768,
+    });
+    const readyCalls: Array<{ name: string; arguments: unknown }> = [];
+    const result = await model.streamComplete!({
+      runId: "run-responses-final-output-omitted",
+      systemPrompt: "Return one structured submit_plan call.",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan this task." }],
+      tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_plan" },
+    }, async (event) => {
+      if (event.type === "tool_call_ready") {
+        readyCalls.push({ name: event.name, arguments: event.arguments });
+      }
+    });
+
+    assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.toolCalls, [{
+      id: "call-plan",
+      name: "submit_plan",
+      arguments: {
+        goal: "analyze",
+        selectedSkillIds: [],
+        steps: [{
+          id: "extract",
+          objective: "extract evidence",
+          dependencies: [],
+          skillIds: [],
+          requiredToolNames: [],
+          successCriteria: [{ id: "done", description: "evidence exists" }],
+        }],
+      },
+    }]);
+    assert.deepEqual(readyCalls.map((call) => call.name), ["submit_plan"]);
+    assert.deepEqual(result.usage, { inputTokens: 12, outputTokens: 4 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses streaming timeout extends while chunks keep arriving", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => delayedSseResponse([
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"lookup","arguments":""}}\n\n',
+    'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\\"q\\":"}\n\n',
+    'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"\\"status\\"}"}\n\n',
+    'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0}\n\n',
+    'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call-1","name":"lookup","arguments":"{\\"q\\":\\"status\\"}"}]}}\n\n',
+  ], 15);
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6",
+      contextWindowTokens: 400_000,
+      maxOutputTokens: 32_768,
+      timeoutMs: 40,
+    });
+    assert.equal(model.operationTimeoutMs, 120);
+    const result = await model.streamComplete!({
+      runId: "run-responses-stream-activity-timeout",
+      systemPrompt: "Return one structured lookup call.",
+      phase: "execution",
+      messages: [{ role: "user", content: "Check." }],
+      tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
+      toolChoice: { name: "lookup" },
+    }, async () => undefined);
+
+    assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.toolCalls[0], { id: "call-1", name: "lookup", arguments: { q: "status" } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter rejects a Chat Completions payload instead of treating it as an empty stop", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: "" } }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://models.example.test",
+      apiKey: "server-secret",
+      model: "chat-completions-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    await assert.rejects(
+      () => model.complete({
+        runId: "responses-protocol-mismatch",
+        systemPrompt: "Return one structured call.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+        toolChoice: { name: "submit_plan" },
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.equal(
+          (error as { message?: string }).message,
+          "Configured Responses Provider returned a Chat Completions payload; set protocol to chat-completions",
+        );
+        assert.deepEqual((error as { details?: unknown }).details, {
+          expectedProtocol: "responses",
+          observedProtocol: "chat-completions",
+          responseShape: ["choices"],
+        });
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses streaming adapter rejects Chat Completions chunks at the protocol boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"choices":[{"finish_reason":"stop","delta":{"content":""}}]}\n\n',
+  ]);
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://models.example.test",
+      apiKey: "server-secret",
+      model: "chat-completions-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "responses-stream-protocol-mismatch",
+        systemPrompt: "Return one structured call.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+        toolChoice: { name: "submit_plan" },
+      }, async () => undefined),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.match((error as { message?: string }).message ?? "", /returned a Chat Completions payload/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter preserves final message text when completed response omits top-level output_text", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant"}}\n\n',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"Loaded"}\n\n',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":" skill"}\n\n',
+    'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Loaded skill"}]}],"usage":{"input_tokens":10,"output_tokens":2}}}\n\n',
+  ]);
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "server-secret",
+      model: "deepseek-v4-pro",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    const result = await model.streamComplete!({
+      runId: "run-responses-message-output",
+      systemPrompt: "System instructions",
+      messages: [{ role: "user", content: "Check" }],
+      tools: [],
+    }, async () => undefined);
+
+    assert.equal(result.content, "Loaded skill");
+    assert.equal(result.finishReason, "stop");
+    assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 2 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter keeps provider input non-empty for system-only runtime phases", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse([
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_assessment","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\\"criteria\\":[],\\"skills\\":[],\\"feedback\\":\\"\\"}"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_assessment","arguments":"{\\"criteria\\":[],\\"skills\\":[],\\"feedback\\":\\"\\"}"}]}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "server-secret",
+      model: "deepseek-v4-pro",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      toolChoiceMode: "constrained-as-auto",
+    });
+    const result = await model.streamComplete!({
+      runId: "run-responses-assessment",
+      systemPrompt: "Return exactly one submit_assessment tool call.",
+      phase: "assessment",
+      runtimeContext: {
+        id: "run-responses-assessment:assessment:1:1",
+        phase: "assessment",
+        content: "<assessment_context source=\"server\">{\"candidate\":\"done\"}</assessment_context>",
+      },
+      messages: [],
+      tools: [{ name: "submit_assessment", description: "Submit assessment", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_assessment" },
+    }, async () => undefined);
+
+    assert.match(String(capturedBody?.instructions), /assessment_context/);
+    assert.deepEqual(capturedBody?.input, [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue." }],
+      },
+    ]);
+    assert.deepEqual(capturedBody?.tool_choice, "auto");
+    assert.equal(result.finishReason, "tool_calls");
+    assert.equal(result.toolCalls[0].name, "submit_assessment");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter replays assistant tool calls without a synthetic empty assistant message", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "done" }],
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "server-secret",
+      model: "deepseek-v4-pro",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    await model.complete({
+      runId: "run-responses-tool-replay",
+      systemPrompt: "System instructions",
+      messages: [
+        { role: "user", content: "Check" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "lookup", arguments: { query: "status" } }],
+        },
+        {
+          role: "tool",
+          toolCallId: "call-1",
+          name: "lookup",
+          content: "{\"status\":\"ok\"}",
+          isError: false,
+        },
+      ],
+      tools: [],
+    });
+
+    assert.deepEqual(capturedBody?.input, [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Check" }] },
+      {
+        type: "function_call",
+        call_id: "call-1",
+        name: "lookup",
+        arguments: "{\"query\":\"status\"}",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call-1",
+        output: "{\"status\":\"ok\"}",
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+function delayedSseResponse(chunks: string[], delayMs: number): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const chunk of chunks) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        controller.enqueue(encoder.encode(chunk));
+      }
       controller.close();
     },
   });

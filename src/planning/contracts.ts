@@ -1,6 +1,5 @@
-import type { AgentDefinition } from "../agents/agent-service.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { RuntimeEventSink } from "../runtime/contracts.ts";
+import type { ModelMessage, RuntimeEventSink } from "../runtime/contracts.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -8,9 +7,26 @@ export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
 export interface TaskSpec {
   readonly runId: string;
   readonly input: string;
-  readonly agent: AgentDefinition;
   readonly availableSkills: readonly PrivateSkill[];
   readonly availableToolNames: readonly string[];
+  readonly availableTools?: readonly PlanningToolSummary[];
+  /**
+   * A conversational answer is still persisted through the canonical Plan
+   * lifecycle, but it may neither select capabilities nor execute Tools.
+   */
+  readonly responseOnly?: boolean;
+  /**
+   * Prior user/assistant turns from the same conversation, newest last. The
+   * planner sees these as real transcript messages so a follow-up instruction
+   * is planned in the context of what was already requested and produced.
+   */
+  readonly conversationHistory?: readonly ModelMessage[];
+}
+
+export interface PlanningToolSummary {
+  readonly name: string;
+  readonly description: string;
+  readonly dangerous?: boolean;
 }
 
 export interface SuccessCriterion {

@@ -1,14 +1,14 @@
-import type { AppDatabase } from "../storage/database.ts";
 import { AppError } from "../shared/errors.ts";
 import type { PlanRepository } from "../planning/plan-repository.ts";
+import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 
 export class TerminalCommitter {
-  private readonly database: AppDatabase;
   private readonly plans: PlanRepository;
+  private readonly outcomes: RunOutcomeRepository;
 
-  constructor(database: AppDatabase, plans: PlanRepository) {
-    this.database = database;
+  constructor(plans: PlanRepository, outcomes: RunOutcomeRepository) {
     this.plans = plans;
+    this.outcomes = outcomes;
   }
 
   commitCompleted(runId: string, planId: string, output: string): void {
@@ -27,19 +27,7 @@ export class TerminalCommitter {
         );
       }
     }
-    const now = Date.now();
-    this.database.transaction(() => {
-      this.database.raw.prepare("UPDATE plans SET status = 'completed', updated_at = ? WHERE id = ?")
-        .run(now, planId);
-      this.database.raw.prepare(`
-        INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-        VALUES (?, ?, 'completed', ?, 'plan_assessed_and_completed', ?)
-      `).run(runId, planId, output, now);
-      this.database.raw.prepare(`
-        UPDATE runs SET status = 'completed', output = ?, error_code = NULL, finished_at = ?
-        WHERE id = ? AND status = 'running'
-      `).run(output, now, runId);
-    });
+    this.outcomes.commitCompleted({ runId, planId, output });
   }
 
   commitStopped(input: {
@@ -48,20 +36,6 @@ export class TerminalCommitter {
     status: "failed" | "cancelled";
     reasonCode: string;
   }): void {
-    const now = Date.now();
-    this.database.transaction(() => {
-      if (input.planId !== undefined) {
-        this.database.raw.prepare("UPDATE plans SET status = 'failed', updated_at = ? WHERE id = ?")
-          .run(now, input.planId);
-      }
-      this.database.raw.prepare(`
-        INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-        VALUES (?, ?, ?, NULL, ?, ?)
-      `).run(input.runId, input.planId ?? null, input.status, input.reasonCode, now);
-      this.database.raw.prepare(`
-        UPDATE runs SET status = ?, error_code = ?, finished_at = ?
-        WHERE id = ? AND status = 'running'
-      `).run(input.status, input.reasonCode, now, input.runId);
-    });
+    this.outcomes.commitStopped(input);
   }
 }

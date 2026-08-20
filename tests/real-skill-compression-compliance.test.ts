@@ -3,7 +3,6 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { AgentService } from "../src/agents/agent-service.ts";
 import { AuthService } from "../src/auth/auth-service.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
@@ -14,7 +13,7 @@ import { AppDatabase } from "../src/storage/database.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const SKILL_DIRECTORY = resolve(ROOT, "skills");
-const DELIVERY_TOOL = "test_record_skill_delivery";
+const DELIVERY_TOOL = "test_generate_skill_delivery";
 
 interface SkillScenario {
   readonly skillName: "frontend-design" | "canvas-design";
@@ -99,31 +98,23 @@ test("real frontend-design and canvas-design packages survive compaction and req
     });
     await skills.refreshSkillDirectory();
     const available = await skills.listAvailable(owner.user.id);
-    const agents = new AgentService(database, skills);
 
     for (const scenario of SCENARIOS) {
       await t.test(`${scenario.skillName} is reloaded after its exact body leaves the context tail`, async () => {
         const skill = available.find((candidate) => candidate.name === scenario.skillName);
         assert.notEqual(skill, undefined);
         const model = new CompressionComplianceModel(scenario, skill!.id);
-        const agent = agents.create(owner.user.id, {
-          name: `${scenario.skillName}-compression-agent`,
-          systemPrompt: "Follow the admitted Skill and provide only evidence-backed completion candidates.",
-          providerKey: "controlled-scenario",
-          maxSteps: 5,
-          skillIds: [skill!.id],
-          toolNames: [DELIVERY_TOOL],
-        });
         const runs = new RunService({
           database,
           skills,
-          agents,
           workspaceRoot: workspace,
           tools: [createDeliveryTool(workspace, scenario)],
           modelFactory: () => model,
         });
 
-        const run = await runs.execute(owner.user.id, agent.id, scenario.task);
+        const run = await runs.execute(owner.user.id, scenario.task, {
+          allowDangerousTools: true,
+        });
         assert.equal(run.status, "completed");
         assert.equal(run.output, scenario.finalOutput);
         assert.equal(model.summaryCalls, 1);
@@ -229,14 +220,10 @@ class CompressionComplianceModel implements ModelAdapter {
 
   private plan(request: ModelInvocation): ModelResponse {
     this.plannerCalls += 1;
-    if (this.plannerCalls === 1) {
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["load_skill", "submit_plan"]);
-      assert.match(request.runtimeContext?.content ?? "", new RegExp(`<name>${this.scenario.skillName}</name>`));
-      this.assertSkillIsNotVisible(request);
-      return toolResponse("planner-load", "load_skill", { name: this.scenario.skillName });
-    }
-    assert.equal(this.plannerCalls, 2);
-    this.assertExactLoadedSkill(request);
+    assert.equal(this.plannerCalls, 1);
+    assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan"]);
+    assert.match(request.runtimeContext?.content ?? "", new RegExp(`<name>${this.scenario.skillName}</name>`));
+    this.assertSkillIsNotVisible(request);
     return toolResponse("planner-submit", "submit_plan", {
       goal: this.scenario.task,
       selectedSkillIds: [this.skillId],
@@ -296,14 +283,19 @@ class CompressionComplianceModel implements ModelAdapter {
     this.assessmentCalls += 1;
     assert.equal(request.messages.length, 0);
     const assessmentInput = JSON.parse(contextPayload(request, "assessment_context")) as {
-      readonly skills: readonly { readonly instructions: string }[];
+      readonly skills: readonly {
+        readonly instructionSummary: string;
+        readonly description: string;
+        readonly instructions?: unknown;
+      }[];
       readonly evidence: { readonly candidateOutput: string };
       readonly contextSummary?: string;
     };
     assert.equal(assessmentInput.skills.length, 1);
-    for (const probe of this.scenario.instructionProbes) {
-      assert.match(assessmentInput.skills[0].instructions, new RegExp(escapeRegExp(probe)));
-    }
+    assert.equal(typeof assessmentInput.skills[0].instructionSummary, "string");
+    assert.equal(assessmentInput.skills[0].instructionSummary.length > 0, true);
+    assert.equal(assessmentInput.skills[0].instructionSummary.length <= 700, true);
+    assert.equal("instructions" in assessmentInput.skills[0], false);
     if (this.assessmentCalls === 1) {
       assert.match(assessmentInput.evidence.candidateOutput, /INTENTIONALLY-OVERLONG-UNVERIFIED-DRAFT/);
       return toolResponse("assessment-reject", "submit_assessment", {
@@ -346,7 +338,7 @@ class CompressionComplianceModel implements ModelAdapter {
     this.executionCalls += 1;
     const tools = request.tools.map((tool) => tool.name);
     if (this.executionCalls === 1) {
-      assert.deepEqual(tools, ["load_skill"]);
+      assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
       this.assertSkillIsNotVisible(request);
       return toolResponse("step-load", "load_skill", { name: this.scenario.skillName });
     }
@@ -365,13 +357,16 @@ class CompressionComplianceModel implements ModelAdapter {
       };
     }
     if (this.executionCalls === 4) {
-      assert.deepEqual(tools, ["load_skill"]);
+      assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
       assert.match(request.runtimeContext?.content ?? "", /structured_summary/);
       this.assertSkillIsNotVisible(request);
       return toolResponse("step-reload", "load_skill", { name: this.scenario.skillName });
     }
     assert.equal(this.executionCalls, 5);
-    assert.deepEqual(tools, []);
+    // File-producing Skills receive convergence grace steps, so the final
+    // candidate is produced on a tool-enabled turn rather than a stripped
+    // convergence turn; the model still stops and is assessed normally.
+    assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
     this.assertExactLoadedSkill(request);
     return { content: this.scenario.finalOutput, toolCalls: [], finishReason: "stop" };
   }

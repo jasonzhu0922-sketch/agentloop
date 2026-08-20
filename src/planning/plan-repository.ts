@@ -1,4 +1,4 @@
-import type { AppDatabase } from "../storage/database.ts";
+import type { SqlConnection } from "../storage/connection.ts";
 import { notFound } from "../shared/errors.ts";
 import type {
   ExecutionPlan,
@@ -48,15 +48,15 @@ interface PlanRevisionInput {
 }
 
 export class PlanRepository {
-  private readonly database: AppDatabase;
+  private readonly database: SqlConnection;
 
-  constructor(database: AppDatabase) {
+  constructor(database: SqlConnection) {
     this.database = database;
   }
 
   create(plan: ExecutionPlan): ExecutionPlan {
     this.database.transaction(() => {
-      this.database.raw.prepare(`
+      this.database.prepare(`
         INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
@@ -69,7 +69,7 @@ export class PlanRepository {
         plan.createdAt,
         plan.updatedAt,
       );
-      const insertStep = this.database.raw.prepare(`
+      const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
           plan_id, step_id, position, objective, dependencies_json, skill_ids_json,
           required_tool_names_json, success_criteria_json, status
@@ -94,19 +94,19 @@ export class PlanRepository {
   }
 
   getByRun(runId: string): ExecutionPlan {
-    const row = this.database.raw.prepare("SELECT * FROM plans WHERE run_id = ?").get(runId) as PlanRow | undefined;
+    const row = this.database.prepare("SELECT * FROM plans WHERE run_id = ?").get(runId) as PlanRow | undefined;
     if (row === undefined) throw notFound("Plan");
     return this.hydrate(row);
   }
 
   get(planId: string): ExecutionPlan {
-    const row = this.database.raw.prepare("SELECT * FROM plans WHERE id = ?").get(planId) as PlanRow | undefined;
+    const row = this.database.prepare("SELECT * FROM plans WHERE id = ?").get(planId) as PlanRow | undefined;
     if (row === undefined) throw notFound("Plan");
     return this.hydrate(row);
   }
 
   markPlan(planId: string, status: PlanStatus): ExecutionPlan {
-    this.database.raw.prepare("UPDATE plans SET status = ?, updated_at = ? WHERE id = ?")
+    this.database.prepare("UPDATE plans SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, Date.now(), planId);
     return this.get(planId);
   }
@@ -114,9 +114,9 @@ export class PlanRepository {
   startStep(planId: string, stepId: string): ExecutionPlan {
     const now = Date.now();
     this.database.transaction(() => {
-      this.database.raw.prepare("UPDATE plans SET status = 'running', updated_at = ? WHERE id = ?")
+      this.database.prepare("UPDATE plans SET status = 'running', updated_at = ? WHERE id = ?")
         .run(now, planId);
-      this.database.raw.prepare(`
+      this.database.prepare(`
         UPDATE plan_steps SET status = 'running', started_at = ?
         WHERE plan_id = ? AND step_id = ? AND status = 'pending'
       `).run(now, planId, stepId);
@@ -127,12 +127,12 @@ export class PlanRepository {
   completeStep(planId: string, stepId: string, output: string, evidence: StepEvidence): ExecutionPlan {
     const now = Date.now();
     this.database.transaction(() => {
-      this.database.raw.prepare(`
+      this.database.prepare(`
         UPDATE plan_steps
         SET status = 'completed', output = ?, evidence_json = ?, finished_at = ?
         WHERE plan_id = ? AND step_id = ? AND status = 'running'
       `).run(output, JSON.stringify(evidence), now, planId, stepId);
-      this.database.raw.prepare("UPDATE plans SET updated_at = ? WHERE id = ?").run(now, planId);
+      this.database.prepare("UPDATE plans SET updated_at = ? WHERE id = ?").run(now, planId);
     });
     return this.get(planId);
   }
@@ -140,18 +140,18 @@ export class PlanRepository {
   failStep(planId: string, stepId: string, error: string): ExecutionPlan {
     const now = Date.now();
     this.database.transaction(() => {
-      this.database.raw.prepare(`
+      this.database.prepare(`
         UPDATE plan_steps SET status = 'failed', error = ?, finished_at = ?
         WHERE plan_id = ? AND step_id = ?
       `).run(error, now, planId, stepId);
-      this.database.raw.prepare("UPDATE plans SET status = 'failed', updated_at = ? WHERE id = ?")
+      this.database.prepare("UPDATE plans SET status = 'failed', updated_at = ? WHERE id = ?")
         .run(now, planId);
     });
     return this.get(planId);
   }
 
   saveAssessment(assessment: SkillComplianceAssessment): void {
-    this.database.raw.prepare(`
+    this.database.prepare(`
       INSERT INTO skill_compliance_assessments(
         id, plan_id, step_id, attempt, approved, criteria_json, skills_json,
         evidence_digest, feedback, created_at
@@ -171,7 +171,7 @@ export class PlanRepository {
   }
 
   assessments(planId: string): SkillComplianceAssessment[] {
-    const rows = this.database.raw.prepare(`
+    const rows = this.database.prepare(`
       SELECT id, plan_id, step_id, attempt, approved, criteria_json, skills_json,
              evidence_digest, feedback, created_at
       FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY step_id, attempt
@@ -233,12 +233,12 @@ export class PlanRepository {
     const now = Date.now();
     this.database.transaction(() => {
       this.saveSnapshot(current, "before_revision", input.actionId, now);
-      this.database.raw.prepare(`
+      this.database.prepare(`
         UPDATE plans
         SET version = ?, goal = ?, selected_skill_ids_json = ?, status = 'running', updated_at = ?
         WHERE id = ?
       `).run(current.version + 1, next.goal, JSON.stringify(next.selectedSkillIds), now, current.id);
-      const insertStep = this.database.raw.prepare(`
+      const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
           plan_id, step_id, position, objective, dependencies_json, skill_ids_json,
           required_tool_names_json, success_criteria_json, status
@@ -253,7 +253,7 @@ export class PlanRepository {
         );
         nextPosition += 1;
       }
-      const retire = this.database.raw.prepare(`
+      const retire = this.database.prepare(`
         INSERT INTO plan_step_retirements(plan_id, step_id, action_id, reason, retired_at)
         VALUES (?, ?, ?, ?, ?)
       `);
@@ -267,7 +267,7 @@ export class PlanRepository {
   }
 
   private hydrate(row: PlanRow): ExecutionPlan {
-    const steps = this.database.raw.prepare(`
+    const steps = this.database.prepare(`
       SELECT plan_steps.*, plan_step_retirements.retired_at, plan_step_retirements.reason AS retirement_reason
       FROM plan_steps
       LEFT JOIN plan_step_retirements
@@ -303,7 +303,7 @@ export class PlanRepository {
         ...(step.retiredAt === undefined ? {} : { retiredAt: step.retiredAt }),
       })),
     };
-    this.database.raw.prepare(`
+    this.database.prepare(`
       INSERT OR IGNORE INTO plan_revision_snapshots(plan_id, version, proposal_json, reason, action_id, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);

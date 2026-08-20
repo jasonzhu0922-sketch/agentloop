@@ -24,6 +24,8 @@ export type ModelMessage =
       readonly role: "assistant";
       readonly content: string;
       readonly toolCalls?: readonly ModelToolCall[];
+      /** Opaque provider continuation data. Never rendered as user-visible text. */
+      readonly reasoningContent?: string;
     }
   | {
       readonly role: "tool";
@@ -61,10 +63,28 @@ export interface ModelResponse {
   readonly content: string;
   readonly toolCalls: readonly ModelToolCall[];
   readonly finishReason: "stop" | "tool_calls" | "length" | "error";
+  /** Opaque continuation required by reasoning-mode Chat Completions providers. */
+  readonly reasoningContent?: string;
+  /** Provider-supplied cause for a non-completed response, when available. */
+  readonly finishReasonDetail?: string;
   readonly usage?: Readonly<{
     inputTokens?: number;
     outputTokens?: number;
   }>;
+}
+
+export interface ModelRequestLogContext {
+  readonly protocol: "chat-completions" | "responses";
+  readonly model: string;
+  readonly phase: RuntimeContextSnapshot["phase"] | "unknown";
+  readonly stream: boolean;
+  readonly canonicalMessageCount: number;
+  readonly providerMessageCount?: number;
+  readonly providerInputItemCount?: number;
+  readonly insertedEmptyInputSentinel?: boolean;
+  readonly toolCount: number;
+  readonly toolChoice: string;
+  readonly runtimeContextPlacement: string;
 }
 
 /**
@@ -98,6 +118,26 @@ export type ModelStreamEvent =
 
 export type ModelStreamSink = (event: ModelStreamEvent) => void | Promise<void>;
 
+/**
+ * Server-authored progress signal emitted when a model request is retried
+ * inside the adapter. The Runtime persists it as a durable `model.retry` event
+ * so the UI can surface a bounded retry instead of a silent hang or failure.
+ */
+export interface ModelRetryInfo {
+  /** The 1-based attempt number that just failed. */
+  readonly attempt: number;
+  /** Total attempts allowed for one model request. */
+  readonly maxAttempts: number;
+  /** HTTP status that triggered the retry, when the failure was an HTTP response. */
+  readonly status?: number;
+  /** Backoff delay in milliseconds before the next attempt. */
+  readonly delayMs: number;
+  /** Sanitized provider-bound request shape, without prompt, tool results, or secrets. */
+  readonly request?: ModelRequestLogContext;
+}
+
+export type ModelRetryReporter = (info: ModelRetryInfo) => void | Promise<void>;
+
 export interface ModelAdapter {
   readonly limits: Readonly<{
     contextWindowTokens: number;
@@ -129,11 +169,11 @@ export interface ModelAdapter {
 export interface CapabilityGrant {
   readonly actorUserId: string;
   readonly runId: string;
-  readonly agentId: string;
+  readonly conversationId?: string;
   readonly depth: number;
+  readonly workspaceRoot?: string;
   readonly allowedToolNames: ReadonlySet<string>;
   readonly allowedSkillIds: ReadonlySet<string>;
-  readonly allowedChildAgentIds: ReadonlySet<string>;
 }
 
 export interface RuntimeEvent {
@@ -148,6 +188,7 @@ export interface AgentLoopResult {
   readonly messages: readonly ModelMessage[];
   readonly steps: number;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
+  readonly activatedSkillNames: readonly string[];
 }
 
 export interface AgentLoopToolEvidence {
@@ -163,6 +204,7 @@ export interface CandidateCompletionContext {
   readonly modelSteps: number;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly projectedToolEvidence: readonly AgentLoopToolEvidence[];
+  readonly activatedSkillNames: readonly string[];
   readonly contextSummary?: string;
 }
 

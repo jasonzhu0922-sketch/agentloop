@@ -3,6 +3,8 @@ config/llm-providers.json
 coverage/
 data/
 node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
 *.db
 *.db-shm
 *.db-wal

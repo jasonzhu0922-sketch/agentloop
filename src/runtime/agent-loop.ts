@@ -19,27 +19,35 @@ import type {
 import type { PreparedToolCall } from "./tool-registry.ts";
 import { ToolRegistry } from "./tool-registry.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
+import { isTextToolInvocation } from "./text-tool-invocation.ts";
 
 export interface AgentLoopOptions {
   readonly runId: string;
   readonly systemPrompt: string;
   readonly runtimeContext?: Omit<RuntimeContextSnapshot, "id" | "supersedesId">;
   readonly input: string;
+  /** Prior user/assistant turns from the same conversation, newest last. */
+  readonly conversationHistory?: readonly ModelMessage[];
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
   readonly model: ModelAdapter;
   readonly tools: ToolRegistry;
   readonly grant: CapabilityGrant;
-  readonly requiredSkills?: readonly {
+  readonly availableSkills?: readonly {
     readonly id: string;
     readonly name: string;
     readonly contentHash: string;
   }[];
   readonly maxSteps: number;
+  /** Additional tool-enabled steps allowed after `maxSteps` when the model is still working. */
+  readonly convergenceGraceSteps?: number;
   readonly maxToolResultCharacters?: number;
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
+  readonly shouldConvergeAfterToolStep?: (
+    context: ToolStepConvergenceContext,
+  ) => boolean | ToolStepConvergenceDecision | Promise<boolean | ToolStepConvergenceDecision>;
   readonly signal?: AbortSignal;
   readonly emit?: RuntimeEventSink;
   readonly actionTracker?: {
@@ -56,6 +64,19 @@ export interface AgentLoopOptions {
   ) => Promise<CandidateCompletionEvaluation>;
 }
 
+export interface ToolStepConvergenceContext {
+  readonly step: number;
+  readonly messages: readonly ModelMessage[];
+  readonly toolEvidence: readonly AgentLoopToolEvidence[];
+  readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
+  readonly activatedSkillNames: readonly string[];
+}
+
+export interface ToolStepConvergenceDecision {
+  readonly converge: boolean;
+  readonly reason?: string;
+}
+
 type PreparedEntry =
   | { readonly kind: "ready"; readonly value: PreparedToolCall }
   | { readonly kind: "rejected"; readonly call: ModelToolCall; readonly message: string };
@@ -66,15 +87,38 @@ interface ToolOutcome {
   readonly isError: boolean;
 }
 
+// Execution turns often need more room than planning because the assistant may
+// need to carry the full skill workflow plus the actual deliverable candidate.
+// A single large `computer_write_file` (e.g. a render script) must fit inside
+// one turn's output budget, so this matches the Provider's maxOutputTokens.
+const MODEL_STEP_MAX_OUTPUT_TOKENS = 16_384;
+const CONVERGENCE_MAX_OUTPUT_TOKENS = 768;
+const EMPTY_CANDIDATE_REPAIR_ATTEMPTS = 2;
+// Extra tool-enabled steps granted after the primary budget when the model is
+// still actively executing. Defaults to 0 so the primary `maxSteps` budget is
+// the tight cost cap; callers may raise it (e.g. for file-producing Skills)
+// so a "write → run → verify" workflow is not cut off one render short.
+const DEFAULT_CONVERGENCE_GRACE_STEPS = 0;
+
 const CONVERGENCE_PROMPT = [
   "<runtime_convergence>",
   "This is the final model step allowed by the current step budget.",
   "No execution tools are available on this turn.",
   "Use the canonical tool results already present in the conversation to submit one concise completion candidate.",
-  "Address the current Plan step and its success criteria, cite the concrete evidence you relied on, and state any unmet criterion truthfully.",
+  "Return 1-3 short sentences. Name what was completed, cite the concrete evidence or tool results used, and state any unmet criterion truthfully.",
+  "Never return an empty response.",
   "This response is only a candidate: the independent assessor and Terminal Committer remain authoritative.",
   "Do not request or emit tool calls.",
   "</runtime_convergence>",
+].join("\n");
+
+const EMPTY_CANDIDATE_REPAIR_PROMPT = [
+  "<runtime_candidate_repair>",
+  "The previous completion candidate was empty, so it cannot be assessed.",
+  "Return a non-empty completion candidate in 1-3 short sentences.",
+  "Name the completed work, cite the concrete evidence or tool results used, and state any unmet criterion truthfully.",
+  "Do not request or emit tool calls.",
+  "</runtime_candidate_repair>",
 ].join("\n");
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
@@ -83,11 +127,19 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
   const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
-  const messages: ModelMessage[] = options.initialMessages === undefined
-    ? [{ role: "user", content: options.input }]
-    : [...options.initialMessages];
+  const graceSteps = Math.max(0, options.convergenceGraceSteps ?? DEFAULT_CONVERGENCE_GRACE_STEPS);
+  const hardLimit = options.maxSteps + graceSteps;
+  const messages: ModelMessage[] = [
+    ...(options.conversationHistory ?? []),
+    ...(options.initialMessages === undefined
+      ? [{ role: "user", content: options.input }]
+      : options.initialMessages),
+  ];
   const toolEvidence: AgentLoopToolEvidence[] = [...(options.initialToolEvidence ?? [])];
-  const requiredSkills = new Map((options.requiredSkills ?? []).map((skill) => [skill.name, skill]));
+  const availableSkills = new Map((options.availableSkills ?? []).map((skill) => [skill.name, skill]));
+  const activatedSkillNames = new Set(
+    collectActivatedSkillNames(options.initialMessages ?? [], availableSkills),
+  );
   const contextAssembler = new ContextAssembler({
     runId: options.runId,
     systemPrompt: options.systemPrompt,
@@ -102,13 +154,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   await emit({
     type: "loop.started",
-    data: { runId: options.runId, agentId: options.grant.agentId, depth: options.grant.depth },
+    data: { runId: options.runId, depth: options.grant.depth },
   });
-  if (requiredSkills.size > 0) {
+  if (availableSkills.size > 0) {
     await emit({
-      type: "skill.activation.required",
+      type: "skill.activation.available",
       data: {
-        skills: [...requiredSkills.values()].map((skill) => ({
+        skills: [...availableSkills.values()].map((skill) => ({
           id: skill.id,
           name: skill.name,
           contentHash: skill.contentHash,
@@ -118,9 +170,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   }
 
   let convergenceRequested = false;
-  for (let step = 1; step <= options.maxSteps; step += 1) {
+  let previousToolSignature: string | undefined;
+  let stalled = false;
+  let requestedConvergenceReason: string | undefined;
+  for (let step = 1; step <= hardLimit; step += 1) {
     throwIfAborted(options.signal);
-    const convergenceOnly = step === options.maxSteps && toolEvidence.length > 0;
+    const inGrace = step > options.maxSteps;
+    const convergenceOnly = toolEvidence.length > 0
+      && (requestedConvergenceReason !== undefined || step === hardLimit);
     if (convergenceOnly) {
       convergenceRequested = true;
       contextAssembler.setRuntimeDirective(CONVERGENCE_PROMPT);
@@ -129,7 +186,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         data: {
           step,
           maxSteps: options.maxSteps,
+          convergenceGraceSteps: graceSteps,
+          hardLimit,
           priorToolResultCount: toolEvidence.length,
+          ...(requestedConvergenceReason === undefined ? {} : { reason: requestedConvergenceReason }),
         },
       });
     }
@@ -137,66 +197,66 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     // Ported from OpenCode's materialization boundary: each model step gets a
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
-    let activeSkillNames = contextAssembler.activeSkillNames(messages);
-    let pendingSkillNames = [...requiredSkills.keys()].filter((name) => !activeSkillNames.has(name));
-    let activeGrant = pendingSkillNames.length === 0
-      ? options.grant
-      : {
-          ...options.grant,
-          allowedToolNames: new Set(
-            options.grant.allowedToolNames.has("load_skill") ? ["load_skill"] : [],
-          ),
-        };
-    let materialized = options.tools.materialize(activeGrant);
+    const materialized = options.tools.materialize(options.grant);
     let assembly = await contextAssembler.assemble(messages, convergenceOnly ? [] : materialized.definitions, options.signal);
-    const activeAfterAssembly = contextAssembler.activeSkillNames(messages);
-    if (!sameStringSet(activeSkillNames, activeAfterAssembly)) {
-      activeSkillNames = activeAfterAssembly;
-      pendingSkillNames = [...requiredSkills.keys()].filter((name) => !activeSkillNames.has(name));
-      activeGrant = pendingSkillNames.length === 0
-        ? options.grant
-        : {
-            ...options.grant,
-            allowedToolNames: new Set(
-              options.grant.allowedToolNames.has("load_skill") ? ["load_skill"] : [],
-            ),
-          };
-      materialized = options.tools.materialize(activeGrant);
-      assembly = await contextAssembler.assemble(
-        messages,
-        convergenceOnly ? [] : materialized.definitions,
-        options.signal,
-      );
-    }
 
-    const invocation: ModelInvocation = {
-      runId: options.runId,
-      systemPrompt: options.systemPrompt,
-      phase: "execution",
-      runtimeContext: assembly.runtimeContext,
-      messages: assembly.messages,
-      tools: convergenceOnly ? [] : materialized.definitions,
-      ...(convergenceOnly || materialized.definitions.length === 0
-        ? {}
-        : { toolChoice: pendingSkillNames.length === 0 ? "auto" as const : "required" as const }),
-    };
-    const earlyOutcomes = new Map<string, ToolOutcome>();
-    const response = await completeWithStreamingAndDispatch({
-      model: options.model,
-      invocation,
-      emit,
-      step,
-      signal: options.signal,
-      grant: options.grant,
-      prepare: (call) => materialized.prepare(call),
-      maxToolResultCharacters,
-      maxParallelToolCalls,
-      actionTracker: options.actionTracker,
-    }, earlyOutcomes);
+    let earlyOutcomes = new Map<string, ToolOutcome>();
+    let response: ModelResponse | undefined;
+    for (let candidateAttempt = 1; candidateAttempt <= EMPTY_CANDIDATE_REPAIR_ATTEMPTS; candidateAttempt += 1) {
+      const invocation: ModelInvocation = {
+        runId: options.runId,
+        systemPrompt: options.systemPrompt,
+        phase: "execution",
+        runtimeContext: assembly.runtimeContext,
+        messages: assembly.messages,
+        tools: convergenceOnly ? [] : materialized.definitions,
+        ...(convergenceOnly || materialized.definitions.length === 0
+          ? {}
+          : { toolChoice: "auto" as const }),
+        maxOutputTokens: Math.min(
+          convergenceOnly ? CONVERGENCE_MAX_OUTPUT_TOKENS : MODEL_STEP_MAX_OUTPUT_TOKENS,
+          options.model.limits.maxOutputTokens,
+        ),
+      };
+      earlyOutcomes = new Map<string, ToolOutcome>();
+      response = await completeWithStreamingAndDispatch({
+        model: options.model,
+        invocation,
+        emit,
+        step,
+        signal: options.signal,
+        grant: options.grant,
+        prepare: (call) => materialized.prepare(call),
+        maxToolResultCharacters,
+        maxParallelToolCalls,
+        actionTracker: options.actionTracker,
+      }, earlyOutcomes);
+      if (
+        response.toolCalls.length === 0
+        && response.finishReason === "stop"
+        && response.content.trim().length === 0
+        && candidateAttempt < EMPTY_CANDIDATE_REPAIR_ATTEMPTS
+      ) {
+        await emit({
+          type: "candidate.rejected",
+          data: { step, output: response.content, feedback: "Completion candidate was empty" },
+        });
+        contextAssembler.setRuntimeDirective(EMPTY_CANDIDATE_REPAIR_PROMPT);
+        assembly = await contextAssembler.assemble(
+          messages,
+          convergenceOnly ? [] : materialized.definitions,
+          options.signal,
+        );
+        continue;
+      }
+      break;
+    }
+    if (response === undefined) throw new AppError("MODEL_ERROR", "Model did not produce a response", 502);
     const assistantMessage: ModelMessage = {
       role: "assistant",
       content: response.content,
       ...(response.toolCalls.length === 0 ? {} : { toolCalls: response.toolCalls }),
+      ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
     };
     messages.push(assistantMessage);
 
@@ -213,16 +273,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
 
     if (response.toolCalls.length === 0) {
-      if (pendingSkillNames.length > 0) {
-        const feedback = `Load every Skill bound to this Plan step before working or submitting completion: ${pendingSkillNames.join(", ")}`;
-        await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
-        contextAssembler.setRuntimeDirective(feedback);
-        continue;
-      }
       if (response.finishReason !== "stop") {
         const feedback = `Completion candidate was not accepted because the model finished with ${response.finishReason}`;
         await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
         contextAssembler.setRuntimeDirective(feedback);
+        continue;
+      }
+      // A converged turn has no tools, so a model that is still mid-execution
+      // tends to emit its next tool call as literal text. That is not a
+      // completion candidate: reject it so it never reaches the assessor (which
+      // would otherwise resume the execution instead of assessing it). The
+      // loop then exits and reports the budget exhaustion accurately.
+      if (convergenceOnly && isTextToolInvocation(response.content)) {
+        await emit({
+          type: "candidate.rejected",
+          data: {
+            step,
+            output: response.content,
+            feedback: "Completion candidate was an unexecuted tool invocation; the step budget was exhausted while the model was still working",
+          },
+        });
         continue;
       }
       const evaluation = await options.evaluateCandidate?.({
@@ -231,6 +301,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         modelSteps: step,
         toolEvidence,
         projectedToolEvidence: contextAssembler.projectToolEvidence(messages, toolEvidence),
+        activatedSkillNames: [...activatedSkillNames],
         ...(contextAssembler.contextSummary === undefined
           ? {}
           : { contextSummary: contextAssembler.contextSummary }),
@@ -241,8 +312,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       if (evaluation.approved) {
         await emit({ type: "loop.completed", data: { step, output: response.content } });
-        return { output: response.content, messages, steps: step, toolEvidence };
+        return { output: response.content, messages, steps: step, toolEvidence, activatedSkillNames: [...activatedSkillNames] };
       }
+      requestedConvergenceReason = undefined;
       contextAssembler.setRuntimeDirective(
         evaluation.feedback || "Completion was rejected. Repair this step using the available evidence.",
       );
@@ -250,6 +322,38 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     contextAssembler.setRuntimeDirective(undefined);
+
+    // Progress-aware grace: once past the primary budget, re-issuing the exact
+    // same tool calls (name + arguments) as the previous step is a stall, not
+    // progress. Stop granting further grace and report the budget exhaustion
+    // instead of paying for a looping model.
+    if (
+      !convergenceOnly
+      && response.finishReason !== "length"
+      && response.toolCalls.length > 0
+    ) {
+      const signature = toolCallSignature(response.toolCalls);
+      if (inGrace && previousToolSignature !== undefined && signature === previousToolSignature) {
+        stalled = true;
+        for (const call of response.toolCalls) {
+          await emit({
+            type: "tool.rejected",
+            data: {
+              step,
+              toolCallId: call.id,
+              toolName: call.name,
+              reason: "Tool call was not executed because the model repeated identical tool calls without forward progress",
+            },
+          });
+        }
+        await emit({
+          type: "loop.no_progress",
+          data: { step, phase: "execution", toolSignature: signature },
+        });
+        break;
+      }
+      previousToolSignature = signature;
+    }
 
     let outcomes: ToolOutcome[];
     if (convergenceOnly) {
@@ -337,13 +441,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     // Provider protocol requires tool results in source call order even when the
     // actual effects complete out of order.
+    const latestToolEvidence: AgentLoopToolEvidence[] = [];
     for (const outcome of outcomes) {
-      toolEvidence.push({
+      const evidence = {
         toolCallId: outcome.call.id,
         toolName: outcome.call.name,
         result: outcome.content,
         isError: outcome.isError,
-      });
+      };
+      toolEvidence.push(evidence);
+      latestToolEvidence.push(evidence);
       messages.push({
         role: "tool",
         toolCallId: outcome.call.id,
@@ -353,8 +460,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       if (!outcome.isError && outcome.call.name === "load_skill") {
         const name = skillNameFromArguments(outcome.call.arguments);
-        const skill = name === undefined ? undefined : requiredSkills.get(name);
+        const skill = name === undefined ? undefined : availableSkills.get(name);
         if (skill !== undefined) {
+          activatedSkillNames.add(skill.name);
           await emit({
             type: "skill.activated",
             data: {
@@ -372,24 +480,51 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       type: "step.completed",
       data: { step, toolResults: outcomes.map((item) => ({ toolCallId: item.call.id, isError: item.isError })) },
     });
+
+    const convergenceDecision = await evaluateToolStepConvergence(options.shouldConvergeAfterToolStep, {
+      step,
+      messages,
+      toolEvidence,
+      latestToolEvidence,
+      activatedSkillNames: [...activatedSkillNames],
+    });
+    if (convergenceDecision.converge) {
+      requestedConvergenceReason = convergenceDecision.reason ?? "tool_evidence_ready";
+      await emit({
+        type: "loop.convergence_queued",
+        data: { step, reason: requestedConvergenceReason, priorToolResultCount: toolEvidence.length },
+      });
+    }
   }
 
   await emit({
     type: "loop.limit_exceeded",
-    data: { maxSteps: options.maxSteps, convergenceRequested },
+    data: {
+      maxSteps: options.maxSteps,
+      convergenceGraceSteps: graceSteps,
+      hardLimit,
+      convergenceRequested,
+      stalled,
+    },
   });
   throw new AppError(
     "RUN_LIMIT_EXCEEDED",
-    `Run exceeded its ${options.maxSteps}-step limit`,
+    stalled
+      ? `Run stopped extending its budget: the model repeated identical tool calls without forward progress (${options.maxSteps} primary + ${graceSteps} convergence grace)`
+      : `Run exceeded its ${hardLimit}-step limit (${options.maxSteps} primary + ${graceSteps} convergence grace)`,
     409,
-    { maxSteps: options.maxSteps },
+    { maxSteps: options.maxSteps, convergenceGraceSteps: graceSteps, hardLimit, stalled },
   );
 }
 
-function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
-  if (left.size !== right.size) return false;
-  for (const value of left) if (!right.has(value)) return false;
-  return true;
+async function evaluateToolStepConvergence(
+  predicate: AgentLoopOptions["shouldConvergeAfterToolStep"],
+  context: ToolStepConvergenceContext,
+): Promise<ToolStepConvergenceDecision> {
+  if (predicate === undefined) return { converge: false };
+  const decision = await predicate(context);
+  if (typeof decision === "boolean") return { converge: decision };
+  return decision;
 }
 
 interface StreamingDispatchContext {
@@ -625,6 +760,47 @@ function skillNameFromArguments(value: unknown): string | undefined {
   const name = (value as Record<string, unknown>).name;
   return typeof name === "string" ? name : undefined;
 }
+
+function collectActivatedSkillNames(
+  messages: readonly ModelMessage[],
+  availableSkills: ReadonlyMap<string, { readonly name: string }>,
+): readonly string[] {
+  const calls = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.toolCalls ?? []) {
+      if (call.name !== "load_skill") continue;
+      const name = skillNameFromArguments(call.arguments);
+      if (name !== undefined) calls.set(call.id, name);
+    }
+  }
+  const activated = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "tool" || message.name !== "load_skill" || message.isError) continue;
+    const name = calls.get(message.toolCallId);
+    const skill = name === undefined ? undefined : availableSkills.get(name);
+    if (skill !== undefined) activated.add(skill.name);
+  }
+  return [...activated];
+}
+
+/**
+ * Fingerprint one step's requested tool calls (name + argument digest) so the
+ * Runtime can tell a productive step from a repeat of the previous step.
+ */
+function toolCallSignature(calls: readonly ModelToolCall[]): string {
+  return calls
+    .map((call) => {
+      const serialized = typeof call.arguments === "string"
+        ? call.arguments
+        : JSON.stringify(call.arguments) ?? "";
+      return `${call.name}#${createHash("sha256").update(serialized).digest("hex")}`;
+    })
+    .sort()
+    .join("|");
+}
+
+
 
 function serializeToolResult(value: unknown, maximum: number): string {
   let serialized: string;

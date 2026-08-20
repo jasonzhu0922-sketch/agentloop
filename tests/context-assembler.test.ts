@@ -52,8 +52,49 @@ test("ContextAssembler reduces an overlong persisted summary before treating com
 
   assert.equal(requests.length, 2);
   assert.equal(requests[0].maxOutputTokens, 8_192);
+  assert.match(requests[0].messages[0]?.content ?? "", /at most 1600 estimated tokens/);
   assert.match(requests[1].messages[0]?.content ?? "", /at most 1600 estimated tokens/);
   assert.ok(estimateTextTokens(assembly.runtimeContext.content) < 1_600);
+});
+
+test("ContextAssembler retries a length-truncated summary without accepting partial content", async () => {
+  const requests: ModelInvocation[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 20_000, maxOutputTokens: 16_384 },
+    complete: async (request) => {
+      requests.push(request);
+      if (requests.length === 1) {
+        return {
+          content: structuredSummary("partial content that must be discarded"),
+          toolCalls: [],
+          finishReason: "length",
+          usage: { inputTokens: 4_000, outputTokens: 8_192 },
+        };
+      }
+      return {
+        content: structuredSummary("retry success"),
+        toolCalls: [],
+        finishReason: "stop",
+        usage: { inputTokens: 4_000, outputTokens: 200 },
+      };
+    },
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-summary-length-retry",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+  const assembly = await assembler.assemble([
+    { role: "user", content: "source ".repeat(7_000) },
+    { role: "assistant", content: "latest action" },
+  ], []);
+
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].messages[0]?.content ?? "", /at most 1600 estimated tokens/);
+  assert.match(requests[1].messages[0]?.content ?? "", /previous summarization attempt exceeded the output limit/i);
+  assert.match(assembly.runtimeContext.content, /retry success/);
+  assert.doesNotMatch(assembly.runtimeContext.content, /partial content/);
 });
 
 test("ContextAssembler summarizes an oversized terminal candidate instead of retaining an over-budget tail", async () => {
@@ -80,6 +121,46 @@ test("ContextAssembler summarizes an oversized terminal candidate instead of ret
   assert.ok(assembly.estimatedInputTokens <= assembly.usableInputTokens);
 });
 
+test("ContextAssembler projects large ToolResults before they pollute the next model turn", async () => {
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-large-tool-projection",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+    emit: (event) => events.push(event),
+  });
+  const largeProfile = JSON.stringify({ rows: Array.from({ length: 2_500 }, (_, index) => ({ index, value: "profile row" })) });
+  assert.ok(largeProfile.length > 16_000);
+  const canonical = [
+    {
+      role: "assistant" as const,
+      content: "",
+      toolCalls: [{ id: "read-profile", name: "computer_read_file", arguments: { path: "source_profile.json" } }],
+    },
+    {
+      role: "tool" as const,
+      toolCallId: "read-profile",
+      name: "computer_read_file",
+      content: largeProfile,
+      isError: false,
+    },
+  ];
+
+  const assembly = await assembler.assemble(canonical, []);
+  const projectedTool = assembly.messages.find((message) => message.role === "tool");
+  assert.equal(projectedTool?.role, "tool");
+  assert.ok((projectedTool?.content.length ?? 0) < largeProfile.length);
+  assert.match(projectedTool?.content ?? "", /Large tool result projected/);
+  assert.match(projectedTool?.content ?? "", /canonical event retained/);
+  assert.ok(canonical[1].content.length === largeProfile.length, "canonical ToolResult remains unchanged");
+  assert.ok(events.some((event) => event.type === "context.tool_outputs_projected"));
+});
+
 test("the Loop prunes old Tool output, compacts complete exchanges, and reloads a Skill whose body left the tail", async () => {
   const model = new CompactingSkillModel();
   const events: RuntimeEvent[] = [];
@@ -104,13 +185,11 @@ test("the Loop prunes old Tool output, compacts complete exchanges, and reloads 
     grant: createCapabilityGrant({
       actorUserId: "user-1",
       runId: "run-compaction",
-      agentId: "agent-1",
       depth: 0,
       allowedToolNames: ["load_skill", "inspect_renderer"],
       allowedSkillIds: ["skill-1"],
-      allowedChildAgentIds: [],
     }),
-    requiredSkills: [{ id: "skill-1", name: "presentation-skill", contentHash: "skill-hash" }],
+    availableSkills: [{ id: "skill-1", name: "presentation-skill", contentHash: "skill-hash" }],
     maxSteps: 20,
     emit: (event) => events.push(event),
   });
@@ -175,7 +254,10 @@ class CompactingSkillModel implements ModelAdapter {
     }
 
     const toolNames = request.tools.map((tool) => tool.name);
-    if (toolNames.length === 1 && toolNames[0] === "load_skill") {
+    const hasLoadedSkill = request.messages.some((message) =>
+      message.role === "tool" && message.name === "load_skill" && !message.isError
+    );
+    if (!hasLoadedSkill && toolNames.includes("load_skill")) {
       this.skillLoadCalls += 1;
       this.serial += 1;
       return {

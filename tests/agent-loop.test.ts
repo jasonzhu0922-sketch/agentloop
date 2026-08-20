@@ -149,6 +149,242 @@ test("the final budgeted turn converges without tools and submits existing evide
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("an empty completion candidate is repaired within the same budgeted step", async () => {
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "collect_evidence",
+    description: "Collect canonical evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return { artifact: "ready", qa: "passed" };
+    },
+  };
+  const model = new EmptyThenConvergedModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["collect_evidence"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete the admitted step.",
+    input: "produce and verify the artifact",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    emit: (event) => events.push(event),
+  });
+
+  assert.equal(result.output, "artifact ready; QA passed; evidence: collect_evidence");
+  assert.equal(executions, 1);
+  assert.equal(model.calls, 3);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  assert.equal(events.filter((event) => event.type === "step.started").length, 2);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a mid-work model is granted convergence grace steps to reach real completion", async () => {
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "render",
+    description: "Render the artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return { rendered: true };
+    },
+  };
+  const model = new GraceCompletionModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["render"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Render until done.",
+    input: "render",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    convergenceGraceSteps: 2,
+    emit: (event) => events.push(event),
+  });
+
+  assert.equal(result.output, "rendered artifact");
+  assert.equal(executions, 2);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 0);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("distinct tool calls keep extending grace while the model makes progress", async () => {
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "work",
+    description: "Do one unit of work",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return "ok";
+    },
+  };
+  const model = new DistinctGraceModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["work"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Work until done.",
+    input: "work",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    convergenceGraceSteps: 3,
+    emit: (event) => events.push(event),
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(executions, 3);
+  assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 0);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("tool evidence can queue an early convergence turn before the hard limit", async () => {
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "render",
+    description: "Render the artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return { path: "poster.png", status: "ready" };
+    },
+  };
+  const model = new EarlyConvergenceModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["render"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Render then submit a candidate.",
+    input: "render",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 12,
+    convergenceGraceSteps: 8,
+    emit: (event) => events.push(event),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.some((item) => item.toolName === "render" && item.result.includes("poster.png")),
+      reason: "artifact_ready",
+    }),
+  });
+
+  assert.equal(result.output, "poster artifact ready; evidence: render");
+  assert.equal(executions, 1);
+  assert.equal(model.calls, 2);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_queued").length, 1);
+  const requested = events.find((event) => event.type === "loop.convergence_requested");
+  assert.equal(requested?.data.reason, "artifact_ready");
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a looping model stops extending grace once it repeats identical tool calls", async () => {
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "render",
+    description: "Render the artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return "rendered";
+    },
+  };
+  const model = new LoopingGraceModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["render"]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Render the artifact.",
+      input: "render",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant,
+      maxSteps: 2,
+      convergenceGraceSteps: 4,
+      emit: (event) => events.push(event),
+    }),
+    (error: unknown) => error !== null
+      && typeof error === "object"
+      && "code" in error
+      && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED"
+      && (error as { message: string }).message.includes("without forward progress"),
+  );
+  assert.equal(executions, 2);
+  assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 1);
+  assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 1);
+  const limitEvent = events.find((event) => event.type === "loop.limit_exceeded");
+  assert.equal(limitEvent?.data.stalled, true);
+});
+
+test("a converged turn that emits an unexecuted tool invocation never reaches the assessor", async () => {
+  let executions = 0;
+  let assessments = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "render",
+    description: "Render the artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return "ok";
+    },
+  };
+  const model = new ConvergedToolInvocationModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["render"]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Render the artifact.",
+      input: "render",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant,
+      maxSteps: 2,
+      emit: (event) => events.push(event),
+      evaluateCandidate: async () => {
+        assessments += 1;
+        return { approved: false, feedback: "never assessed" };
+      },
+    }),
+    (error: unknown) => error !== null
+      && typeof error === "object"
+      && "code" in error
+      && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED",
+  );
+  assert.equal(executions, 1);
+  assert.equal(assessments, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  assert.equal(events.some((event) => event.type === "candidate.approved"), false);
+  assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 1);
+});
+
 test("streaming turns emit live deltas before the durable assistant checkpoint", async () => {
   const events: RuntimeEvent[] = [];
   const tool: RuntimeTool<unknown> = {
@@ -234,11 +470,9 @@ test("capability grants are immutable at runtime, not only in TypeScript", () =>
   const grant = createCapabilityGrant({
     actorUserId: "user-1",
     runId: "run-1",
-    agentId: "agent-1",
     depth: 0,
     allowedToolNames: ["read"],
     allowedSkillIds: ["skill-1"],
-    allowedChildAgentIds: [],
   });
   assert.equal(grant.allowedToolNames.has("read"), true);
   assert.equal("add" in grant.allowedToolNames, false);
@@ -317,10 +551,133 @@ class ConvergenceScenarioModel implements ModelAdapter {
     }
     assert.deepEqual(request.tools, []);
     assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
+    assert.equal(request.maxOutputTokens, 768);
     const evidence = request.messages.find((message) => message.role === "tool" && message.name === "collect_evidence");
     assert.match(evidence?.content ?? "", /\"artifact\":\"ready\"/);
     return {
       content: "artifact ready; QA passed; evidence: collect_evidence",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class EmptyThenConvergedModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["collect_evidence"]);
+      assert.equal(request.maxOutputTokens, 8_192);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "collect-1", name: "collect_evidence", arguments: {} }],
+      };
+    }
+    assert.deepEqual(request.tools, []);
+    assert.equal(request.maxOutputTokens, 768);
+    if (this.calls === 2) {
+      return { content: "", finishReason: "stop", toolCalls: [] };
+    }
+    assert.match(request.runtimeContext?.content ?? "", /runtime_candidate_repair/);
+    return {
+      content: "artifact ready; QA passed; evidence: collect_evidence",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class GraceCompletionModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls <= 2) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: `render-${this.calls}`, name: "render", arguments: {} }],
+      };
+    }
+    return { content: "rendered artifact", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class DistinctGraceModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls <= 3) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: `work-${this.calls}`, name: "work", arguments: { step: this.calls } }],
+      };
+    }
+    return { content: "done", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class EarlyConvergenceModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["render"]);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "render-1", name: "render", arguments: {} }],
+      };
+    }
+    assert.deepEqual(request.tools, []);
+    assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
+    return {
+      content: "poster artifact ready; evidence: render",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class LoopingGraceModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(): Promise<ModelResponse> {
+    this.calls += 1;
+    return {
+      content: "still rendering",
+      finishReason: "tool_calls",
+      toolCalls: [{ id: `render-${this.calls}`, name: "render", arguments: {} }],
+    };
+  }
+}
+
+class ConvergedToolInvocationModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "render-1", name: "render", arguments: {} }],
+      };
+    }
+    return {
+      content: '<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="render">\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>',
       finishReason: "stop",
       toolCalls: [],
     };
@@ -429,10 +786,8 @@ function makeGrant(toolNames: readonly string[]): CapabilityGrant {
   return {
     actorUserId: "user-1",
     runId: "run-1",
-    agentId: "agent-1",
     depth: 0,
     allowedToolNames: new Set(toolNames),
     allowedSkillIds: new Set(),
-    allowedChildAgentIds: new Set(),
   };
 }

@@ -43,19 +43,19 @@ class ImmutableStringSet implements ReadonlySet<string> {
 export function createCapabilityGrant(input: {
   actorUserId: string;
   runId: string;
-  agentId: string;
+  conversationId?: string;
   depth: number;
+  workspaceRoot?: string;
   allowedToolNames: Iterable<string>;
   allowedSkillIds: Iterable<string>;
-  allowedChildAgentIds: Iterable<string>;
 }): CapabilityGrant {
   return Object.freeze({
     actorUserId: input.actorUserId,
     runId: input.runId,
-    agentId: input.agentId,
+    ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     depth: input.depth,
+    ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
     allowedToolNames: new ImmutableStringSet(input.allowedToolNames),
     allowedSkillIds: new ImmutableStringSet(input.allowedSkillIds),
-    allowedChildAgentIds: new ImmutableStringSet(input.allowedChildAgentIds),
   });
 }
