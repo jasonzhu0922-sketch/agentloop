@@ -13,6 +13,7 @@ import type {
   ConversationReusableArtifact,
   ConversationWorkingSet,
   ExecutionPlan,
+  PlanningWorkspaceFacts,
   Planner,
   PlanRevisionAssessor,
   SkillComplianceAssessment,
@@ -1011,6 +1012,7 @@ export class RunService {
         availableSkills: planningSkills,
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
+        workspaceFacts: await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId),
         visibleDirectories,
         ...(responseOnly ? { responseOnly: true } : {}),
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
@@ -2140,6 +2142,41 @@ function toolSummaries(
       dangerous: DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name),
     }))
     .sort((left, right) => left.name.localeCompare(right.name, "en"));
+}
+
+async function planningWorkspaceFacts(
+  workspaceRoot: string,
+  visibleDirectories: readonly VisibleDirectoryGrant[],
+  conversationId: string | undefined,
+): Promise<PlanningWorkspaceFacts> {
+  try {
+    const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
+    const names = entries
+      .map((entry) => entry.isDirectory() ? `${entry.name}/` : entry.name)
+      .sort((left, right) => left.localeCompare(right, "en"))
+      .slice(0, 20);
+    return {
+      schema: "planning.workspaceFacts/v1",
+      kind: conversationId === undefined ? "workspace_root" : "conversation_workspace",
+      rootLabel: conversationId === undefined ? "configured workspace root" : "conversation workspace",
+      state: entries.length === 0 ? "empty" : "has_entries",
+      entryCount: entries.length,
+      sampleEntries: names,
+      visibleDirectoryCount: visibleDirectories.length,
+      guidance: entries.length === 0 && visibleDirectories.length === 0
+        ? "The workspace is empty and has no visible external directories. Do not create a workspace inspection Plan step unless the user asks to inspect an existing project; plan direct artifact creation when file-writing tools are available."
+        : "Use these workspace facts as planning context. Create an inspection Plan step only when existing files or visible directories must be understood to satisfy the user request.",
+    };
+  } catch (error) {
+    return {
+      schema: "planning.workspaceFacts/v1",
+      kind: conversationId === undefined ? "workspace_root" : "conversation_workspace",
+      rootLabel: conversationId === undefined ? "configured workspace root" : "conversation workspace",
+      state: "unavailable",
+      visibleDirectoryCount: visibleDirectories.length,
+      guidance: `Workspace facts could not be read before planning: ${error instanceof Error ? error.message : "unknown error"}. Create an inspection step only if the user request depends on workspace contents.`,
+    };
+  }
 }
 
 function canProduceFiles(allowedToolNames: ReadonlySet<string>): boolean {

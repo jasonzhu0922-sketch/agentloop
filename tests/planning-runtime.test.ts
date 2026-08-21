@@ -328,6 +328,88 @@ test("ModelPlanner exposes conversation workset facts for follow-up planning", a
   assert.equal(sawWorkingSet, true);
 });
 
+test("ModelPlanner treats empty conversation workspace as context instead of Plan work", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /planning\.workspaceFacts\/v1/);
+      assert.match(context, /Do not create a workspace inspection Plan step/);
+      assert.match(request.systemPrompt, /Runtime\/context intake facts are planning inputs/);
+      assert.match(request.systemPrompt, /do not create a workspace inspection step/);
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "workspace-inspection-plan",
+            name: "submit_plan",
+            arguments: {
+              goal: "build a landing page",
+              selectedSkillIds: [],
+              steps: [
+                {
+                  id: "inspect_workspace",
+                  objective: "Inspect the empty workspace to identify project entry files and framework constraints.",
+                  dependencies: [],
+                  skillIds: [],
+                  requiredToolNames: ["computer_list_directory", "computer_find_files"],
+                  successCriteria: [{ id: "workspace-understood", description: "Workspace project structure is identified." }],
+                },
+              ],
+            },
+          }],
+        };
+      }
+      assert.match(context, /empty workspace context intake into Plan work/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "outcome-plan",
+          name: "submit_plan_patch",
+          arguments: {
+            replacements: [{
+              targetStepId: "inspect_workspace",
+              downstreamDependencyStepId: "create_page",
+              replacementSteps: [{
+                id: "create_page",
+                objective: "Create the requested landing page as a standalone index.html in the empty conversation workspace.",
+                dependencies: [],
+                skillIds: [],
+                requiredToolNames: ["computer_write_file"],
+                successCriteria: [{ id: "page-created", description: "A standalone index.html file is written in the workspace." }],
+              }],
+            }],
+          },
+        }],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-empty-workspace-plan",
+    input: "做一个活动宣传网页",
+    availableSkills: [],
+    availableToolNames: ["computer_list_directory", "computer_find_files", "computer_write_file"],
+    workspaceFacts: {
+      schema: "planning.workspaceFacts/v1",
+      kind: "conversation_workspace",
+      rootLabel: "conversation workspace",
+      state: "empty",
+      entryCount: 0,
+      sampleEntries: [],
+      visibleDirectoryCount: 0,
+      guidance: "The workspace is empty and has no visible external directories. Do not create a workspace inspection Plan step unless the user asks to inspect an existing project.",
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["create_page"]);
+});
+
 test("ModelPlanner proactively guides reusable-artifact work into small steps", async () => {
   let calls = 0;
   let sawSmallStepGuidance = false;
@@ -399,6 +481,179 @@ test("ModelPlanner proactively guides reusable-artifact work into small steps", 
     "extract-analysis-contract",
     "author-script",
     "verify-script",
+  ]);
+});
+
+test("ModelPlanner rejects default QA and repair tails for ordinary artifact tasks", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      assert.match(request.systemPrompt, /Do not add default inspect_\*, repair_\*_if_needed, final_verify_\*/);
+      assert.match(request.systemPrompt, /Skill-mandated QA belongs inside the Skill-bound leaf/);
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "heavy-poster-plan",
+            name: "submit_plan",
+            arguments: {
+              goal: "create a concert poster",
+              selectedSkillIds: [],
+              steps: [
+                {
+                  id: "create_poster",
+                  objective: "Create and export the requested poster as PNG.",
+                  dependencies: [],
+                  skillIds: [],
+                  requiredToolNames: ["computer_write_file"],
+                  successCriteria: [{ id: "poster-created", description: "poster.png is written." }],
+                },
+                {
+                  id: "inspect_poster",
+                  objective: "Inspect the generated poster for technical and quality issues.",
+                  dependencies: ["create_poster"],
+                  skillIds: [],
+                  requiredToolNames: ["computer_read_file"],
+                  successCriteria: [{ id: "poster-inspected", description: "Poster inspection is recorded." }],
+                },
+                {
+                  id: "repair_poster_if_needed",
+                  objective: "Repair the poster only if inspection found defects.",
+                  dependencies: ["inspect_poster"],
+                  skillIds: [],
+                  requiredToolNames: ["computer_write_file"],
+                  successCriteria: [{ id: "poster-repaired", description: "Repair is completed or marked unnecessary." }],
+                },
+                {
+                  id: "final_verify_poster",
+                  objective: "Perform final verification of the poster.",
+                  dependencies: ["repair_poster_if_needed"],
+                  skillIds: [],
+                  requiredToolNames: ["computer_read_file"],
+                  successCriteria: [{ id: "poster-verified", description: "Final poster verification is recorded." }],
+                },
+              ],
+            },
+          }],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /default QA\/repair tail steps/);
+      if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /default QA\/repair tail steps/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "still-heavy-poster-plan",
+            name: "submit_plan_patch",
+            arguments: {
+              replacements: [{
+                targetStepId: "repair_poster_if_needed",
+                downstreamDependencyStepId: "record_no_repair_needed",
+                replacementSteps: [{
+                  id: "record_no_repair_needed",
+                  objective: "Record that no poster repair is needed.",
+                  dependencies: ["inspect_poster"],
+                  skillIds: [],
+                  requiredToolNames: ["computer_write_file"],
+                  successCriteria: [{ id: "recorded", description: "No-repair decision is recorded." }],
+                }],
+              }],
+            },
+          }],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /ordinary artifact tasks as a light Outcome Plan/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "light-poster-plan",
+          name: "submit_plan",
+          arguments: {
+            goal: "create a concert poster",
+            selectedSkillIds: [],
+            steps: [{
+              id: "create_poster",
+              objective: "Create and export the requested poster as poster.png.",
+              dependencies: [],
+              skillIds: [],
+              requiredToolNames: ["computer_write_file"],
+              successCriteria: [{ id: "poster-created", description: "poster.png is written and non-empty." }],
+            }],
+          },
+        }],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-heavy-qa-tail",
+    input: "生成一张演唱会海报",
+    availableSkills: [],
+    availableToolNames: ["computer_read_file", "computer_write_file"],
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["create_poster"]);
+});
+
+test("ModelPlanner allows source inspection without treating it as a default QA tail", async () => {
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: "source-grounded-report-plan",
+        name: "submit_plan",
+        arguments: {
+          goal: "write a source-grounded report",
+          selectedSkillIds: [],
+          steps: [
+            {
+              id: "inspect_sources",
+              objective: "Inspect the provided source files and identify reusable report facts.",
+              dependencies: [],
+              skillIds: [],
+              requiredToolNames: ["computer_read_file"],
+              successCriteria: [{ id: "sources-profiled", description: "Source facts and gaps are recorded." }],
+            },
+            {
+              id: "write_report",
+              objective: "Write the requested report from the inspected source facts.",
+              dependencies: ["inspect_sources"],
+              skillIds: [],
+              requiredToolNames: ["computer_write_file"],
+              successCriteria: [{ id: "report-written", description: "The report file is written." }],
+            },
+            {
+              id: "verify_report_receipt",
+              objective: "Confirm the report file exists and references the inspected source facts.",
+              dependencies: ["write_report"],
+              skillIds: [],
+              requiredToolNames: ["computer_read_file"],
+              successCriteria: [{ id: "report-receipt", description: "The written report can be read back locally." }],
+            },
+          ],
+        },
+      }],
+    }),
+  });
+
+  const plan = await planner.plan({
+    runId: "run-source-inspection-not-tail",
+    input: "基于这些资料写一份报告",
+    availableSkills: [],
+    availableToolNames: ["computer_read_file", "computer_write_file"],
+  });
+
+  assert.deepEqual(plan.steps.map((step) => step.id), [
+    "inspect_sources",
+    "write_report",
+    "verify_report_receipt",
   ]);
 });
 
@@ -711,8 +966,8 @@ test("ModelPlanner repair resubmit keeps artifact repair conditional across the 
     complete: async (request) => {
       calls += 1;
       if (calls === 1) {
-        assert.match(request.systemPrompt, /Required quality checks for an artifact-generating/);
-        assert.match(request.systemPrompt, /do not fold post-generation rendering, parsing, comparison, quality review, or defect repair/);
+        assert.match(request.systemPrompt, /Do not add default inspect_\*, repair_\*_if_needed, final_verify_\*/);
+        assert.match(request.systemPrompt, /Create an independent QA or repair step only when/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -741,7 +996,7 @@ test("ModelPlanner repair resubmit keeps artifact repair conditional across the 
       }
       if (calls === 2) {
         assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan_patch"]);
-        assert.match(request.runtimeContext?.content ?? "", /Keep artifact repair conditional/);
+        assert.match(request.runtimeContext?.content ?? "", /Keep artifact repair failure-driven/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -773,8 +1028,8 @@ test("ModelPlanner repair resubmit keeps artifact repair conditional across the 
       const context = request.runtimeContext?.content ?? "";
       assert.match(context, /Audit every step in the resubmitted Plan/);
       assert.match(context, /Preserve previously valid split steps and downstream dependencies/);
-      assert.match(context, /Do not introduce a new step that combines source or inspection evidence/);
-      assert.match(context, /Keep artifact repair conditional/);
+      assert.match(context, /Do not introduce a new step that combines unrelated source or inspection evidence/);
+      assert.match(context, /ordinary artifact tasks as a light Outcome Plan/);
       return {
         content: "",
         finishReason: "tool_calls",

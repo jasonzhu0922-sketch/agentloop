@@ -17,6 +17,7 @@ export interface TaskSpec {
   readonly availableSkills: readonly PrivateSkill[];
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
+  readonly workspaceFacts?: PlanningWorkspaceFacts;
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   /**
    * A conversational answer is still persisted through the canonical Plan
@@ -34,6 +35,17 @@ export interface TaskSpec {
    * is built from canonical Run facts, not model prose or UI transcript text.
    */
   readonly conversationWorkingSet?: ConversationWorkingSet;
+}
+
+export interface PlanningWorkspaceFacts {
+  readonly schema: "planning.workspaceFacts/v1";
+  readonly kind: "conversation_workspace" | "workspace_root";
+  readonly rootLabel: string;
+  readonly state: "empty" | "has_entries" | "unavailable";
+  readonly entryCount?: number;
+  readonly sampleEntries?: readonly string[];
+  readonly visibleDirectoryCount: number;
+  readonly guidance: string;
 }
 
 export interface ConversationWorkingSet {

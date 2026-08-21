@@ -122,8 +122,9 @@ const STEP_GRANULARITY_GUIDANCE = {
     "The objective contains a chain such as read/reconstruct/confirm/write/verify or inspect/build/test.",
   ],
   mergeOnlyWhen: [
-    "The work is a tiny one-off direct answer or direct deliverable and verification is a local check of that same artifact.",
+    "The work is a direct user deliverable and checks are limited to local receipt, export metadata, or Skill-mandated checks for that same artifact.",
     "No intermediate evidence, script, source profile, or downstream deliverable needs to be reused by another step.",
+    "The user did not ask for independent QA, review, E2E, browser acceptance, or release validation.",
   ],
   recommendedPatterns: [
     {
@@ -198,9 +199,11 @@ export class ModelPlanner implements Planner {
       "You are the planning phase of a plan-first agent runtime.",
       "You do not execute the task and you cannot declare completion.",
       "Use only the Skill catalog summaries to choose relevant Skills or none.",
+      "Plan from the supplied context facts first. Runtime/context intake facts are planning inputs, not default user-visible Plan steps.",
       "Use the available Tool descriptions to decide whether requested artifacts can actually be produced in this Run.",
       "Return exactly one submit_plan tool call and no other tool call.",
       "Select only relevant Skills. Bind every selected Skill to at least one concrete step.",
+      "Do not expand unloaded Skill internals into Plan steps. Load and interpret a Skill only while executing a Skill-bound leaf.",
       "Build an acyclic dependency graph. Tool names and IDs must come from the supplied catalogs.",
       "Use kind=\"leaf\" for executable steps. You may use kind=\"milestone\" only as a lightweight non-executable phase boundary for work that should be refined later from durable evidence.",
       "Milestone steps must not require execution Tools. They are planning structure, not completion evidence.",
@@ -216,12 +219,16 @@ export class ModelPlanner implements Planner {
       "A source-profiling step should identify files/sheets/tables/fields/ranges/counts only; a later extraction execution step should produce the reusable evidence artifact.",
       "When conversation.workset/v1 is present, use it as persisted context for follow-up requests: continue from unfinished Plan steps, reuse listed artifacts, preserve failed boundary facts, and bind the required capabilities that still apply.",
       "Do not restart completed upstream steps solely because the latest user message says to continue; plan the smallest continuation that consumes prior durable outputs.",
+      "When planning.workspaceFacts/v1 says the conversation workspace is empty and no visible directories are present, do not create a workspace inspection step unless the user explicitly asks to inspect an existing project.",
       "Do not plan file, image, PDF, or other artifact creation unless a writable, render, generation, or command Tool is available.",
+      "For artifact-producing leaves, state the concrete production boundary in the objective or success criteria: source file, export format, target path, or verifiable artifact type.",
       "Do not create a Plan step whose objective is only to load, activate, fetch, retrieve, or read a Skill.",
       "Skill loading is Runtime preparation for a Skill-bound user-deliverable step; bind the Skill to the concrete work step that uses it.",
       "Keep the Plan scoped to the user's requested deliverable. Do not add optional polish, critique, or follow-up work as a separate terminal step unless the user explicitly requested it or it is necessary to prove a stated success criterion.",
-      "Required quality checks for an artifact-generating or artifact-modifying step must remain a separate verification step unless they are only the local receipt needed to prove that same step's output exists.",
-      "Prefer the smallest valid Plan that preserves phase boundaries. Fold only one-off receipt checks into production; do not fold post-generation rendering, parsing, comparison, quality review, or defect repair into the same step that writes or builds the artifact.",
+      "Do not add default inspect_*, repair_*_if_needed, final_verify_*, QA, polish, or quality-correction tail steps for ordinary artifact tasks.",
+      "Create an independent QA or repair step only when the user explicitly asks for it, the task has high-risk external side effects, the loaded Skill contract requires independent QA, or a prior Assessment/recovery directive rejected the leaf.",
+      "Skill-mandated QA belongs inside the Skill-bound leaf execution or a Skill-driven QA action. It is not a generic Planner template.",
+      "Prefer the smallest valid Outcome Plan that preserves user-value phase boundaries. Fold local receipt/export checks into production; keep independent verification only for reusable workflows, data/report pipelines, explicit acceptance tasks, high-risk releases, or Skill-required QA.",
     ].filter(Boolean).join("\n\n");
     let lastError = new AppError("PLANNING_ERROR", "Planner did not produce a valid Plan", 422);
     let planningAttempts = 0;
@@ -301,6 +308,7 @@ export class ModelPlanner implements Planner {
           ? applyPlanPatch(rejectedProposalForPatch, parsePlanPatch(patchCalls[0]))
           : parsePlanProposal(planCalls[0]);
         rejectedProposal = proposal;
+        assertOutcomePlanShape(proposal, task);
         admitPlan({
           runId: task.runId,
           proposal,
@@ -323,8 +331,8 @@ export class ModelPlanner implements Planner {
             instruction: response.finishReason === "length"
               ? "Return only one compact submit_plan call. Do not explain or repeat the task. Keep the plan as small as possible."
               : rejectedProposalForPatch !== undefined && turn === 1
-                ? "Return exactly one submit_plan_patch call. Replace only invalid steps from rejectedPlan. Keep unchanged steps out of the patch. If a target step is split, set downstreamDependencyStepId to the final replacement step that downstream work should depend on. Keep artifact repair conditional: inspect or verify first, then materialize source modification, rebuild, and final verification only when blocking defects are confirmed."
-                : "Resubmit the entire Plan as exactly one valid submit_plan tool call. Audit every step in the resubmitted Plan, not only the previously rejected step. Preserve previously valid split steps and downstream dependencies. If any step is too broad, split discovery/extraction, production/writing, and verification/comparison into smaller dependency-linked steps with their own success criteria. Keep artifact repair conditional: inspect or verify first, then materialize source modification, rebuild, and final verification only when blocking defects are confirmed. Do not introduce a new step that combines source or inspection evidence, write/build/command production, and readback/render/parse/quality verification. If the invalid step only loads or activates a Skill, remove that infrastructure step and bind the Skill to the concrete user-deliverable step.",
+                ? "Return exactly one submit_plan_patch call. Replace only invalid steps from rejectedPlan. Keep unchanged steps out of the patch. If a target step is split, set downstreamDependencyStepId to the final replacement step that downstream work should depend on. Keep artifact repair failure-driven: do not add inspect/repair/final verification tails unless the rejected boundary or user/Skill contract requires them."
+                : "Resubmit the entire Plan as exactly one valid submit_plan tool call. Audit every step in the resubmitted Plan, not only the previously rejected step. Preserve previously valid split steps and downstream dependencies. If any step is too broad, split discovery/extraction, production/writing, and required independent verification into smaller dependency-linked steps with their own success criteria. Keep ordinary artifact tasks as a light Outcome Plan; do not add default inspect/repair/final verification tails. Do not introduce a new step that combines unrelated source or inspection evidence, write/build/command production, and independent readback/render/parse/quality verification. If the invalid step only loads or activates a Skill, remove that infrastructure step and bind the Skill to the concrete user-deliverable step.",
           },
         });
       }
@@ -393,6 +401,7 @@ function planningRuntimeContext(
       JSON.stringify({
         availableToolNames: task.availableToolNames,
         availableTools: task.availableTools ?? task.availableToolNames.map((name) => ({ name })),
+        ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         visibleDirectories: task.visibleDirectories ?? [],
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
         stepGranularity: STEP_GRANULARITY_GUIDANCE,
@@ -437,6 +446,131 @@ function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationP
 
 function summarizePlanningError(message: string): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+function assertOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
+  const explicitQa = explicitIndependentQaRequested(task.input)
+    || task.conversationWorkingSet?.failedBoundaries.length > 0
+    || task.conversationWorkingSet?.activeGoal?.unfinished === true;
+  if (isEmptyConversationWorkspace(task) && !explicitWorkspaceInspectionRequested(task.input)) {
+    const inspectionStep = proposal.steps.find((step) => isWorkspaceInspectionStep(step));
+    if (inspectionStep !== undefined) {
+      throw new AppError(
+        "PLANNING_ERROR",
+        `Step ${inspectionStep.id} turns empty workspace context intake into Plan work; use planning.workspaceFacts/v1 and plan the requested outcome directly`,
+        422,
+      );
+    }
+  }
+  if (!explicitQa) {
+    const artifactProducerIds = new Set(
+      proposal.steps
+        .filter((step) => isArtifactProducingStep(step))
+        .map((step) => step.id),
+    );
+    const qualityTails = proposal.steps.filter((step) =>
+      isDefaultQualityTailStep(step)
+      && dependsOnAnyStep(step, artifactProducerIds, proposal.steps)
+    );
+    if (qualityTails.some((step) => isRepairIfNeededStep(step)) || qualityTails.length >= 2) {
+      throw new AppError(
+        "PLANNING_ERROR",
+        `Plan adds default QA/repair tail steps (${qualityTails.map((step) => step.id).join(", ")}); keep QA Skill-driven or failure-driven unless the user explicitly requested independent validation`,
+        422,
+      );
+    }
+  }
+}
+
+function isEmptyConversationWorkspace(task: TaskSpec): boolean {
+  return task.workspaceFacts?.schema === "planning.workspaceFacts/v1"
+    && task.workspaceFacts.kind === "conversation_workspace"
+    && task.workspaceFacts.state === "empty"
+    && task.workspaceFacts.visibleDirectoryCount === 0;
+}
+
+function explicitWorkspaceInspectionRequested(input: string): boolean {
+  const text = normalizePlannerText(input);
+  return /(?:inspect|scan|explore|check|read|analyze|modify|update|refactor|debug|fix|look\s+at|查看|检查|分析|梳理|定位|修改|修复|调试|基于现有)/iu.test(text)
+    && /(?:workspace|project|repo|repository|codebase|source|directory|folder|files?|工作区|项目|仓库|代码库|源码|目录|文件|已有|现有)/iu.test(text);
+}
+
+function isWorkspaceInspectionStep(step: PlanStepProposal): boolean {
+  const text = normalizePlannerText([
+    step.id,
+    step.objective,
+    ...step.successCriteria.map((criterion) => criterion.description),
+  ].join("\n"));
+  const usesInspectionTools = step.requiredToolNames.some((tool) =>
+    tool === "computer_list_directory"
+    || tool === "computer_find_files"
+    || tool === "computer_search_text"
+    || tool === "computer_read_file"
+  );
+  return usesInspectionTools
+    && /(?:workspace|project|repo|repository|codebase|entry|framework|directory|folder|工作区|项目|仓库|代码库|入口|技术栈|目录|文件结构)/iu.test(text)
+    && /(?:inspect|scan|explore|identify|determine|survey|inventory|勘察|检查|识别|确定|梳理|探查)/iu.test(text);
+}
+
+function explicitIndependentQaRequested(input: string): boolean {
+  return /(?:\b(?:verify|validate|test|inspect|review|qa|quality|acceptance|e2e|preflight|release)\b|验证|校验|测试|检查|复验|质检|终检|验收|发布|上线|逐项)/iu
+    .test(input);
+}
+
+function isDefaultQualityTailStep(step: PlanStepProposal): boolean {
+  const text = normalizePlannerText([
+    step.id,
+    step.objective,
+    ...step.successCriteria.map((criterion) => criterion.description),
+  ].join("\n"));
+  return /(?:^|[_\-\s])(?:inspect|verify|validate|review|qa|quality|final|repair)(?:[_\-\s]|$)/iu.test(text)
+    || /(?:检查|验证|校验|复验|质检|终检|修复|缺陷)/iu.test(text);
+}
+
+function isArtifactProducingStep(step: PlanStepProposal): boolean {
+  const text = normalizePlannerText([
+    step.id,
+    step.objective,
+    ...step.successCriteria.map((criterion) => criterion.description),
+  ].join("\n"));
+  return step.requiredToolNames.some((tool) =>
+    /(?:write|create|generate|render|export|build|patch|edit|image|pdf|docx|pptx|artifact)/iu.test(tool)
+  )
+    || /(?:create|write|generate|render|export|build|produce|author|生成|创建|写入|导出|渲染|构建|制作|编写|产出)/iu.test(text);
+}
+
+function dependsOnAnyStep(
+  step: PlanStepProposal,
+  targetStepIds: ReadonlySet<string>,
+  allSteps: readonly PlanStepProposal[],
+): boolean {
+  const byId = new Map(allSteps.map((candidate) => [candidate.id, candidate]));
+  const pending = [...step.dependencies];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const dependencyId = pending.pop();
+    if (dependencyId === undefined || visited.has(dependencyId)) {
+      continue;
+    }
+    visited.add(dependencyId);
+    if (targetStepIds.has(dependencyId)) {
+      return true;
+    }
+    const dependency = byId.get(dependencyId);
+    if (dependency !== undefined) {
+      pending.push(...dependency.dependencies);
+    }
+  }
+  return false;
+}
+
+function isRepairIfNeededStep(step: PlanStepProposal): boolean {
+  const text = normalizePlannerText(`${step.id}\n${step.objective}`);
+  return /(?:repair|fix|if_needed|if\s+needed|conditional|修复|若|如果|缺陷)/iu.test(text);
+}
+
+function normalizePlannerText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function summarizePlanProposal(proposal: PlanProposal): Record<string, unknown> {

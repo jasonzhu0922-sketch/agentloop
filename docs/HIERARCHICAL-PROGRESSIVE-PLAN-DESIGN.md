@@ -1,20 +1,24 @@
 # 分层渐进式 Plan 设计方案
 
-版本：v0.2
+版本：v0.3
 日期：2026-08-21
 状态：设计稿 / 第一阶段落地中
 
 ## 1. 设计结论
 
-当前 Planner 不稳定的根因不是某条提示词不够强，也不是 Admission 需要更多场景化规则，而是 Plan-first 的结构层级不够明确：
+当前 Planner 不稳定的根因不是某条提示词不够强，也不是 Admission 需要更多场景化规则，而是 Plan-first 的职责层级不够明确：
 
-> Runtime 现在要求 Planner 在第一阶段提交一份完整、可执行、可 Admission 的扁平 Plan；但许多真实任务必须先完成信息核验、工作区探查、Skill 读取和约束提取，后续步骤才能被正确拆小。
+> Runtime 现在要求 Planner 在第一阶段提交一份完整、可执行、可 Admission 的扁平 Plan；于是模型容易把 context intake、Skill workflow、质量检查、修复兜底都提前塞进 Plan，导致计划过重且不稳定。
 
-因此，第一阶段合理的目标不是“猜出完整执行细节”，而是允许 Planner 提交一份稳定的 **分层骨架 Plan**，并先以轻量语义接入 Runtime：
+因此，第一阶段合理的目标不是“猜出完整执行细节”，而是建立 **Context facts -> Skill selection -> Outcome Plan -> Progressive Actions** 的轻量范式：
 
-- 顶层 Plan 表达用户目标、阶段边界、依赖关系、未知事实和完成门槛。
+- Context Intake 先收集运行事实和显式指令，但不是默认 Plan leaf。
+- Planner 先基于 context facts 和 Skill catalog 选择可能需要的 Skill，不提前复制 Skill 内部流程。
+- 顶层 Plan 表达用户价值链路、阶段边界、关键依赖和交付门槛。
 - 只有 `leaf` Step 可以被 Scheduler 调度执行。
 - `milestone` Step 不能执行；第一阶段只作为非执行阶段边界、层级归属和上下文提示。
+- 具体 leaf 执行时再 `load_skill`，由 Skill contract 决定领域动作、artifact 工序和必要 QA。
+- Planner 不默认生成通用 `inspect -> repair_if_needed -> final_verify` 质量纠正链路。
 - `requiredFacts` 和 `refinementState` 第一阶段只作为可持久化的规划元数据，不作为强制事实门禁。
 - 自动 refinement、fact index、CAS Plan Revision 是后续增强层；启用前不能影响 leaf-only 执行和完成判定。
 - 完成仍只来自 leaf Step 的 Assessment、全局 Goal Assessment 和 Terminal Committer Outcome。
@@ -23,19 +27,22 @@
 
 节制原则：
 
-> 先让 Plan 能表达“阶段尚未细化”，不要立刻把每个任务推进到事实门禁、自动修订和复杂状态机。只有当轻量 milestone 无法稳定支撑真实 Run 时，才逐层打开 D3/D4 能力。
+> 先让 Plan 表达“用户价值链路”和“阶段尚未细化”，不要把每个任务推进到事实门禁、自动修订、独立 QA 和复杂状态机。质量由 Skill contract 与 Assessment 承担，repair 由失败触发。
 
 ## 2. 要修复的运行契约
 
 真实契约：
 
-> Runtime 必须始终基于同一份 canonical Plan 调度任务；当下一段工作依赖尚未获取的事实时，Plan 应能持久化这个未知边界，并先调度已明确的 leaf，而不是要求首轮 Planner 预先猜完所有细节。
+> Runtime 必须始终基于同一份 canonical Plan 调度任务；Planner 的首轮 Plan 只应表达用户价值链路和必要依赖，context intake 不默认进入 Plan，Skill 内部流程和 QA 不默认提前展开。
 
 该设计不允许以下捷径：
 
 - 让 Admission 把模型生成的宽步骤自动拆成业务步骤。
 - 用更多 retry/patch prompt 逼模型重写同一份扁平 Plan。
 - 把 `milestone` 当成执行 Step，让 Tool 或模型在其中自行推进状态。
+- 把 workspace/context intake 包装成用户可见 leaf，除非用户目标确实要求探索现有项目。
+- 默认追加 `inspect_*`、`repair_*_if_needed`、`final_verify_*` 这类通用质量模板。
+- Runtime 或 Planner 代替 Skill 决定领域 QA 流程。
 - 用 artifact、Tool success、UI 事件或模型文本跳过 Assessment / Terminal Committer。
 - 为某类任务、某个 Skill 或某个网页/报告场景硬编码流程模板。
 
@@ -55,7 +62,36 @@
 - 第一轮和第三轮都把构建、源码检查、事实追溯核验和缺陷记录合并到一个验证步骤。
 - 第二轮只 patch 了实现步骤，没有解决前后两个阶段边界。
 
-这说明第一处语义缺失在 **Plan 表达能力**：系统只有“可执行步骤”一种形态，于是 Planner 必须在首轮同时完成架构分解和执行级拆分。Admission 只能拒绝宽步骤，却不能表达“这个阶段可以先作为 milestone 被 admitted，等证据回来后再 refine”。
+这说明第一处语义缺失在 **Plan 表达能力与职责分层**：系统只有“可执行步骤”一种形态，于是 Planner 必须在首轮同时完成架构分解、context intake 和执行级拆分。Admission 只能拒绝宽步骤，却不能表达“这个阶段可以先作为 milestone 被 admitted，等证据回来后再 refine”。
+
+### 3.1 补充复盘：run `8e3965f5`
+
+该 Run 的首个 admitted step 是“勘察工作区中的现有前端项目、入口文件、技术栈与可用资源”。实际持久化结果只是确认 conversation workspace 为空，并建议新建 standalone HTML。
+
+这个信息有用，但它不该作为用户价值链路中的 leaf：
+
+- conversation workspace 是否为空是 Runtime / Context Assembler 可以直接提供的 context fact。
+- 用户任务的主要不确定性是外部活动和人物事实，而不是项目结构。
+- 把空 workspace 勘察放入 Plan 会消耗 model/tool/assessment，并把关键事实核验后置。
+
+结论：**Context Intake 不是默认 Plan leaf**。只有当用户要求修改现有项目、提供 visible directories、或入口/技术栈确实未知且影响交付时，Planner 才应生成 workspace inspection leaf。
+
+### 3.2 补充复盘：run `a6dc56e6`
+
+该 Run 的首步 `research_event` 是合理的：它直接对应用户“搜索相关内容”的目标，并形成结构化研究记录。但后续 Plan 预置了：
+
+```text
+create_poster -> inspect_poster -> repair_poster_if_needed -> final_verify_poster
+```
+
+这暴露出另一类过重问题：
+
+- `inspect_poster`、`repair_poster_if_needed`、`final_verify_poster` 是通用质量模板，不是用户显式目标。
+- 如果 `canvas-design` Skill 要求独立 QA，可以在该 Skill 的执行策略或 Skill compliance assessment 中体现。
+- 如果 Assessment 发现 artifact 技术无效、文案错误或 Skill compliance 不达标，再触发 repair，而不是预先把 repair 作为必经 leaf。
+- `create_poster` 本身没有明确 artifact production strategy，执行中先写了“视觉哲学” Markdown，而非 PNG/PDF 海报。这说明 Plan 应该收紧交付产物边界，而不是追加更多后置 QA。
+
+结论：**Plan 应轻，质量不应消失，但应回到 Skill contract、leaf success criteria 和 Assessment 失败后的 repair 机制。**
 
 ## 4. 核心概念
 
@@ -132,7 +168,33 @@ interface RequiredFact {
 
 ## 5. 首轮 Plan 应该长什么样
 
-对 `7f96ac93` 这类任务，首轮 Planner 不应该生成完整执行细节，而应该提交稳定骨架：
+首轮 Planner 不应该生成完整执行细节，也不应该把 Context Intake 和 Skill QA 链路提前展开。它应该先遵循四段式输入和输出范式：
+
+```text
+Context facts:
+  - 用户原始目标与显式约束
+  - conversation workspace / visible directories / prior artifacts
+  - 可用 Tool surface
+  - Skill catalog summary
+  - 历史上下文中已经持久化的 facts
+
+Skill selection:
+  - 只基于 catalog 选择可能需要的 Skill
+  - 不加载 Skill 正文来生成首轮仪式化步骤
+  - 不复制 Skill 内部 QA 或模板到 Plan schema
+
+Outcome Plan:
+  - 只表达用户价值链路和必要依赖
+  - leaf 是可交付推进单元，不是每个内部动作
+  - milestone 只表示阶段边界或待细化区域
+
+Progressive Actions:
+  - 执行 leaf 时再 load_skill
+  - Skill 解析后决定该 leaf 内部动作策略
+  - Skill 要求 QA 时才执行 QA；Assessment 失败时才触发 repair
+```
+
+对 `8e3965f5` 这类网页任务，如果 workspace fact 已显示是空 conversation workspace，首轮 Plan 应类似：
 
 ```text
 goal: 设计并交付一个宣传网页，且活动事实可追溯
@@ -141,22 +203,41 @@ leaf: collect_public_event_facts
   - websearch/webfetch
   - 产出结构化事实记录
 
-leaf: inspect_workspace_frontend
-  - list/find/read
-  - 产出项目入口、技术栈、可写文件范围
-
-milestone: design_and_implement_webpage
-  dependsOn: collect_public_event_facts, inspect_workspace_frontend
-  requiredFacts: public_event_facts, workspace_frontend_shape, frontend_skill_workflow
-  refineInto: content_spec, page_structure, visual_style, asset_integration
-
-milestone: verify_and_deliver_webpage
-  dependsOn: design_and_implement_webpage
-  requiredFacts: produced_files, build_command, verification_surface
-  refineInto: build_check, source_check, factual_traceability_check, browser_acceptance_if_available
+leaf: create_promotional_page
+  - dependsOn: collect_public_event_facts
+  - bind Skill only if catalog indicates frontend/page design workflow is needed
+  - 产出可打开的 HTML/CSS/asset 文件
+  - 成功标准包含事实文案与研究记录一致、交付路径和使用方式可由 TerminalCommitter 汇总
 ```
 
-首轮 Plan 的正确性来自阶段边界和事实依赖，而不是预先猜出所有 leaf。
+对 `a6dc56e6` 这类海报任务，首轮 Plan 应类似：
+
+```text
+goal: 搜索 2025 MC法老「生于未来」巡回演唱会相关内容，并生成一张原创海报
+
+leaf: collect_event_facts
+  - websearch/webfetch
+  - 写结构化研究记录
+  - 区分可用事实、视觉灵感和禁用信息
+
+leaf: create_and_export_poster
+  - dependsOn: collect_event_facts
+  - bind canvas-design
+  - load_skill 后按 Skill 生成可渲染源文件和 PNG/PDF
+  - 如果 Skill 明确要求 QA，则在该 leaf 内执行或生成 Skill-driven QA action
+  - 成功标准包含最终文件路径、格式、尺寸和来源约束，供 TerminalCommitter 交付
+```
+
+首轮 Plan 的正确性来自用户价值链路、事实依赖和交付边界，而不是预先猜出所有内部动作，也不是默认追加通用质量纠正链路。
+
+允许生成独立 QA / repair leaf 的条件：
+
+- 用户明确要求独立验收、逐项检查、E2E、浏览器验收或正式发布前质检。
+- 已加载 Skill 的 contract 明确要求独立 QA 或多阶段渲染检查。
+- 任务风险很高，且没有独立 QA 会导致不可接受的外部副作用、法律/财务/安全风险。
+- Assessment 已拒绝当前 leaf，需要进入 repair/recovery。
+
+不满足这些条件时，质量要求应进入 leaf success criteria、Skill compliance assessment 或最终 DeliveryCandidate 校验，而不是成为默认 Plan steps。
 
 ## 6. 调度模型
 
@@ -199,7 +280,23 @@ refined milestone -> 根据 children 状态归约
 
 ## 7. Planner 协议
 
-### 7.1 初始规划
+### 7.1 初始规划输入
+
+Planner 的首轮输入应明确区分事实层，不把它们合并成一个泛化 user prompt：
+
+```text
+section: user_objective
+section: context_facts
+section: workspace_facts
+section: prior_artifacts
+section: available_skills_catalog
+section: available_tools
+section: planning_contract
+```
+
+`workspace_facts` 是 Runtime 直接可得的事实，例如 conversation workspace 是否为空、visible directories、已有文件摘要。除非用户目标要求探索现有项目，否则这些事实不得被 Planner 再规划成 workspace inspection leaf。
+
+### 7.2 初始规划输出
 
 第一阶段继续使用现有 `submit_plan`，只扩展 Step 的可选字段：
 
@@ -217,9 +314,13 @@ refined milestone -> 根据 children 状态归约
 - 至少要有一个可执行 leaf。
 - 允许 milestone 暂时没有 requiredFacts；这表示轻量阶段边界，而不是事实门禁。
 - milestone 不能要求执行 Tool。
-- 选择的 Skill 可以绑定到 milestone，但执行前必须在 leaf 中通过 `load_skill` 激活精确版本。
+- Planner 可以基于 Skill catalog 选择 Skill，但不得把未加载 Skill 的内部流程展开成 Plan steps。
+- 选择的 Skill 可以绑定到 milestone 或 leaf；真正执行前必须在 leaf 中通过 `load_skill` 激活精确版本。
+- Plan 不默认生成 `inspect_*`、`repair_*_if_needed`、`final_verify_*` steps。
+- QA / repair step 只有在用户明确要求、已加载 Skill 明确要求、风险等级要求或 Assessment 失败后才允许出现。
+- Artifact-producing leaf 必须说明交付边界，例如可渲染源文件、导出格式、目标路径或可验证文件类型；不能只写“生成成品”。
 
-### 7.2 运行中细化
+### 7.3 运行中细化
 
 Refinement Planner 只看一个目标 milestone、其 ancestors、已满足 facts、相关 siblings 和可用能力：
 
@@ -242,7 +343,7 @@ Admission 规则：
 - 若 child 是 leaf，必须通过 leaf 粒度规则。
 - 若 child 仍是 milestone，必须说明新的 requiredFacts，且不能无限细化同一语义边界。
 
-### 7.3 修订而非补丁提示
+### 7.4 修订而非补丁提示
 
 现有 `submit_plan_patch` 更像错误修补工具。新协议应统一为 Plan Revision：
 
@@ -260,7 +361,7 @@ Admission 从“拒绝整个扁平 Plan”变成“按节点类型校验”：
 | 节点类型 | Admission 重点 |
 |---|---|
 | `milestone` | 目标覆盖、依赖合法、requiredFacts 可由现有或后续 leaf 产生、没有执行 Tool、没有宣称完成 |
-| `leaf` | Tool 可用、Skill 已选择且可加载、步骤足够小、成功标准可评估、不会混合 discovery/production/verification |
+| `leaf` | Tool 可用、Skill 已选择且可加载、步骤足够小、成功标准可评估、不会混合不相干的 discovery/production；不默认承担独立 QA/repair 模板 |
 | `revision` | CAS 版本正确、替换范围合法、显式目标未丢失、未绕过失败边界、不退休未评估的必要工作 |
 
 Admission 不负责：
@@ -268,6 +369,7 @@ Admission 不负责：
 - 自动拆业务步骤。
 - 根据 task 文本选择固定流程模板。
 - 将某个 Skill 的工作流复制进 runtime schema。
+- 要求每个 artifact 任务都有独立 inspect/repair/final verify。
 - 根据 artifact 存在判断完成。
 
 ## 9. Canonical 存储
@@ -350,11 +452,14 @@ ToolResult、Assessment、source intake、artifact receipts 都可以投影为 f
 
 ## 10. Context Assembler
 
-规划上下文要分层输入，而不是把所有内容混在一个 user JSON 中。第一阶段只需要把当前 Plan tree、可用能力和 Planner 协议约束表达清楚；D3 再加入 satisfied/pending facts：
+规划上下文要分层输入，而不是把所有内容混在一个 user JSON 中。第一阶段只需要把用户目标、context facts、workspace facts、Skill catalog、可用能力和 Planner 协议约束表达清楚；D3 再加入 satisfied/pending facts：
 
 ```text
 system: Planner authority and protocol
-section: current_user_request
+section: user_objective
+section: context_facts
+section: workspace_facts
+section: prior_artifacts
 section: current_plan_tree
 section: frontier_nodes
 section: satisfied_facts              # D3
@@ -364,6 +469,15 @@ section: available_tool_catalog
 section: revision_contract
 section: prior_failed_boundaries
 ```
+
+Context Assembler 应尽量把廉价、确定、非业务的运行事实直接提供给 Planner。例如：
+
+- conversation workspace 是空目录，还是已有项目目录。
+- visible directories 是否存在。
+- prior artifacts 是否可以复用。
+- 当前 Run 是否允许写文件、执行命令或联网。
+
+这些事实只作为规划输入，不自动成为 Plan leaf。Planner 只有在这些事实不足以决定交付路径时，才生成探索 leaf。
 
 Refinement 请求只给 Planner 足够细化目标 milestone 的内容，不把全量 transcript 和所有 Tool 输出重复塞回去。这个能力属于 D3+；第一阶段不引入新的强制 refinement 调用。
 
@@ -376,15 +490,18 @@ Skill 的职责不变：
 
 分层 Plan 下的 Skill 使用方式：
 
-- 首轮 Planner 可根据 catalog 选择 Skill 并把它绑定到相关 milestone。
-- 当 milestone refine 到具体 leaf 时，leaf 必须显式绑定 Skill。
+- 首轮 Planner 只根据 catalog 摘要选择 Skill，并把它绑定到相关 milestone 或 leaf。
+- 首轮 Planner 不读取 Skill 正文，也不把 Skill 内部 workflow / QA checklist 复制成 Plan steps。
+- 当 milestone refine 到具体 leaf 时，leaf 必须显式绑定所需 Skill。
 - 执行 leaf 前仍走 `load_skill`，加载精确 Package hash。
-- Skill 正文可以影响 leaf 的具体 workflow，但不能直接决定 Plan admitted、Step completed 或 Run outcome。
+- Skill 正文可以影响 leaf 的具体 workflow、artifact 生成方式和 QA 要求，但不能直接决定 Plan admitted、Step completed 或 Run outcome。
+- 如果 Skill 明确要求 QA，Runtime 可以在该 leaf 内执行 QA 动作，或生成 Skill-driven QA action；这不是 Planner 默认质量模板。
 
 这避免两种错误：
 
 - 首轮 Planner 没加载 Skill 就假装知道完整 workflow。
 - Runtime 为某个 Skill 硬编码拆分模板。
+- Planner 把每个 artifact 任务都拖成 inspect/repair/final verify。
 
 ## 12. Completion 边界
 
@@ -401,30 +518,30 @@ all required leaf nodes completed
 
 Milestone 不能直接完成 Run。它只证明“这一阶段已经被细化并且其 children 完成”。
 
+严格完成不等于重 Plan：
+
+- Assessment 可以拒绝不满足成功标准或 Skill compliance 的 leaf。
+- 被拒绝后再进入 bounded repair / recovery。
+- 不为了防止可能失败而在首轮 Plan 中预置 repair leaf。
+
 ## 13. UI 投影
 
 UI 不需要暴露复杂内部机制，但应显示层级：
 
 ```text
 ✓ 收集公开活动事实
-✓ 识别工作区前端结构
-▾ 设计并实现宣传网页
-  ✓ 形成内容与视觉规格
-  ✓ 编写页面结构
-  ✓ 编写响应式视觉样式
-▾ 验证并交付网页
-  ✓ 构建检查
-  ✓ 源码结构检查
-  ✓ 事实追溯检查
-  ○ 浏览器验收
+▾ 生成宣传网页
+  ✓ 创建页面文件
+  ✓ 按 Skill 要求完成必要检查
+✓ TerminalCommitter 交付结果
 ```
 
 关键是让用户看到：
 
 - 哪些阶段只是计划边界。
 - 哪些 leaf 正在执行。
-- 哪些 evidence 解锁了下一轮细化。
-- 失败发生在 acquisition、preservation、interpretation、admission、execution 还是 assessment。
+- 哪些 QA 来自 Skill 要求或失败后的 repair，而不是默认模板。
+- 失败发生在 acquisition、preservation、interpretation、admission、execution、skill_compliance 还是 assessment。
 
 ## 14. 迁移路径
 
@@ -442,6 +559,14 @@ UI 不需要暴露复杂内部机制，但应显示层级：
 - Scheduler 只调度 leaf，并让 child leaf 继承 parent milestone 的前置依赖。
 - TerminalCommitter 只要求 active leaf 完成和通过 Assessment。
 - UI/current-step/failure summary 排除 milestone，避免把阶段边界误显示为执行中。
+
+### D2.5：Outcome Plan 瘦身与 Skill-driven QA
+
+- Context Assembler 提供 workspace facts，Planner 不再默认生成 workspace inspection leaf。
+- Planner 先基于 context facts 和 Skill catalog 选择 Skill，再生成用户价值链路 Plan。
+- Planner prompt 明确禁止默认 `inspect_*`、`repair_*_if_needed`、`final_verify_*` 尾巴。
+- Artifact-producing leaf 必须说明产物边界；例如源文件、导出格式、目标路径或可验证文件类型。
+- Skill QA 只来自已加载 Skill contract；Assessment 失败后才进入 repair/recovery。
 
 ### D2-full：受控 refinement Action
 
@@ -470,8 +595,11 @@ UI 不需要暴露复杂内部机制，但应显示层级：
 2. Leaf 仍会被 Admission 拒绝过宽的 discovery/production/verification 混合。
 3. Milestone 要保持非执行，且 Plan 至少包含一个 leaf。
 4. Child leaf 不会绕过 parent milestone 的前置依赖。
-5. Artifact 存在但 leaf Assessment 未批准时，Run 不完成。
-6. 全部 leaf 完成但 Goal Assessment 未批准时，TerminalCommitter 不写 completed outcome。
+5. 空 conversation workspace 作为 context fact 进入 Planner，不生成默认 workspace inspection leaf。
+6. 普通 artifact 任务的首轮 Plan 不默认包含 inspect/repair/final verify 三段尾巴。
+7. Skill 要求 QA 时，QA 来自 Skill-bound leaf 的执行/assessment，而不是 Planner 泛化模板。
+8. Artifact 存在但 leaf Assessment 未批准时，Run 不完成。
+9. 全部 leaf 完成但 Goal Assessment 未批准时，TerminalCommitter 不写 completed outcome。
 
 D3+ 再覆盖：
 
@@ -487,6 +615,8 @@ D3+ 再覆盖：
 |---|---|
 | Plan tree 过复杂，模型过度层级化 | 第一阶段只支持轻量 milestone；后续才限制最大深度和每次 refine 子节点数量 |
 | Milestone 被滥用为模糊占位 | milestone 不可执行、不计完成，且不能没有可执行 leaf frontier |
+| Plan 被 QA/repair 尾巴拖重 | 默认禁止通用 inspect/repair/final verify；QA 只来自用户指令、Skill contract、风险等级或 Assessment 失败 |
+| Plan 过轻导致质量下降 | leaf success criteria、Skill compliance assessment 和 TerminalCommitter 保持严格；失败后触发 bounded repair |
 | 细化导致重复读取/执行 | Facts 成为 Planner 输入；已满足 facts 不允许要求重复产生，除非显式过期或冲突 |
 | Revision 漂移丢失用户目标 | Plan Revision Assessor 对照 original goal、显式 constraints 和 unfinished nodes |
 | UI 难懂 | UI 展示“阶段/执行项”两级，不暴露 schema 细节 |
@@ -500,6 +630,7 @@ D3+ 再覆盖：
 - 不让 Admission 依据中文关键词自动生成子步骤。
 - 不改变 TerminalCommitter 权威边界。
 - 不把 Skill workflow 复制到 Runtime schema。
+- 不把质量检查做成所有任务默认必经流程。
 
 ## 18. 最小验收标准
 
@@ -508,6 +639,9 @@ D3+ 再覆盖：
 ```text
 initial Plan with leaf/milestone admitted
   -> Scheduler executes only leaf
+  -> Context facts are not re-planned as default leaf work
+  -> Skill-bound leaf loads Skill at execution time
+  -> QA is Skill-driven or failure-driven, not template-driven
   -> child leaf respects parent milestone dependencies
   -> Assessment approves executable leaf
   -> TerminalCommitter commits only after active leaf completion and assessment
