@@ -9,12 +9,15 @@ import type { ConversationWorkingSet, PlanProposal, Planner, TaskSpec } from "..
 import { ModelStepAssessor, RuleBasedStepAssessor } from "../src/planning/assessor.ts";
 import { ModelPlanner } from "../src/planning/planner.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
+import { DependencyScheduler } from "../src/planning/scheduler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService, selectPlanningSkills } from "../src/runtime/run-service.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
 import type { RuntimeTool } from "../src/runtime/tool-registry.ts";
 import { SkillService, type PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { RunOutcomeRepository } from "../src/storage/repositories/outcome-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
 test("ModelPlanner fails closed when the model returns prose instead of submit_plan", async () => {
@@ -1381,6 +1384,188 @@ test("Admission rejects cycles, unknown dependencies, unbound Skills, and missin
     }),
     (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED"),
   );
+});
+
+test("Admission accepts lightweight milestones but only schedules executable leaves", () => {
+  const plan = admitPlan({
+    runId: "run-milestone",
+    proposal: {
+      goal: "research then build",
+      selectedSkillIds: [],
+      steps: [
+        {
+          ...step("research-phase"),
+          kind: "milestone",
+          objective: "Collect enough durable evidence to decide the concrete implementation plan.",
+          requiredFacts: [],
+          requiredToolNames: [],
+          successCriteria: [{ id: "phase-defined", description: "The research phase boundary is explicit.", source: "planner" }],
+        },
+        {
+          ...step("collect-evidence"),
+          dependencies: ["research-phase"],
+          objective: "Collect durable evidence for the next implementation step.",
+          requiredToolNames: ["computer_read_file"],
+        },
+      ],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(["computer_read_file"]),
+  });
+
+  assert.equal(plan.steps[0].kind, "milestone");
+  assert.equal(plan.steps[0].refinementState, "ready_to_refine");
+  assert.equal(plan.steps[1].kind, "leaf");
+  assert.equal(new DependencyScheduler().nextReady(plan)?.id, "collect-evidence");
+});
+
+test("Scheduler inherits milestone dependencies for child leaves without executing milestones", () => {
+  const plan = admitPlan({
+    runId: "run-milestone-parent-dependencies",
+    proposal: {
+      goal: "research before implementation",
+      selectedSkillIds: [],
+      steps: [
+        {
+          ...step("collect-evidence"),
+          objective: "Collect evidence required before implementation.",
+          requiredToolNames: ["computer_read_file"],
+        },
+        {
+          ...step("implementation-phase"),
+          kind: "milestone",
+          dependencies: ["collect-evidence"],
+          objective: "Implementation phase starts only after evidence collection.",
+          requiredToolNames: [],
+        },
+        {
+          ...step("implement"),
+          parentId: "implementation-phase",
+          objective: "Implement from collected evidence.",
+          requiredToolNames: ["computer_read_file"],
+        },
+      ],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(["computer_read_file"]),
+  });
+
+  const scheduler = new DependencyScheduler();
+  assert.equal(scheduler.nextReady(plan)?.id, "collect-evidence");
+
+  const withEvidenceComplete = {
+    ...plan,
+    steps: plan.steps.map((candidate) =>
+      candidate.id === "collect-evidence" ? { ...candidate, status: "completed" as const } : candidate
+    ),
+  };
+  assert.equal(scheduler.nextReady(withEvidenceComplete)?.id, "implement");
+});
+
+test("Admission keeps milestones non-executable and requires at least one leaf", () => {
+  assert.throws(
+    () => admitPlan({
+      runId: "run-milestone-tool",
+      proposal: {
+        goal: "invalid milestone",
+        selectedSkillIds: [],
+        steps: [{
+          ...step("phase"),
+          kind: "milestone",
+          requiredToolNames: ["computer_read_file"],
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(["computer_read_file"]),
+    }),
+    (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED")
+      && String((error as Error).message).includes("cannot require execution Tools"),
+  );
+
+  assert.throws(
+    () => admitPlan({
+      runId: "run-only-milestone",
+      proposal: {
+        goal: "invalid skeleton",
+        selectedSkillIds: [],
+        steps: [{ ...step("phase"), kind: "milestone", requiredToolNames: [] }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }),
+    (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED")
+      && String((error as Error).message).includes("at least one executable leaf"),
+  );
+
+  assert.throws(
+    () => admitPlan({
+      runId: "run-leaf-parent",
+      proposal: {
+        goal: "invalid parent",
+        selectedSkillIds: [],
+        steps: [{ ...step("parent") }, { ...step("child"), parentId: "parent" }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }),
+    (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED")
+      && String((error as Error).message).includes("must be a milestone"),
+  );
+});
+
+test("TerminalCommitter ignores milestone nodes and requires assessments only for leaves", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const owner = await auth.register("milestone-terminal@example.com", "milestone terminal secure password");
+    const runId = "run-milestone-terminal";
+    database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+        status, input, created_at
+      ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, "research then build", Date.now());
+    const plans = new PlanRepository(database);
+    let plan = plans.create(admitPlan({
+      runId,
+      proposal: {
+        goal: "research then build",
+        selectedSkillIds: [],
+        steps: [
+          { ...step("phase"), kind: "milestone", requiredToolNames: [] },
+          { ...step("build"), dependencies: ["phase"] },
+        ],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    plan = plans.startStep(plan.id, "build");
+    plan = plans.completeStep(plan.id, "build", "leaf output", {
+      candidateOutput: "leaf output",
+      toolCalls: [],
+      modelSteps: 1,
+    });
+    plans.saveAssessment({
+      id: "assessment-build-1",
+      planId: plan.id,
+      stepId: "build",
+      attempt: 1,
+      approved: true,
+      criteria: [{ criterionId: "build-done", satisfied: true, rationale: "Leaf is complete.", evidenceRefs: ["candidateOutput"] }],
+      skills: [],
+      evidenceDigest: "leaf-evidence",
+      feedback: "",
+      createdAt: Date.now(),
+    });
+
+    new TerminalCommitter(plans, new RunOutcomeRepository(database)).commitCompleted(runId, plan.id, "leaf output");
+    const outcome = database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(runId) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason_code, "plan_assessed_and_completed");
+  } finally {
+    database.close();
+  }
 });
 
 test("Admission adds only the generic Skill activation Tool to a Skill-bound Step", async () => {

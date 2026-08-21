@@ -77,8 +77,9 @@ export function streamingToolProgress(stream: RunEvent | null): string {
 
 export function currentStep(plan: LivePlan | null): PlanStep | null {
   if (!plan) return null;
-  return plan.steps.find((s) => s.status === "running")
-    ?? plan.steps.find((s) => s.status === "pending")
+  const executableSteps = plan.steps.filter((s) => s.kind !== "milestone");
+  return executableSteps.find((s) => s.status === "running")
+    ?? executableSteps.find((s) => s.status === "pending")
     ?? null;
 }
 
@@ -226,7 +227,7 @@ export function failureSummary(input: {
   const errorCode = input.errorCode ?? latestFailureCode(input.events);
   const rawMessage = latestFailureMessage(input.events);
   const limit = latestEvent(input.events, "loop.limit_exceeded");
-  const steps = input.steps ?? livePlan(input.events)?.steps ?? [];
+  const steps = (input.steps ?? livePlan(input.events)?.steps ?? []).filter((step) => step.kind !== "milestone");
   const total = steps.length;
   const completed = steps.filter((step) => step.status === "completed").length;
   const failed = steps.find((step) => step.status === "failed");

@@ -20,8 +20,25 @@ const PLAN_STEP_SCHEMA = {
   required: ["id", "objective", "dependencies", "skillIds", "requiredToolNames", "successCriteria"],
   properties: {
     id: { type: "string" },
+    kind: { type: "string", enum: ["leaf", "milestone"] },
+    parentId: { type: "string" },
     objective: { type: "string" },
     dependencies: { type: "array", items: { type: "string" } },
+    refinementState: { type: "string", enum: ["not_refinable", "pending_facts", "ready_to_refine", "refining", "refined"] },
+    requiredFacts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "description", "evidenceKinds"],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          evidenceKinds: { type: "array", items: { type: "string" } },
+          satisfiedBy: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
     skillIds: { type: "array", items: { type: "string" } },
     requiredToolNames: { type: "array", uniqueItems: true, items: { type: "string" } },
     successCriteria: {
@@ -185,6 +202,8 @@ export class ModelPlanner implements Planner {
       "Return exactly one submit_plan tool call and no other tool call.",
       "Select only relevant Skills. Bind every selected Skill to at least one concrete step.",
       "Build an acyclic dependency graph. Tool names and IDs must come from the supplied catalogs.",
+      "Use kind=\"leaf\" for executable steps. You may use kind=\"milestone\" only as a lightweight non-executable phase boundary for work that should be refined later from durable evidence.",
+      "Milestone steps must not require execution Tools. They are planning structure, not completion evidence.",
       "Each step needs observable success criteria. Do not copy the Skill body into step prose and do not put the Plan in prose.",
       "Every step must include the tools needed to prove its own success criteria.",
       "Use the operation profile catalog in the planning context to shape each step's working method. Profiles are generic operation disciplines, not business-domain instructions.",
@@ -546,13 +565,62 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
   });
   return {
     id: requireString(record.id, `steps[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
+    ...parseOptionalStepKind(record.kind, index),
+    ...parseOptionalParentId(record.parentId, index),
     objective: requireString(record.objective, `steps[${index}].objective`, { max: 20_000 }),
     dependencies: requireStringArray(record.dependencies, `steps[${index}].dependencies`, 100),
+    ...parseOptionalRefinementState(record.refinementState, index),
+    ...parseOptionalRequiredFacts(record.requiredFacts, index),
     skillIds: requireStringArray(record.skillIds, `steps[${index}].skillIds`, 100),
     requiredToolNames: canonicalStringSet(record.requiredToolNames, `steps[${index}].requiredToolNames`, 100),
     successCriteria: criteria.length === 0
       ? [{ id: `criterion-${randomUUID()}`, description: "Produce observable evidence for this objective", source: "planner" }]
       : criteria,
+  };
+}
+
+function parseOptionalStepKind(value: unknown, index: number): Pick<PlanStepProposal, "kind"> {
+  if (value === undefined) return {};
+  if (value === "leaf" || value === "milestone") return { kind: value };
+  throw badRequest(`steps[${index}].kind must be leaf or milestone`);
+}
+
+function parseOptionalParentId(value: unknown, index: number): Pick<PlanStepProposal, "parentId"> {
+  if (value === undefined) return {};
+  return { parentId: requireString(value, `steps[${index}].parentId`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }) };
+}
+
+function parseOptionalRefinementState(value: unknown, index: number): Pick<PlanStepProposal, "refinementState"> {
+  if (value === undefined) return {};
+  if (
+    value === "not_refinable"
+    || value === "pending_facts"
+    || value === "ready_to_refine"
+    || value === "refining"
+    || value === "refined"
+  ) {
+    return { refinementState: value };
+  }
+  throw badRequest(`steps[${index}].refinementState is invalid`);
+}
+
+function parseOptionalRequiredFacts(value: unknown, index: number): Pick<PlanStepProposal, "requiredFacts"> {
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || value.length > 100) {
+    throw badRequest(`steps[${index}].requiredFacts must be an array with at most 100 entries`);
+  }
+  return {
+    requiredFacts: value.map((item, factIndex) => {
+      const fact = requireRecord(item, `steps[${index}].requiredFacts[${factIndex}]`);
+      return {
+        id: requireString(fact.id, `requiredFact id`, { max: 128 }),
+        description: requireString(fact.description, `requiredFact description`, { max: 2_000 }),
+        evidenceKinds: requireStringArray(fact.evidenceKinds, `requiredFact evidenceKinds`, 50),
+        ...(fact.satisfiedBy === undefined
+          ? {}
+          : { satisfiedBy: requireStringArray(fact.satisfiedBy, `requiredFact satisfiedBy`, 100) }),
+      };
+    }),
   };
 }
 

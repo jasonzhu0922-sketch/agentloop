@@ -184,9 +184,14 @@ export class AppDatabase implements SqlConnection {
       CREATE TABLE IF NOT EXISTS plan_steps (
         plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
         step_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'leaf' CHECK(kind IN ('leaf', 'milestone')),
+        parent_step_id TEXT,
         position INTEGER NOT NULL,
         objective TEXT NOT NULL,
         dependencies_json TEXT NOT NULL,
+        refinement_state TEXT NOT NULL DEFAULT 'not_refinable'
+          CHECK(refinement_state IN ('not_refinable', 'pending_facts', 'ready_to_refine', 'refining', 'refined')),
+        required_facts_json TEXT NOT NULL DEFAULT '[]',
         skill_ids_json TEXT NOT NULL,
         required_tool_names_json TEXT NOT NULL,
         success_criteria_json TEXT NOT NULL,
@@ -321,6 +326,10 @@ export class AppDatabase implements SqlConnection {
     this.ensureColumn("runs", "allow_dangerous_tools", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("runs", "conversation_id", "TEXT REFERENCES conversations(id) ON DELETE SET NULL");
     this.ensureColumn("runs", "model_key", "TEXT");
+    this.ensureColumn("plan_steps", "kind", "TEXT NOT NULL DEFAULT 'leaf'");
+    this.ensureColumn("plan_steps", "parent_step_id", "TEXT");
+    this.ensureColumn("plan_steps", "refinement_state", "TEXT NOT NULL DEFAULT 'not_refinable'");
+    this.ensureColumn("plan_steps", "required_facts_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
     this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
     this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");

@@ -24,7 +24,6 @@ const EXPECTED_SKILL_NAMES = [
   "internal-comms",
   "mcp-builder",
   "pdf",
-  "pptx",
   "presentation-skill",
   "skill-creator",
   "slack-gif-creator",

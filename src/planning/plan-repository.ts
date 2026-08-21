@@ -25,9 +25,13 @@ interface PlanRow {
 interface StepRow {
   plan_id: string;
   step_id: string;
+  kind: "leaf" | "milestone";
+  parent_step_id: string | null;
   position: number;
   objective: string;
   dependencies_json: string;
+  refinement_state: "not_refinable" | "pending_facts" | "ready_to_refine" | "refining" | "refined";
+  required_facts_json: string;
   skill_ids_json: string;
   required_tool_names_json: string;
   success_criteria_json: string;
@@ -73,17 +77,22 @@ export class PlanRepository {
       );
       const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
-          plan_id, step_id, position, objective, dependencies_json, skill_ids_json,
+          plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
+          refinement_state, required_facts_json, skill_ids_json,
           required_tool_names_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const step of plan.steps) {
         insertStep.run(
           plan.id,
           step.id,
+          step.kind,
+          step.parentId ?? null,
           step.position,
           step.objective,
           JSON.stringify(step.dependencies),
+          step.refinementState,
+          JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
           JSON.stringify(step.requiredToolNames),
           JSON.stringify(step.successCriteria),
@@ -249,16 +258,27 @@ export class PlanRepository {
       `).run(current.version + 1, next.goal, JSON.stringify(next.selectedSkillIds), now, current.id);
       const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
-          plan_id, step_id, position, objective, dependencies_json, skill_ids_json,
+          plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
+          refinement_state, required_facts_json, skill_ids_json,
           required_tool_names_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
       `);
       let nextPosition = Math.max(-1, ...current.steps.map((step) => step.position)) + 1;
       for (const step of next.steps) {
         if (currentById.has(step.id)) continue;
         insertStep.run(
-          current.id, step.id, nextPosition, step.objective, JSON.stringify(step.dependencies),
-          JSON.stringify(step.skillIds), JSON.stringify(step.requiredToolNames), JSON.stringify(step.successCriteria),
+          current.id,
+          step.id,
+          step.kind,
+          step.parentId ?? null,
+          nextPosition,
+          step.objective,
+          JSON.stringify(step.dependencies),
+          step.refinementState,
+          JSON.stringify(step.requiredFacts),
+          JSON.stringify(step.skillIds),
+          JSON.stringify(step.requiredToolNames),
+          JSON.stringify(step.successCriteria),
         );
         nextPosition += 1;
       }
@@ -303,8 +323,12 @@ export class PlanRepository {
       selectedSkillIds: plan.selectedSkillIds,
       steps: plan.steps.map((step) => ({
         id: step.id,
+        kind: step.kind,
+        ...(step.parentId === undefined ? {} : { parentId: step.parentId }),
         objective: step.objective,
         dependencies: step.dependencies,
+        refinementState: step.refinementState,
+        requiredFacts: step.requiredFacts,
         skillIds: step.skillIds,
         requiredToolNames: step.requiredToolNames,
         successCriteria: step.successCriteria,
@@ -338,9 +362,13 @@ function parseAssessmentMethod(value: string | undefined): AssessmentMethod {
 function toStep(row: StepRow): PlanStep {
   return {
     id: row.step_id,
+    kind: row.kind ?? "leaf",
+    ...(row.parent_step_id === null ? {} : { parentId: row.parent_step_id }),
     position: row.position,
     objective: row.objective,
     dependencies: JSON.parse(row.dependencies_json),
+    refinementState: row.refinement_state ?? "not_refinable",
+    requiredFacts: row.required_facts_json === undefined ? [] : JSON.parse(row.required_facts_json),
     skillIds: JSON.parse(row.skill_ids_json),
     requiredToolNames: JSON.parse(row.required_tool_names_json),
     successCriteria: JSON.parse(row.success_criteria_json),
@@ -356,8 +384,12 @@ function toStep(row: StepRow): PlanStep {
 }
 
 function samePlanStepDefinition(left: PlanStep, right: PlanStep): boolean {
-  return left.objective === right.objective
+  return left.kind === right.kind
+    && left.parentId === right.parentId
+    && left.objective === right.objective
     && JSON.stringify(left.dependencies) === JSON.stringify(right.dependencies)
+    && left.refinementState === right.refinementState
+    && JSON.stringify(left.requiredFacts) === JSON.stringify(right.requiredFacts)
     && JSON.stringify(left.skillIds) === JSON.stringify(right.skillIds)
     && JSON.stringify(left.requiredToolNames) === JSON.stringify(right.requiredToolNames)
     && JSON.stringify(left.successCriteria) === JSON.stringify(right.successCriteria);

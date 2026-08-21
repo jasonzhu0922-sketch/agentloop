@@ -1,6 +1,7 @@
 import { AppError } from "../shared/errors.ts";
 import type { PlanRepository } from "../planning/plan-repository.ts";
 import type { PlanStep, SkillComplianceAssessment } from "../planning/contracts.ts";
+import { activeLeafSteps } from "../planning/plan-utils.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 
 export class TerminalCommitter {
@@ -14,11 +15,12 @@ export class TerminalCommitter {
 
   commitCompleted(runId: string, planId: string, output: string): void {
     const plan = this.plans.get(planId);
-    if (plan.runId !== runId || plan.steps.some((step) => step.status !== "completed" && step.retiredAt === undefined)) {
-      throw new AppError("ASSESSMENT_ERROR", "Terminal commit requires every Plan step to be completed", 409);
+    const leafSteps = activeLeafSteps(plan);
+    if (plan.runId !== runId || leafSteps.some((step) => step.status !== "completed")) {
+      throw new AppError("ASSESSMENT_ERROR", "Terminal commit requires every executable Plan leaf step to be completed", 409);
     }
     const assessments = this.plans.assessments(planId);
-    for (const step of plan.steps.filter((step) => step.retiredAt === undefined)) {
+    for (const step of leafSteps) {
       const latest = assessments.filter((item) => item.stepId === step.id).at(-1);
       if (latest?.approved !== true) {
         throw new AppError(
@@ -37,12 +39,13 @@ export class TerminalCommitter {
 
   commitCompletedWithCaveats(runId: string, planId: string, output: string, reasonCode: string): void {
     const plan = this.plans.get(planId);
-    if (plan.runId !== runId || plan.steps.some((step) => step.status !== "completed" && step.retiredAt === undefined)) {
-      throw new AppError("ASSESSMENT_ERROR", "Caveated completion commit requires every Plan step to be completed", 409);
+    const leafSteps = activeLeafSteps(plan);
+    if (plan.runId !== runId || leafSteps.some((step) => step.status !== "completed")) {
+      throw new AppError("ASSESSMENT_ERROR", "Caveated completion commit requires every executable Plan leaf step to be completed", 409);
     }
     let hasCaveat = false;
     const assessments = this.plans.assessments(planId);
-    for (const step of plan.steps.filter((step) => step.retiredAt === undefined)) {
+    for (const step of leafSteps) {
       const latest = assessments.filter((item) => item.stepId === step.id).at(-1);
       if (latest?.approved === true) {
         if (latest.skills.some((skill) => skill.status === "process_caveat" || skill.status === "skipped_unavailable")) {

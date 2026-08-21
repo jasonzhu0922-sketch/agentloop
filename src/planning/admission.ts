@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { ExecutionPlan, PlanProposal, PlanStep, SuccessCriterion } from "./contracts.ts";
+import type { ExecutionPlan, PlanProposal, PlanStep, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
   "computer_write_file",
@@ -33,6 +33,9 @@ export function admitPlan(input: {
   const canProduceFiles = hasFileProducer(input.availableToolNames);
 
   const steps: PlanStep[] = proposal.steps.map((step, position) => {
+    const kind = step.kind ?? "leaf";
+    const refinementState = normalizeRefinementState(kind, step.refinementState);
+    const requiredFacts = step.requiredFacts ?? [];
     assertUnique(step.dependencies, `dependencies for step ${step.id}`);
     assertUnique(step.skillIds, `Skill bindings for step ${step.id}`);
     assertUnique(step.requiredToolNames, `tools for step ${step.id}`);
@@ -40,19 +43,32 @@ export function admitPlan(input: {
     for (const dependency of step.dependencies) {
       if (!stepIdSet.has(dependency)) reject(`Step ${step.id} has unknown dependency ${dependency}`);
     }
-    if (step.skillIds.length > 0 && isPureSkillActivationStep(step)) {
+    if (step.parentId !== undefined && !stepIdSet.has(step.parentId)) {
+      reject(`Step ${step.id} has unknown parent ${step.parentId}`);
+    }
+    assertUnique(requiredFacts.map((fact) => fact.id), `required facts for step ${step.id}`);
+    for (const fact of requiredFacts) assertRequiredFact(step.id, fact);
+    if (kind === "milestone") {
+      if (step.requiredToolNames.length > 0) {
+        reject(`Milestone ${step.id} cannot require execution Tools; refine it into leaf steps first`);
+      }
+      if (refinementState === "not_refinable") {
+        reject(`Milestone ${step.id} must be refinable`);
+      }
+    }
+    if (kind === "leaf" && step.skillIds.length > 0 && isPureSkillActivationStep(step)) {
       reject(
         `Step ${step.id} is only a Skill activation step; bind the Skill to a concrete user-deliverable step instead`,
       );
     }
-    const fileProducingStep = requiresFileProduction(step);
+    const fileProducingStep = kind === "leaf" && requiresFileProduction(step);
     if (!canProduceFiles && fileProducingStep) {
       reject(
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
       );
     }
     const mergedTools = new Set(step.requiredToolNames);
-    if (step.skillIds.length > 0) mergedTools.add("load_skill");
+    if (kind === "leaf" && step.skillIds.length > 0) mergedTools.add("load_skill");
     const criteria: SuccessCriterion[] = [...step.successCriteria];
     for (const skillId of step.skillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
@@ -67,10 +83,13 @@ export function admitPlan(input: {
     }
     if (criteria.length === 0) reject(`Step ${step.id} has no success criteria`);
     assertUnique(criteria.map((criterion) => criterion.id), `criteria for step ${step.id}`);
-    assertStepIsBounded(step);
+    if (kind === "leaf") assertStepIsBounded(step);
     return {
       ...step,
+      kind,
       position,
+      refinementState,
+      requiredFacts,
       requiredToolNames: [...mergedTools],
       successCriteria: criteria,
       status: "pending",
@@ -80,6 +99,10 @@ export function admitPlan(input: {
   for (const skillId of selectedSet) {
     if (!boundSkillIds.has(skillId)) reject(`Selected Skill ${skillId} is not bound to any Plan step`);
   }
+  if (steps.every((step) => step.kind !== "leaf")) {
+    reject("Plan must contain at least one executable leaf step");
+  }
+  assertParentTree(steps);
   assertAcyclic(steps);
   const now = input.now ?? Date.now();
   return {
@@ -93,6 +116,53 @@ export function admitPlan(input: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function normalizeRefinementState(kind: "leaf" | "milestone", value: RefinementState | undefined): RefinementState {
+  if (kind === "leaf") {
+    if (value !== undefined && value !== "not_refinable") reject("Leaf steps must use refinementState not_refinable");
+    return "not_refinable";
+  }
+  if (value === undefined) return "ready_to_refine";
+  if (
+    value === "pending_facts"
+    || value === "ready_to_refine"
+    || value === "refining"
+    || value === "refined"
+  ) {
+    return value;
+  }
+  reject("Milestone steps cannot use refinementState not_refinable");
+}
+
+function assertRequiredFact(stepId: string, fact: RequiredFact): void {
+  if (fact.id.trim().length === 0) reject(`Step ${stepId} has a requiredFact with an empty id`);
+  if (fact.description.trim().length === 0) reject(`Step ${stepId} has a requiredFact with an empty description`);
+  assertUnique([...fact.evidenceKinds], `evidenceKinds for required fact ${fact.id}`);
+  if (fact.evidenceKinds.length === 0) {
+    reject(`Step ${stepId} requiredFact ${fact.id} must declare at least one evidence kind`);
+  }
+  if (fact.satisfiedBy !== undefined) assertUnique([...fact.satisfiedBy], `satisfiedBy refs for required fact ${fact.id}`);
+}
+
+function assertParentTree(steps: readonly PlanStep[]): void {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  for (const step of steps) {
+    if (step.parentId === undefined) continue;
+    if (step.parentId === step.id) reject(`Step ${step.id} cannot be its own parent`);
+    const parent = byId.get(step.parentId);
+    if (parent === undefined) continue;
+    if (parent.kind !== "milestone") {
+      reject(`Step ${step.id} parent ${parent.id} must be a milestone`);
+    }
+    const seen = new Set([step.id]);
+    let cursor: PlanStep | undefined = parent;
+    while (cursor !== undefined) {
+      if (seen.has(cursor.id)) reject(`Step ${step.id} has a cyclic parent chain`);
+      seen.add(cursor.id);
+      cursor = cursor.parentId === undefined ? undefined : byId.get(cursor.parentId);
+    }
+  }
 }
 
 function assertAcyclic(steps: readonly PlanStep[]): void {

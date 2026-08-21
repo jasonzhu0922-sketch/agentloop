@@ -3,6 +3,13 @@ import type { ModelMessage, RuntimeEventSink } from "../runtime/contracts.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
+export type PlanStepKind = "leaf" | "milestone";
+export type RefinementState =
+  | "not_refinable"
+  | "pending_facts"
+  | "ready_to_refine"
+  | "refining"
+  | "refined";
 
 export interface TaskSpec {
   readonly runId: string;
@@ -61,6 +68,7 @@ export interface ConversationPlanCursor {
 
 export interface ConversationPlanStepCursor {
   readonly id: string;
+  readonly kind?: PlanStepKind;
   readonly position: number;
   readonly status: PlanStepStatus;
   readonly objective: string;
@@ -116,10 +124,21 @@ export interface SuccessCriterion {
   readonly source: "task" | "planner";
 }
 
+export interface RequiredFact {
+  readonly id: string;
+  readonly description: string;
+  readonly evidenceKinds: readonly string[];
+  readonly satisfiedBy?: readonly string[];
+}
+
 export interface PlanStepProposal {
   readonly id: string;
+  readonly kind?: PlanStepKind;
+  readonly parentId?: string;
   readonly objective: string;
   readonly dependencies: readonly string[];
+  readonly refinementState?: RefinementState;
+  readonly requiredFacts?: readonly RequiredFact[];
   readonly skillIds: readonly string[];
   readonly requiredToolNames: readonly string[];
   readonly successCriteria: readonly SuccessCriterion[];
@@ -132,8 +151,11 @@ export interface PlanProposal {
 }
 
 export interface PlanStep extends PlanStepProposal {
+  readonly kind: PlanStepKind;
   readonly position: number;
   readonly status: PlanStepStatus;
+  readonly refinementState: RefinementState;
+  readonly requiredFacts: readonly RequiredFact[];
   readonly output?: string;
   readonly evidence?: StepEvidence;
   readonly error?: string;
@@ -214,6 +236,19 @@ export interface SkillComplianceAssessment {
 
 export interface Planner {
   plan(task: TaskSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanProposal>;
+  refine?(task: PlanRefinementSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<readonly PlanStepProposal[]>;
+}
+
+export interface PlanRefinementSpec {
+  readonly runId: string;
+  readonly input: string;
+  readonly plan: ExecutionPlan;
+  readonly milestone: PlanStep;
+  readonly availableSkills: readonly PrivateSkill[];
+  readonly availableToolNames: readonly string[];
+  readonly availableTools?: readonly PlanningToolSummary[];
+  readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
+  readonly conversationHistory?: readonly ModelMessage[];
 }
 
 export interface StepAssessmentInput {

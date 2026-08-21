@@ -21,6 +21,7 @@ import type {
 } from "../planning/contracts.ts";
 import { ModelPlanner } from "../planning/planner.ts";
 import { PlanRepository } from "../planning/plan-repository.ts";
+import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
 import { DependencyScheduler } from "../planning/scheduler.ts";
 import { formatAvailableSkills, formatLoadedSkill } from "../skills/skill-context.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
@@ -413,6 +414,7 @@ export class RunService {
             .filter((step) => step.retiredAt === undefined)
             .map((step) => ({
               id: step.id,
+              kind: step.kind,
               position: step.position,
               status: step.status,
               objective: step.objective,
@@ -424,9 +426,7 @@ export class RunService {
             })),
         };
         planCursors.push(cursor);
-        const unfinishedSteps = plan.steps.filter((step) =>
-          step.retiredAt === undefined && step.status !== "completed"
-        );
+        const unfinishedSteps = activeLeafSteps(plan).filter((step) => step.status !== "completed");
         if (unfinishedSteps.length > 0 || run.status !== "completed") {
           activeGoal = {
             runId: run.id,
@@ -1132,7 +1132,7 @@ export class RunService {
   }): Promise<ExecutionPlan> {
     let plan = input.plan;
     let forcedStepId = input.initialRecovery?.stepId;
-    while (plan.steps.some((step) => step.status !== "completed" && step.retiredAt === undefined)) {
+    while (!isPlanLeafComplete(plan)) {
       if (forcedStepId === undefined) this.scheduler.assertProgressPossible(plan);
       const step = forcedStepId === undefined
         ? this.scheduler.nextReady(plan)
@@ -1836,9 +1836,10 @@ function buildResumeSuggestion(
   if (activeGoal === undefined || activeGoal.planId === undefined) return undefined;
   const cursor = [...planCursors].reverse().find((item) => item.planId === activeGoal.planId);
   if (cursor === undefined) return undefined;
-  const nextStep = cursor.steps.find((step) => step.status === "failed")
-    ?? cursor.steps.find((step) => step.status === "running")
-    ?? cursor.steps.find((step) => step.status === "pending");
+  const executableSteps = cursor.steps.filter((step) => step.kind !== "milestone");
+  const nextStep = executableSteps.find((step) => step.status === "failed")
+    ?? executableSteps.find((step) => step.status === "running")
+    ?? executableSteps.find((step) => step.status === "pending");
   if (nextStep === undefined) return undefined;
   const artifacts = reusableArtifacts
     .filter((artifact) => artifact.runId === activeGoal.runId)
@@ -2635,7 +2636,7 @@ function buildRecoveredStepRuntimeContext(
 }
 
 function finalPlanOutput(plan: ExecutionPlan): string {
-  const effectiveSteps = plan.steps.filter((step) => step.retiredAt === undefined);
+  const effectiveSteps = activeLeafSteps(plan);
   const terminalSteps = effectiveSteps.filter((candidate) =>
     !effectiveSteps.some((other) => other.dependencies.includes(candidate.id))
   );
@@ -2644,7 +2645,7 @@ function finalPlanOutput(plan: ExecutionPlan): string {
 }
 
 function isEffectivelyComplete(plan: ExecutionPlan): boolean {
-  return plan.steps.every((step) => step.status === "completed" || step.retiredAt !== undefined);
+  return isPlanLeafComplete(plan);
 }
 
 function toConversationSummary(

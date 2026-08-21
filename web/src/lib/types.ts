@@ -76,9 +76,13 @@ export interface RunEvent {
 
 export interface PlanStep {
   readonly id: string;
+  readonly kind?: "leaf" | "milestone";
+  readonly parentId?: string;
   readonly objective: string;
   readonly status: "pending" | "running" | "completed" | "failed";
+  readonly refinementState?: "not_refinable" | "pending_facts" | "ready_to_refine" | "refining" | "refined";
   readonly dependencies?: readonly string[];
+  readonly requiredFacts?: readonly { readonly id: string; readonly description: string; readonly evidenceKinds: readonly string[] }[];
   readonly requiredToolNames?: readonly string[];
   readonly successCriteria?: readonly { readonly id: string; readonly description: string }[];
   readonly output?: string;

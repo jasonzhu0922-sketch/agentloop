@@ -1,8 +1,8 @@
 # 分层渐进式 Plan 设计方案
 
-版本：v0.1  
-日期：2026-08-21  
-状态：设计稿
+版本：v0.2
+日期：2026-08-21
+状态：设计稿 / 第一阶段落地中
 
 ## 1. 设计结论
 
@@ -10,21 +10,26 @@
 
 > Runtime 现在要求 Planner 在第一阶段提交一份完整、可执行、可 Admission 的扁平 Plan；但许多真实任务必须先完成信息核验、工作区探查、Skill 读取和约束提取，后续步骤才能被正确拆小。
 
-因此，第一阶段合理的目标不是“猜出完整执行细节”，而是提交一份稳定的 **分层骨架 Plan**：
+因此，第一阶段合理的目标不是“猜出完整执行细节”，而是允许 Planner 提交一份稳定的 **分层骨架 Plan**，并先以轻量语义接入 Runtime：
 
 - 顶层 Plan 表达用户目标、阶段边界、依赖关系、未知事实和完成门槛。
 - 只有 `leaf` Step 可以被 Scheduler 调度执行。
-- `milestone` Step 不能执行，只能在前置证据满足后由 Planner 细化为更小的子 Step。
-- 每次细化都是 canonical Plan Revision，必须经 Admission、CAS 和事件持久化，不是模型临时补丁。
+- `milestone` Step 不能执行；第一阶段只作为非执行阶段边界、层级归属和上下文提示。
+- `requiredFacts` 和 `refinementState` 第一阶段只作为可持久化的规划元数据，不作为强制事实门禁。
+- 自动 refinement、fact index、CAS Plan Revision 是后续增强层；启用前不能影响 leaf-only 执行和完成判定。
 - 完成仍只来自 leaf Step 的 Assessment、全局 Goal Assessment 和 Terminal Committer Outcome。
 
 这保留 Plan-first 的核心：运行前必须有可审计计划；同时避免让 Planner 在缺少证据时把“探索、生产、验证”硬塞进同一个可执行步骤。
+
+节制原则：
+
+> 先让 Plan 能表达“阶段尚未细化”，不要立刻把每个任务推进到事实门禁、自动修订和复杂状态机。只有当轻量 milestone 无法稳定支撑真实 Run 时，才逐层打开 D3/D4 能力。
 
 ## 2. 要修复的运行契约
 
 真实契约：
 
-> Runtime 必须始终基于同一份 canonical Plan 调度任务；当下一段工作依赖尚未获取的事实时，Plan 应持久化这个未知边界，并在事实到位后通过受控 refine 生成可执行 leaf，而不是要求首轮 Planner 预先猜完所有细节。
+> Runtime 必须始终基于同一份 canonical Plan 调度任务；当下一段工作依赖尚未获取的事实时，Plan 应能持久化这个未知边界，并先调度已明确的 leaf，而不是要求首轮 Planner 预先猜完所有细节。
 
 该设计不允许以下捷径：
 
@@ -99,7 +104,8 @@ type RefinementState =
 
 - `leaf` 固定为 `not_refinable`。
 - `milestone` 初始通常是 `pending_facts` 或 `ready_to_refine`。
-- 当 `requiredFacts` 全部由 canonical evidence 满足后，Scheduler 可创建 `planning_refinement` Action。
+- 第一阶段不由 Scheduler 自动创建 `planning_refinement` Action。
+- 后续启用 fact-gated refinement 时，当 `requiredFacts` 全部由 canonical evidence 满足后，Scheduler 才可创建 `planning_refinement` Action。
 - Planner refine 后，原 milestone 变为 `refined`，新增 children 成为 canonical Plan 的一部分。
 - `refined` milestone 自身不再被执行；完成由其 children 的完成状态归约。
 
@@ -154,13 +160,12 @@ milestone: verify_and_deliver_webpage
 
 ## 6. 调度模型
 
-Scheduler 的核心规则：
+第一阶段 Scheduler 的核心规则：
 
 ```text
 ready leaf        -> 创建 model_turn / tool_call / assessment Action
-ready milestone   -> 创建 planning_refinement Action
-pending milestone -> 等待依赖 leaf 产生 requiredFacts
-refined milestone -> 根据 children 状态归约
+ready milestone   -> 不创建执行 Action，不参与 Assessment
+parent milestone  -> 其 dependencies 会约束 child leaf 的 ready 判断
 completed goal    -> 进入 Goal Assessment 与 Terminal Committer
 ```
 
@@ -177,43 +182,41 @@ while run is active:
     persist evidence facts
     continue
 
-  if exists ready milestone:
-    assemble refinement context from milestone + satisfied facts
-    Planner submits PlanRevision
-    Admission validates revision
-    Writer commits revision with CAS
-    continue
-
-  if unresolved facts require user input:
-    ask_user through canonical gap
-
   if all leaves under goal are assessed:
     run Goal Assessment
     Terminal Committer commits Delivery / Outcome
 ```
 
-Scheduler 不解释业务含义；它只看节点类型、依赖、requiredFacts 和状态。
+Scheduler 不解释业务含义；第一阶段只看节点类型、依赖、父级依赖和 leaf 状态。`requiredFacts` 可以被持久化和展示，但不驱动调度。
+
+后续启用 D3 后，再增加：
+
+```text
+ready milestone   -> 创建 planning_refinement Action
+pending milestone -> 等待依赖 leaf 产生 requiredFacts
+refined milestone -> 根据 children 状态归约
+```
 
 ## 7. Planner 协议
 
 ### 7.1 初始规划
 
-首轮工具从 `submit_plan` 演进为 `submit_plan_revision` 的初始模式：
+第一阶段继续使用现有 `submit_plan`，只扩展 Step 的可选字段：
 
 ```ts
 {
-  mode: "initial",
   goal: string,
   selectedSkillIds: string[],
-  nodes: PlanNodeProposal[]
+  steps: PlanNodeProposal[]
 }
 ```
 
 约束：
 
 - 顶层必须覆盖用户显式目标。
-- 至少要有一个可执行 leaf，除非任务确实只能先 ask_user。
-- 不允许首轮 milestone 没有 requiredFacts 且没有细化条件。
+- 至少要有一个可执行 leaf。
+- 允许 milestone 暂时没有 requiredFacts；这表示轻量阶段边界，而不是事实门禁。
+- milestone 不能要求执行 Tool。
 - 选择的 Skill 可以绑定到 milestone，但执行前必须在 leaf 中通过 `load_skill` 激活精确版本。
 
 ### 7.2 运行中细化
@@ -271,7 +274,7 @@ Admission 不负责：
 
 ### 9.1 Plan 表
 
-现有 `plans` 可保留 Plan 头，但需要把 version 语义从单次创建扩展为 revision chain：
+第一阶段保留现有 `plans` 头和 `plan_steps` 表，只做兼容扩展。后续启用自动 refinement 时，再把 version 语义从单次创建扩展为 revision chain：
 
 ```text
 plans(id, run_id, current_version, goal, selected_skill_ids_json, status, ...)
@@ -280,7 +283,18 @@ plan_revisions(plan_id, version, mode, target_node_id, proposal_json, reason, ac
 
 ### 9.2 Plan Nodes
 
-`plan_steps` 可演进为 `plan_nodes`，或先兼容扩展：
+第一阶段先兼容扩展 `plan_steps`：
+
+```text
+plan_steps(
+  kind default leaf,
+  parent_step_id,
+  refinement_state default not_refinable,
+  required_facts_json default []
+)
+```
+
+后续需要完整 revision history 时，`plan_steps` 可演进为 `plan_nodes`：
 
 ```text
 plan_nodes(
@@ -316,7 +330,7 @@ plan_nodes(
 
 ### 9.3 Evidence Facts
 
-需要一个中性 fact index，供 `requiredFacts` 绑定：
+后续 D3 需要一个中性 fact index，供 `requiredFacts` 绑定：
 
 ```text
 run_facts(
@@ -336,22 +350,22 @@ ToolResult、Assessment、source intake、artifact receipts 都可以投影为 f
 
 ## 10. Context Assembler
 
-规划上下文要分层输入，而不是把所有内容混在一个 user JSON 中：
+规划上下文要分层输入，而不是把所有内容混在一个 user JSON 中。第一阶段只需要把当前 Plan tree、可用能力和 Planner 协议约束表达清楚；D3 再加入 satisfied/pending facts：
 
 ```text
 system: Planner authority and protocol
 section: current_user_request
 section: current_plan_tree
 section: frontier_nodes
-section: satisfied_facts
-section: pending_required_facts
+section: satisfied_facts              # D3
+section: pending_required_facts       # D3
 section: available_skills_catalog
 section: available_tool_catalog
 section: revision_contract
 section: prior_failed_boundaries
 ```
 
-Refinement 请求只给 Planner 足够细化目标 milestone 的内容，不把全量 transcript 和所有 Tool 输出重复塞回去。这样能同时减少重复读取、重复执行和上下文漂移。
+Refinement 请求只给 Planner 足够细化目标 milestone 的内容，不把全量 transcript 和所有 Tool 输出重复塞回去。这个能力属于 D3+；第一阶段不引入新的强制 refinement 调用。
 
 ## 11. Skill 边界
 
@@ -414,19 +428,26 @@ UI 不需要暴露复杂内部机制，但应显示层级：
 
 ## 14. 迁移路径
 
-### D1：只引入概念和持久化，不改执行语义
+### D1：引入 leaf/milestone 概念和兼容持久化
 
 - 新增 `kind = leaf` 默认值，现有 Plan 全部视为 leaf。
-- 新增 Plan Revision 表，先记录当前 initial proposal。
-- Context / UI 可读取树结构但仍显示扁平列表。
+- `plan_steps` 兼容新增 `parent_step_id`、`refinement_state`、`required_facts_json`。
+- `submit_plan` schema 接受可选层级字段。
 - 保证现有测试和行为不变。
 
-### D2：允许 initial Plan 包含 milestone
+### D2-lite：允许 initial Plan 包含轻量 milestone
 
 - Admission 接受 milestone，但 Scheduler 不执行 milestone。
+- milestone 不能要求执行 Tool，但不强制 requiredFacts。
+- Scheduler 只调度 leaf，并让 child leaf 继承 parent milestone 的前置依赖。
+- TerminalCommitter 只要求 active leaf 完成和通过 Assessment。
+- UI/current-step/failure summary 排除 milestone，避免把阶段边界误显示为执行中。
+
+### D2-full：受控 refinement Action
+
 - 若 frontier 出现 `ready_to_refine` milestone，创建 `planning_refinement` Action。
 - Planner 增加 `mode: refine` 协议。
-- 增加 leaf-only Tool Grant：只有 leaf 的 requiredToolNames 可以进入执行模型。
+- Plan Revision 经 Admission、CAS 和事件持久化。
 
 ### D3：Fact-gated progressive refinement
 
@@ -443,25 +464,29 @@ UI 不需要暴露复杂内部机制，但应显示层级：
 
 ## 15. 回归测试矩阵
 
-必须覆盖：
+第一阶段必须覆盖：
 
 1. 首轮 Plan 可以包含 `milestone`，但 `milestone` 不会被 Scheduler 当作可执行 step。
 2. Leaf 仍会被 Admission 拒绝过宽的 discovery/production/verification 混合。
-3. Milestone 如果没有 requiredFacts 或 refine 条件，会被 Admission 拒绝。
-4. RequiredFacts 满足后，Scheduler 创建 `planning_refinement` Action。
-5. Refinement 只能替换目标 milestone 子树，不能改写无关 Plan 节点。
-6. Refinement 后 dependencies 被正确重写，后续 Scheduler 只调度 children leaf。
-7. Skill 绑定在 milestone 时不会暴露 Skill 正文；只有 leaf 执行前 `load_skill`。
-8. Artifact 存在但 leaf Assessment 未批准时，Run 不完成。
-9. 全部 leaf 完成但 Goal Assessment 未批准时，TerminalCommitter 不写 completed outcome。
-10. Conversation resume 能从 current Plan tree 和 facts 继续，而不是重启首轮骨架。
+3. Milestone 要保持非执行，且 Plan 至少包含一个 leaf。
+4. Child leaf 不会绕过 parent milestone 的前置依赖。
+5. Artifact 存在但 leaf Assessment 未批准时，Run 不完成。
+6. 全部 leaf 完成但 Goal Assessment 未批准时，TerminalCommitter 不写 completed outcome。
+
+D3+ 再覆盖：
+
+1. RequiredFacts 满足后，Scheduler 创建 `planning_refinement` Action。
+2. Refinement 只能替换目标 milestone 子树，不能改写无关 Plan 节点。
+3. Refinement 后 dependencies 被正确重写，后续 Scheduler 只调度 children leaf。
+4. Skill 绑定在 milestone 时不会暴露 Skill 正文；只有 leaf 执行前 `load_skill`。
+5. Conversation resume 能从 current Plan tree 和 facts 继续，而不是重启首轮骨架。
 
 ## 16. 实施风险
 
 | 风险 | 处理 |
 |---|---|
-| Plan tree 过复杂，模型过度层级化 | Admission 限制最大深度和每次 refine 子节点数量；初期深度最多 2 |
-| Milestone 被滥用为模糊占位 | 必须有 requiredFacts、细化条件和覆盖关系；不能没有可执行 frontier |
+| Plan tree 过复杂，模型过度层级化 | 第一阶段只支持轻量 milestone；后续才限制最大深度和每次 refine 子节点数量 |
+| Milestone 被滥用为模糊占位 | milestone 不可执行、不计完成，且不能没有可执行 leaf frontier |
 | 细化导致重复读取/执行 | Facts 成为 Planner 输入；已满足 facts 不允许要求重复产生，除非显式过期或冲突 |
 | Revision 漂移丢失用户目标 | Plan Revision Assessor 对照 original goal、显式 constraints 和 unfinished nodes |
 | UI 难懂 | UI 展示“阶段/执行项”两级，不暴露 schema 细节 |
@@ -479,6 +504,16 @@ UI 不需要暴露复杂内部机制，但应显示层级：
 ## 18. 最小验收标准
 
 该方案的第一个可验收版本不是“某个网页任务跑通”，而是以下通用链路成立：
+
+```text
+initial Plan with leaf/milestone admitted
+  -> Scheduler executes only leaf
+  -> child leaf respects parent milestone dependencies
+  -> Assessment approves executable leaf
+  -> TerminalCommitter commits only after active leaf completion and assessment
+```
+
+D3+ 的完整渐进式验收再扩展为：
 
 ```text
 initial hierarchical Plan admitted
