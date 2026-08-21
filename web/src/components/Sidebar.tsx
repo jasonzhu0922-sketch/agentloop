@@ -21,7 +21,6 @@ export function Sidebar(): React.ReactNode {
           <div className="sessions-empty">还没有对话</div>
         ) : (
           state.conversations.map((c) => {
-            const running = c.lastStatus === "running";
             const active = state.conversation?.conversation.id === c.id;
             return (
               <div className="session-wrap" key={c.id}>
@@ -42,8 +41,7 @@ export function Sidebar(): React.ReactNode {
                   type="button"
                   className="session-delete"
                   aria-label="删除会话"
-                  title={running ? "运行中的会话不能删除" : "删除会话"}
-                  disabled={running}
+                  title="删除会话"
                   onClick={() => void actions.deleteConversation(c.id, c.title)}
                 >
                   &times;

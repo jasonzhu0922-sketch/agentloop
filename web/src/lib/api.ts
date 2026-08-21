@@ -2,8 +2,10 @@ import type {
   ConversationDetail,
   ConversationSummary,
   ModelSummary,
+  LocalDirectoryListing,
   PlanDetail,
   ProcessArtifact,
+  ArtifactPreview,
   ProviderSummary,
   RunEvent,
   RunRecord,
@@ -113,6 +115,9 @@ export const api = {
   tools(token: string): Promise<{ tools: readonly ToolSummary[] }> {
     return request("/v1/tools", { token });
   },
+  localDirectories(token: string, path?: string): Promise<LocalDirectoryListing> {
+    return request(`/v1/local-directories${path === undefined ? "" : `?path=${encodeURIComponent(path)}`}`, { token });
+  },
   providers(token: string): Promise<{
     providers: readonly ProviderSummary[];
     models?: readonly ModelSummary[];
@@ -130,10 +135,26 @@ export const api = {
   deleteConversation(token: string, id: string): Promise<void> {
     return request(`/v1/conversations/${encodeURIComponent(id)}`, { method: "DELETE", token });
   },
+  updateConversationVisibleDirectories(
+    token: string,
+    id: string,
+    visibleDirectories: readonly string[],
+  ): Promise<{ conversation: ConversationSummary }> {
+    return request(`/v1/conversations/${encodeURIComponent(id)}/visible-directories`, {
+      method: "PATCH",
+      token,
+      body: { visibleDirectories },
+    });
+  },
   startRun(
     token: string,
     input: string,
-    options: { allowDangerousTools?: boolean; conversationId?: string; modelKey?: string } = {},
+    options: {
+      allowDangerousTools?: boolean;
+      conversationId?: string;
+      modelKey?: string;
+      visibleDirectories?: readonly string[];
+    } = {},
   ): Promise<{ run: RunRecord }> {
     return request("/v1/runs/async", {
       method: "POST",
@@ -143,12 +164,18 @@ export const api = {
         allowDangerousTools: options.allowDangerousTools ?? true,
         conversationIntent: "auto",
         ...(options.modelKey === undefined ? {} : { modelKey: options.modelKey }),
+        ...(options.visibleDirectories === undefined || options.visibleDirectories.length === 0
+          ? {}
+          : { visibleDirectories: options.visibleDirectories }),
         ...(options.conversationId === undefined ? {} : { conversationId: options.conversationId }),
       },
     });
   },
   run(token: string, id: string): Promise<{ run: RunRecord }> {
     return request(`/v1/runs/${encodeURIComponent(id)}`, { token });
+  },
+  cancelRun(token: string, id: string): Promise<{ run: RunRecord }> {
+    return request(`/v1/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", token });
   },
   runEvents(token: string, id: string): Promise<{ events: readonly RunEvent[] }> {
     return request(`/v1/runs/${encodeURIComponent(id)}/events`, { token });
@@ -158,6 +185,9 @@ export const api = {
   },
   runArtifacts(token: string, id: string): Promise<{ artifacts: readonly ProcessArtifact[] }> {
     return request(`/v1/runs/${encodeURIComponent(id)}/artifacts`, { token });
+  },
+  runArtifactPreview(token: string, runId: string, artifactId: string): Promise<{ preview: ArtifactPreview }> {
+    return request(`/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/preview`, { token });
   },
   runArtifactBytes(token: string, runId: string, artifactId: string): Promise<Blob> {
     return fetch(`/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`, {

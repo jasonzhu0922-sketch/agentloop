@@ -54,6 +54,49 @@ function inlineMd(text: string): string {
   return s;
 }
 
+function splitTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  const cells: string[] = [];
+  let start = trimmed.startsWith("|") ? 1 : 0;
+  let inCode = false;
+  for (let i = start; i < trimmed.length; i++) {
+    const char = trimmed[i];
+    if (char === BT) inCode = !inCode;
+    if (char === "|" && !inCode) {
+      cells.push(trimmed.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const tailEnd = trimmed.endsWith("|") ? trimmed.length - 1 : trimmed.length;
+  if (start <= tailEnd) cells.push(trimmed.slice(start, tailEnd).trim());
+  const normalized = cells.map((cell) => cell.trim());
+  return normalized.length > 1 ? normalized : null;
+}
+
+function isTableSeparator(cells: readonly string[]): boolean {
+  if (cells.length === 0) return false;
+  return cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function tableAlign(cell: string): string {
+  const value = cell.trim();
+  if (value.startsWith(":") && value.endsWith(":")) return "center";
+  if (value.endsWith(":")) return "right";
+  return "left";
+}
+
+function renderTable(header: readonly string[], separator: readonly string[], rows: readonly (readonly string[])[]): string {
+  const align = separator.map(tableAlign);
+  const cellAttr = (index: number): string => align[index] && align[index] !== "left" ? ' style="text-align:' + align[index] + '"' : "";
+  const head = "<thead><tr>" + header.map((cell, index) => "<th" + cellAttr(index) + ">" + inlineMd(cell) + "</th>").join("") + "</tr></thead>";
+  const bodyRows = rows.map((row) => {
+    const cells = header.map((_, index) => row[index] ?? "");
+    return "<tr>" + cells.map((cell, index) => "<td" + cellAttr(index) + ">" + inlineMd(cell) + "</td>").join("") + "</tr>";
+  });
+  return '<div class="md-table-wrap"><table>' + head + "<tbody>" + bodyRows.join("") + "</tbody></table></div>";
+}
+
 function mdBlocks(text: string): string {
   const lines = text.split(NL);
   const out: string[] = [];
@@ -73,7 +116,25 @@ function mdBlocks(text: string): string {
       listItems = [];
     }
   };
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const header = splitTableRow(line);
+    const separator = index + 1 < lines.length ? splitTableRow(lines[index + 1]) : null;
+    if (header && separator && isTableSeparator(separator)) {
+      flushPara();
+      flushList();
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length) {
+        const row = splitTableRow(lines[index]);
+        if (!row || isTableSeparator(row)) break;
+        rows.push(row);
+        index += 1;
+      }
+      index -= 1;
+      out.push(renderTable(header, separator, rows));
+      continue;
+    }
     if (line.slice(0, 4) === "### ") {
       flushPara();
       flushList();

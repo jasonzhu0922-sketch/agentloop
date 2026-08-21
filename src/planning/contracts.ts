@@ -10,6 +10,7 @@ export interface TaskSpec {
   readonly availableSkills: readonly PrivateSkill[];
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
+  readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   /**
    * A conversational answer is still persisted through the canonical Plan
    * lifecycle, but it may neither select capabilities nor execute Tools.
@@ -21,6 +22,86 @@ export interface TaskSpec {
    * is planned in the context of what was already requested and produced.
    */
   readonly conversationHistory?: readonly ModelMessage[];
+  /**
+   * Persisted cross-turn semantic state for follow-up execution requests. This
+   * is built from canonical Run facts, not model prose or UI transcript text.
+   */
+  readonly conversationWorkingSet?: ConversationWorkingSet;
+}
+
+export interface ConversationWorkingSet {
+  readonly schema: "conversation.workset/v1";
+  readonly conversationId: string;
+  readonly runCount: number;
+  readonly activeGoal?: ConversationActiveGoal;
+  readonly planCursors: readonly ConversationPlanCursor[];
+  readonly reusableArtifacts: readonly ConversationReusableArtifact[];
+  readonly failedBoundaries: readonly ConversationFailedBoundary[];
+  readonly requiredCapabilities: ConversationRequiredCapabilities;
+  readonly resumeSuggestion?: string;
+}
+
+export interface ConversationActiveGoal {
+  readonly runId: string;
+  readonly planId?: string;
+  readonly goal: string;
+  readonly status: PlanStatus | "failed" | "cancelled";
+  readonly unfinished: boolean;
+  readonly reasonCode?: string;
+}
+
+export interface ConversationPlanCursor {
+  readonly runId: string;
+  readonly planId: string;
+  readonly goal: string;
+  readonly status: PlanStatus;
+  readonly selectedSkillIds: readonly string[];
+  readonly steps: readonly ConversationPlanStepCursor[];
+}
+
+export interface ConversationPlanStepCursor {
+  readonly id: string;
+  readonly position: number;
+  readonly status: PlanStepStatus;
+  readonly objective: string;
+  readonly dependencies: readonly string[];
+  readonly skillIds: readonly string[];
+  readonly recommendedToolNames: readonly string[];
+  readonly output?: string;
+  readonly error?: string;
+}
+
+export interface ConversationReusableArtifact {
+  readonly runId: string;
+  readonly path: string;
+  readonly name: string;
+  readonly bytes: number;
+  readonly mimeType: string;
+  readonly sourceTool: string;
+  readonly sourceToolCallId?: string;
+  readonly sourcePlanStepId?: string;
+  readonly reusable: boolean;
+}
+
+export interface ConversationFailedBoundary {
+  readonly runId: string;
+  readonly planId?: string;
+  readonly stepId?: string;
+  readonly code?: string;
+  readonly message?: string;
+  readonly reasonCode?: string;
+  readonly category: "provider" | "planning" | "assessment" | "tool" | "runtime" | "cancelled" | "unknown";
+}
+
+export interface ConversationRequiredCapabilities {
+  readonly skillIds: readonly string[];
+  readonly toolNames: readonly string[];
+}
+
+export interface PlanningVisibleDirectory {
+  readonly id: string;
+  readonly name: string;
+  readonly path: string;
 }
 
 export interface PlanningToolSummary {
@@ -85,6 +166,12 @@ export interface StepEvidence {
   readonly candidateOutput: string;
   readonly toolCalls: readonly ToolEvidence[];
   readonly modelSteps: number;
+  readonly completionCaveat?: CompletionCaveat;
+}
+
+export interface CompletionCaveat {
+  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit";
+  readonly feedback: string;
 }
 
 export interface CriterionAssessment {
@@ -96,16 +183,27 @@ export interface CriterionAssessment {
 
 export interface SkillAssessment {
   readonly skillId: string;
+  readonly status?: "followed" | "skipped_unavailable" | "process_caveat" | "not_followed";
   readonly followed: boolean;
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];
 }
+
+export type AssessmentProfileId =
+  | "deterministic"
+  | "lookup_lite"
+  | "source_grounded"
+  | "risk_sensitive";
+
+export type AssessmentMethod = "rule" | "model";
 
 export interface SkillComplianceAssessment {
   readonly id: string;
   readonly planId: string;
   readonly stepId: string;
   readonly attempt: number;
+  readonly assessmentProfile?: AssessmentProfileId;
+  readonly assessmentMethod?: AssessmentMethod;
   readonly approved: boolean;
   readonly criteria: readonly CriterionAssessment[];
   readonly skills: readonly SkillAssessment[];
@@ -126,6 +224,7 @@ export interface StepAssessmentInput {
   readonly evidence: StepEvidence;
   readonly modelEvidence?: StepEvidence;
   readonly contextSummary?: string;
+  readonly assessmentProfile?: AssessmentProfileId;
   readonly attempt: number;
 }
 

@@ -34,6 +34,7 @@ const skills = new SkillService(database, {
   allowedImportRoots: parseStringArray(process.env.SKILL_IMPORT_ROOTS_JSON, "SKILL_IMPORT_ROOTS_JSON"),
   skillDirectory,
 });
+const refreshedInstalledSkillCount = await skills.refreshInstalledPackageMetadata();
 const discoveredSkills = await skills.refreshSkillDirectory();
 const runs = new RunService({
   database,
@@ -64,7 +65,7 @@ const batches = new BatchService(database, runs);
 const server = createAgentLoopServer({ auth, skills, runs, batches, providers }, { webOrigins });
 server.listen(port, host, () => {
   process.stdout.write(
-    `AgentLoop API listening on http://${host}:${port}; discovered ${discoveredSkills.length} Skill package(s) from ${skillDirectory}; queued ${reconciledRunCount} recovery review(s)\n`,
+    `AgentLoop API listening on http://${host}:${port}; discovered ${discoveredSkills.length} Skill package(s) from ${skillDirectory}; refreshed ${refreshedInstalledSkillCount} installed Skill package(s); queued ${reconciledRunCount} recovery review(s)\n`,
   );
 });
 

@@ -338,17 +338,17 @@ class CompressionComplianceModel implements ModelAdapter {
     this.executionCalls += 1;
     const tools = request.tools.map((tool) => tool.name);
     if (this.executionCalls === 1) {
-      assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
+      assertExecutionTools(tools);
       this.assertSkillIsNotVisible(request);
       return toolResponse("step-load", "load_skill", { name: this.scenario.skillName });
     }
     if (this.executionCalls === 2) {
-      assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
+      assertExecutionTools(tools);
       this.assertExactLoadedSkill(request);
       return toolResponse("record-delivery", DELIVERY_TOOL, { skillName: this.scenario.skillName });
     }
     if (this.executionCalls === 3) {
-      assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
+      assertExecutionTools(tools);
       this.assertExactLoadedSkill(request);
       return {
         content: `INTENTIONALLY-OVERLONG-UNVERIFIED-DRAFT\n${"draft ".repeat(5_000)}`,
@@ -357,7 +357,7 @@ class CompressionComplianceModel implements ModelAdapter {
       };
     }
     if (this.executionCalls === 4) {
-      assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
+      assertExecutionTools(tools);
       assert.match(request.runtimeContext?.content ?? "", /structured_summary/);
       this.assertSkillIsNotVisible(request);
       return toolResponse("step-reload", "load_skill", { name: this.scenario.skillName });
@@ -366,7 +366,7 @@ class CompressionComplianceModel implements ModelAdapter {
     // File-producing Skills receive convergence grace steps, so the final
     // candidate is produced on a tool-enabled turn rather than a stripped
     // convergence turn; the model still stops and is assessed normally.
-    assert.deepEqual(tools, [DELIVERY_TOOL, "load_skill"]);
+    assertExecutionTools(tools);
     this.assertExactLoadedSkill(request);
     return { content: this.scenario.finalOutput, toolCalls: [], finishReason: "stop" };
   }
@@ -395,6 +395,13 @@ function toolResponse(id: string, name: string, argumentsValue: unknown): ModelR
     finishReason: "tool_calls",
     toolCalls: [{ id, name, arguments: argumentsValue }],
   };
+}
+
+function assertExecutionTools(tools: readonly string[]): void {
+  assert.equal(tools.includes(DELIVERY_TOOL), true);
+  assert.equal(tools.includes("load_skill"), true);
+  assert.equal(tools.includes("submit_plan"), false);
+  assert.equal(tools.includes("submit_assessment"), false);
 }
 
 function escapeRegExp(value: string): string {

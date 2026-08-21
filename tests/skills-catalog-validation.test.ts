@@ -14,9 +14,12 @@ const ROOT = resolve(import.meta.dirname, "..");
 const SKILL_DIRECTORY = resolve(ROOT, "skills");
 const EXPECTED_SKILL_NAMES = [
   "algorithmic-art",
+  "api-query",
   "brand-guidelines",
+  "build-dashboard",
   "canvas-design",
   "docx",
+  "explore-data",
   "frontend-design",
   "internal-comms",
   "mcp-builder",
@@ -25,13 +28,14 @@ const EXPECTED_SKILL_NAMES = [
   "presentation-skill",
   "skill-creator",
   "slack-gif-creator",
+  "statistical-analysis",
   "theme-factory",
   "web-artifacts-builder",
   "webapp-testing",
   "xlsx",
 ] as const;
 
-test("every checked-in Skill package is discoverable, private, exact, and progressively disclosed", async () => {
+test("every checked-in Skill package is discoverable, exact, and progressively disclosed", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-real-skills-"));
   const packageStore = join(workspace, "skill-packages");
   const database = new AppDatabase(":memory:");
@@ -74,8 +78,7 @@ test("every checked-in Skill package is discoverable, private, exact, and progre
       assert.equal(skill.package?.packageHash, source?.inspection.packageHash);
       assert.equal(skill.package?.fileCount, source?.inspection.fileCount);
       assert.equal(skill.package?.totalBytes, source?.inspection.totalBytes);
-      assert.notEqual(skill.package?.root, source?.sourceDirectory);
-      assert.equal((await fs.stat(join(skill.package!.root, "SKILL.md"))).mode & 0o222, 0);
+      assert.equal(skill.package?.root, source?.sourceDirectory);
       assert.match(catalogContext, new RegExp(`<name>${skill.name}</name>`));
       assert.doesNotMatch(catalogContext, new RegExp(escapeRegExp(skill.instructions)));
 

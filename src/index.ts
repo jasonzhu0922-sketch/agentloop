@@ -56,7 +56,7 @@ export { RunRepository } from "./storage/repositories/run-repository.ts";
 export { SkillRepository } from "./storage/repositories/skill-repository.ts";
 export { admitPlan } from "./planning/admission.ts";
 export { ModelPlanner } from "./planning/planner.ts";
-export { ModelStepAssessor, RuleBasedStepAssessor } from "./planning/assessor.ts";
+export { ModelStepAssessor, ProfiledRuleStepAssessor, RuleBasedStepAssessor } from "./planning/assessor.ts";
 export { DependencyScheduler } from "./planning/scheduler.ts";
 export { PlanRepository } from "./planning/plan-repository.ts";
 export type * from "./planning/contracts.ts";

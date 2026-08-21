@@ -46,6 +46,8 @@ export function createCapabilityGrant(input: {
   conversationId?: string;
   depth: number;
   workspaceRoot?: string;
+  visibleDirectories?: CapabilityGrant["visibleDirectories"];
+  skillExecutionRoots?: CapabilityGrant["skillExecutionRoots"];
   allowedToolNames: Iterable<string>;
   allowedSkillIds: Iterable<string>;
 }): CapabilityGrant {
@@ -55,6 +57,8 @@ export function createCapabilityGrant(input: {
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     depth: input.depth,
     ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+    visibleDirectories: Object.freeze([...(input.visibleDirectories ?? [])]),
+    skillExecutionRoots: Object.freeze([...(input.skillExecutionRoots ?? [])]),
     allowedToolNames: new ImmutableStringSet(input.allowedToolNames),
     allowedSkillIds: new ImmutableStringSet(input.allowedSkillIds),
   });

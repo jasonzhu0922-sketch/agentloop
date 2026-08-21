@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { renderMarkdown } from "../md";
 import { eventLabel, fmtBytes, toolAction, truncate } from "../format";
-import { executionInsights, livePlan, currentStepWhy, stepToolPurposes, toolActivityItems } from "../live";
+import { plannedEventMap, translateRunEvent, translatedTimeline } from "../event-translator";
+import { executionInsights, livePlan, currentStepWhy, failureSummary, stepToolPurposes, toolActivityItems } from "../live";
 import { mergeRunIntoConversation } from "../../state/run-state";
 import type { ConversationDetail, RunEvent, RunRecord } from "../types";
 
@@ -26,6 +27,18 @@ describe("renderMarkdown", () => {
     const html = renderMarkdown("```\nconst x = 1;\n```");
     expect(html).toContain('<pre class="md-code"><code>');
     expect(html).toContain("const x = 1;");
+  });
+
+  it("renders markdown tables", () => {
+    const html = renderMarkdown([
+      "| API_ID | 中文名 | 状态 |",
+      "|---|---|---|",
+      "| `M_ADS_FACT` | 客商画像-客商代码 | 已发布 |",
+    ].join("\n"));
+    expect(html).toContain("<table>");
+    expect(html).toContain("<th>API_ID</th>");
+    expect(html).toContain('<code class="md-inline">M_ADS_FACT</code>');
+    expect(html).toContain("<td>已发布</td>");
   });
 });
 
@@ -66,6 +79,34 @@ describe("format", () => {
 });
 
 describe("live projection", () => {
+  it("translates raw run events into user-readable timeline copy", () => {
+    const events: RunEvent[] = [
+      { seq: 1, type: "planning.started", createdAt: 0, data: { availableSkillCount: 2, availableToolCount: 4 } },
+      { seq: 2, type: "planning.turn.started", createdAt: 0, data: { turn: 1, hasRuntimeDirective: false } },
+      {
+        seq: 3,
+        type: "tool.planned",
+        createdAt: 0,
+        data: { toolCallId: "call-1", toolName: "computer_read_file", arguments: { path: "design.md" } },
+      },
+      {
+        seq: 4,
+        type: "tool.completed",
+        createdAt: 0,
+        data: { toolCallId: "call-1", toolName: "computer_read_file", result: "ok" },
+      },
+    ];
+    const planned = plannedEventMap(events);
+    const translated = events.map((event) => translateRunEvent(event, planned));
+    const timeline = translatedTimeline(events, 4);
+
+    expect(translated[0].title).toBe("开始规划任务");
+    expect(translated[1].detail).toContain("第 1 轮规划");
+    expect(translated[3].title).toBe("工具完成");
+    expect(translated[3].detail).toContain("读取文件 design.md");
+    expect(timeline.map((event) => event.rawType)).toEqual(events.map((event) => event.type));
+  });
+
   it("builds user-readable execution insights from SSE events", () => {
     const events: RunEvent[] = [
       { seq: 1, type: "planning.started", createdAt: 0, data: { availableSkillCount: 2, availableToolCount: 4 } },
@@ -103,6 +144,42 @@ describe("live projection", () => {
     expect(insights.map((item) => item.title)).toContain("工具已准备");
     expect(toolActivityItems(events).map((item) => item.type)).toContain("context.assembled");
   });
+
+  it("projects run-limit failures into a friendly stopped summary", () => {
+    const events: RunEvent[] = [
+      {
+        seq: 1,
+        type: "plan.admitted",
+        createdAt: 0,
+        data: {
+          goal: "生成报告",
+          steps: [
+            { id: "extract", objective: "提取数据", status: "completed" },
+            { id: "write", objective: "生成分析报告", status: "pending" },
+          ],
+        },
+      },
+      { seq: 2, type: "loop.limit_exceeded", createdAt: 0, data: { hardLimit: 12, stalled: false } },
+      {
+        seq: 3,
+        type: "run.failed",
+        createdAt: 0,
+        data: { code: "RUN_LIMIT_EXCEEDED", message: "Run exceeded its 12-step limit" },
+      },
+    ];
+
+    const summary = failureSummary({
+      errorCode: "RUN_LIMIT_EXCEEDED",
+      events,
+      steps: livePlan(events)?.steps,
+      artifactCount: 1,
+    });
+
+    expect(summary.title).toContain("未完成");
+    expect(summary.reason).toContain("步数上限");
+    expect(summary.progress).toContain("1/2");
+    expect(summary.nextAction).toContain("预览");
+  });
 });
 
 describe("run state", () => {
@@ -127,6 +204,7 @@ describe("run state", () => {
       conversation: {
         id: "conversation-1",
         title: "分析脚本",
+        visibleDirectories: [],
         createdAt: 100,
         updatedAt: 100,
         runCount: 1,

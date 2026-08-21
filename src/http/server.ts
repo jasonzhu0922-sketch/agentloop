@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { BatchService } from "../batch/batch-service.ts";
 import type { AuthService, AuthenticatedUser } from "../auth/auth-service.ts";
 import type { RunService } from "../runtime/run-service.ts";
@@ -10,6 +15,7 @@ import { AppError, asAppError, badRequest, notFound } from "../shared/errors.ts"
 import { requireRecord } from "../shared/validation.ts";
 
 const MAX_REQUEST_BYTES = 1_000_000;
+const execFileAsync = promisify(execFile);
 
 export interface HttpDependencies {
   readonly auth: AuthService;
@@ -40,7 +46,7 @@ export function createAgentLoopServer(
       if (request.method === "OPTIONS") {
         if (allowedOrigin === undefined) throw notFound("Route");
         response.statusCode = 204;
-        response.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+        response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
         response.setHeader("access-control-allow-headers", "authorization, content-type");
         response.setHeader("access-control-max-age", "86400");
         response.end();
@@ -86,6 +92,10 @@ export function createAgentLoopServer(
           ...(dependencies.providers === undefined ? {} : { defaultModelKey: dependencies.providers.defaultModelKey }),
         });
       }
+      if (request.method === "GET" && url.pathname === "/v1/local-directories") {
+        const path = url.searchParams.get("path") ?? undefined;
+        return sendJson(response, 200, await listLocalDirectories(path));
+      }
 
       if (request.method === "GET" && url.pathname === "/v1/skills") {
         return sendJson(response, 200, { skills: await dependencies.skills.listAvailable(user.id) });
@@ -124,6 +134,7 @@ export function createAgentLoopServer(
         const run = await dependencies.runs.start(user.id, body.input, {
           allowDangerousTools: body.allowDangerousTools,
           ...(body.modelKey === undefined ? {} : { modelKey: body.modelKey }),
+          ...(body.visibleDirectories === undefined ? {} : { visibleDirectories: body.visibleDirectories }),
           ...(body.conversationId === undefined ? {} : { conversationId: body.conversationId }),
           ...(body.conversationIntent === undefined ? {} : { conversationIntent: body.conversationIntent }),
         });
@@ -134,6 +145,7 @@ export function createAgentLoopServer(
         const run = await dependencies.runs.execute(user.id, body.input, {
           allowDangerousTools: body.allowDangerousTools,
           ...(body.modelKey === undefined ? {} : { modelKey: body.modelKey }),
+          ...(body.visibleDirectories === undefined ? {} : { visibleDirectories: body.visibleDirectories }),
           ...(body.conversationId === undefined ? {} : { conversationId: body.conversationId }),
           ...(body.conversationIntent === undefined ? {} : { conversationIntent: body.conversationIntent }),
         });
@@ -160,6 +172,17 @@ export function createAgentLoopServer(
           decodeURIComponent(conversationMatch[1]),
         ));
       }
+      const conversationVisibleDirectoriesMatch = url.pathname.match(/^\/v1\/conversations\/([^/]+)\/visible-directories$/);
+      if (request.method === "PATCH" && conversationVisibleDirectoriesMatch !== null) {
+        const body = requireRecord(await readJson(request));
+        return sendJson(response, 200, {
+          conversation: await dependencies.runs.updateConversationVisibleDirectories(
+            user.id,
+            decodeURIComponent(conversationVisibleDirectoriesMatch[1]),
+            body.visibleDirectories,
+          ),
+        });
+      }
       if (request.method === "DELETE" && conversationMatch !== null) {
         dependencies.runs.deleteConversation(user.id, decodeURIComponent(conversationMatch[1]));
         return sendJson(response, 204, undefined);
@@ -177,6 +200,22 @@ export function createAgentLoopServer(
       const runEventsStreamMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/events\/stream$/);
       if (request.method === "GET" && runEventsStreamMatch !== null) {
         return streamRunEvents(request, response, dependencies, user.id, decodeURIComponent(runEventsStreamMatch[1]));
+      }
+      const runCancelMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && runCancelMatch !== null) {
+        return sendJson(response, 200, {
+          run: dependencies.runs.cancel(user.id, decodeURIComponent(runCancelMatch[1])),
+        });
+      }
+      const runArtifactPreviewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/artifacts\/([a-f0-9]{64})\/preview$/);
+      if (request.method === "GET" && runArtifactPreviewMatch !== null) {
+        return sendJson(response, 200, {
+          preview: await dependencies.runs.previewProcessArtifact(
+            user.id,
+            decodeURIComponent(runArtifactPreviewMatch[1]),
+            runArtifactPreviewMatch[2],
+          ),
+        });
       }
       const runArtifactMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/artifacts\/([a-f0-9]{64})$/);
       if (request.method === "GET" && runArtifactMatch !== null) {
@@ -351,6 +390,71 @@ function streamRunEvents(
     unsubscribe();
     if (!response.writableEnded) response.end();
   });
+}
+
+interface LocalDirectoryListing {
+  readonly currentPath: string;
+  readonly parentPath?: string;
+  readonly entries: readonly LocalDirectoryEntry[];
+}
+
+interface LocalDirectoryEntry {
+  readonly name: string;
+  readonly path: string;
+}
+
+async function listLocalDirectories(pathValue: string | undefined): Promise<LocalDirectoryListing> {
+  const requested = pathValue?.trim() || homedir() || process.cwd();
+  if (!isAbsolute(requested)) throw badRequest("path must be an absolute directory path");
+  const currentPath = await fs.realpath(resolve(requested)).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw badRequest("Directory does not exist");
+    throw error;
+  });
+  const stat = await fs.lstat(currentPath);
+  if (stat.isSymbolicLink()) throw badRequest("Directory cannot be a symbolic link");
+  if (!stat.isDirectory()) throw badRequest("path must be a directory");
+  const entries = await directoryEntries(currentPath);
+  const parent = dirname(currentPath);
+  return {
+    currentPath,
+    ...(parent === currentPath ? {} : { parentPath: parent }),
+    entries,
+  };
+}
+
+async function directoryEntries(currentPath: string): Promise<LocalDirectoryEntry[]> {
+  const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "EACCES" || error.code === "EPERM") return [];
+    throw error;
+  });
+  const directories: LocalDirectoryEntry[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const child = resolve(currentPath, entry.name);
+    const stat = await fs.lstat(child).catch(() => undefined);
+    if (stat === undefined || stat.isSymbolicLink() || !stat.isDirectory()) continue;
+    if (await isHiddenDirectory(child, entry.name)) continue;
+    directories.push({ name: entry.name, path: child });
+  }
+  return directories.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
+}
+
+async function isHiddenDirectory(path: string, name: string): Promise<boolean> {
+  if (name.startsWith(".")) return true;
+  if (process.platform === "darwin") return isHiddenDarwinDirectory(path);
+  if (process.platform === "win32") return isHiddenWindowsDirectory(path);
+  return false;
+}
+
+async function isHiddenDarwinDirectory(path: string): Promise<boolean> {
+  const { stdout } = await execFileAsync("stat", ["-f", "%Sf", path]).catch(() => ({ stdout: "" }));
+  return String(stdout).split(",").map((item) => item.trim().toLowerCase()).includes("hidden");
+}
+
+async function isHiddenWindowsDirectory(path: string): Promise<boolean> {
+  const { stdout } = await execFileAsync("attrib", [path], { windowsHide: true }).catch(() => ({ stdout: "" }));
+  const attributeColumn = String(stdout).split(/\r?\n/, 1)[0]?.slice(0, 16) ?? "";
+  return /[HS]/i.test(attributeColumn);
 }
 
 function sendJson(response: ServerResponse, status: number, payload: unknown): void {

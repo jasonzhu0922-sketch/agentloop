@@ -7,7 +7,20 @@ const MAX_PACKAGE_FILES = 10_000;
 const MAX_PACKAGE_BYTES = 256 * 1024 * 1024;
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_SKILL_INSTRUCTION_BYTES = 200_000;
-const IGNORED_DIRECTORY_NAMES = new Set([".git", "node_modules"]);
+const PRESERVED_NON_PACKAGE_DIRECTORY_NAMES = new Set([".git", "node_modules"]);
+const TRANSIENT_DIRECTORY_NAMES = new Set([
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".workbuddy",
+  "__pycache__",
+]);
+const IGNORED_DIRECTORY_NAMES = new Set([
+  ...PRESERVED_NON_PACKAGE_DIRECTORY_NAMES,
+  ...TRANSIENT_DIRECTORY_NAMES,
+]);
+const TRANSIENT_FILE_NAMES = new Set([".DS_Store"]);
+const TRANSIENT_FILE_EXTENSIONS = new Set([".pyc", ".pyo"]);
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export interface SkillPackageInspection {
@@ -28,6 +41,7 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
   });
   const rootStat = await fs.stat(root);
   if (!rootStat.isDirectory()) throw badRequest("Skill package source must be a directory");
+  await cleanTransientPackageArtifacts(root);
 
   const files: string[] = [];
   let totalBytes = 0;
@@ -92,6 +106,65 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
     totalBytes,
     files,
   };
+}
+
+async function cleanTransientPackageArtifacts(root: string): Promise<void> {
+  const visit = async (current: string): Promise<void> => {
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.includes("\0")) continue;
+      const target = resolve(current, entry.name);
+      if (TRANSIENT_DIRECTORY_NAMES.has(entry.name)) {
+        await removeTransientPackagePath(current, target);
+        continue;
+      }
+      if (isTransientFileName(entry.name)) {
+        await removeTransientPackagePath(current, target);
+        continue;
+      }
+      if (entry.isDirectory() && !entry.isSymbolicLink() && !PRESERVED_NON_PACKAGE_DIRECTORY_NAMES.has(entry.name)) {
+        await visit(target);
+      }
+    }
+  };
+  await visit(root).catch((error) => {
+    throw invalidPackage(`Skill package transient cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  });
+}
+
+async function removeTransientPackagePath(parent: string, target: string): Promise<void> {
+  await withWritableDirectory(parent, async () => {
+    await makeWritableForRemoval(target);
+    await fs.rm(target, { recursive: true, force: true });
+  });
+}
+
+async function withWritableDirectory<T>(directory: string, operation: () => Promise<T>): Promise<T> {
+  const stat = await fs.stat(directory);
+  const originalMode = stat.mode & 0o777;
+  const writableMode = originalMode | 0o700;
+  if (writableMode !== originalMode) await fs.chmod(directory, writableMode);
+  try {
+    return await operation();
+  } finally {
+    if (writableMode !== originalMode) await fs.chmod(directory, originalMode).catch(() => undefined);
+  }
+}
+
+async function makeWritableForRemoval(target: string): Promise<void> {
+  const stat = await fs.lstat(target).catch(() => undefined);
+  if (stat === undefined || stat.isSymbolicLink()) return;
+  if (!stat.isDirectory()) return;
+  await fs.chmod(target, (stat.mode & 0o777) | 0o700).catch(() => undefined);
+  const entries = await fs.readdir(target, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    await makeWritableForRemoval(resolve(target, entry.name));
+  }
+}
+
+function isTransientFileName(name: string): boolean {
+  if (TRANSIENT_FILE_NAMES.has(name)) return true;
+  return [...TRANSIENT_FILE_EXTENSIONS].some((extension) => name.endsWith(extension));
 }
 
 export async function copySkillPackage(

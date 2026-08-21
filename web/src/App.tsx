@@ -5,7 +5,7 @@ import { AuthScreen } from "./components/AuthScreen";
 import { Sidebar } from "./components/Sidebar";
 import { ConversationView } from "./components/ConversationView";
 import { Composer } from "./components/Composer";
-import { DetailsPanel } from "./components/DetailsPanel";
+import { ArtifactsPanel } from "./components/DetailsPanel";
 
 function Shell(): React.ReactNode {
   const { state, actions } = useAgentLoop();
@@ -34,19 +34,16 @@ function Shell(): React.ReactNode {
             <span className="status-pill">
               <i className="status-dot" /> {modelLabel(state.models, state.selectedModelKey || state.defaultModelKey)}
             </span>
-            <button type="button" className="chip-btn" onClick={() => actions.toggleDetails()}>
-              {state.showDetails ? "收起详情" : "详情"}
-            </button>
           </div>
         </header>
-        <div className={"main-grid" + (state.showDetails ? " has-details" : "")}>
+        <div className="main-grid">
           <section className="conversation">
             <div className="conversation-scroll">
               <ConversationView />
             </div>
             <Composer />
           </section>
-          {state.showDetails ? <DetailsPanel /> : null}
+          <ArtifactsPanel />
         </div>
       </main>
     </div>

@@ -47,6 +47,11 @@ export class SkillRepository {
       .all(ownerUserId) as unknown as SkillRow[];
   }
 
+  listPackageSkills(): SkillRow[] {
+    return this.connection.prepare(`SELECT ${SKILL_COLUMNS} FROM skills WHERE source_kind = 'package' ORDER BY owner_user_id, name`)
+      .all() as unknown as SkillRow[];
+  }
+
   findByIdAndOwner(skillId: string, ownerUserId: string): SkillRow | undefined {
     return this.connection.prepare(`SELECT ${SKILL_COLUMNS} FROM skills WHERE id = ? AND owner_user_id = ?`)
       .get(skillId, ownerUserId) as SkillRow | undefined;
@@ -94,6 +99,48 @@ export class SkillRepository {
         input.contentHash,
         input.now,
         input.now,
+      );
+    } catch (error) {
+      if (String(error).includes("UNIQUE constraint failed")) {
+        throw conflict(`A private skill named "${input.name}" already exists`);
+      }
+      throw error;
+    }
+  }
+
+  updatePackageMetadata(input: {
+    id: string;
+    name: string;
+    description: string;
+    instructions: string;
+    packageHash: string;
+    packageFileCount: number;
+    packageTotalBytes: number;
+    now: number;
+  }): void {
+    try {
+      this.connection.prepare(`
+        UPDATE skills
+        SET name = ?,
+            description = ?,
+            instructions = ?,
+            package_hash = ?,
+            package_file_count = ?,
+            package_total_bytes = ?,
+            content_hash = ?,
+            version = version + 1,
+            updated_at = ?
+        WHERE id = ? AND source_kind = 'package'
+      `).run(
+        input.name,
+        input.description,
+        input.instructions,
+        input.packageHash,
+        input.packageFileCount,
+        input.packageTotalBytes,
+        input.packageHash,
+        input.now,
+        input.id,
       );
     } catch (error) {
       if (String(error).includes("UNIQUE constraint failed")) {

@@ -1,5 +1,5 @@
-import { eventTone } from "../lib/format";
-import { plannedMap, toolActivityItems, toolRowLabel } from "../lib/live";
+import { plannedMap, toolActivityItems } from "../lib/live";
+import { translateRunEvent } from "../lib/event-translator";
 import type { RunEvent } from "../lib/types";
 
 export function ToolActivity({ events }: { readonly events: readonly RunEvent[] }): React.ReactNode {
@@ -9,12 +9,17 @@ export function ToolActivity({ events }: { readonly events: readonly RunEvent[] 
   const shown = list.slice(-10);
   const extra = list.length - shown.length;
   const rows = shown.map((e) => {
-    const tone = eventTone(e.type);
+    const translated = translateRunEvent(e, planned);
+    const tone = translated.tone;
     const icon = tone === "good" ? "✓" : tone === "bad" ? "✕" : "●";
     return (
       <li className={"tool-log-item " + tone} key={e.seq}>
         <span className="tool-log-icon">{icon}</span>
-        <span>{toolRowLabel(e, planned)}</span>
+        <span className="tool-log-copy">
+          <strong>{translated.title}</strong>
+          {translated.detail ? <span>{translated.detail}</span> : null}
+          <code>{translated.rawType}</code>
+        </span>
       </li>
     );
   });

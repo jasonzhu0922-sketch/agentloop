@@ -1,12 +1,17 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { createComputerTools, DANGEROUS_COMPUTER_TOOL_NAMES } from "../computer/computer-tools.ts";
+import { createVisibleDirectoryTools } from "../computer/visible-directory-tools.ts";
 import { admitPlan, hasFileProducer } from "../planning/admission.ts";
-import { ModelStepAssessor } from "../planning/assessor.ts";
+import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import type {
+  AssessmentProfileId,
+  ConversationFailedBoundary,
+  ConversationReusableArtifact,
+  ConversationWorkingSet,
   ExecutionPlan,
   Planner,
   PlanRevisionAssessor,
@@ -37,6 +42,8 @@ import type {
   ModelStreamSink,
   RuntimeContextSnapshot,
   RuntimeEvent,
+  SkillExecutionRootGrant,
+  VisibleDirectoryGrant,
 } from "./contracts.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
@@ -58,7 +65,9 @@ import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
   collectProcessArtifacts,
   readProcessArtifact,
+  previewProcessArtifact,
   type ProcessArtifact,
+  type ProcessArtifactPreview,
 } from "./process-artifacts.ts";
 import { executionOperationProfile } from "./operation-profiles.ts";
 import { ToolRegistry } from "./tool-registry.ts";
@@ -81,6 +90,9 @@ export const DEFAULT_RUNNER_SYSTEM_PROMPT =
 /** Server-wide default model-turn budget per Plan step. */
 export const DEFAULT_MAX_STEPS = 12;
 
+const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
+const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
+
 export interface RunRecord {
   readonly id: string;
   readonly ownerUserId: string;
@@ -100,6 +112,7 @@ export interface RunRecord {
 export interface ConversationSummary {
   readonly id: string;
   readonly title: string;
+  readonly visibleDirectories: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly runCount: number;
@@ -118,6 +131,7 @@ interface ExecuteOptions {
   readonly conversationId?: string;
   readonly conversationIntent?: "auto";
   readonly modelKey?: string;
+  readonly visibleDirectories: readonly string[];
 }
 
 export interface RecoveryDetail {
@@ -135,6 +149,7 @@ export class RunService {
   private readonly modelFactory: ModelFactory;
   private readonly plannerFactory: PlannerFactory;
   private readonly assessorFactory: AssessorFactory;
+  private readonly defaultAssessmentPolicyEnabled: boolean;
   private readonly recoveryPlannerFactory: RecoveryPlannerFactory;
   private readonly planRevisionAssessorFactory: PlanRevisionAssessorFactory;
   private readonly systemPrompt: string;
@@ -151,6 +166,7 @@ export class RunService {
   private readonly recovery: RecoveryRepository;
   private readonly eventHub = new RunEventHub();
   private readonly runEventLogSink?: RunEventLogSink;
+  private readonly activeRunControllers = new Map<string, AbortController>();
 
   constructor(options: {
     database: SqlConnection;
@@ -175,6 +191,7 @@ export class RunService {
     this.skills = options.skills;
     this.modelFactory = options.modelFactory;
     this.plannerFactory = options.plannerFactory ?? ((model) => new ModelPlanner(model));
+    this.defaultAssessmentPolicyEnabled = options.assessorFactory === undefined;
     this.assessorFactory = options.assessorFactory ?? ((model) => new ModelStepAssessor(model));
     this.recoveryPlannerFactory = options.recoveryPlannerFactory ?? ((model) => new ModelRecoveryPlanner(model));
     this.planRevisionAssessorFactory = options.planRevisionAssessorFactory ?? ((model) => new ModelPlanRevisionAssessor(model));
@@ -244,6 +261,41 @@ export class RunService {
     return toRunRecord(row);
   }
 
+  cancel(actorUserId: string, runId: string): RunRecord {
+    const run = this.get(actorUserId, runId);
+    if (run.status !== "running") return run;
+    const plan = optionalPlanByRun(this.plans, runId);
+    const controller = this.activeRunControllers.get(runId);
+    const aborted = controller !== undefined;
+    this.actions.cancelDispatchedForRun(runId);
+    if (plan !== undefined) {
+      for (const step of plan.steps) {
+        if (step.status === "running") this.plans.failStep(plan.id, step.id, "Run was cancelled by the user");
+      }
+    }
+    this.terminal.commitStopped({
+      runId,
+      ...(plan === undefined ? {} : { planId: plan.id }),
+      status: "cancelled",
+      reasonCode: "user_cancelled",
+    });
+    this.appendRunEvent(runId, {
+      type: "run.cancellation_requested",
+      data: { runId, actorUserId, abortedActiveExecution: aborted },
+    });
+    this.appendRunEvent(runId, {
+      type: "run.cancelled",
+      data: {
+        runId,
+        ...(plan === undefined ? {} : { planId: plan.id }),
+        code: "CANCELLED",
+        message: "Run was cancelled by the user",
+      },
+    });
+    controller?.abort();
+    return this.get(actorUserId, runId);
+  }
+
   /** Most-recent-first run history for one user, bounded for the conversation list. */
   list(actorUserId: string, limitValue?: unknown): RunRecord[] {
     const limit = optionalPositiveInteger(limitValue, "limit", 200, 500);
@@ -256,14 +308,7 @@ export class RunService {
     const rows = this.runs.listConversationSummaries(actorUserId);
     return rows.map((row) => {
       const last = this.runs.lastTopLevelStatus(row.id);
-      return {
-        id: row.id,
-        title: row.title,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        runCount: row.run_count,
-        lastStatus: last?.status ?? null,
-      };
+      return toConversationSummary(row, row.run_count, last?.status ?? null);
     });
   }
 
@@ -277,19 +322,33 @@ export class RunService {
     const rows = this.runs.topLevelRunsInConversation(conversationId);
     const last = this.runs.lastTopLevelStatus(conversationId);
     return {
-      conversation: {
-        id: conversation.id,
-        title: conversation.title,
-        createdAt: conversation.created_at,
-        updatedAt: conversation.updated_at,
-        runCount: rows.length,
-        lastStatus: last?.status ?? null,
-      },
+      conversation: toConversationSummary(conversation, rows.length, last?.status ?? null),
       runs: rows.map(toRunRecord),
     };
   }
 
+  async updateConversationVisibleDirectories(
+    actorUserId: string,
+    conversationId: string,
+    paths: unknown,
+  ): Promise<ConversationSummary> {
+    const visibleDirectories = await resolveVisibleDirectories(parseVisibleDirectoryPaths(paths));
+    const row = this.runs.setConversationVisibleDirectories(
+      actorUserId,
+      conversationId,
+      visibleDirectories.map((item) => item.path),
+      Date.now(),
+    );
+    const last = this.runs.lastTopLevelStatus(conversationId);
+    return toConversationSummary(
+      row,
+      this.runs.topLevelRunsInConversation(conversationId).length,
+      last?.status ?? null,
+    );
+  }
+
   deleteConversation(actorUserId: string, conversationId: string): void {
+    this.actions.reconcileRunningRuns();
     this.runs.deleteConversation(actorUserId, conversationId);
   }
 
@@ -318,6 +377,119 @@ export class RunService {
       if (row.output !== null) messages.push({ role: "assistant", content: row.output });
     }
     return capConversationHistory(messages);
+  }
+
+  private async buildConversationWorkingSet(conversationId: string): Promise<ConversationWorkingSet | undefined> {
+    const allRuns = this.runs.topLevelRunsInConversation(conversationId);
+    if (allRuns.length === 0) return undefined;
+    const consideredRuns = allRuns.slice(-CONVERSATION_WORKING_SET_RUN_LIMIT);
+    const planCursors: Array<ConversationWorkingSet["planCursors"][number]> = [];
+    const reusableArtifacts: ConversationReusableArtifact[] = [];
+    const failedBoundaries: ConversationFailedBoundary[] = [];
+    const requiredSkillIds = new Set<string>();
+    const requiredToolNames = new Set<string>();
+    let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
+
+    for (const run of consideredRuns) {
+      const events = this.eventsFromRows(this.runs.eventsByRun(run.id));
+      const outcome = this.outcomeForRun(run.id);
+      const failure = failureBoundaryForRun(run, outcome, events);
+      if (failure !== undefined) failedBoundaries.push(failure);
+
+      let plan: ExecutionPlan | undefined;
+      try {
+        plan = this.plans.getByRun(run.id);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
+      }
+      if (plan !== undefined) {
+        const cursor = {
+          runId: run.id,
+          planId: plan.id,
+          goal: plan.goal,
+          status: plan.status,
+          selectedSkillIds: plan.selectedSkillIds,
+          steps: plan.steps
+            .filter((step) => step.retiredAt === undefined)
+            .map((step) => ({
+              id: step.id,
+              position: step.position,
+              status: step.status,
+              objective: step.objective,
+              dependencies: step.dependencies,
+              skillIds: step.skillIds,
+              recommendedToolNames: step.requiredToolNames,
+              ...(step.output === undefined ? {} : { output: truncateWorkingSetText(step.output, 1_200) }),
+              ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
+            })),
+        };
+        planCursors.push(cursor);
+        const unfinishedSteps = plan.steps.filter((step) =>
+          step.retiredAt === undefined && step.status !== "completed"
+        );
+        if (unfinishedSteps.length > 0 || run.status !== "completed") {
+          activeGoal = {
+            runId: run.id,
+            planId: plan.id,
+            goal: plan.goal,
+            status: plan.status,
+            unfinished: true,
+            ...(outcome?.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
+          };
+          for (const step of unfinishedSteps) {
+            for (const skillId of step.skillIds) requiredSkillIds.add(skillId);
+            for (const toolName of step.requiredToolNames) requiredToolNames.add(toolName);
+          }
+        }
+      } else if (run.status !== "completed") {
+        activeGoal = {
+          runId: run.id,
+          goal: run.input,
+          status: run.status,
+          unfinished: true,
+          ...(outcome?.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
+        };
+      }
+
+      const sourceByPath = artifactSourceByPath(events, this.actions.list(run.id));
+      const artifacts = await collectProcessArtifacts({
+        runId: run.id,
+        workspaceRoot: this.runWorkspaceRoot(toRunRecord(run)),
+        runCreatedAt: run.created_at,
+        events,
+      });
+      for (const artifact of artifacts) {
+        const source = sourceByPath.get(artifact.path);
+        reusableArtifacts.push({
+          runId: run.id,
+          path: artifact.path,
+          name: artifact.name,
+          bytes: artifact.bytes,
+          mimeType: artifact.mimeType,
+          sourceTool: artifact.sourceTool,
+          ...(source?.toolCallId === undefined ? {} : { sourceToolCallId: source.toolCallId }),
+          ...(source?.stepId === undefined ? {} : { sourcePlanStepId: source.stepId }),
+          reusable: true,
+        });
+      }
+    }
+
+    const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
+    const resumeSuggestion = buildResumeSuggestion(activeGoal, planCursors, boundedArtifacts, failedBoundaries);
+    return {
+      schema: "conversation.workset/v1",
+      conversationId,
+      runCount: allRuns.length,
+      ...(activeGoal === undefined ? {} : { activeGoal }),
+      planCursors,
+      reusableArtifacts: boundedArtifacts,
+      failedBoundaries,
+      requiredCapabilities: {
+        skillIds: [...requiredSkillIds],
+        toolNames: [...requiredToolNames],
+      },
+      ...(resumeSuggestion === undefined ? {} : { resumeSuggestion }),
+    };
   }
 
   private runWorkspaceRoot(run: Pick<RunRecord, "conversationId">): string {
@@ -393,12 +565,28 @@ export class RunService {
   events(actorUserId: string, runId: string): StoredRunEvent[] {
     this.get(actorUserId, runId);
     const rows = this.runs.eventsByRun(runId);
+    return this.eventsFromRows(rows);
+  }
+
+  private eventsFromRows(rows: readonly RunEventRow[]): StoredRunEvent[] {
     return rows.map((row) => ({
       seq: row.seq,
       type: row.type,
       data: JSON.parse(row.payload_json) as Record<string, unknown>,
       createdAt: row.created_at,
     }));
+  }
+
+  private outcomeForRun(runId: string): { status: string; reasonCode: string; planId?: string } | undefined {
+    const row = this.database.prepare(`
+      SELECT status, reason_code, plan_id FROM run_outcomes WHERE run_id = ?
+    `).get(runId) as { status: string; reason_code: string; plan_id: string | null } | undefined;
+    if (row === undefined) return undefined;
+    return {
+      status: row.status,
+      reasonCode: row.reason_code,
+      ...(row.plan_id === null ? {} : { planId: row.plan_id }),
+    };
   }
 
   /**
@@ -426,6 +614,17 @@ export class RunService {
     const run = this.get(actorUserId, runId);
     try {
       return { artifact, content: await readProcessArtifact({ artifact, workspaceRoot: this.runWorkspaceRoot(run) }) };
+    } catch {
+      throw notFound("Process artifact");
+    }
+  }
+
+  async previewProcessArtifact(actorUserId: string, runId: string, artifactId: string): Promise<ProcessArtifactPreview> {
+    const artifact = (await this.processArtifacts(actorUserId, runId)).find((item) => item.id === artifactId);
+    if (artifact === undefined) throw notFound("Process artifact");
+    const run = this.get(actorUserId, runId);
+    try {
+      return await previewProcessArtifact({ artifact, workspaceRoot: this.runWorkspaceRoot(run) });
     } catch {
       throw notFound("Process artifact");
     }
@@ -565,7 +764,6 @@ export class RunService {
       events: this.events(actorUserId, runId),
     });
     const privateSkills = await this.skills.resolveForConversation(actorUserId);
-    await this.skills.assertIntegrity(privateSkills);
     const allTools = this.createTools(privateSkills);
     assertNoDuplicateTools(allTools);
     const allowedToolNames = this.recoveryAvailableToolNames(privateSkills, run.allowDangerousTools);
@@ -600,8 +798,10 @@ export class RunService {
         plan,
         model,
         assessor,
+        defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
         registry: new ToolRegistry(allTools),
         emit,
+        visibleDirectories: [],
         ...(run.conversationId === undefined
           ? {}
           : { conversationHistory: this.conversationHistory(run.conversationId) }),
@@ -613,9 +813,8 @@ export class RunService {
         },
         onStepChanged: (stepId) => { actionScope.stepId = stepId; },
       });
-      await this.skills.assertIntegrity(privateSkills);
       const output = finalPlanOutput(resumedPlan);
-      this.terminal.commitCompleted(runId, resumedPlan.id, output);
+      commitCompletedPlan(this.terminal, this.plans.assessments(resumedPlan.id), resumedPlan, runId, output);
       await emit({ type: "run.completed", data: { runId, planId: resumedPlan.id, output, recovered: true } });
       return this.get(actorUserId, runId);
     } catch (error) {
@@ -655,14 +854,31 @@ export class RunService {
     onRunStarted?: (run: RunRecord) => void,
   ): Promise<RunRecord> {
     const runId = randomUUID();
+    const runController = new AbortController();
     const modelKey = this.resolveRunModelKey(executeOptions.modelKey);
+    const requestedVisibleDirectories = await resolveVisibleDirectories(executeOptions.visibleDirectories);
     const conversationId = this.resolveConversation(actorUserId, input, executeOptions.conversationId);
+    const conversation = this.runs.findConversation(actorUserId, conversationId);
+    if (conversation === undefined) throw notFound("Conversation");
+    const boundVisibleDirectories = await resolveVisibleDirectories(conversationVisibleDirectoryPaths(conversation));
+    const visibleDirectories = mergeVisibleDirectories(boundVisibleDirectories, requestedVisibleDirectories);
+    if (requestedVisibleDirectories.length > 0) {
+      this.runs.setConversationVisibleDirectories(
+        actorUserId,
+        conversationId,
+        visibleDirectories.map((item) => item.path),
+        Date.now(),
+      );
+    }
     const runWorkspaceRoot = conversationId === undefined
       ? this.workspaceRoot
       : await this.ensureConversationWorkspace(conversationId);
     const conversationHistory = conversationId === undefined
       ? undefined
       : this.conversationHistory(conversationId);
+    const conversationWorkingSet = conversationId === undefined
+      ? undefined
+      : await this.buildConversationWorkingSet(conversationId);
     this.runs.insertRun({
       id: runId,
       ownerUserId: actorUserId,
@@ -672,6 +888,7 @@ export class RunService {
       input,
       createdAt: Date.now(),
     });
+    this.activeRunControllers.set(runId, runController);
 
     const emit = async (event: RuntimeEvent): Promise<void> => {
       this.appendRunEvent(runId, event);
@@ -686,6 +903,7 @@ export class RunService {
         ...(modelKey === undefined ? {} : { modelKey }),
         ...(conversationId === undefined ? {} : { conversationId }),
         workspaceRoot: runWorkspaceRoot,
+        visibleDirectories,
       },
     });
     onRunStarted?.(this.get(actorUserId, runId));
@@ -693,9 +911,11 @@ export class RunService {
     let planId: string | undefined;
     let runningStepId: string | undefined;
     try {
+      throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
       const responseOnly = executeOptions.conversationIntent === "auto"
-        && await classifyConversationTurn(rawModel, input, conversationHistory);
+        && await classifyConversationTurn(rawModel, input, conversationHistory, runController.signal);
+      throwIfRunCancelled(this.runs, runId, runController.signal);
       if (executeOptions.conversationIntent === "auto") {
         await emit({
           type: "conversation.intent.classified",
@@ -705,7 +925,6 @@ export class RunService {
       const privateSkills = responseOnly
         ? []
         : await this.skills.resolveForConversation(actorUserId);
-      await this.skills.assertIntegrity(privateSkills);
       const discoveredByName = new Map(this.skills.discovered().map((skill) => [skill.name, skill]));
       for (const skill of privateSkills) {
         if (skill.sourceKind !== "package" || skill.package === undefined) continue;
@@ -720,7 +939,7 @@ export class RunService {
               skillId: skill.id,
               name: skill.name,
               packageHash: discovered.packageHash,
-              privatePackageRoot: skill.package.root,
+              packageRoot: skill.package.root,
               ...(discovered.sourceUrl === undefined ? {} : {
                 sourceUrl: discovered.sourceUrl,
                 sourceRevision: discovered.sourceRevision,
@@ -744,7 +963,7 @@ export class RunService {
         });
       }
 
-      const allTools = this.createTools(privateSkills);
+      const allTools = this.createTools(privateSkills, visibleDirectories);
       assertNoDuplicateTools(allTools);
       const allowedToolNames = responseOnly
         ? []
@@ -758,6 +977,7 @@ export class RunService {
         ...(conversationId === undefined ? {} : { conversationId }),
         depth: 0,
         workspaceRoot: runWorkspaceRoot,
+        visibleDirectories,
         allowedToolNames,
         allowedSkillIds: privateSkills.map((skill) => skill.id),
       });
@@ -767,7 +987,7 @@ export class RunService {
       const planningSkills = responseOnly ? [] : selectPlanningSkills(
         privateSkills,
         input,
-        [],
+        conversationWorkingSet?.requiredCapabilities.skillIds ?? [],
       );
       if (planningSkills.some((skill) => skillRequiresFileOutput(skill)) && !canProduceFiles(allowedToolNames)) {
         throw new AppError(
@@ -791,13 +1011,17 @@ export class RunService {
         availableSkills: planningSkills,
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
+        visibleDirectories,
         ...(responseOnly ? { responseOnly: true } : {}),
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
-      }, undefined, emit);
+        ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
+      }, runController.signal, emit);
+      throwIfRunCancelled(this.runs, runId, runController.signal);
       await emit({
         type: "plan.proposed",
         data: { goal: proposal.goal, selectedSkillIds: proposal.selectedSkillIds, stepCount: proposal.steps.length },
       });
+      throwIfRunCancelled(this.runs, runId, runController.signal);
       let plan = admitPlan({
         runId,
         proposal,
@@ -823,30 +1047,21 @@ export class RunService {
         plan,
         model,
         assessor,
+        defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
         registry,
         emit,
+        visibleDirectories,
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
+        signal: runController.signal,
         onStepChanged: (stepId) => {
           runningStepId = stepId;
           actionScope.stepId = stepId;
         },
       });
 
-      await this.skills.assertIntegrity(privateSkills);
-      for (const skill of privateSkills) {
-        if (skill.sourceKind !== "package" || skill.package === undefined) continue;
-        await emit({
-          type: "skill.package.verified",
-          data: {
-            phase: "terminal",
-            skillId: skill.id,
-            packageHash: skill.package.packageHash,
-            ...(skill.package.revision === undefined ? {} : { sourceRevision: skill.package.revision }),
-          },
-        });
-      }
       const output = finalPlanOutput(plan);
-      this.terminal.commitCompleted(runId, plan.id, output);
+      throwIfRunCancelled(this.runs, runId, runController.signal);
+      commitCompletedPlan(this.terminal, this.plans.assessments(plan.id), plan, runId, output);
       await emit({ type: "run.completed", data: { runId, planId: plan.id, output } });
       return this.get(actorUserId, runId);
     } catch (error) {
@@ -854,30 +1069,40 @@ export class RunService {
       const appError = error instanceof AppError
         ? error
         : new AppError("INTERNAL_ERROR", "Run failed", 500);
-      if (planId !== undefined && runningStepId !== undefined) {
-        this.plans.failStep(planId, runningStepId, appError.message);
+      if (this.runs.get(runId)?.status === "running") {
+        if (planId !== undefined && runningStepId !== undefined) {
+          this.plans.failStep(planId, runningStepId, appError.message);
+        }
+        const status = appError.code === "CANCELLED" ? "cancelled" : "failed";
+        this.terminal.commitStopped({ runId, planId, status, reasonCode: appError.code });
+        await emit({
+          type: status === "cancelled" ? "run.cancelled" : "run.failed",
+          data: {
+            runId,
+            planId,
+            code: appError.code,
+            message: appError.message,
+            ...(appError.details === undefined ? {} : { details: appError.details }),
+          },
+        });
       }
-      const status = appError.code === "CANCELLED" ? "cancelled" : "failed";
-      this.terminal.commitStopped({ runId, planId, status, reasonCode: appError.code });
-      await emit({
-        type: status === "cancelled" ? "run.cancelled" : "run.failed",
-        data: {
-          runId,
-          planId,
-          code: appError.code,
-          message: appError.message,
-          ...(appError.details === undefined ? {} : { details: appError.details }),
-        },
-      });
       throw new AppError(appError.code, appError.message, appError.status, {
         ...(appError.details ?? {}),
         runId,
       });
+    } finally {
+      if (this.activeRunControllers.get(runId) === runController) {
+        this.activeRunControllers.delete(runId);
+      }
     }
   }
 
-  private createTools(privateSkills: readonly PrivateSkill[]): RuntimeTool<unknown>[] {
+  private createTools(
+    privateSkills: readonly PrivateSkill[],
+    visibleDirectories: readonly VisibleDirectoryGrant[] = [],
+  ): RuntimeTool<unknown>[] {
     const tools: RuntimeTool<unknown>[] = [...this.computerTools, ...this.pluginTools];
+    if (visibleDirectories.length > 0) tools.push(...createVisibleDirectoryTools());
     if (privateSkills.length > 0) tools.push(createSkillLoader(privateSkills));
     return tools;
   }
@@ -891,8 +1116,10 @@ export class RunService {
     plan: ExecutionPlan;
     model: ModelAdapter;
     assessor: StepAssessor;
+    defaultAssessmentPolicyEnabled: boolean;
     registry: ToolRegistry;
     emit: (event: RuntimeEvent) => Promise<void>;
+    visibleDirectories: readonly VisibleDirectoryGrant[];
     conversationHistory?: readonly ModelMessage[];
     initialRecovery?: Readonly<{
       stepId: string;
@@ -901,6 +1128,7 @@ export class RunService {
       facts: unknown;
     }>;
     onStepChanged: (stepId: string | undefined) => void;
+    signal?: AbortSignal;
   }): Promise<ExecutionPlan> {
     let plan = input.plan;
     let forcedStepId = input.initialRecovery?.stepId;
@@ -922,17 +1150,16 @@ export class RunService {
         if (skill === undefined) throw new AppError("PLAN_NOT_ADMITTED", `Skill ${skillId} disappeared`, 409);
         return skill;
       });
-      await this.skills.assertIntegrity(stepSkills);
-      const stepToolNames = new Set(
-        activeStep.requiredToolNames.filter((name) => input.rootGrant.allowedToolNames.has(name)),
-      );
+      const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
       const stepGrant = createCapabilityGrant({
         actorUserId: input.actorUserId,
         runId: input.runId,
         ...(input.rootGrant.conversationId === undefined ? {} : { conversationId: input.rootGrant.conversationId }),
         depth: input.rootGrant.depth,
         ...(input.rootGrant.workspaceRoot === undefined ? {} : { workspaceRoot: input.rootGrant.workspaceRoot }),
-        allowedToolNames: stepToolNames,
+        visibleDirectories: input.visibleDirectories,
+        skillExecutionRoots,
+        allowedToolNames: input.rootGrant.allowedToolNames,
         allowedSkillIds: activeStep.skillIds,
       });
       await input.emit({
@@ -942,25 +1169,44 @@ export class RunService {
           stepId: activeStep.id,
           skillIds: activeStep.skillIds,
           toolNames: [...stepGrant.allowedToolNames],
+          recommendedToolNames: activeStep.requiredToolNames,
+          ...(skillExecutionRoots.length === 0 ? {} : {
+            skillExecutionRoots: skillExecutionRoots.map((root) => ({
+              id: root.id,
+              skillId: root.skillId,
+              name: root.name,
+              cwd: root.cwd,
+            })),
+          }),
           ...(input.initialRecovery?.stepId === activeStep.id ? { recovered: true } : {}),
         },
       });
       let assessmentAttempt = this.plans.assessments(plan.id)
         .filter((assessment) => assessment.stepId === activeStep.id).length;
+      const assessedCandidates = new Map<string, SkillComplianceAssessment>();
       const recovery = input.initialRecovery?.stepId === activeStep.id ? input.initialRecovery : undefined;
       const fileOutputStep = stepSkills.some((skill) => skillRequiresFileOutput(skill))
         || stepRequiresFileOutput(activeStep);
+      const lookupEvidenceStep = !fileOutputStep && stepCanConvergeFromLookupEvidence(activeStep);
       const result = await runAgentLoop({
         runId: input.runId,
         systemPrompt: buildStepSystemPrompt(this.systemPrompt),
         runtimeContext: recovery === undefined
-          ? buildStepRuntimeContext(activeStep, plan, stepSkills, input.rootGrant.workspaceRoot ?? this.workspaceRoot)
+          ? buildStepRuntimeContext(
+            activeStep,
+            plan,
+            stepSkills,
+            input.rootGrant.workspaceRoot ?? this.workspaceRoot,
+            input.visibleDirectories,
+            skillExecutionRoots,
+          )
           : buildRecoveredStepRuntimeContext(
             activeStep,
             plan,
             stepSkills,
             input.rootGrant.workspaceRoot ?? this.workspaceRoot,
             recovery.facts,
+            skillExecutionRoots,
           ),
         input: input.input,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -973,14 +1219,18 @@ export class RunService {
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
         maxSteps: this.maxSteps,
+        candidateRepairGraceSteps: CANDIDATE_REPAIR_GRACE_STEPS,
         ...(fileOutputStep
           ? { convergenceGraceSteps: FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
           : {}),
         ...(fileOutputStep ? { contextPolicy: FILE_OUTPUT_CONTEXT_POLICY } : {}),
         ...(fileOutputStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterFileEvidence(activeStep, context),
+        } : lookupEvidenceStep ? {
+          shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context),
         } : {}),
         emit: input.emit,
+        signal: input.signal,
         actionTracker: {
           executeToolCall: (toolAction, operation) => this.actions.execute({
             runId: input.runId,
@@ -999,7 +1249,12 @@ export class RunService {
         evaluateCandidate: async (candidate) => {
           assessmentAttempt += 1;
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
-          await this.skills.assertIntegrity(activatedStepSkills);
+          const assessmentProfile = selectAssessmentProfile(activeStep, activatedStepSkills);
+          const useProfiledRuleAssessor = input.defaultAssessmentPolicyEnabled
+            && isProfiledRuleAssessmentProfile(assessmentProfile);
+          const assessor = useProfiledRuleAssessor
+            ? new ProfiledRuleStepAssessor(assessmentProfile)
+            : input.assessor;
           const evidence: StepEvidence = {
             candidateOutput: candidate.output,
             toolCalls: candidate.toolEvidence,
@@ -1010,7 +1265,44 @@ export class RunService {
             toolCalls: candidate.projectedToolEvidence,
             modelSteps: candidate.modelSteps,
           };
-          const assessment = await input.assessor.assess({
+          const assessmentSignature = stepAssessmentSignature({
+            stepId: activeStep.id,
+            assessmentProfile,
+            activatedSkills: activatedStepSkills,
+            evidence,
+            modelEvidence,
+          });
+          const reusedAssessment = assessedCandidates.get(assessmentSignature);
+          if (reusedAssessment !== undefined) {
+            const deferredValidation = shouldDeferValidationToUser({
+              assessment: reusedAssessment,
+              assessmentAttempt,
+              step: activeStep,
+              evidence,
+            });
+            await input.emit({
+              type: "skill.compliance.assessment_reused",
+              data: {
+                planId: plan.id,
+                stepId: activeStep.id,
+                attempt: assessmentAttempt,
+                originalAttempt: reusedAssessment.attempt,
+                assessmentProfile: reusedAssessment.assessmentProfile,
+                assessmentMethod: reusedAssessment.assessmentMethod,
+                approved: reusedAssessment.approved,
+                feedback: reusedAssessment.feedback,
+                deferredValidation,
+              },
+            });
+            return {
+              approved: reusedAssessment.approved,
+              feedback: reusedAssessment.feedback,
+              deferredValidation,
+              allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(reusedAssessment),
+              assessmentReused: true,
+            };
+          }
+          const assess = () => assessor.assess({
             runId: input.runId,
             planId: plan.id,
             step: activeStep,
@@ -1018,8 +1310,21 @@ export class RunService {
             evidence,
             modelEvidence,
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
+            assessmentProfile,
             attempt: assessmentAttempt,
-          }, undefined, input.emit);
+          }, input.signal, input.emit);
+          const assessment = useProfiledRuleAssessor
+            ? await this.actions.execute({
+              runId: input.runId,
+              planId: plan.id,
+              stepId: activeStep.id,
+              kind: "assessment",
+              replayPolicy: "safe",
+              deadlineMs: 10_000,
+              metadata: { phase: "assessment", assessmentProfile, assessmentMethod: "rule" },
+            }, assess)
+            : await assess();
+          assessedCandidates.set(assessmentSignature, assessment);
           this.plans.saveAssessment(assessment);
           await input.emit({
             type: "skill.compliance.assessed",
@@ -1027,6 +1332,8 @@ export class RunService {
               planId: plan.id,
               stepId: activeStep.id,
               attempt: assessment.attempt,
+              assessmentProfile: assessment.assessmentProfile,
+              assessmentMethod: assessment.assessmentMethod,
               approved: assessment.approved,
               evidenceDigest: assessment.evidenceDigest,
               criteria: assessment.criteria,
@@ -1034,13 +1341,24 @@ export class RunService {
               feedback: assessment.feedback,
             },
           });
-          return { approved: assessment.approved, feedback: assessment.feedback };
+          return {
+            approved: assessment.approved,
+            feedback: assessment.feedback,
+            deferredValidation: shouldDeferValidationToUser({
+              assessment,
+              assessmentAttempt,
+              step: activeStep,
+              evidence,
+            }),
+            allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(assessment),
+          };
         },
       });
       const evidence: StepEvidence = {
         candidateOutput: result.output,
         toolCalls: result.toolEvidence,
         modelSteps: result.steps,
+        ...(result.completionCaveat === undefined ? {} : { completionCaveat: result.completionCaveat }),
       };
       plan = this.plans.completeStep(plan.id, activeStep.id, result.output, evidence);
       input.onStepChanged(undefined);
@@ -1063,7 +1381,6 @@ export class RunService {
       throw new AppError("PLAN_NOT_ADMITTED", "Plan revision requires the persisted current Plan", 422);
     }
     const privateSkills = await this.skills.resolveForConversation(input.run.ownerUserId);
-    await this.skills.assertIntegrity(privateSkills);
     const availableToolNames = this.recoveryAvailableToolNames(privateSkills, input.run.allowDangerousTools);
     const admitted = admitPlan({
       runId: input.run.id,
@@ -1200,6 +1517,7 @@ export class RunService {
 
 const TERMINAL_EVENT_TYPES = new Set([
   "run.started",
+  "run.cancellation_requested",
   "run.completed",
   "run.failed",
   "run.cancelled",
@@ -1232,6 +1550,7 @@ const TERMINAL_EVENT_TYPES = new Set([
   "tool.rejected",
   "candidate.approved",
   "candidate.rejected",
+  "candidate.validation_deferred",
   "assessment.turn.completed",
   "skill.activation.available",
   "skill.activated",
@@ -1265,6 +1584,8 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   addString(details, "tool", data.name);
   addString(details, "finish", data.finishReason);
   addString(details, "code", data.code);
+  addString(details, "assessmentProfile", data.assessmentProfile);
+  addString(details, "assessmentMethod", data.assessmentMethod);
   addBoolean(details, "approved", data.approved);
   addNumber(details, "attempt", data.attempt);
   addNumber(details, "maxAttempts", data.maxAttempts);
@@ -1347,8 +1668,15 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   if (type === "skill.activation.available" && Array.isArray(data.skills)) {
     details.push(`skills=${data.skills.length}`);
   }
-  if (type === "candidate.rejected" || type === "run.failed" || type === "run.cancelled" || type === "tool.failed" || type === "tool.rejected") {
-    if (type === "candidate.rejected") {
+  if (
+    type === "candidate.rejected"
+    || type === "candidate.validation_deferred"
+    || type === "run.failed"
+    || type === "run.cancelled"
+    || type === "tool.failed"
+    || type === "tool.rejected"
+  ) {
+    if (type === "candidate.rejected" || type === "candidate.validation_deferred") {
       const output = asString(data.output);
       details.push(`outputChars=${output === undefined ? 0 : output.length}`);
     }
@@ -1425,6 +1753,144 @@ function truncateForTerminal(value: string, maximum: number): string {
   return compact.length <= maximum ? compact : `${compact.slice(0, maximum - 1)}...`;
 }
 
+function truncateWorkingSetText(value: string, maximum: number): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length <= maximum ? compact : `${compact.slice(0, maximum - 1)}...`;
+}
+
+function failureBoundaryForRun(
+  run: RunRow,
+  outcome: { reasonCode: string; planId?: string } | undefined,
+  events: readonly StoredRunEvent[],
+): ConversationFailedBoundary | undefined {
+  if (run.status === "completed") return undefined;
+  const failedEvent = [...events].reverse().find((event) =>
+    event.type === "run.failed" || event.type === "run.cancelled"
+  );
+  const eventData = failedEvent?.data;
+  const code = stringField(eventData, "code") ?? run.error_code ?? outcome?.reasonCode;
+  const message = stringField(eventData, "message");
+  const planId = stringField(eventData, "planId") ?? outcome?.planId;
+  const stepId = latestFailedStepId(events);
+  return {
+    runId: run.id,
+    ...(planId === undefined ? {} : { planId }),
+    ...(stepId === undefined ? {} : { stepId }),
+    ...(code === undefined ? {} : { code }),
+    ...(message === undefined ? {} : { message: truncateWorkingSetText(message, 600) }),
+    ...(outcome?.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
+    category: failureCategory(code ?? outcome?.reasonCode ?? failedEvent?.type),
+  };
+}
+
+function artifactSourceByPath(
+  events: readonly StoredRunEvent[],
+  actions: readonly RuntimeActionRecord[],
+): Map<string, { toolCallId?: string; stepId?: string }> {
+  const toolStepByCall = new Map<string, string>();
+  for (const action of actions) {
+    if (action.kind !== "tool_call" || action.stepId === undefined) continue;
+    const toolCallId = typeof action.metadata.toolCallId === "string" ? action.metadata.toolCallId : undefined;
+    if (toolCallId !== undefined) toolStepByCall.set(toolCallId, action.stepId);
+  }
+  const result = new Map<string, { toolCallId?: string; stepId?: string }>();
+  for (const event of events) {
+    if (event.type !== "tool.completed") continue;
+    const toolCallId = stringField(event.data, "toolCallId");
+    const toolName = stringField(event.data, "toolName");
+    const parsed = parseToolResultObject(event.data.result);
+    const paths = artifactPathsFromToolResult(toolName, parsed);
+    for (const path of paths) {
+      result.set(path, {
+        ...(toolCallId === undefined ? {} : { toolCallId }),
+        ...(toolCallId === undefined || toolStepByCall.get(toolCallId) === undefined
+          ? {}
+          : { stepId: toolStepByCall.get(toolCallId) }),
+      });
+    }
+  }
+  return result;
+}
+
+function artifactPathsFromToolResult(toolName: string | undefined, result: Readonly<Record<string, unknown>> | undefined): string[] {
+  if (result === undefined) return [];
+  if (toolName === "computer_write_file") {
+    const path = typeof result.path === "string" ? result.path : undefined;
+    return path === undefined ? [] : [normalizeArtifactPath(path)];
+  }
+  if (toolName !== "computer_run_command") return [];
+  const changes = Array.isArray(result.fileChanges) ? result.fileChanges : [];
+  return changes.flatMap((item) => {
+    const record = asRecord(item);
+    const path = typeof record?.path === "string" ? record.path : undefined;
+    return path === undefined ? [] : [normalizeArtifactPath(path)];
+  });
+}
+
+function buildResumeSuggestion(
+  activeGoal: ConversationWorkingSet["activeGoal"] | undefined,
+  planCursors: ConversationWorkingSet["planCursors"],
+  reusableArtifacts: readonly ConversationReusableArtifact[],
+  failedBoundaries: readonly ConversationFailedBoundary[],
+): string | undefined {
+  if (activeGoal === undefined || activeGoal.planId === undefined) return undefined;
+  const cursor = [...planCursors].reverse().find((item) => item.planId === activeGoal.planId);
+  if (cursor === undefined) return undefined;
+  const nextStep = cursor.steps.find((step) => step.status === "failed")
+    ?? cursor.steps.find((step) => step.status === "running")
+    ?? cursor.steps.find((step) => step.status === "pending");
+  if (nextStep === undefined) return undefined;
+  const artifacts = reusableArtifacts
+    .filter((artifact) => artifact.runId === activeGoal.runId)
+    .map((artifact) => artifact.path)
+    .slice(-5);
+  const failure = [...failedBoundaries].reverse().find((item) => item.runId === activeGoal.runId);
+  return [
+    `Continue from prior Run ${shortId(activeGoal.runId)} Plan step ${nextStep.id}: ${truncateWorkingSetText(nextStep.objective, 240)}.`,
+    artifacts.length === 0 ? "" : `Reuse durable artifact(s): ${artifacts.join(", ")}.`,
+    failure === undefined ? "" : `Preserve failure boundary: ${failure.code ?? failure.reasonCode ?? failure.category}${failure.message === undefined ? "" : ` (${truncateWorkingSetText(failure.message, 160)})`}.`,
+  ].filter((item) => item.length > 0).join(" ");
+}
+
+function latestFailedStepId(events: readonly StoredRunEvent[]): string | undefined {
+  for (const event of [...events].reverse()) {
+    if (event.type !== "plan.step.failed" && event.type !== "run.failed") continue;
+    const stepId = stringField(event.data, "stepId");
+    if (stepId !== undefined) return stepId;
+  }
+  return undefined;
+}
+
+function failureCategory(code: string | undefined): ConversationFailedBoundary["category"] {
+  if (code === undefined) return "unknown";
+  if (/MODEL_ERROR|provider|HTTP 5\d\d|HTTP 4\d\d/i.test(code)) return "provider";
+  if (/PLANNING|PLAN/i.test(code)) return "planning";
+  if (/ASSESSMENT/i.test(code)) return "assessment";
+  if (/TOOL/i.test(code)) return "tool";
+  if (/CANCEL/i.test(code)) return "cancelled";
+  if (/INTERNAL|CONFLICT|BAD_REQUEST/i.test(code)) return "runtime";
+  return "unknown";
+}
+
+function parseToolResultObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    return asRecord(JSON.parse(value) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeArtifactPath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/^\.\/+/, "");
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  const record = asRecord(value);
+  const field = record?.[key];
+  return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
 export function selectPlanningSkills(
   skills: readonly PrivateSkill[],
   taskInput: string,
@@ -1445,7 +1911,13 @@ export function selectPlanningSkills(
   }));
   scored.sort((left, right) => right.score - left.score || left.index - right.index);
   const topScore = scored[0]?.score ?? 0;
-  if (topScore < MIN_PLANNING_SKILL_SCORE) return [];
+  if (topScore < MIN_PLANNING_SKILL_SCORE) {
+    if (topScore < LOW_CONFIDENCE_PLANNING_SKILL_SCORE) return [];
+    return scored
+      .filter((entry) => entry.score === topScore)
+      .slice(0, LOW_CONFIDENCE_PLANNING_SKILL_LIMIT)
+      .map((entry) => entry.skill);
+  }
   const secondScore = scored[1]?.score ?? 0;
   const strongWinner = topScore - secondScore >= STRONG_WINNER_GAP;
   const candidates = scored.filter((entry) => entry.score >= Math.max(MIN_PLANNING_SKILL_SCORE, topScore - 1));
@@ -1459,6 +1931,8 @@ export function selectPlanningSkills(
 // (for example, a web page can need frontend design as well as implementation).
 const MAX_PLANNING_SKILLS = 5;
 const MIN_PLANNING_SKILL_SCORE = 2;
+const LOW_CONFIDENCE_PLANNING_SKILL_SCORE = 1;
+const LOW_CONFIDENCE_PLANNING_SKILL_LIMIT = 2;
 const STRONG_WINNER_GAP = 2;
 
 function exactSkillMention(signal: string, skill: PrivateSkill): boolean {
@@ -1472,10 +1946,14 @@ function scorePlanningSkill(skill: PrivateSkill, signal: string, bound: boolean)
   const signalTokens = tokenizePlanningSignal(signal);
   const textTokens = new Set(tokenizePlanningSignal(text));
   let score = bound ? 5 : 0;
+  for (const alias of planningSkillAliases(skill)) {
+    if (alias.length > 0 && signal.includes(alias)) score += alias.length >= 6 ? 4 : 3;
+  }
   for (const token of signalTokens) {
     if (!textTokens.has(token)) continue;
     score += token.length >= 6 ? 2 : 1;
   }
+  score += scoreCjkSubphrases(signalTokens, textTokens);
   if (exactSkillMention(signal, skill)) score += 8;
   if (signal.includes("海报") && text.includes("poster")) score += 3;
   if (signal.includes("设计") && text.includes("design")) score += 2;
@@ -1485,6 +1963,66 @@ function scorePlanningSkill(skill: PrivateSkill, signal: string, bound: boolean)
   if (signal.includes("web") && text.includes("web")) score += 2;
   if (signal.includes("ppt") && text.includes("slide")) score += 2;
   return score;
+}
+
+function planningSkillAliases(skill: PrivateSkill): string[] {
+  const aliases = [
+    skill.name,
+    skill.name.replace(/-/g, " "),
+    ...extractTriggerAliases(skill.description),
+  ];
+  return [...new Set(aliases.map(normalizePlanningSignal).filter(Boolean))];
+}
+
+function extractTriggerAliases(description: string): string[] {
+  const aliases: string[] = [];
+  const triggerPattern = /(?:触发词|trigger(?:s)?|aliases?)[:：]([^。.;\n]+)/gi;
+  for (const match of description.matchAll(triggerPattern)) {
+    aliases.push(
+      ...match[1]
+        .split(/[、,，;；]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+  }
+  return aliases;
+}
+
+function scoreCjkSubphrases(signalTokens: readonly string[], textTokens: ReadonlySet<string>): number {
+  const signalCjkTokens = signalTokens.filter(isCjkToken);
+  if (signalCjkTokens.length === 0) return 0;
+  const textCjkTokens = [...textTokens].filter(isCjkToken);
+  let score = 0;
+  for (const signalToken of signalCjkTokens) {
+    for (const textToken of textCjkTokens) {
+      const length = longestCommonCjkSubstringLength(signalToken, textToken);
+      if (length >= 4) {
+        score += 2;
+        break;
+      }
+      if (length >= 2) {
+        score += 1;
+        break;
+      }
+    }
+  }
+  return Math.min(score, 4);
+}
+
+function isCjkToken(token: string): boolean {
+  return /[\u4e00-\u9fff]/.test(token);
+}
+
+function longestCommonCjkSubstringLength(left: string, right: string): number {
+  let best = 0;
+  for (let start = 0; start < left.length; start += 1) {
+    for (let end = start + 2; end <= left.length; end += 1) {
+      const phrase = left.slice(start, end);
+      if (!isCjkToken(phrase) || !right.includes(phrase)) continue;
+      best = Math.max(best, phrase.length);
+    }
+  }
+  return best;
 }
 
 function normalizePlanningSignal(value: string): string {
@@ -1546,7 +2084,11 @@ class ActionTrackedModel implements ModelAdapter {
       replayPolicy: "safe",
       deadlineMs: this.operationTimeoutMs + 15_000,
       metadata: { phase: invocation.phase },
-    }, () => this.model.complete(invocation, signal));
+    }, async () => {
+      const response = await this.model.complete(invocation, signal);
+      throwIfAbortSignal(signal);
+      return response;
+    });
   }
 
   streamComplete(
@@ -1564,10 +2106,18 @@ class ActionTrackedModel implements ModelAdapter {
       replayPolicy: "safe",
       deadlineMs: this.operationTimeoutMs + 15_000,
       metadata: { phase: invocation.phase },
-    }, () => stream === undefined
-      ? this.model.complete(invocation, signal)
-      : stream.call(this.model, invocation, sink, signal));
+    }, async () => {
+      const response = stream === undefined
+        ? await this.model.complete(invocation, signal)
+        : await stream.call(this.model, invocation, sink, signal);
+      throwIfAbortSignal(signal);
+      return response;
+    });
   }
+}
+
+function throwIfAbortSignal(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new AppError("CANCELLED", "Run was cancelled", 409);
 }
 
 function actionKindForPhase(phase: RuntimeContextSnapshot["phase"]): Exclude<RuntimeActionRecord["kind"], "recovery_review"> {
@@ -1595,6 +2145,63 @@ function canProduceFiles(allowedToolNames: ReadonlySet<string>): boolean {
   return hasFileProducer(allowedToolNames);
 }
 
+function commitCompletedPlan(
+  terminal: TerminalCommitter,
+  assessments: readonly SkillComplianceAssessment[],
+  plan: ExecutionPlan,
+  runId: string,
+  output: string,
+): void {
+  const reasonCode = completionCaveatReasonCode(plan, assessments);
+  if (reasonCode === undefined) {
+    terminal.commitCompleted(runId, plan.id, output);
+    return;
+  }
+  terminal.commitCompletedWithCaveats(runId, plan.id, output, reasonCode);
+}
+
+function completionCaveatReasonCode(
+  plan: ExecutionPlan,
+  assessments: readonly SkillComplianceAssessment[],
+): string | undefined {
+  if (plan.steps.some((step) => step.evidence?.completionCaveat?.reason === "repair_limit")) {
+    return "completed_with_repair_limit_caveat";
+  }
+  const latestByStep = new Map<string, SkillComplianceAssessment>();
+  for (const assessment of assessments) latestByStep.set(assessment.stepId, assessment);
+  if ([...latestByStep.values()].some((assessment) =>
+    assessment.skills.some((skill) => skill.status === "process_caveat")
+  )) {
+    return "completed_with_process_caveat";
+  }
+  if ([...latestByStep.values()].some((assessment) =>
+    assessment.skills.some((skill) => skill.status === "skipped_unavailable")
+  )) {
+    return "completed_with_deferred_validation";
+  }
+  return undefined;
+}
+
+function shouldDeferValidationToUser(input: {
+  assessment: SkillComplianceAssessment;
+  assessmentAttempt: number;
+  step: ExecutionPlan["steps"][number];
+  evidence: StepEvidence;
+}): boolean {
+  if (input.assessment.approved) return false;
+  if (input.assessmentAttempt < 2) return false;
+  if (!stepRequiresFileOutput(input.step)) return false;
+  if (!input.assessment.skills.some((skill) => skill.status === "skipped_unavailable")) return false;
+  if (artifactExtensionsProducedByEvidence(input.evidence.toolCalls).size === 0) return false;
+  return input.assessment.criteria.some((criterion) => !criterion.satisfied);
+}
+
+function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment): boolean {
+  if (assessment.approved) return true;
+  if (assessment.criteria.length === 0) return true;
+  return assessment.criteria.some((criterion) => criterion.satisfied);
+}
+
 /**
  * Extra tool-enabled steps granted to file-producing Skills after the agent's
  * primary `maxSteps` budget. A generative workflow (write script → run render →
@@ -1603,6 +2210,7 @@ function canProduceFiles(allowedToolNames: ReadonlySet<string>): boolean {
  * premature convergence candidate.
  */
 const FILE_OUTPUT_CONVERGENCE_GRACE_STEPS = 8;
+const CANDIDATE_REPAIR_GRACE_STEPS = 4;
 const FILE_OUTPUT_CONTEXT_POLICY: ContextPolicy = {
   proactiveCompactionTokens: 24_000,
   preserveRecentTokens: 12_000,
@@ -1621,10 +2229,45 @@ function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
     || step.requiredToolNames.some((name) => name === "computer_write_file" || name === "computer_run_command");
 }
 
+function stepCanConvergeFromLookupEvidence(step: ExecutionPlan["steps"][number]): boolean {
+  return step.requiredToolNames.length > 0
+    && step.requiredToolNames.every((name) => isLookupToolName(name));
+}
+
+function shouldConvergeAfterLookupEvidence(
+  step: ExecutionPlan["steps"][number],
+  context: ToolStepConvergenceContext,
+): { converge: boolean; reason?: string } {
+  if (!stepCanConvergeFromLookupEvidence(step)) return { converge: false };
+  const latestSuccessfulLookupEvidence = context.latestToolEvidence
+    .filter((item) => !item.isError && isLookupToolName(item.toolName));
+  if (latestSuccessfulLookupEvidence.length === 0) return { converge: false };
+
+  const successfulLookupEvidence = context.toolEvidence
+    .filter((item) => !item.isError && isLookupToolName(item.toolName));
+  const webSearchCount = successfulLookupEvidence.filter((item) => item.toolName === "websearch").length;
+  const webFetchCount = successfulLookupEvidence.filter((item) => item.toolName === "webfetch").length;
+  const webStep = step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
+  if (!webStep && successfulLookupEvidence.length >= 1) {
+    return { converge: true, reason: "lookup_evidence_ready" };
+  }
+  if (webFetchCount >= 1) {
+    return { converge: true, reason: "lookup_evidence_ready:webfetch_result" };
+  }
+  if (webSearchCount >= 2) {
+    return { converge: true, reason: "lookup_evidence_ready:websearch_results" };
+  }
+  if (successfulLookupEvidence.length >= 3) {
+    return { converge: true, reason: "lookup_evidence_ready:bounded_research" };
+  }
+  return { converge: false };
+}
+
 function shouldConvergeAfterFileEvidence(
   step: ExecutionPlan["steps"][number],
   context: ToolStepConvergenceContext,
 ): { converge: boolean; reason?: string } {
+  if (!stepAllowsFileArtifactConvergence(step)) return { converge: false };
   const requiredExtensions = artifactExtensionsRequiredByStep(step);
   if (requiredExtensions.size === 0) return { converge: false };
   const producedExtensions = artifactExtensionsProducedByEvidence(context.toolEvidence);
@@ -1635,6 +2278,31 @@ function shouldConvergeAfterFileEvidence(
     converge: true,
     reason: `required_file_artifacts_observed:${[...requiredExtensions].sort().join(",")}`,
   };
+}
+
+function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number]): boolean {
+  const text = [
+    step.id,
+    step.objective,
+    ...step.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
+  ].join("\n").toLowerCase();
+  const productionTool = step.requiredToolNames.some((name) => name === "computer_write_file");
+  if (productionTool) return true;
+  const productionIntent =
+    /\b(?:create|generate|write|build|rebuild|export|save|produce|output|materialize|render)\b/i.test(text)
+    || /(?:生成|创建|制作|写入|构建|重建|导出|保存|输出|产出|渲染)/u.test(text);
+  if (!productionIntent) return false;
+  const verificationIntent =
+    /\b(?:verify|validate|check|inspect|review|qa|quality|compare|readback)\b/i.test(text)
+    || /(?:验证|校验|检查|审查|终检|验收|质量|对比|问题清单)/u.test(text);
+  const onlyCommandOrLookup = step.requiredToolNames.every((name) =>
+    name === "computer_run_command" || isLookupToolName(name) || name === "load_skill"
+  );
+  if (verificationIntent && onlyCommandOrLookup && !/\b(?:build|rebuild|export|save|write|generate|create|produce|output)\b/i.test(text)
+    && !/(?:生成|创建|制作|写入|构建|重建|导出|保存|输出|产出)/u.test(text)) {
+    return false;
+  }
+  return true;
 }
 
 const ARTIFACT_EXTENSIONS = new Set([
@@ -1655,7 +2323,11 @@ function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEv
   const extensions = new Set<string>();
   for (const item of evidence) {
     if (item.isError) continue;
-    if (item.toolName !== "computer_write_file" && item.toolName !== "computer_list_directory") continue;
+    if (
+      item.toolName !== "computer_write_file"
+      && item.toolName !== "computer_list_directory"
+      && item.toolName !== "computer_run_command"
+    ) continue;
     const parsed = parseToolResult(item.result);
     if (
       item.toolName === "computer_write_file"
@@ -1673,8 +2345,24 @@ function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEv
         }
       }
     }
+    if (
+      item.toolName === "computer_run_command"
+      && isPlainRecord(parsed)
+      && Array.isArray(parsed.fileChanges)
+    ) {
+      for (const change of parsed.fileChanges) {
+        if (!isPlainRecord(change)) continue;
+        if (change.changeType !== "created" && change.changeType !== "modified") continue;
+        if (typeof change.path === "string") addArtifactExtensions(extensions, change.path);
+      }
+    }
   }
   return extensions;
+}
+
+function isLookupToolName(name: string): boolean {
+  if (name === "websearch" || name === "webfetch") return true;
+  return /(?:^|_)(read|list|search|fetch|inspect|get|query)(?:_|$)/i.test(name);
 }
 
 function artifactExtensionsFromText(text: string): Set<string> {
@@ -1725,6 +2413,91 @@ function activatedSkillsForAssessment(
   return stepSkills.filter((skill) => activated.has(skill.name));
 }
 
+function skillExecutionRootsForSkills(skills: readonly PrivateSkill[]): SkillExecutionRootGrant[] {
+  return skills.flatMap((skill) => {
+    if (skill.sourceKind !== "package" || skill.package === undefined) return [];
+    return [{
+      id: `skill-root:${skill.id}`,
+      skillId: skill.id,
+      name: skill.name,
+      cwd: skillExecutionCwd(skill),
+      path: skill.package.root,
+    }];
+  });
+}
+
+function skillExecutionCwd(skill: PrivateSkill): string {
+  return `@skills/${skill.name}`;
+}
+
+function stepAssessmentSignature(input: {
+  stepId: string;
+  assessmentProfile: AssessmentProfileId;
+  activatedSkills: readonly PrivateSkill[];
+  evidence: StepEvidence;
+  modelEvidence: StepEvidence;
+}): string {
+  return createHash("sha256").update(JSON.stringify({
+    stepId: input.stepId,
+    assessmentProfile: input.assessmentProfile,
+    activatedSkills: input.activatedSkills
+      .map((skill) => ({ id: skill.id, contentHash: skill.contentHash }))
+      .sort((left, right) => left.id.localeCompare(right.id, "en")),
+    evidence: assessmentEvidenceSignature(input.evidence),
+    modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+  })).digest("hex");
+}
+
+function assessmentEvidenceSignature(evidence: StepEvidence): Record<string, unknown> {
+  return {
+    candidateOutput: evidence.candidateOutput.trim(),
+    toolCalls: [
+      ...new Set(evidence.toolCalls.map((toolCall) => [
+        toolCall.toolName,
+        toolCall.isError ? "error" : "ok",
+        createHash("sha256").update(toolCall.result).digest("hex"),
+      ].join("\u0000"))),
+    ].sort(),
+  };
+}
+
+function selectAssessmentProfile(
+  step: ExecutionPlan["steps"][number],
+  activatedSkills: readonly PrivateSkill[],
+): AssessmentProfileId {
+  const text = [
+    step.objective,
+    ...step.successCriteria.map((criterion) => criterion.description),
+  ].join("\n");
+  if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
+  if (activatedSkills.length > 0) return "source_grounded";
+  if (matchesSourceGroundedAssessment(text)) return "source_grounded";
+  if (step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+    return "lookup_lite";
+  }
+  if (step.requiredToolNames.length === 0) return "deterministic";
+  if (step.requiredToolNames.every((name) => /(?:read|list|search|fetch|inspect|get|query)/i.test(name))) {
+    return "lookup_lite";
+  }
+  return "source_grounded";
+}
+
+function isProfiledRuleAssessmentProfile(
+  profile: AssessmentProfileId,
+): profile is Extract<AssessmentProfileId, "deterministic" | "lookup_lite"> {
+  return profile === "deterministic" || profile === "lookup_lite";
+}
+
+function matchesRiskSensitiveAssessment(value: string): boolean {
+  return /(?:\b(?:medical|medicine|clinical|diagnosis|legal|law|lawsuit|contract|financial|finance|investment|securities|tax|compliance|safety|production|credential|secret|security|procurement|purchase|vendor|regulation)\b|医疗|诊断|法律|诉讼|合同|金融|投资|证券|税务|合规|安全|生产|凭证|密钥|采购|供应商|监管)/iu
+    .test(value);
+}
+
+function matchesSourceGroundedAssessment(value: string): boolean {
+  return /(?:\b(?:compare|comparison|conflict|contradiction|multi[-\s]?source|research|report|briefing|analysis|synthesize|citation|cite|sources?|published|publication date)\b|对比|比较|冲突|矛盾|多源|多个来源|研究|调研|报告|简报|分析|综合|引用|来源|发布日期)/iu
+    .test(value);
+}
+
 function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<unknown> {
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
   return {
@@ -1746,7 +2519,7 @@ function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<unknown
     execute: async (context, value) => {
       const skill = byName.get((value as { name: string }).name);
       if (skill === undefined || !context.grant.allowedSkillIds.has(skill.id)) throw notFound("Skill");
-      return formatLoadedSkill(skill);
+      return formatLoadedSkill(skill, { executionCwd: skillExecutionCwd });
     },
   };
 }
@@ -1771,6 +2544,8 @@ function buildStepRuntimeContext(
   plan: ExecutionPlan,
   skills: readonly PrivateSkill[],
   workspaceRoot: string,
+  visibleDirectories: readonly VisibleDirectoryGrant[] = [],
+  skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const skillCatalog = formatAvailableSkills(skills);
   const usesWebTools = step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
@@ -1788,6 +2563,7 @@ function buildStepRuntimeContext(
         currentPlanStep: {
           id: step.id,
           objective: step.objective,
+          recommendedToolNames: step.requiredToolNames,
           successCriteria: step.successCriteria,
         },
         downstreamPlanSteps: plan.steps
@@ -1801,6 +2577,7 @@ function buildStepRuntimeContext(
             id: item.id,
             objective: item.objective,
             status: item.status,
+            recommendedToolNames: item.requiredToolNames,
             successCriteria: item.successCriteria,
           })),
         dependencyOutputs: step.dependencies.map((dependencyId) => {
@@ -1808,6 +2585,14 @@ function buildStepRuntimeContext(
           return { stepId: dependencyId, output: dependency?.output ?? "" };
         }),
         workspace: { root: workspaceRoot, filePolicy: "workspace-write" },
+        visibleDirectories,
+        skillExecutionRoots: skillExecutionRoots.map((root) => ({
+          id: root.id,
+          skillId: root.skillId,
+          name: root.name,
+          cwd: root.cwd,
+          readOnly: true,
+        })),
         operationProfile,
         ...(usesWebTools
           ? {
@@ -1832,8 +2617,9 @@ function buildRecoveredStepRuntimeContext(
   skills: readonly PrivateSkill[],
   workspaceRoot: string,
   recoveryFacts: unknown,
+  skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
-  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot);
+  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot, [], skillExecutionRoots);
   return {
     ...base,
     content: [
@@ -1861,12 +2647,59 @@ function isEffectivelyComplete(plan: ExecutionPlan): boolean {
   return plan.steps.every((step) => step.status === "completed" || step.retiredAt !== undefined);
 }
 
+function toConversationSummary(
+  row: Pick<RunRow, never> & {
+    id: string;
+    title: string;
+    visible_directories_json: string;
+    created_at: number;
+    updated_at: number;
+  },
+  runCount: number,
+  lastStatus: RunRecord["status"] | null,
+): ConversationSummary {
+  return {
+    id: row.id,
+    title: row.title,
+    visibleDirectories: conversationVisibleDirectoryPaths(row),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    runCount,
+    lastStatus,
+  };
+}
+
+function conversationVisibleDirectoryPaths(row: { visible_directories_json: string }): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.visible_directories_json);
+  } catch {
+    throw new AppError("INTERNAL_ERROR", "Conversation visible directory binding is invalid", 500);
+  }
+  return parseVisibleDirectoryPaths(parsed);
+}
+
+function mergeVisibleDirectories(
+  bound: readonly VisibleDirectoryGrant[],
+  requested: readonly VisibleDirectoryGrant[],
+): VisibleDirectoryGrant[] {
+  const paths = new Set<string>();
+  const merged: VisibleDirectoryGrant[] = [];
+  for (const grant of [...bound, ...requested]) {
+    if (paths.has(grant.path)) continue;
+    paths.add(grant.path);
+    merged.push({ ...grant, id: `visible_dir_${merged.length + 1}` });
+  }
+  return merged;
+}
+
 function parseExecuteOptions(value: unknown): ExecuteOptions {
-  if (value === undefined) return { allowDangerousTools: false };
+  if (value === undefined) return { allowDangerousTools: false, visibleDirectories: [] };
   const record = requireRecord(value, "run options");
   if (record.allowDangerousTools !== undefined && typeof record.allowDangerousTools !== "boolean") {
     throw new AppError("BAD_REQUEST", "allowDangerousTools must be boolean", 400);
   }
+  const visibleDirectories = parseVisibleDirectoryPaths(record.visibleDirectories);
   const conversationId = record.conversationId === undefined || record.conversationId === null
     ? undefined
     : requireString(record.conversationId, "conversationId", { max: 128 });
@@ -1878,10 +2711,57 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
   }
   return {
     allowDangerousTools: record.allowDangerousTools === true,
+    visibleDirectories,
     ...(conversationId === undefined ? {} : { conversationId }),
     ...(modelKey === undefined ? {} : { modelKey }),
     ...(record.conversationIntent === "auto" ? { conversationIntent: "auto" as const } : {}),
   };
+}
+
+function parseVisibleDirectoryPaths(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 12) {
+    throw new AppError("BAD_REQUEST", "visibleDirectories must be an array with at most 12 entries", 400);
+  }
+  const result = value.map((item, index) =>
+    requireString(item, `visibleDirectories[${index}]`, { max: 4_000 })
+  );
+  if (new Set(result).size !== result.length) {
+    throw new AppError("BAD_REQUEST", "visibleDirectories must not contain duplicates", 400);
+  }
+  return result;
+}
+
+async function resolveVisibleDirectories(paths: readonly string[]): Promise<VisibleDirectoryGrant[]> {
+  const grants: VisibleDirectoryGrant[] = [];
+  const seen = new Set<string>();
+  for (const rawPath of paths) {
+    if (!isAbsolute(rawPath)) {
+      throw new AppError("BAD_REQUEST", "visibleDirectories entries must be absolute directory paths", 400);
+    }
+    const lexical = resolve(rawPath);
+    const stat = await fs.lstat(lexical).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        throw new AppError("BAD_REQUEST", `Visible directory does not exist: ${rawPath}`, 400);
+      }
+      throw error;
+    });
+    if (stat.isSymbolicLink()) {
+      throw forbidden("Visible directories cannot be symbolic links");
+    }
+    if (!stat.isDirectory()) {
+      throw new AppError("BAD_REQUEST", `Visible directory is not a directory: ${rawPath}`, 400);
+    }
+    const canonical = await fs.realpath(lexical);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    grants.push({
+      id: `visible_dir_${grants.length + 1}`,
+      name: basename(canonical) || canonical,
+      path: canonical,
+    });
+  }
+  return grants;
 }
 
 const CONVERSATION_INTENT_TOOL = {
@@ -1899,6 +2779,7 @@ async function classifyConversationTurn(
   model: ModelAdapter,
   input: string,
   conversationHistory: readonly ModelMessage[] | undefined,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (requiresExternalState(input)) return false;
   const response = await model.complete({
@@ -1920,7 +2801,7 @@ async function classifyConversationTurn(
     ],
     tools: [CONVERSATION_INTENT_TOOL],
     toolChoice: { name: CONVERSATION_INTENT_TOOL.name },
-  });
+  }, signal);
   const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_INTENT_TOOL.name);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
     throw new AppError("MODEL_ERROR", "Conversation intent classifier must return exactly one structured decision", 502);
@@ -1929,6 +2810,21 @@ async function classifyConversationTurn(
   if (argumentsRecord.kind === "reply") return true;
   if (argumentsRecord.kind === "execute") return false;
   throw new AppError("MODEL_ERROR", "Conversation intent classifier returned an invalid decision", 502);
+}
+
+function optionalPlanByRun(plans: PlanRepository, runId: string): ExecutionPlan | undefined {
+  try {
+    return plans.getByRun(runId);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "NOT_FOUND") return undefined;
+    throw error;
+  }
+}
+
+function throwIfRunCancelled(runs: RunRepository, runId: string, signal: AbortSignal): void {
+  if (signal.aborted || runs.get(runId)?.status !== "running") {
+    throw new AppError("CANCELLED", "Run was cancelled", 409);
+  }
 }
 
 function requiresExternalState(input: string): boolean {

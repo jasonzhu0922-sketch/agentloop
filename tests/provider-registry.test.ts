@@ -202,6 +202,7 @@ test("the provider registry routes GPT5.6 through the Responses protocol", async
           providerKey: "openai",
           providerModel: "gpt-5.6",
           displayName: "GPT5.6",
+          toolChoiceMode: "constrained-as-auto",
           protocol: "responses",
         },
       },
@@ -235,7 +236,8 @@ test("the provider registry routes GPT5.6 through the Responses protocol", async
       runId: "gpt-5-6",
       systemPrompt: "System",
       messages: [{ role: "user", content: "Check" }],
-      tools: [],
+      tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
+      toolChoice: { name: "lookup" },
     });
     assert.equal(result.content, "configured");
     assert.deepEqual(captured, {
@@ -245,8 +247,15 @@ test("the provider registry routes GPT5.6 through the Responses protocol", async
         model: "gpt-5.6",
         instructions: "System",
         input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Check" }] }],
-        tools: [],
+        tools: [{
+          type: "function",
+          name: "lookup",
+          description: "Lookup",
+          parameters: { type: "object" },
+        }],
+        tool_choice: "auto",
         max_output_tokens: 32_768,
+        stream: true,
       },
     });
   } finally {

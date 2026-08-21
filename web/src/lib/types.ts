@@ -22,6 +22,17 @@ export interface ToolSummary {
   readonly description?: string;
 }
 
+export interface LocalDirectoryListing {
+  readonly currentPath: string;
+  readonly parentPath?: string;
+  readonly entries: readonly LocalDirectoryEntry[];
+}
+
+export interface LocalDirectoryEntry {
+  readonly name: string;
+  readonly path: string;
+}
+
 export interface SkillSummary {
   readonly id: string;
   readonly name: string;
@@ -31,6 +42,7 @@ export interface SkillSummary {
 export interface ConversationSummary {
   readonly id: string;
   readonly title: string;
+  readonly visibleDirectories: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly runCount: number;
@@ -84,6 +96,8 @@ export interface PlanDetail {
   };
   readonly assessments: readonly {
     readonly stepId: string;
+    readonly assessmentProfile?: "deterministic" | "lookup_lite" | "source_grounded" | "risk_sensitive";
+    readonly assessmentMethod?: "rule" | "model";
     readonly approved: boolean;
     readonly feedback?: string;
   }[];
@@ -98,6 +112,35 @@ export interface ProcessArtifact {
   readonly sourceTool: "computer_write_file" | "computer_run_command";
   readonly previewable: boolean;
 }
+
+export type ArtifactPreview =
+  | {
+    readonly kind: "text";
+    readonly name: string;
+    readonly mimeType: string;
+    readonly text: string;
+    readonly truncated: boolean;
+  }
+  | {
+    readonly kind: "docx";
+    readonly name: string;
+    readonly paragraphs: readonly string[];
+    readonly truncated: boolean;
+  }
+  | {
+    readonly kind: "xlsx";
+    readonly name: string;
+    readonly sheets: readonly {
+      readonly name: string;
+      readonly rows: readonly (readonly string[])[];
+      readonly truncated: boolean;
+    }[];
+  }
+  | {
+    readonly kind: "binary";
+    readonly name: string;
+    readonly mimeType: string;
+  };
 
 export interface ConversationDetail {
   readonly conversation: ConversationSummary;

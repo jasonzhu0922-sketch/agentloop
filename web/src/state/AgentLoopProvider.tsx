@@ -162,14 +162,14 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
     [token, handleEvent, finalizeRun, stopStreaming, note],
   );
 
-  const refresh = useCallback(async (): Promise<void> => {
-    if (token === "") throw new Error("not authenticated");
-    const me = await api.me(token);
+  const refresh = useCallback(async (nextToken = token): Promise<void> => {
+    if (nextToken === "") throw new Error("not authenticated");
+    const me = await api.me(nextToken);
     const [skillBody, toolBody, providerBody, conversationBody] = await Promise.all([
-      api.skills(token),
-      api.tools(token),
-      api.providers(token),
-      api.conversations(token),
+      api.skills(nextToken),
+      api.tools(nextToken),
+      api.providers(nextToken),
+      api.conversations(nextToken),
     ]);
     setUser(me.user);
     setSkills(skillBody.skills);
@@ -191,14 +191,19 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
   }, [token]);
 
   const startRun = useCallback(
-    async (input: string): Promise<void> => {
+    async (input: string, visibleDirectories: readonly string[] = []): Promise<void> => {
       stopStreaming();
       setRunning(true);
       const conversationId = conversation?.conversation.id;
+      const nextVisibleDirectories = mergeDirectoryPaths(
+        conversation?.conversation.visibleDirectories ?? [],
+        visibleDirectories,
+      );
       let run: RunRecord;
       try {
         const body = await api.startRun(token, input, {
           ...(selectedModelKey === "" ? {} : { modelKey: selectedModelKey }),
+          ...(visibleDirectories.length === 0 ? {} : { visibleDirectories }),
           ...(conversationId === undefined ? {} : { conversationId }),
         });
         run = body.run;
@@ -212,6 +217,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
           conversation: {
             id: run.conversationId ?? "",
             title: truncate(input, 60),
+            visibleDirectories: nextVisibleDirectories,
             createdAt: run.createdAt,
             updatedAt: run.createdAt,
             runCount: 1,
@@ -223,6 +229,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
           {
             id: run.conversationId ?? "",
             title: truncate(input, 60),
+            visibleDirectories: nextVisibleDirectories,
             createdAt: run.createdAt,
             updatedAt: run.createdAt,
             runCount: 1,
@@ -231,7 +238,11 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
           ...previous,
         ]);
       } else {
-        setConversation((previous) => (previous === null ? previous : { ...previous, runs: [...previous.runs, run] }));
+        setConversation((previous) => (previous === null ? previous : {
+          ...previous,
+          conversation: { ...previous.conversation, visibleDirectories: nextVisibleDirectories },
+          runs: [...previous.runs, run],
+        }));
       }
       setActiveRunId(run.id);
       if (run.modelKey !== undefined) setSelectedModelKeyState(run.modelKey);
@@ -239,6 +250,47 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       subscribeRun(run.id);
     },
     [token, selectedModelKey, conversation, subscribeRun, stopStreaming, note],
+  );
+
+  const cancelRun = useCallback(async (): Promise<void> => {
+    const runId = activeRunId;
+    if (runId === null) return;
+    try {
+      const body = await api.cancelRun(token, runId);
+      setConversation((previous) => mergeRunIntoConversation(previous, body.run));
+      if (body.run.status !== "running") {
+        setRunning(false);
+        setActiveRunId(null);
+        await loadRunDetail(runId);
+        await loadConversations();
+        note("任务已停止。");
+      } else {
+        note("已请求停止当前任务。");
+      }
+    } catch (error) {
+      note(error instanceof Error ? error.message : "停止任务失败");
+    }
+  }, [token, activeRunId, loadRunDetail, loadConversations, note]);
+
+  const updateConversationVisibleDirectories = useCallback(
+    async (visibleDirectories: readonly string[]): Promise<void> => {
+      const conversationId = conversation?.conversation.id;
+      if (conversationId === undefined) return;
+      try {
+        const body = await api.updateConversationVisibleDirectories(token, conversationId, visibleDirectories);
+        setConversation((previous) => (
+          previous?.conversation.id === body.conversation.id
+            ? { ...previous, conversation: body.conversation }
+            : previous
+        ));
+        setConversations((previous) => previous.map((item) =>
+          item.id === body.conversation.id ? body.conversation : item
+        ));
+      } catch (error) {
+        note(error instanceof Error ? error.message : "更新会话目录失败");
+      }
+    },
+    [token, conversation, note],
   );
 
   const openConversation = useCallback(
@@ -273,7 +325,12 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
   const deleteConversation = useCallback(
     async (id: string, title: string): Promise<void> => {
       if (!window.confirm(`删除会话“${title}”？该会话的运行记录、计划与评估也会被删除。`)) return;
-      await api.deleteConversation(token, id);
+      try {
+        await api.deleteConversation(token, id);
+      } catch (error) {
+        note(error instanceof Error ? error.message : "删除会话失败");
+        return;
+      }
       setConversations((previous) => previous.filter((c) => c.id !== id));
       if (conversation?.conversation.id === id) {
         stopStreaming();
@@ -362,6 +419,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       setToken,
       logout,
       startRun,
+      cancelRun,
       openConversation,
       deleteConversation,
       selectRun,
@@ -370,6 +428,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       toggleTheme,
       setSelectedSkill,
       setSelectedModel,
+      updateConversationVisibleDirectories,
       note,
       refresh,
       loadRunDetail,
@@ -382,6 +441,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       setToken,
       logout,
       startRun,
+      cancelRun,
       openConversation,
       deleteConversation,
       selectRun,
@@ -390,6 +450,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       toggleTheme,
       setSelectedSkill,
       setSelectedModel,
+      updateConversationVisibleDirectories,
       note,
       refresh,
       loadRunDetail,
@@ -461,4 +522,34 @@ function Notice({ message }: { readonly message: string }): React.ReactNode {
       {message}
     </div>
   );
+}
+
+function mergeDirectoryPaths(
+  existingDirectories: readonly string[],
+  addedDirectories: readonly string[],
+): readonly string[] {
+  const seen = new Set(existingDirectories.map(directoryKey));
+  const next = [...existingDirectories];
+  for (const path of addedDirectories) {
+    const key = directoryKey(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(path);
+  }
+  return next;
+}
+
+function trimTrailingSeparator(path: string): string {
+  if (/^[A-Za-z]:[\\/]?$/.test(path)) return path;
+  if (/^\/+$/.test(path)) return "/";
+  if (/^\\\\[^\\/]+[\\/]?[^\\/]+[\\/]?$/.test(path)) return path.replace(/[\\/]$/, "");
+  return path.replace(/[\\/]+$/, "");
+}
+
+function directoryKey(path: string): string {
+  const normalized = trimTrailingSeparator(path);
+  if (/^[A-Za-z]:[\\/]/.test(normalized) || /^\\\\/.test(normalized)) {
+    return normalized.replace(/\//g, "\\").toLowerCase();
+  }
+  return normalized;
 }

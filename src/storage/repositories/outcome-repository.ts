@@ -11,14 +11,28 @@ export class RunOutcomeRepository {
 
   /** Commit a successfully assessed Plan: mark plan/run completed and record the outcome, atomically. */
   commitCompleted(input: { runId: string; planId: string; output: string }): void {
+    this.commitCompletedWithReason({ ...input, reasonCode: "plan_assessed_and_completed" });
+  }
+
+  /** Commit a completed run whose output carries explicit unresolved validation caveats. */
+  commitCompletedWithDeferredValidation(input: { runId: string; planId: string; output: string }): void {
+    this.commitCompletedWithReason({ ...input, reasonCode: "completed_with_deferred_validation" });
+  }
+
+  /** Commit a completed run whose output carries explicit unresolved quality or process caveats. */
+  commitCompletedWithCaveats(input: { runId: string; planId: string; output: string; reasonCode: string }): void {
+    this.commitCompletedWithReason(input);
+  }
+
+  private commitCompletedWithReason(input: { runId: string; planId: string; output: string; reasonCode: string }): void {
     const now = Date.now();
     this.connection.transaction(() => {
       this.connection.prepare("UPDATE plans SET status = 'completed', updated_at = ? WHERE id = ?")
         .run(now, input.planId);
       this.connection.prepare(`
         INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-        VALUES (?, ?, 'completed', ?, 'plan_assessed_and_completed', ?)
-      `).run(input.runId, input.planId, input.output, now);
+        VALUES (?, ?, 'completed', ?, ?, ?)
+      `).run(input.runId, input.planId, input.output, input.reasonCode, now);
       this.connection.prepare(`
         UPDATE runs SET status = 'completed', output = ?, error_code = NULL, finished_at = ?
         WHERE id = ? AND status = 'running'

@@ -99,7 +99,45 @@ test("an existing Skill package is copied byte-for-byte, hashed as a whole, and 
   }
 });
 
-test("package integrity failure stops a Run instead of silently accepting a modified Skill", async () => {
+test("Skill package hash cleans local tool and interpreter cache files before hashing", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-package-cache-noise-"));
+  try {
+    await fs.mkdir(join(workspace, "scripts"), { recursive: true });
+    await fs.writeFile(join(workspace, "SKILL.md"), [
+      "---",
+      "name: cache-noise",
+      "description: Ignore local runtime cache files",
+      "---",
+      "instruction",
+      "",
+    ].join("\n"));
+    await fs.writeFile(join(workspace, "scripts", "run.py"), "print('ok')\n");
+    const clean = await inspectSkillPackage(workspace);
+
+    await fs.writeFile(join(workspace, ".DS_Store"), "finder metadata");
+    await fs.mkdir(join(workspace, ".workbuddy", "memory"), { recursive: true });
+    await fs.writeFile(join(workspace, ".workbuddy", "memory", "note.md"), "local note\n");
+    await fs.mkdir(join(workspace, "scripts", "__pycache__"), { recursive: true });
+    await fs.writeFile(join(workspace, "scripts", "__pycache__", "run.cpython-313.pyc"), "bytecode");
+    await fs.writeFile(join(workspace, "scripts", "run.pyo"), "optimized bytecode");
+    await fs.chmod(join(workspace, "scripts"), 0o555);
+    await fs.chmod(workspace, 0o555);
+
+    const noisy = await inspectSkillPackage(workspace);
+    assert.equal(noisy.packageHash, clean.packageHash);
+    assert.deepEqual(noisy.files, ["scripts/run.py", "SKILL.md"]);
+    assert.equal((await fs.stat(workspace)).mode & 0o777, 0o555);
+    assert.equal((await fs.stat(join(workspace, "scripts"))).mode & 0o777, 0o555);
+    await assert.rejects(() => fs.stat(join(workspace, ".DS_Store")));
+    await assert.rejects(() => fs.stat(join(workspace, ".workbuddy")));
+    await assert.rejects(() => fs.stat(join(workspace, "scripts", "__pycache__")));
+    await assert.rejects(() => fs.stat(join(workspace, "scripts", "run.pyo")));
+  } finally {
+    await removeSkillPackage(workspace);
+  }
+});
+
+test("explicit package integrity checks still detect modified Skill contents", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-package-mutation-"));
   const imports = join(workspace, "imports");
   const source = join(imports, "immutable-skill");
@@ -133,6 +171,59 @@ test("package integrity failure stops a Run instead of silently accepting a modi
       () => skills.assertIntegrity([installed]),
       (error: unknown) => hasCode(error, "SKILL_PACKAGE_MUTATED"),
     );
+  } finally {
+    database.close();
+    await removeSkillPackage(workspace);
+  }
+});
+
+test("installed package metadata can be refreshed from current package contents at startup", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-package-refresh-"));
+  const imports = join(workspace, "imports");
+  const source = join(imports, "refreshable-skill");
+  const store = join(workspace, "managed-packages");
+  const database = new AppDatabase(":memory:");
+  try {
+    await fs.mkdir(source, { recursive: true });
+    await fs.writeFile(join(source, "SKILL.md"), [
+      "---",
+      "name: refreshable-skill",
+      "description: Refresh package metadata",
+      "---",
+      "ORIGINAL-INSTRUCTION",
+      "",
+    ].join("\n"));
+    const auth = new AuthService(database);
+    const owner = await auth.register("refresh@example.com", "refresh secure password");
+    const skills = new SkillService(database, { packageStoreRoot: store, allowedImportRoots: [imports] });
+    const expected = await inspectSkillPackage(source);
+    const installed = await skills.installFromDirectory(owner.user.id, {
+      sourceDirectory: source,
+      sourceUrl: SOURCE_URL,
+      sourceRevision: SOURCE_REVISION,
+      expectedPackageHash: expected.packageHash,
+    });
+
+    await fs.chmod(installed.package!.root, 0o700);
+    await fs.chmod(join(installed.package!.root, "SKILL.md"), 0o600);
+    await fs.writeFile(join(installed.package!.root, "SKILL.md"), [
+      "---",
+      "name: refreshable-skill",
+      "description: Refresh package metadata",
+      "---",
+      "UPDATED-INSTRUCTION",
+      "",
+    ].join("\n"));
+    const current = await inspectSkillPackage(installed.package!.root);
+    assert.notEqual(current.packageHash, installed.package!.packageHash);
+
+    const refreshedCount = await skills.refreshInstalledPackageMetadata();
+    const refreshed = skills.get(owner.user.id, installed.id);
+    assert.equal(refreshedCount, 1);
+    assert.equal(refreshed.instructions, current.instructions);
+    assert.equal(refreshed.contentHash, current.packageHash);
+    assert.equal(refreshed.package?.packageHash, current.packageHash);
+    await skills.assertIntegrity([refreshed]);
   } finally {
     database.close();
     await removeSkillPackage(workspace);
@@ -212,10 +303,13 @@ test("the admitted step receives the unchanged package Skill and persists packag
       "description: Existing runtime package",
       "---",
       "PACKAGE-INSTRUCTION-MUST-STAY-EXACT",
+      "Run `scripts/probe.mjs` when execution is needed.",
       "Read `references/proof.md`.",
       "",
     ].join("\n"));
     await fs.writeFile(join(source, "references/proof.md"), "proof\n");
+    await fs.mkdir(join(source, "scripts"), { recursive: true });
+    await fs.writeFile(join(source, "scripts/probe.mjs"), "process.stdout.write('PACKAGE-SCRIPT-RAN')\n");
     const auth = new AuthService(database);
     const owner = await auth.register("package-run@example.com", "package run secure password");
     const skills = new SkillService(database, { packageStoreRoot: store, allowedImportRoots: [imports] });
@@ -238,13 +332,15 @@ test("the admitted step receives the unchanged package Skill and persists packag
       assessorFactory: () => approvingAssessor(),
       workspaceRoot: workspace,
     });
-    const run = await runs.execute(owner.user.id, "use installed package");
+    const run = await runs.execute(owner.user.id, "use installed package", { allowDangerousTools: true });
 
     assert.equal(run.status, "completed");
     assert.equal(model.sawUnchangedInstruction, true);
     assert.equal(model.sawPackageEnvelope, true);
+    assert.equal(model.sawRuntimeExecutionCwd, true);
+    assert.equal(model.sawScriptOutput, true);
     const verified = runs.events(owner.user.id, run.id).filter((event) => event.type === "skill.package.verified");
-    assert.deepEqual(verified.map((event) => event.data.phase), ["run-start", "terminal"]);
+    assert.deepEqual(verified.map((event) => event.data.phase), ["run-start"]);
     assert.ok(verified.every((event) => event.data.packageHash === installed.package!.packageHash));
   } finally {
     database.close();
@@ -256,6 +352,8 @@ class InspectPackageModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   sawUnchangedInstruction = false;
   sawPackageEnvelope = false;
+  sawRuntimeExecutionCwd = false;
+  sawScriptOutput = false;
   private readonly packageRoot: string;
   private readonly packageHash: string;
   private calls = 0;
@@ -277,11 +375,34 @@ class InspectPackageModel implements ModelAdapter {
       };
     }
     const loaded = request.messages.find((message) => message.role === "tool" && message.name === "load_skill");
-    this.sawUnchangedInstruction = (loaded?.content.includes("PACKAGE-INSTRUCTION-MUST-STAY-EXACT") ?? false)
-      && !(loaded?.content.includes("MUTATED") ?? false);
-    this.sawPackageEnvelope = (loaded?.content.includes(`Base directory for this Skill: ${this.packageRoot}`) ?? false)
-      && (loaded?.content.includes(`package_sha256=\"${this.packageHash}\"`) ?? false)
-      && (loaded?.content.includes('read_only="true"') ?? false);
+    if (this.calls === 2) {
+      this.sawUnchangedInstruction = (loaded?.content.includes("PACKAGE-INSTRUCTION-MUST-STAY-EXACT") ?? false)
+        && !(loaded?.content.includes("MUTATED") ?? false);
+      this.sawPackageEnvelope = (loaded?.content.includes(`Base directory for this Skill: ${this.packageRoot}`) ?? false)
+        && (loaded?.content.includes(`package_sha256=\"${this.packageHash}\"`) ?? false)
+        && (loaded?.content.includes('read_only="true"') ?? false);
+      this.sawRuntimeExecutionCwd = loaded?.content.includes("Runtime execution cwd for this Skill: @skills/runtime-package") ?? false;
+      assert.match(request.runtimeContext?.content ?? "", /"cwd":"@skills\/runtime-package"/);
+      assert.ok(request.tools.some((tool) => tool.name === "computer_run_command"));
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "run-package-script",
+          name: "computer_run_command",
+          arguments: {
+            command: "node",
+            args: ["scripts/probe.mjs"],
+            cwd: "@skills/runtime-package",
+            timeoutMs: 2_000,
+          },
+        }],
+      };
+    }
+    const scriptResult = request.messages.find((message) =>
+      message.role === "tool" && message.name === "computer_run_command" && message.toolCallId === "run-package-script"
+    );
+    this.sawScriptOutput = scriptResult?.content.includes("PACKAGE-SCRIPT-RAN") ?? false;
     return { content: "package instruction followed", toolCalls: [], finishReason: "stop" };
   }
 }

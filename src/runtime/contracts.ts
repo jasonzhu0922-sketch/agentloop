@@ -172,8 +172,24 @@ export interface CapabilityGrant {
   readonly conversationId?: string;
   readonly depth: number;
   readonly workspaceRoot?: string;
+  readonly visibleDirectories: readonly VisibleDirectoryGrant[];
+  readonly skillExecutionRoots: readonly SkillExecutionRootGrant[];
   readonly allowedToolNames: ReadonlySet<string>;
   readonly allowedSkillIds: ReadonlySet<string>;
+}
+
+export interface VisibleDirectoryGrant {
+  readonly id: string;
+  readonly name: string;
+  readonly path: string;
+}
+
+export interface SkillExecutionRootGrant {
+  readonly id: string;
+  readonly skillId: string;
+  readonly name: string;
+  readonly cwd: string;
+  readonly path: string;
 }
 
 export interface RuntimeEvent {
@@ -189,6 +205,13 @@ export interface AgentLoopResult {
   readonly steps: number;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly activatedSkillNames: readonly string[];
+  readonly deferredValidation?: boolean;
+  readonly completionCaveat?: RuntimeCompletionCaveat;
+}
+
+export interface RuntimeCompletionCaveat {
+  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit";
+  readonly feedback: string;
 }
 
 export interface AgentLoopToolEvidence {
@@ -211,4 +234,7 @@ export interface CandidateCompletionContext {
 export interface CandidateCompletionEvaluation {
   readonly approved: boolean;
   readonly feedback: string;
+  readonly deferredValidation?: boolean;
+  readonly allowRepairLimitCompletion?: boolean;
+  readonly assessmentReused?: boolean;
 }

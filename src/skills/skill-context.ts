@@ -2,6 +2,7 @@ import type { PrivateSkill } from "./skill-service.ts";
 
 export interface SkillContextOptions {
   readonly packageRoot?: (skill: PrivateSkill) => string;
+  readonly executionCwd?: (skill: PrivateSkill) => string | undefined;
 }
 
 /**
@@ -42,13 +43,19 @@ export function formatLoadedSkill(
   const packageRoot = skill.package === undefined
     ? undefined
     : options.packageRoot?.(skill) ?? skill.package.root;
+  const executionCwd = skill.package === undefined ? undefined : options.executionCwd?.(skill);
   const metadata = skill.package === undefined
     ? []
     : [
         "",
         `<skill_package${formatSourceAttributes(skill.package.url, skill.package.revision)} package_sha256="${escapeXml(skill.package.packageHash)}" read_only="true" />`,
+        ...(executionCwd === undefined ? [] : [
+          `Runtime execution cwd for this Skill: ${executionCwd}`,
+          `When running package scripts with computer_run_command, set cwd to "${executionCwd}" and pass script paths relative to that Skill root.`,
+        ]),
         `Base directory for this Skill: ${packageRoot}`,
-        "Relative paths in this Skill are relative to that base directory.",
+        `Read-only package directory for this Skill: ${packageRoot}`,
+        "Relative paths in this Skill are relative to the Skill root.",
         "Do not edit the installed Skill package; write task sources, work, QA evidence, and artifacts to the task workspace.",
       ];
   return [

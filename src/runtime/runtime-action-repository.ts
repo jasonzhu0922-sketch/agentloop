@@ -191,6 +191,30 @@ export class RuntimeActionRepository {
     return reconciled;
   }
 
+  cancelDispatchedForRun(runId: string, code = "CANCELLED"): number {
+    const now = Date.now();
+    let cancelled = 0;
+    this.database.transaction(() => {
+      const actions = this.database.prepare(`
+        SELECT id, fence, revision
+        FROM runtime_actions
+        WHERE run_id = ? AND state = 'dispatched'
+      `).all(runId) as unknown as Array<{ id: string; fence: number; revision: number }>;
+      for (const action of actions) {
+        const result = this.database.prepare(`
+          UPDATE runtime_actions
+          SET state = 'failed', lease_until = NULL, error_code = ?, revision = revision + 1,
+              updated_at = ?, closed_at = ?
+          WHERE id = ? AND state = 'dispatched' AND revision = ?
+        `).run(code, now, now, action.id, action.revision) as { changes: number };
+        if (result.changes !== 1) continue;
+        this.appendEvent(runId, "action.failed", { actionId: action.id, fence: action.fence, code }, now);
+        cancelled += 1;
+      }
+    });
+    return cancelled;
+  }
+
   private succeed(actionId: string, fence: number): void {
     const now = Date.now();
     this.database.transaction(() => {

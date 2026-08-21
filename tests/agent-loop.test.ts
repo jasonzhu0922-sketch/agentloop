@@ -149,6 +149,64 @@ test("the final budgeted turn converges without tools and submits existing evide
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("structured tool candidates go directly to assessment without a final model rewrite", async () => {
+  let executions = 0;
+  let assessmentCalls = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "lookup_api",
+    description: "Return structured API lookup evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return {
+        schema: "api_catalog_result/v1",
+        deliveryCandidate: {
+          output: "合同备案记录查询 API has sysId input and verified output fields.",
+        },
+        assessmentProjection: {
+          match_count: 1,
+          primary_api_id: "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001",
+          output_field_counts: { "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001": 32 },
+        },
+        rawRows: "x".repeat(20_000),
+      };
+    },
+  };
+  const model = new StructuredCandidateModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["lookup_api"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete the admitted step.",
+    input: "query contract filing API",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 4,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async (candidate) => {
+      assessmentCalls += 1;
+      assert.match(candidate.output, /sysId/);
+      const projected = candidate.projectedToolEvidence.find((item) => item.toolCallId === "lookup-1");
+      assert.match(projected?.result ?? "", /api_catalog_result\/v1/);
+      assert.match(projected?.result ?? "", /primary_api_id/);
+      assert.doesNotMatch(projected?.result ?? "", /xxxxxxxxxxxxxxxxxxxxxxxx/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "合同备案记录查询 API has sysId input and verified output fields.");
+  assert.equal(executions, 1);
+  assert.equal(model.calls, 1);
+  assert.equal(assessmentCalls, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 1);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
 test("an empty completion candidate is repaired within the same budgeted step", async () => {
   let executions = 0;
   const tool: RuntimeTool<unknown> = {
@@ -184,6 +242,171 @@ test("an empty completion candidate is repaired within the same budgeted step", 
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
   assert.equal(events.filter((event) => event.type === "step.started").length, 2);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a rejected assessed candidate grants bounded tool repair grace", async () => {
+  let executions = 0;
+  let assessments = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "read_evidence",
+    description: "Read verification evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return executions === 1 ? { report: "read" } : { evidence: "consistent" };
+    },
+  };
+  const model = new CandidateRepairGraceModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["read_evidence"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Verify the report.",
+    input: "verify",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    candidateRepairGraceSteps: 2,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async (candidate) => {
+      assessments += 1;
+      return {
+        approved: candidate.output.includes("evidence consistent"),
+        feedback: "Need direct evidence comparison before approval.",
+      };
+    },
+  });
+
+  assert.equal(result.output, "report verified; evidence consistent");
+  assert.equal(executions, 2);
+  assert.equal(assessments, 2);
+  assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("deferred validation candidate stops repair loop with a caveat", async () => {
+  let executions = 0;
+  let assessments = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "render_probe",
+    description: "Probe renderer availability",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return executions === 1
+        ? { fileChanges: [{ changeType: "created", path: "deck.pptx" }] }
+        : { error: "renderer unavailable" };
+    },
+  };
+  const model = new DeferredValidationModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["render_probe"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Build and validate.",
+    input: "build deck",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    candidateRepairGraceSteps: 4,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async (candidate) => {
+      assessments += 1;
+      return assessments === 1
+        ? { approved: false, feedback: "Renderer missing; try one probe." }
+        : {
+          approved: false,
+          feedback: "Renderer remains unavailable; leave visual validation to the user.",
+          deferredValidation: true,
+        };
+    },
+  });
+
+  assert.equal(result.deferredValidation, true);
+  assert.match(result.output, /leave visual validation to the user/);
+  assert.equal(executions, 2);
+  assert.equal(assessments, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.validation_deferred").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("candidate repair assessment limit accepts the latest output with a caveat", async () => {
+  let calls = 0;
+  let assessments = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return { content: `candidate ${calls}`, finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce the candidate.",
+    input: "produce",
+    model,
+    tools: new ToolRegistry([]),
+    grant,
+    maxSteps: 3,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async () => {
+      assessments += 1;
+      return { approved: false, feedback: "Quality issue remained after repair." };
+    },
+  });
+
+  assert.equal(calls, 3);
+  assert.equal(assessments, 3);
+  assert.equal(result.completionCaveat?.reason, "repair_limit");
+  assert.match(result.output, /Repair caveat/);
+  assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("candidate repair assessment limit can be blocked for unmet prerequisite criteria", async () => {
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return { content: `missing input candidate ${calls}`, finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Read the required source file.",
+      input: "read missing source",
+      model,
+      tools: new ToolRegistry([]),
+      grant,
+      maxSteps: 3,
+      emit: (event) => events.push(event),
+      evaluateCandidate: async () => ({
+        approved: false,
+        feedback: "No source file was found, so no success criteria are satisfied.",
+        allowRepairLimitCompletion: false,
+      }),
+    }),
+    (error) => error instanceof Error && /cannot be accepted with a repair-limit caveat/.test(error.message),
+  );
+
+  assert.equal(calls, 3);
+  assert.equal(events.filter((event) => event.type === "candidate.repair_limit_blocked").length, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 0);
 });
 
 test("a mid-work model is granted convergence grace steps to reach real completion", async () => {
@@ -562,6 +785,20 @@ class ConvergenceScenarioModel implements ModelAdapter {
   }
 }
 
+class StructuredCandidateModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(): Promise<ModelResponse> {
+    this.calls += 1;
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{ id: "lookup-1", name: "lookup_api", arguments: { query: "合同备案" } }],
+    };
+  }
+}
+
 class EmptyThenConvergedModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   calls = 0;
@@ -588,6 +825,64 @@ class EmptyThenConvergedModel implements ModelAdapter {
       finishReason: "stop",
       toolCalls: [],
     };
+  }
+}
+
+class CandidateRepairGraceModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["read_evidence"]);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "read-report", name: "read_evidence", arguments: { path: "report.md" } }],
+      };
+    }
+    if (this.calls === 2) {
+      return { content: "report readable but evidence not compared", finishReason: "stop", toolCalls: [] };
+    }
+    if (this.calls === 3) {
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["read_evidence"]);
+      assert.match(request.runtimeContext?.content ?? "", /Need direct evidence comparison/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "read-json", name: "read_evidence", arguments: { path: "evidence/data.json" } }],
+      };
+    }
+    return { content: "report verified; evidence consistent", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class DeferredValidationModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "build", name: "render_probe", arguments: { action: "build" } }],
+      };
+    }
+    if (this.calls === 2) {
+      return { content: "deck.pptx exists, but visual validation has not run", finishReason: "stop", toolCalls: [] };
+    }
+    if (this.calls === 3) {
+      assert.match(request.runtimeContext?.content ?? "", /Renderer missing/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "probe", name: "render_probe", arguments: { action: "probe" } }],
+      };
+    }
+    return { content: "deck.pptx exists, but renderer validation is unavailable", finishReason: "stop", toolCalls: [] };
   }
 }
 

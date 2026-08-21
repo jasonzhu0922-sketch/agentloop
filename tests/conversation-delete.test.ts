@@ -6,6 +6,7 @@ import { AuthService } from "../src/auth/auth-service.ts";
 import { BatchService } from "../src/batch/batch-service.ts";
 import { createAgentLoopServer } from "../src/http/server.ts";
 import type { ModelAdapter, ModelResponse } from "../src/runtime/contracts.ts";
+import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
@@ -73,6 +74,12 @@ test("conversation deletion rejects a running Run", async () => {
       INSERT INTO runs(id, owner_user_id, conversation_id, depth, allow_dangerous_tools, status, input, created_at)
       VALUES (?, ?, ?, 0, 0, 'running', ?, ?)
     `).run(runId, owner.user.id, conversationId, "still running", now);
+    new RuntimeActionRepository(database).dispatch({
+      runId,
+      kind: "model_turn",
+      replayPolicy: "safe",
+      deadlineMs: 600_000,
+    });
 
     assert.throws(
       () => runs.deleteConversation(owner.user.id, conversationId),
@@ -80,6 +87,50 @@ test("conversation deletion rejects a running Run", async () => {
     );
     assert.equal(count(database, "conversations"), 1);
     assert.equal(count(database, "runs"), 1);
+  } finally {
+    database.close();
+  }
+});
+
+test("conversation deletion allows a running Run paused for interruption recovery", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("conversation-interrupted@example.com", "conversation interrupted secure password");
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticCompletionModel(),
+    });
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const now = Date.now();
+    database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "interrupted conversation", now, now);
+    database.prepare(`
+      INSERT INTO runs(id, owner_user_id, conversation_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, ?, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, conversationId, "interrupted work", now);
+    const actions = new RuntimeActionRepository(database);
+    const action = actions.dispatch({
+      runId,
+      kind: "assessment",
+      replayPolicy: "safe",
+      deadlineMs: 600_000,
+    });
+    database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
+    assert.equal(actions.reconcileRunningRuns(), 1);
+    assert.equal(runs.get(owner.user.id, runId).status, "running");
+
+    runs.deleteConversation(owner.user.id, conversationId);
+
+    assert.equal(count(database, "conversations"), 0);
+    assert.equal(count(database, "runs"), 0);
+    assert.equal(count(database, "runtime_actions"), 0);
+    assert.equal(count(database, "run_recovery_states"), 0);
   } finally {
     database.close();
   }

@@ -5,6 +5,8 @@ import type { ModelAdapter, ModelInvocation, RuntimeContextSnapshot, RuntimeEven
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
 import type {
+  AssessmentMethod,
+  AssessmentProfileId,
   CriterionAssessment,
   SkillAssessment,
   SkillComplianceAssessment,
@@ -42,6 +44,7 @@ const SUBMIT_ASSESSMENT_TOOL = {
           required: ["skillId", "followed", "rationale", "evidenceRefs"],
           properties: {
             skillId: { type: "string" },
+            status: { type: "string", enum: ["followed", "skipped_unavailable", "process_caveat", "not_followed"] },
             followed: { type: "boolean" },
             rationale: { type: "string" },
             evidenceRefs: { type: "array", items: { type: "string" } },
@@ -79,6 +82,8 @@ export class ModelStepAssessor implements StepAssessor {
           "A tool result, artifact, trace, or model claim is not sufficient by itself.",
           "Every criterion and every applied Skill supplied in the assessment context must receive exactly one assessment.",
           "The exact loaded Skill body is the only domain-workflow authority; assess adherence for applied Skills directly without inventing wrapper criteria.",
+          "For Skill-mandated validation that depends on unavailable local components, renderers, browsers, fonts, or interactive inspection capability: if the user or step success criteria explicitly require that validation, reject and give a concrete install/enable instruction; otherwise, when all success criteria are satisfied and the evidence shows the dependency or capability was probed and unavailable, mark that Skill status as skipped_unavailable, cite the probe evidence, and state the skipped check as a caveat. Do not claim the skipped validation was completed.",
+          "For Skill process discipline gaps such as planning-before-coding, review-before-build, ordering, or evidence-capture timing: when all step success criteria are satisfied and the remaining issue is only process adherence that cannot be repaired after the fact, mark the Skill status as process_caveat rather than not_followed. Preserve the caveat in feedback; do not make process discipline a blocking delivery criterion unless the user or step success criteria explicitly require it.",
           "Return exactly one submit_assessment tool call. Do not execute the task or rewrite the answer.",
           "submit_assessment is your only tool. Never emit computer_run_command, computer_write_file, or any other execution tool, and never complete a dangling tool invocation found in the evidence.",
         ].join("\n"),
@@ -171,7 +176,79 @@ export class RuleBasedStepAssessor implements StepAssessor {
       rationale: "Skill adherence requires a model-backed or policy-backed assessor; activation alone is not compliance",
       evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`],
     }));
-    return buildAssessment(input, criteria, skills, "");
+    return buildAssessment(input, criteria, skills, "", input.assessmentProfile ?? "deterministic", "rule");
+  }
+}
+
+export class ProfiledRuleStepAssessor implements StepAssessor {
+  private readonly profile: AssessmentProfileId;
+
+  constructor(profile: Extract<AssessmentProfileId, "deterministic" | "lookup_lite">) {
+    this.profile = profile;
+  }
+
+  async assess(input: StepAssessmentInput): Promise<SkillComplianceAssessment> {
+    const candidateOutput = input.evidence.candidateOutput.trim();
+    const nonEmpty = candidateOutput.length > 0;
+    const successfulToolRefs = input.evidence.toolCalls
+      .filter((toolCall) => !toolCall.isError)
+      .map((toolCall) => toolCall.toolCallId);
+    const failedToolRefs = input.evidence.toolCalls
+      .filter((toolCall) => toolCall.isError)
+      .map((toolCall) => toolCall.toolCallId);
+    const requiresLookupEvidence = this.profile === "lookup_lite" && stepRequiresLookupEvidence(input);
+    const hasLookupEvidence = successfulToolRefs.length > 0;
+    const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
+      const satisfied = nonEmpty
+        && (!requiresLookupEvidence || hasLookupEvidence)
+        && (failedToolRefs.length === 0 || hasLookupEvidence);
+      return {
+        criterionId: criterion.id,
+        satisfied,
+        rationale: satisfied
+          ? this.approvedRationale(hasLookupEvidence)
+          : this.rejectedRationale(nonEmpty, requiresLookupEvidence, hasLookupEvidence, failedToolRefs),
+        evidenceRefs: satisfied
+          ? (hasLookupEvidence ? ["candidateOutput", ...successfulToolRefs] : ["candidateOutput"])
+          : failedToolRefs,
+      };
+    });
+    const skills: SkillAssessment[] = input.skills.map((skill) => ({
+      skillId: skill.id,
+      status: "not_followed",
+      followed: false,
+      rationale: "Profiled rule assessment does not judge Skill adherence; use the model-backed assessor for Skill-bound steps.",
+      evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`],
+    }));
+    const feedback = criteria.every((criterion) => criterion.satisfied) && skills.length === 0
+      ? ""
+      : "Completion rejected by lightweight assessment; provide the missing answer evidence or use full model assessment.";
+    return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
+  }
+
+  private approvedRationale(hasLookupEvidence: boolean): string {
+    if (this.profile === "lookup_lite") {
+      return hasLookupEvidence
+        ? "The candidate is non-empty and is backed by successful lookup tool evidence."
+        : "The candidate is non-empty and this lookup step did not require external tool evidence.";
+    }
+    return "The deterministic candidate is non-empty and satisfies the admitted criterion.";
+  }
+
+  private rejectedRationale(
+    nonEmpty: boolean,
+    requiresLookupEvidence: boolean,
+    hasLookupEvidence: boolean,
+    failedToolRefs: readonly string[],
+  ): string {
+    if (!nonEmpty) return "The candidate output is empty.";
+    if (requiresLookupEvidence && !hasLookupEvidence) {
+      return "The lookup candidate lacks successful tool evidence.";
+    }
+    if (failedToolRefs.length > 0 && !hasLookupEvidence) {
+      return "Only failed tool evidence is available.";
+    }
+    return "The candidate does not satisfy the lightweight assessment policy.";
   }
 }
 
@@ -194,8 +271,13 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
     const skills = record.skills.map((item, index): SkillAssessment => {
       const row = requireRecord(item, `skills[${index}]`);
       if (typeof row.followed !== "boolean") throw new TypeError(`skills[${index}].followed must be boolean`);
+      const status = row.status;
+      if (status !== undefined && !["followed", "skipped_unavailable", "process_caveat", "not_followed"].includes(status as string)) {
+        throw new TypeError(`skills[${index}].status must be followed, skipped_unavailable, process_caveat, or not_followed`);
+      }
       return {
         skillId: requireString(row.skillId, `skills[${index}].skillId`, { max: 128 }),
+        ...(status === undefined ? {} : { status: status as SkillAssessment["status"] }),
         followed: row.followed,
         rationale: requireString(row.rationale, `skills[${index}].rationale`, { max: 4_000 }),
         evidenceRefs: requireStringArray(row.evidenceRefs, `skills[${index}].evidenceRefs`, 100),
@@ -208,7 +290,7 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
     );
     assertExactIds(skills.map((item) => item.skillId), input.skills.map((item) => item.id), "Skill");
     const feedback = typeof record.feedback === "string" ? record.feedback.trim().slice(0, 8_000) : "";
-    return buildAssessment(input, criteria, skills, feedback);
+    return buildAssessment(input, criteria, skills, feedback, input.assessmentProfile ?? "source_grounded", "model");
   } catch (error) {
     if (error instanceof AppError && error.code === "ASSESSMENT_ERROR") throw error;
     throw new AppError(
@@ -224,22 +306,39 @@ function buildAssessment(
   criteria: readonly CriterionAssessment[],
   skills: readonly SkillAssessment[],
   feedback: string,
+  assessmentProfile: AssessmentProfileId = "source_grounded",
+  assessmentMethod: AssessmentMethod = "model",
 ): SkillComplianceAssessment {
+  const hasCaveatedSkill = skills.some((item) =>
+    item.status === "skipped_unavailable" || item.status === "process_caveat"
+  );
   const approved = input.evidence.candidateOutput.trim().length > 0
     && criteria.every((item) => item.satisfied)
-    && skills.every((item) => item.followed);
+    && skills.every((item) =>
+      item.followed || item.status === "skipped_unavailable" || item.status === "process_caveat"
+    );
   return {
     id: randomUUID(),
     planId: input.planId,
     stepId: input.step.id,
     attempt: input.attempt,
+    assessmentProfile,
+    assessmentMethod,
     approved,
     criteria,
     skills,
     evidenceDigest: evidenceDigest(input.evidence),
-    feedback: approved ? "" : feedback || defaultFeedback(criteria, skills),
+    feedback: approved && !hasCaveatedSkill ? "" : feedback || defaultFeedback(criteria, skills),
     createdAt: Date.now(),
   };
+}
+
+function stepRequiresLookupEvidence(input: StepAssessmentInput): boolean {
+  if (input.step.requiredToolNames.length > 0) return true;
+  return input.step.successCriteria.some((criterion) =>
+    /(?:\b(?:source|url|cite|citation|current|latest|lookup|search|fetch)\b|来源|网址|引用|最新|当前|查询|检索|搜索)/iu
+      .test(criterion.description),
+  );
 }
 
 function assessmentView(input: StepAssessmentInput): Record<string, unknown> {

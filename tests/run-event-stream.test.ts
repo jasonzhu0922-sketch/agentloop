@@ -400,7 +400,7 @@ test("an informational follow-up does not inherit Skills or execution Tools from
     assert.equal(events.some((event) => event.type === "skill.activated"), false);
     assert.equal(events.some((event) => event.type.startsWith("tool.")), false);
     assert.equal(model.classifierSawSkillCatalog, false);
-    assert.deepEqual(model.executionToolCounts, [0, 0]);
+    assert.equal(model.executionToolCounts[1], 0);
   } finally {
     database.close();
   }

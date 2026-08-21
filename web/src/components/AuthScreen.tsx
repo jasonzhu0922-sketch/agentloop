@@ -6,19 +6,21 @@ export function AuthScreen(): React.ReactNode {
   const { actions } = useAgentLoop();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [mode, setMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
 
-  const submit = async (event: React.FormEvent): Promise<void> => {
-    event.preventDefault();
+  const submitAuth = async (mode: "login" | "register"): Promise<void> => {
     setError("");
     try {
       const body = await (mode === "login" ? api.login(email, password) : api.register(email, password));
       actions.setToken(body.token);
-      await actions.refresh();
+      await actions.refresh(body.token);
     } catch (err) {
       setError(err instanceof Error ? err.message : "操作失败");
     }
+  };
+  const submitLogin = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    await submitAuth("login");
   };
 
   return (
@@ -33,7 +35,7 @@ export function AuthScreen(): React.ReactNode {
         </div>
         <p className="auth-sub">登录后即可开始多轮对话。每次指令都会先制定计划、执行，并生成可核验的结果。</p>
         {error !== "" ? <p className="auth-error">{error}</p> : null}
-        <form className="auth-form" onSubmit={(e) => void submit(e)}>
+        <form className="auth-form" onSubmit={(e) => void submitLogin(e)}>
           <label className="field">
             邮箱
             <input
@@ -59,14 +61,13 @@ export function AuthScreen(): React.ReactNode {
             <button
               type="submit"
               className="btn primary"
-              onClick={() => setMode("login")}
             >
               登录
             </button>
             <button
-              type="submit"
+              type="button"
               className="btn ghost"
-              onClick={() => setMode("register")}
+              onClick={() => void submitAuth("register")}
             >
               注册新账号
             </button>

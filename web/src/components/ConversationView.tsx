@@ -1,27 +1,21 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAgentLoop } from "../state/context";
 import { Markdown } from "./Markdown";
 import {
-  currentStep,
-  currentStepWhy,
-  executionInsights,
   failureDetails,
+  failureSummary,
   latestProgressEvent,
   latestStreaming,
-  latestTool,
   livePlan,
   modelWaitText,
-  plannedMap,
   progressText,
   retryText,
   streamingToolProgress,
-  stepToolPurposes,
-  toolActivityItems,
-  toolRowLabel,
 } from "../lib/live";
-import { clip, eventLabel, eventTone, previewText, stepClass, stepLabel } from "../lib/format";
-import type { PlanStep, RunEvent, RunRecord } from "../lib/types";
-import { ToolActivity } from "./ToolActivity";
+import { clip, previewText, stepClass, stepLabel } from "../lib/format";
+import { translatedTimeline } from "../lib/event-translator";
+import type { PlanStep, ProcessArtifact, RunEvent, RunRecord } from "../lib/types";
+import { ArtifactLinks } from "./DetailsPanel";
 
 function Thinking(): React.ReactNode {
   return (
@@ -46,64 +40,57 @@ function UserMessage({ text }: { readonly text: string }): React.ReactNode {
   );
 }
 
-function PlanCard({ steps, goal }: { readonly steps: readonly PlanStep[]; readonly goal: string }): React.ReactNode {
+function PlanStepsPanel({ id, steps }: { readonly id: string; readonly steps: readonly PlanStep[] }): React.ReactNode {
+  if (steps.length === 0) return null;
   return (
-    <article className="msg assistant">
-      <div className="msg-avatar">A</div>
-      <div className="msg-body">
-        <div className="plan-card">
-          <div className="plan-head">
-            <span className="plan-title">执行计划</span>
-            <span className="plan-goal">{goal}</span>
-          </div>
-          <ul className="plan-steps">
-            {steps.map((s) => (
-              <li className="plan-step" key={s.id}>
-                <span className={"step-dot " + stepClass(s.status)} />
-                <span className="step-main">
-                  <span className="step-obj">{s.objective || s.id}</span>
-                  <span className="step-meta">
-                    {(s.requiredToolNames ?? []).slice(0, 3).join(" · ")}
-                    {(s.successCriteria ?? []).length ? " · " + (s.successCriteria ?? []).length + " 条验收标准" : ""}
-                  </span>
-                </span>
-                <span className="step-state">{stepLabel(s.status)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </article>
+    <div className="live-plan-panel" id={id} aria-label="全部规划步骤">
+      <ol className="live-plan-steps">
+        {steps.map((step, index) => (
+          <li className="live-plan-step" key={step.id || index}>
+            <span className={"step-dot " + stepClass(step.status)} />
+            <div className="live-plan-step-body">
+              <div className="live-plan-step-head">
+                <span className="live-plan-index">{String(index + 1).padStart(2, "0")}</span>
+                <strong>{step.objective || step.id}</strong>
+                <span className={"live-plan-state " + stepClass(step.status)}>{stepLabel(step.status)}</span>
+              </div>
+              {step.dependencies?.length ? (
+                <div className="live-plan-meta">依赖：{step.dependencies.join("、")}</div>
+              ) : null}
+              {step.requiredToolNames?.length ? (
+                <div className="live-plan-meta">工具：{step.requiredToolNames.join("、")}</div>
+              ) : null}
+              {step.successCriteria?.length ? (
+                <ul className="live-plan-criteria">
+                  {step.successCriteria.map((criterion) => (
+                    <li key={criterion.id || criterion.description}>{criterion.description}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {step.output ? <div className="live-plan-output">{step.output}</div> : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
 function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; readonly steps: readonly PlanStep[] }): React.ReactNode {
+  const [planOpen, setPlanOpen] = useState(false);
+  const planPanelId = useId();
   const stream = latestStreaming(events);
   const content = stream?.data?.content ? String(stream.data.content) : "";
   const streamTool = streamingToolProgress(stream);
   const progressEvent = latestProgressEvent(events);
   const phaseEvent = stream?.data?.phase ? stream.data.phase : (progressEvent?.data?.phase ?? "处理中");
-  const tool = latestTool(events);
   const total = steps.length;
   const done = steps.filter((s) => s.status === "completed").length;
   const current = steps.find((s) => s.status === "running") ?? null;
   const plan = livePlan(events);
-  const focusStep = currentStep(plan);
-  const insights = executionInsights(events);
-  const toolPurposes = stepToolPurposes(focusStep);
-  const stepLine = total > 0 ? (
-    <span className="live-step">
-      步骤 {done}/{total}
-      {current ? " · " + clip(current.objective || current.id, 24) : ""}
-    </span>
-  ) : null;
-  const toolLine = tool ? (
-    <div className="live-tools">
-      <span className="live-tool">⚙ {eventLabel(tool)}</span>
-    </div>
-  ) : null;
   const retry = retryText(events);
   const idle = streamTool || modelWaitText(events) || progressText(events, plan);
+  const timeline = translatedTimeline(events, 1);
   const preview = content ? (
     <div className="live-preview">{previewText(content)}</div>
   ) : (
@@ -116,34 +103,32 @@ function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; rea
         <div className="live-card">
           <div className="live-head">
             <Thinking /> <span>正在{phase(phaseEvent)}</span>
-            {stepLine}
-          </div>
-          <div className="live-focus">
-            <div>
-              <span className="live-label">当前步骤</span>
-              <strong>{focusStep ? clip(focusStep.objective || focusStep.id, 120) : "等待计划进入执行"}</strong>
-            </div>
-            <div>
-              <span className="live-label">为什么做</span>
-              <p>{currentStepWhy(focusStep)}</p>
-            </div>
-            {toolPurposes.length ? (
-              <div className="live-purpose-list">
-                {toolPurposes.map((item) => <span key={item}>{item}</span>)}
-              </div>
+            {total > 0 ? (
+              <button
+                type="button"
+                className="live-step-toggle"
+                aria-expanded={planOpen}
+                aria-controls={planPanelId}
+                onClick={() => setPlanOpen((open) => !open)}
+              >
+                步骤 {done}/{total}
+                <span className="live-step-caret" aria-hidden="true">⌄</span>
+              </button>
             ) : null}
           </div>
+          {planOpen ? <PlanStepsPanel id={planPanelId} steps={steps} /> : null}
+          {current ? <div className="live-current">{clip(current.objective || current.id, 120)}</div> : null}
           {retry ? <div className="live-retry">{retry}</div> : null}
-          {toolLine}
           {preview}
-          {insights.length ? (
-            <ol className="live-insights">
-              {insights.map((item) => (
-                <li className={item.tone} key={item.key}>
-                  <span className="live-insight-dot" />
-                  <span className="live-insight-body">
-                    <b>{item.title}</b>
-                    {item.detail ? <span>{item.detail}</span> : null}
+          {timeline.length ? (
+            <ol className="run-timeline">
+              {timeline.map((event) => (
+                <li className={event.tone} key={event.key}>
+                  <span className="timeline-dot" />
+                  <span className="timeline-copy">
+                    <strong>{event.title}</strong>
+                    {event.detail ? <span>{event.detail}</span> : null}
+                    <code>{event.rawType}</code>
                   </span>
                 </li>
               ))}
@@ -166,7 +151,35 @@ function phase(value: unknown): string {
   );
 }
 
-function FinalAnswer({ run }: { readonly run: RunRecord }): React.ReactNode {
+function TurnArtifacts({
+  run,
+  artifacts,
+  loaded,
+}: {
+  readonly run: RunRecord;
+  readonly artifacts: readonly ProcessArtifact[];
+  readonly loaded: boolean;
+}): React.ReactNode {
+  const { actions } = useAgentLoop();
+  if (loaded) return <ArtifactLinks artifacts={artifacts} runId={run.id} />;
+  return (
+    <div className="turn-footer">
+      <button type="button" className="text-btn" onClick={() => void actions.selectRun(run.id)}>
+        查看本轮产物
+      </button>
+    </div>
+  );
+}
+
+function FinalAnswer({
+  run,
+  artifacts,
+  loaded,
+}: {
+  readonly run: RunRecord;
+  readonly artifacts: readonly ProcessArtifact[];
+  readonly loaded: boolean;
+}): React.ReactNode {
   return (
     <article className="msg assistant">
       <div className="msg-avatar">A</div>
@@ -175,45 +188,60 @@ function FinalAnswer({ run }: { readonly run: RunRecord }): React.ReactNode {
         <div className="msg-text md">
           {run.output ? <Markdown text={run.output} /> : <span className="muted">（没有产生文本输出）</span>}
         </div>
+        <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>
     </article>
   );
 }
 
-function ErrorMessage({ run, events }: { readonly run: RunRecord; readonly events: readonly RunEvent[] }): React.ReactNode {
-  let msg = "";
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.type === "run.failed" || e.type === "run.cancelled") {
-      msg = e.data && typeof e.data.message === "string" ? e.data.message : "";
-      break;
-    }
-  }
+function ErrorMessage({
+  run,
+  events,
+  steps,
+  artifacts,
+  loaded,
+}: {
+  readonly run: RunRecord;
+  readonly events: readonly RunEvent[];
+  readonly steps: readonly PlanStep[];
+  readonly artifacts: readonly ProcessArtifact[];
+  readonly loaded: boolean;
+}): React.ReactNode {
+  const summary = failureSummary({
+    errorCode: run.errorCode,
+    status: run.status,
+    events,
+    steps,
+    artifactCount: artifacts.length,
+  });
   const diag = failureDetails(events);
   return (
     <article className="msg assistant">
       <div className="msg-avatar">A</div>
       <div className="msg-body">
-        <div className="msg-heading error">✕ 任务未完成</div>
-        <div className="msg-text">
-          {run.errorCode ? <span className="mono">{run.errorCode}</span> : null}
-          {msg ? <div className="muted">{msg}</div> : <span className="muted">任务在完成前被终止。</span>}
-          {diag ? <div className="muted mono">{diag}</div> : null}
+        <div className="failure-card">
+          <div className="msg-heading error">任务未完成</div>
+          <strong className="failure-title">{summary.title}</strong>
+          <p>{summary.reason}</p>
+          <div className="failure-grid">
+            <div>
+              <span>当前进度</span>
+              <p>{summary.progress}</p>
+            </div>
+            <div>
+              <span>建议下一步</span>
+              <p>{summary.nextAction}</p>
+            </div>
+          </div>
+          <details className="failure-technical">
+            <summary>技术细节</summary>
+            {run.errorCode ? <div className="mono">{run.errorCode}</div> : null}
+            {summary.rawMessage ? <div className="muted">{summary.rawMessage}</div> : null}
+            {diag ? <div className="muted mono">{diag}</div> : null}
+          </details>
         </div>
+        <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>
-    </article>
-  );
-}
-
-function AssessmentSummary({ assessments }: { readonly assessments: readonly { approved: boolean }[] }): React.ReactNode {
-  if (!assessments.length) return null;
-  const ok = assessments.filter((a) => a.approved).length;
-  const total = assessments.length;
-  const cls = ok === total ? "good" : ok === 0 ? "bad" : "warn";
-  const text = ok === total ? "质量评估：" + ok + "/" + total + " 步通过，已通过合规检查。" : "质量评估：" + ok + "/" + total + " 步通过，部分步骤未通过。";
-  return (
-    <article className="msg harness note-line">
-      <span className={"note-dot " + cls} /> {text}
     </article>
   );
 }
@@ -298,19 +326,16 @@ export function ConversationView(): React.ReactNode {
       const events = state.currentRun?.events ?? [];
       const plan = livePlan(events);
       const steps = plan?.steps ?? [];
-      if (plan) parts.push(<PlanCard key={"p" + r.id} steps={steps} goal={plan.goal} />);
       parts.push(<LiveCard key={"l" + r.id} events={events} steps={steps} />);
-      const assessments = state.currentRun?.detail.assessments ?? [];
-      parts.push(<AssessmentSummary key={"a" + r.id} assessments={assessments} />);
-      parts.push(<ToolActivity key={"t" + r.id} events={events} />);
     } else if (r.status === "completed") {
-      parts.push(<FinalAnswer key={"f" + r.id} run={r} />);
-      const doneEvents = isLoaded ? (state.currentRun?.events ?? []) : [];
-      parts.push(<ToolActivity key={"t" + r.id} events={doneEvents} />);
+      const artifacts = isLoaded ? (state.currentRun?.artifacts ?? []) : [];
+      parts.push(<FinalAnswer key={"f" + r.id} run={r} artifacts={artifacts} loaded={isLoaded} />);
     } else if (r.status === "failed" || r.status === "cancelled") {
       const failEvents = isLoaded ? (state.currentRun?.events ?? []) : [];
-      parts.push(<ErrorMessage key={"e" + r.id} run={r} events={failEvents} />);
-      parts.push(<ToolActivity key={"t" + r.id} events={failEvents} />);
+      const artifacts = isLoaded ? (state.currentRun?.artifacts ?? []) : [];
+      const plan = isLoaded ? livePlan(failEvents) : null;
+      const steps = plan?.steps ?? (isLoaded ? (state.currentRun?.detail.plan.steps ?? []) : []);
+      parts.push(<ErrorMessage key={"e" + r.id} run={r} events={failEvents} steps={steps} artifacts={artifacts} loaded={isLoaded} />);
     } else if (r.status === "running") {
       parts.push(<RunningPlaceholder key={"r" + r.id} />);
     }
@@ -322,5 +347,3 @@ export function ConversationView(): React.ReactNode {
     </div>
   );
 }
-
-export { eventLabel, eventTone, plannedMap, toolActivityItems, toolRowLabel };

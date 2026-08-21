@@ -32,7 +32,8 @@ export interface AppState {
 export interface AppActions {
   setToken(token: string): void;
   logout(): Promise<void>;
-  startRun(input: string): Promise<void>;
+  startRun(input: string, visibleDirectories?: readonly string[]): Promise<void>;
+  cancelRun(): Promise<void>;
   openConversation(id: string): Promise<void>;
   deleteConversation(id: string, title: string): Promise<void>;
   selectRun(runId: string): Promise<void>;
@@ -41,8 +42,9 @@ export interface AppActions {
   toggleTheme(): void;
   setSelectedSkill(id: string): void;
   setSelectedModel(key: string): void;
+  updateConversationVisibleDirectories(visibleDirectories: readonly string[]): Promise<void>;
   note(message: string): void;
-  refresh(): Promise<void>;
+  refresh(token?: string): Promise<void>;
   loadRunDetail(runId: string): Promise<RunDetail>;
   handleEvent(event: RunEvent): void;
   finalizeRun(runId: string): Promise<void>;

@@ -18,6 +18,7 @@ import type { SkillDirectoryEntry } from "./skill-directory.ts";
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SOURCE_REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const DISCOVERED_SKILL_ID_PREFIX = "discovered:";
 
 export type SkillSourceKind = "inline" | "package";
 
@@ -71,7 +72,6 @@ export class SkillService {
   private readonly allowedImportRoots: readonly string[];
   private readonly configuredSkillDirectory?: string;
   private directoryEntries: readonly SkillDirectoryEntry[] = [];
-  private readonly activeProvisioning = new Map<string, Promise<PrivateSkill[]>>();
 
   constructor(database: SqlConnection, options: SkillServiceOptions = {}) {
     this.skills = new SkillRepository(database);
@@ -116,13 +116,12 @@ export class SkillService {
   }
 
   async listAvailable(ownerUserId: string): Promise<SkillSummary[]> {
-    await this.provisionDiscovered(ownerUserId);
-    return this.list(ownerUserId);
+    return this.availableForOwner(ownerUserId).map(toSkillSummary);
   }
 
   async resolveForAgent(ownerUserId: string, boundSkillIds: readonly string[]): Promise<PrivateSkill[]> {
-    const explicitlyBound = this.getMany(ownerUserId, boundSkillIds);
-    const discovered = await this.provisionDiscovered(ownerUserId);
+    const explicitlyBound = boundSkillIds.map((skillId) => this.resolveAvailableSkill(ownerUserId, skillId));
+    const discovered = this.discoveredPrivateSkills(ownerUserId);
     const merged = new Map<string, PrivateSkill>();
     for (const skill of [...explicitlyBound, ...discovered]) merged.set(skill.id, skill);
     const names = new Set<string>();
@@ -142,8 +141,7 @@ export class SkillService {
    * needed by the current request.
    */
   async resolveForConversation(ownerUserId: string): Promise<PrivateSkill[]> {
-    await this.provisionDiscovered(ownerUserId);
-    return this.getMany(ownerUserId, this.list(ownerUserId).map((skill) => skill.id));
+    return this.availableForOwner(ownerUserId);
   }
 
   create(
@@ -155,6 +153,7 @@ export class SkillService {
     },
   ): PrivateSkill {
     const name = requireString(input.name, "name", { max: 80, pattern: SKILL_NAME_PATTERN });
+    this.assertNotDiscoveredSkillName(name);
     const description = requireString(input.description, "description", { max: 500 });
     const instructions = requireString(input.instructions, "instructions", { max: 200_000 });
     const id = randomUUID();
@@ -223,6 +222,7 @@ export class SkillService {
     }
 
     const source = await inspectSkillPackage(canonicalSource);
+    this.assertNotDiscoveredSkillName(source.name);
     if (source.packageHash !== expectedPackageHash) {
       throw new AppError(
         "SKILL_PACKAGE_INVALID",
@@ -309,90 +309,81 @@ export class SkillService {
     }
   }
 
-  private provisionDiscovered(ownerUserId: string): Promise<PrivateSkill[]> {
-    if (this.directoryEntries.length === 0) return Promise.resolve([]);
-    const active = this.activeProvisioning.get(ownerUserId);
-    if (active !== undefined) return active;
-    const operation = this.provisionDiscoveredNow(ownerUserId).finally(() => {
-      if (this.activeProvisioning.get(ownerUserId) === operation) {
-        this.activeProvisioning.delete(ownerUserId);
-      }
-    });
-    this.activeProvisioning.set(ownerUserId, operation);
-    return operation;
-  }
-
-  private async provisionDiscoveredNow(ownerUserId: string): Promise<PrivateSkill[]> {
-    if (this.packageStore === undefined) {
-      throw new AppError(
-        "SKILL_PACKAGE_INVALID",
-        "Skill package storage is required when a Skill directory is configured",
-        503,
-      );
-    }
-    const provisioned: PrivateSkill[] = [];
-    for (const entry of this.directoryEntries) {
-      const existing = this.skills.findIdByOwnerAndName(ownerUserId, entry.inspection.name);
-      if (existing !== undefined) {
-        const skill = this.get(ownerUserId, existing.id);
-        if (
-          skill.sourceKind !== "package"
-          || skill.package === undefined
-          || skill.package.packageHash !== entry.inspection.packageHash
-        ) {
-          throw conflict(
-            `Private Skill "${entry.inspection.name}" conflicts with the discovered Skill directory package`,
-          );
-        }
-        provisioned.push(skill);
+  async refreshInstalledPackageMetadata(): Promise<number> {
+    let updated = 0;
+    for (const row of this.skills.listPackageSkills()) {
+      const packageSource = parsePackageSource(row);
+      const current = await inspectSkillPackage(packageSource.root);
+      if (
+        row.name === current.name
+        && row.description === current.description
+        && row.instructions === current.instructions
+        && row.package_hash === current.packageHash
+        && row.package_file_count === current.fileCount
+        && row.package_total_bytes === current.totalBytes
+        && row.content_hash === current.packageHash
+      ) {
         continue;
       }
-
-      const currentSource = await inspectSkillPackage(entry.sourceDirectory);
-      if (currentSource.packageHash !== entry.inspection.packageHash) {
-        throw new AppError(
-          "SKILL_PACKAGE_MUTATED",
-          `Discovered Skill package ${entry.inspection.name} changed after directory refresh`,
-          409,
-          {
-            expectedHash: entry.inspection.packageHash,
-            actualHash: currentSource.packageHash,
-          },
-        );
-      }
-      const id = randomUUID();
-      const ownerRoot = resolve(this.packageStore, ownerUserId);
-      assertPathInside(ownerRoot, this.packageStore, "Skill package owner root");
-      await fs.mkdir(ownerRoot, { recursive: true, mode: 0o700 });
-      const destination = resolve(ownerRoot, id);
-      let copied: Awaited<ReturnType<typeof copySkillPackage>> | undefined;
-      try {
-        copied = await copySkillPackage(currentSource, destination);
-        const now = Date.now();
-        this.insert({
-          id,
-          ownerUserId,
-          name: copied.name,
-          description: copied.description,
-          instructions: copied.instructions,
-          sourceKind: "package",
-          sourceUrl: entry.sourceUrl,
-          sourceRevision: entry.sourceRevision,
-          packageRoot: copied.root,
-          entrypointPath: copied.entrypointPath,
-          packageHash: copied.packageHash,
-          packageFileCount: copied.fileCount,
-          packageTotalBytes: copied.totalBytes,
-          contentHash: copied.packageHash,
-          now,
-        });
-        provisioned.push(this.get(ownerUserId, id));
-      } catch (error) {
-        if (copied !== undefined) await removeSkillPackage(copied.root).catch(() => undefined);
-        throw error;
-      }
+      this.skills.updatePackageMetadata({
+        id: row.id,
+        name: current.name,
+        description: current.description,
+        instructions: current.instructions,
+        packageHash: current.packageHash,
+        packageFileCount: current.fileCount,
+        packageTotalBytes: current.totalBytes,
+        now: Date.now(),
+      });
+      updated += 1;
     }
-    return provisioned;
+    return updated;
+  }
+
+  private availableForOwner(ownerUserId: string): PrivateSkill[] {
+    const discoveredNames = new Set(this.directoryEntries.map((entry) => entry.inspection.name));
+    const privateSkills = this.getMany(ownerUserId, this.list(ownerUserId)
+      .filter((skill) => !discoveredNames.has(skill.name))
+      .map((skill) => skill.id));
+    return [...privateSkills, ...this.discoveredPrivateSkills(ownerUserId)]
+      .sort((left, right) => left.name.localeCompare(right.name, "en"));
+  }
+
+  private discoveredPrivateSkills(ownerUserId: string): PrivateSkill[] {
+    return this.directoryEntries.map((entry) => ({
+      id: discoveredSkillId(entry.inspection.name),
+      ownerUserId,
+      name: entry.inspection.name,
+      description: entry.inspection.description,
+      instructions: entry.inspection.instructions,
+      sourceKind: "package",
+      version: 1,
+      contentHash: entry.inspection.packageHash,
+      updatedAt: 0,
+      package: {
+        root: entry.sourceDirectory,
+        entrypointPath: entry.inspection.entrypointPath,
+        packageHash: entry.inspection.packageHash,
+        fileCount: entry.inspection.fileCount,
+        totalBytes: entry.inspection.totalBytes,
+        ...(entry.sourceUrl === undefined ? {} : {
+          url: entry.sourceUrl,
+          revision: entry.sourceRevision,
+        }),
+      },
+    }));
+  }
+
+  private resolveAvailableSkill(ownerUserId: string, skillId: string): PrivateSkill {
+    const discovered = this.discoveredPrivateSkills(ownerUserId).find((skill) => skill.id === skillId);
+    if (discovered !== undefined) return discovered;
+    return this.get(ownerUserId, skillId);
+  }
+
+  private assertNotDiscoveredSkillName(name: string): void {
+    if (this.directoryEntries.some((entry) => entry.inspection.name === name)) {
+      throw conflict(`A discovered Skill named "${name}" already exists`);
+    }
   }
 
   private insert(input: {
@@ -439,6 +430,19 @@ function toPrivateSkill(row: SkillRow): PrivateSkill {
   };
 }
 
+function toSkillSummary(skill: PrivateSkill): SkillSummary {
+  return {
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    version: skill.version,
+    sourceKind: skill.sourceKind,
+    contentHash: skill.contentHash,
+    ...(skill.package === undefined ? {} : { package: skill.package }),
+    updatedAt: skill.updatedAt,
+  };
+}
+
 function parsePackageSource(row: SkillRow): SkillPackageSource {
   if (
     row.package_root === null
@@ -465,6 +469,10 @@ function parsePackageSource(row: SkillRow): SkillPackageSource {
 function parseSourceKind(value: string): SkillSourceKind {
   if (value === "inline" || value === "package") return value;
   throw new Error(`Stored Skill has invalid source kind ${value}`);
+}
+
+function discoveredSkillId(name: string): string {
+  return `${DISCOVERED_SKILL_ID_PREFIX}${name}`;
 }
 
 function requireHttpsUrl(value: unknown): string {

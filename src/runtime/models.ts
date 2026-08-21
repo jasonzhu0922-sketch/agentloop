@@ -504,63 +504,7 @@ export class ResponsesModel implements ModelAdapter {
   }
 
   async complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
-    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
-    const request = this.buildRequest(invocation, false);
-
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-      let response: Response;
-      try {
-        response = await fetch(this.endpoint, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${this.apiKey}`,
-            "content-type": "application/json",
-          },
-          body: request.body,
-          signal: combinedSignal,
-        });
-      } catch (error) {
-        if (combinedSignal.aborted) throw modelRequestAborted();
-        if (attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
-          continue;
-        }
-        throw new AppError("MODEL_ERROR", "Model provider is unreachable", 502, {
-          attempts: attempt,
-          causeCode: transportCauseCode(error),
-          request: request.logContext,
-        });
-      }
-
-      if (!response.ok) {
-        if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-          await response.body?.cancel().catch(() => undefined);
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, response.status, request.logContext);
-          continue;
-        }
-        throw providerHttpError(response, request.logContext);
-      }
-
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch (error) {
-        if (combinedSignal.aborted) throw modelRequestAborted();
-        if (attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
-          continue;
-        }
-        throw new AppError("MODEL_ERROR", "Model provider returned an unreadable response", 502, {
-          attempts: attempt,
-          causeCode: transportCauseCode(error),
-          request: request.logContext,
-        });
-      }
-      assertResponsesPayload(payload);
-      return parseResponsesResponse(payload);
-    }
-    throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
+    return await this.streamComplete(invocation, async () => undefined, signal);
   }
 
   async streamComplete(
@@ -607,6 +551,11 @@ export class ResponsesModel implements ModelAdapter {
         }
 
         try {
+          if (isJsonResponse(response)) {
+            const payload = await response.json();
+            assertResponsesPayload(payload);
+            return parseResponsesResponse(payload);
+          }
           return await this.consumeStream(response, sink, requestTimeout.recordActivity);
         } catch (error) {
           if (requestTimeout.aborted) throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
@@ -1049,6 +998,11 @@ function describeToolChoice(value: unknown): string {
     }
   }
   return "unknown";
+}
+
+function isJsonResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  return /\bapplication\/(?:[a-z0-9.+-]+\+)?json\b/u.test(contentType);
 }
 
 async function providerHttpError(response: Response, request: ModelRequestLogContext): Promise<AppError> {

@@ -48,6 +48,7 @@
       "providerKey": "openai",
       "providerModel": "gpt-5.6",
       "displayName": "GPT5.6",
+      "toolChoiceMode": "constrained-as-auto",
       "protocol": "responses"
     }
   }

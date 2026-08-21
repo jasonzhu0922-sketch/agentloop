@@ -51,9 +51,6 @@ export function admitPlan(input: {
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
       );
     }
-    if (fileProducingStep && !hasFileProducer(new Set(step.requiredToolNames))) {
-      reject(`Step ${step.id} requires file or artifact production, but it does not require a file-producing Tool`);
-    }
     const mergedTools = new Set(step.requiredToolNames);
     if (step.skillIds.length > 0) mergedTools.add("load_skill");
     const criteria: SuccessCriterion[] = [...step.successCriteria];
@@ -175,9 +172,9 @@ function assertStepIsBounded(step: PlanProposal["steps"][number]): void {
   const tools = new Set(step.requiredToolNames);
   const hasInspectionTool = [...tools].some((name) => /(?:^|_)(list|read|search|inspect|fetch)(?:_|$)/.test(name));
   const hasProducerTool = hasFileProducer(tools);
-  const hasDiscoveryWork = /\b(read|inspect|explore|discover|extract|analy[sz]e|reconstruct|summari[sz]e|confirm|identify)\b|读取|检查|探索|发现|提取|分析|重构|总结|确认|识别/.test(text);
+  const hasDiscoveryWork = containsDiscoveryWork(text);
   const hasProductionWork = /\b(write|author|create|generate|build|implement|materialize|produce|save)\b|编写|撰写|创建|生成|实现|沉淀|产出|保存|写入/.test(text);
-  const hasVerificationWork = /\b(verify|validate|test|run|compare|check)\b|验证|校验|测试|运行|对比|检查/.test(text);
+  const hasVerificationWork = containsVerificationWork(text);
   const hasDataAnalysisWork = /\b(?:data|spreadsheet|sheet|workbook|table|dataset|schema|field|row|record|range|count|metric|analysis)\b|数据|表格|工作簿|工作表|字段|行|记录|范围|数量|指标|分析/.test(text);
   const hasSourceProfilingWork = /\b(?:source|sheet|table|schema|field|range|count|identify|profile|scope)\b|来源|源|工作表|表格|字段|范围|数量|识别|定位|解析/.test(text);
   const hasDurableEvidenceWork = /\b(?:structured evidence|evidence artifact|json|markdown|artifact|hash|reusable evidence)\b|结构化证据|证据文件|证据产物|可复用证据|哈希/.test(text);
@@ -204,6 +201,28 @@ function assertStepIsBounded(step: PlanProposal["steps"][number]): void {
       `Step ${step.id} is too broad: split data source profiling, extraction artifact generation, and downstream reporting or verification into smaller dependency-linked steps`,
     );
   }
+}
+
+function containsDiscoveryWork(text: string): boolean {
+  if (/\b(read|inspect|explore|discover|extract|analy[sz]e|reconstruct|summari[sz]e|confirm|identify)\b/.test(text)) {
+    return true;
+  }
+  if (/读取|探索|(?<!未)发现|提取|分析|重构|总结|识别/.test(text)) {
+    return true;
+  }
+  return /定位(?:并)?(?:读取|阅读|查找|找到|确认)/.test(text)
+    || /定位.{0,16}(文件|路径|目录|位置|来源|数据源|工作表|表格)/.test(text)
+    || /解析.{0,16}(源|数据|文件|内容|工作表|表格|字段)/.test(text)
+    || /(源|数据|文件|内容|工作表|表格|字段).{0,16}解析/.test(text)
+    || /确认.{0,20}(来源|数据源|输入|读取|设计稿|工作表|表格|字段|范围|文件名)/.test(text)
+    || /确认.{0,24}(源文件路径|源数据路径|输入路径|设计稿.{0,8}路径|路径.{0,8}(来源|源|输入|设计稿))/.test(text);
+}
+
+function containsVerificationWork(text: string): boolean {
+  if (/\b(verify|validate|test|run|compare|check)\b/.test(text)) return true;
+  if (/验证|校验|测试|运行|检查/.test(text)) return true;
+  return /(?:进行|完成|执行|结果|输出|证据|数据|基准|预期|实际|差异|一致|正确|校验|验证|检查).{0,20}对比/.test(text)
+    || /对比.{0,20}(结果|输出|证据|数据|源|基准|预期|实际|差异|一致|正确|校验|验证|检查)/.test(text);
 }
 
 function reject(message: string): never {

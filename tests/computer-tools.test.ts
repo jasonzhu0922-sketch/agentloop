@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildCommandEnvironment, ComputerExecutor, parseGrepLine, parseRgJsonLine } from "../src/computer/computer-executor.ts";
 import { createComputerTools } from "../src/computer/computer-tools.ts";
+import { createVisibleDirectoryTools } from "../src/computer/visible-directory-tools.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ToolRegistry } from "../src/runtime/tool-registry.ts";
 
@@ -21,6 +23,72 @@ test("computer paths cannot escape the workspace lexically or through a symbolic
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file reports a missing path as actionable NOT_FOUND", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-missing-path-"));
+  try {
+    const executor = new ComputerExecutor(root);
+    await assert.rejects(
+      () => executor.readFile("missing.json"),
+      (error: unknown) => hasCode(error, "NOT_FOUND")
+        && error instanceof Error
+        && error.message === "Path not found: missing.json",
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file resolves a missing bare filename from a nested evidence file", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-basename-"));
+  try {
+    await fs.mkdir(join(root, "evidence"), { recursive: true });
+    await fs.writeFile(join(root, "evidence", "content_distribution.json"), "{\"total\":61}");
+    const executor = new ComputerExecutor(root);
+    const result = await executor.readFile("content_distribution.json");
+    assert.equal(result.content, "{\"total\":61}");
+    assert.equal(result.requestedPath, "content_distribution.json");
+    assert.equal(result.resolvedPath, "evidence/content_distribution.json");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file prefers ranked evidence paths over lower-priority duplicate basenames", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-basename-priority-"));
+  try {
+    await fs.mkdir(join(root, "archive"), { recursive: true });
+    await fs.mkdir(join(root, "evidence"), { recursive: true });
+    await fs.writeFile(join(root, "archive", "progress_stats.json"), "{\"source\":\"archive\"}");
+    await fs.writeFile(join(root, "evidence", "progress_stats.json"), "{\"source\":\"evidence\"}");
+    const executor = new ComputerExecutor(root);
+    const result = await executor.readFile("progress_stats.json");
+    assert.equal(result.content, "{\"source\":\"evidence\"}");
+    assert.equal(result.resolvedPath, "evidence/progress_stats.json");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file reports same-priority duplicate basenames as an explicit conflict", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-basename-conflict-"));
+  try {
+    await fs.mkdir(join(root, "alpha"), { recursive: true });
+    await fs.mkdir(join(root, "beta"), { recursive: true });
+    await fs.writeFile(join(root, "alpha", "summary.json"), "{\"source\":\"alpha\"}\n");
+    await fs.writeFile(join(root, "beta", "summary.json"), "{\"source\":\"beta\"}\n");
+    const executor = new ComputerExecutor(root);
+    await assert.rejects(
+      () => executor.readFile("summary.json"),
+      (error: unknown) => hasCode(error, "CONFLICT")
+        && error instanceof Error
+        && /Multiple files named summary\.json/.test(error.message)
+        && Array.isArray((error as { details?: { candidates?: unknown } }).details?.candidates),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
   }
 });
 
@@ -163,6 +231,89 @@ test("computer command arguments preserve long absolute paths while remaining bo
   }
 });
 
+test("computer_write_file returns bounded write-after-inspection evidence", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-write-inspection-"));
+  try {
+    const content = [
+      "# Report",
+      "opening evidence",
+      ...Array.from({ length: 90 }, (_, index) => `body line ${index + 1}`),
+      "## Source list",
+      "- source A",
+      "## Final checks",
+      "- tail evidence",
+    ].join("\n");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_write_file"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_write_file");
+    assert.match(definition?.description ?? "", /write-after-inspection evidence/);
+    const prepared = allowed.prepare({
+      id: "write-report",
+      name: "computer_write_file",
+      arguments: { path: "reports/summary.md", content },
+    });
+    await fs.mkdir(join(root, "reports"), { recursive: true });
+
+    const result = await prepared.tool.execute(grantContext(["computer_write_file"]), prepared.input) as {
+      path: string;
+      bytes: number;
+      sha256: string;
+      totalLines: number;
+      inspection: {
+        sha256: string;
+        characters: number;
+        totalLines: number;
+        outline: Array<{ line: number; text: string }>;
+        sampleRanges: Array<{ startLine: number; endLine: number; content: string; truncated: boolean }>;
+      };
+    };
+
+    assert.equal(result.path, "reports/summary.md");
+    assert.equal(result.bytes, Buffer.byteLength(content));
+    assert.equal(result.sha256, createHash("sha256").update(content).digest("hex"));
+    assert.equal(result.inspection.sha256, result.sha256);
+    assert.equal(result.totalLines, 96);
+    assert.deepEqual(result.inspection.outline, [
+      { line: 1, text: "# Report" },
+      { line: 93, text: "## Source list" },
+      { line: 95, text: "## Final checks" },
+    ]);
+    assert.equal(result.inspection.sampleRanges.length, 2);
+    assert.match(result.inspection.sampleRanges[0].content, /opening evidence/);
+    assert.match(result.inspection.sampleRanges[1].content, /tail evidence/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command treats empty cwd as the workspace root", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-empty-cwd-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(grant(["computer_run_command"]));
+    const prepared = allowed.prepare({
+      id: "empty-cwd",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["-e", "process.stdout.write(process.cwd())"],
+        cwd: "",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as {
+      exitCode: number | null;
+      stdout: string;
+    };
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, await fs.realpath(root));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_run_command stores large stdout as reusable content-addressed evidence", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-output-ref-"));
   try {
@@ -194,6 +345,52 @@ test("computer_run_command stores large stdout as reusable content-addressed evi
     assert.match(result.stdout, /stored as content-addressed evidence/);
     assert.match(result.stdout, new RegExp(result.stdoutRef.sha256));
     assert.equal(await fs.readFile(join(root, result.stdoutRef.path), "utf8"), "row-data\n".repeat(1200));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command reports bounded workspace file changes as structured evidence", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-file-changes-"));
+  try {
+    await fs.writeFile(join(root, "existing.txt"), "before\n");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(grant(["computer_run_command"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_run_command");
+    assert.match(definition?.description ?? "", /fileChanges/);
+    const prepared = allowed.prepare({
+      id: "file-change-command",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: [
+          "-e",
+          [
+            "const fs = require('node:fs');",
+            "fs.writeFileSync('created.json', '{\"ok\":true}\\n');",
+            "fs.writeFileSync('existing.txt', 'after\\n');",
+          ].join(" "),
+        ],
+        cwd: ".",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as {
+      exitCode: number | null;
+      fileChanges: Array<{ path: string; changeType: string; bytes?: number }>;
+      fileChangesTruncated: boolean;
+    };
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.fileChangesTruncated, false);
+    assert.deepEqual(
+      result.fileChanges.map((change) => ({ path: change.path, changeType: change.changeType })),
+      [
+        { path: "created.json", changeType: "created" },
+        { path: "existing.txt", changeType: "modified" },
+      ],
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -237,6 +434,100 @@ test("computer command names remain bare executable names", async () => {
     );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command can use only Runtime-authorized Skill execution roots as cwd", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-root-"));
+  const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-package-"));
+  try {
+    await fs.mkdir(join(skillRoot, "scripts"), { recursive: true });
+    await fs.writeFile(
+      join(skillRoot, "scripts", "probe.mjs"),
+      "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync('SKILL.md', 'utf8'));\n",
+    );
+    await fs.writeFile(join(skillRoot, "SKILL.md"), "PACKAGE-SCRIPT-OK\n");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(skillRootGrant(["computer_run_command"], skillRoot));
+    const prepared = allowed.prepare({
+      id: "skill-script",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["scripts/probe.mjs"],
+        cwd: "@skills/demo-skill",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute({
+      grant: skillRootGrant(["computer_run_command"], skillRoot),
+    }, prepared.input) as { exitCode: number | null; stdout: string; fileChanges: unknown[] };
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "PACKAGE-SCRIPT-OK\n");
+    assert.deepEqual(result.fileChanges, []);
+
+    const unbound = allowed.prepare({
+      id: "unbound-skill-script",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["scripts/probe.mjs"],
+        cwd: "@skills/other-skill",
+        timeoutMs: 2_000,
+      },
+    });
+    await assert.rejects(
+      () => unbound.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, unbound.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(skillRoot, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command rejects commands that mutate an authorized Skill execution root", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-root-mutation-"));
+  const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-package-mutation-"));
+  try {
+    await fs.writeFile(join(skillRoot, "SKILL.md"), "PACKAGE-SCRIPT-OK\n");
+    const executor = new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    });
+    await assert.rejects(
+      () => executor.runCommand({
+        command: "trusted-node",
+        args: ["-e", "require('node:fs').writeFileSync('generated.txt', 'bad\\n')"],
+        cwd: "@skills/demo-skill",
+        timeoutMs: 2_000,
+      }),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+
+    const registry = new ToolRegistry(createComputerTools(executor));
+    const allowed = registry.materialize(skillRootGrant(["computer_run_command"], skillRoot));
+    const prepared = allowed.prepare({
+      id: "mutating-skill-script",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["-e", "require('node:fs').writeFileSync('generated.txt', 'bad\\n')"],
+        cwd: "@skills/demo-skill",
+        timeoutMs: 2_000,
+      },
+    });
+    await assert.rejects(
+      () => prepared.tool.execute({
+        grant: skillRootGrant(["computer_run_command"], skillRoot),
+      }, prepared.input),
+      (error: unknown) => hasCode(error, "SKILL_PACKAGE_MUTATED"),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(skillRoot, { recursive: true, force: true });
   }
 });
 
@@ -289,6 +580,99 @@ test("computer_read_file supports small line windows", async () => {
   }
 });
 
+test("read_file schemas reject mixed single-window and range-window arguments", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-schema-"));
+  try {
+    const computerRegistry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const computerAllowed = computerRegistry.materialize(grant(["computer_read_file"]));
+    const computerDefinition = computerAllowed.definitions.find((tool) => tool.name === "computer_read_file");
+    assertReadFileSchemaForbidsMixedWindows(computerDefinition?.inputSchema);
+    assert.throws(
+      () => computerAllowed.prepare({
+        id: "mixed-computer-read",
+        name: "computer_read_file",
+        arguments: { path: "profile.json", offset: 1, ranges: [{ offset: 1, limit: 1 }] },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && error instanceof Error
+        && /ranges cannot be combined with offset or limit/.test(error.message),
+    );
+
+    const visibleRegistry = new ToolRegistry(createVisibleDirectoryTools());
+    const visibleAllowed = visibleRegistry.materialize(visibleGrant(["visible_read_file"], root));
+    const visibleDefinition = visibleAllowed.definitions.find((tool) => tool.name === "visible_read_file");
+    assertReadFileSchemaForbidsMixedWindows(visibleDefinition?.inputSchema);
+    assert.throws(
+      () => visibleAllowed.prepare({
+        id: "mixed-visible-read",
+        name: "visible_read_file",
+        arguments: { rootId: "visible_dir_1", path: "profile.json", limit: 1, ranges: [{ offset: 1 }] },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && error instanceof Error
+        && /ranges cannot be combined with offset or limit/.test(error.message),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file reads line windows beyond the default byte prefix", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-late-window-"));
+  try {
+    const lines = Array.from({ length: 30_050 }, (_, index) =>
+      index === 30_020 ? "target: late evidence" : `filler ${index.toString().padStart(5, "0")} ${"x".repeat(20)}`
+    );
+    await fs.writeFile(join(root, "large.md"), lines.join("\n"));
+    const executor = new ComputerExecutor(root);
+
+    const prefix = await executor.readFile("large.md");
+    assert.equal(prefix.truncated, true);
+    assert.equal(prefix.content.includes("target: late evidence"), false);
+
+    const window = await executor.readFile("large.md", undefined, { offset: 30_020, limit: 3 });
+    assert.match(window.content, /target: late evidence/);
+    assert.equal(window.offset, 30_020);
+    assert.equal(window.limit, 3);
+    assert.equal(window.totalLines, 30_050);
+    assert.equal(window.nextOffset, 30_023);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_file supports multiple evidence ranges in one call", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-ranges-"));
+  try {
+    await fs.writeFile(join(root, "brief.md"), ["one", "two", "three", "four", "five"].join("\n"));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_file"]));
+    const prepared = allowed.prepare({
+      id: "read-ranges",
+      name: "computer_read_file",
+      arguments: {
+        path: "brief.md",
+        ranges: [
+          { offset: 2, limit: 1 },
+          { offset: 5, limit: 1 },
+        ],
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_read_file"]), prepared.input) as {
+      content: string;
+      ranges: Array<{ content: string; startLine: number; endLine: number }>;
+    };
+    assert.match(result.content, /brief\.md lines 2-2/);
+    assert.match(result.content, /brief\.md lines 5-5/);
+    assert.deepEqual(result.ranges.map((range) => [range.startLine, range.endLine, range.content]), [
+      [2, 2, "two"],
+      [5, 5, "five"],
+    ]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_find_files finds files by glob without dumping directory trees", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-find-files-"));
   try {
@@ -315,6 +699,82 @@ test("computer_find_files finds files by glob without dumping directory trees", 
   }
 });
 
+test("computer_find_files treats an empty path as the workspace root", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-find-files-empty-path-"));
+  try {
+    await fs.mkdir(join(root, "reports"), { recursive: true });
+    await fs.writeFile(join(root, "reports", "scenario.json"), "{}");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_find_files"]));
+    const prepared = allowed.prepare({
+      id: "find-json-empty-path",
+      name: "computer_find_files",
+      arguments: { pattern: "**/*.json", path: "", limit: 10 },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_find_files"]), prepared.input) as {
+      matches: string[];
+      truncated: boolean;
+    };
+    assert.deepEqual(result.matches, ["reports/scenario.json"]);
+    assert.equal(result.truncated, false);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("visible directory tools read only from explicitly granted local directories", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-root-"));
+  const outside = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-outside-"));
+  try {
+    await fs.mkdir(join(root, "materials"), { recursive: true });
+    await fs.writeFile(join(root, "materials", "brief.md"), "# Brief\nlocal evidence\n");
+    await fs.writeFile(join(outside, "secret.md"), "not granted\n");
+    const registry = new ToolRegistry(createVisibleDirectoryTools());
+    const allowed = registry.materialize(visibleGrant(["visible_find_files", "visible_read_file"], root));
+
+    const find = allowed.prepare({
+      id: "find-visible",
+      name: "visible_find_files",
+      arguments: { rootId: "visible_dir_1", pattern: "**/brief.md" },
+    });
+    const found = await find.tool.execute(
+      { grant: visibleGrant(["visible_find_files", "visible_read_file"], root) },
+      find.input,
+    ) as { rootId: string; matches: string[] };
+    assert.deepEqual(found, { rootId: "visible_dir_1", matches: ["materials/brief.md"], limit: 1000, truncated: false });
+
+    const read = allowed.prepare({
+      id: "read-visible",
+      name: "visible_read_file",
+      arguments: { rootId: "visible_dir_1", path: "materials/brief.md" },
+    });
+    const content = await read.tool.execute(
+      { grant: visibleGrant(["visible_find_files", "visible_read_file"], root) },
+      read.input,
+    ) as { content: string; path: string };
+    assert.equal(content.path, "materials/brief.md");
+    assert.match(content.content, /local evidence/);
+
+    await assert.rejects(
+      () => read.tool.execute(
+        { grant: visibleGrant(["visible_find_files", "visible_read_file"], root) },
+        { rootId: "missing", path: "materials/brief.md" },
+      ),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+    await assert.rejects(
+      () => read.tool.execute(
+        { grant: visibleGrant(["visible_find_files", "visible_read_file"], root) },
+        { rootId: "visible_dir_1", path: "../" + join(outside, "secret.md") },
+      ),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
+});
+
 test("computer_search_text searches a single file path", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-search-file-"));
   try {
@@ -323,6 +783,41 @@ test("computer_search_text searches a single file path", async () => {
     assert.deepEqual(await executor.searchText("only.txt", "hello"), [
       { path: "only.txt", line: 2, text: "hello there" },
     ]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_search_text returns bounded context windows and read ranges", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-search-context-"));
+  try {
+    await fs.writeFile(join(root, "plan.md"), [
+      "# Plan",
+      "before",
+      "target decision",
+      "after",
+      "tail",
+    ].join("\n"));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_search_text"]));
+    const prepared = allowed.prepare({
+      id: "search-context",
+      name: "computer_search_text",
+      arguments: { path: ".", query: "target", contextBefore: 1, contextAfter: 1, maxMatches: 5 },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_search_text"]), prepared.input) as Array<{
+      path: string;
+      line: number;
+      context?: { startLine: number; endLine: number; content: string };
+      readRange?: { offset: number; limit?: number };
+    }>;
+    assert.deepEqual(result, [{
+      path: "plan.md",
+      line: 3,
+      text: "target decision",
+      context: { startLine: 2, endLine: 4, content: "before\ntarget decision\nafter" },
+      readRange: { offset: 2, limit: 3 },
+    }]);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -376,6 +871,7 @@ test("buildCommandEnvironment is platform-aware and lets server env override", (
   assert.equal(typeof env.PATH, "string");
   assert.equal(env.LANG, process.env.LANG ?? "C.UTF-8");
   assert.equal(env.LC_ALL, process.env.LC_ALL ?? "C.UTF-8");
+  assert.equal(env.PYTHONDONTWRITEBYTECODE, "1");
   assert.ok(env.TMPDIR);
   assert.equal("TEMP" in env, false);
   assert.equal("SystemRoot" in env, false);
@@ -403,8 +899,45 @@ function grant(toolNames: readonly string[]) {
   });
 }
 
+function visibleGrant(toolNames: readonly string[], path: string) {
+  return createCapabilityGrant({
+    actorUserId: "user",
+    runId: "run",
+    depth: 0,
+    visibleDirectories: [{ id: "visible_dir_1", name: "visible", path }],
+    allowedToolNames: toolNames,
+    allowedSkillIds: [],
+  });
+}
+
+function skillRootGrant(toolNames: readonly string[], path: string) {
+  return createCapabilityGrant({
+    actorUserId: "user",
+    runId: "run",
+    depth: 0,
+    skillExecutionRoots: [{
+      id: "skill-root:demo",
+      skillId: "demo-skill",
+      name: "demo-skill",
+      cwd: "@skills/demo-skill",
+      path,
+    }],
+    allowedToolNames: toolNames,
+    allowedSkillIds: ["demo-skill"],
+  });
+}
+
 function grantContext(toolNames: readonly string[]) {
   return { grant: grant(toolNames) };
+}
+
+function assertReadFileSchemaForbidsMixedWindows(schema: unknown) {
+  assert.equal(schema !== null && typeof schema === "object", true);
+  const allOf = (schema as { allOf?: unknown }).allOf;
+  assert.deepEqual(allOf, [
+    { not: { required: ["ranges", "offset"] } },
+    { not: { required: ["ranges", "limit"] } },
+  ]);
 }
 
 function hasCode(error: unknown, code: string): boolean {

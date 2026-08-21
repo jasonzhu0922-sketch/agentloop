@@ -42,6 +42,10 @@ export interface AgentLoopOptions {
   readonly maxSteps: number;
   /** Additional tool-enabled steps allowed after `maxSteps` when the model is still working. */
   readonly convergenceGraceSteps?: number;
+  /** Additional tool-enabled steps allowed only after an assessor rejects a completion candidate. */
+  readonly candidateRepairGraceSteps?: number;
+  /** Rejected assessed candidates allowed before accepting the latest non-empty output with a caveat. */
+  readonly candidateRepairAssessmentLimit?: number;
   readonly maxToolResultCharacters?: number;
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
@@ -87,6 +91,13 @@ interface ToolOutcome {
   readonly isError: boolean;
 }
 
+interface StructuredToolCandidate {
+  readonly output: string;
+  readonly projection: string;
+  readonly sourceToolCallId: string;
+  readonly schema?: string;
+}
+
 // Execution turns often need more room than planning because the assistant may
 // need to carry the full skill workflow plus the actual deliverable candidate.
 // A single large `computer_write_file` (e.g. a render script) must fit inside
@@ -121,6 +132,8 @@ const EMPTY_CANDIDATE_REPAIR_PROMPT = [
   "</runtime_candidate_repair>",
 ].join("\n");
 
+const DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT = 2;
+
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
   const emit = async (event: RuntimeEvent): Promise<void> => {
     await options.emit?.(event);
@@ -128,7 +141,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
   const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
   const graceSteps = Math.max(0, options.convergenceGraceSteps ?? DEFAULT_CONVERGENCE_GRACE_STEPS);
-  const hardLimit = options.maxSteps + graceSteps;
+  const candidateRepairGraceSteps = Math.max(0, options.candidateRepairGraceSteps ?? 0);
+  const candidateRepairAssessmentLimit = Math.max(
+    0,
+    options.candidateRepairAssessmentLimit ?? DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT,
+  );
+  let grantedCandidateRepairGraceSteps = 0;
+  let rejectedCandidateAssessments = 0;
   const messages: ModelMessage[] = [
     ...(options.conversationHistory ?? []),
     ...(options.initialMessages === undefined
@@ -173,9 +192,29 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let previousToolSignature: string | undefined;
   let stalled = false;
   let requestedConvergenceReason: string | undefined;
-  for (let step = 1; step <= hardLimit; step += 1) {
+  const evaluateCandidate = async (
+    step: number,
+    context: CandidateCompletionContext,
+  ): Promise<CandidateCompletionEvaluation> => {
+    if (options.evaluateCandidate === undefined) return { approved: true, feedback: "" };
+    const evaluation = await options.evaluateCandidate(context);
+    if (evaluation.assessmentReused === true) {
+      await emit({
+        type: "candidate.assessment_reused",
+        data: {
+          step,
+          approved: evaluation.approved,
+          deferredValidation: evaluation.deferredValidation === true,
+          feedback: evaluation.feedback,
+        },
+      });
+    }
+    return evaluation;
+  };
+  for (let step = 1; step <= currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps); step += 1) {
     throwIfAborted(options.signal);
     const inGrace = step > options.maxSteps;
+    const hardLimit = currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps);
     const convergenceOnly = toolEvidence.length > 0
       && (requestedConvergenceReason !== undefined || step === hardLimit);
     if (convergenceOnly) {
@@ -295,7 +334,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         });
         continue;
       }
-      const evaluation = await options.evaluateCandidate?.({
+      const evaluation = await evaluateCandidate(step, {
         output: response.content,
         messages,
         modelSteps: step,
@@ -305,7 +344,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ...(contextAssembler.contextSummary === undefined
           ? {}
           : { contextSummary: contextAssembler.contextSummary }),
-      }) ?? { approved: true, feedback: "" };
+      });
       await emit({
         type: evaluation.approved ? "candidate.approved" : "candidate.rejected",
         data: { step, output: response.content, feedback: evaluation.feedback },
@@ -314,9 +353,82 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output: response.content } });
         return { output: response.content, messages, steps: step, toolEvidence, activatedSkillNames: [...activatedSkillNames] };
       }
+      if (evaluation.deferredValidation === true) {
+        const output = deferredValidationOutput(response.content, evaluation.feedback);
+        const completionCaveat = { reason: "deferred_validation" as const, feedback: evaluation.feedback };
+        await emit({
+          type: "candidate.validation_deferred",
+          data: { step, output, feedback: evaluation.feedback },
+        });
+        await emit({ type: "loop.completed", data: { step, output, deferredValidation: true, completionCaveat } });
+        return {
+          output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+          deferredValidation: true,
+          completionCaveat,
+        };
+      }
+      rejectedCandidateAssessments += 1;
+      if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
+        if (evaluation.allowRepairLimitCompletion === false) {
+          await emit({
+            type: "candidate.repair_limit_blocked",
+            data: {
+              step,
+              output: response.content,
+              feedback: evaluation.feedback,
+              rejectedCandidateAssessments,
+              candidateRepairAssessmentLimit,
+            },
+          });
+          throw new AppError(
+            "STEP_NOT_COMPLETED",
+            "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
+            422,
+            { feedback: evaluation.feedback },
+          );
+        }
+        const output = repairLimitCompletionOutput(response.content, evaluation.feedback, candidateRepairAssessmentLimit);
+        const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
+        await emit({
+          type: "candidate.completion_caveated",
+          data: {
+            step,
+            output,
+            feedback: evaluation.feedback,
+            reason: completionCaveat.reason,
+            rejectedCandidateAssessments,
+            candidateRepairAssessmentLimit,
+          },
+        });
+        await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
+        return {
+          output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+          completionCaveat,
+        };
+      }
       requestedConvergenceReason = undefined;
+      if (candidateRepairGraceSteps > grantedCandidateRepairGraceSteps) {
+        grantedCandidateRepairGraceSteps = candidateRepairGraceSteps;
+        await emit({
+          type: "loop.candidate_repair_grace_granted",
+          data: {
+            step,
+            candidateRepairGraceSteps,
+            hardLimit: currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps),
+            feedback: evaluation.feedback,
+          },
+        });
+      }
       contextAssembler.setRuntimeDirective(
-        evaluation.feedback || "Completion was rejected. Repair this step using the available evidence.",
+        candidateRepairDirective(evaluation, "Completion was rejected. Repair this step using the available evidence."),
       );
       continue;
     }
@@ -481,6 +593,115 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       data: { step, toolResults: outcomes.map((item) => ({ toolCallId: item.call.id, isError: item.isError })) },
     });
 
+    const structuredCandidate = options.evaluateCandidate === undefined
+      ? undefined
+      : extractStructuredToolCandidate(latestToolEvidence);
+    if (structuredCandidate !== undefined) {
+      await emit({
+        type: "candidate.structured_tool_detected",
+        data: {
+          step,
+          toolCallId: structuredCandidate.sourceToolCallId,
+          ...(structuredCandidate.schema === undefined ? {} : { schema: structuredCandidate.schema }),
+        },
+      });
+      const evaluation = await evaluateCandidate(step, {
+        output: structuredCandidate.output,
+        messages,
+        modelSteps: step,
+        toolEvidence,
+        projectedToolEvidence: projectStructuredCandidateEvidence(toolEvidence, structuredCandidate),
+        activatedSkillNames: [...activatedSkillNames],
+        ...(contextAssembler.contextSummary === undefined
+          ? {}
+          : { contextSummary: contextAssembler.contextSummary }),
+      });
+      await emit({
+        type: evaluation.approved ? "candidate.approved" : "candidate.rejected",
+        data: { step, output: structuredCandidate.output, feedback: evaluation.feedback },
+      });
+      if (evaluation.approved) {
+        await emit({ type: "loop.completed", data: { step, output: structuredCandidate.output } });
+        return {
+          output: structuredCandidate.output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+        };
+      }
+      if (evaluation.deferredValidation === true) {
+        const output = deferredValidationOutput(structuredCandidate.output, evaluation.feedback);
+        const completionCaveat = { reason: "deferred_validation" as const, feedback: evaluation.feedback };
+        await emit({
+          type: "candidate.validation_deferred",
+          data: { step, output, feedback: evaluation.feedback },
+        });
+        await emit({ type: "loop.completed", data: { step, output, deferredValidation: true, completionCaveat } });
+        return {
+          output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+          deferredValidation: true,
+          completionCaveat,
+        };
+      }
+      rejectedCandidateAssessments += 1;
+      if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
+        if (evaluation.allowRepairLimitCompletion === false) {
+          await emit({
+            type: "candidate.repair_limit_blocked",
+            data: {
+              step,
+              output: structuredCandidate.output,
+              feedback: evaluation.feedback,
+              rejectedCandidateAssessments,
+              candidateRepairAssessmentLimit,
+            },
+          });
+          throw new AppError(
+            "STEP_NOT_COMPLETED",
+            "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
+            422,
+            { feedback: evaluation.feedback },
+          );
+        }
+        const output = repairLimitCompletionOutput(
+          structuredCandidate.output,
+          evaluation.feedback,
+          candidateRepairAssessmentLimit,
+        );
+        const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
+        await emit({
+          type: "candidate.completion_caveated",
+          data: {
+            step,
+            output,
+            feedback: evaluation.feedback,
+            reason: completionCaveat.reason,
+            rejectedCandidateAssessments,
+            candidateRepairAssessmentLimit,
+          },
+        });
+        await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
+        return {
+          output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+          completionCaveat,
+        };
+      }
+      requestedConvergenceReason = undefined;
+      contextAssembler.setRuntimeDirective(
+        candidateRepairDirective(evaluation, "Structured tool candidate was rejected. Repair this step using the available evidence."),
+      );
+      continue;
+    }
+
     const convergenceDecision = await evaluateToolStepConvergence(options.shouldConvergeAfterToolStep, {
       step,
       messages,
@@ -502,7 +723,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     data: {
       maxSteps: options.maxSteps,
       convergenceGraceSteps: graceSteps,
-      hardLimit,
+      candidateRepairGraceSteps,
+      candidateRepairAssessmentLimit,
+      grantedCandidateRepairGraceSteps,
+      hardLimit: currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps),
       convergenceRequested,
       stalled,
     },
@@ -511,10 +735,41 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     "RUN_LIMIT_EXCEEDED",
     stalled
       ? `Run stopped extending its budget: the model repeated identical tool calls without forward progress (${options.maxSteps} primary + ${graceSteps} convergence grace)`
-      : `Run exceeded its ${hardLimit}-step limit (${options.maxSteps} primary + ${graceSteps} convergence grace)`,
+      : `Run exceeded its ${currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps)}-step limit (${options.maxSteps} primary + ${graceSteps} convergence grace + ${grantedCandidateRepairGraceSteps} candidate repair grace)`,
     409,
-    { maxSteps: options.maxSteps, convergenceGraceSteps: graceSteps, hardLimit, stalled },
+    {
+      maxSteps: options.maxSteps,
+      convergenceGraceSteps: graceSteps,
+      candidateRepairGraceSteps,
+      candidateRepairAssessmentLimit,
+      grantedCandidateRepairGraceSteps,
+      hardLimit: currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps),
+      stalled,
+    },
   );
+}
+
+function currentHardLimit(
+  maxSteps: number,
+  convergenceGraceSteps: number,
+  candidateRepairGraceSteps: number,
+): number {
+  return maxSteps + convergenceGraceSteps + candidateRepairGraceSteps;
+}
+
+function deferredValidationOutput(output: string, feedback: string): string {
+  const trimmedOutput = output.trim();
+  const trimmedFeedback = feedback.trim();
+  if (trimmedFeedback.length === 0 || trimmedOutput.includes(trimmedFeedback)) return trimmedOutput;
+  if (trimmedOutput.length === 0) return trimmedFeedback;
+  return `${trimmedOutput}\n\nDeferred validation note: ${trimmedFeedback}`;
+}
+
+function repairLimitCompletionOutput(output: string, feedback: string, repairLimit: number): string {
+  const trimmedOutput = output.trim();
+  const trimmedFeedback = feedback.trim();
+  const caveat = `Repair caveat: the candidate was assessed again after ${repairLimit} repair attempt(s), but the remaining issue did not converge. The latest deliverable is accepted with this caveat instead of continuing the repair loop.`;
+  return [trimmedOutput, caveat, trimmedFeedback].filter((part) => part.length > 0).join("\n\n");
 }
 
 async function evaluateToolStepConvergence(
@@ -525,6 +780,93 @@ async function evaluateToolStepConvergence(
   const decision = await predicate(context);
   if (typeof decision === "boolean") return { converge: decision };
   return decision;
+}
+
+function extractStructuredToolCandidate(
+  evidence: readonly AgentLoopToolEvidence[],
+): StructuredToolCandidate | undefined {
+  for (let index = evidence.length - 1; index >= 0; index -= 1) {
+    const item = evidence[index];
+    if (item.isError) continue;
+    for (const record of candidateRecordsFromToolResult(item.result)) {
+      const candidate = structuredCandidateFromRecord(record, item.toolCallId);
+      if (candidate !== undefined) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function candidateRecordsFromToolResult(result: string): ReadonlyArray<Record<string, unknown>> {
+  const direct = parseJsonRecord(result);
+  if (direct === undefined) return [];
+  const records: Record<string, unknown>[] = [direct];
+  if (
+    "exitCode" in direct
+    && direct.exitCode !== 0
+    && direct.exitCode !== null
+  ) {
+    return records;
+  }
+  if (typeof direct.stdout === "string") {
+    const stdout = parseJsonRecord(direct.stdout);
+    if (stdout !== undefined) records.unshift(stdout);
+  }
+  return records;
+}
+
+function structuredCandidateFromRecord(
+  record: Record<string, unknown>,
+  sourceToolCallId: string,
+): StructuredToolCandidate | undefined {
+  const schema = typeof record.schema === "string" ? record.schema : undefined;
+  const deliveryCandidate = isPlainRecord(record.deliveryCandidate) ? record.deliveryCandidate : undefined;
+  const output = typeof deliveryCandidate?.output === "string"
+    ? deliveryCandidate.output
+    : (typeof record.delivery_markdown === "string" ? record.delivery_markdown : undefined);
+  if (output === undefined || output.trim().length === 0) return undefined;
+  const projectionSource = record.assessmentProjection
+    ?? record.assessment_summary
+    ?? {
+      schema,
+      sourceToolCallId,
+      deliveryCharacters: output.length,
+    };
+  return {
+    output,
+    projection: JSON.stringify({
+      structuredToolCandidate: projectionSource,
+      sourceToolCallId,
+      ...(schema === undefined ? {} : { schema }),
+    }),
+    sourceToolCallId,
+    ...(schema === undefined ? {} : { schema }),
+  };
+}
+
+function projectStructuredCandidateEvidence(
+  evidence: readonly AgentLoopToolEvidence[],
+  candidate: StructuredToolCandidate,
+): readonly AgentLoopToolEvidence[] {
+  return evidence.map((item) => {
+    if (item.toolCallId !== candidate.sourceToolCallId) return item;
+    return {
+      ...item,
+      result: candidate.projection,
+    };
+  });
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value);
+    return isPlainRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 interface StreamingDispatchContext {
@@ -798,6 +1140,15 @@ function toolCallSignature(calls: readonly ModelToolCall[]): string {
     })
     .sort()
     .join("|");
+}
+
+function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fallback: string): string {
+  const feedback = evaluation.feedback || fallback;
+  if (evaluation.assessmentReused !== true) return feedback;
+  return [
+    feedback,
+    "The exact completion candidate was already assessed against the same evidence. Do not resubmit it; gather new evidence or provide a materially changed candidate.",
+  ].join("\n");
 }
 
 

@@ -691,6 +691,66 @@ test("Responses streaming timeout extends while chunks keep arriving", async () 
   }
 });
 
+test("Responses adapter preserves provider HTTP error details for semantic complete requests", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    error: {
+      message: "tool_choice named function is not supported",
+      type: "invalid_request_error",
+    },
+  }), {
+    status: 400,
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": "req-responses-400",
+    },
+  });
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://models.example.test",
+      apiKey: "server-secret",
+      model: "responses-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.complete({
+        runId: "responses-provider-http-error",
+        systemPrompt: "Return exactly one lookup call.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Classify this." }],
+        tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
+        toolChoice: { name: "lookup" },
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.equal((error as { message?: string }).message, "Model provider returned HTTP 400");
+        assert.deepEqual((error as { details?: Record<string, unknown> }).details, {
+          status: 400,
+          providerRequestId: "req-responses-400",
+          request: {
+            protocol: "responses",
+            model: "responses-model",
+            phase: "planning",
+            stream: true,
+            canonicalMessageCount: 1,
+            providerInputItemCount: 1,
+            insertedEmptyInputSentinel: false,
+            toolCount: 1,
+            toolChoice: "function:lookup",
+            runtimeContextPlacement: "system",
+          },
+          providerErrorBody: "{\"error\":{\"message\":\"tool_choice named function is not supported\",\"type\":\"invalid_request_error\"}}",
+        });
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Responses adapter rejects a Chat Completions payload instead of treating it as an empty stop", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
@@ -903,6 +963,7 @@ test("Responses adapter replays assistant tool calls without a synthetic empty a
         output: "{\"status\":\"ok\"}",
       },
     ]);
+    assert.equal(capturedBody?.stream, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

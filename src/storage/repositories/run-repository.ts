@@ -29,6 +29,7 @@ export interface RunEventRow {
 export interface ConversationRow {
   id: string;
   title: string;
+  visible_directories_json: string;
   created_at: number;
   updated_at: number;
 }
@@ -47,6 +48,13 @@ export class RunRepository {
 
   constructor(connection: SqlConnection) {
     this.connection = connection;
+  }
+
+  get(runId: string): RunRow | undefined {
+    return this.connection.prepare(`
+      SELECT ${RUN_COLUMNS}
+      FROM runs WHERE id = ?
+    `).get(runId) as RunRow | undefined;
   }
 
   getByOwner(runId: string, ownerUserId: string): RunRow | undefined {
@@ -94,6 +102,7 @@ export class RunRepository {
   listConversationSummaries(ownerUserId: string): ConversationSummaryRow[] {
     return this.connection.prepare(`
       SELECT c.id, c.title, c.created_at, c.updated_at,
+             c.visible_directories_json,
              (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.id AND r.parent_run_id IS NULL) AS run_count
       FROM conversations c
       WHERE c.owner_user_id = ?
@@ -110,7 +119,7 @@ export class RunRepository {
 
   findConversation(ownerUserId: string, conversationId: string): ConversationRow | undefined {
     return this.connection.prepare(`
-      SELECT id, title, created_at, updated_at
+      SELECT id, title, visible_directories_json, created_at, updated_at
       FROM conversations WHERE id = ? AND owner_user_id = ?
     `).get(conversationId, ownerUserId) as ConversationRow | undefined;
   }
@@ -127,6 +136,21 @@ export class RunRepository {
     this.connection.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, conversationId);
   }
 
+  setConversationVisibleDirectories(
+    ownerUserId: string,
+    conversationId: string,
+    visibleDirectories: readonly string[],
+    now: number,
+  ): ConversationRow {
+    const updated = this.connection.prepare(`
+      UPDATE conversations
+      SET visible_directories_json = ?, updated_at = ?
+      WHERE id = ? AND owner_user_id = ?
+    `).run(JSON.stringify([...visibleDirectories]), now, conversationId, ownerUserId);
+    if (updated.changes === 0) throw notFound("Conversation");
+    return this.findConversation(ownerUserId, conversationId)!;
+  }
+
   insertConversation(input: { id: string; ownerUserId: string; title: string; createdAt: number }): void {
     this.connection.prepare(`
       INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
@@ -141,7 +165,7 @@ export class RunRepository {
       `).get(conversationId, ownerUserId) as { id: string } | undefined;
       if (conversation === undefined) throw notFound("Conversation");
 
-      const running = this.connection.prepare(`
+      const active = this.connection.prepare(`
         WITH RECURSIVE run_tree(id, status) AS (
           SELECT id, status FROM runs WHERE conversation_id = ? AND owner_user_id = ?
           UNION ALL
@@ -149,12 +173,35 @@ export class RunRepository {
           FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
           WHERE child.owner_user_id = ?
         )
-        SELECT id FROM run_tree WHERE status = 'running' LIMIT 1
+        SELECT id FROM run_tree
+        WHERE status = 'running'
+          AND (
+            EXISTS (
+              SELECT 1 FROM runtime_actions action
+              WHERE action.run_id = run_tree.id AND action.state = 'dispatched'
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM run_recovery_states state
+              JOIN runtime_actions action ON action.id = state.action_id
+              WHERE state.run_id = run_tree.id AND action.state = 'recovery_required'
+            )
+          )
+        LIMIT 1
       `).get(conversationId, ownerUserId, ownerUserId) as { id: string } | undefined;
-      if (running !== undefined) {
-        throw new AppError("CONFLICT", "Cannot delete a conversation while one of its runs is running", 409);
+      if (active !== undefined) {
+        throw new AppError("CONFLICT", "Cannot delete a conversation while one of its runs is active", 409);
       }
 
+      this.connection.prepare(`
+        WITH RECURSIVE run_tree(id) AS (
+          SELECT id FROM runs WHERE conversation_id = ? AND owner_user_id = ?
+          UNION ALL
+          SELECT child.id FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
+          WHERE child.owner_user_id = ?
+        )
+        DELETE FROM run_recovery_states WHERE run_id IN (SELECT id FROM run_tree)
+      `).run(conversationId, ownerUserId, ownerUserId);
       this.connection.prepare(`
         WITH RECURSIVE run_tree(id) AS (
           SELECT id FROM runs WHERE conversation_id = ? AND owner_user_id = ?

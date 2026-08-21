@@ -1,5 +1,6 @@
 import type { PlanStep, RunEvent } from "./types";
 import { clip, eventLabel, eventTone, phaseLabel, stepLabel, toolAction, toolOutcome } from "./format";
+import { translateRunEvent } from "./event-translator";
 
 export interface LivePlan {
   readonly goal: string;
@@ -12,6 +13,14 @@ export interface ExecutionInsight {
   readonly detail: string;
   readonly tone: "good" | "warn" | "bad" | "";
   readonly seq?: number;
+}
+
+export interface FailureSummary {
+  readonly title: string;
+  readonly reason: string;
+  readonly progress: string;
+  readonly nextAction: string;
+  readonly rawMessage: string;
 }
 
 export function admittedPlan(events: readonly RunEvent[]): { goal: string; steps: readonly PlanStep[] } | null {
@@ -207,6 +216,84 @@ export function failureDetails(events: readonly RunEvent[]): string {
   return "";
 }
 
+export function failureSummary(input: {
+  readonly errorCode?: string;
+  readonly status?: string;
+  readonly events: readonly RunEvent[];
+  readonly steps?: readonly PlanStep[];
+  readonly artifactCount?: number;
+}): FailureSummary {
+  const errorCode = input.errorCode ?? latestFailureCode(input.events);
+  const rawMessage = latestFailureMessage(input.events);
+  const limit = latestEvent(input.events, "loop.limit_exceeded");
+  const steps = input.steps ?? livePlan(input.events)?.steps ?? [];
+  const total = steps.length;
+  const completed = steps.filter((step) => step.status === "completed").length;
+  const failed = steps.find((step) => step.status === "failed");
+  const running = steps.find((step) => step.status === "running");
+  const stoppedAt = failed ?? running ?? steps.find((step) => step.status === "pending") ?? null;
+  const artifactCount = input.artifactCount ?? 0;
+
+  const cancelled = input.status === "cancelled" || errorCode === "CANCELLED";
+  const stalled = limit?.data?.stalled === true;
+  const limitText = limit
+    ? "已执行到系统设置的步数上限"
+      + (typeof limit.data?.hardLimit === "number" ? "（" + limit.data.hardLimit + " 步）" : "")
+      + "，为避免继续无效消耗，任务被停止。"
+    : "";
+  const title = cancelled
+    ? "任务已取消"
+    : errorCode === "RUN_LIMIT_EXCEEDED"
+      ? "任务已停止，当前结果未完成"
+      : "任务未完成，但已有过程信息可查看";
+  const reason = cancelled
+    ? "任务在完成前被取消，系统没有提交最终结果。"
+    : errorCode === "RUN_LIMIT_EXCEEDED"
+      ? stalled
+        ? "系统检测到连续步骤没有形成新的有效进展，因此停止本轮执行。"
+        : limitText || "执行超过系统允许的步数上限，因此没有进入最终提交。"
+      : friendlyErrorReason(errorCode, rawMessage);
+  const progress = total > 0
+    ? "已完成 " + completed + "/" + total + " 个规划步骤"
+      + (stoppedAt ? "，停在：" + clip(stoppedAt.objective || stoppedAt.id, 90) : "。")
+    : input.events.length > 0
+      ? "已记录 " + input.events.length + " 条执行事件，可在时间线中查看过程。"
+      : "尚未加载本轮详细执行记录。";
+  const nextAction = artifactCount > 0
+    ? "可以先预览下方已生成的过程产物；如需继续，建议基于这些产物发起一次更小范围的后续任务。"
+    : errorCode === "RUN_LIMIT_EXCEEDED"
+      ? "建议缩小任务范围，或让系统先只完成读取、提取、生成报告中的一个阶段。"
+      : "建议查看技术细节后重试；如果问题重复出现，需要检查模型、工具权限或输入文件。";
+  return { title, reason, progress, nextAction, rawMessage };
+}
+
+function latestFailureMessage(events: readonly RunEvent[]): string {
+  const event = latestEvent(events, "run.failed") ?? latestEvent(events, "run.cancelled");
+  return typeof event?.data?.message === "string" ? event.data.message : "";
+}
+
+function latestFailureCode(events: readonly RunEvent[]): string | undefined {
+  const event = latestEvent(events, "run.failed") ?? latestEvent(events, "run.cancelled");
+  return typeof event?.data?.code === "string" ? event.data.code : undefined;
+}
+
+function latestEvent(events: readonly RunEvent[], type: string): RunEvent | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === type) return events[i];
+  }
+  return null;
+}
+
+function friendlyErrorReason(errorCode: string | undefined, rawMessage: string): string {
+  if (errorCode === "PLANNING_ERROR" || errorCode === "PLAN_NOT_ADMITTED") return "系统没有得到可执行的规划，因此没有开始或继续执行。";
+  if (errorCode === "ASSESSMENT_ERROR") return "结果评估阶段没有通过，系统没有把当前候选结果提交为最终完成。";
+  if (errorCode === "MODEL_ERROR") return "模型请求或模型返回异常，导致本轮执行中断。";
+  if (errorCode === "TOOL_EXECUTION_ERROR") return "工具执行过程中发生异常，导致本轮执行中断。";
+  if (errorCode === "TOOL_POLICY_DENIED" || errorCode === "FORBIDDEN") return "当前权限不允许执行所需操作，任务已停止。";
+  if (rawMessage) return rawMessage;
+  return "任务在完成前中断，系统没有提交最终结果。";
+}
+
 const ACTIVITY_TYPES: Record<string, boolean> = {
   "planning.started": true,
   "planning.skills.selected": true,
@@ -249,14 +336,8 @@ export function toolActivityItems(events: readonly RunEvent[]): readonly RunEven
 }
 
 export function toolRowLabel(event: RunEvent, planned: Map<string, RunEvent>): string {
-  const label = eventLabel(event);
-  const id = event.data?.toolCallId;
-  const p = id ? planned.get(String(id)) : undefined;
-  if (!p) return label;
-  if (event.type === "tool.completed") return toolAction(p) + " · " + toolOutcome(event);
-  if (event.type === "tool.failed") return toolAction(p) + " · 失败：" + clip(event.data?.error, 72);
-  if (event.type === "tool.rejected") return toolAction(p) + " · 被拒：" + clip(event.data?.reason, 72);
-  return label;
+  const translated = translateRunEvent(event, planned);
+  return translated.detail ? translated.title + " · " + translated.detail : translated.title;
 }
 
 export function stepText(step: PlanStep): string {
@@ -318,7 +399,7 @@ function insightForEvent(event: RunEvent, planned: Map<string, RunEvent>): Execu
     return {
       key,
       title: "开始计划步骤",
-      detail: "步骤 " + String(d.stepId ?? "?") + toolNamesSuffix(d.toolNames),
+      detail: "步骤 " + String(d.stepId ?? "?") + toolNamesSuffix(d.recommendedToolNames ?? d.toolNames),
       tone,
       seq: event.seq,
     };
@@ -425,7 +506,7 @@ function countSuffix(value: unknown, label: string): string {
 }
 
 function toolNamesSuffix(value: unknown): string {
-  return Array.isArray(value) && value.length > 0 ? " · 可用工具 " + value.slice(0, 4).join(", ") : "";
+  return Array.isArray(value) && value.length > 0 ? " · 推荐工具 " + value.slice(0, 4).join(", ") : "";
 }
 
 function toolPurpose(name: string): string {

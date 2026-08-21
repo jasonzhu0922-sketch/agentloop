@@ -2,7 +2,7 @@ import { badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import type { RuntimeTool, ToolExecutionContext } from "../runtime/tool-registry.ts";
 import type { ComputerDriver } from "./computer-driver.ts";
-import { ComputerExecutor } from "./computer-executor.ts";
+import { ComputerExecutor, type CommandRootMount } from "./computer-executor.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
 const MAX_COMMAND_ARGUMENT_CHARACTERS = 4_096;
@@ -36,28 +36,48 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       description: [
         "Read a UTF-8 file under the configured workspace root.",
         "path must be relative to the workspace root; absolute paths are rejected.",
-        "Use optional 1-indexed offset and limit to inspect large files in small chunks instead of reading the entire file into the model context.",
+        "If a bare filename is missing at the workspace root, the tool searches authorized subdirectories by basename; unique ranked matches are read and ambiguous matches return candidate paths.",
+        "Use optional 1-indexed offset and limit for one line window, or ranges for multiple line windows; do not combine ranges with offset or limit.",
       ].join(" "),
-      inputSchema: objectSchema(["path"], {
+      inputSchema: readFileInputSchema(["path"], {
         path: { type: "string" },
         offset: { type: "integer", minimum: 1 },
         limit: { type: "integer", minimum: 1 },
+        ranges: {
+          type: "array",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["offset"],
+            properties: {
+              offset: { type: "integer", minimum: 1 },
+              limit: { type: "integer", minimum: 1, maximum: 2_000 },
+            },
+          },
+        },
       }),
       executionMode: "parallel",
       replaySafe: true,
       parse: (value) => {
         const record = requireRecord(value, "computer_read_file arguments");
+        if (record.ranges !== undefined && (record.offset !== undefined || record.limit !== undefined)) {
+          throw badRequest("ranges cannot be combined with offset or limit");
+        }
         return {
           path: requireString(record.path, "path", { max: 4_000 }),
           offset: optionalPositiveInteger(record.offset, "offset"),
           limit: optionalPositiveInteger(record.limit, "limit"),
+          ranges: parseReadRanges(record.ranges),
         };
       },
       execute: async (context, value) => {
-        const input = value as { path: string; offset?: number; limit?: number };
+        const input = value as { path: string; offset?: number; limit?: number; ranges?: Array<{ offset: number; limit?: number }> };
         return executorForContext(executor, context).readFile(input.path, undefined, {
           offset: input.offset,
           limit: input.limit,
+          ranges: input.ranges,
         });
       },
     },
@@ -78,7 +98,7 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       parse: (value) => {
         const record = requireRecord(value, "computer_find_files arguments");
         return {
-          path: record.path === undefined ? "." : requireString(record.path, "path", { max: 4_000 }),
+          path: record.path === undefined || record.path === "" ? "." : requireString(record.path, "path", { max: 4_000 }),
           pattern: requireString(record.pattern, "pattern", { max: 1_000 }),
           limit: optionalPositiveInteger(record.limit, "limit"),
         };
@@ -94,14 +114,34 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
         "Search literal text recursively under the configured workspace root.",
         "path must be relative to the workspace root; absolute paths are rejected.",
         "Use this low-noise search tool instead of running shell grep/cat loops for file discovery.",
+        "Use optional contextBefore/contextAfter to return small evidence windows around each match.",
       ].join(" "),
-      inputSchema: objectSchema(["path", "query"], { path: { type: "string" }, query: { type: "string" } }),
+      inputSchema: objectSchema(["path", "query"], {
+        path: { type: "string" },
+        query: { type: "string" },
+        maxMatches: { type: "integer", minimum: 1, maximum: 200 },
+        contextBefore: { type: "integer", minimum: 0, maximum: 20 },
+        contextAfter: { type: "integer", minimum: 0, maximum: 20 },
+      }),
       executionMode: "parallel",
       replaySafe: true,
-      parse: (value) => ({ path: fieldString(value, "path", 4_000), query: fieldString(value, "query", 2_000) }),
+      parse: (value) => {
+        const record = requireRecord(value, "computer_search_text arguments");
+        return {
+          path: requireString(record.path, "path", { max: 4_000 }),
+          query: requireString(record.query, "query", { max: 2_000 }),
+          maxMatches: optionalBoundedInteger(record.maxMatches, "maxMatches", 1, 200),
+          contextBefore: optionalBoundedInteger(record.contextBefore, "contextBefore", 0, 20),
+          contextAfter: optionalBoundedInteger(record.contextAfter, "contextAfter", 0, 20),
+        };
+      },
       execute: async (_context, value) => {
-        const input = value as { path: string; query: string };
-        return executorForContext(executor, _context).searchText(input.path, input.query);
+        const input = value as { path: string; query: string; maxMatches?: number; contextBefore?: number; contextAfter?: number };
+        return executorForContext(executor, _context).searchText(input.path, input.query, {
+          maxMatches: input.maxMatches,
+          contextBefore: input.contextBefore,
+          contextAfter: input.contextAfter,
+        });
       },
     },
     {
@@ -110,6 +150,7 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
         "Create or overwrite a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
         "For very large content, prefer several smaller write_file calls over one oversized call so the arguments do not exceed the output budget.",
+        "The result includes sha256, line count, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),
       inputSchema: objectSchema(["path", "content"], {
         path: { type: "string" }, content: { type: "string" }, overwrite: { type: "boolean" },
@@ -140,9 +181,10 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       description: [
         "Spawn an executable with an argument array and no shell; requires dangerous-tool consent.",
         "command must be a bare executable name (no path separators or shell syntax).",
-        "cwd must be relative to the workspace root; absolute paths are rejected.",
+        "cwd must be relative to the workspace root; absolute paths are rejected. For an authorized package Skill, cwd may also be the Runtime-provided @skills/<skill-name> execution root shown by load_skill.",
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
+        "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
         `timeoutMs is optional, defaults to ${DEFAULT_COMMAND_TIMEOUT_MS}, and must be between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS}.`,
       ].join(" "),
       inputSchema: objectSchema(["command", "args"], {
@@ -166,7 +208,7 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
         return {
           command: requireString(record.command, "command", { max: 200 }),
           args: commandArguments(record.args),
-          cwd: record.cwd === undefined ? "." : requireString(record.cwd, "cwd", { max: 4_000 }),
+          cwd: record.cwd === undefined || record.cwd === "" ? "." : requireString(record.cwd, "cwd", { max: 4_000 }),
           timeoutMs: timeoutMs as number,
         };
       },
@@ -181,9 +223,15 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
 }
 
 function executorForContext(executor: ComputerExecutor, context: ToolExecutionContext): ComputerExecutor {
-  return context.grant.workspaceRoot === undefined
-    ? executor
-    : executor.withWorkspaceRoot(context.grant.workspaceRoot);
+  const commandRoots: CommandRootMount[] = context.grant.skillExecutionRoots.map((root) => ({
+    id: root.cwd,
+    path: root.path,
+  }));
+  if (context.grant.workspaceRoot !== undefined) {
+    return executor.withWorkspaceRoot(context.grant.workspaceRoot, { commandRoots });
+  }
+  if (commandRoots.length > 0) return executor.withWorkspaceRoot(executor.workspaceRoot, { commandRoots });
+  return executor;
 }
 
 function commandArguments(value: unknown): string[] {
@@ -210,6 +258,35 @@ function optionalPositiveInteger(value: unknown, field: string): number | undefi
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
     throw badRequest(`${field} must be a positive integer`);
+  }
+  return value as number;
+}
+
+function optionalBoundedInteger(value: unknown, field: string, min: number, max: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
+    throw badRequest(`${field} must be an integer between ${min} and ${max}`);
+  }
+  return value as number;
+}
+
+function parseReadRanges(value: unknown): Array<{ offset: number; limit?: number }> | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) {
+    throw badRequest("ranges must be an array with 1 to 20 entries");
+  }
+  return value.map((item, index) => {
+    const record = requireRecord(item, `ranges[${index}]`);
+    return {
+      offset: requireBoundedInteger(record.offset, `ranges[${index}].offset`, 1, Number.MAX_SAFE_INTEGER),
+      limit: optionalBoundedInteger(record.limit, `ranges[${index}].limit`, 1, 2_000),
+    };
+  });
+}
+
+function requireBoundedInteger(value: unknown, field: string, min: number, max: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
+    throw badRequest(`${field} must be an integer between ${min} and ${max}`);
   }
   return value as number;
 }
@@ -261,4 +338,14 @@ function fieldString(value: unknown, field: string, max: number): string {
 
 function objectSchema(required: readonly string[], properties: Record<string, unknown>): Record<string, unknown> {
   return { type: "object", additionalProperties: false, required, properties };
+}
+
+function readFileInputSchema(required: readonly string[], properties: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...objectSchema(required, properties),
+    allOf: [
+      { not: { required: ["ranges", "offset"] } },
+      { not: { required: ["ranges", "limit"] } },
+    ],
+  };
 }

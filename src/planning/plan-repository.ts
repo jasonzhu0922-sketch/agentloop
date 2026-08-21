@@ -1,6 +1,8 @@
 import type { SqlConnection } from "../storage/connection.ts";
 import { notFound } from "../shared/errors.ts";
 import type {
+  AssessmentMethod,
+  AssessmentProfileId,
   ExecutionPlan,
   PlanStatus,
   PlanStep,
@@ -153,14 +155,17 @@ export class PlanRepository {
   saveAssessment(assessment: SkillComplianceAssessment): void {
     this.database.prepare(`
       INSERT INTO skill_compliance_assessments(
-        id, plan_id, step_id, attempt, approved, criteria_json, skills_json,
+        id, plan_id, step_id, attempt, assessment_profile, assessment_method,
+        approved, criteria_json, skills_json,
         evidence_digest, feedback, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       assessment.id,
       assessment.planId,
       assessment.stepId,
       assessment.attempt,
+      assessment.assessmentProfile ?? "source_grounded",
+      assessment.assessmentMethod ?? "model",
       assessment.approved ? 1 : 0,
       JSON.stringify(assessment.criteria),
       JSON.stringify(assessment.skills),
@@ -172,11 +177,13 @@ export class PlanRepository {
 
   assessments(planId: string): SkillComplianceAssessment[] {
     const rows = this.database.prepare(`
-      SELECT id, plan_id, step_id, attempt, approved, criteria_json, skills_json,
+      SELECT id, plan_id, step_id, attempt, assessment_profile, assessment_method,
+             approved, criteria_json, skills_json,
              evidence_digest, feedback, created_at
       FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY step_id, attempt
     `).all(planId) as unknown as Array<{
-      id: string; plan_id: string; step_id: string; attempt: number; approved: number;
+      id: string; plan_id: string; step_id: string; attempt: number;
+      assessment_profile?: string; assessment_method?: string; approved: number;
       criteria_json: string; skills_json: string; evidence_digest: string; feedback: string; created_at: number;
     }>;
     return rows.map((row) => ({
@@ -184,6 +191,8 @@ export class PlanRepository {
       planId: row.plan_id,
       stepId: row.step_id,
       attempt: row.attempt,
+      assessmentProfile: parseAssessmentProfile(row.assessment_profile),
+      assessmentMethod: parseAssessmentMethod(row.assessment_method),
       approved: row.approved === 1,
       criteria: JSON.parse(row.criteria_json),
       skills: JSON.parse(row.skills_json),
@@ -308,6 +317,22 @@ export class PlanRepository {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);
   }
+}
+
+function parseAssessmentProfile(value: string | undefined): AssessmentProfileId {
+  if (
+    value === "deterministic"
+    || value === "lookup_lite"
+    || value === "source_grounded"
+    || value === "risk_sensitive"
+  ) {
+    return value;
+  }
+  return "source_grounded";
+}
+
+function parseAssessmentMethod(value: string | undefined): AssessmentMethod {
+  return value === "rule" || value === "model" ? value : "model";
 }
 
 function toStep(row: StepRow): PlanStep {

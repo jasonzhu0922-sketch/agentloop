@@ -13,7 +13,7 @@ import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
-test("Agent Loop discovers an unlocked Skill directory and privately provisions the exact package", async () => {
+test("Agent Loop discovers an unlocked Skill directory and exposes the exact package without private provisioning", async () => {
   const fixture = await createDirectoryFixture();
   const database = new AppDatabase(":memory:");
   try {
@@ -34,11 +34,11 @@ test("Agent Loop discovers an unlocked Skill directory and privately provisions 
     const strangerSkills = await skills.listAvailable(stranger.user.id);
     assert.equal(ownerSkills.length, 1);
     assert.equal(strangerSkills.length, 1);
-    assert.notEqual(ownerSkills[0].id, strangerSkills[0].id);
-    assert.notEqual(ownerSkills[0].package?.root, strangerSkills[0].package?.root);
-    assert.notEqual(ownerSkills[0].package?.root, fixture.sourcePackage);
+    assert.equal(ownerSkills[0].id, "discovered:directory-demo");
+    assert.equal(strangerSkills[0].id, "discovered:directory-demo");
+    assert.equal(ownerSkills[0].package?.root, fixture.sourcePackage);
+    assert.equal(strangerSkills[0].package?.root, fixture.sourcePackage);
     assert.equal(ownerSkills[0].package?.packageHash, fixture.packageHash);
-    assert.equal((await fs.stat(resolve(ownerSkills[0].package!.root, "SKILL.md"))).mode & 0o222, 0);
 
     const runs = new RunService({
       database,
@@ -64,6 +64,47 @@ test("Agent Loop discovers an unlocked Skill directory and privately provisions 
       event.type === "skill.directory.resolved" && event.data.packageHash === fixture.packageHash
     ), true);
     assert.equal((await inspectSkillPackage(fixture.sourcePackage)).packageHash, fixture.packageHash);
+  } finally {
+    database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a discovered Skill directory supersedes an old same-name private Skill record", async () => {
+  const fixture = await createDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const owner = await auth.register("directory-shadow@example.com", "directory shadow secure password");
+    const skills = new SkillService(database, {
+      packageStoreRoot: fixture.packageStore,
+      skillDirectory: fixture.skillDirectory,
+    });
+    skills.create(owner.user.id, {
+      name: "directory-demo",
+      description: "Old private copy",
+      instructions: "OLD-PRIVATE-BODY",
+    });
+
+    await skills.refreshSkillDirectory();
+    const available = await skills.listAvailable(owner.user.id);
+    assert.deepEqual(available.map((skill) => skill.id), ["discovered:directory-demo"]);
+    assert.equal(available[0].package?.root, fixture.sourcePackage);
+
+    const resolved = await skills.resolveForConversation(owner.user.id);
+    assert.equal(resolved.length, 1);
+    assert.equal(resolved[0].id, "discovered:directory-demo");
+    assert.match(resolved[0].instructions, /DIRECTORY-SKILL-SECRET-BODY/);
+    assert.doesNotMatch(resolved[0].instructions, /OLD-PRIVATE-BODY/);
+    assert.throws(
+      () => skills.create(owner.user.id, {
+        name: "directory-demo",
+        description: "Duplicate private copy",
+        instructions: "DUPLICATE",
+      }),
+      /A discovered Skill named "directory-demo" already exists/,
+    );
   } finally {
     database.close();
     await removeSkillPackage(fixture.packageStore).catch(() => undefined);
@@ -183,7 +224,7 @@ async function createDirectoryFixture(): Promise<{
   return {
     root,
     skillDirectory,
-    sourcePackage,
+    sourcePackage: inspection.root,
     packageStore,
     packageHash: inspection.packageHash,
   };

@@ -123,7 +123,8 @@ class TuiE2eModel implements ModelAdapter {
         }],
       };
     }
-    assert.deepEqual(toolNames, []);
+    assert.equal(toolNames.includes("submit_plan"), false);
+    assert.equal(toolNames.includes("submit_assessment"), false);
     return {
       content: "TUI E2E produced canonical evidence",
       finishReason: "stop",

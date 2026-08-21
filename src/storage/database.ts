@@ -75,6 +75,7 @@ export class AppDatabase implements SqlConnection {
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title TEXT NOT NULL,
+        visible_directories_json TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -237,6 +238,10 @@ export class AppDatabase implements SqlConnection {
         plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
         step_id TEXT NOT NULL,
         attempt INTEGER NOT NULL,
+        assessment_profile TEXT NOT NULL DEFAULT 'source_grounded'
+          CHECK(assessment_profile IN ('deterministic', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
+        assessment_method TEXT NOT NULL DEFAULT 'model'
+          CHECK(assessment_method IN ('rule', 'model')),
         approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
         criteria_json TEXT NOT NULL,
         skills_json TEXT NOT NULL,
@@ -312,9 +317,12 @@ export class AppDatabase implements SqlConnection {
     this.ensureColumn("skills", "package_hash", "TEXT");
     this.ensureColumn("skills", "package_file_count", "INTEGER");
     this.ensureColumn("skills", "package_total_bytes", "INTEGER");
+    this.ensureColumn("conversations", "visible_directories_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("runs", "allow_dangerous_tools", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("runs", "conversation_id", "TEXT REFERENCES conversations(id) ON DELETE SET NULL");
     this.ensureColumn("runs", "model_key", "TEXT");
+    this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
+    this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
     this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
   }
 

@@ -8,7 +8,7 @@ import test from "node:test";
 import { AuthService } from "../src/auth/auth-service.ts";
 import { BatchService } from "../src/batch/batch-service.ts";
 import { createAgentLoopServer } from "../src/http/server.ts";
-import { collectProcessArtifacts, artifactId } from "../src/runtime/process-artifacts.ts";
+import { collectProcessArtifacts, artifactId, previewProcessArtifact } from "../src/runtime/process-artifacts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
@@ -164,6 +164,14 @@ test("process artifact API serves owner evidence and denies another user", async
     assert.equal(content.headers.get("content-type"), "application/pdf");
     assert.equal(await content.text(), "PDF PROCESS ARTIFACT");
 
+    const preview = await fetch(`${baseUrl}/v1/runs/${runId}/artifacts/${body.artifacts[0].id}/preview`, {
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    assert.equal(preview.status, 200);
+    const previewBody = await preview.json() as { preview: { kind: string; mimeType: string } };
+    assert.equal(previewBody.preview.kind, "binary");
+    assert.equal(previewBody.preview.mimeType, "application/pdf");
+
     const hidden = await fetch(`${baseUrl}/v1/runs/${runId}/artifacts`, {
       headers: { authorization: `Bearer ${stranger.token}` },
     });
@@ -230,9 +238,137 @@ test("process artifact API serves UTF-8 filenames in the download header", async
     const disposition = content.headers.get("content-disposition") ?? "";
     assert.match(disposition, /filename="\S+"/);
     assert.match(disposition, /filename\*=UTF-8''%E5%9C%BA%E6%99%AF%E5%88%86%E6%9E%90%E6%8A%A5%E5%91%8A\.md/);
+
+    const preview = await fetch(`${baseUrl}/v1/runs/${runId}/artifacts/${body.artifacts[0]!.id}/preview`, {
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    assert.equal(preview.status, 200);
+    const previewBody = await preview.json() as { preview: { kind: string; text: string } };
+    assert.equal(previewBody.preview.kind, "text");
+    assert.equal(previewBody.preview.text, "# 场景分析报告\n");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     database.close();
     await fs.rm(workspace, { recursive: true, force: true });
   }
 });
+
+test("process artifact preview extracts docx paragraphs and xlsx rows", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-preview-"));
+  try {
+    const docxPath = join(workspace, "weekly.docx");
+    const xlsxPath = join(workspace, "plan.xlsx");
+    await fs.writeFile(docxPath, zipStore({
+      "word/document.xml": [
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>",
+        "<w:p><w:r><w:t>项目周报</w:t></w:r></w:p>",
+        "<w:p><w:r><w:t>进度正常</w:t></w:r></w:p>",
+        "</w:body></w:document>",
+      ].join(""),
+    }));
+    await fs.writeFile(xlsxPath, zipStore({
+      "xl/workbook.xml": "<workbook><sheets><sheet name=\"计划\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>",
+      "xl/sharedStrings.xml": "<sst><si><t>事项</t></si><si><t>完成率</t></si><si><t>登录优化</t></si></sst>",
+      "xl/worksheets/sheet1.xml": [
+        "<worksheet><sheetData>",
+        "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"s\"><v>1</v></c></row>",
+        "<row r=\"2\"><c r=\"A2\" t=\"s\"><v>2</v></c><c r=\"B2\"><v>100%</v></c></row>",
+        "</sheetData></worksheet>",
+      ].join(""),
+    }));
+
+    const docxPreview = await previewProcessArtifact({
+      workspaceRoot: workspace,
+      artifact: {
+        id: "docx",
+        path: "weekly.docx",
+        name: "weekly.docx",
+        bytes: (await fs.stat(docxPath)).size,
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        sourceTool: "computer_write_file",
+        previewable: true,
+      },
+    });
+    const xlsxPreview = await previewProcessArtifact({
+      workspaceRoot: workspace,
+      artifact: {
+        id: "xlsx",
+        path: "plan.xlsx",
+        name: "plan.xlsx",
+        bytes: (await fs.stat(xlsxPath)).size,
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sourceTool: "computer_write_file",
+        previewable: true,
+      },
+    });
+
+    assert.equal(docxPreview.kind, "docx");
+    if (docxPreview.kind === "docx") {
+      assert.deepEqual(docxPreview.paragraphs, ["项目周报", "进度正常"]);
+    }
+    assert.equal(xlsxPreview.kind, "xlsx");
+    if (xlsxPreview.kind === "xlsx") {
+      assert.equal(xlsxPreview.sheets[0]?.name, "计划");
+      assert.deepEqual(xlsxPreview.sheets[0]?.rows, [
+        ["事项", "完成率"],
+        ["登录优化", "100%"],
+      ]);
+    }
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+function zipStore(entries: Record<string, string>): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(entries)) {
+    const nameBuffer = Buffer.from(name, "utf8");
+    const data = Buffer.from(text, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(0, 10);
+    local.writeUInt32LE(0, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuffer.length, 26);
+    local.writeUInt16LE(0, 28);
+    locals.push(local, nameBuffer, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(0, 12);
+    central.writeUInt32LE(0, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBuffer.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameBuffer);
+    offset += local.length + nameBuffer.length + data.length;
+  }
+  const centralDirectory = Buffer.concat(centrals);
+  const localFiles = Buffer.concat(locals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(Object.keys(entries).length, 8);
+  eocd.writeUInt16LE(Object.keys(entries).length, 10);
+  eocd.writeUInt32LE(centralDirectory.length, 12);
+  eocd.writeUInt32LE(localFiles.length, 16);
+  eocd.writeUInt16LE(0, 20);
+  return Buffer.concat([localFiles, centralDirectory, eocd]);
+}
