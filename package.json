@@ -10,7 +10,6 @@
     "build": "npm run build --prefix web",
     "dev": "node scripts/dev.mjs",
     "start": "node --env-file-if-exists=.env src/app.ts",
-    "tui": "node src/tui.ts",
     "test": "node --test --test-isolation=process tests/*.test.ts",
     "test:coverage": "node --test --experimental-test-coverage --test-isolation=process tests/*.test.ts"
   },

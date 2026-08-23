@@ -10,17 +10,83 @@ import { ModelStepAssessor, RuleBasedStepAssessor } from "../src/planning/assess
 import { ModelPlanner } from "../src/planning/planner.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { DependencyScheduler } from "../src/planning/scheduler.ts";
+import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService, selectPlanningSkills } from "../src/runtime/run-service.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
 import type { RuntimeTool } from "../src/runtime/tool-registry.ts";
+import { AppError } from "../src/shared/errors.ts";
 import { SkillService, type PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { RunOutcomeRepository } from "../src/storage/repositories/outcome-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
-test("ModelPlanner fails closed when the model returns prose instead of submit_plan", async () => {
+type LegacyPlanStepFixture = Omit<PlanProposal["steps"][number], "successCriteria"> & {
+  readonly successCriteria?: readonly { readonly id: string; readonly description: string; readonly source?: "task" | "planner" }[];
+};
+
+function submitOutcomePlanToolCall(
+  id: string,
+  input: {
+    readonly goal: string;
+    readonly selectedSkillIds?: readonly string[];
+    readonly selectedSkillRoles?: readonly { readonly skillId: string; readonly role: "primary_builder" | "source_provider" | "support" | "qa"; readonly reason: string }[];
+    readonly shape?: "single_leaf" | "fact_then_produce" | "multi_deliverable" | "pipeline" | "recovery_patch";
+    readonly steps: readonly LegacyPlanStepFixture[];
+  },
+): ModelResponse["toolCalls"][number] {
+  const selectedSkillRoles = input.selectedSkillRoles
+    ?? (input.selectedSkillIds ?? []).map((skillId) => ({
+      skillId,
+      role: "primary_builder" as const,
+      reason: "Focused test fixture selection",
+    }));
+  return {
+    id,
+    name: "submit_outcome_plan",
+    arguments: {
+      schema: "agentloop.outcomePlan/v2",
+      goal: input.goal,
+      shape: input.shape ?? (input.steps.length === 1 ? "single_leaf" : "pipeline"),
+      selectedSkillRoles,
+      leaves: input.steps.map((step) => ({
+        id: step.id,
+        objective: step.objective,
+        dependsOn: step.dependencies,
+        role: outcomeLeafRoleForFixture(step),
+        skillIds: step.skillIds,
+        requiredToolNames: step.requiredToolNames,
+        evidenceContract: evidenceContractForFixture(step),
+      })),
+    },
+  };
+}
+
+function outcomeLeafRoleForFixture(step: LegacyPlanStepFixture): "fact_acquisition" | "produce" | "deliver" | "repair" {
+  if (step.role !== undefined) return step.role;
+  const text = `${step.id} ${step.objective}`.toLowerCase();
+  if (step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch")) return "fact_acquisition";
+  if (/repair|fix|修复/.test(text)) return "repair";
+  if (step.requiredToolNames.some((name) => /write|run|export|create/i.test(name))) return "produce";
+  return "deliver";
+}
+
+function evidenceContractForFixture(step: LegacyPlanStepFixture): {
+  readonly requiredKinds: readonly string[];
+  readonly caveatPolicy: "none" | "mark_unverified_facts" | "strict_fail_on_missing_source";
+} {
+  if (step.evidenceContract !== undefined) return step.evidenceContract;
+  if (step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+    return { requiredKinds: ["source_summary", "source_urls", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" };
+  }
+  if (step.requiredToolNames.some((name) => /write|run|read_file|find_files/i.test(name))) {
+    return { requiredKinds: ["artifact_path", "artifact_non_empty", "delivery_receipt"], caveatPolicy: "none" };
+  }
+  return { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" };
+}
+
+test("ModelPlanner fails closed when the model returns prose instead of submit_outcome_plan", async () => {
   const planner = new ModelPlanner(new StaticModel({ content: "Here is a markdown plan", toolCalls: [], finishReason: "stop" }));
   await assert.rejects(
     () => planner.plan({
@@ -32,7 +98,7 @@ test("ModelPlanner fails closed when the model returns prose instead of submit_p
     (error: unknown) => {
       assert.equal(hasCode(error, "PLANNING_ERROR"), true);
       assert.deepEqual((error as { details?: unknown }).details, {
-        planningTurn: 3,
+        planningTurn: 1,
         finishReason: "stop",
         toolCallCount: 0,
         toolCallNames: [],
@@ -50,17 +116,23 @@ test("ModelPlanner canonicalizes duplicate names in the set-valued Tool capabili
     finishReason: "tool_calls",
     toolCalls: [{
       id: "plan",
-      name: "submit_plan",
+      name: "submit_outcome_plan",
       arguments: {
+        schema: "agentloop.outcomePlan/v2",
         goal: "inspect then build",
-        selectedSkillIds: [],
-        steps: [{
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        leaves: [{
           id: "build",
           objective: "build output",
-          dependencies: [],
+          dependsOn: [],
+          role: "produce",
           skillIds: [],
           requiredToolNames: ["computer_read_file", "computer_write_file", "computer_write_file"],
-          successCriteria: [{ id: "built", description: "output exists" }],
+          evidenceContract: {
+            requiredKinds: ["artifact_path", "artifact_non_empty", "delivery_receipt"],
+            caveatPolicy: "none",
+          },
         }],
       },
     }],
@@ -117,10 +189,7 @@ test("ModelPlanner caps the planning model output budget", async () => {
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "plan",
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall("plan", {
             goal: "build",
             selectedSkillIds: [],
             steps: [{
@@ -131,8 +200,7 @@ test("ModelPlanner caps the planning model output budget", async () => {
               requiredToolNames: [],
               successCriteria: [{ id: "built", description: "output exists" }],
             }],
-          },
-        }],
+        })],
       };
     },
   });
@@ -145,6 +213,45 @@ test("ModelPlanner caps the planning model output budget", async () => {
   assert.equal(observedMaxOutputTokens, 8_192);
 });
 
+test("ModelPlanner keeps stable planning system prompt compact", async () => {
+  let observedSystemPrompt = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedSystemPrompt = request.systemPrompt;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("plan", {
+            goal: "answer",
+            selectedSkillIds: [],
+            steps: [{
+              id: "answer",
+              objective: "Answer the user.",
+              dependencies: [],
+              skillIds: [],
+              requiredToolNames: [],
+              successCriteria: [{ id: "answered", description: "The user receives an answer." }],
+            }],
+        })],
+      };
+    },
+  });
+
+  await planner.plan({
+    runId: "run-compact-planner-prompt",
+    input: "answer briefly",
+    availableSkills: [],
+    availableToolNames: [],
+  });
+
+  assert.ok(estimateTextTokens(observedSystemPrompt) <= 700, `Planner systemPrompt is too large: ${estimateTextTokens(observedSystemPrompt)} estimated tokens`);
+  assert.match(observedSystemPrompt, /dynamic_prompt_profile/);
+  assert.match(observedSystemPrompt, /browser-presentable, presentation-style, or document-like artifacts/);
+  assert.doesNotMatch(observedSystemPrompt, /html-ppt|DCMM/i);
+  assert.doesNotMatch(observedSystemPrompt, /data-to-report|workspace inspection|inspect_\*|repeated raw stdout|Skill-mandated QA/);
+});
+
 test("ModelPlanner exposes operation profiles for source-level step shaping", async () => {
   let sawProfiles = false;
   const planner = new ModelPlanner({
@@ -152,16 +259,16 @@ test("ModelPlanner exposes operation profiles for source-level step shaping", as
     complete: async (request) => {
       sawProfiles = /operationProfiles/.test(request.runtimeContext?.content ?? "")
         && /data_analysis/.test(request.runtimeContext?.content ?? "")
+        && /dynamic_prompt_context/.test(request.runtimeContext?.content ?? "")
+        && /agentloop\.taskProfile\/v2/.test(request.runtimeContext?.content ?? "")
+        && /"intent":"execute"/.test(request.runtimeContext?.content ?? "")
         && /structured extraction artifact/.test(request.runtimeContext?.content ?? "")
-        && /data-to-report/.test(request.systemPrompt)
-        && /repeated raw stdout dumps/.test(request.systemPrompt);
+        && !/data-to-report/.test(request.systemPrompt)
+        && !/repeated raw stdout dumps/.test(request.systemPrompt);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "plan",
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall("plan", {
             goal: "analyze spreadsheet",
             selectedSkillIds: [],
             steps: [{
@@ -172,8 +279,7 @@ test("ModelPlanner exposes operation profiles for source-level step shaping", as
               requiredToolNames: ["computer_run_command"],
               successCriteria: [{ id: "facts", description: "Structured analysis evidence exists" }],
             }],
-          },
-        }],
+        })],
       };
     },
   });
@@ -200,10 +306,7 @@ test("ModelPlanner keeps executable Skill tasks out of direct-answer-only planni
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "plan",
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall("plan", {
             goal: "build a homepage",
             selectedSkillIds: [skill.id],
             steps: [{
@@ -214,8 +317,7 @@ test("ModelPlanner keeps executable Skill tasks out of direct-answer-only planni
               requiredToolNames: ["test_skill_delivery"],
               successCriteria: [{ id: "homepage-delivered", description: "The homepage delivery is generated." }],
             }],
-          },
-        }],
+        })],
       };
     },
   });
@@ -239,14 +341,12 @@ test("ModelPlanner exposes conversation workset facts for follow-up planning", a
       sawWorkingSet = context.includes("conversation.workset/v1")
         && context.includes("artifacts/outline.json")
         && context.includes("MODEL_ERROR")
-        && /continue from unfinished Plan steps/i.test(request.systemPrompt);
+        && context.includes("Continue from prior Run prior-run Plan step build.")
+        && !/continue from unfinished Plan steps/i.test(request.systemPrompt);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "plan",
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall("plan", {
             goal: "continue prior artifact work",
             selectedSkillIds: [],
             steps: [{
@@ -257,8 +357,7 @@ test("ModelPlanner exposes conversation workset facts for follow-up planning", a
               requiredToolNames: ["computer_write_file"],
               successCriteria: [{ id: "continued", description: "Continuation artifact is written." }],
             }],
-          },
-        }],
+        })],
       };
     },
   });
@@ -337,55 +436,29 @@ test("ModelPlanner treats empty conversation workspace as context instead of Pla
       const context = request.runtimeContext?.content ?? "";
       assert.match(context, /planning\.workspaceFacts\/v1/);
       assert.match(context, /Do not create a workspace inspection Plan step/);
-      assert.match(request.systemPrompt, /Runtime\/context intake facts are planning inputs/);
-      assert.match(request.systemPrompt, /do not create a workspace inspection step/);
+      assert.doesNotMatch(request.systemPrompt, /Runtime\/context intake facts are planning inputs/);
+      assert.doesNotMatch(request.systemPrompt, /workspace inspection step/);
       if (calls === 1) {
         return {
           content: "",
           finishReason: "tool_calls",
-          toolCalls: [{
-            id: "workspace-inspection-plan",
-            name: "submit_plan",
-            arguments: {
+          toolCalls: [submitOutcomePlanToolCall("workspace-outcome-plan", {
               goal: "build a landing page",
               selectedSkillIds: [],
               steps: [
                 {
-                  id: "inspect_workspace",
-                  objective: "Inspect the empty workspace to identify project entry files and framework constraints.",
+                  id: "create_page",
+                  objective: "Create the requested landing page as a standalone index.html in the empty conversation workspace.",
                   dependencies: [],
                   skillIds: [],
-                  requiredToolNames: ["computer_list_directory", "computer_find_files"],
-                  successCriteria: [{ id: "workspace-understood", description: "Workspace project structure is identified." }],
+                  requiredToolNames: ["computer_write_file"],
+                  successCriteria: [{ id: "page-created", description: "A standalone index.html file is written in the workspace." }],
                 },
               ],
-            },
-          }],
+          })],
         };
       }
-      assert.match(context, /empty workspace context intake into Plan work/);
-      return {
-        content: "",
-        finishReason: "tool_calls",
-        toolCalls: [{
-          id: "outcome-plan",
-          name: "submit_plan_patch",
-          arguments: {
-            replacements: [{
-              targetStepId: "inspect_workspace",
-              downstreamDependencyStepId: "create_page",
-              replacementSteps: [{
-                id: "create_page",
-                objective: "Create the requested landing page as a standalone index.html in the empty conversation workspace.",
-                dependencies: [],
-                skillIds: [],
-                requiredToolNames: ["computer_write_file"],
-                successCriteria: [{ id: "page-created", description: "A standalone index.html file is written in the workspace." }],
-              }],
-            }],
-          },
-        }],
-      };
+      throw new Error("Planner should not ask for a repair turn for empty workspace context");
     },
   });
 
@@ -406,30 +479,80 @@ test("ModelPlanner treats empty conversation workspace as context instead of Pla
     },
   });
 
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
   assert.deepEqual(plan.steps.map((step) => step.id), ["create_page"]);
 });
 
-test("ModelPlanner proactively guides reusable-artifact work into small steps", async () => {
+test("ModelPlanner accepts artifact delivery receipts in an empty conversation workspace", async () => {
   let calls = 0;
-  let sawSmallStepGuidance = false;
+  const skill = skillFixture({ id: "web", name: "web-artifacts-builder" });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("artifact-delivery-plan", {
+            goal: "制作 HTML-PPT 培训材料",
+            selectedSkillIds: [skill.id],
+            steps: [{
+              id: "build_html_ppt",
+              objective: "基于调研结果制作并交付 DCMM 4级评级中文培训 HTML-PPT。",
+              dependencies: [],
+              skillIds: [skill.id],
+              requiredToolNames: ["load_skill", "computer_write_file", "computer_run_command", "computer_read_file"],
+              successCriteria: [
+                { id: "sc-1", description: "交付非空的 HTML-PPT 文件或可运行的 HTML 演示项目，位于对话工作区内，并提供明确路径。" },
+                { id: "sc-2", description: "通过本地构建或读取检查获得非空交付回执，能够确认输出格式、工作区路径及基本可用性。" },
+              ],
+            }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-empty-workspace-artifact-delivery",
+    input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
+    availableSkills: [skill],
+    availableToolNames: ["load_skill", "computer_write_file", "computer_run_command", "computer_read_file"],
+    workspaceFacts: {
+      schema: "planning.workspaceFacts/v1",
+      kind: "conversation_workspace",
+      rootLabel: "conversation workspace",
+      state: "empty",
+      entryCount: 0,
+      sampleEntries: [],
+      visibleDirectoryCount: 0,
+      guidance: "The workspace is empty and has no visible external directories. Do not create a workspace inspection Plan step unless the user asks to inspect an existing project.",
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["build_html_ppt"]);
+});
+
+test("ModelPlanner keeps ordinary planning light without adding explicit QA tails", async () => {
+  let calls = 0;
+  let sawOutcomePlanGuidance = false;
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      sawSmallStepGuidance = /stepGranularity/.test(request.runtimeContext?.content ?? "")
-        && /extract_contract_or_spec/.test(request.runtimeContext?.content ?? "")
-        && /author_reusable_artifact/.test(request.runtimeContext?.content ?? "")
-        && /verify_reusable_artifact/.test(request.runtimeContext?.content ?? "")
-        && /Before calling submit_plan, choose the smallest dependency-linked operation units/.test(request.systemPrompt)
-        && /convert prior work, analysis evidence, or source material into a reusable script/.test(request.systemPrompt);
+      const context = request.runtimeContext?.content ?? "";
+      sawOutcomePlanGuidance = /stepGranularity/.test(context)
+        && /ordinary artifact or answer task/.test(context)
+        && /one outcome leaf with concrete delivery boundary/.test(context)
+        && /reusable pipeline or targeted recovery is required/.test(context)
+        && /smallest Outcome Plan/.test(request.systemPrompt)
+        && /Use one leaf for ordinary answer or artifact tasks/.test(request.systemPrompt)
+        && /two leaves only when source facts must be acquired before production/.test(request.systemPrompt)
+        && !/choose the smallest dependency-linked operation units/.test(request.systemPrompt);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "small-plan",
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall("small-plan", {
             goal: "create reusable data analysis script",
             selectedSkillIds: [],
             steps: [
@@ -443,23 +566,14 @@ test("ModelPlanner proactively guides reusable-artifact work into small steps", 
               },
               {
                 id: "author-script",
-                objective: "Write analyze_scenario.py from the analysis contract.",
+                objective: "Write analyze_scenario.py from the analysis contract and record the expected execution command as delivery evidence.",
                 dependencies: ["extract-analysis-contract"],
                 skillIds: [],
                 requiredToolNames: ["computer_read_file", "computer_write_file"],
-                successCriteria: [{ id: "script-written", description: "The reusable script is written." }],
-              },
-              {
-                id: "verify-script",
-                objective: "Run the reusable script and compare key outputs with the prior artifacts.",
-                dependencies: ["author-script"],
-                skillIds: [],
-                requiredToolNames: ["computer_run_command", "computer_read_file"],
-                successCriteria: [{ id: "script-verified", description: "Verification evidence is recorded." }],
+                successCriteria: [{ id: "script-written", description: "The reusable script is written with its execution contract recorded." }],
               },
             ],
-          },
-        }],
+        })],
       };
     },
   });
@@ -476,11 +590,10 @@ test("ModelPlanner proactively guides reusable-artifact work into small steps", 
   });
 
   assert.equal(calls, 1);
-  assert.equal(sawSmallStepGuidance, true);
+  assert.equal(sawOutcomePlanGuidance, true);
   assert.deepEqual(plan.steps.map((item) => item.id), [
     "extract-analysis-contract",
     "author-script",
-    "verify-script",
   ]);
 });
 
@@ -490,16 +603,14 @@ test("ModelPlanner rejects default QA and repair tails for ordinary artifact tas
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      assert.match(request.systemPrompt, /Do not add default inspect_\*, repair_\*_if_needed, final_verify_\*/);
-      assert.match(request.systemPrompt, /Skill-mandated QA belongs inside the Skill-bound leaf/);
-      if (calls === 1) {
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "heavy-poster-plan",
-            name: "submit_plan",
-            arguments: {
+      assert.match(request.systemPrompt, /repair\/verification tail leaves/);
+      assert.doesNotMatch(request.systemPrompt, /inspect_\*/);
+      assert.doesNotMatch(request.systemPrompt, /Skill-mandated QA belongs inside/);
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("light-poster-plan", {
               goal: "create a concert poster",
               selectedSkillIds: [],
               steps: [
@@ -511,81 +622,8 @@ test("ModelPlanner rejects default QA and repair tails for ordinary artifact tas
                   requiredToolNames: ["computer_write_file"],
                   successCriteria: [{ id: "poster-created", description: "poster.png is written." }],
                 },
-                {
-                  id: "inspect_poster",
-                  objective: "Inspect the generated poster for technical and quality issues.",
-                  dependencies: ["create_poster"],
-                  skillIds: [],
-                  requiredToolNames: ["computer_read_file"],
-                  successCriteria: [{ id: "poster-inspected", description: "Poster inspection is recorded." }],
-                },
-                {
-                  id: "repair_poster_if_needed",
-                  objective: "Repair the poster only if inspection found defects.",
-                  dependencies: ["inspect_poster"],
-                  skillIds: [],
-                  requiredToolNames: ["computer_write_file"],
-                  successCriteria: [{ id: "poster-repaired", description: "Repair is completed or marked unnecessary." }],
-                },
-                {
-                  id: "final_verify_poster",
-                  objective: "Perform final verification of the poster.",
-                  dependencies: ["repair_poster_if_needed"],
-                  skillIds: [],
-                  requiredToolNames: ["computer_read_file"],
-                  successCriteria: [{ id: "poster-verified", description: "Final poster verification is recorded." }],
-                },
               ],
-            },
-          }],
-        };
-      }
-      assert.match(request.runtimeContext?.content ?? "", /default QA\/repair tail steps/);
-      if (calls === 2) {
-        assert.match(request.runtimeContext?.content ?? "", /default QA\/repair tail steps/);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "still-heavy-poster-plan",
-            name: "submit_plan_patch",
-            arguments: {
-              replacements: [{
-                targetStepId: "repair_poster_if_needed",
-                downstreamDependencyStepId: "record_no_repair_needed",
-                replacementSteps: [{
-                  id: "record_no_repair_needed",
-                  objective: "Record that no poster repair is needed.",
-                  dependencies: ["inspect_poster"],
-                  skillIds: [],
-                  requiredToolNames: ["computer_write_file"],
-                  successCriteria: [{ id: "recorded", description: "No-repair decision is recorded." }],
-                }],
-              }],
-            },
-          }],
-        };
-      }
-      assert.match(request.runtimeContext?.content ?? "", /ordinary artifact tasks as a light Outcome Plan/);
-      return {
-        content: "",
-        finishReason: "tool_calls",
-        toolCalls: [{
-          id: "light-poster-plan",
-          name: "submit_plan",
-          arguments: {
-            goal: "create a concert poster",
-            selectedSkillIds: [],
-            steps: [{
-              id: "create_poster",
-              objective: "Create and export the requested poster as poster.png.",
-              dependencies: [],
-              skillIds: [],
-              requiredToolNames: ["computer_write_file"],
-              successCriteria: [{ id: "poster-created", description: "poster.png is written and non-empty." }],
-            }],
-          },
-        }],
+        })],
       };
     },
   });
@@ -596,22 +634,243 @@ test("ModelPlanner rejects default QA and repair tails for ordinary artifact tas
     availableSkills: [],
     availableToolNames: ["computer_read_file", "computer_write_file"],
   });
-  assert.equal(calls, 3);
+  assert.equal(calls, 1);
   assert.deepEqual(plan.steps.map((step) => step.id), ["create_poster"]);
 });
 
-test("ModelPlanner allows source inspection without treating it as a default QA tail", async () => {
+test("ModelPlanner accepts delivery leaves with core file receipt evidence", async () => {
+  const skill = skillFixture({ id: "discovered:theme-factory", name: "theme-factory" });
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
     complete: async () => ({
       content: "",
       finishReason: "tool_calls",
-      toolCalls: [{
-        id: "source-grounded-report-plan",
-        name: "submit_plan",
-        arguments: {
+      toolCalls: [submitOutcomePlanToolCall("dcmm-plan", {
+        goal: "制作一套面向 DCMM 4 级评级培训的中文 HTML-PPT 材料。",
+        selectedSkillIds: [skill.id],
+        shape: "fact_then_produce",
+        steps: [
+          {
+            id: "step-1",
+            kind: "leaf",
+            objective: "检索并整理制作 DCMM 4 级评级培训材料所需的权威事实，包括等级定位、能力域与过程要求、量化管理特征、评估依据和评级准备要点。",
+            dependencies: [],
+            refinementState: "not_refinable",
+            requiredFacts: [
+              {
+                id: "fact-1",
+                description: "DCMM 4 级的标准定位、能力域及过程要求",
+                evidenceKinds: ["权威标准或官方机构网页", "标准版本或发布日期", "来源URL"],
+              },
+            ],
+            skillIds: [],
+            requiredToolNames: ["websearch", "webfetch"],
+            successCriteria: [{
+              id: "sc-1",
+              description: "形成可直接用于课件的中文事实摘要，引用可访问来源，并标注不可确认事实边界。",
+            }],
+          },
+          {
+            id: "step-2",
+            kind: "leaf",
+            objective: "基于已核实事实制作并交付一套主题统一、适合授课的 DCMM 4 级评级中文 HTML-PPT。",
+            dependencies: ["step-1"],
+            refinementState: "not_refinable",
+            skillIds: [skill.id],
+            requiredToolNames: ["load_skill", "computer_write_file", "computer_run_command"],
+            successCriteria: [
+              {
+                id: "sc-2",
+                description: "在工作区交付可直接用浏览器打开、逐页切换或导航演示的 HTML-PPT 文件，包含封面、目录、章节内容、总结与参考来源。",
+              },
+              {
+                id: "sc-3",
+                description: "文件写入回执提供最终 HTML-PPT 的工作区路径和非空状态，证明交付物已生成。",
+              },
+            ],
+          },
+        ],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+    runId: "run-dcmm-html-ppt-plan",
+    input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
+    availableSkills: [skill],
+    availableToolNames: ["websearch", "webfetch", "load_skill", "computer_write_file", "computer_run_command"],
+  });
+
+  assert.deepEqual(plan.steps.map((step) => step.id), ["step-1", "step-2"]);
+});
+
+test("ModelPlanner accepts first-round factual artifact plans with conditional source metadata", async () => {
+  let calls = 0;
+  const skill = skillFixture({ id: "discovered:web-artifacts-builder", name: "web-artifacts-builder" });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("dcmm-conditional-source-plan", {
+            goal: "制作一套面向 DCMM 4级评级培训的中文 HTML-PPT。",
+            selectedSkillIds: [skill.id],
+            shape: "fact_then_produce",
+            steps: [
+              {
+                id: "dcmm-research",
+                kind: "leaf",
+                objective: "检索并提炼 DCMM 4级评级培训所需的核心事实、来源依据与适用边界，作为课件内容基础。",
+                dependencies: [],
+                refinementState: "not_refinable",
+                requiredFacts: [{
+                  id: "dcmm-level4-facts",
+                  description: "DCMM 4级定位、核心要求、量化管理机制及评估准备相关事实。",
+                  evidenceKinds: ["公开网页来源", "来源URL", "发布日期（来源提供且与判断相关时）", "相关性判断"],
+                  satisfiedBy: ["dcmm-research-evidence"],
+                }],
+                skillIds: [],
+                requiredToolNames: ["websearch", "webfetch"],
+                successCriteria: [{
+                  id: "dcmm-research-evidence",
+                  description: "形成与 DCMM 4级培训直接相关的事实摘要，记录所采用来源的 URL、来源提供且与判断相关时的发布日期，以及来源与课件主题的相关性；公开资料无法确认的事项明确标注为待核实，不作为确定评级要求。",
+                }],
+              },
+              {
+                id: "build-dcmm-html-ppt",
+                kind: "leaf",
+                objective: "基于已提炼的资料制作并交付中文 DCMM 4级评级 HTML-PPT。",
+                dependencies: ["dcmm-research"],
+                refinementState: "not_refinable",
+                requiredFacts: [],
+                skillIds: [skill.id],
+                requiredToolNames: ["load_skill", "computer_write_file", "computer_run_command", "computer_read_file"],
+                successCriteria: [
+                  {
+                    id: "html-ppt-delivered",
+                    description: "交付可在浏览器中打开的 HTML-PPT 文件，具有清晰的逐页幻灯片结构和可用的基本翻页/演示交互。",
+                  },
+                  {
+                    id: "training-content-covered",
+                    description: "课件覆盖培训目标、DCMM 概览与等级体系、4级定义和特征、相关能力域及关键要求、评估关注点、建设路径、常见问题与总结，内容适合中文培训讲授。",
+                  },
+                  {
+                    id: "local-receipt-confirmed",
+                    description: "关键事实与研究结论一致，末尾列出采用的来源 URL、可获得的发布日期或访问日期及必要 caveat；同一交付步骤内完成本地运行或读取确认，确保入口文件和核心内容完整。",
+                  },
+                ],
+              },
+            ],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-dcmm-first-round-conditional-sources",
+    input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
+    availableSkills: [skill],
+    availableToolNames: ["websearch", "webfetch", "load_skill", "computer_write_file", "computer_run_command", "computer_read_file"],
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["dcmm-research", "build-dcmm-html-ppt"]);
+});
+
+test("ModelPlanner drops unrequested optional enhancement success criteria without a repair turn", async () => {
+  let calls = 0;
+  const skill = skillFixture({ id: "discovered:theme-factory", name: "theme-factory" });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("overconstrained-dcmm-plan", {
+            goal: "制作 DCMM 4 级 HTML-PPT 培训材料。",
+            selectedSkillIds: [skill.id],
+            shape: "fact_then_produce",
+            steps: [
+              {
+                id: "step-1",
+                kind: "leaf",
+                objective: "检索并整理 DCMM 4 级评级培训材料所需的来源事实。",
+                dependencies: [],
+                refinementState: "not_refinable",
+                skillIds: [],
+                requiredToolNames: ["websearch", "webfetch"],
+                successCriteria: [
+                  {
+                    id: "sc-1",
+                    description: "形成覆盖定义、等级特征和评级准备要点的事实摘要。",
+                  },
+                  {
+                    id: "sc-2",
+                    description: "列出实际获取并采用的来源URL、发布机构及发布日期，并说明版本差异。",
+                  },
+                ],
+              },
+              {
+                id: "step-2",
+                kind: "leaf",
+                objective: "基于已核实事实设计并生成中文 DCMM 4级 HTML-PPT。",
+                dependencies: ["step-1"],
+                refinementState: "not_refinable",
+                skillIds: [skill.id],
+                requiredToolNames: ["load_skill", "computer_write_file"],
+                successCriteria: [
+                  {
+                    id: "sc-3",
+                    description: "交付一个可直接在浏览器打开和演示的 HTML-PPT 文件。",
+                  },
+                  {
+                    id: "sc-4",
+                    description: "具备清晰的逐页导航、键盘翻页、页码或进度提示，并适配常见演示屏幕。",
+                  },
+                  {
+                    id: "sc-5",
+                    description: "课件形成完整培训叙事，至少涵盖案例或练习、常见误区、实施路线图。",
+                  },
+                  {
+                    id: "sc-6",
+                    description: "视觉主题专业统一，中文排版清晰，图表、流程、矩阵或时间路线等可视化内容支持培训理解，且无明显内容溢出或不可读元素。",
+                  },
+                ],
+              },
+            ],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-dcmm-optional-enhancements",
+    input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
+    availableSkills: [skill],
+    availableToolNames: ["websearch", "webfetch", "load_skill", "computer_write_file"],
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["step-1", "step-2"]);
+  assert.deepEqual(plan.steps.map((step) => step.successCriteria.map((criterion) => criterion.id)), [
+    ["source_summary", "source_urls", "explicit_caveats"],
+    ["artifact_path", "artifact_non_empty", "delivery_receipt"],
+  ]);
+});
+
+test("ModelPlanner allows source inspection and keeps local report receipt inside production", async () => {
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("source-grounded-report-plan", {
           goal: "write a source-grounded report",
           selectedSkillIds: [],
+          shape: "fact_then_produce",
           steps: [
             {
               id: "inspect_sources",
@@ -623,23 +882,14 @@ test("ModelPlanner allows source inspection without treating it as a default QA 
             },
             {
               id: "write_report",
-              objective: "Write the requested report from the inspected source facts.",
+              objective: "Write the requested report from the inspected source facts and confirm the report file can be read locally.",
               dependencies: ["inspect_sources"],
               skillIds: [],
-              requiredToolNames: ["computer_write_file"],
-              successCriteria: [{ id: "report-written", description: "The report file is written." }],
-            },
-            {
-              id: "verify_report_receipt",
-              objective: "Confirm the report file exists and references the inspected source facts.",
-              dependencies: ["write_report"],
-              skillIds: [],
-              requiredToolNames: ["computer_read_file"],
-              successCriteria: [{ id: "report-receipt", description: "The written report can be read back locally." }],
+              requiredToolNames: ["computer_write_file", "computer_read_file"],
+              successCriteria: [{ id: "report-written", description: "The report file is written and local readback confirms it references the inspected source facts." }],
             },
           ],
-        },
-      }],
+      })],
     }),
   });
 
@@ -653,18 +903,21 @@ test("ModelPlanner allows source inspection without treating it as a default QA 
   assert.deepEqual(plan.steps.map((step) => step.id), [
     "inspect_sources",
     "write_report",
-    "verify_report_receipt",
   ]);
 });
 
-test("Plan admission rejects oversized exploratory production steps", () => {
+test("Plan admission accepts leaf-local artifact production and readback evidence", () => {
   const proposal: PlanProposal = {
     goal: "create reusable data analysis script",
+    schema: "agentloop.outcomePlan/v2",
+    shape: "single_leaf",
+    selectedSkillRoles: [],
     selectedSkillIds: [],
     steps: [{
       id: "reconstruct-author-and-verify",
       objective: "Read prior artifacts, reconstruct the spreadsheet analysis flow, confirm python/openpyxl, write analyze_scenario.py, and verify regenerated JSON and Markdown outputs.",
       dependencies: [],
+      role: "produce",
       skillIds: [],
       requiredToolNames: [
         "computer_list_directory",
@@ -673,31 +926,33 @@ test("Plan admission rejects oversized exploratory production steps", () => {
         "computer_write_file",
         "computer_run_command",
       ],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
+        caveatPolicy: "none",
+      },
       successCriteria: [
-        { id: "sources-read", description: "Prior artifacts are read and summarized." },
-        { id: "script-created", description: "analyze_scenario.py is written." },
-        { id: "io-parameterized", description: "Input and output paths are parameterized." },
-        { id: "verified", description: "The script is run and outputs are compared with prior artifacts." },
+        { id: "artifact_path", description: "The generated script path is recorded." },
+        { id: "artifact_non_empty", description: "The generated script is non-empty." },
+        { id: "format_matches_request", description: "The generated script format matches the request." },
+        { id: "delivery_receipt", description: "The delivery receipt identifies the final result." },
       ],
     }],
   };
 
-  assert.throws(
-    () => admitPlan({
-      runId: "run-oversized-step",
-      proposal,
-      availableSkills: [],
-      availableToolNames: new Set([
-        "computer_list_directory",
-        "computer_read_file",
-        "computer_search_text",
-        "computer_write_file",
-        "computer_run_command",
-      ]),
-    }),
-    (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED")
-      && String((error as Error).message).includes("split discovery/extraction, production, and verification"),
-  );
+  const plan = admitPlan({
+    runId: "run-leaf-local-artifact",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set([
+      "computer_list_directory",
+      "computer_read_file",
+      "computer_search_text",
+      "computer_write_file",
+      "computer_run_command",
+    ]),
+  });
+
+  assert.deepEqual(plan.steps.map((step) => step.id), ["reconstruct-author-and-verify"]);
 });
 
 test("Plan admission preserves visual contrast language as artifact authoring work", () => {
@@ -792,145 +1047,102 @@ test("Plan admission preserves visual contrast language as artifact authoring wo
   ]);
 });
 
-test("Plan admission still rejects Chinese steps that mix extraction, production, and comparison verification", () => {
+test("Plan admission accepts Chinese leaf-local production with readback evidence", () => {
   const proposal: PlanProposal = {
     goal: "读取资料并生成报告",
+    schema: "agentloop.outcomePlan/v2",
+    shape: "single_leaf",
+    selectedSkillRoles: [],
     selectedSkillIds: [],
     steps: [{
       id: "read_create_and_compare",
       objective: "读取源文件，提取结构化内容，创建报告，并对比源数据验证输出。",
       dependencies: [],
+      role: "produce",
       skillIds: [],
       requiredToolNames: ["computer_read_file", "computer_write_file", "computer_run_command"],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
+        caveatPolicy: "none",
+      },
       successCriteria: [
-        { id: "source-read", description: "源文件内容已读取并提取为结构化内容。" },
-        { id: "report-created", description: "报告文件已创建。" },
-        { id: "output-verified", description: "报告输出与源数据完成对比验证。" },
+        { id: "artifact_path", description: "报告文件路径已记录。" },
+        { id: "artifact_non_empty", description: "报告文件非空。" },
+        { id: "format_matches_request", description: "报告格式符合请求。" },
+        { id: "delivery_receipt", description: "交付回执标识最终结果。" },
       ],
     }],
   };
 
-  assert.throws(
-    () => admitPlan({
-      runId: "run-chinese-oversized-step",
-      proposal,
-      availableSkills: [],
-      availableToolNames: new Set(["computer_read_file", "computer_write_file", "computer_run_command"]),
-    }),
-    (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED")
-      && String((error as Error).message).includes("split discovery/extraction, production, and verification"),
-  );
+  const plan = admitPlan({
+    runId: "run-chinese-leaf-local-step",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["computer_read_file", "computer_write_file", "computer_run_command"]),
+  });
+
+  assert.deepEqual(plan.steps.map((step) => step.id), ["read_create_and_compare"]);
 });
 
-test("Plan admission rejects oversized data evidence extraction steps", () => {
+test("Plan admission accepts structured data evidence as one fact-acquisition leaf", () => {
   const proposal: PlanProposal = {
     goal: "分析工作区中的 1.xlsx 并生成中文场景分析报告",
+    schema: "agentloop.outcomePlan/v2",
+    shape: "fact_then_produce",
+    selectedSkillRoles: [],
     selectedSkillIds: [],
     steps: [{
       id: "extract_structured_evidence",
       objective: "定位并解析 1.xlsx，识别工作表、字段、有效数据范围、记录数量、关键分组与指标，形成供报告写作使用的结构化分析证据；本步骤不撰写最终报告。",
       dependencies: [],
+      role: "fact_acquisition",
       skillIds: [],
       requiredToolNames: ["computer_list_directory", "computer_run_command", "computer_write_file"],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats", "delivery_receipt"],
+        caveatPolicy: "mark_unverified_facts",
+      },
       successCriteria: [
-        { id: "source_identified", description: "确认实际读取的 1.xlsx 路径，并记录文件所含工作表及各表有效数据范围。" },
-        { id: "schema_and_counts_captured", description: "结构化证据包含各工作表字段摘要、有效记录数、缺失或异常概况以及用于场景划分的关键维度。" },
-        { id: "evidence_written", description: "生成独立的结构化证据文件，包含关键统计、场景分组结果与可追溯的源表/字段引用，且不以完整原始行数据转储代替分析。" },
+        { id: "source_summary", description: "结构化证据摘要可用于后续报告写作。" },
+        { id: "explicit_caveats", description: "无法确认的数据边界被明确标注。" },
+        { id: "delivery_receipt", description: "证据产物回执已记录。" },
       ],
     }],
   };
 
-  assert.throws(
-    () => admitPlan({
-      runId: "run-oversized-data-evidence-step",
-      proposal,
-      availableSkills: [],
-      availableToolNames: new Set(["computer_list_directory", "computer_run_command", "computer_write_file"]),
-    }),
-    (error: unknown) => hasCode(error, "PLAN_NOT_ADMITTED")
-      && String((error as Error).message).includes("split data source profiling, extraction artifact generation"),
-  );
+  const plan = admitPlan({
+    runId: "run-data-evidence-leaf",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["computer_list_directory", "computer_run_command", "computer_write_file"]),
+  });
+
+  assert.deepEqual(plan.steps.map((step) => step.id), ["extract_structured_evidence"]);
 });
 
-test("ModelPlanner repairs oversized steps with a structured patch turn", async () => {
+test("ModelPlanner fails closed when a model submits legacy submit_plan", async () => {
   let calls = 0;
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      assert.match(request.systemPrompt, /Keep each step as one bounded operation unit/);
-      if (calls === 1) {
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "oversized-plan",
-            name: "submit_plan",
-            arguments: {
-              goal: "create reusable data analysis script",
-              selectedSkillIds: [],
-              steps: [{
-                id: "reconstruct-author-and-verify",
-                objective: "Read prior artifacts, reconstruct the spreadsheet analysis flow, confirm python/openpyxl, write analyze_scenario.py, and verify regenerated JSON and Markdown outputs.",
-                dependencies: [],
-                skillIds: [],
-                requiredToolNames: [
-                  "computer_list_directory",
-                  "computer_read_file",
-                  "computer_search_text",
-                  "computer_write_file",
-                  "computer_run_command",
-                ],
-                successCriteria: [
-                  { id: "sources-read", description: "Prior artifacts are read and summarized." },
-                  { id: "script-created", description: "analyze_scenario.py is written." },
-                  { id: "io-parameterized", description: "Input and output paths are parameterized." },
-                  { id: "verified", description: "The script is run and outputs are compared with prior artifacts." },
-                ],
-              }],
-            },
-          }],
-        };
-      }
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan_patch"]);
-      assert.match(request.runtimeContext?.content ?? "", /is too broad/i);
-      assert.match(request.runtimeContext?.content ?? "", /smaller dependency-linked steps/);
+      assert.match(request.systemPrompt, /smallest Outcome Plan/);
       return {
         content: "",
         finishReason: "tool_calls",
         toolCalls: [{
-          id: "split-plan",
-          name: "submit_plan_patch",
+          id: "legacy-plan",
+          name: "submit_plan",
           arguments: {
-            replacements: [{
-              targetStepId: "reconstruct-author-and-verify",
-              downstreamDependencyStepId: "verify-script",
-              replacementSteps: [
-                {
-                  id: "extract-analysis-contract",
-                  objective: "Read prior artifacts and write a concise analysis contract describing source scope, fields, counts, and expected outputs.",
-                  dependencies: [],
-                  skillIds: [],
-                  requiredToolNames: ["computer_read_file", "computer_write_file"],
-                  successCriteria: [{ id: "contract-written", description: "A structured analysis contract file is written." }],
-                },
-                {
-                  id: "author-script",
-                  objective: "Write analyze_scenario.py from the analysis contract.",
-                  dependencies: ["extract-analysis-contract"],
-                  skillIds: [],
-                  requiredToolNames: ["computer_read_file", "computer_write_file"],
-                  successCriteria: [{ id: "script-written", description: "analyze_scenario.py exists and implements the contract." }],
-                },
-                {
-                  id: "verify-script",
-                  objective: "Run analyze_scenario.py and compare its key outputs with the prior artifacts.",
-                  dependencies: ["author-script"],
-                  skillIds: [],
-                  requiredToolNames: ["computer_run_command", "computer_read_file"],
-                  successCriteria: [{ id: "script-verified", description: "The script exits successfully and verification evidence is recorded." }],
-                },
-              ],
+            goal: "create reusable data analysis script",
+            selectedSkillIds: [],
+            steps: [{
+              id: "reconstruct-author-and-verify",
+              objective: "Read prior artifacts, reconstruct the spreadsheet analysis flow, confirm python/openpyxl, write analyze_scenario.py, and verify regenerated JSON and Markdown outputs.",
+              dependencies: [],
+              skillIds: [],
+              requiredToolNames: ["computer_read_file", "computer_write_file", "computer_run_command"],
+              successCriteria: [{ id: "verified", description: "The script is run and outputs are compared with prior artifacts." }],
             }],
           },
         }],
@@ -938,142 +1150,61 @@ test("ModelPlanner repairs oversized steps with a structured patch turn", async 
     },
   });
 
-  const plan = await planner.plan({
-    runId: "run-repair-oversized-step",
-    input: "总结此前分析过程，生成可复用 analyze_scenario.py 并验证",
-    availableSkills: [],
-    availableToolNames: [
-      "computer_list_directory",
-      "computer_read_file",
-      "computer_search_text",
-      "computer_write_file",
-      "computer_run_command",
-    ],
-  });
-
-  assert.equal(calls, 2);
-  assert.deepEqual(plan.steps.map((item) => item.id), [
-    "extract-analysis-contract",
-    "author-script",
-    "verify-script",
-  ]);
+  await assert.rejects(
+    () => planner.plan({
+      runId: "run-legacy-submit-plan",
+      input: "总结此前分析过程，生成可复用 analyze_scenario.py 并验证",
+      availableSkills: [],
+      availableToolNames: ["computer_read_file", "computer_write_file", "computer_run_command"],
+    }),
+    (error: unknown) => hasCode(error, "PLANNING_ERROR")
+      && String((error as Error).message).includes("submit_outcome_plan"),
+  );
+  assert.equal(calls, 1);
 });
 
-test("ModelPlanner repair resubmit keeps artifact repair conditional across the whole Plan", async () => {
+test("ModelPlanner admits repair leaves only for recovery-shaped OutcomePlans", async () => {
   let calls = 0;
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      if (calls === 1) {
-        assert.match(request.systemPrompt, /Do not add default inspect_\*, repair_\*_if_needed, final_verify_\*/);
-        assert.match(request.systemPrompt, /Create an independent QA or repair step only when/);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "initial-broad-finalization",
-            name: "submit_plan",
-            arguments: {
-              goal: "produce and verify final deck",
-              selectedSkillIds: [],
-              steps: [{
-                id: "finalize_deck",
-                objective: "Read the quality report, write source fixes, build the final PPTX, and verify the rendered deck.",
-                dependencies: [],
-                skillIds: [],
-                requiredToolNames: ["computer_read_file", "computer_write_file", "computer_run_command"],
-                successCriteria: [
-                  { id: "report-read", description: "Quality report is read." },
-                  { id: "source-fixed", description: "Source fixes are written." },
-                  { id: "deck-built", description: "Final PPTX is generated." },
-                  { id: "deck-verified", description: "Final PPTX is rendered and verified." },
-                ],
-              }],
-            },
-          }],
-        };
-      }
-      if (calls === 2) {
-        assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan_patch"]);
-        assert.match(request.runtimeContext?.content ?? "", /Keep artifact repair failure-driven/);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "patch-still-broad-finalization",
-            name: "submit_plan_patch",
-            arguments: {
-              replacements: [{
-                targetStepId: "finalize_deck",
-                downstreamDependencyStepId: "rebuild_and_verify_final_deck",
-                replacementSteps: [{
-                  id: "rebuild_and_verify_final_deck",
-                  objective: "Read the quality report, write source fixes, build the final PPTX, and verify the final PPTX page count.",
-                  dependencies: [],
-                  skillIds: [],
-                  requiredToolNames: ["computer_read_file", "computer_write_file", "computer_run_command"],
-                  successCriteria: [
-                    { id: "source-fixed", description: "Source fixes are written." },
-                    { id: "deck-built", description: "Final PPTX is generated." },
-                    { id: "deck-verified", description: "Final PPTX page count is verified." },
-                  ],
-                }],
-              }],
-            },
-          }],
-        };
-      }
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan"]);
-      const context = request.runtimeContext?.content ?? "";
-      assert.match(context, /Audit every step in the resubmitted Plan/);
-      assert.match(context, /Preserve previously valid split steps and downstream dependencies/);
-      assert.match(context, /Do not introduce a new step that combines unrelated source or inspection evidence/);
-      assert.match(context, /ordinary artifact tasks as a light Outcome Plan/);
+      assert.match(request.systemPrompt, /repair\/verification tail leaves/);
+      assert.doesNotMatch(request.systemPrompt, /inspect_\*/);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "split-finalization",
-          name: "submit_plan",
-          arguments: {
-            goal: "produce and verify final deck",
-            selectedSkillIds: [],
-            steps: [
-              {
-                id: "apply_quality_fixes",
-                objective: "Read the quality report and update the deck source with the required fixes.",
-                dependencies: [],
-                skillIds: [],
-                requiredToolNames: ["computer_read_file", "computer_write_file"],
-                successCriteria: [{ id: "source-fixed", description: "Source fixes are written from the quality report." }],
-              },
-              {
-                id: "rebuild_final_deck",
-                objective: "Run the deck build command to generate the final PPTX from the fixed source.",
-                dependencies: ["apply_quality_fixes"],
-                skillIds: [],
-                requiredToolNames: ["computer_run_command"],
-                successCriteria: [{ id: "deck-built", description: "Final PPTX is generated by the build command." }],
-              },
-              {
-                id: "verify_final_deck",
-                objective: "Render and parse the final PPTX, then record the final validation evidence.",
-                dependencies: ["rebuild_final_deck"],
-                skillIds: [],
-                requiredToolNames: ["computer_run_command", "computer_read_file"],
-                successCriteria: [{ id: "deck-verified", description: "Final PPTX render and parse evidence confirms the expected deck." }],
-              },
-            ],
-          },
-        }],
+        toolCalls: [submitOutcomePlanToolCall("recovery-repair-plan", {
+          goal: "produce and verify final deck",
+          shape: "recovery_patch",
+          steps: [{
+            id: "repair-final-deck",
+            objective: "Read the quality report, apply targeted source fixes, rebuild the final PPTX, and record delivery evidence.",
+            dependencies: [],
+            role: "repair",
+            skillIds: [],
+            requiredToolNames: ["computer_read_file", "computer_write_file", "computer_run_command"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "delivery_receipt"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
       };
     },
   });
 
   const plan = await planner.plan({
-    runId: "run-repair-finalization-boundaries",
+    runId: "run-recovery-finalization-boundaries",
     input: "修正 PPT 质量问题，重新生成并终检",
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      runCount: 1,
+      requiredCapabilities: { skillIds: [], toolNames: ["computer_read_file", "computer_write_file", "computer_run_command"] },
+      reusableArtifacts: [],
+      failedBoundaries: [{ stepId: "finalize_deck", category: "validation", message: "quality report failed", reusableEvidenceRefs: [] }],
+      resumeSuggestion: "Continue from prior Run by repairing finalize_deck.",
+    },
     availableSkills: [],
     availableToolNames: [
       "computer_read_file",
@@ -1082,99 +1213,85 @@ test("ModelPlanner repair resubmit keeps artifact repair conditional across the 
     ],
   });
 
-  assert.equal(calls, 3);
-  assert.deepEqual(plan.steps.map((step) => step.id), [
-    "apply_quality_fixes",
-    "rebuild_final_deck",
-    "verify_final_deck",
-  ]);
+  assert.equal(calls, 1);
+  assert.equal(plan.shape, "recovery_patch");
+  assert.deepEqual(plan.steps.map((step) => step.id), ["repair-final-deck"]);
+  assert.equal(plan.steps[0].role, "repair");
 });
 
-test("ModelPlanner keeps repairing oversized submitted Plans with the rejected Plan context", async () => {
+test("ModelPlanner rejects non-recovery repair leaves without a patch turn", async () => {
   let calls = 0;
-  const oversizedPlan = {
-    goal: "analyze spreadsheet and write report",
-    selectedSkillIds: [],
-    steps: [{
-      id: "extract_data",
-      objective: "Read the workbook, profile sheets, write an extraction script, run it, verify the JSON evidence, and prepare report-ready summary statistics.",
-      dependencies: [],
-      skillIds: [],
-      requiredToolNames: [
-        "computer_list_directory",
-        "computer_read_file",
-        "computer_write_file",
-        "computer_run_command",
-      ],
-      successCriteria: [
-        { id: "profiled", description: "Workbook sheets, fields, ranges, and counts are profiled." },
-        { id: "script-written", description: "The extraction script is written." },
-        { id: "json-produced", description: "The extraction script produces JSON evidence." },
-        { id: "json-verified", description: "The JSON evidence is verified against source counts." },
-      ],
-    }],
-  };
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      if (calls === 1 || calls === 2) {
-        if (calls === 2) {
-          assert.match(request.runtimeContext?.content ?? "", /rejectedPlan/);
-          assert.match(request.runtimeContext?.content ?? "", /extract_data/);
-          assert.match(request.runtimeContext?.content ?? "", /smaller dependency-linked steps/);
-        }
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: `oversized-${calls}`, name: "submit_plan", arguments: oversizedPlan }],
-        };
-      }
-      assert.match(request.runtimeContext?.content ?? "", /rejectedPlan/);
-      assert.match(request.runtimeContext?.content ?? "", /extract_data/);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "split-plan",
-          name: "submit_plan",
-          arguments: {
-            goal: "analyze spreadsheet and write report",
-            selectedSkillIds: [],
-            steps: [
-              {
-                id: "profile_source",
-                objective: "Profile workbook sheets, fields, ranges, and counts.",
-                dependencies: [],
-                skillIds: [],
-                requiredToolNames: ["computer_list_directory", "computer_run_command"],
-                successCriteria: [{ id: "source-profiled", description: "Source workbook structure is profiled." }],
-              },
-              {
-                id: "author_extractor",
-                objective: "Write the extraction script from the source profile.",
-                dependencies: ["profile_source"],
-                skillIds: [],
-                requiredToolNames: ["computer_write_file"],
-                successCriteria: [{ id: "script-written", description: "Extraction script is written." }],
-              },
-              {
-                id: "run_extractor",
-                objective: "Run the extraction script and verify the JSON evidence against the source profile.",
-                dependencies: ["author_extractor"],
-                skillIds: [],
-                requiredToolNames: ["computer_run_command", "computer_read_file"],
-                successCriteria: [{ id: "json-verified", description: "JSON evidence is produced and verified." }],
-              },
-            ],
-          },
-        }],
+        toolCalls: [submitOutcomePlanToolCall("invalid-repair-leaf", {
+          goal: "analyze spreadsheet and write report",
+          shape: "single_leaf",
+          steps: [{
+            id: "repair_data",
+            objective: "Repair the spreadsheet analysis without a failed boundary.",
+            dependencies: [],
+            role: "repair",
+            skillIds: [],
+            requiredToolNames: ["computer_read_file", "computer_write_file"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "delivery_receipt"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  await assert.rejects(
+    () => planner.plan({
+      runId: "run-invalid-initial-repair",
+      input: "分析 xlsx 并生成报告",
+      availableSkills: [],
+      availableToolNames: ["computer_read_file", "computer_write_file"],
+    }),
+    (error: unknown) => hasCode(error, "PLANNING_ERROR")
+      && String((error as Error).message).includes("repair leaves"),
+  );
+  assert.equal(calls, 1);
+});
+
+test("ModelPlanner accepts a broad artifact leaf instead of requesting patch repair", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("broad-artifact-leaf", {
+          goal: "analyze spreadsheet and write report",
+          shape: "single_leaf",
+          steps: [{
+            id: "extract_data",
+            objective: "Read the workbook, profile sheets, write an extraction script, run it, verify the JSON evidence, and prepare report-ready summary statistics.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredToolNames: ["computer_list_directory", "computer_read_file", "computer_write_file", "computer_run_command"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "delivery_receipt"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
       };
     },
   });
 
   const plan = await planner.plan({
-    runId: "run-repair-repeated-oversized-step",
+    runId: "run-broad-artifact-leaf",
     input: "分析 xlsx 并生成报告",
     availableSkills: [],
     availableToolNames: [
@@ -1185,12 +1302,8 @@ test("ModelPlanner keeps repairing oversized submitted Plans with the rejected P
     ],
   });
 
-  assert.equal(calls, 3);
-  assert.deepEqual(plan.steps.map((item) => item.id), [
-    "profile_source",
-    "author_extractor",
-    "run_extractor",
-  ]);
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps.map((item) => item.id), ["extract_data"]);
 });
 
 test("RunService exposes downstream Plan steps as execution boundary context", async () => {
@@ -1274,10 +1387,10 @@ test("ModelPlanner creates response-only conversational Plans without a planning
 });
 
 test("selectPlanningSkills prefers the matching Skill summary and allows no-skill", () => {
-  const canvas = skillFixture({ id: "canvas", name: "canvas-design", description: "Create beautiful poster and visual art in .png and .pdf documents using design philosophy." });
-  const algorithmic = skillFixture({ id: "algo", name: "algorithmic-art", description: "Creating algorithmic art using p5.js with seeded randomness and interactive parameter exploration." });
-  const unrelated = skillFixture({ id: "note", name: "note-writer", description: "Write short notes and messages." });
-  const frontend = skillFixture({ id: "frontend", name: "frontend-design", description: "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one." });
+  const canvas = skillFixture({ id: "canvas", name: "canvas-design", description: "Create beautiful poster and visual art in .png and .pdf documents using design philosophy.", agentLoop: agentLoopMetadata(["primary_builder"], ["image"]) });
+  const algorithmic = skillFixture({ id: "algo", name: "algorithmic-art", description: "Creating algorithmic art using p5.js with seeded randomness and interactive parameter exploration.", agentLoop: agentLoopMetadata(["primary_builder"], ["image"]) });
+  const unrelated = skillFixture({ id: "note", name: "note-writer", description: "Write short notes and messages.", agentLoop: agentLoopMetadata(["primary_builder"], ["none"]) });
+  const frontend = skillFixture({ id: "frontend", name: "frontend-design", description: "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one.", agentLoop: agentLoopMetadata(["primary_builder"], ["html", "code"]) });
 
   const selected = selectPlanningSkills(
     [algorithmic, unrelated, canvas, frontend],
@@ -1299,16 +1412,19 @@ test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and su
     id: "api-query",
     name: "api-query",
     description: "查询集团（宝武数据中台）API 目录信息。Use when 用户要了解某个 API/接口/服务是干什么的、有哪些入参、哪些出参、涉及哪些数据表，或要检索现有 API。触发词：查API、查接口、API入参出参、这个接口是干啥的、接口涉及哪些表、API目录检索。数据源为数智域通用 SQL API。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
   });
   const exploreData = skillFixture({
     id: "explore-data",
     name: "explore-data",
     description: "Profile and explore a dataset to understand its shape, quality, and patterns.",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["data"]),
   });
   const dashboard = skillFixture({
     id: "build-dashboard",
     name: "build-dashboard",
     description: "Build an interactive HTML dashboard with charts, filters, and tables.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
   });
 
   const naturalLanguageSelected = selectPlanningSkills(
@@ -1327,9 +1443,9 @@ test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and su
 });
 
 test("selectPlanningSkills keeps explicitly bound Skills ahead of generic task wording", () => {
-  const frontend = skillFixture({ id: "frontend", name: "frontend-design", description: "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one." });
-  const pptx = skillFixture({ id: "pptx", name: "pptx", description: "Create presentation slides." });
-  const algorithmic = skillFixture({ id: "algo", name: "algorithmic-art", description: "Create existing Skill validation art examples." });
+  const frontend = skillFixture({ id: "frontend", name: "frontend-design", description: "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one.", agentLoop: agentLoopMetadata(["primary_builder"], ["html", "code"]) });
+  const pptx = skillFixture({ id: "pptx", name: "pptx", description: "Create presentation slides.", agentLoop: agentLoopMetadata(["primary_builder"], ["presentation"]) });
+  const algorithmic = skillFixture({ id: "algo", name: "algorithmic-art", description: "Create existing Skill validation art examples.", agentLoop: agentLoopMetadata(["primary_builder"], ["image"]) });
 
   const selected = selectPlanningSkills(
     [pptx, algorithmic, frontend],
@@ -1340,65 +1456,110 @@ test("selectPlanningSkills keeps explicitly bound Skills ahead of generic task w
   assert.deepEqual(selected.map((skill) => skill.name), ["frontend-design"]);
 });
 
-test("ModelPlanner repairs an invalid structured Plan without weakening the schema", async () => {
+test("selectPlanningSkills prefers artifact builders over styling support for HTML-PPT requests", () => {
+  const webArtifacts = skillFixture({
+    id: "web",
+    name: "web-artifacts-builder",
+    description: "Suite of tools for creating elaborate, multi-component HTML artifacts using modern frontend web technologies. Bundle to a single HTML file.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
+  });
+  const presentation = skillFixture({
+    id: "presentation",
+    name: "presentation-skill",
+    description: "Build, edit, redesign, render, and verify polished editable PowerPoint `.pptx` decks. Aliases: presentation generator, slide-deck generator, deck builder.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["presentation"]),
+  });
+  const theme = skillFixture({
+    id: "theme",
+    name: "theme-factory",
+    description: "Toolkit for styling artifacts with a theme. These artifacts can be slides, docs, reportings, HTML landing pages, etc. There are 10 pre-set themes with colors/fonts that you can apply to any artifact that has been creating, or can generate a new theme on-the-fly.",
+    agentLoop: agentLoopMetadata(["support"], ["html", "presentation"]),
+  });
+
+  const selected = selectPlanningSkills(
+    [theme, presentation, webArtifacts],
+    "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
+    [],
+  );
+
+  assert.equal(selected[0]?.name, "web-artifacts-builder");
+  assert.equal(selected.some((skill) => skill.name === "theme-factory"), false);
+});
+
+test("selectPlanningSkills excludes undeclared and support-only Skills from ordinary first-round planning", () => {
+  const undeclared = skillFixture({
+    id: "legacy",
+    name: "legacy-helper",
+    description: "Create HTML artifacts, but without structured AgentLoop role metadata.",
+    agentLoop: undefined,
+  });
+  const webArtifacts = skillFixture({
+    id: "web",
+    name: "web-artifacts-builder",
+    description: "Create single HTML artifacts.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
+  });
+  const theme = skillFixture({
+    id: "theme",
+    name: "theme-factory",
+    description: "Apply styling and visual themes to existing artifacts.",
+    agentLoop: agentLoopMetadata(["support"], ["html"]),
+  });
+
+  const selected = selectPlanningSkills(
+    [undeclared, theme, webArtifacts],
+    "做一个 DCMM 4 评级培训材料，html-ppt 格式",
+    [],
+  );
+
+  assert.deepEqual(selected.map((skill) => skill.name), ["web-artifacts-builder"]);
+});
+
+test("ModelPlanner fails closed on invalid OutcomePlan structure without a repair turn", async () => {
   let calls = 0;
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      if (calls === 1) {
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "invalid-plan",
-            name: "submit_plan",
-            arguments: {
-              goal: "build",
-              selectedSkillIds: [],
-              steps: [{
-                id: "build",
-                objective: { invalid: true },
-                dependencies: [],
-                skillIds: [],
-                requiredToolNames: [],
-                successCriteria: [{ id: "built", description: "output exists" }],
-              }],
-            },
-          }],
-        };
-      }
-      assert.match(request.runtimeContext?.content ?? "", /objective must be a string/);
       return {
         content: "",
         finishReason: "tool_calls",
         toolCalls: [{
-          id: "repaired-plan",
-          name: "submit_plan",
+          id: "invalid-plan",
+          name: "submit_outcome_plan",
           arguments: {
+            schema: "agentloop.outcomePlan/v2",
             goal: "build",
-            selectedSkillIds: [],
-            steps: [{
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
               id: "build",
-              objective: "build output",
-              dependencies: [],
+              objective: { invalid: true },
+              dependsOn: [],
+              role: "deliver",
               skillIds: [],
               requiredToolNames: [],
-              successCriteria: [{ id: "built", description: "output exists" }],
+              evidenceContract: {
+                requiredKinds: ["delivery_receipt"],
+                caveatPolicy: "none",
+              },
             }],
           },
         }],
       };
     },
   };
-  const plan = await new ModelPlanner(model).plan({
-    runId: "run-1",
-    input: "build",
-    availableSkills: [],
-    availableToolNames: [],
-  });
-  assert.equal(calls, 2);
-  assert.equal(plan.steps[0].objective, "build output");
+  await assert.rejects(
+    () => new ModelPlanner(model).plan({
+      runId: "run-1",
+      input: "build",
+      availableSkills: [],
+      availableToolNames: [],
+    }),
+    (error: unknown) => hasCode(error, "PLANNING_ERROR")
+      && String((error as Error).message).includes("objective must be a string"),
+  );
+  assert.equal(calls, 1);
 });
 
 test("ModelPlanner selects Skills from the catalog and submits a Plan without loading Skill bodies", async () => {
@@ -1408,32 +1569,30 @@ test("ModelPlanner selects Skills from the catalog and submits a Plan without lo
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan"]);
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
       assert.match(request.runtimeContext?.content ?? "", /<available_skills>/);
       assert.match(request.runtimeContext?.content ?? "", /computer_write_file/);
       assert.match(request.runtimeContext?.content ?? "", /Create or overwrite a UTF-8 file/);
-      assert.match(request.systemPrompt, /Use only the Skill catalog summaries/);
+      assert.match(request.systemPrompt, /Skill catalog entries/);
       assert.doesNotMatch(request.systemPrompt, /EXACT-PLANNING-INSTRUCTIONS/);
       assert.doesNotMatch(request.messages.map((message) => message.content).join("\n"), /EXACT-PLANNING-INSTRUCTIONS/);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: `plan-${calls}`,
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall(`plan-${calls}`, {
             goal: "materialize and verify",
             selectedSkillIds: [skill.id],
+            shape: "single_leaf",
             steps: [{
               id: "materialize-and-verify",
               objective: "materialize and verify",
               dependencies: [],
+              role: "produce",
               skillIds: [skill.id],
               requiredToolNames: ["computer_write_file"],
               successCriteria: [{ id: "verified", description: "artifact exists and is valid" }],
             }],
-          },
-        }],
+        })],
       };
     },
   };
@@ -1456,27 +1615,25 @@ test("ModelPlanner keeps optional refinement out of the terminal Plan scope", as
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
-      assert.match(request.systemPrompt, /Keep the Plan scoped to the user's requested deliverable/);
-      assert.match(request.systemPrompt, /Do not add optional polish, critique, or follow-up work/);
+      assert.match(request.systemPrompt, /smallest Outcome Plan/);
+      assert.match(request.systemPrompt, /polish-only/);
+      assert.doesNotMatch(request.systemPrompt, /optional polish, critique, or follow-up work/);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "plan",
-          name: "submit_plan",
-          arguments: {
+        toolCalls: [submitOutcomePlanToolCall("plan", {
             goal: "Create a steel company homepage",
-            selectedSkillIds: [],
+            shape: "single_leaf",
             steps: [{
               id: "build-and-verify-homepage",
               objective: "Create and verify the requested homepage",
               dependencies: [],
+              role: "produce",
               skillIds: [],
               requiredToolNames: [],
               successCriteria: [{ id: "homepage-ready", description: "The requested homepage is present and verified" }],
             }],
-          },
-        }],
+        })],
       };
     },
   };
@@ -1490,73 +1647,47 @@ test("ModelPlanner keeps optional refinement out of the terminal Plan scope", as
   assert.equal(plan.steps[0].id, "build-and-verify-homepage");
 });
 
-test("ModelPlanner repairs pure Skill activation steps into user-deliverable steps", async () => {
+test("ModelPlanner rejects pure Skill activation leaves without a patch turn", async () => {
   const skill = skillFixture({ id: "canvas-design", name: "canvas-design" });
   let calls = 0;
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      assert.match(request.systemPrompt, /Do not create a Plan step whose objective is only to load/);
-      if (calls === 1) {
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "bad-plan",
-            name: "submit_plan",
-            arguments: {
-              goal: "Design a poster",
-              selectedSkillIds: [skill.id],
-              steps: [{
-                id: "load-skill",
-                objective: "Load the canvas-design Skill",
-                dependencies: [],
-                skillIds: [skill.id],
-                requiredToolNames: [],
-                successCriteria: [{ id: "skill-loaded", description: "The Skill is loaded" }],
-              }],
-            },
-          }],
-        };
-      }
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan_patch"]);
-      assert.match(request.runtimeContext?.content ?? "", /only a Skill activation step/);
+      assert.match(request.systemPrompt, /Skill-loading-only/);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{
-          id: "repaired-plan",
-          name: "submit_plan_patch",
-          arguments: {
-            replacements: [{
-              targetStepId: "load-skill",
-              downstreamDependencyStepId: "design-poster",
-              replacementSteps: [{
-                id: "design-poster",
-                objective: "Design the requested poster using the bound Skill",
-                dependencies: [],
-                skillIds: [skill.id],
-                requiredToolNames: [],
-                successCriteria: [{ id: "poster-ready", description: "The poster design is produced" }],
-              }],
-            }],
-          },
-        }],
+        toolCalls: [submitOutcomePlanToolCall("bad-plan", {
+          goal: "Design a poster",
+          selectedSkillIds: [skill.id],
+          shape: "single_leaf",
+          steps: [{
+            id: "load-skill",
+            objective: "Load the canvas-design Skill",
+            dependencies: [],
+            role: "deliver",
+            skillIds: [skill.id],
+            requiredToolNames: [],
+            successCriteria: [{ id: "skill-loaded", description: "The Skill is loaded" }],
+          }],
+        })],
       };
     },
   };
 
-  const plan = await new ModelPlanner(model).plan({
-    runId: "run-1",
-    input: "Design a poster",
-    availableSkills: [skill],
-    availableToolNames: ["load_skill"],
-  });
+  await assert.rejects(
+    () => new ModelPlanner(model).plan({
+      runId: "run-1",
+      input: "Design a poster",
+      availableSkills: [skill],
+      availableToolNames: ["load_skill"],
+    }),
+    (error: unknown) => hasCode(error, "PLANNING_ERROR")
+      && String((error as Error).message).includes("only a Skill activation step"),
+  );
 
-  assert.equal(calls, 2);
-  assert.equal(plan.steps.length, 1);
-  assert.equal(plan.steps[0].id, "design-poster");
+  assert.equal(calls, 1);
 });
 
 test("legacy interrupted Runs enter recovery review instead of being terminally failed on restart", async () => {
@@ -1823,6 +1954,83 @@ test("TerminalCommitter ignores milestone nodes and requires assessments only fo
   }
 });
 
+test("PlanRepository preserves OutcomePlan evidence contracts and assessment failed boundaries", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const owner = await auth.register("evidence-contract@example.com", "evidence contract secure password");
+    const runId = "evidence-contract-run";
+    database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+        status, input, created_at
+      ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, "build an html artifact", Date.now());
+
+    const plans = new PlanRepository(database);
+    const evidenceContract = {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_openable"] as const,
+      caveatPolicy: "none" as const,
+    };
+    const plan = plans.create(admitPlan({
+      runId,
+      proposal: {
+        schema: "agentloop.outcomePlan/v2",
+        shape: "single_leaf",
+        goal: "build an html artifact",
+        selectedSkillIds: [],
+        selectedSkillRoles: [],
+        steps: [{
+          ...step("produce-html"),
+          role: "produce",
+          requiredToolNames: ["computer_write_file"],
+          evidenceContract,
+          successCriteria: evidenceContract.requiredKinds.map((kind) => ({
+            id: kind,
+            description: `${kind} evidence is present`,
+            source: "planner" as const,
+          })),
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(["computer_write_file"]),
+    }));
+
+    assert.deepEqual(plans.get(plan.id).steps[0].evidenceContract, evidenceContract);
+
+    const failedBoundary = {
+      stepId: "produce-html",
+      missingEvidenceKinds: ["artifact_openable"],
+      violatedSkillRequirements: [],
+      reusableEvidenceRefs: ["write-file"],
+      suggestedRepairShape: "repair_leaf" as const,
+    };
+    plans.saveAssessment({
+      id: "assessment-produce-html-1",
+      planId: plan.id,
+      stepId: "produce-html",
+      attempt: 1,
+      assessmentProfile: "source_grounded",
+      assessmentMethod: "model",
+      approved: false,
+      criteria: [
+        { criterionId: "artifact_path", satisfied: true, rationale: "Path exists", evidenceRefs: ["write-file"] },
+        { criterionId: "artifact_non_empty", satisfied: true, rationale: "Content exists", evidenceRefs: ["write-file"] },
+        { criterionId: "artifact_openable", satisfied: false, rationale: "No openability evidence", evidenceRefs: [] },
+      ],
+      skills: [],
+      evidenceDigest: "digest",
+      feedback: "Openability evidence is missing.",
+      failedBoundary,
+      createdAt: Date.now(),
+    });
+
+    assert.deepEqual(plans.assessments(plan.id)[0].failedBoundary, failedBoundary);
+  } finally {
+    database.close();
+  }
+});
+
 test("Admission adds only the generic Skill activation Tool to a Skill-bound Step", async () => {
   const skill = skillFixture();
   const plan = admitPlan({
@@ -2034,6 +2242,247 @@ test("ModelStepAssessor still rejects unavailable validation when a required cri
   assert.match(assessment.feedback, /Install the renderer/);
 });
 
+test("ModelStepAssessor carries evidence contracts into assessment and accepts rejected failed boundaries", async () => {
+  let observedContext = "";
+  const assessor = new ModelStepAssessor({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "assessment",
+          name: "submit_assessment",
+          arguments: {
+            criteria: [
+              { criterionId: "artifact_path", satisfied: true, rationale: "Path was recorded", evidenceRefs: ["write-file"] },
+              { criterionId: "artifact_openable", satisfied: false, rationale: "No browser/readback evidence was recorded", evidenceRefs: [] },
+            ],
+            skills: [],
+            feedback: "Record artifact openability evidence before delivery.",
+            failedBoundary: {
+              stepId: "produce-html",
+              missingEvidenceKinds: ["artifact_openable"],
+              violatedSkillRequirements: [],
+              reusableEvidenceRefs: ["write-file"],
+              suggestedRepairShape: "repair_leaf",
+            },
+          },
+        }],
+      };
+    },
+  });
+  const assessment = await assessor.assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("produce-html"),
+      position: 0,
+      status: "running",
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_openable"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "Artifact path evidence is present", source: "planner" },
+        { id: "artifact_openable", description: "Artifact openability evidence is present", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Generated /tmp/out.html",
+      toolCalls: [{ toolCallId: "write-file", toolName: "computer_write_file", isError: false, result: "created out.html" }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.match(observedContext, /"evidenceContract"/);
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary, {
+    stepId: "produce-html",
+    missingEvidenceKinds: ["artifact_openable"],
+    violatedSkillRequirements: [],
+    reusableEvidenceRefs: ["write-file"],
+    suggestedRepairShape: "repair_leaf",
+  });
+});
+
+test("RuleBasedStepAssessor derives failed boundaries from rejected evidence contracts", async () => {
+  const assessment = await new RuleBasedStepAssessor().assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("produce-html"),
+      position: 0,
+      status: "running",
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "Artifact path evidence is present", source: "planner" },
+        { id: "artifact_non_empty", description: "Artifact non-empty evidence is present", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: { candidateOutput: "", toolCalls: [], modelSteps: 1 },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary, {
+    stepId: "produce-html",
+    missingEvidenceKinds: ["artifact_path", "artifact_non_empty"],
+    violatedSkillRequirements: [],
+    reusableEvidenceRefs: [],
+    suggestedRepairShape: "repair_leaf",
+  });
+});
+
+test("RunService emits assessment failed boundaries for rejected candidates", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("failed-boundary-event@example.com", "failed boundary event secure password");
+    const failedBoundary = {
+      stepId: "test-step",
+      missingEvidenceKinds: ["delivery_receipt"],
+      violatedSkillRequirements: [],
+      reusableEvidenceRefs: ["candidateOutput"],
+      suggestedRepairShape: "repair_leaf" as const,
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({ content: "partial result", toolCalls: [], finishReason: "stop" }),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => ({
+        assess: async (input) => ({
+          id: `reject-${input.attempt}`,
+          planId: input.planId,
+          stepId: input.step.id,
+          attempt: input.attempt,
+          assessmentProfile: input.assessmentProfile,
+          assessmentMethod: "model",
+          approved: false,
+          criteria: input.step.successCriteria.map((criterion) => ({
+            criterionId: criterion.id,
+            satisfied: false,
+            rationale: "Delivery receipt evidence is missing.",
+            evidenceRefs: ["candidateOutput"],
+          })),
+          skills: [],
+          evidenceDigest: "digest",
+          feedback: "Delivery receipt evidence is missing.",
+          failedBoundary,
+          createdAt: Date.now(),
+        }),
+      }),
+      maxSteps: 2,
+    });
+
+    const run = await runs.execute(owner.user.id, "produce a delivery receipt");
+    const recovery = await waitForRecoveryState(runs, owner.user.id, run.id, "waiting_recovery");
+    assert.equal(runs.get(owner.user.id, run.id).status, "running");
+    assert.equal(recovery.action?.stepId, "test-step");
+    assert.deepEqual(recovery.action?.metadata.failedBoundary, failedBoundary);
+    const events = runs.events(owner.user.id, run.id);
+    const assessed = events.find((event) => event.type === "skill.compliance.assessed");
+    assert.deepEqual((assessed?.data as { failedBoundary?: unknown } | undefined)?.failedBoundary, failedBoundary);
+    const boundary = events.find((event) => event.type === "assessment.failed_boundary");
+    assert.deepEqual((boundary?.data as { failedBoundary?: unknown } | undefined)?.failedBoundary, failedBoundary);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), true);
+  } finally {
+    database.close();
+  }
+});
+
+test("failedBoundary recovery creates and executes only a targeted repair leaf", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("failed-boundary-repair@example.com", "failed boundary repair secure password");
+    const failedBoundary = {
+      stepId: "test-step",
+      missingEvidenceKinds: ["delivery_receipt"],
+      violatedSkillRequirements: [],
+      reusableEvidenceRefs: ["candidateOutput"],
+      suggestedRepairShape: "repair_leaf" as const,
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({ content: "delivery receipt is now present", toolCalls: [], finishReason: "stop" }),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => ({
+        assess: async (input) => {
+          const approved = input.step.role === "repair";
+          return {
+            id: `assessment-${input.step.id}-${input.attempt}`,
+            planId: input.planId,
+            stepId: input.step.id,
+            attempt: input.attempt,
+            assessmentProfile: input.assessmentProfile,
+            assessmentMethod: "model",
+            approved,
+            criteria: input.step.successCriteria.map((criterion) => ({
+              criterionId: criterion.id,
+              satisfied: approved,
+              rationale: approved
+                ? "The repair leaf produced the missing delivery receipt evidence."
+                : "The original leaf is missing delivery receipt evidence.",
+              evidenceRefs: ["candidateOutput"],
+            })),
+            skills: [],
+            evidenceDigest: `digest-${input.step.id}`,
+            feedback: approved ? "" : "Delivery receipt evidence is missing.",
+            ...(approved ? {} : { failedBoundary }),
+            createdAt: Date.now(),
+          };
+        },
+      }),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({
+          approved: true,
+          feedback: "",
+          evidenceRefs: ["assessment.failed_boundary"],
+        }),
+      }),
+      maxSteps: 2,
+    });
+
+    const run = await runs.execute(owner.user.id, "produce a delivery receipt");
+    await waitForRecoveryState(runs, owner.user.id, run.id, "waiting_recovery");
+
+    const recovery = await runs.advanceRecovery(owner.user.id, run.id);
+
+    assert.equal(recovery.state, undefined);
+    assert.equal(runs.get(owner.user.id, run.id).status, "completed");
+    const detail = runs.plan(owner.user.id, run.id);
+    const original = detail.plan.steps.find((step) => step.id === "test-step");
+    const repair = detail.plan.steps.find((step) => step.id === "test-step.repair.2");
+    assert.notEqual(original?.retiredAt, undefined);
+    assert.equal(repair?.role, "repair");
+    assert.equal(repair?.status, "completed");
+    assert.deepEqual(repair?.evidenceContract, { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" });
+    assert.equal(detail.assessments.some((assessment) => assessment.stepId === "test-step" && !assessment.approved), true);
+    assert.equal(detail.assessments.some((assessment) => assessment.stepId === "test-step.repair.2" && assessment.approved), true);
+    const events = runs.events(owner.user.id, run.id);
+    assert.equal(events.filter((event) => event.type === "recovery.repair_leaf_created").length, 1);
+    assert.equal(recovery.decisions[0]?.planRevision?.shape, "recovery_patch");
+    const outcome = database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(run.id) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason_code, "plan_assessed_and_completed");
+  } finally {
+    database.close();
+  }
+});
+
 test("Admission rejects pure Skill activation steps", () => {
   const skill = skillFixture({ id: "canvas-design", name: "canvas-design" });
   assert.throws(
@@ -2161,6 +2610,125 @@ test("ModelStepAssessor caps the assessment model output budget", async () => {
   assert.equal(observedMaxOutputTokens, 8_192);
 });
 
+test("ModelStepAssessor keeps stable assessment system prompt compact", async () => {
+  let observedSystemPrompt = "";
+  let observedContext = "";
+  const assessor = new ModelStepAssessor({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedSystemPrompt = request.systemPrompt;
+      observedContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "assessment",
+          name: "submit_assessment",
+          arguments: {
+            criteria: [{
+              criterionId: "done",
+              satisfied: true,
+              rationale: "Canonical evidence proves completion",
+              evidenceRefs: ["candidateOutput"],
+            }],
+            skills: [],
+            feedback: "",
+          },
+        }],
+      };
+    },
+  });
+
+  await assessor.assess({
+    runId: "run-compact-assessor-prompt",
+    planId: "plan",
+    step: {
+      ...step("assess"),
+      position: 0,
+      status: "running",
+      successCriteria: [{ id: "done", description: "Work is complete", source: "planner" }],
+    },
+    skills: [],
+    evidence: { candidateOutput: "complete", toolCalls: [], modelSteps: 1 },
+    attempt: 1,
+  });
+
+  assert.ok(
+    estimateTextTokens(observedSystemPrompt) <= 260,
+    `Assessment systemPrompt is too large: ${estimateTextTokens(observedSystemPrompt)} estimated tokens`,
+  );
+  assert.match(observedSystemPrompt, /dynamic_prompt_profile/);
+  assert.doesNotMatch(observedSystemPrompt, /Skill-mandated validation|planning-before-coding|computer_run_command/);
+  assert.match(observedContext, /dynamic_prompt_context/);
+  assert.match(observedContext, /agentloop\.taskProfile\/v2/);
+  assert.match(observedContext, /"evidenceProfile":"source_grounded"/);
+  assert.doesNotMatch(observedContext, /assessmentPolicy|Skill-mandated validation|planning-before-coding/);
+});
+
+test("ModelStepAssessor exposes Skill caveat policy only for Skill-bound assessments", async () => {
+  const skill = skillFixture({
+    id: "visual-skill",
+    name: "visual-skill",
+    instructions: "Render visual output when local rendering is available.",
+  });
+  let observedSystemPrompt = "";
+  let observedContext = "";
+  const assessor = new ModelStepAssessor({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedSystemPrompt = request.systemPrompt;
+      observedContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "assessment",
+          name: "submit_assessment",
+          arguments: {
+            criteria: [{
+              criterionId: "done",
+              satisfied: true,
+              rationale: "Canonical evidence proves completion",
+              evidenceRefs: ["candidateOutput"],
+            }],
+            skills: [{
+              skillId: skill.id,
+              status: "skipped_unavailable",
+              followed: false,
+              rationale: "Renderer was probed and unavailable.",
+              evidenceRefs: ["renderer-probe"],
+            }],
+            feedback: "Renderer unavailable; visual validation was not claimed complete.",
+          },
+        }],
+      };
+    },
+  });
+
+  await assessor.assess({
+    runId: "run-skill-assessment-policy",
+    planId: "plan",
+    step: {
+      ...step("assess"),
+      position: 0,
+      status: "running",
+      successCriteria: [{ id: "done", description: "Work is complete", source: "planner" }],
+    },
+    skills: [skill],
+    evidence: {
+      candidateOutput: "complete; renderer unavailable",
+      toolCalls: [{ toolCallId: "renderer-probe", toolName: "computer_run_command", isError: false, result: "renderer missing" }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.doesNotMatch(observedSystemPrompt, /Skill-mandated validation|planning-before-coding|review-before-build/);
+  assert.match(observedContext, /assessmentPolicy/);
+  assert.match(observedContext, /Skill-mandated validation/);
+  assert.match(observedContext, /planning-before-coding/);
+});
+
 test("ModelStepAssessor repairs invalid structured arguments without approving by default", async () => {
   let calls = 0;
   const model: ModelAdapter = {
@@ -2221,7 +2789,7 @@ test("Plan-bound Skill instructions are loaded on demand and compliance is persi
     const skill = skills.create(owner.user.id, {
       name: "strict-private",
       description: "Private procedure",
-      instructions: "MANDATORY-PRIVATE-INSTRUCTION",
+      instructions: instructionsWithAgentLoopMetadata("MANDATORY-PRIVATE-INSTRUCTION"),
     });
     const model = new InspectSkillModel();
     const runs = new RunService({
@@ -2353,7 +2921,11 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
     const skill = skills.create(owner.user.id, {
       name: "deck-builder",
       description: "Create and verify editable pptx presentation files from outlines.",
-      instructions: "Build the deck from source-grounded outline files.",
+      instructions: instructionsWithAgentLoopMetadata(
+        "Build the deck from source-grounded outline files.",
+        ["primary_builder"],
+        ["presentation"],
+      ),
     });
     const conversationId = "conversation-workset";
     const priorRunId = "prior-failed-run";
@@ -2565,6 +3137,9 @@ test("execution context injects data-analysis operation profile before the first
       complete: async (request) => {
         const context = request.runtimeContext?.content ?? "";
         sawDataAnalysisProfile = /"id":"data_analysis"/.test(context)
+          && /dynamic_prompt_profile/.test(request.systemPrompt)
+          && /dynamic_prompt_context/.test(context)
+          && /agentloop\.taskProfile\/v2/.test(context)
           && /structured extraction artifact/.test(context)
           && /Do not repeatedly print overlapping raw rows to stdout/.test(context)
           && !/dataAcquisitionDiscipline/.test(context);
@@ -2740,7 +3315,7 @@ test("rule-based assessment cannot claim Skill compliance but repair limit can c
     const skill = skills.create(owner.user.id, {
       name: "semantic-check",
       description: "Requires semantic review",
-      instructions: "Apply the rule.",
+      instructions: instructionsWithAgentLoopMetadata("Apply the rule."),
     });
     const runs = new RunService({
       database, skills, modelFactory: () => new LoadThenClaimModel(), maxSteps: 3,
@@ -2774,7 +3349,7 @@ test("process-only Skill gaps complete with process caveat outcome", async () =>
     skills.create(owner.user.id, {
       name: "semantic-check",
       description: "Requires process evidence",
-      instructions: "Plan before building.",
+      instructions: instructionsWithAgentLoopMetadata("Plan before building."),
     });
     const runs = new RunService({
       database, skills, modelFactory: () => new LoadThenClaimModel(), maxSteps: 3,
@@ -2846,6 +3421,240 @@ test("required validation that remains locally unavailable completes with deferr
   }
 });
 
+test("external source gaps can complete with an evidence-boundary caveat", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("evidence-boundary@example.com", "evidence boundary secure password");
+    const websearch: RuntimeTool<unknown> = {
+      name: "websearch",
+      description: "Search public sources",
+      inputSchema: { type: "object", additionalProperties: false, properties: { query: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async () => [{ title: "Official metadata", url: "https://example.test/metadata", snippet: "Metadata is public" }],
+    };
+    const webfetch: RuntimeTool<unknown> = {
+      name: "webfetch",
+      description: "Fetch public source text",
+      inputSchema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value as { url: string },
+      execute: async (_context, value) => {
+        const url = (value as { url: string }).url;
+        if (url.includes("blocked")) {
+          throw new AppError("BAD_REQUEST", "HTTP 403 while fetching https://example.test/blocked", 422);
+        }
+        return { url, title: "Official metadata", content: "Verified metadata is available." };
+      },
+    };
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "research source facts with a clear boundary",
+        selectedSkillIds: [],
+        steps: [{
+          id: "research-sources",
+          objective: "Research external source facts for a training artifact and preserve any evidence boundary.",
+          dependencies: [],
+          skillIds: [],
+          requiredToolNames: ["websearch", "webfetch"],
+          successCriteria: [{
+            id: "source-facts",
+            description: "A source-grounded fact baseline is returned with URLs and any unavailable authoritative facts clearly identified.",
+          }],
+        }],
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new EvidenceBoundaryResearchModel(),
+      plannerFactory: () => planner,
+      assessorFactory: () => evidenceBoundaryAssessor(),
+      tools: [websearch, webfetch],
+      maxSteps: 6,
+    });
+
+    const run = await runs.execute(owner.user.id, "Prepare a training brief from public sources");
+
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /Evidence boundary note/);
+    assert.match(run.output ?? "", /403/);
+    const detail = runs.plan(owner.user.id, run.id);
+    assert.equal(detail.plan.status, "completed");
+    assert.equal(detail.assessments.length, 1);
+    assert.equal(detail.assessments.at(-1)?.approved, false);
+    assert.equal(detail.plan.steps[0].evidence?.completionCaveat?.reason, "evidence_boundary");
+    assert.equal(runs.events(owner.user.id, run.id).filter((event) => event.type === "candidate.evidence_boundary_accepted").length, 1);
+    const outcome = database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(run.id) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason_code, "completed_with_evidence_boundary");
+  } finally {
+    database.close();
+  }
+});
+
+test("missing source facts do not block the core artifact deliverable", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-source-boundary-delivery-"));
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("source-boundary-delivery@example.com", "source boundary secure password");
+    const websearch: RuntimeTool<unknown> = {
+      name: "websearch",
+      description: "Search public source metadata",
+      inputSchema: { type: "object", additionalProperties: false, properties: { query: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async () => [{ title: "Standard metadata", url: "https://example.test/standard", snippet: "Metadata only" }],
+    };
+    const webfetch: RuntimeTool<unknown> = {
+      name: "webfetch",
+      description: "Fetch public source metadata",
+      inputSchema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async (_context, value) => ({
+        url: (value as { url: string }).url,
+        title: "Standard metadata",
+        content: "The page exposes public standard metadata but does not expose the full text.",
+      }),
+    };
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "create a source-bounded training report",
+        selectedSkillIds: [],
+        steps: [
+          {
+            id: "research-sources",
+            objective: "Collect source facts for a training report while preserving missing source boundaries.",
+            dependencies: [],
+            skillIds: [],
+            requiredToolNames: ["websearch", "webfetch"],
+            successCriteria: [{
+              id: "source-outline",
+              description: "A bounded source outline is returned, with missing full-text facts clearly identified.",
+            }],
+          },
+          {
+            id: "write-report",
+            objective: "Generate the requested HTML training report from the bounded source outline.",
+            dependencies: ["research-sources"],
+            skillIds: [],
+            requiredToolNames: ["computer_write_file"],
+            successCriteria: [{
+              id: "report-written",
+              description: "An HTML report file is written and states the evidence boundary.",
+            }],
+          },
+        ],
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new MissingSourceFactsReportModel(),
+      plannerFactory: () => planner,
+      assessorFactory: () => missingSourceFactsAssessor(),
+      tools: [websearch, webfetch],
+      workspaceRoot: workspace,
+      maxSteps: 8,
+    });
+
+    const run = await runs.execute(owner.user.id, "Generate the DCMM training report", { allowDangerousTools: true });
+
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /dcmm-training.html/);
+    const artifacts = await runs.processArtifacts(owner.user.id, run.id);
+    const report = artifacts.find((artifact) => artifact.path.endsWith("dcmm-training.html"));
+    assert.notEqual(report, undefined);
+    const readReport = await runs.readProcessArtifact(owner.user.id, run.id, report.id);
+    assert.equal(readReport.content.toString("utf8").includes("Evidence boundary"), true);
+    const detail = runs.plan(owner.user.id, run.id);
+    assert.equal(detail.plan.status, "completed");
+    assert.equal(detail.plan.steps[0].evidence?.completionCaveat?.reason, "evidence_boundary");
+    assert.equal(detail.plan.steps[1].status, "completed");
+    const outcome = database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(run.id) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason_code, "completed_with_evidence_boundary");
+  } finally {
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("strict source requirements remain blocking instead of evidence-boundary delivery", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("strict-source@example.com", "strict source secure password");
+    const websearch: RuntimeTool<unknown> = {
+      name: "websearch",
+      description: "Search public source metadata",
+      inputSchema: { type: "object", additionalProperties: false, properties: { query: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async () => [{ title: "Standard metadata", url: "https://example.test/standard", snippet: "Metadata only" }],
+    };
+    const webfetch: RuntimeTool<unknown> = {
+      name: "webfetch",
+      description: "Fetch public source metadata",
+      inputSchema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async (_context, value) => ({
+        url: (value as { url: string }).url,
+        title: "Standard metadata",
+        content: "The page exposes public standard metadata but does not expose the full text.",
+      }),
+    };
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "strict source research",
+        selectedSkillIds: [],
+        steps: [{
+          id: "research-sources",
+          objective: "必须严格依据官方标准全文逐条核验，生成来源事实基线。",
+          dependencies: [],
+          skillIds: [],
+          requiredToolNames: ["websearch", "webfetch"],
+          successCriteria: [{
+            id: "strict-source-facts",
+            description: "必须按照官方标准全文逐条给出精确条款；缺少全文时不能交付。",
+          }],
+        }],
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new MissingSourceFactsReportModel(),
+      plannerFactory: () => planner,
+      assessorFactory: () => missingSourceFactsAssessor(),
+      tools: [websearch, webfetch],
+      maxSteps: 6,
+    });
+
+    await assert.rejects(
+      () => runs.execute(owner.user.id, "必须严格按照官方标准全文逐条核验"),
+      (error) => hasCode(error, "STEP_NOT_COMPLETED"),
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test("Structured planning, execution, assessment, and terminal commit form one complete chain", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -2855,7 +3664,18 @@ test("Structured planning, execution, assessment, and terminal commit form one c
     const skill = skills.create(owner.user.id, {
       name: "evidence-chain",
       description: "Require evidence in the answer",
-      instructions: "Include canonical evidence.",
+      instructions: [
+        "---",
+        "agentloop:",
+        "  roles:",
+        "    - primary_builder",
+        "  artifactKinds:",
+        "    - none",
+        "  sourceKinds: []",
+        "  qaKinds: []",
+        "---",
+        "Include canonical evidence.",
+      ].join("\n"),
     });
     const model = new FullChainModel(skill.id);
     const lines: string[] = [];
@@ -2870,7 +3690,7 @@ test("Structured planning, execution, assessment, and terminal commit form one c
     assert.equal(run.output, "answer with canonical evidence");
     assert.ok(lines.some((line) => line.includes("event=planning.skills.selected") && line.includes("selected=\"evidence-chain\"")));
     assert.ok(lines.some((line) => line.includes("event=planning.started") && line.includes("availableSkills=1")));
-    assert.ok(lines.some((line) => line.includes("event=planning.turn.completed") && line.includes("submitPlanCalls=1")));
+    assert.ok(lines.some((line) => line.includes("event=planning.turn.completed") && line.includes("submitOutcomePlanCalls=1")));
     assert.ok(lines.some((line) => line.includes("event=run.completed")));
     const detail = runs.plan(owner.user.id, run.id);
     assert.equal(detail.plan.status, "completed");
@@ -2947,7 +3767,32 @@ test("budgeted convergence still requires assessment before TerminalCommitter co
       .find((action) => action.kind === "tool_call");
     assert.equal(proofAction?.state, "succeeded");
     assert.equal(proofAction?.replayPolicy, "safe");
-    assert.equal(runs.events(owner.user.id, run.id).filter((event) => event.type === "loop.convergence_requested").length, 1);
+    const events = runs.events(owner.user.id, run.id);
+    assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 1);
+    const lifecycle = events
+      .filter((event) =>
+        typeof event.data.toolCallId === "string"
+        && event.data.toolCallId === "proof-1"
+        && [
+          "tool.effect_pending",
+          "tool.dispatched",
+          "tool.result_committed",
+          "tool.completed",
+        ].includes(event.type)
+      )
+      .map((event) => event.type);
+    assert.deepEqual(lifecycle, [
+      "tool.effect_pending",
+      "tool.dispatched",
+      "tool.result_committed",
+      "tool.completed",
+    ]);
+    const terminalIndex = events.findIndex((event) => event.type === "terminal.delivery_committed");
+    const completedIndex = events.findIndex((event) => event.type === "run.completed");
+    assert.notEqual(terminalIndex, -1);
+    assert.notEqual(completedIndex, -1);
+    assert.equal(terminalIndex < completedIndex, true);
+    assert.equal(events[terminalIndex].data.reasonCode, "plan_assessed_and_completed");
     const outcome = database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
       .get(run.id) as { status: string; reason_code: string };
     assert.equal(outcome.status, "completed");
@@ -3604,6 +4449,105 @@ class BoundedWebResearchModel implements ModelAdapter {
   }
 }
 
+class EvidenceBoundaryResearchModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  executionCalls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase === "assessment") {
+      throw new Error("evidence-boundary test uses a focused assessor");
+    }
+    this.executionCalls += 1;
+    if (this.executionCalls === 1) {
+      assert.equal(request.tools.some((tool) => tool.name === "websearch"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "search", name: "websearch", arguments: { query: "official source metadata" } }],
+      };
+    }
+    if (this.executionCalls === 2) {
+      assert.equal(request.tools.some((tool) => tool.name === "webfetch"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          { id: "fetch-ok", name: "webfetch", arguments: { url: "https://example.test/metadata" } },
+          { id: "fetch-blocked", name: "webfetch", arguments: { url: "https://example.test/blocked" } },
+        ],
+      };
+    }
+    return {
+      content: "Verified facts are limited to public metadata from https://example.test/metadata. The full text remains unverified because https://example.test/blocked returned HTTP 403, so missing source facts are not claimed as verified.",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class MissingSourceFactsReportModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  executionCalls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase === "assessment") {
+      throw new Error("missing-source-facts test uses a focused assessor");
+    }
+    this.executionCalls += 1;
+    const toolNames = request.tools.map((tool) => tool.name);
+    if (this.executionCalls === 1) {
+      assert.equal(toolNames.includes("websearch"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "search-metadata", name: "websearch", arguments: { query: "standard metadata" } }],
+      };
+    }
+    if (this.executionCalls === 2) {
+      assert.equal(toolNames.includes("webfetch"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "fetch-metadata", name: "webfetch", arguments: { url: "https://example.test/standard" } }],
+      };
+    }
+    if (this.executionCalls === 3) {
+      return {
+        content: "Verified facts are limited to public metadata. The full text remains unverified, so missing source facts and exact clauses are not claimed as verified; downstream report content must label those sections as training interpretation.",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    }
+    if (this.executionCalls >= 4 && !toolNames.includes("computer_write_file")) {
+      return {
+        content: "Verified facts are limited to public metadata. The full text remains unverified, so missing source facts and exact clauses are not claimed as verified; downstream report content must label those sections as training interpretation.",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    }
+    if (this.executionCalls === 4) {
+      assert.equal(toolNames.includes("computer_write_file"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "write-report",
+          name: "computer_write_file",
+          arguments: {
+            path: "dcmm-training.html",
+            content: "<!doctype html><html><body><h1>DCMM Training Report</h1><p>Evidence boundary: full text remains unverified; exact clauses are not claimed as verified.</p></body></html>",
+          },
+        }],
+      };
+    }
+    return {
+      content: "dcmm-training.html was generated from the bounded source outline and states the evidence boundary.",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
 class StepBoundaryContextModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   firstSystemPrompt = "";
@@ -3629,7 +4573,7 @@ class FullChainModel implements ModelAdapter {
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     this.calls += 1;
     if (this.calls === 1) {
-      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan"]);
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
       assert.match(request.runtimeContext?.content ?? "", /evidence-chain/);
       assert.doesNotMatch(request.runtimeContext?.content ?? "", /Include canonical evidence/);
       return {
@@ -3637,17 +4581,27 @@ class FullChainModel implements ModelAdapter {
         finishReason: "tool_calls",
         toolCalls: [{
           id: "plan",
-          name: "submit_plan",
+          name: "submit_outcome_plan",
           arguments: {
+            schema: "agentloop.outcomePlan/v2",
             goal: "produce answer",
-            selectedSkillIds: [this.skillId],
-            steps: [{
+            shape: "single_leaf",
+            selectedSkillRoles: [{
+              skillId: this.skillId,
+              role: "primary_builder",
+              reason: "The answer must follow the selected evidence Skill.",
+            }],
+            leaves: [{
               id: "answer",
               objective: "produce the evidence-backed answer",
-              dependencies: [],
+              dependsOn: [],
+              role: "deliver",
               skillIds: [this.skillId],
               requiredToolNames: [],
-              successCriteria: [{ id: "answer-ready", description: "An answer is produced" }],
+              evidenceContract: {
+                requiredKinds: ["delivery_receipt"],
+                caveatPolicy: "none",
+              },
             }],
           },
         }],
@@ -3676,7 +4630,7 @@ class FullChainModel implements ModelAdapter {
         name: "submit_assessment",
         arguments: {
           criteria: [
-            { criterionId: "answer-ready", satisfied: true, rationale: "Answer exists", evidenceRefs: ["candidateOutput"] },
+            { criterionId: "delivery_receipt", satisfied: true, rationale: "Answer exists", evidenceRefs: ["candidateOutput"] },
           ],
           skills: [{
             skillId: this.skillId,
@@ -3884,8 +4838,65 @@ function skillFixture(overrides: Partial<PrivateSkill> = {}): PrivateSkill {
   return {
     id: "skill-1", ownerUserId: "user-1", name: "skill", description: "skill",
     instructions: "instructions", sourceKind: "inline",
-    version: 1, contentHash: "hash", updatedAt: 1, ...overrides,
+    version: 1, contentHash: "hash",
+    agentLoop: {
+      roles: ["primary_builder"],
+      artifactKinds: ["none"],
+      sourceKinds: [],
+      qaKinds: [],
+    },
+    updatedAt: 1, ...overrides,
   };
+}
+
+function agentLoopMetadata(
+  roles: NonNullable<PrivateSkill["agentLoop"]>["roles"],
+  artifactKinds: NonNullable<PrivateSkill["agentLoop"]>["artifactKinds"],
+  sourceKinds: readonly string[] = [],
+  qaKinds: readonly string[] = [],
+): NonNullable<PrivateSkill["agentLoop"]> {
+  return { roles, artifactKinds, sourceKinds, qaKinds };
+}
+
+function instructionsWithAgentLoopMetadata(
+  body: string,
+  roles: NonNullable<PrivateSkill["agentLoop"]>["roles"] = ["primary_builder"],
+  artifactKinds: NonNullable<PrivateSkill["agentLoop"]>["artifactKinds"] = ["none"],
+  sourceKinds: readonly string[] = [],
+  qaKinds: readonly string[] = [],
+): string {
+  const lines = [
+    "---",
+    "agentloop:",
+    "  roles:",
+    ...roles.map((role) => `    - ${role}`),
+    "  artifactKinds:",
+    ...artifactKinds.map((kind) => `    - ${kind}`),
+    ...(sourceKinds.length === 0
+      ? ["  sourceKinds: []"]
+      : ["  sourceKinds:", ...sourceKinds.map((kind) => `    - ${kind}`)]),
+    ...(qaKinds.length === 0
+      ? ["  qaKinds: []"]
+      : ["  qaKinds:", ...qaKinds.map((kind) => `    - ${kind}`)]),
+    "---",
+    body,
+  ];
+  return lines.join("\n");
+}
+
+async function waitForRecoveryState(
+  runs: RunService,
+  ownerUserId: string,
+  runId: string,
+  state: "waiting_recovery" | "waiting_user" | "ready_to_resume",
+): Promise<ReturnType<RunService["recoveryForRun"]>> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    const recovery = runs.recoveryForRun(ownerUserId, runId);
+    if (recovery.state?.state === state) return recovery;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return runs.recoveryForRun(ownerUserId, runId);
 }
 
 function approvingSkillAssessor(): import("../src/planning/contracts.ts").StepAssessor {
@@ -3968,6 +4979,61 @@ function deferredValidationAssessor(skillId: string): import("../src/planning/co
       feedback: "Renderer remains unavailable; leave visual validation to the user and report the exact caveat.",
       createdAt: Date.now(),
     }),
+  };
+}
+
+function evidenceBoundaryAssessor(): import("../src/planning/contracts.ts").StepAssessor {
+  return {
+    assess: async (input) => ({
+      id: `assessment-${input.step.id}-${input.attempt}`,
+      planId: input.planId,
+      stepId: input.step.id,
+      attempt: input.attempt,
+      assessmentProfile: input.assessmentProfile,
+      assessmentMethod: "model",
+      approved: false,
+      criteria: input.step.successCriteria.map((criterion) => ({
+        criterionId: criterion.id,
+        satisfied: false,
+        rationale: "The candidate preserves verified public metadata, but the full text is unavailable with HTTP 403 and source facts remain unverified.",
+        evidenceRefs: ["candidateOutput", "fetch-ok", "fetch-blocked"],
+      })),
+      skills: [],
+      evidenceDigest: "evidence-boundary-digest",
+      feedback: "Proceed only as a limited evidence-boundary delivery: cite verified metadata, state that the source returned 403, and do not claim missing source facts as verified.",
+      createdAt: Date.now(),
+    }),
+  };
+}
+
+function missingSourceFactsAssessor(): import("../src/planning/contracts.ts").StepAssessor {
+  return {
+    assess: async (input) => {
+      const approved = input.step.id === "write-report";
+      return {
+        id: `assessment-${input.step.id}-${input.attempt}`,
+        planId: input.planId,
+        stepId: input.step.id,
+        attempt: input.attempt,
+        assessmentProfile: input.assessmentProfile,
+        assessmentMethod: "model",
+        approved,
+        criteria: input.step.successCriteria.map((criterion) => ({
+          criterionId: criterion.id,
+          satisfied: approved,
+          rationale: approved
+            ? "The requested report artifact was generated and preserves the evidence boundary."
+            : "候选输出保留了已验证的公开元数据，但关键事实仍未验证，标准全文未提供，精确条款无法可靠核实。",
+          evidenceRefs: approved ? ["candidateOutput", "write-report"] : ["candidateOutput", "fetch-metadata"],
+        })),
+        skills: [],
+        evidenceDigest: `missing-source-facts-${input.step.id}`,
+        feedback: approved
+          ? ""
+          : "Proceed with an evidence-boundary delivery: use verified metadata, state that standard details cannot be publicly confirmed, and do not claim unverified key facts or exact clauses as verified.",
+        createdAt: Date.now(),
+      };
+    },
   };
 }
 

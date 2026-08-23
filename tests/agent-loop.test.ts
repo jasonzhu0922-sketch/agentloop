@@ -338,6 +338,44 @@ test("deferred validation candidate stops repair loop with a caveat", async () =
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("evidence-boundary candidate stops repair loop with a caveat", async () => {
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      return {
+        content: "Verified metadata is available, but full text remains unverified because the source returned HTTP 403.",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Research public sources.",
+    input: "research",
+    model,
+    tools: new ToolRegistry([]),
+    grant,
+    maxSteps: 3,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async () => ({
+      approved: false,
+      feedback: "Proceed only as a limited evidence-boundary delivery.",
+      evidenceBoundary: true,
+    }),
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.completionCaveat?.reason, "evidence_boundary");
+  assert.match(result.output, /Evidence boundary note/);
+  assert.equal(events.filter((event) => event.type === "candidate.evidence_boundary_accepted").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
 test("candidate repair assessment limit accepts the latest output with a caveat", async () => {
   let calls = 0;
   let assessments = 0;

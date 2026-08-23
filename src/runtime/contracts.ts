@@ -210,7 +210,7 @@ export interface AgentLoopResult {
 }
 
 export interface RuntimeCompletionCaveat {
-  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit";
+  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit" | "evidence_boundary";
   readonly feedback: string;
 }
 
@@ -235,6 +235,14 @@ export interface CandidateCompletionEvaluation {
   readonly approved: boolean;
   readonly feedback: string;
   readonly deferredValidation?: boolean;
+  readonly evidenceBoundary?: boolean;
   readonly allowRepairLimitCompletion?: boolean;
+  readonly failedBoundary?: Readonly<{
+    readonly stepId: string;
+    readonly missingEvidenceKinds: readonly string[];
+    readonly violatedSkillRequirements: readonly string[];
+    readonly reusableEvidenceRefs: readonly string[];
+    readonly suggestedRepairShape: "repair_leaf" | "ask_user" | "fail";
+  }>;
   readonly assessmentReused?: boolean;
 }

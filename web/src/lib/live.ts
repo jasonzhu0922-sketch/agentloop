@@ -381,7 +381,7 @@ function insightForEvent(event: RunEvent, planned: Map<string, RunEvent>): Execu
     return {
       key,
       title: "规划返回",
-      detail: "返回 " + String(d.submitPlanCallCount ?? 0) + " 个 submit_plan 调用"
+      detail: "返回 " + String(d.submitOutcomePlanCalls ?? d.submitOutcomePlanCallCount ?? 0) + " 个 submit_outcome_plan 调用"
         + (d.finishReason ? " · " + String(d.finishReason) : ""),
       tone,
       seq: event.seq,

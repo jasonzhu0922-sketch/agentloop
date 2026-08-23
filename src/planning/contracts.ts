@@ -10,11 +10,45 @@ export type RefinementState =
   | "ready_to_refine"
   | "refining"
   | "refined";
+export type OutcomePlanShape =
+  | "single_leaf"
+  | "fact_then_produce"
+  | "multi_deliverable"
+  | "pipeline"
+  | "recovery_patch";
+export type SkillRole = "primary_builder" | "source_provider" | "support" | "qa";
+export type OutcomeLeafRole = "fact_acquisition" | "produce" | "deliver" | "repair";
+export type EvidenceKind =
+  | "source_summary"
+  | "source_urls"
+  | "artifact_path"
+  | "artifact_non_empty"
+  | "artifact_openable"
+  | "format_matches_request"
+  | "basic_navigation"
+  | "delivery_receipt"
+  | "explicit_caveats";
+export type CaveatPolicy =
+  | "none"
+  | "mark_unverified_facts"
+  | "strict_fail_on_missing_source";
+
+export interface SelectedSkillRole {
+  readonly skillId: string;
+  readonly role: SkillRole;
+  readonly reason: string;
+}
+
+export interface EvidenceContract {
+  readonly requiredKinds: readonly EvidenceKind[];
+  readonly caveatPolicy: CaveatPolicy;
+}
 
 export interface TaskSpec {
   readonly runId: string;
   readonly input: string;
   readonly availableSkills: readonly PrivateSkill[];
+  readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly workspaceFacts?: PlanningWorkspaceFacts;
@@ -149,15 +183,20 @@ export interface PlanStepProposal {
   readonly parentId?: string;
   readonly objective: string;
   readonly dependencies: readonly string[];
+  readonly role?: OutcomeLeafRole;
   readonly refinementState?: RefinementState;
   readonly requiredFacts?: readonly RequiredFact[];
   readonly skillIds: readonly string[];
   readonly requiredToolNames: readonly string[];
+  readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
 }
 
 export interface PlanProposal {
   readonly goal: string;
+  readonly schema?: "agentloop.outcomePlan/v2";
+  readonly shape?: OutcomePlanShape;
+  readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   readonly selectedSkillIds: readonly string[];
   readonly steps: readonly PlanStepProposal[];
 }
@@ -204,7 +243,7 @@ export interface StepEvidence {
 }
 
 export interface CompletionCaveat {
-  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit";
+  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit" | "evidence_boundary";
   readonly feedback: string;
 }
 
@@ -221,6 +260,16 @@ export interface SkillAssessment {
   readonly followed: boolean;
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];
+}
+
+export type SuggestedRepairShape = "repair_leaf" | "ask_user" | "fail";
+
+export interface FailedBoundary {
+  readonly stepId: string;
+  readonly missingEvidenceKinds: readonly string[];
+  readonly violatedSkillRequirements: readonly string[];
+  readonly reusableEvidenceRefs: readonly string[];
+  readonly suggestedRepairShape: SuggestedRepairShape;
 }
 
 export type AssessmentProfileId =
@@ -243,6 +292,7 @@ export interface SkillComplianceAssessment {
   readonly skills: readonly SkillAssessment[];
   readonly evidenceDigest: string;
   readonly feedback: string;
+  readonly failedBoundary?: FailedBoundary;
   readonly createdAt: number;
 }
 

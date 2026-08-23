@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useAgentLoop } from "../state/context";
+import { projectConversationRun } from "../state/run-state";
 import { Markdown } from "./Markdown";
 import {
   failureDetails,
@@ -318,23 +319,29 @@ export function ConversationView(): React.ReactNode {
   const runs = state.conversation.runs;
   const parts: React.ReactNode[] = [];
   for (let i = 0; i < runs.length; i++) {
-    const r = runs[i];
-    const isActive = r.id === state.activeRunId && state.running;
-    const isLoaded = state.currentRun?.run.id === r.id;
+    const detail = state.runDetailsById[runs[i].id]
+      ?? (state.currentRun?.run.id === runs[i].id ? state.currentRun : undefined);
+    const projection = projectConversationRun(
+      runs[i],
+      detail?.run,
+      state.activeRunIds,
+    );
+    const r = projection.run;
+    const isLoaded = projection.isLoaded;
     parts.push(<UserMessage key={"u" + r.id} text={r.input} />);
-    if (isActive) {
-      const events = state.currentRun?.events ?? [];
+    if (projection.isLive) {
+      const events = isLoaded ? (detail?.events ?? []) : [];
       const plan = livePlan(events);
       const steps = plan?.steps ?? [];
       parts.push(<LiveCard key={"l" + r.id} events={events} steps={steps} />);
     } else if (r.status === "completed") {
-      const artifacts = isLoaded ? (state.currentRun?.artifacts ?? []) : [];
+      const artifacts = isLoaded ? (detail?.artifacts ?? []) : [];
       parts.push(<FinalAnswer key={"f" + r.id} run={r} artifacts={artifacts} loaded={isLoaded} />);
     } else if (r.status === "failed" || r.status === "cancelled") {
-      const failEvents = isLoaded ? (state.currentRun?.events ?? []) : [];
-      const artifacts = isLoaded ? (state.currentRun?.artifacts ?? []) : [];
+      const failEvents = isLoaded ? (detail?.events ?? []) : [];
+      const artifacts = isLoaded ? (detail?.artifacts ?? []) : [];
       const plan = isLoaded ? livePlan(failEvents) : null;
-      const steps = plan?.steps ?? (isLoaded ? (state.currentRun?.detail.plan.steps ?? []) : []);
+      const steps = plan?.steps ?? (isLoaded ? (detail?.detail.plan.steps ?? []) : []);
       parts.push(<ErrorMessage key={"e" + r.id} run={r} events={failEvents} steps={steps} artifacts={artifacts} loaded={isLoaded} />);
     } else if (r.status === "running") {
       parts.push(<RunningPlaceholder key={"r" + r.id} />);

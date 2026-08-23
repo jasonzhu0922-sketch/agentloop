@@ -78,6 +78,7 @@ interface ProviderRequest {
 
 const STREAM_WALL_TIMEOUT_FACTOR = 3;
 const STREAM_WALL_TIMEOUT_MAX_MS = 15 * 60 * 1_000;
+const NEVER_ABORT_SIGNAL = new AbortController().signal;
 
 export class OpenAICompatibleModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
@@ -236,11 +237,12 @@ export class OpenAICompatibleModel implements ModelAdapter {
     sink: ModelStreamSink,
     signal?: AbortSignal,
   ): Promise<ModelResponse> {
-    const requestTimeout = createStreamingModelTimeout(this.timeoutMs, signal);
     const request = this.buildRequest(invocation, true);
+    const retrySignal = signal ?? NEVER_ABORT_SIGNAL;
 
-    try {
-      for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      const requestTimeout = createStreamingModelTimeout(this.timeoutMs, signal);
+      try {
         let response: Response;
         try {
           response = await fetch(this.endpoint, {
@@ -253,9 +255,15 @@ export class OpenAICompatibleModel implements ModelAdapter {
             signal: requestTimeout.signal,
           });
         } catch (error) {
-          if (requestTimeout.aborted) throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          if (requestTimeout.aborted) {
+            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
+              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+              continue;
+            }
+            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          }
           if (attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, requestTimeout.signal, undefined, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
             continue;
           }
           throw new AppError("MODEL_ERROR", "Model provider is unreachable", 502, {
@@ -268,7 +276,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
             await response.body?.cancel().catch(() => undefined);
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, requestTimeout.signal, response.status, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext);
             continue;
           }
           throw await providerHttpError(response, request.logContext);
@@ -277,7 +285,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
         try {
           return await this.consumeStream(response, sink, requestTimeout.recordActivity);
         } catch (error) {
-          if (requestTimeout.aborted) throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          if (requestTimeout.aborted) {
+            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
+              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+              continue;
+            }
+            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          }
           if (error instanceof AppError) throw error;
           // Partial deltas may already have been emitted to the sink, so a
           // mid-stream failure is never replayed through a second provider call.
@@ -287,11 +301,11 @@ export class OpenAICompatibleModel implements ModelAdapter {
             request: request.logContext,
           });
         }
+      } finally {
+        requestTimeout.dispose();
       }
-      throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
-    } finally {
-      requestTimeout.dispose();
     }
+    throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
   }
 
   private buildRequest(invocation: ModelInvocation, stream: boolean): ProviderRequest {
@@ -512,11 +526,12 @@ export class ResponsesModel implements ModelAdapter {
     sink: ModelStreamSink,
     signal?: AbortSignal,
   ): Promise<ModelResponse> {
-    const requestTimeout = createStreamingModelTimeout(this.timeoutMs, signal);
     const request = this.buildRequest(invocation, true);
+    const retrySignal = signal ?? NEVER_ABORT_SIGNAL;
 
-    try {
-      for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      const requestTimeout = createStreamingModelTimeout(this.timeoutMs, signal);
+      try {
         let response: Response;
         try {
           response = await fetch(this.endpoint, {
@@ -529,9 +544,15 @@ export class ResponsesModel implements ModelAdapter {
             signal: requestTimeout.signal,
           });
         } catch (error) {
-          if (requestTimeout.aborted) throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          if (requestTimeout.aborted) {
+            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
+              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+              continue;
+            }
+            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          }
           if (attempt < this.maxAttempts) {
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, requestTimeout.signal, undefined, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
             continue;
           }
           throw new AppError("MODEL_ERROR", "Model provider is unreachable", 502, {
@@ -544,7 +565,7 @@ export class ResponsesModel implements ModelAdapter {
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
             await response.body?.cancel().catch(() => undefined);
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, requestTimeout.signal, response.status, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext);
             continue;
           }
           throw await providerHttpError(response, request.logContext);
@@ -558,7 +579,13 @@ export class ResponsesModel implements ModelAdapter {
           }
           return await this.consumeStream(response, sink, requestTimeout.recordActivity);
         } catch (error) {
-          if (requestTimeout.aborted) throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          if (requestTimeout.aborted) {
+            if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
+              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+              continue;
+            }
+            throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          }
           if (error instanceof AppError) throw error;
           throw new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
             attempts: attempt,
@@ -566,11 +593,11 @@ export class ResponsesModel implements ModelAdapter {
             request: request.logContext,
           });
         }
+      } finally {
+        requestTimeout.dispose();
       }
-      throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
-    } finally {
-      requestTimeout.dispose();
     }
+    throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
   }
 
   private buildRequest(invocation: ModelInvocation, stream: boolean): ProviderRequest {
@@ -1043,6 +1070,10 @@ interface StreamingModelTimeout {
 }
 
 type ModelAbortReason = "request_timeout" | "stream_idle_timeout" | "stream_wall_timeout" | "cancelled";
+
+function isRetryableStreamingAbort(reason: ModelAbortReason | undefined): boolean {
+  return reason === "request_timeout";
+}
 
 function streamOperationTimeoutMs(timeoutMs: number): number {
   return Math.min(timeoutMs * STREAM_WALL_TIMEOUT_FACTOR, STREAM_WALL_TIMEOUT_MAX_MS);

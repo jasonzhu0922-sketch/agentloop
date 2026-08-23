@@ -63,6 +63,45 @@ test("process artifacts require successful tool evidence and stay inside the wor
   }
 });
 
+test("process artifacts include successful command file changes when stdout omits filenames", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-command-file-changes-"));
+  try {
+    const createdAt = Date.now();
+    await fs.writeFile(join(workspace, "poster.png"), "png bytes");
+    await fs.writeFile(join(workspace, "poster.pdf"), "pdf bytes");
+    await fs.writeFile(join(workspace, "scratch.txt"), "deleted bytes");
+
+    const artifacts = await collectProcessArtifacts({
+      runId: "run-file-change-artifacts",
+      workspaceRoot: workspace,
+      runCreatedAt: createdAt,
+      events: [{
+        seq: 1,
+        type: "tool.completed",
+        createdAt,
+        data: {
+          toolName: "computer_run_command",
+          result: JSON.stringify({
+            exitCode: 0,
+            stdout: "saved (1600, 2400) 3197084 282746\n",
+            fileChanges: [
+              { path: "poster.pdf", changeType: "created", bytes: 9 },
+              { path: "poster.png", changeType: "created", bytes: 9 },
+              { path: "scratch.txt", changeType: "deleted", bytes: 13 },
+            ],
+            fileChangesTruncated: false,
+          }),
+        },
+      }],
+    });
+
+    assert.deepEqual(artifacts.map((artifact) => artifact.path), ["poster.pdf", "poster.png"]);
+    assert.deepEqual(artifacts.map((artifact) => artifact.sourceTool), ["computer_run_command", "computer_run_command"]);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("process artifacts include conversation workspace files mentioned by absolute path", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-conversation-artifacts-"));
   const database = new AppDatabase(":memory:");

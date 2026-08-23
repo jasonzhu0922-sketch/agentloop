@@ -1,149 +1,136 @@
-import { randomUUID } from "node:crypto";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { inferOperationProfile, operationProfileCatalogForPlanning } from "../runtime/operation-profiles.ts";
+import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type {
+  CaveatPolicy,
+  EvidenceContract,
+  EvidenceKind,
+  OutcomeLeafRole,
+  OutcomePlanShape,
   PlanProposal,
   PlanStepProposal,
   Planner,
-  SuccessCriterion,
+  SelectedSkillRole,
   TaskSpec,
 } from "./contracts.ts";
 import { admitPlan } from "./admission.ts";
 
-const PLAN_STEP_SCHEMA = {
+const EVIDENCE_KIND_VALUES = [
+  "source_summary",
+  "source_urls",
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_openable",
+  "format_matches_request",
+  "basic_navigation",
+  "delivery_receipt",
+  "explicit_caveats",
+] as const satisfies readonly EvidenceKind[];
+
+const CAVEAT_POLICY_VALUES = [
+  "none",
+  "mark_unverified_facts",
+  "strict_fail_on_missing_source",
+] as const satisfies readonly CaveatPolicy[];
+
+const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["id", "objective", "dependencies", "skillIds", "requiredToolNames", "successCriteria"],
+  required: ["id", "objective", "dependsOn", "role", "skillIds", "requiredToolNames", "evidenceContract"],
   properties: {
     id: { type: "string" },
-    kind: { type: "string", enum: ["leaf", "milestone"] },
-    parentId: { type: "string" },
     objective: { type: "string" },
-    dependencies: { type: "array", items: { type: "string" } },
-    refinementState: { type: "string", enum: ["not_refinable", "pending_facts", "ready_to_refine", "refining", "refined"] },
-    requiredFacts: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "description", "evidenceKinds"],
-        properties: {
-          id: { type: "string" },
-          description: { type: "string" },
-          evidenceKinds: { type: "array", items: { type: "string" } },
-          satisfiedBy: { type: "array", items: { type: "string" } },
-        },
-      },
-    },
+    dependsOn: { type: "array", items: { type: "string" } },
+    role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
     requiredToolNames: { type: "array", uniqueItems: true, items: { type: "string" } },
-    successCriteria: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "description"],
-        properties: { id: { type: "string" }, description: { type: "string" } },
+    evidenceContract: {
+      type: "object",
+      additionalProperties: false,
+      required: ["requiredKinds", "caveatPolicy"],
+      properties: {
+        requiredKinds: {
+          type: "array",
+          minItems: 1,
+          maxItems: 20,
+          items: { type: "string", enum: EVIDENCE_KIND_VALUES },
+        },
+        caveatPolicy: { type: "string", enum: CAVEAT_POLICY_VALUES },
       },
     },
   },
 } as const;
 
-const SUBMIT_PLAN_TOOL = {
-  name: "submit_plan",
-  description: "Submit the complete dependency-aware execution plan. This is the only valid planning response.",
+const SUBMIT_OUTCOME_PLAN_TOOL = {
+  name: "submit_outcome_plan",
+  description: "Submit the minimal OutcomePlan. This is the only valid first-round planning response.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["goal", "selectedSkillIds", "steps"],
+    required: ["schema", "goal", "shape", "selectedSkillRoles", "leaves"],
     properties: {
+      schema: { type: "string", enum: ["agentloop.outcomePlan/v2"] },
       goal: { type: "string" },
-      selectedSkillIds: { type: "array", items: { type: "string" } },
-      steps: {
+      shape: { type: "string", enum: ["single_leaf", "fact_then_produce", "multi_deliverable", "pipeline", "recovery_patch"] },
+      selectedSkillRoles: {
         type: "array",
-        minItems: 1,
-        maxItems: 100,
-        items: PLAN_STEP_SCHEMA,
-      },
-    },
-  },
-} as const;
-
-const SUBMIT_PLAN_PATCH_TOOL = {
-  name: "submit_plan_patch",
-  description: "Repair the previously rejected Plan by replacing only invalid steps. Do not resubmit unchanged steps.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["replacements"],
-    properties: {
-      replacements: {
-        type: "array",
-        minItems: 1,
         maxItems: 20,
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["targetStepId", "replacementSteps", "downstreamDependencyStepId"],
+          required: ["skillId", "role", "reason"],
           properties: {
-            targetStepId: { type: "string" },
-            replacementSteps: {
-              type: "array",
-              minItems: 1,
-              maxItems: 20,
-              items: PLAN_STEP_SCHEMA,
-            },
-            downstreamDependencyStepId: { type: "string" },
+            skillId: { type: "string" },
+            role: { type: "string", enum: ["primary_builder", "source_provider", "support", "qa"] },
+            reason: { type: "string" },
           },
         },
+      },
+      leaves: {
+        type: "array",
+        minItems: 1,
+        maxItems: 20,
+        items: OUTCOME_LEAF_SCHEMA,
       },
     },
   },
 } as const;
 
-const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_MAX_OUTPUT_TOKENS = 8_192;
-const PLANNING_PATCH_MAX_OUTPUT_TOKENS = 4_096;
 const STEP_GRANULARITY_GUIDANCE = {
   stepContract: [
-    "One Plan step is one assessable operation unit with one dominant work phase.",
-    "A step may use multiple tools only when they serve the same phase and produce the same evidence boundary.",
-    "Every step must be small enough that its success criteria can be assessed without continuing into a different phase.",
+    "Initial Plan is not a workflow script; it is the smallest canonical outcome boundary that lets Runtime start useful work.",
+    "One leaf is one user-value outcome or prerequisite fact boundary, not a checklist of internal actions.",
+    "A leaf may contain local tool calls, Skill workflow actions, receipt checks, and export/readback evidence needed to complete that same outcome.",
+    "Success criteria state the delivered boundary and assessable evidence, not an internal QA or repair checklist.",
+    "Optional enhancement, polish, exhaustive source depth, examples, advanced navigation, and visual refinements are execution preferences unless the user explicitly requested them.",
   ],
   splitWhen: [
-    "Discovery, extraction, or reverse engineering is needed before production.",
-    "Data source profiling, extraction-program authoring, extraction execution, report writing, or verification each needs its own success evidence.",
-    "The task creates or modifies a reusable artifact and then verifies it.",
-    "Different success evidence is needed for source understanding, artifact creation, and verification.",
-    "The objective contains a chain such as read/reconstruct/confirm/write/verify or inspect/build/test.",
+    "Independent source acquisition or research is required before production and its facts will be reused by a later outcome.",
+    "The task requires multiple independent deliverables or reusable artifacts that should be assessed separately.",
+    "A prior Assessment, recovery directive, or failed boundary requires a targeted repair/replan step, not a generic QA tail.",
   ],
   mergeOnlyWhen: [
-    "The work is a direct user deliverable and checks are limited to local receipt, export metadata, or Skill-mandated checks for that same artifact.",
-    "No intermediate evidence, script, source profile, or downstream deliverable needs to be reused by another step.",
-    "The user did not ask for independent QA, review, E2E, browser acceptance, or release validation.",
+    "The task is an ordinary answer or artifact deliverable.",
+    "Local file receipt, export metadata, and readback evidence prove the same leaf's output and do not need their own Plan step.",
+    "Skill workflow, formatting, polish, QA, and defect repair are leaf execution or recovery details, not generic Planner steps.",
   ],
-  recommendedPatterns: [
+  progressiveRefinement: [
     {
-      when: "turn prior evidence or analysis into a reusable script, workflow, or tool",
-      steps: [
-        "extract_contract_or_spec",
-        "author_reusable_artifact",
-        "verify_reusable_artifact",
-      ],
+      when: "ordinary artifact or answer task",
+      defaultShape: "one outcome leaf with concrete delivery boundary",
     },
     {
-      when: "analyze data and write a report from reusable evidence",
-      steps: [
-        "profile_data_source",
-        "author_extraction_program",
-        "run_extraction_program",
-        "write_report_from_evidence",
-        "verify_report_or_outputs",
-      ],
+      when: "research/source facts are required before production",
+      defaultShape: "one fact-acquisition leaf followed by one production leaf",
+    },
+    {
+      when: "reusable pipeline or targeted recovery is required",
+      defaultShape: "split only the durable fact, production, and required recovery boundaries",
     },
   ],
 } as const;
@@ -195,181 +182,156 @@ export class ModelPlanner implements Planner {
       ...(task.conversationHistory ?? []),
       { role: "user", content: task.input },
     ];
-    const systemPrompt = [
-      "You are the planning phase of a plan-first agent runtime.",
-      "You do not execute the task and you cannot declare completion.",
-      "Use only the Skill catalog summaries to choose relevant Skills or none.",
-      "Plan from the supplied context facts first. Runtime/context intake facts are planning inputs, not default user-visible Plan steps.",
-      "Use the available Tool descriptions to decide whether requested artifacts can actually be produced in this Run.",
-      "Return exactly one submit_plan tool call and no other tool call.",
-      "Select only relevant Skills. Bind every selected Skill to at least one concrete step.",
-      "Do not expand unloaded Skill internals into Plan steps. Load and interpret a Skill only while executing a Skill-bound leaf.",
-      "Build an acyclic dependency graph. Tool names and IDs must come from the supplied catalogs.",
-      "Use kind=\"leaf\" for executable steps. You may use kind=\"milestone\" only as a lightweight non-executable phase boundary for work that should be refined later from durable evidence.",
-      "Milestone steps must not require execution Tools. They are planning structure, not completion evidence.",
-      "Each step needs observable success criteria. Do not copy the Skill body into step prose and do not put the Plan in prose.",
-      "Every step must include the tools needed to prove its own success criteria.",
-      "Use the operation profile catalog in the planning context to shape each step's working method. Profiles are generic operation disciplines, not business-domain instructions.",
-      "Before calling submit_plan, choose the smallest dependency-linked operation units using the stepGranularity guidance in the planning context.",
-      "Keep each step as one bounded operation unit. Split discovery/extraction, production/writing, and verification/comparison into dependency-linked steps when they need different evidence or tool phases.",
-      "When the task asks to convert prior work, analysis evidence, or source material into a reusable script, workflow, or tool, plan separate steps for extracting the reusable contract, authoring the artifact, and verifying it.",
-      "For data-analysis work, plan for structured extraction evidence rather than repeated raw stdout dumps or a success criterion that requires all raw cells/rows.",
-      "For data-to-report work over files or bulk data, default to separate steps for source profiling, extraction-program authoring when needed, extraction execution, report writing, and verification.",
-      "Keep extraction and writing boundaries explicit: an extraction step must not produce the final report, and the writing step must consume the extraction artifact rather than re-read or re-dump the source data.",
-      "A source-profiling step should identify files/sheets/tables/fields/ranges/counts only; a later extraction execution step should produce the reusable evidence artifact.",
-      "When conversation.workset/v1 is present, use it as persisted context for follow-up requests: continue from unfinished Plan steps, reuse listed artifacts, preserve failed boundary facts, and bind the required capabilities that still apply.",
-      "Do not restart completed upstream steps solely because the latest user message says to continue; plan the smallest continuation that consumes prior durable outputs.",
-      "When planning.workspaceFacts/v1 says the conversation workspace is empty and no visible directories are present, do not create a workspace inspection step unless the user explicitly asks to inspect an existing project.",
-      "Do not plan file, image, PDF, or other artifact creation unless a writable, render, generation, or command Tool is available.",
-      "For artifact-producing leaves, state the concrete production boundary in the objective or success criteria: source file, export format, target path, or verifiable artifact type.",
-      "Do not create a Plan step whose objective is only to load, activate, fetch, retrieve, or read a Skill.",
-      "Skill loading is Runtime preparation for a Skill-bound user-deliverable step; bind the Skill to the concrete work step that uses it.",
-      "Keep the Plan scoped to the user's requested deliverable. Do not add optional polish, critique, or follow-up work as a separate terminal step unless the user explicitly requested it or it is necessary to prove a stated success criterion.",
-      "Do not add default inspect_*, repair_*_if_needed, final_verify_*, QA, polish, or quality-correction tail steps for ordinary artifact tasks.",
-      "Create an independent QA or repair step only when the user explicitly asks for it, the task has high-risk external side effects, the loaded Skill contract requires independent QA, or a prior Assessment/recovery directive rejected the leaf.",
-      "Skill-mandated QA belongs inside the Skill-bound leaf execution or a Skill-driven QA action. It is not a generic Planner template.",
-      "Prefer the smallest valid Outcome Plan that preserves user-value phase boundaries. Fold local receipt/export checks into production; keep independent verification only for reusable workflows, data/report pipelines, explicit acceptance tasks, high-risk releases, or Skill-required QA.",
-    ].filter(Boolean).join("\n\n");
-    let lastError = new AppError("PLANNING_ERROR", "Planner did not produce a valid Plan", 422);
-    let planningAttempts = 0;
-    let runtimeDirective: string | undefined;
-    let rejectedProposalForPatch: PlanProposal | undefined;
-    for (let turn = 1; turn <= MAX_PLANNING_ATTEMPTS; turn += 1) {
-      const turnRuntimeDirective = runtimeDirective;
-      const patchTurn = rejectedProposalForPatch !== undefined && turn === 2;
-      const planningTool = patchTurn ? SUBMIT_PLAN_PATCH_TOOL : SUBMIT_PLAN_TOOL;
-      await emit?.({
-        type: "planning.turn.started",
-        data: {
-          turn,
-          loadedSkillCount: 0,
-          pendingSkillCount: 0,
-          hasRuntimeDirective: turnRuntimeDirective !== undefined,
-          toolCount: 1,
-          repairMode: patchTurn ? "patch" : "full",
-          messageCount: messages.length,
-        },
+    const taskProfile = planningTaskProfile(task);
+    const selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
+    await emit?.({
+      type: "planning.profile.created",
+      data: taskProfile,
+    });
+    await emit?.({
+      type: "planning.skills.role_selected",
+      data: {
+        selectedCount: selectedSkillRoles.length,
+        skills: selectedSkillRoles,
+      },
+    });
+    const systemPrompt = buildDynamicSystemPrompt({
+      phase: "planning",
+      baseInstructions: [
+        "You are the Planner for a Plan-first Runtime.",
+        "Return exactly one submit_outcome_plan tool call; do not execute work, call other tools, or declare completion.",
+        "Use only supplied context facts, Tool summaries, and Skill catalog entries.",
+      ],
+      contractLines: [
+        "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
+        "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
+        "Use one leaf for ordinary answer or artifact tasks and two leaves only when source facts must be acquired before production.",
+        "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
+        "Bind primary/source Skills to concrete leaves, but do not expand unloaded Skill internals.",
+        "Keep local receipt, export, and readback evidence inside the producing leaf.",
+        "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
+        "For browser-presentable, presentation-style, or document-like artifacts, basic openability and page/section/slide navigation are format evidence; advanced interaction, responsive polish, rich visuals, examples, and exercises are optional unless explicitly requested.",
+        "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
+        "Evidence contracts must contain only core requiredKinds and caveatPolicy; do not turn optional enhancements into blocking evidence.",
+        "For factual materials, require available source grounding and explicit caveats for unavailable facts; do not require inaccessible official/full-text sources as a blocking criterion unless the user asked for strict official-source verification.",
+        "All leaf IDs, Skill IDs, Tool names, dependencies, roles, and evidence kinds must match the submit_outcome_plan schema and supplied catalogs.",
+      ],
+      taskProfile,
+    });
+    const turn = 1;
+    await emit?.({
+      type: "planning.turn.started",
+      data: {
+        turn,
+        loadedSkillCount: 0,
+        pendingSkillCount: 0,
+        hasRuntimeDirective: false,
+        toolCount: 1,
+        repairMode: "none",
+        messageCount: messages.length,
+      },
+    });
+    const invocation: ModelInvocation = {
+      runId: task.runId,
+      systemPrompt,
+      phase: "planning",
+      runtimeContext: planningRuntimeContext(task, turn, undefined, taskProfile, selectedSkillRoles),
+      messages,
+      tools: [SUBMIT_OUTCOME_PLAN_TOOL],
+      toolChoice: { name: SUBMIT_OUTCOME_PLAN_TOOL.name },
+      maxOutputTokens: Math.min(PLANNING_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
+    };
+    const response = emit === undefined
+      ? await this.model.complete(invocation, signal)
+      : await completeWithStreaming({
+        model: this.model,
+        invocation,
+        emit,
+        signal,
+        base: { phase: "planning", turn },
       });
-      const invocation: ModelInvocation = {
-        runId: task.runId,
-        systemPrompt: patchTurn ? planPatchSystemPrompt(systemPrompt) : systemPrompt,
-        phase: "planning",
-        runtimeContext: planningRuntimeContext(task, turn, turnRuntimeDirective),
-        messages,
-        tools: [planningTool],
-        toolChoice: { name: planningTool.name },
-        maxOutputTokens: Math.min(
-          patchTurn ? PLANNING_PATCH_MAX_OUTPUT_TOKENS : PLANNING_MAX_OUTPUT_TOKENS,
-          this.model.limits.maxOutputTokens,
-        ),
-      };
-      const response = emit === undefined
-        ? await this.model.complete(invocation, signal)
-        : await completeWithStreaming({
-          model: this.model,
-          invocation,
-          emit,
-          signal,
-          base: { phase: "planning", turn },
-        });
-      const planCalls = response.toolCalls.filter((call) => call.name === SUBMIT_PLAN_TOOL.name);
-      const patchCalls = response.toolCalls.filter((call) => call.name === SUBMIT_PLAN_PATCH_TOOL.name);
-      await emit?.({
-        type: "planning.turn.completed",
-        data: {
-          turn,
-          finishReason: response.finishReason,
-          toolCallCount: response.toolCalls.length,
-          loadSkillCallCount: 0,
-          submitPlanCallCount: planCalls.length,
-          submitPlanPatchCallCount: patchCalls.length,
-          loadedSkillCount: 0,
-          contentLength: response.content.length,
-          repairMode: patchTurn ? "patch" : "full",
-        },
-      });
+    const outcomePlanCalls = response.toolCalls.filter((call) => call.name === SUBMIT_OUTCOME_PLAN_TOOL.name);
+    await emit?.({
+      type: "planning.turn.completed",
+      data: {
+        turn,
+        finishReason: response.finishReason,
+        toolCallCount: response.toolCalls.length,
+        loadSkillCallCount: 0,
+        submitOutcomePlanCallCount: outcomePlanCalls.length,
+        submitPlanPatchCallCount: 0,
+        loadedSkillCount: 0,
+        contentLength: response.content.length,
+        repairMode: "none",
+      },
+    });
 
-      let rejectedProposal: PlanProposal | undefined;
-      try {
-        if (response.finishReason === "length") {
-          throw planningResponseError(
-            "Planner response was truncated",
-            turn,
-            response,
-          );
-        }
-        if (!patchTurn && (response.toolCalls.length !== 1 || planCalls.length !== 1)) {
-          throw planningResponseError("Planner must submit exactly one structured submit_plan call", turn, response);
-        }
-        if (patchTurn && (response.toolCalls.length !== 1 || patchCalls.length !== 1)) {
-          throw planningResponseError("Planner must submit exactly one structured submit_plan_patch call", turn, response);
-        }
-        const proposal = patchTurn
-          ? applyPlanPatch(rejectedProposalForPatch, parsePlanPatch(patchCalls[0]))
-          : parsePlanProposal(planCalls[0]);
-        rejectedProposal = proposal;
-        assertOutcomePlanShape(proposal, task);
-        admitPlan({
-          runId: task.runId,
-          proposal,
-          availableSkills: task.availableSkills,
-          availableToolNames: new Set(task.availableToolNames),
-        });
-        return proposal;
-      } catch (error) {
-        planningAttempts += 1;
-        lastError = error instanceof AppError && error.code === "PLANNING_ERROR"
-          ? error
-          : new AppError("PLANNING_ERROR", error instanceof Error ? error.message : "Invalid Plan", 422);
-        if (planningAttempts === MAX_PLANNING_ATTEMPTS) break;
-        rejectedProposalForPatch = rejectedProposal ?? rejectedProposalForPatch;
-        runtimeDirective = JSON.stringify({
-          planningRepair: {
-            attempt: planningAttempts + 1,
-            validationError: summarizePlanningError(lastError.message),
-            ...(rejectedProposalForPatch === undefined ? {} : { rejectedPlan: summarizePlanProposal(rejectedProposalForPatch) }),
-            instruction: response.finishReason === "length"
-              ? "Return only one compact submit_plan call. Do not explain or repeat the task. Keep the plan as small as possible."
-              : rejectedProposalForPatch !== undefined && turn === 1
-                ? "Return exactly one submit_plan_patch call. Replace only invalid steps from rejectedPlan. Keep unchanged steps out of the patch. If a target step is split, set downstreamDependencyStepId to the final replacement step that downstream work should depend on. Keep artifact repair failure-driven: do not add inspect/repair/final verification tails unless the rejected boundary or user/Skill contract requires them."
-                : "Resubmit the entire Plan as exactly one valid submit_plan tool call. Audit every step in the resubmitted Plan, not only the previously rejected step. Preserve previously valid split steps and downstream dependencies. If any step is too broad, split discovery/extraction, production/writing, and required independent verification into smaller dependency-linked steps with their own success criteria. Keep ordinary artifact tasks as a light Outcome Plan; do not add default inspect/repair/final verification tails. Do not introduce a new step that combines unrelated source or inspection evidence, write/build/command production, and independent readback/render/parse/quality verification. If the invalid step only loads or activates a Skill, remove that infrastructure step and bind the Skill to the concrete user-deliverable step.",
-          },
-        });
+    try {
+      if (response.finishReason === "length") {
+        throw planningResponseError("Planner response was truncated", turn, response);
       }
+      if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) {
+        throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
+      }
+      const proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
+      assertInitialOutcomePlanShape(proposal, task);
+      await emit?.({
+        type: "planning.outcome_plan.submitted",
+        data: {
+          schema: proposal.schema,
+          shape: proposal.shape,
+          selectedSkillRoles: proposal.selectedSkillRoles ?? [],
+          leafCount: proposal.steps.length,
+        },
+      });
+      admitPlan({
+        runId: task.runId,
+        proposal,
+        availableSkills: task.availableSkills,
+        availableToolNames: new Set(task.availableToolNames),
+      });
+      await emit?.({
+        type: "planning.outcome_plan.admitted",
+        data: {
+          shape: proposal.shape,
+          leafCount: proposal.steps.length,
+        },
+      });
+      return proposal;
+    } catch (error) {
+      const planningError = error instanceof AppError && error.code === "PLANNING_ERROR"
+        ? error
+        : new AppError("PLANNING_ERROR", error instanceof Error ? error.message : "Invalid OutcomePlan", 422);
+      await emit?.({
+        type: "planning.contract_failed",
+        data: {
+          validationError: summarizePlanningError(planningError.message),
+          planningTurn: turn,
+        },
+      });
+      throw planningError;
     }
-    if (planningAttempts < MAX_PLANNING_ATTEMPTS) {
-      lastError = new AppError(
-        "PLANNING_ERROR",
-        `Planner exceeded its ${MAX_PLANNING_ATTEMPTS}-attempt Plan submission limit`,
-        422,
-      );
-    }
-    throw lastError;
   }
 }
 
 function responseOnlyPlan(input: string): PlanProposal {
   return {
     goal: input.trim().slice(0, 20_000) || "Answer the latest user message",
+    schema: "agentloop.outcomePlan/v2",
+    shape: "single_leaf",
+    selectedSkillRoles: [],
     selectedSkillIds: [],
     steps: [{
       id: "response",
       objective: "Answer the latest user message directly without using Skills or Tools.",
       dependencies: [],
+      role: "deliver",
       skillIds: [],
       requiredToolNames: [],
+      evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
       successCriteria: [{ id: "answered", description: "A non-empty direct answer is returned." }],
     }],
   };
-}
-
-function planPatchSystemPrompt(base: string): string {
-  return [
-    base,
-    "This repair turn must not resubmit the whole Plan.",
-    "Return exactly one submit_plan_patch tool call. Replace only rejected or invalid steps from the supplied rejectedPlan.",
-    "Every replacement step must still use only supplied Skill IDs and Tool names, keep dependencies acyclic, and carry observable success criteria.",
-  ].join("\n\n");
 }
 
 function planningResponseError(
@@ -387,10 +349,98 @@ function planningResponseError(
   });
 }
 
+function planningTaskProfile(task: TaskSpec): TaskProfile {
+  const operationProfiles = relevantOperationProfiles(task);
+  const artifactKind = inferArtifactKind(task.input);
+  const sourceNeed = inferSourceNeed(task.input);
+  const recovery = task.conversationWorkingSet?.failedBoundaries.length
+    || task.conversationWorkingSet?.activeGoal?.unfinished === true;
+  const planShape = recovery
+    ? "recovery_patch"
+    : artifactKind !== "none" && (sourceNeed === "source_grounded" || sourceNeed === "strict_user_source")
+      ? "fact_then_produce"
+      : "single_leaf";
+  return buildTaskProfile({
+    phase: "planning",
+    intent: recovery ? "recover" : "execute",
+    operations: operationProfiles,
+    evidenceProfile: sourceNeed === "none"
+      ? "deterministic"
+      : sourceNeed === "strict_user_source"
+        ? "risk_sensitive"
+        : sourceNeed,
+    riskProfile: inferRiskProfile(task.availableToolNames),
+    planShape,
+    artifactKind,
+    sourceNeed,
+    skillBound: task.availableSkills.length > 0,
+    responseOnly: false,
+  });
+}
+
+function inferArtifactKind(input: string): NonNullable<TaskProfile["artifactKind"]> {
+  const text = normalizePlannerText(input).toLowerCase();
+  if (/(?:html|web\s?page|webpage|landing\s?page|网页|页面|浏览器|站点|website)/iu.test(text)) return "html";
+  if (/(?:pptx?|slides?|deck|presentation|幻灯片|演示文稿|课件)/iu.test(text)) return "presentation";
+  if (/(?:docx?|word|document|文档|报告书)/iu.test(text)) return "document";
+  if (/(?:xlsx?|spreadsheet|sheet|csv|表格|工作簿)/iu.test(text)) return "spreadsheet";
+  if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(text)) return "image";
+  if (/(?:code|script|program|app|代码|脚本|程序|应用)/iu.test(text)) return "code";
+  return "none";
+}
+
+function inferSourceNeed(input: string): NonNullable<TaskProfile["sourceNeed"]> {
+  const text = normalizePlannerText(input).toLowerCase();
+  if (/(?:strict source|official source|authoritative|标准全文|官方|权威|严格来源|精确条款|逐条核验)/iu.test(text)) {
+    return "strict_user_source";
+  }
+  if (/(?:source[- ]grounded|research|lookup|cite|citation|standard|policy|regulation|rating|certification|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处)/iu.test(text)) {
+    return "source_grounded";
+  }
+  if (/(?:latest|current|today|recent|最新|当前|今天|近期)/iu.test(text)) return "lookup_lite";
+  return "none";
+}
+
+function inferRiskProfile(toolNames: readonly string[]): NonNullable<TaskProfile["riskProfile"]> {
+  if (toolNames.some((name) => /(?:email|send|publish|deploy|payment|delete|remove|dangerous)/iu.test(name))) {
+    return "external_side_effect";
+  }
+  if (toolNames.some((name) => /(?:web|http|fetch|search|browser|network)/iu.test(name))) {
+    return "external_network";
+  }
+  if (toolNames.some((name) => /(?:write|create|patch|edit|run|command|save|export)/iu.test(name))) {
+    return "workspace_write";
+  }
+  if (toolNames.some((name) => /(?:read|list|inspect|find|search)/iu.test(name))) return "read_only";
+  return "no_tool";
+}
+
+function selectInitialSkillRoles(
+  skills: readonly TaskSpec["availableSkills"][number][],
+  taskProfile: TaskProfile,
+): SelectedSkillRole[] {
+  if (skills.length === 0) return [];
+  return skills.map((skill) => ({
+    skillId: skill.id,
+    role: taskProfile.artifactKind === "none" && taskProfile.sourceNeed !== "none"
+      ? "source_provider"
+      : "primary_builder",
+    reason: "Selected by deterministic first-round relevance filtering for the current TaskProfile.",
+  }));
+}
+
 function planningRuntimeContext(
   task: TaskSpec,
   turn: number,
   runtimeDirective: string | undefined,
+  taskProfile: TaskProfile = buildTaskProfile({
+    phase: "planning",
+    intent: task.responseOnly === true ? "reply" : "execute",
+    operations: relevantOperationProfiles(task),
+    skillBound: task.availableSkills.length > 0,
+    responseOnly: task.responseOnly === true,
+  }),
+  selectedSkillRoles: readonly SelectedSkillRole[] = [],
 ): RuntimeContextSnapshot {
   return {
     id: `${task.runId}:planning:${turn}`,
@@ -405,9 +455,23 @@ function planningRuntimeContext(
         visibleDirectories: task.visibleDirectories ?? [],
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
         stepGranularity: STEP_GRANULARITY_GUIDANCE,
-        operationProfiles: relevantOperationProfiles(task),
+        operationProfiles: taskProfile.operations,
+        taskProfile,
+        selectedSkillRoles,
+        outcomePlanContract: {
+          schema: "agentloop.outcomePlan/v2",
+          allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
+          allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
+          caveatPolicies: CAVEAT_POLICY_VALUES,
+          firstRoundRules: [
+            "submit exactly one OutcomePlan",
+            "do not submit plan patches",
+            "do not create QA or repair leaves unless TaskProfile.planShape is recovery_patch",
+          ],
+        },
       }),
       "</planning_context>",
+      formatDynamicPromptContext(taskProfile),
       formatAvailableSkills(task.availableSkills),
       ...(runtimeDirective === undefined ? [] : [
         "<runtime_directive>",
@@ -448,10 +512,7 @@ function summarizePlanningError(message: string): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
-function assertOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
-  const explicitQa = explicitIndependentQaRequested(task.input)
-    || task.conversationWorkingSet?.failedBoundaries.length > 0
-    || task.conversationWorkingSet?.activeGoal?.unfinished === true;
+function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
   if (isEmptyConversationWorkspace(task) && !explicitWorkspaceInspectionRequested(task.input)) {
     const inspectionStep = proposal.steps.find((step) => isWorkspaceInspectionStep(step));
     if (inspectionStep !== undefined) {
@@ -462,24 +523,56 @@ function assertOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
       );
     }
   }
-  if (!explicitQa) {
-    const artifactProducerIds = new Set(
-      proposal.steps
-        .filter((step) => isArtifactProducingStep(step))
-        .map((step) => step.id),
+  const recoveryPlan = proposal.shape === "recovery_patch";
+  if (!recoveryPlan && proposal.steps.some((step) => step.role === "repair")) {
+    throw new AppError(
+      "PLANNING_ERROR",
+      "Initial OutcomePlan cannot contain repair leaves unless TaskProfile.planShape is recovery_patch",
+      422,
     );
-    const qualityTails = proposal.steps.filter((step) =>
-      isDefaultQualityTailStep(step)
-      && dependsOnAnyStep(step, artifactProducerIds, proposal.steps)
-    );
-    if (qualityTails.some((step) => isRepairIfNeededStep(step)) || qualityTails.length >= 2) {
-      throw new AppError(
-        "PLANNING_ERROR",
-        `Plan adds default QA/repair tail steps (${qualityTails.map((step) => step.id).join(", ")}); keep QA Skill-driven or failure-driven unless the user explicitly requested independent validation`,
-        422,
-      );
-    }
   }
+  const invalidRoleSkills = (proposal.selectedSkillRoles ?? []).filter((selection) =>
+    !recoveryPlan && (selection.role === "support" || selection.role === "qa")
+  );
+  if (invalidRoleSkills.length > 0) {
+    throw new AppError(
+      "PLANNING_ERROR",
+      `Initial OutcomePlan cannot expose support/qa Skill roles (${invalidRoleSkills.map((selection) => selection.skillId).join(", ")})`,
+      422,
+    );
+  }
+}
+
+function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): PlanProposal {
+  return {
+    ...proposal,
+    steps: proposal.steps.map((step) => {
+      if (step.evidenceContract !== undefined) return step;
+      const coreCriteria = step.successCriteria.filter((criterion) =>
+        !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
+      );
+      if (coreCriteria.length > 0) return { ...step, successCriteria: coreCriteria };
+      return {
+        ...step,
+        successCriteria: [{
+          id: `${step.id}-core-delivery`,
+          description: coreSuccessCriterionDescription(step),
+          source: "planner",
+        }],
+      };
+    }),
+  };
+}
+
+function coreSuccessCriterionDescription(step: PlanStepProposal): string {
+  const text = normalizePlannerText(`${step.id}\n${step.objective}`);
+  if (/(?:html[-_ ]?ppt|html|网页|页面|浏览器)/iu.test(text)) {
+    return "Deliver the requested HTML artifact with an observable workspace path and non-empty file evidence.";
+  }
+  if (/(?:source|research|web|fact|来源|调研|检索|事实|资料)/iu.test(text)) {
+    return "Produce a bounded fact summary with available source references and explicit caveats for unavailable facts.";
+  }
+  return "Produce observable evidence for the step objective without making unrequested optional enhancements blocking.";
 }
 
 function isEmptyConversationWorkspace(task: TaskSpec): boolean {
@@ -501,6 +594,7 @@ function isWorkspaceInspectionStep(step: PlanStepProposal): boolean {
     step.objective,
     ...step.successCriteria.map((criterion) => criterion.description),
   ].join("\n"));
+  if (isArtifactDeliveryReceiptStep(step, text)) return false;
   const usesInspectionTools = step.requiredToolNames.some((tool) =>
     tool === "computer_list_directory"
     || tool === "computer_find_files"
@@ -512,250 +606,215 @@ function isWorkspaceInspectionStep(step: PlanStepProposal): boolean {
     && /(?:inspect|scan|explore|identify|determine|survey|inventory|勘察|检查|识别|确定|梳理|探查)/iu.test(text);
 }
 
-function explicitIndependentQaRequested(input: string): boolean {
-  return /(?:\b(?:verify|validate|test|inspect|review|qa|quality|acceptance|e2e|preflight|release)\b|验证|校验|测试|检查|复验|质检|终检|验收|发布|上线|逐项)/iu
-    .test(input);
-}
-
-function isDefaultQualityTailStep(step: PlanStepProposal): boolean {
-  const text = normalizePlannerText([
-    step.id,
-    step.objective,
-    ...step.successCriteria.map((criterion) => criterion.description),
-  ].join("\n"));
-  return /(?:^|[_\-\s])(?:inspect|verify|validate|review|qa|quality|final|repair)(?:[_\-\s]|$)/iu.test(text)
-    || /(?:检查|验证|校验|复验|质检|终检|修复|缺陷)/iu.test(text);
+function isArtifactDeliveryReceiptStep(step: PlanStepProposal, text: string): boolean {
+  if (!isArtifactProducingStep(step)) return false;
+  const hasDeliveryIntent = /(?:deliver|delivery|create|produce|generate|write|build|export|save|artifact|file|path|workspace path|交付|创建|生成|制作|写入|构建|导出|保存|产物|文件|路径|工作区路径)/iu
+    .test(text);
+  if (!hasDeliveryIntent) return false;
+  return /(?:receipt|readback|non-empty|openable|readable|exists|local build|local read|交付回执|读取确认|读回|非空|可打开|可读|本地构建|本地读取|路径明确)/iu
+    .test(text);
 }
 
 function isArtifactProducingStep(step: PlanStepProposal): boolean {
-  const text = normalizePlannerText([
-    step.id,
-    step.objective,
-    ...step.successCriteria.map((criterion) => criterion.description),
-  ].join("\n"));
   return step.requiredToolNames.some((tool) =>
     /(?:write|create|generate|render|export|build|patch|edit|image|pdf|docx|pptx|artifact)/iu.test(tool)
-  )
-    || /(?:create|write|generate|render|export|build|produce|author|生成|创建|写入|导出|渲染|构建|制作|编写|产出)/iu.test(text);
+  );
 }
 
-function dependsOnAnyStep(
-  step: PlanStepProposal,
-  targetStepIds: ReadonlySet<string>,
-  allSteps: readonly PlanStepProposal[],
-): boolean {
-  const byId = new Map(allSteps.map((candidate) => [candidate.id, candidate]));
-  const pending = [...step.dependencies];
-  const visited = new Set<string>();
-  while (pending.length > 0) {
-    const dependencyId = pending.pop();
-    if (dependencyId === undefined || visited.has(dependencyId)) {
-      continue;
-    }
-    visited.add(dependencyId);
-    if (targetStepIds.has(dependencyId)) {
-      return true;
-    }
-    const dependency = byId.get(dependencyId);
-    if (dependency !== undefined) {
-      pending.push(...dependency.dependencies);
-    }
-  }
-  return false;
+function isUnrequestedOptionalEnhancementCriterion(description: string, userInput: string): boolean {
+  const criterion = normalizePlannerText(description);
+  const input = normalizePlannerText(userInput);
+  if (explicitStrictQualityRequested(input)) return false;
+  if (explicitSourceStrictnessRequested(input) && matchesSourceStrictness(criterion)) return false;
+  if (explicitVisualEnhancementRequested(input) && matchesVisualEnhancement(criterion)) return false;
+  if (explicitNavigationEnhancementRequested(input) && matchesNavigationEnhancement(criterion)) return false;
+  if (explicitExampleEnhancementRequested(input) && matchesExampleEnhancement(criterion)) return false;
+  return matchesSourceStrictness(criterion)
+    || matchesVisualEnhancement(criterion)
+    || matchesNavigationEnhancement(criterion)
+    || matchesExampleEnhancement(criterion);
 }
 
-function isRepairIfNeededStep(step: PlanStepProposal): boolean {
-  const text = normalizePlannerText(`${step.id}\n${step.objective}`);
-  return /(?:repair|fix|if_needed|if\s+needed|conditional|修复|若|如果|缺陷)/iu.test(text);
+function explicitStrictQualityRequested(input: string): boolean {
+  return /(?:strict quality|must pass acceptance|pixel-perfect|release validation|严格质量|必须验收|终检|发布验收|上线验收)/iu.test(input);
+}
+
+function explicitSourceStrictnessRequested(input: string): boolean {
+  return /(?:official|authoritative|full-text|source verification|cite every|标准全文|官方|权威|来源核验|逐条|逐项|精确条款|引用每|出处完整)/iu.test(input);
+}
+
+function explicitVisualEnhancementRequested(input: string): boolean {
+  return /(?:visual|theme|beautiful|polish|design|chart|diagram|matrix|timeline|professional|视觉|主题|美观|设计|图表|流程图|矩阵|时间线|专业|排版)/iu.test(input);
+}
+
+function explicitNavigationEnhancementRequested(input: string): boolean {
+  return /(?:html[-_ ]?ppt|presentation|slides?|deck|keyboard|progress|pagination|responsive|navigation|screen|演示|课件|幻灯片|键盘|进度|页码|响应式|导航|翻页|演示屏)/iu.test(input);
+}
+
+function explicitExampleEnhancementRequested(input: string): boolean {
+  return /(?:case|exercise|example|practice|misconception|案例|练习|示例|实操|误区)/iu.test(input);
+}
+
+function matchesSourceStrictness(text: string): boolean {
+  return /(?:official|authoritative|full-text|standard version|must cite|权威|官方|标准全文|标准版本|逐条|逐项|精确条款|完整来源)/iu.test(text)
+    || /(?:无法确认|无法获得|不可访问).{0,24}(不(?:能|得)|阻塞|失败|未完成)/iu.test(text);
+}
+
+function matchesVisualEnhancement(text: string): boolean {
+  return /(?:visual theme|professional|polish|clear typography|chart|diagram|matrix|timeline|flow|no overflow|unreadable|视觉主题|专业统一|排版清晰|图表|流程|矩阵|时间路线|可视化|无明显内容溢出|不可读元素|美观|高级)/iu.test(text);
+}
+
+function matchesNavigationEnhancement(text: string): boolean {
+  return /(?:keyboard|progress|page number|pagination|responsive|common screen|navigation|键盘翻页|页码|进度提示|适配|常见演示屏幕|逐页导航|浏览运行检查)/iu.test(text);
+}
+
+function matchesExampleEnhancement(text: string): boolean {
+  return /(?:case|exercise|example|practice|misconception|roadmap|案例|练习|示例|实操|常见误区|路线图)/iu.test(text);
 }
 
 function normalizePlannerText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function summarizePlanProposal(proposal: PlanProposal): Record<string, unknown> {
+function parseOutcomePlanProposal(call: ModelToolCall): PlanProposal {
+  try {
+    const value = requireRecord(call.arguments, "submit_outcome_plan arguments");
+    const schema = requireString(value.schema, "schema", { max: 128 });
+    if (schema !== "agentloop.outcomePlan/v2") {
+      throw badRequest("schema must be agentloop.outcomePlan/v2");
+    }
+    const shape = parseOutcomePlanShape(value.shape);
+    const selectedSkillRoles = parseSelectedSkillRoles(value.selectedSkillRoles);
+    if (!Array.isArray(value.leaves) || value.leaves.length === 0 || value.leaves.length > 20) {
+      throw badRequest("leaves must contain between 1 and 20 entries");
+    }
+    return {
+      schema: "agentloop.outcomePlan/v2",
+      goal: requireString(value.goal, "goal", { max: 20_000 }),
+      shape,
+      selectedSkillRoles,
+      selectedSkillIds: [...new Set(selectedSkillRoles.map((selection) => selection.skillId))],
+      steps: value.leaves.map((item, index) => parseOutcomeLeaf(item, index)),
+    };
+  } catch (error) {
+    if (error instanceof AppError && error.code === "BAD_REQUEST") {
+      throw new AppError("PLANNING_ERROR", error.message, 422);
+    }
+    throw error;
+  }
+}
+
+function parseOutcomePlanShape(value: unknown): OutcomePlanShape {
+  const shape = requireString(value, "shape", { max: 64 });
+  if (
+    shape === "single_leaf"
+    || shape === "fact_then_produce"
+    || shape === "multi_deliverable"
+    || shape === "pipeline"
+    || shape === "recovery_patch"
+  ) {
+    return shape;
+  }
+  throw badRequest("shape is invalid");
+}
+
+function parseSelectedSkillRoles(value: unknown): SelectedSkillRole[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw badRequest("selectedSkillRoles must be an array with at most 20 entries");
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const record = requireRecord(item, `selectedSkillRoles[${index}]`);
+    const skillId = requireString(record.skillId, `selectedSkillRoles[${index}].skillId`, { max: 128 });
+    const role = parseSkillRole(record.role, index);
+    const key = `${skillId}:${role}`;
+    if (seen.has(key)) throw badRequest("selectedSkillRoles must not contain duplicates");
+    seen.add(key);
+    return {
+      skillId,
+      role,
+      reason: requireString(record.reason, `selectedSkillRoles[${index}].reason`, { max: 1_000 }),
+    };
+  });
+}
+
+function parseSkillRole(value: unknown, index: number): SelectedSkillRole["role"] {
+  const role = requireString(value, `selectedSkillRoles[${index}].role`, { max: 64 });
+  if (role === "primary_builder" || role === "source_provider" || role === "support" || role === "qa") return role;
+  throw badRequest(`selectedSkillRoles[${index}].role is invalid`);
+}
+
+function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
+  const record = requireRecord(value, `leaves[${index}]`);
+  const evidenceContract = parseEvidenceContract(record.evidenceContract, index);
   return {
-    goal: proposal.goal.slice(0, 500),
-    selectedSkillIds: proposal.selectedSkillIds,
-    steps: proposal.steps.map((step) => ({
-      id: step.id,
-      objective: step.objective.slice(0, 500),
-      dependencies: step.dependencies,
-      skillIds: step.skillIds,
-      requiredToolNames: step.requiredToolNames,
-      successCriteria: step.successCriteria.map((criterion) => ({
-        id: criterion.id,
-        description: criterion.description.slice(0, 300),
-      })),
+    id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
+    kind: "leaf",
+    objective: requireString(record.objective, `leaves[${index}].objective`, { max: 20_000 }),
+    dependencies: requireStringArray(record.dependsOn, `leaves[${index}].dependsOn`, 100),
+    role: parseOutcomeLeafRole(record.role, index),
+    skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
+    requiredToolNames: canonicalStringSet(record.requiredToolNames, `leaves[${index}].requiredToolNames`, 100),
+    evidenceContract,
+    successCriteria: evidenceContract.requiredKinds.map((kind) => ({
+      id: kind,
+      description: evidenceCriterionDescription(kind, evidenceContract.caveatPolicy),
+      source: "planner",
     })),
   };
 }
 
-function parsePlanProposal(call: ModelToolCall): PlanProposal {
-  try {
-    const value = requireRecord(call.arguments, "submit_plan arguments");
-    if (!Array.isArray(value.steps) || value.steps.length === 0 || value.steps.length > 100) {
-      throw badRequest("steps must contain between 1 and 100 entries");
-    }
-    return {
-      goal: requireString(value.goal, "goal", { max: 20_000 }),
-      selectedSkillIds: requireStringArray(value.selectedSkillIds, "selectedSkillIds", 100),
-      steps: value.steps.map((item, index) => parseStep(item, index)),
-    };
-  } catch (error) {
-    if (error instanceof AppError && error.code === "BAD_REQUEST") {
-      throw new AppError("PLANNING_ERROR", error.message, 422);
-    }
-    throw error;
+function parseOutcomeLeafRole(value: unknown, index: number): OutcomeLeafRole {
+  const role = requireString(value, `leaves[${index}].role`, { max: 64 });
+  if (role === "fact_acquisition" || role === "produce" || role === "deliver" || role === "repair") return role;
+  throw badRequest(`leaves[${index}].role is invalid`);
+}
+
+function parseEvidenceContract(value: unknown, index: number): EvidenceContract {
+  const record = requireRecord(value, `leaves[${index}].evidenceContract`);
+  const requiredKinds = canonicalStringSet(record.requiredKinds, `leaves[${index}].evidenceContract.requiredKinds`, 20)
+    .map((kind) => parseEvidenceKind(kind, index));
+  if (requiredKinds.length === 0) {
+    throw badRequest(`leaves[${index}].evidenceContract.requiredKinds must contain at least 1 entry`);
   }
+  const caveatPolicy = parseCaveatPolicy(record.caveatPolicy, index);
+  return { requiredKinds, caveatPolicy };
 }
 
-interface PlanPatch {
-  readonly replacements: readonly PlanStepReplacement[];
+function parseEvidenceKind(value: string, index: number): EvidenceKind {
+  if ((EVIDENCE_KIND_VALUES as readonly string[]).includes(value)) return value as EvidenceKind;
+  throw badRequest(`leaves[${index}].evidenceContract.requiredKinds contains unsupported evidence kind ${value}`);
 }
 
-interface PlanStepReplacement {
-  readonly targetStepId: string;
-  readonly replacementSteps: readonly PlanStepProposal[];
-  readonly downstreamDependencyStepId: string;
+function parseCaveatPolicy(value: unknown, index: number): CaveatPolicy {
+  const policy = requireString(value, `leaves[${index}].evidenceContract.caveatPolicy`, { max: 64 });
+  if ((CAVEAT_POLICY_VALUES as readonly string[]).includes(policy)) return policy as CaveatPolicy;
+  throw badRequest(`leaves[${index}].evidenceContract.caveatPolicy is invalid`);
 }
 
-function parsePlanPatch(call: ModelToolCall): PlanPatch {
-  try {
-    const value = requireRecord(call.arguments, "submit_plan_patch arguments");
-    if (!Array.isArray(value.replacements) || value.replacements.length === 0 || value.replacements.length > 20) {
-      throw badRequest("replacements must contain between 1 and 20 entries");
-    }
-    return {
-      replacements: value.replacements.map((item, index) => {
-        const replacement = requireRecord(item, `replacements[${index}]`);
-        if (!Array.isArray(replacement.replacementSteps) || replacement.replacementSteps.length === 0 || replacement.replacementSteps.length > 20) {
-          throw badRequest(`replacements[${index}].replacementSteps must contain between 1 and 20 entries`);
-        }
-        return {
-          targetStepId: requireString(replacement.targetStepId, `replacements[${index}].targetStepId`, { max: 128 }),
-          replacementSteps: replacement.replacementSteps.map((step, stepIndex) =>
-            parseStep(step, stepIndex)
-          ),
-          downstreamDependencyStepId: requireString(replacement.downstreamDependencyStepId, `replacements[${index}].downstreamDependencyStepId`, { max: 128 }),
-        };
-      }),
-    };
-  } catch (error) {
-    if (error instanceof AppError && error.code === "BAD_REQUEST") {
-      throw new AppError("PLANNING_ERROR", error.message, 422);
-    }
-    throw error;
+function evidenceCriterionDescription(kind: EvidenceKind, caveatPolicy: CaveatPolicy): string {
+  const suffix = caveatPolicy === "none" ? "" : ` Caveat policy: ${caveatPolicy}.`;
+  switch (kind) {
+    case "source_summary":
+      return `A bounded source summary is available.${suffix}`;
+    case "source_urls":
+      return `Source URLs or equivalent source references are available.${suffix}`;
+    case "artifact_path":
+      return "The delivered artifact path is recorded.";
+    case "artifact_non_empty":
+      return "The delivered artifact is non-empty.";
+    case "artifact_openable":
+      return "The delivered artifact can be opened by the appropriate local/browser tool.";
+    case "format_matches_request":
+      return "The delivered artifact format matches the user request.";
+    case "basic_navigation":
+      return "Basic navigation for the delivered artifact works when applicable.";
+    case "delivery_receipt":
+      return "A delivery receipt identifies the final user-facing result.";
+    case "explicit_caveats":
+      return `Unavailable or unverified facts are explicitly caveated.${suffix}`;
   }
-}
-
-function applyPlanPatch(base: PlanProposal | undefined, patch: PlanPatch): PlanProposal {
-  if (base === undefined) throw new AppError("PLANNING_ERROR", "Plan patch requires a rejected Plan", 422);
-  let steps = [...base.steps];
-  const replacedTargets = new Set<string>();
-  for (const replacement of patch.replacements) {
-    if (replacedTargets.has(replacement.targetStepId)) {
-      throw new AppError("PLANNING_ERROR", `Plan patch replaces step ${replacement.targetStepId} more than once`, 422);
-    }
-    replacedTargets.add(replacement.targetStepId);
-    const index = steps.findIndex((step) => step.id === replacement.targetStepId);
-    if (index < 0) throw new AppError("PLANNING_ERROR", `Plan patch targets unknown step ${replacement.targetStepId}`, 422);
-    const replacementIds = new Set(replacement.replacementSteps.map((step) => step.id));
-    if (!replacementIds.has(replacement.downstreamDependencyStepId)) {
-      throw new AppError("PLANNING_ERROR", `Plan patch downstreamDependencyStepId ${replacement.downstreamDependencyStepId} is not a replacement step`, 422);
-    }
-    const unrelatedIds = new Set(steps.map((step) => step.id).filter((id) => id !== replacement.targetStepId));
-    for (const replacementId of replacementIds) {
-      if (unrelatedIds.has(replacementId)) {
-        throw new AppError("PLANNING_ERROR", `Plan patch replacement step ${replacementId} duplicates an existing step`, 422);
-      }
-    }
-    steps = [
-      ...steps.slice(0, index),
-      ...replacement.replacementSteps,
-      ...steps.slice(index + 1).map((step) => ({
-        ...step,
-        dependencies: step.dependencies.map((dependency) =>
-          dependency === replacement.targetStepId ? replacement.downstreamDependencyStepId : dependency
-        ),
-      })),
-    ];
-  }
-  return { ...base, steps };
-}
-
-function parseStep(value: unknown, index: number): PlanStepProposal {
-  const record = requireRecord(value, `steps[${index}]`);
-  if (!Array.isArray(record.successCriteria) || record.successCriteria.length > 50) {
-    throw badRequest(`steps[${index}].successCriteria must be an array with at most 50 entries`);
-  }
-  const criteria: SuccessCriterion[] = record.successCriteria.map((item, criterionIndex) => {
-    const criterion = requireRecord(item, `steps[${index}].successCriteria[${criterionIndex}]`);
-    return {
-      id: requireString(criterion.id, `criterion id`, { max: 128 }),
-      description: requireString(criterion.description, `criterion description`, { max: 2_000 }),
-      source: "planner",
-    };
-  });
-  return {
-    id: requireString(record.id, `steps[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
-    ...parseOptionalStepKind(record.kind, index),
-    ...parseOptionalParentId(record.parentId, index),
-    objective: requireString(record.objective, `steps[${index}].objective`, { max: 20_000 }),
-    dependencies: requireStringArray(record.dependencies, `steps[${index}].dependencies`, 100),
-    ...parseOptionalRefinementState(record.refinementState, index),
-    ...parseOptionalRequiredFacts(record.requiredFacts, index),
-    skillIds: requireStringArray(record.skillIds, `steps[${index}].skillIds`, 100),
-    requiredToolNames: canonicalStringSet(record.requiredToolNames, `steps[${index}].requiredToolNames`, 100),
-    successCriteria: criteria.length === 0
-      ? [{ id: `criterion-${randomUUID()}`, description: "Produce observable evidence for this objective", source: "planner" }]
-      : criteria,
-  };
-}
-
-function parseOptionalStepKind(value: unknown, index: number): Pick<PlanStepProposal, "kind"> {
-  if (value === undefined) return {};
-  if (value === "leaf" || value === "milestone") return { kind: value };
-  throw badRequest(`steps[${index}].kind must be leaf or milestone`);
-}
-
-function parseOptionalParentId(value: unknown, index: number): Pick<PlanStepProposal, "parentId"> {
-  if (value === undefined) return {};
-  return { parentId: requireString(value, `steps[${index}].parentId`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }) };
-}
-
-function parseOptionalRefinementState(value: unknown, index: number): Pick<PlanStepProposal, "refinementState"> {
-  if (value === undefined) return {};
-  if (
-    value === "not_refinable"
-    || value === "pending_facts"
-    || value === "ready_to_refine"
-    || value === "refining"
-    || value === "refined"
-  ) {
-    return { refinementState: value };
-  }
-  throw badRequest(`steps[${index}].refinementState is invalid`);
-}
-
-function parseOptionalRequiredFacts(value: unknown, index: number): Pick<PlanStepProposal, "requiredFacts"> {
-  if (value === undefined) return {};
-  if (!Array.isArray(value) || value.length > 100) {
-    throw badRequest(`steps[${index}].requiredFacts must be an array with at most 100 entries`);
-  }
-  return {
-    requiredFacts: value.map((item, factIndex) => {
-      const fact = requireRecord(item, `steps[${index}].requiredFacts[${factIndex}]`);
-      return {
-        id: requireString(fact.id, `requiredFact id`, { max: 128 }),
-        description: requireString(fact.description, `requiredFact description`, { max: 2_000 }),
-        evidenceKinds: requireStringArray(fact.evidenceKinds, `requiredFact evidenceKinds`, 50),
-        ...(fact.satisfiedBy === undefined
-          ? {}
-          : { satisfiedBy: requireStringArray(fact.satisfiedBy, `requiredFact satisfiedBy`, 100) }),
-      };
-    }),
-  };
 }
 
 function canonicalStringSet(value: unknown, label: string, maximum: number): string[] {

@@ -43,15 +43,17 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
   const [conversations, setConversations] = useState<readonly ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [currentRun, setCurrentRun] = useState<RunDetail | null>(null);
-  const [running, setRunning] = useState(false);
+  const [runDetailsById, setRunDetailsById] = useState<Readonly<Record<string, RunDetail>>>({});
+  const [activeRunIds, setActiveRunIds] = useState<readonly string[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const running = activeRunIds.length > 0;
   const [selectedSkillId, setSelectedSkillIdState] = useState("");
   const [selectedModelKey, setSelectedModelKeyState] = useState("");
   const [showDetails, setShowDetails] = useState(false);
   const [theme, setTheme] = useState<"auto" | "light" | "dark">(initialTheme);
   const [notice, setNotice] = useState<string>("");
   const noticeTimer = useRef<number | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const abortRef = useRef<Map<string, AbortController>>(new Map());
 
   const note = useCallback((message: string): void => {
     setNotice(message);
@@ -69,29 +71,57 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
     applyTheme(theme);
   }, [theme, applyTheme]);
 
-  const stopStreaming = useCallback((): void => {
-    if (abortRef.current !== null) {
-      abortRef.current.abort();
-      abortRef.current = null;
+  const stopStreaming = useCallback((runId?: string): void => {
+    if (runId !== undefined) {
+      const controller = abortRef.current.get(runId);
+      if (controller !== undefined) {
+        controller.abort();
+        abortRef.current.delete(runId);
+      }
+      return;
     }
+    for (const controller of abortRef.current.values()) controller.abort();
+    abortRef.current.clear();
   }, []);
 
-  const loadRunDetail = useCallback(async (runId: string): Promise<RunDetail> => {
+  const rememberRunDetail = useCallback((detail: RunDetail): void => {
+    setRunDetailsById((previous) => ({ ...previous, [detail.run.id]: detail }));
+  }, []);
+
+  const addActiveRun = useCallback((runId: string): void => {
+    setActiveRunIds((previous) => previous.includes(runId) ? previous : [...previous, runId]);
+    setActiveRunId(runId);
+  }, []);
+
+  const removeActiveRun = useCallback((runId: string): void => {
+    setActiveRunIds((previous) => {
+      const next = previous.filter((id) => id !== runId);
+      setActiveRunId((current) => current === runId ? (next[next.length - 1] ?? null) : current);
+      return next;
+    });
+  }, []);
+
+  const fetchRunDetail = useCallback(async (runId: string): Promise<RunDetail> => {
     const [run, events, detail, artifacts] = await Promise.all([
       api.run(token, runId),
       api.runEvents(token, runId),
       api.runPlan(token, runId),
       api.runArtifacts(token, runId),
     ]);
-    const next = {
+    return {
       run: run.run,
       detail,
       events: events.events,
       artifacts: artifacts.artifacts,
     };
-    setCurrentRun(next);
-    return next;
   }, [token]);
+
+  const loadRunDetail = useCallback(async (runId: string): Promise<RunDetail> => {
+    const next = await fetchRunDetail(runId);
+    setCurrentRun(next);
+    rememberRunDetail(next);
+    return next;
+  }, [fetchRunDetail, rememberRunDetail]);
 
   const loadConversations = useCallback(async (): Promise<void> => {
     try {
@@ -102,22 +132,30 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
     }
   }, [token]);
 
-  const handleEvent = useCallback((event: RunEvent): void => {
-    setCurrentRun((previous) => {
-      if (previous === null) return previous;
+  const handleEvent = useCallback((runId: string, event: RunEvent): void => {
+    const mergeEvent = (previous: RunDetail): RunDetail => {
       const list = [...previous.events];
       if (!list.some((e) => e.seq === event.seq)) {
         list.push(event);
         list.sort((a, b) => a.seq - b.seq);
       }
       return { ...previous, events: list };
+    };
+    setRunDetailsById((previous) => {
+      const detail = previous[runId];
+      if (detail === undefined) return previous;
+      return { ...previous, [runId]: mergeEvent(detail) };
+    });
+    setCurrentRun((previous) => {
+      if (previous === null || previous.run.id !== runId) return previous;
+      return mergeEvent(previous);
     });
   }, []);
 
   const finalizeRun = useCallback(
     async (runId: string): Promise<void> => {
-      setRunning(false);
-      setActiveRunId(null);
+      removeActiveRun(runId);
+      stopStreaming(runId);
       try {
         const detail = await loadRunDetail(runId);
         setConversation((previous) => mergeRunIntoConversation(previous, detail.run));
@@ -137,29 +175,30 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
         note(error instanceof Error ? error.message : "刷新任务终态失败");
       }
     },
-    [token, loadConversations, loadRunDetail, note],
+    [token, loadConversations, loadRunDetail, note, removeActiveRun, stopStreaming],
   );
 
   const subscribeRun = useCallback(
     (runId: string): void => {
-      stopStreaming();
+      if (abortRef.current.has(runId)) return;
       const controller = new AbortController();
-      abortRef.current = controller;
+      abortRef.current.set(runId, controller);
       subscribeRunEvents(
         token,
         runId,
-        handleEvent,
+        (event) => handleEvent(runId, event),
         () => {
           void finalizeRun(runId);
         },
         (message) => {
-          setRunning(false);
+          removeActiveRun(runId);
+          abortRef.current.delete(runId);
           note(message);
         },
         controller.signal,
       );
     },
-    [token, handleEvent, finalizeRun, stopStreaming, note],
+    [token, handleEvent, finalizeRun, note, removeActiveRun],
   );
 
   const refresh = useCallback(async (nextToken = token): Promise<void> => {
@@ -192,8 +231,6 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
 
   const startRun = useCallback(
     async (input: string, visibleDirectories: readonly string[] = []): Promise<void> => {
-      stopStreaming();
-      setRunning(true);
       const conversationId = conversation?.conversation.id;
       const nextVisibleDirectories = mergeDirectoryPaths(
         conversation?.conversation.visibleDirectories ?? [],
@@ -208,7 +245,6 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
         });
         run = body.run;
       } catch (error) {
-        setRunning(false);
         note(error instanceof Error ? error.message : "启动任务失败");
         return;
       }
@@ -244,23 +280,25 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
           runs: [...previous.runs, run],
         }));
       }
-      setActiveRunId(run.id);
       if (run.modelKey !== undefined) setSelectedModelKeyState(run.modelKey);
-      setCurrentRun({ run, detail: emptyDetail(), events: [], artifacts: [] });
+      const detail = { run, detail: emptyDetail(), events: [], artifacts: [] };
+      setCurrentRun(detail);
+      rememberRunDetail(detail);
+      addActiveRun(run.id);
       subscribeRun(run.id);
     },
-    [token, selectedModelKey, conversation, subscribeRun, stopStreaming, note],
+    [token, selectedModelKey, conversation, subscribeRun, note, rememberRunDetail, addActiveRun],
   );
 
   const cancelRun = useCallback(async (): Promise<void> => {
-    const runId = activeRunId;
+    const runId = activeRunId ?? activeRunIds[activeRunIds.length - 1] ?? null;
     if (runId === null) return;
     try {
       const body = await api.cancelRun(token, runId);
       setConversation((previous) => mergeRunIntoConversation(previous, body.run));
       if (body.run.status !== "running") {
-        setRunning(false);
-        setActiveRunId(null);
+        removeActiveRun(runId);
+        stopStreaming(runId);
         await loadRunDetail(runId);
         await loadConversations();
         note("任务已停止。");
@@ -270,7 +308,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
     } catch (error) {
       note(error instanceof Error ? error.message : "停止任务失败");
     }
-  }, [token, activeRunId, loadRunDetail, loadConversations, note]);
+  }, [token, activeRunId, activeRunIds, loadRunDetail, loadConversations, note, removeActiveRun, stopStreaming]);
 
   const updateConversationVisibleDirectories = useCallback(
     async (visibleDirectories: readonly string[]): Promise<void> => {
@@ -296,8 +334,9 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
   const openConversation = useCallback(
     async (id: string): Promise<void> => {
       stopStreaming();
-      setRunning(false);
       setActiveRunId(null);
+      setActiveRunIds([]);
+      setRunDetailsById({});
       let body: ConversationDetail;
       try {
         body = await api.conversation(token, id);
@@ -308,18 +347,24 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       setConversation(body);
       const latest = body.runs[body.runs.length - 1];
       if (latest?.modelKey !== undefined) setSelectedModelKeyState(latest.modelKey);
+      const runningRuns = body.runs.filter((run) => run.status === "running");
       if (latest) {
-        await loadRunDetail(latest.id);
+        const latestDetail = await fetchRunDetail(latest.id);
+        const otherRunningIds = runningRuns.map((run) => run.id).filter((runId) => runId !== latest.id);
+        const runningDetails = await Promise.all(otherRunningIds.map((runId) => fetchRunDetail(runId)));
+        const details = [latestDetail, ...runningDetails];
+        setRunDetailsById(Object.fromEntries(details.map((detail) => [detail.run.id, detail])));
+        setCurrentRun(latestDetail);
       } else {
         setCurrentRun(null);
       }
-      if (latest && latest.status === "running") {
-        setRunning(true);
-        setActiveRunId(latest.id);
-        subscribeRun(latest.id);
+      if (runningRuns.length > 0) {
+        setActiveRunIds(runningRuns.map((run) => run.id));
+        setActiveRunId(runningRuns[runningRuns.length - 1]?.id ?? null);
+        for (const run of runningRuns) subscribeRun(run.id);
       }
     },
-    [token, loadRunDetail, subscribeRun, stopStreaming, note],
+    [token, fetchRunDetail, subscribeRun, stopStreaming, note],
   );
 
   const deleteConversation = useCallback(
@@ -336,8 +381,9 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
         stopStreaming();
         setConversation(null);
         setCurrentRun(null);
+        setRunDetailsById({});
         setActiveRunId(null);
-        setRunning(false);
+        setActiveRunIds([]);
         setShowDetails(false);
       }
       note("会话已删除");
@@ -347,35 +393,31 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
 
   const selectRun = useCallback(
     async (runId: string): Promise<void> => {
-      if (activeRunId === runId) return;
-      stopStreaming();
-      setRunning(false);
-      setActiveRunId(null);
+      if (currentRun?.run.id === runId) return;
       try {
-        await loadRunDetail(runId);
+        const detail = await loadRunDetail(runId);
+        if (detail.run.status === "running") {
+          addActiveRun(runId);
+          subscribeRun(runId);
+        } else {
+          removeActiveRun(runId);
+          stopStreaming(runId);
+        }
       } catch (error) {
         note(error instanceof Error ? error.message : "载入详情失败");
         return;
       }
-      if (currentRun?.run.status === "running") {
-        // not reached: currentRun updated asynchronously by loadRunDetail
-      }
-      const latestRun = conversation?.runs.find((r) => r.id === runId);
-      if (latestRun?.status === "running") {
-        setRunning(true);
-        setActiveRunId(runId);
-        subscribeRun(runId);
-      }
     },
-    [activeRunId, stopStreaming, loadRunDetail, currentRun, conversation, subscribeRun, note],
+    [currentRun, loadRunDetail, addActiveRun, subscribeRun, removeActiveRun, stopStreaming, note],
   );
 
   const newChat = useCallback((): void => {
     stopStreaming();
     setConversation(null);
     setCurrentRun(null);
+    setRunDetailsById({});
     setActiveRunId(null);
-    setRunning(false);
+    setActiveRunIds([]);
     setShowDetails(false);
   }, [stopStreaming]);
 
@@ -391,8 +433,9 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
     setUser(null);
     setConversation(null);
     setCurrentRun(null);
+    setRunDetailsById({});
     setActiveRunId(null);
-    setRunning(false);
+    setActiveRunIds([]);
   }, [token, stopStreaming]);
 
   const setToken = useCallback((next: string): void => {
@@ -473,8 +516,10 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       conversations,
       conversation,
       currentRun,
+      runDetailsById,
       running,
       activeRunId,
+      activeRunIds,
       selectedSkillId,
       selectedModelKey,
       showDetails,
@@ -491,8 +536,10 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       conversations,
       conversation,
       currentRun,
+      runDetailsById,
       running,
       activeRunId,
+      activeRunIds,
       selectedSkillId,
       selectedModelKey,
       showDetails,

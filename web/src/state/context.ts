@@ -21,8 +21,10 @@ export interface AppState {
   readonly conversations: readonly ConversationSummary[];
   readonly conversation: ConversationDetail | null;
   readonly currentRun: RunDetail | null;
+  readonly runDetailsById: Readonly<Record<string, RunDetail>>;
   readonly running: boolean;
   readonly activeRunId: string | null;
+  readonly activeRunIds: readonly string[];
   readonly selectedSkillId: string;
   readonly selectedModelKey: string;
   readonly showDetails: boolean;
@@ -46,10 +48,10 @@ export interface AppActions {
   note(message: string): void;
   refresh(token?: string): Promise<void>;
   loadRunDetail(runId: string): Promise<RunDetail>;
-  handleEvent(event: RunEvent): void;
+  handleEvent(runId: string, event: RunEvent): void;
   finalizeRun(runId: string): Promise<void>;
   subscribeRun(runId: string): void;
-  stopStreaming(): void;
+  stopStreaming(runId?: string): void;
 }
 
 export interface AgentLoopContextValue {

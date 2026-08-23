@@ -156,7 +156,11 @@ export class RuntimeActionRepository {
           AND NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
       `).all() as unknown as Array<{ id: string }>;
       for (const run of legacyRuns) {
-        this.createRecoveryReview(run.id, "legacy_state_incomplete", now);
+        this.createRecoveryReview({
+          runId: run.id,
+          reason: "legacy_state_incomplete",
+          createdAt: now,
+        });
         reconciled += 1;
       }
 
@@ -215,6 +219,38 @@ export class RuntimeActionRepository {
     return cancelled;
   }
 
+  requireRecoveryReview(input: {
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly reason: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }): RuntimeActionRecord {
+    const now = Date.now();
+    let actionId = "";
+    this.database.transaction(() => {
+      const existing = this.database.prepare(`
+        SELECT id FROM runtime_actions
+        WHERE run_id = ? AND state = 'recovery_required'
+        ORDER BY created_at DESC LIMIT 1
+      `).get(input.runId) as { id: string } | undefined;
+      if (existing !== undefined) {
+        actionId = existing.id;
+        this.upsertRecoveryState(input.runId, actionId, "waiting_recovery", undefined, now);
+        return;
+      }
+      actionId = this.createRecoveryReview({
+        runId: input.runId,
+        planId: input.planId,
+        stepId: input.stepId,
+        reason: input.reason,
+        metadata: input.metadata,
+        createdAt: now,
+      });
+    });
+    return this.require(actionId);
+  }
+
   private succeed(actionId: string, fence: number): void {
     const now = Date.now();
     this.database.transaction(() => {
@@ -245,19 +281,46 @@ export class RuntimeActionRepository {
     });
   }
 
-  private createRecoveryReview(runId: string, reason: string, now: number): void {
+  private createRecoveryReview(input: {
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly reason: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly createdAt: number;
+  }): string {
     const id = randomUUID();
+    const metadata = { reason: input.reason, ...(input.metadata ?? {}) };
     this.database.prepare(`
       INSERT INTO runtime_actions(
         id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
         replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
         created_at, updated_at
-      ) VALUES (?, ?, NULL, NULL, 'recovery_review', 'recovery_required', 0, 0,
+      ) VALUES (?, ?, ?, ?, 'recovery_review', 'recovery_required', 0, 0,
                 'unsafe', NULL, NULL, 0, 1, ?, ?, ?)
-    `).run(id, runId, JSON.stringify({ reason }), now, now);
-    this.appendEvent(runId, "action.created", { actionId: id, kind: "recovery_review" }, now);
-    this.appendEvent(runId, "action.recovery_required", { actionId: id, reason }, now);
-    this.upsertRecoveryState(runId, id, "waiting_recovery", undefined, now);
+    `).run(
+      id,
+      input.runId,
+      input.planId ?? null,
+      input.stepId ?? null,
+      JSON.stringify(metadata),
+      input.createdAt,
+      input.createdAt,
+    );
+    this.appendEvent(input.runId, "action.created", {
+      actionId: id,
+      kind: "recovery_review",
+      ...(input.planId === undefined ? {} : { planId: input.planId }),
+      ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
+    }, input.createdAt);
+    this.appendEvent(input.runId, "action.recovery_required", {
+      actionId: id,
+      reason: input.reason,
+      ...(input.planId === undefined ? {} : { planId: input.planId }),
+      ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
+    }, input.createdAt);
+    this.upsertRecoveryState(input.runId, id, "waiting_recovery", undefined, input.createdAt);
+    return id;
   }
 
   private upsertRecoveryState(

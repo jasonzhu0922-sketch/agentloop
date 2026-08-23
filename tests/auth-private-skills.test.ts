@@ -334,25 +334,31 @@ class DeferredRunModel implements ModelAdapter {
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     const toolNames = request.tools.map((tool) => tool.name);
-    if (toolNames.includes("submit_plan")) {
+    if (toolNames.includes("submit_outcome_plan")) {
       await this.release;
-      return toolResponse("async-plan", "submit_plan", {
+      return toolResponse("async-plan", "submit_outcome_plan", {
+        schema: "agentloop.outcomePlan/v2",
         goal: "Produce a trackable async result",
-        selectedSkillIds: [],
-        steps: [{
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        leaves: [{
           id: "answer",
           objective: "Produce the async result",
-          dependencies: [],
+          dependsOn: [],
+          role: "deliver",
           skillIds: [],
           requiredToolNames: [],
-          successCriteria: [{ id: "answer-ready", description: "The async result is present" }],
+          evidenceContract: {
+            requiredKinds: ["delivery_receipt"],
+            caveatPolicy: "none",
+          },
         }],
       });
     }
     if (toolNames.includes("submit_assessment")) {
       return toolResponse("async-assessment", "submit_assessment", {
         criteria: [{
-          criterionId: "answer-ready",
+          criterionId: "delivery_receipt",
           satisfied: true,
           rationale: "The candidate contains the async tracked output.",
           evidenceRefs: ["candidateOutput"],

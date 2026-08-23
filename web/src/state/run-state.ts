@@ -1,5 +1,26 @@
 import type { ConversationDetail, RunRecord } from "../lib/types";
 
+export interface ConversationRunProjection {
+  readonly run: RunRecord;
+  readonly isLoaded: boolean;
+  readonly isLive: boolean;
+}
+
+export function projectConversationRun(
+  run: RunRecord,
+  loadedRun: RunRecord | null | undefined,
+  activeRunIds: readonly string[],
+): ConversationRunProjection {
+  const isLoaded = loadedRun?.id === run.id;
+  const displayRun = isLoaded ? loadedRun : run;
+  const isActive = activeRunIds.includes(run.id);
+  return {
+    run: displayRun,
+    isLoaded,
+    isLive: displayRun.status === "running" && (isLoaded || isActive),
+  };
+}
+
 export function mergeRunIntoConversation(
   previous: ConversationDetail | null,
   run: RunRecord,

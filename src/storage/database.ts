@@ -189,11 +189,13 @@ export class AppDatabase implements SqlConnection {
         position INTEGER NOT NULL,
         objective TEXT NOT NULL,
         dependencies_json TEXT NOT NULL,
+        role TEXT,
         refinement_state TEXT NOT NULL DEFAULT 'not_refinable'
           CHECK(refinement_state IN ('not_refinable', 'pending_facts', 'ready_to_refine', 'refining', 'refined')),
         required_facts_json TEXT NOT NULL DEFAULT '[]',
         skill_ids_json TEXT NOT NULL,
         required_tool_names_json TEXT NOT NULL,
+        evidence_contract_json TEXT,
         success_criteria_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed')),
         output TEXT,
@@ -252,6 +254,7 @@ export class AppDatabase implements SqlConnection {
         skills_json TEXT NOT NULL,
         evidence_digest TEXT NOT NULL,
         feedback TEXT NOT NULL,
+        failed_boundary_json TEXT,
         created_at INTEGER NOT NULL,
         UNIQUE(plan_id, step_id, attempt),
         FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
@@ -328,10 +331,13 @@ export class AppDatabase implements SqlConnection {
     this.ensureColumn("runs", "model_key", "TEXT");
     this.ensureColumn("plan_steps", "kind", "TEXT NOT NULL DEFAULT 'leaf'");
     this.ensureColumn("plan_steps", "parent_step_id", "TEXT");
+    this.ensureColumn("plan_steps", "role", "TEXT");
     this.ensureColumn("plan_steps", "refinement_state", "TEXT NOT NULL DEFAULT 'not_refinable'");
     this.ensureColumn("plan_steps", "required_facts_json", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("plan_steps", "evidence_contract_json", "TEXT");
     this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
     this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
+    this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
     this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
   }
 

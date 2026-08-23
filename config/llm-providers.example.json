@@ -48,6 +48,9 @@
       "providerKey": "openai",
       "providerModel": "gpt-5.6",
       "displayName": "GPT5.6",
+      "timeoutMs": 180000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
       "toolChoiceMode": "constrained-as-auto",
       "protocol": "responses"
     }

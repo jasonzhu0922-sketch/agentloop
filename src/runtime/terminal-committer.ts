@@ -86,5 +86,6 @@ function isCaveatedAssessment(
   if (assessment?.skills.some((skill) => skill.status === "skipped_unavailable" || skill.status === "process_caveat") === true) {
     return true;
   }
-  return step.evidence?.completionCaveat?.reason === "repair_limit";
+  return step.evidence?.completionCaveat?.reason === "repair_limit"
+    || step.evidence?.completionCaveat?.reason === "evidence_boundary";
 }

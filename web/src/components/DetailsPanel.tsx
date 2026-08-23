@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { fmtBytes, fmtTime, statusLabel, truncate } from "../lib/format";
+import { fmtBytes, fmtTime, statusLabel } from "../lib/format";
 import { useAgentLoop } from "../state/context";
 import type { ArtifactPreview, ProcessArtifact } from "../lib/types";
 import { Markdown } from "./Markdown";
@@ -274,7 +274,6 @@ export function ArtifactsPanel(): React.ReactNode {
 
   const run = state.currentRun.run;
   const artifacts = state.currentRun.artifacts;
-  const outputPreview = run.output ? truncate(run.output, 220) : "";
 
   return (
     <aside className="details artifacts-panel">
@@ -290,10 +289,12 @@ export function ArtifactsPanel(): React.ReactNode {
           {run.finishedAt ? " - " + fmtTime(run.finishedAt) : ""}
         </p>
       </div>
-      {outputPreview ? (
+      {run.output ? (
         <div className="details-section">
           <h4>最终回复</h4>
-          <p className="artifact-output-preview">{outputPreview}</p>
+          <div className="artifact-output-preview md">
+            <Markdown text={run.output} />
+          </div>
         </div>
       ) : null}
       <div className="details-section">

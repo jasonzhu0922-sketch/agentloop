@@ -22,6 +22,18 @@ const IGNORED_DIRECTORY_NAMES = new Set([
 const TRANSIENT_FILE_NAMES = new Set([".DS_Store"]);
 const TRANSIENT_FILE_EXTENSIONS = new Set([".pyc", ".pyo"]);
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SKILL_ROLE_VALUES = new Set(["primary_builder", "source_provider", "support", "qa"]);
+const ARTIFACT_KIND_VALUES = new Set(["html", "document", "presentation", "spreadsheet", "image", "code", "none"]);
+
+export type SkillAgentLoopRole = "primary_builder" | "source_provider" | "support" | "qa";
+export type SkillAgentLoopArtifactKind = "html" | "document" | "presentation" | "spreadsheet" | "image" | "code" | "none";
+
+export interface SkillAgentLoopMetadata {
+  readonly roles: readonly SkillAgentLoopRole[];
+  readonly artifactKinds: readonly SkillAgentLoopArtifactKind[];
+  readonly sourceKinds: readonly string[];
+  readonly qaKinds: readonly string[];
+}
 
 export interface SkillPackageInspection {
   readonly root: string;
@@ -33,6 +45,7 @@ export interface SkillPackageInspection {
   readonly fileCount: number;
   readonly totalBytes: number;
   readonly files: readonly string[];
+  readonly agentLoop?: SkillAgentLoopMetadata;
 }
 
 export async function inspectSkillPackage(directory: string): Promise<SkillPackageInspection> {
@@ -105,6 +118,7 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
     fileCount: files.length,
     totalBytes,
     files,
+    ...(metadata.agentLoop === undefined ? {} : { agentLoop: metadata.agentLoop }),
   };
 }
 
@@ -223,7 +237,7 @@ async function makePackageReadOnly(inspection: SkillPackageInspection): Promise<
   }
 }
 
-function parseSkillFrontmatter(source: string): { name: string; description: string } {
+function parseSkillFrontmatter(source: string): { name: string; description: string; agentLoop?: SkillAgentLoopMetadata } {
   const normalized = source.replaceAll("\r\n", "\n");
   const lines = normalized.split("\n");
   if (lines[0] !== "---") throw invalidPackage("SKILL.md must begin with YAML frontmatter");
@@ -264,7 +278,105 @@ function parseSkillFrontmatter(source: string): { name: string; description: str
   if (description.length === 0 || description.length > 2_000) {
     throw invalidPackage("SKILL.md frontmatter description must contain between 1 and 2000 characters");
   }
-  return { name, description };
+  const agentLoop = parseAgentLoopFrontmatter(lines, closing);
+  return { name, description, ...(agentLoop === undefined ? {} : { agentLoop }) };
+}
+
+export function readSkillAgentLoopMetadata(source: string): SkillAgentLoopMetadata | undefined {
+  const normalized = source.replaceAll("\r\n", "\n");
+  const lines = normalized.split("\n");
+  if (lines[0] !== "---") return undefined;
+  const closing = lines.indexOf("---", 1);
+  if (closing < 0) return undefined;
+  return parseAgentLoopFrontmatter(lines, closing);
+}
+
+function parseAgentLoopFrontmatter(lines: readonly string[], closing: number): SkillAgentLoopMetadata | undefined {
+  let start = -1;
+  for (let index = 1; index < closing; index += 1) {
+    if (/^agentloop:\s*$/u.test(lines[index])) {
+      start = index + 1;
+      break;
+    }
+  }
+  if (start < 0) return undefined;
+  const fields = new Map<string, string[]>();
+  for (let index = start; index < closing;) {
+    const line = lines[index];
+    if (line.trim().length === 0) {
+      index += 1;
+      continue;
+    }
+    if (!line.startsWith("  ")) break;
+    const match = line.match(/^  ([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/u);
+    if (match === null) throw invalidPackage("agentloop Skill metadata must use two-space YAML fields");
+    const key = match[1];
+    const inline = match[2].trim();
+    if (inline === "[]") {
+      fields.set(key, []);
+      index += 1;
+      continue;
+    }
+    if (inline.length > 0) {
+      throw invalidPackage(`agentloop.${key} must be a YAML list`);
+    }
+    const values: string[] = [];
+    index += 1;
+    while (index < closing) {
+      const itemLine = lines[index];
+      if (itemLine.trim().length === 0) {
+        index += 1;
+        continue;
+      }
+      if (!itemLine.startsWith("    - ")) break;
+      values.push(parseScalar(itemLine.slice(6)));
+      index += 1;
+    }
+    fields.set(key, values);
+  }
+  const roles = requireAgentLoopList(fields, "roles")
+    .map((value) => parseAgentLoopRole(value));
+  const artifactKinds = requireAgentLoopList(fields, "artifactKinds")
+    .map((value) => parseAgentLoopArtifactKind(value));
+  const sourceKinds = normalizeAgentLoopStrings(fields.get("sourceKinds") ?? [], "sourceKinds");
+  const qaKinds = normalizeAgentLoopStrings(fields.get("qaKinds") ?? [], "qaKinds");
+  if (roles.length === 0) throw invalidPackage("agentloop.roles must declare at least one role");
+  return {
+    roles: unique(roles),
+    artifactKinds: unique(artifactKinds),
+    sourceKinds: unique(sourceKinds),
+    qaKinds: unique(qaKinds),
+  };
+}
+
+function requireAgentLoopList(fields: ReadonlyMap<string, readonly string[]>, key: string): readonly string[] {
+  const value = fields.get(key);
+  if (value === undefined) throw invalidPackage(`agentloop.${key} is required`);
+  return value;
+}
+
+function parseAgentLoopRole(value: string): SkillAgentLoopRole {
+  if (SKILL_ROLE_VALUES.has(value)) return value as SkillAgentLoopRole;
+  throw invalidPackage(`agentloop.roles contains unsupported role ${value}`);
+}
+
+function parseAgentLoopArtifactKind(value: string): SkillAgentLoopArtifactKind {
+  if (ARTIFACT_KIND_VALUES.has(value)) return value as SkillAgentLoopArtifactKind;
+  throw invalidPackage(`agentloop.artifactKinds contains unsupported artifact kind ${value}`);
+}
+
+function normalizeAgentLoopStrings(values: readonly string[], key: string): string[] {
+  return values.map((value) => {
+    const normalized = value.trim();
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(normalized)) {
+      throw invalidPackage(`agentloop.${key} contains an invalid value`);
+    }
+    return normalized;
+  });
+}
+
+function unique<T extends string>(values: readonly T[]): T[] {
+  return [...new Set(values)];
 }
 
 function parseBlockScalar(lines: readonly string[], style: "|" | ">", chomping: string | undefined): string {

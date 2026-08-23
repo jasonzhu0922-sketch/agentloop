@@ -371,6 +371,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           completionCaveat,
         };
       }
+      if (evaluation.evidenceBoundary === true) {
+        const output = evidenceBoundaryOutput(response.content, evaluation.feedback);
+        const completionCaveat = { reason: "evidence_boundary" as const, feedback: evaluation.feedback };
+        await emit({
+          type: "candidate.evidence_boundary_accepted",
+          data: { step, output, feedback: evaluation.feedback },
+        });
+        await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
+        return {
+          output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+          completionCaveat,
+        };
+      }
       rejectedCandidateAssessments += 1;
       if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
         if (evaluation.allowRepairLimitCompletion === false) {
@@ -388,7 +405,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             "STEP_NOT_COMPLETED",
             "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
             422,
-            { feedback: evaluation.feedback },
+            {
+              feedback: evaluation.feedback,
+              ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
+            },
           );
         }
         const output = repairLimitCompletionOutput(response.content, evaluation.feedback, candidateRepairAssessmentLimit);
@@ -648,6 +668,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           completionCaveat,
         };
       }
+      if (evaluation.evidenceBoundary === true) {
+        const output = evidenceBoundaryOutput(structuredCandidate.output, evaluation.feedback);
+        const completionCaveat = { reason: "evidence_boundary" as const, feedback: evaluation.feedback };
+        await emit({
+          type: "candidate.evidence_boundary_accepted",
+          data: { step, output, feedback: evaluation.feedback },
+        });
+        await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
+        return {
+          output,
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+          completionCaveat,
+        };
+      }
       rejectedCandidateAssessments += 1;
       if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
         if (evaluation.allowRepairLimitCompletion === false) {
@@ -665,7 +702,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             "STEP_NOT_COMPLETED",
             "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
             422,
-            { feedback: evaluation.feedback },
+            {
+              feedback: evaluation.feedback,
+              ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
+            },
           );
         }
         const output = repairLimitCompletionOutput(
@@ -763,6 +803,14 @@ function deferredValidationOutput(output: string, feedback: string): string {
   if (trimmedFeedback.length === 0 || trimmedOutput.includes(trimmedFeedback)) return trimmedOutput;
   if (trimmedOutput.length === 0) return trimmedFeedback;
   return `${trimmedOutput}\n\nDeferred validation note: ${trimmedFeedback}`;
+}
+
+function evidenceBoundaryOutput(output: string, feedback: string): string {
+  const trimmedOutput = output.trim();
+  const trimmedFeedback = feedback.trim();
+  if (trimmedFeedback.length === 0 || trimmedOutput.includes(trimmedFeedback)) return trimmedOutput;
+  if (trimmedOutput.length === 0) return trimmedFeedback;
+  return `${trimmedOutput}\n\nEvidence boundary note: ${trimmedFeedback}`;
 }
 
 function repairLimitCompletionOutput(output: string, feedback: string, repairLimit: number): string {
@@ -1063,13 +1111,17 @@ async function executePrepared(
   const { call, tool, input } = entry.value;
   try {
     throwIfAborted(signal);
+    // This is the observable side-effect boundary. The Tool still only
+    // produces facts; Runtime action tracking owns dispatch and commit state.
+    await emit({
+      type: "tool.effect_pending",
+      data: { step, toolCallId: call.id, toolName: call.name, replaySafe: tool.replaySafe },
+    });
+    await emit({
+      type: "tool.dispatched",
+      data: { step, toolCallId: call.id, toolName: call.name, replaySafe: tool.replaySafe },
+    });
     const execute = async (): Promise<unknown> => {
-      // For a replay-unsafe tool this is the persisted point from which recovery
-      // must synthesize an interrupted result instead of executing it again.
-      await emit({
-        type: "tool.effect_pending",
-        data: { step, toolCallId: call.id, toolName: call.name, replaySafe: tool.replaySafe },
-      });
       return tool.execute({ grant, signal }, input);
     };
     const value = actionTracker === undefined
@@ -1082,6 +1134,10 @@ async function executePrepared(
         timeoutMs: tool.timeoutMs,
       }, execute);
     const content = serializeToolResult(value, tool.maxResultCharacters ?? maxCharacters);
+    await emit({
+      type: "tool.result_committed",
+      data: { step, toolCallId: call.id, toolName: call.name, result: content },
+    });
     await emit({
       type: "tool.completed",
       data: { step, toolCallId: call.id, toolName: call.name, result: content },

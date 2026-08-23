@@ -32,7 +32,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     planningRules: [
       "Plan a bounded extraction-and-analysis workflow; do not make full raw-data dumping the success criterion.",
       "Require a durable structured extraction artifact when the input is large, wide, or likely to be reused by later writing/reporting.",
-      "For data-to-report requests over files or bulk data, split source profiling, extraction-program authoring when needed, extraction execution, report writing, and verification into separate dependency-linked steps.",
+      "For data-to-report requests over files or bulk data, split source profiling, extraction-program authoring when needed, extraction execution, and report writing into separate dependency-linked steps.",
       "The source-profiling step identifies files, sheets/tables, fields, ranges, counts, and filters; it should not also write the final structured evidence or report.",
       "The extraction execution step must stop at structured evidence and analysis facts; the writing step must depend on that artifact instead of re-reading or re-dumping the source data.",
       "Success criteria should cite source scope, schema/fields, row or record counts, and the analysis artifact or hash.",
@@ -59,6 +59,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     planningRules: [
       "Separate source gathering from final writing when the content depends on files, data, or prior artifacts.",
       "Success criteria should cover audience, format, source grounding, and final deliverable location when a file is requested.",
+      "Do not make optional examples, exercises, visual polish, exhaustive source metadata, or unavailable source depth blocking success criteria unless the user explicitly requested them.",
     ],
     executionRules: [
       "Clarify the requested format from the user input and current Plan step; do not add unrequested sections or optional polish as separate work.",
@@ -114,18 +115,21 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     name: "Artifact build",
     description: "Create, render, export, or save a concrete file or media artifact.",
     planningRules: [
-      "Success criteria must name the required artifact type and an observable verification.",
+      "Success criteria must name the required artifact type and observable delivery evidence.",
+      "When the user requests an artifact format, treat its minimum usable shape as core evidence: openable/readable output, requested type, workspace path, and non-empty receipt.",
+      "For browser-presentable, presentation-style, or document-like artifacts, basic navigation between pages, sections, or slides is format evidence; advanced interactions and visual polish remain best-effort unless explicitly requested.",
       "Do not plan artifact delivery unless a file-producing tool is available.",
+      "Advanced navigation, responsive polish, charts, visual refinements, and render/browser checks are best-effort execution preferences unless the user or loaded Skill explicitly requires them.",
     ],
     executionRules: [
       "Establish the output path and expected format before producing the artifact.",
-      "After generation, verify existence, size, and a format-appropriate structural or render check.",
+      "After generation, record existence, size, and any format evidence required by the current leaf or loaded Skill contract.",
       "Use the artifact path as evidence; command stdout that only mentions a filename is not delivery evidence by itself.",
     ],
     successEvidence: [
       "artifact path",
-      "existence/size check",
-      "format-specific verification",
+      "existence/size evidence",
+      "format evidence required by the leaf or loaded Skill contract",
     ],
   },
   {

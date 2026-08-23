@@ -18,7 +18,18 @@ test("AgentLoop is a single agent: no delegation, and private Skills load throug
     const skill = skills.create(owner.user.id, {
       name: "private-brief",
       description: "Use the approved internal brief",
-      instructions: "SECRET-INSTRUCTION: cite internal evidence before answering.",
+      instructions: [
+        "---",
+        "agentloop:",
+        "  roles:",
+        "    - primary_builder",
+        "  artifactKinds:",
+        "    - none",
+        "  sourceKinds: []",
+        "  qaKinds: []",
+        "---",
+        "SECRET-INSTRUCTION: cite internal evidence before answering.",
+      ].join("\n"),
     });
     const runs = new RunService({
       database,

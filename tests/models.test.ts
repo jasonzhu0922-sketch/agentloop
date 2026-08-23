@@ -544,6 +544,60 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
   }
 });
 
+test("OpenAI-compatible streaming adapter retries request timeout before first chunk", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async (_input, init) => {
+    attempts += 1;
+    if (attempts === 1) {
+      return await new Promise<Response>((_resolve, reject) => {
+        const requestSignal = init?.signal as AbortSignal | undefined;
+        if (requestSignal === undefined) {
+          reject(new Error("missing request signal"));
+          return;
+        }
+        if (requestSignal.aborted) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
+        requestSignal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }
+    return sseResponse([
+      'data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ]);
+  };
+  const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      timeoutMs: 10,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      onRetry: (info) => {
+        retries.push({ attempt: info.attempt, maxAttempts: info.maxAttempts, status: info.status ?? 0 });
+      },
+    });
+    const result = await model.streamComplete!({
+      runId: "run-stream-request-timeout-retry",
+      systemPrompt: "System",
+      messages: [{ role: "user", content: "Check" }],
+      tools: [],
+    }, async () => undefined);
+
+    assert.equal(attempts, 2);
+    assert.equal(result.content, "recovered");
+    assert.deepEqual(retries, [{ attempt: 1, maxAttempts: 2, status: 0 }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Responses adapter maps input items and emits per-item tool_call_ready before completion", async () => {
   const originalFetch = globalThis.fetch;
   let capturedBody: Record<string, unknown> | undefined;
@@ -686,6 +740,61 @@ test("Responses streaming timeout extends while chunks keep arriving", async () 
 
     assert.equal(result.finishReason, "tool_calls");
     assert.deepEqual(result.toolCalls[0], { id: "call-1", name: "lookup", arguments: { q: "status" } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses streaming adapter retries request timeout before first event", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async (_input, init) => {
+    attempts += 1;
+    if (attempts === 1) {
+      return await new Promise<Response>((_resolve, reject) => {
+        const requestSignal = init?.signal as AbortSignal | undefined;
+        if (requestSignal === undefined) {
+          reject(new Error("missing request signal"));
+          return;
+        }
+        if (requestSignal.aborted) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
+        requestSignal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }
+    return sseResponse([
+      'data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"recovered"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output_text":"recovered"}}\n\n',
+    ]);
+  };
+  const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6",
+      contextWindowTokens: 400_000,
+      maxOutputTokens: 32_768,
+      timeoutMs: 10,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      onRetry: (info) => {
+        retries.push({ attempt: info.attempt, maxAttempts: info.maxAttempts, status: info.status ?? 0 });
+      },
+    });
+    const result = await model.streamComplete!({
+      runId: "run-responses-request-timeout-retry",
+      systemPrompt: "Return text.",
+      phase: "execution",
+      messages: [{ role: "user", content: "Check." }],
+      tools: [],
+    }, async () => undefined);
+
+    assert.equal(attempts, 2);
+    assert.equal(result.content, "recovered");
+    assert.deepEqual(retries, [{ attempt: 1, maxAttempts: 2, status: 0 }]);
   } finally {
     globalThis.fetch = originalFetch;
   }

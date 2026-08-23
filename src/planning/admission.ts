@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { ExecutionPlan, PlanProposal, PlanStep, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
   "computer_write_file",
@@ -18,6 +18,13 @@ export function admitPlan(input: {
   const { proposal } = input;
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
     reject("Plan must contain between 1 and 100 steps");
+  }
+  const recoveryPlan = proposal.shape === "recovery_patch";
+  const invalidRoleSelections = (proposal.selectedSkillRoles ?? []).filter((selection) =>
+    !recoveryPlan && (selection.role === "support" || selection.role === "qa")
+  );
+  if (invalidRoleSelections.length > 0) {
+    reject(`Initial OutcomePlan cannot expose support/qa Skill roles (${invalidRoleSelections.map((selection) => selection.skillId).join(", ")})`);
   }
   const availableSkills = new Map(input.availableSkills.map((skill) => [skill.id, skill]));
   assertUnique(proposal.selectedSkillIds, "selected skill IDs");
@@ -39,6 +46,10 @@ export function admitPlan(input: {
     assertUnique(step.dependencies, `dependencies for step ${step.id}`);
     assertUnique(step.skillIds, `Skill bindings for step ${step.id}`);
     assertUnique(step.requiredToolNames, `tools for step ${step.id}`);
+    if (!recoveryPlan && step.role === "repair") {
+      reject(`Initial OutcomePlan cannot contain repair leaf ${step.id}`);
+    }
+    if (step.evidenceContract !== undefined) assertEvidenceContract(step.id, step.evidenceContract);
     if (step.dependencies.includes(step.id)) reject(`Step ${step.id} cannot depend on itself`);
     for (const dependency of step.dependencies) {
       if (!stepIdSet.has(dependency)) reject(`Step ${step.id} has unknown dependency ${dependency}`);
@@ -83,7 +94,6 @@ export function admitPlan(input: {
     }
     if (criteria.length === 0) reject(`Step ${step.id} has no success criteria`);
     assertUnique(criteria.map((criterion) => criterion.id), `criteria for step ${step.id}`);
-    if (kind === "leaf") assertStepIsBounded(step);
     return {
       ...step,
       kind,
@@ -143,6 +153,20 @@ function assertRequiredFact(stepId: string, fact: RequiredFact): void {
     reject(`Step ${stepId} requiredFact ${fact.id} must declare at least one evidence kind`);
   }
   if (fact.satisfiedBy !== undefined) assertUnique([...fact.satisfiedBy], `satisfiedBy refs for required fact ${fact.id}`);
+}
+
+function assertEvidenceContract(stepId: string, contract: EvidenceContract): void {
+  assertUnique([...contract.requiredKinds], `evidence kinds for step ${stepId}`);
+  if (contract.requiredKinds.length === 0) {
+    reject(`Step ${stepId} evidenceContract must declare at least one required kind`);
+  }
+  if (
+    contract.caveatPolicy !== "none"
+    && contract.caveatPolicy !== "mark_unverified_facts"
+    && contract.caveatPolicy !== "strict_fail_on_missing_source"
+  ) {
+    reject(`Step ${stepId} evidenceContract has an invalid caveat policy`);
+  }
 }
 
 function assertParentTree(steps: readonly PlanStep[]): void {
@@ -231,68 +255,6 @@ function requiresFileProduction(step: PlanProposal["steps"][number]): boolean {
   const mentionsFileArtifact = /(?:\.(?:png|pdf|md|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv)\b|\b(?:png|pdf|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv)\b|文件|档案|\bfile\b)/i.test(text);
   const hasProductionVerb = /\b(create|produce|generate|write|save|export|render|materialize|build|deliver|output)\b|创建|生成|写入|保存|导出|渲染|产出|输出|交付|制作/.test(text);
   return mentionsFileArtifact && hasProductionVerb;
-}
-
-function assertStepIsBounded(step: PlanProposal["steps"][number]): void {
-  const text = normalizePlanText([
-    step.id,
-    step.objective,
-    ...step.successCriteria.map((criterion) => `${criterion.id} ${criterion.description}`),
-  ].join(" "));
-  const tools = new Set(step.requiredToolNames);
-  const hasInspectionTool = [...tools].some((name) => /(?:^|_)(list|read|search|inspect|fetch)(?:_|$)/.test(name));
-  const hasProducerTool = hasFileProducer(tools);
-  const hasDiscoveryWork = containsDiscoveryWork(text);
-  const hasProductionWork = /\b(write|author|create|generate|build|implement|materialize|produce|save)\b|编写|撰写|创建|生成|实现|沉淀|产出|保存|写入/.test(text);
-  const hasVerificationWork = containsVerificationWork(text);
-  const hasDataAnalysisWork = /\b(?:data|spreadsheet|sheet|workbook|table|dataset|schema|field|row|record|range|count|metric|analysis)\b|数据|表格|工作簿|工作表|字段|行|记录|范围|数量|指标|分析/.test(text);
-  const hasSourceProfilingWork = /\b(?:source|sheet|table|schema|field|range|count|identify|profile|scope)\b|来源|源|工作表|表格|字段|范围|数量|识别|定位|解析/.test(text);
-  const hasDurableEvidenceWork = /\b(?:structured evidence|evidence artifact|json|markdown|artifact|hash|reusable evidence)\b|结构化证据|证据文件|证据产物|可复用证据|哈希/.test(text);
-  const hasCommandRunner = tools.has("computer_run_command") || [...tools].some((name) => /(?:^|_)run(?:_|$)/.test(name));
-  const hasWriteTool = tools.has("computer_write_file") || [...tools].some((name) => /(?:^|_)(write|save|export|create)(?:_|$)/.test(name));
-  const manyCriteria = step.successCriteria.length >= 4;
-  const broadToolSurface = hasInspectionTool && hasProducerTool && tools.size >= 3;
-
-  if (broadToolSurface && hasDiscoveryWork && hasProductionWork && (hasVerificationWork || manyCriteria)) {
-    reject(
-      `Step ${step.id} is too broad: split discovery/extraction, production, and verification into smaller dependency-linked steps`,
-    );
-  }
-  if (
-    hasDataAnalysisWork
-    && hasSourceProfilingWork
-    && hasDurableEvidenceWork
-    && hasInspectionTool
-    && hasCommandRunner
-    && hasWriteTool
-    && step.successCriteria.length >= 3
-  ) {
-    reject(
-      `Step ${step.id} is too broad: split data source profiling, extraction artifact generation, and downstream reporting or verification into smaller dependency-linked steps`,
-    );
-  }
-}
-
-function containsDiscoveryWork(text: string): boolean {
-  if (/\b(read|inspect|explore|discover|extract|analy[sz]e|reconstruct|summari[sz]e|confirm|identify)\b/.test(text)) {
-    return true;
-  }
-  if (/读取|探索|(?<!未)发现|提取|分析|重构|总结|识别/.test(text)) {
-    return true;
-  }
-  return /定位(?:并)?(?:读取|阅读|查找|找到|确认)/.test(text)
-    || /定位.{0,16}(文件|路径|目录|位置|来源|数据源|工作表|表格)/.test(text)
-    || /解析.{0,16}(源|数据|文件|内容|工作表|表格|字段)/.test(text)
-    || /(源|数据|文件|内容|工作表|表格|字段).{0,16}解析/.test(text)
-    || /确认.{0,20}(来源|数据源|输入|读取|设计稿|工作表|表格|字段|范围|文件名)/.test(text)
-    || /确认.{0,24}(源文件路径|源数据路径|输入路径|设计稿.{0,8}路径|路径.{0,8}(来源|源|输入|设计稿))/.test(text);
-}
-
-function containsVerificationWork(text: string): boolean {
-  if (/\b(verify|validate|test|run|compare|check)\b/.test(text)) return true;
-  if (/验证|校验|测试|运行|检查/.test(text)) return true;
-  return /(?:进行|完成|执行|结果|输出|证据|数据|基准|预期|实际|差异|一致|正确|校验|验证|检查).{0,20}对比/.test(text)
-    || /对比.{0,20}(结果|输出|证据|数据|源|基准|预期|实际|差异|一致|正确|校验|验证|检查)/.test(text);
 }
 
 function reject(message: string): never {

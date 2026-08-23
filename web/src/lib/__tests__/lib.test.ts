@@ -3,7 +3,7 @@ import { renderMarkdown } from "../md";
 import { eventLabel, fmtBytes, toolAction, truncate } from "../format";
 import { plannedEventMap, translateRunEvent, translatedTimeline } from "../event-translator";
 import { executionInsights, livePlan, currentStepWhy, failureSummary, stepToolPurposes, toolActivityItems } from "../live";
-import { mergeRunIntoConversation } from "../../state/run-state";
+import { mergeRunIntoConversation, projectConversationRun } from "../../state/run-state";
 import type { ConversationDetail, RunEvent, RunRecord } from "../types";
 
 describe("renderMarkdown", () => {
@@ -183,6 +183,69 @@ describe("live projection", () => {
 });
 
 describe("run state", () => {
+  it("keeps a loaded running run live even if the active flag was dropped", () => {
+    const running: RunRecord = {
+      id: "run-1",
+      ownerUserId: "user-1",
+      conversationId: "conversation-1",
+      depth: 0,
+      allowDangerousTools: true,
+      status: "running",
+      input: "制作长卷",
+      createdAt: 100,
+    };
+
+    const projection = projectConversationRun(running, running, []);
+
+    expect(projection.isLoaded).toBe(true);
+    expect(projection.isLive).toBe(true);
+    expect(projection.run.status).toBe("running");
+  });
+
+  it("keeps a non-selected active run live in multi-run views", () => {
+    const running: RunRecord = {
+      id: "run-1",
+      ownerUserId: "user-1",
+      conversationId: "conversation-1",
+      depth: 0,
+      allowDangerousTools: true,
+      status: "running",
+      input: "并行任务 A",
+      createdAt: 100,
+    };
+
+    const projection = projectConversationRun(running, undefined, ["run-1", "run-2"]);
+
+    expect(projection.isLoaded).toBe(false);
+    expect(projection.isLive).toBe(true);
+  });
+
+  it("uses loaded terminal details when the conversation run is stale", () => {
+    const running: RunRecord = {
+      id: "run-1",
+      ownerUserId: "user-1",
+      conversationId: "conversation-1",
+      depth: 0,
+      allowDangerousTools: true,
+      status: "running",
+      input: "制作长卷",
+      createdAt: 100,
+    };
+    const completed: RunRecord = {
+      ...running,
+      status: "completed",
+      output: "长卷制作完成",
+      finishedAt: 200,
+    };
+
+    const projection = projectConversationRun(running, completed, ["run-1"]);
+
+    expect(projection.isLoaded).toBe(true);
+    expect(projection.isLive).toBe(false);
+    expect(projection.run.status).toBe("completed");
+    expect(projection.run.output).toBe("长卷制作完成");
+  });
+
   it("replaces a started running run with the persisted terminal run", () => {
     const running: RunRecord = {
       id: "run-1",

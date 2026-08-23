@@ -43,6 +43,39 @@ test("standard YAML block scalar descriptions survive Skill package inspection",
   }
 });
 
+test("AgentLoop role metadata is parsed from Skill package frontmatter", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-package-role-metadata-"));
+  try {
+    const source = [
+      "---",
+      "name: html-builder",
+      "description: Build browser-presentable HTML artifacts.",
+      "agentloop:",
+      "  roles:",
+      "    - primary_builder",
+      "  artifactKinds:",
+      "    - html",
+      "  sourceKinds: []",
+      "  qaKinds:",
+      "    - openability",
+      "---",
+      "",
+      "# HTML Builder",
+      "",
+    ].join("\n");
+    await fs.writeFile(join(workspace, "SKILL.md"), source);
+    const inspected = await inspectSkillPackage(workspace);
+    assert.deepEqual(inspected.agentLoop, {
+      roles: ["primary_builder"],
+      artifactKinds: ["html"],
+      sourceKinds: [],
+      qaKinds: ["openability"],
+    });
+  } finally {
+    await removeSkillPackage(workspace);
+  }
+});
+
 test("an existing Skill package is copied byte-for-byte, hashed as a whole, and made read-only", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-package-"));
   const imports = join(workspace, "imports");
@@ -301,6 +334,13 @@ test("the admitted step receives the unchanged package Skill and persists packag
       "---",
       "name: runtime-package",
       "description: Existing runtime package",
+      "agentloop:",
+      "  roles:",
+      "    - primary_builder",
+      "  artifactKinds:",
+      "    - none",
+      "  sourceKinds: []",
+      "  qaKinds: []",
       "---",
       "PACKAGE-INSTRUCTION-MUST-STAY-EXACT",
       "Run `scripts/probe.mjs` when execution is needed.",

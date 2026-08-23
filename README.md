@@ -73,25 +73,6 @@ WORKSPACE_ROOT=/absolute/workspace DATABASE_PATH=./data/agentloop.db npm start
 
 生产部署时，先 `cd web && npm run build` 产出 `web/dist`，再用任意静态服务器托管该目录，并把 `WEB_ORIGINS_JSON`（后端 `.env`）配置为前端的 Origin 以允许跨域 API 调用；或通过反向代理把 `dist/` 与 `/v1/*` 放在同一 Origin 下。
 
-### 终端交互界面（TUI）
-
-TUI 是 HTTP 客户端，复用同一套登录、Skill、Run 和审计 API，不会直接读取数据库或绕过 Plan-first Runtime。先在一个终端启动服务，再在另一个终端启动 TUI：
-
-```bash
-npm start
-```
-
-```bash
-npm run tui
-```
-
-它提供登录/注册、Skill/Tool 查看、任务运行、快速测试已有 Skill 及 Plan/Assessment/事件查看。会话 Token 仅存在当前进程内；也可仅在当前命令环境中传入已有 Token。远端地址可通过 `AGENTLOOP_URL` 或参数指定：
-
-```bash
-AGENTLOOP_URL=http://127.0.0.1:8787 npm run tui
-npm run tui -- --url http://127.0.0.1:8787
-```
-
 LLM Provider 由服务端 JSON 注册表配置，服务端按注册表决定 Run 使用的默认 Provider，模型 ID 可覆盖该 Provider 的默认模型；Run API 不能传任意 Base URL、密钥或超时参数。当前注册表支持 `openai-compatible` Adapter（例如 DeepSeek、OpenAI-compatible 网关和本地兼容服务），后续 Provider 以新的 Adapter 接入，不改变 Runtime 主链。
 
 先复制 [llm-providers.example.json](config/llm-providers.example.json) 为被 `.gitignore` 排除的 `config/llm-providers.json`，填写 Provider 类型、地址和默认模型；再把 `apiKeyEnv` 指向的 Key 写入本机 `.env` 或部署环境。`npm start` 会在 `.env` 存在时自动加载它，部署环境已注入的同名变量保持优先。模板不包含任何密钥：

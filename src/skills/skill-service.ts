@@ -10,8 +10,10 @@ import {
   assertPathInside,
   copySkillPackage,
   inspectSkillPackage,
+  readSkillAgentLoopMetadata,
   removeSkillPackage,
 } from "./skill-package.ts";
+import type { SkillAgentLoopMetadata } from "./skill-package.ts";
 import { discoverSkillDirectory } from "./skill-directory.ts";
 import type { SkillDirectoryEntry } from "./skill-directory.ts";
 
@@ -41,6 +43,7 @@ export interface SkillSummary {
   readonly sourceKind: SkillSourceKind;
   readonly contentHash: string;
   readonly package?: SkillPackageSource;
+  readonly agentLoop?: SkillAgentLoopMetadata;
   readonly updatedAt: number;
 }
 
@@ -178,6 +181,7 @@ export class SkillService {
       sourceKind: "inline",
       version: 1,
       contentHash,
+      ...skillAgentLoopMetadata(instructions),
       updatedAt: now,
     };
   }
@@ -359,6 +363,7 @@ export class SkillService {
       sourceKind: "package",
       version: 1,
       contentHash: entry.inspection.packageHash,
+      ...(entry.inspection.agentLoop === undefined ? {} : { agentLoop: entry.inspection.agentLoop }),
       updatedAt: 0,
       package: {
         root: entry.sourceDirectory,
@@ -418,6 +423,7 @@ function toSummary(row: SkillRow): SkillSummary {
     sourceKind,
     contentHash: row.content_hash,
     ...(packageSource === undefined ? {} : { package: packageSource }),
+    ...skillAgentLoopMetadata(row.instructions),
     updatedAt: row.updated_at,
   };
 }
@@ -439,8 +445,14 @@ function toSkillSummary(skill: PrivateSkill): SkillSummary {
     sourceKind: skill.sourceKind,
     contentHash: skill.contentHash,
     ...(skill.package === undefined ? {} : { package: skill.package }),
+    ...(skill.agentLoop === undefined ? {} : { agentLoop: skill.agentLoop }),
     updatedAt: skill.updatedAt,
   };
+}
+
+function skillAgentLoopMetadata(instructions: string): Pick<SkillSummary, "agentLoop"> {
+  const agentLoop = readSkillAgentLoopMetadata(instructions);
+  return agentLoop === undefined ? {} : { agentLoop };
 }
 
 function parsePackageSource(row: SkillRow): SkillPackageSource {

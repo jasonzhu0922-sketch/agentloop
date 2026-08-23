@@ -142,6 +142,9 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
       continue;
     }
     if (toolName !== "computer_run_command" || result?.exitCode !== 0 || typeof result.stdout !== "string") continue;
+    for (const path of pathsFromCommandFileChanges(result)) {
+      if (!candidates.has(path)) candidates.set(path, "computer_run_command");
+    }
     for (const path of pathsMentionedInCommandOutput(result.stdout)) {
       if (!candidates.has(path)) candidates.set(path, "computer_run_command");
     }
@@ -166,6 +169,20 @@ function pathsMentionedInCommandOutput(stdout: string): string[] {
   for (const match of stdout.matchAll(COMMAND_ARTIFACT_EXTENSION_PATTERN)) {
     const path = match[1];
     if (path !== undefined && path.length > 0 && !path.includes("\0")) paths.add(path);
+  }
+  return [...paths];
+}
+
+function pathsFromCommandFileChanges(result: Readonly<Record<string, unknown>>): string[] {
+  const paths = new Set<string>();
+  const changes = Array.isArray(result.fileChanges) ? result.fileChanges : [];
+  for (const change of changes) {
+    if (change === null || typeof change !== "object" || Array.isArray(change)) continue;
+    const record = change as Record<string, unknown>;
+    const path = typeof record.path === "string" ? record.path : undefined;
+    const changeType = typeof record.changeType === "string" ? record.changeType : undefined;
+    if (path === undefined || path.length === 0 || path.includes("\0") || changeType === "deleted") continue;
+    paths.add(path);
   }
   return [...paths];
 }

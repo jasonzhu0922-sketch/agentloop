@@ -30,10 +30,12 @@ interface StepRow {
   position: number;
   objective: string;
   dependencies_json: string;
+  role: "fact_acquisition" | "produce" | "deliver" | "repair" | null;
   refinement_state: "not_refinable" | "pending_facts" | "ready_to_refine" | "refining" | "refined";
   required_facts_json: string;
   skill_ids_json: string;
   required_tool_names_json: string;
+  evidence_contract_json: string | null;
   success_criteria_json: string;
   status: PlanStepStatus;
   output: string | null;
@@ -78,9 +80,9 @@ export class PlanRepository {
       const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
-          refinement_state, required_facts_json, skill_ids_json,
-          required_tool_names_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          role, refinement_state, required_facts_json, skill_ids_json,
+          required_tool_names_json, evidence_contract_json, success_criteria_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const step of plan.steps) {
         insertStep.run(
@@ -91,10 +93,12 @@ export class PlanRepository {
           step.position,
           step.objective,
           JSON.stringify(step.dependencies),
+          step.role ?? null,
           step.refinementState,
           JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
           JSON.stringify(step.requiredToolNames),
+          step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
           JSON.stringify(step.successCriteria),
           step.status,
         );
@@ -166,8 +170,8 @@ export class PlanRepository {
       INSERT INTO skill_compliance_assessments(
         id, plan_id, step_id, attempt, assessment_profile, assessment_method,
         approved, criteria_json, skills_json,
-        evidence_digest, feedback, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        evidence_digest, feedback, failed_boundary_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       assessment.id,
       assessment.planId,
@@ -180,6 +184,7 @@ export class PlanRepository {
       JSON.stringify(assessment.skills),
       assessment.evidenceDigest,
       assessment.feedback,
+      assessment.failedBoundary === undefined ? null : JSON.stringify(assessment.failedBoundary),
       assessment.createdAt,
     );
   }
@@ -188,12 +193,13 @@ export class PlanRepository {
     const rows = this.database.prepare(`
       SELECT id, plan_id, step_id, attempt, assessment_profile, assessment_method,
              approved, criteria_json, skills_json,
-             evidence_digest, feedback, created_at
+             evidence_digest, feedback, failed_boundary_json, created_at
       FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY step_id, attempt
     `).all(planId) as unknown as Array<{
       id: string; plan_id: string; step_id: string; attempt: number;
       assessment_profile?: string; assessment_method?: string; approved: number;
-      criteria_json: string; skills_json: string; evidence_digest: string; feedback: string; created_at: number;
+      criteria_json: string; skills_json: string; evidence_digest: string; feedback: string;
+      failed_boundary_json: string | null; created_at: number;
     }>;
     return rows.map((row) => ({
       id: row.id,
@@ -207,6 +213,7 @@ export class PlanRepository {
       skills: JSON.parse(row.skills_json),
       evidenceDigest: row.evidence_digest,
       feedback: row.feedback,
+      ...(row.failed_boundary_json === null ? {} : { failedBoundary: JSON.parse(row.failed_boundary_json) }),
       createdAt: row.created_at,
     }));
   }
@@ -259,9 +266,9 @@ export class PlanRepository {
       const insertStep = this.database.prepare(`
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
-          refinement_state, required_facts_json, skill_ids_json,
-          required_tool_names_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+          role, refinement_state, required_facts_json, skill_ids_json,
+          required_tool_names_json, evidence_contract_json, success_criteria_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
       `);
       let nextPosition = Math.max(-1, ...current.steps.map((step) => step.position)) + 1;
       for (const step of next.steps) {
@@ -274,10 +281,12 @@ export class PlanRepository {
           nextPosition,
           step.objective,
           JSON.stringify(step.dependencies),
+          step.role ?? null,
           step.refinementState,
           JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
           JSON.stringify(step.requiredToolNames),
+          step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
           JSON.stringify(step.successCriteria),
         );
         nextPosition += 1;
@@ -331,6 +340,7 @@ export class PlanRepository {
         requiredFacts: step.requiredFacts,
         skillIds: step.skillIds,
         requiredToolNames: step.requiredToolNames,
+        ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
         successCriteria: step.successCriteria,
         status: step.status,
         ...(step.retiredAt === undefined ? {} : { retiredAt: step.retiredAt }),
@@ -367,10 +377,12 @@ function toStep(row: StepRow): PlanStep {
     position: row.position,
     objective: row.objective,
     dependencies: JSON.parse(row.dependencies_json),
+    ...(row.role === null ? {} : { role: row.role }),
     refinementState: row.refinement_state ?? "not_refinable",
     requiredFacts: row.required_facts_json === undefined ? [] : JSON.parse(row.required_facts_json),
     skillIds: JSON.parse(row.skill_ids_json),
     requiredToolNames: JSON.parse(row.required_tool_names_json),
+    ...(row.evidence_contract_json === null ? {} : { evidenceContract: JSON.parse(row.evidence_contract_json) }),
     successCriteria: JSON.parse(row.success_criteria_json),
     status: row.status,
     ...(row.output === null ? {} : { output: row.output }),
@@ -388,9 +400,11 @@ function samePlanStepDefinition(left: PlanStep, right: PlanStep): boolean {
     && left.parentId === right.parentId
     && left.objective === right.objective
     && JSON.stringify(left.dependencies) === JSON.stringify(right.dependencies)
+    && left.role === right.role
     && left.refinementState === right.refinementState
     && JSON.stringify(left.requiredFacts) === JSON.stringify(right.requiredFacts)
     && JSON.stringify(left.skillIds) === JSON.stringify(right.skillIds)
     && JSON.stringify(left.requiredToolNames) === JSON.stringify(right.requiredToolNames)
+    && JSON.stringify(left.evidenceContract ?? null) === JSON.stringify(right.evidenceContract ?? null)
     && JSON.stringify(left.successCriteria) === JSON.stringify(right.successCriteria);
 }

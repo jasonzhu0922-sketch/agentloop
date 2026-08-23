@@ -1,6 +1,6 @@
 # 分层渐进式 Plan 设计方案
 
-版本：v0.3
+版本：v0.4
 日期：2026-08-21
 状态：设计稿 / 第一阶段落地中
 
@@ -567,6 +567,22 @@ UI 不需要暴露复杂内部机制，但应显示层级：
 - Planner prompt 明确禁止默认 `inspect_*`、`repair_*_if_needed`、`final_verify_*` 尾巴。
 - Artifact-producing leaf 必须说明产物边界；例如源文件、导出格式、目标路径或可验证文件类型。
 - Skill QA 只来自已加载 Skill contract；Assessment 失败后才进入 repair/recovery。
+
+### D2.6：Planner 提示从 Workflow Plan 改为 Outcome Plan
+
+- 首轮 Plan 不是 workflow script，而是让 Runtime 启动有效工作的最小 canonical outcome boundary。
+- 普通问答或 artifact 任务默认优先一个 executable leaf。
+- 本地 receipt、export metadata、render/readback 和 Skill 内部动作属于 leaf evidence / execution actions，不默认升级为 Plan step。
+- 只有独立事实边界、多交付物、用户显式 QA/验收/发布、高风险外部副作用或 Assessment/recovery 指令，才拆多个 leaf。
+- `stepGranularity` 不再提供固定 `extract -> author -> verify` 模板，只描述何时允许 progressive refinement。
+
+### D2.7：Planner systemPrompt 收缩
+
+- 稳定 `systemPrompt` 只保留 Planner 身份、结构化输出协议、最小 Outcome Plan、Skill 渐进披露和 schema/catalog 边界。
+- workspace、conversation workset、operation profile、QA/repair 和数据/报告细则不常驻 `systemPrompt`；它们来自 `planning_context`、Skill contract、Assessment 或 recovery directive。
+- 当前测量基线：Planner `systemPrompt` 从约 1,339 estimated tokens 降到约 248 estimated tokens。
+- 普通新任务首轮 Planner wire 估算从约 3,121 tokens 降到约 2,015 tokens；带全部本地工具摘要和 1 个 Skill 摘要的 artifact 任务从约 3,776 tokens 降到约 2,671 tokens。
+- 新增 regression 要求稳定 Planner `systemPrompt` 保持在 700 estimated tokens 以内，避免运行策略再次回流到常驻提示。
 
 ### D2-full：受控 refinement Action
 

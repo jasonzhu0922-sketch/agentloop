@@ -10,13 +10,22 @@ export function singleStepTestPlanner(): Planner {
   return {
     plan: async (task) => ({
       goal: task.input,
+      schema: "agentloop.outcomePlan/v2",
+      shape: "single_leaf",
+      selectedSkillRoles: task.availableSkills.map((skill) => ({
+        skillId: skill.id,
+        role: "primary_builder",
+        reason: "Focused test Skill selection",
+      })),
       selectedSkillIds: task.availableSkills.map((skill) => skill.id),
       steps: [{
         id: "test-step",
         objective: task.input,
         dependencies: [],
+        role: "deliver",
         skillIds: task.availableSkills.map((skill) => skill.id),
         requiredToolNames: [...task.availableToolNames],
+        evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
         successCriteria: [{
           id: "test-output",
           description: "Produce a non-empty result for the focused test",

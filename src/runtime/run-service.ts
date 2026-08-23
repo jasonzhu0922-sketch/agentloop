@@ -13,12 +13,17 @@ import type {
   ConversationReusableArtifact,
   ConversationWorkingSet,
   ExecutionPlan,
+  FailedBoundary,
   PlanningWorkspaceFacts,
+  PlanProposal,
+  PlanStepProposal,
   Planner,
   PlanRevisionAssessor,
+  SelectedSkillRole,
   SkillComplianceAssessment,
   StepAssessor,
   StepEvidence,
+  ToolEvidence,
 } from "../planning/contracts.ts";
 import { ModelPlanner } from "../planning/planner.ts";
 import { PlanRepository } from "../planning/plan-repository.ts";
@@ -33,6 +38,7 @@ import { optionalPositiveInteger, requireRecord, requireString } from "../shared
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
 import type { ContextPolicy } from "./context-assembler.ts";
+import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -53,6 +59,7 @@ import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-act
 import {
   ModelPlanRevisionAssessor,
   ModelRecoveryPlanner,
+  type RecoveryDecisionProposal,
   type RecoveryPlanner,
 } from "./recovery-planning.ts";
 import {
@@ -681,18 +688,19 @@ export class RunService {
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
     }
-    const proposal = await this.recoveryPlannerFactory(model).decide({
-      runId,
-      userInput: run.input,
-      action,
-      ...(currentPlan === undefined ? {} : { plan: currentPlan }),
-      events: this.events(actorUserId, runId),
-      userResponses: this.recovery.userResponses(runId).map((item) => ({
-        actionId: item.actionId,
-        response: item.response,
-        createdAt: item.createdAt,
-      })),
-    });
+    const proposal = failedBoundaryRecoveryDecision(run, action, currentPlan)
+      ?? await this.recoveryPlannerFactory(model).decide({
+        runId,
+        userInput: run.input,
+        action,
+        ...(currentPlan === undefined ? {} : { plan: currentPlan }),
+        events: this.events(actorUserId, runId),
+        userResponses: this.recovery.userResponses(runId).map((item) => ({
+          actionId: item.actionId,
+          response: item.response,
+          createdAt: item.createdAt,
+        })),
+      });
     const decision = this.recovery.submit(runId, proposal);
     try {
       switch (decision.decision) {
@@ -715,7 +723,7 @@ export class RunService {
           });
           break;
         case "revise_plan":
-          await this.applyPlanRevisionRecovery({ run, action, decision, currentPlan, model });
+          await this.applyPlanRevisionRecovery({ actorUserId, run, action, decision, currentPlan, model });
           break;
       }
     } catch (error) {
@@ -815,7 +823,11 @@ export class RunService {
         onStepChanged: (stepId) => { actionScope.stepId = stepId; },
       });
       const output = finalPlanOutput(resumedPlan);
-      commitCompletedPlan(this.terminal, this.plans.assessments(resumedPlan.id), resumedPlan, runId, output);
+      const reasonCode = commitCompletedPlan(this.terminal, this.plans.assessments(resumedPlan.id), resumedPlan, runId, output);
+      await emit({
+        type: "terminal.delivery_committed",
+        data: { runId, planId: resumedPlan.id, output, reasonCode, recovered: true },
+      });
       await emit({ type: "run.completed", data: { runId, planId: resumedPlan.id, output, recovered: true } });
       return this.get(actorUserId, runId);
     } catch (error) {
@@ -985,11 +997,12 @@ export class RunService {
 
       const actionScope: { planId?: string; stepId?: string } = {};
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
-      const planningSkills = responseOnly ? [] : selectPlanningSkills(
+      const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
         input,
         conversationWorkingSet?.requiredCapabilities.skillIds ?? [],
       );
+      const planningSkills = planningSkillRoles.map((item) => item.skill);
       if (planningSkills.some((skill) => skillRequiresFileOutput(skill)) && !canProduceFiles(allowedToolNames)) {
         throw new AppError(
           "PLAN_NOT_ADMITTED",
@@ -1005,11 +1018,24 @@ export class RunService {
             skills: planningSkills.map((skill) => ({ id: skill.id, name: skill.name })),
           },
         });
+        await emit({
+          type: "planning.skills.role_selected",
+          data: {
+            selectedCount: planningSkillRoles.length,
+            skills: planningSkillRoles.map((item) => ({
+              id: item.skill.id,
+              name: item.skill.name,
+              role: item.selection.role,
+              reason: item.selection.reason,
+            })),
+          },
+        });
       }
       const proposal = await this.plannerFactory(model).plan({
         runId,
         input,
         availableSkills: planningSkills,
+        selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
         workspaceFacts: await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId),
@@ -1063,7 +1089,11 @@ export class RunService {
 
       const output = finalPlanOutput(plan);
       throwIfRunCancelled(this.runs, runId, runController.signal);
-      commitCompletedPlan(this.terminal, this.plans.assessments(plan.id), plan, runId, output);
+      const reasonCode = commitCompletedPlan(this.terminal, this.plans.assessments(plan.id), plan, runId, output);
+      await emit({
+        type: "terminal.delivery_committed",
+        data: { runId, planId: plan.id, output, reasonCode },
+      });
       await emit({ type: "run.completed", data: { runId, planId: plan.id, output } });
       return this.get(actorUserId, runId);
     } catch (error) {
@@ -1072,6 +1102,37 @@ export class RunService {
         ? error
         : new AppError("INTERNAL_ERROR", "Run failed", 500);
       if (this.runs.get(runId)?.status === "running") {
+        const failedBoundary = failedBoundaryFromErrorDetails(appError.details);
+        if (
+          appError.code === "STEP_NOT_COMPLETED"
+          && planId !== undefined
+          && runningStepId !== undefined
+          && failedBoundary !== undefined
+          && failedBoundary.stepId === runningStepId
+        ) {
+          this.plans.failStep(planId, runningStepId, appError.message);
+          const action = this.actions.requireRecoveryReview({
+            runId,
+            planId,
+            stepId: runningStepId,
+            reason: "assessment_failed_boundary",
+            metadata: {
+              failedBoundary,
+              feedback: stringField(appError.details, "feedback"),
+            },
+          });
+          await emit({
+            type: "run.recovery_required",
+            data: {
+              runId,
+              planId,
+              stepId: runningStepId,
+              actionId: action.id,
+              failedBoundary,
+            },
+          });
+          return this.get(actorUserId, runId);
+        }
         if (planId !== undefined && runningStepId !== undefined) {
           this.plans.failStep(planId, runningStepId, appError.message);
         }
@@ -1190,9 +1251,16 @@ export class RunService {
       const fileOutputStep = stepSkills.some((skill) => skillRequiresFileOutput(skill))
         || stepRequiresFileOutput(activeStep);
       const lookupEvidenceStep = !fileOutputStep && stepCanConvergeFromLookupEvidence(activeStep);
+      const stepOperationProfile = executionOperationProfile({
+        objective: activeStep.objective,
+        successCriteria: activeStep.successCriteria,
+        requiredToolNames: activeStep.requiredToolNames,
+        skillNames: stepSkills.map((skill) => skill.name),
+      });
+      const stepTaskProfile = executionTaskProfile(stepOperationProfile, stepSkills.length > 0);
       const result = await runAgentLoop({
         runId: input.runId,
-        systemPrompt: buildStepSystemPrompt(this.systemPrompt),
+        systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
         runtimeContext: recovery === undefined
           ? buildStepRuntimeContext(
             activeStep,
@@ -1201,6 +1269,7 @@ export class RunService {
             input.rootGrant.workspaceRoot ?? this.workspaceRoot,
             input.visibleDirectories,
             skillExecutionRoots,
+            stepTaskProfile,
           )
           : buildRecoveredStepRuntimeContext(
             activeStep,
@@ -1209,6 +1278,7 @@ export class RunService {
             input.rootGrant.workspaceRoot ?? this.workspaceRoot,
             recovery.facts,
             skillExecutionRoots,
+            stepTaskProfile,
           ),
         input: input.input,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -1293,16 +1363,36 @@ export class RunService {
                 assessmentMethod: reusedAssessment.assessmentMethod,
                 approved: reusedAssessment.approved,
                 feedback: reusedAssessment.feedback,
+                ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
                 deferredValidation,
               },
             });
+            if (!reusedAssessment.approved && reusedAssessment.failedBoundary !== undefined) {
+              await input.emit({
+                type: "assessment.failed_boundary",
+                data: {
+                  planId: plan.id,
+                  stepId: activeStep.id,
+                  attempt: assessmentAttempt,
+                  originalAttempt: reusedAssessment.attempt,
+                  failedBoundary: reusedAssessment.failedBoundary,
+                },
+              });
+            }
             return {
               approved: reusedAssessment.approved,
               feedback: reusedAssessment.feedback,
               deferredValidation,
-              allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(reusedAssessment),
-              assessmentReused: true,
-            };
+                evidenceBoundary: shouldCompleteWithEvidenceBoundary({
+                  assessment: reusedAssessment,
+                  assessmentAttempt,
+                  step: activeStep,
+                  evidence,
+                }),
+                allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(reusedAssessment),
+                ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
+                assessmentReused: true,
+              };
           }
           const assess = () => assessor.assess({
             runId: input.runId,
@@ -1341,8 +1431,20 @@ export class RunService {
               criteria: assessment.criteria,
               skills: assessment.skills,
               feedback: assessment.feedback,
+              ...(assessment.failedBoundary === undefined ? {} : { failedBoundary: assessment.failedBoundary }),
             },
           });
+          if (!assessment.approved && assessment.failedBoundary !== undefined) {
+            await input.emit({
+              type: "assessment.failed_boundary",
+              data: {
+                planId: plan.id,
+                stepId: activeStep.id,
+                attempt: assessment.attempt,
+                failedBoundary: assessment.failedBoundary,
+              },
+            });
+          }
           return {
             approved: assessment.approved,
             feedback: assessment.feedback,
@@ -1352,7 +1454,14 @@ export class RunService {
               step: activeStep,
               evidence,
             }),
+            evidenceBoundary: shouldCompleteWithEvidenceBoundary({
+              assessment,
+              assessmentAttempt,
+              step: activeStep,
+              evidence,
+            }),
             allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(assessment),
+            ...(assessment.failedBoundary === undefined ? {} : { failedBoundary: assessment.failedBoundary }),
           };
         },
       });
@@ -1373,6 +1482,7 @@ export class RunService {
   }
 
   private async applyPlanRevisionRecovery(input: {
+    actorUserId: string;
     run: RunRecord;
     action: RuntimeActionRecord;
     decision: RecoveryDecisionRecord;
@@ -1430,11 +1540,117 @@ export class RunService {
       reason: input.decision.rationale,
       actionId: input.action.id,
     });
+    const repairLeaves = revised.steps.filter((step) =>
+      step.retiredAt === undefined
+      && step.role === "repair"
+      && !input.currentPlan!.steps.some((existing) => existing.id === step.id)
+    );
+    for (const step of repairLeaves) {
+      this.appendRunEvent(input.run.id, {
+        type: "recovery.repair_leaf_created",
+        data: {
+          planId: revised.id,
+          stepId: step.id,
+          dependencies: step.dependencies,
+          evidenceContract: step.evidenceContract,
+          sourceActionId: input.action.id,
+        },
+      });
+    }
     this.recovery.admit(input.decision.id);
     if (isEffectivelyComplete(revised)) {
       const output = finalPlanOutput(revised);
       this.terminal.commitCompleted(input.run.id, revised.id, output);
+      this.appendRunEvent(input.run.id, {
+        type: "terminal.delivery_committed",
+        data: {
+          runId: input.run.id,
+          planId: revised.id,
+          output,
+          reasonCode: "plan_assessed_and_completed",
+        },
+      });
       this.appendRunEvent(input.run.id, { type: "run.completed", data: { runId: input.run.id, planId: revised.id, output } });
+      return;
+    }
+
+    const runWorkspaceRoot = input.run.conversationId === undefined
+      ? this.workspaceRoot
+      : await this.ensureConversationWorkspace(input.run.conversationId);
+    const allTools = this.createTools(privateSkills);
+    assertNoDuplicateTools(allTools);
+    const rootGrant = createCapabilityGrant({
+      actorUserId: input.actorUserId,
+      runId: input.run.id,
+      ...(input.run.conversationId === undefined ? {} : { conversationId: input.run.conversationId }),
+      depth: input.run.depth,
+      workspaceRoot: runWorkspaceRoot,
+      allowedToolNames: availableToolNames,
+      allowedSkillIds: privateSkills.map((skill) => skill.id),
+    });
+    const assessor = this.assessorFactory(input.model);
+    let runningStepId: string | undefined;
+    try {
+      const completed = await this.executePlanSteps({
+        actorUserId: input.actorUserId,
+        runId: input.run.id,
+        input: input.run.input,
+        privateSkills,
+        rootGrant,
+        plan: revised,
+        model: input.model,
+        assessor,
+        defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
+        registry: new ToolRegistry(allTools),
+        emit: async (event) => this.appendRunEvent(input.run.id, event),
+        visibleDirectories: [],
+        ...(input.run.conversationId === undefined
+          ? {}
+          : { conversationHistory: this.conversationHistory(input.run.conversationId) }),
+        onStepChanged: (stepId) => { runningStepId = stepId; },
+      });
+      const output = finalPlanOutput(completed);
+      const reasonCode = commitCompletedPlan(this.terminal, this.plans.assessments(completed.id), completed, input.run.id, output);
+      this.appendRunEvent(input.run.id, {
+        type: "terminal.delivery_committed",
+        data: { runId: input.run.id, planId: completed.id, output, reasonCode, recovered: true },
+      });
+      this.appendRunEvent(input.run.id, { type: "run.completed", data: { runId: input.run.id, planId: completed.id, output, recovered: true } });
+    } catch (error) {
+      const appError = error instanceof AppError
+        ? error
+        : new AppError("INTERNAL_ERROR", "Recovery execution failed", 500);
+      const failedBoundary = failedBoundaryFromErrorDetails(appError.details);
+      if (
+        appError.code === "STEP_NOT_COMPLETED"
+        && runningStepId !== undefined
+        && failedBoundary !== undefined
+        && failedBoundary.stepId === runningStepId
+      ) {
+        this.plans.failStep(revised.id, runningStepId, appError.message);
+        const action = this.actions.requireRecoveryReview({
+          runId: input.run.id,
+          planId: revised.id,
+          stepId: runningStepId,
+          reason: "assessment_failed_boundary",
+          metadata: {
+            failedBoundary,
+            feedback: stringField(appError.details, "feedback"),
+          },
+        });
+        this.appendRunEvent(input.run.id, {
+          type: "run.recovery_required",
+          data: {
+            runId: input.run.id,
+            planId: revised.id,
+            stepId: runningStepId,
+            actionId: action.id,
+            failedBoundary,
+          },
+        });
+        return;
+      }
+      throw appError;
     }
   }
 
@@ -1458,6 +1674,7 @@ export class RunService {
       item.planId === planId
       && item.stepId !== undefined
       && retired.has(item.stepId)
+      && item.kind !== "recovery_review"
       && item.replayPolicy === "unsafe"
       && item.state !== "succeeded",
     );
@@ -1547,13 +1764,18 @@ const TERMINAL_EVENT_TYPES = new Set([
   "assistant.tool_call.committed",
   "tool.planned",
   "tool.effect_pending",
+  "tool.dispatched",
+  "tool.result_committed",
   "tool.completed",
   "tool.failed",
   "tool.rejected",
   "candidate.approved",
   "candidate.rejected",
+  "candidate.evidence_boundary_accepted",
   "candidate.validation_deferred",
   "assessment.turn.completed",
+  "assessment.failed_boundary",
+  "terminal.delivery_committed",
   "skill.activation.available",
   "skill.activated",
   "skill.compliance.assessed",
@@ -1618,6 +1840,7 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   if (type === "planning.turn.completed") {
     addNumber(details, "loadSkillCalls", data.loadSkillCallCount);
     addNumber(details, "submitPlanCalls", data.submitPlanCallCount);
+    addNumber(details, "submitOutcomePlanCalls", data.submitOutcomePlanCallCount);
     addNumber(details, "loadedSkills", data.loadedSkillCount);
     addNumber(details, "contentChars", data.contentLength);
   }
@@ -1672,13 +1895,18 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   }
   if (
     type === "candidate.rejected"
+    || type === "candidate.evidence_boundary_accepted"
     || type === "candidate.validation_deferred"
     || type === "run.failed"
     || type === "run.cancelled"
     || type === "tool.failed"
     || type === "tool.rejected"
   ) {
-    if (type === "candidate.rejected" || type === "candidate.validation_deferred") {
+    if (
+      type === "candidate.rejected"
+      || type === "candidate.evidence_boundary_accepted"
+      || type === "candidate.validation_deferred"
+    ) {
       const output = asString(data.output);
       details.push(`outputChars=${output === undefined ? 0 : output.length}`);
     }
@@ -1894,20 +2122,206 @@ function stringField(value: unknown, key: string): string | undefined {
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
 
+function failedBoundaryFromErrorDetails(value: unknown): FailedBoundary | undefined {
+  const boundary = asRecord(asRecord(value)?.failedBoundary);
+  if (boundary === undefined) return undefined;
+  const stepId = typeof boundary.stepId === "string" && boundary.stepId.length > 0
+    ? boundary.stepId
+    : undefined;
+  const suggestedRepairShape = boundary.suggestedRepairShape;
+  if (
+    stepId === undefined
+    || (suggestedRepairShape !== "repair_leaf" && suggestedRepairShape !== "ask_user" && suggestedRepairShape !== "fail")
+  ) {
+    return undefined;
+  }
+  return {
+    stepId,
+    missingEvidenceKinds: stringArrayField(boundary.missingEvidenceKinds),
+    violatedSkillRequirements: stringArrayField(boundary.violatedSkillRequirements),
+    reusableEvidenceRefs: stringArrayField(boundary.reusableEvidenceRefs),
+    suggestedRepairShape,
+  };
+}
+
+function stringArrayField(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function failedBoundaryRecoveryDecision(
+  run: RunRecord,
+  action: RuntimeActionRecord,
+  plan: ExecutionPlan | undefined,
+): RecoveryDecisionProposal | undefined {
+  const failedBoundary = failedBoundaryFromRecoveryAction(action);
+  if (failedBoundary === undefined) return undefined;
+  const evidenceRefs = failedBoundary.reusableEvidenceRefs;
+  const base = {
+    actionId: action.id,
+    expectedActionRevision: action.revision,
+    evidenceRefs,
+  };
+  if (failedBoundary.suggestedRepairShape === "ask_user") {
+    return {
+      ...base,
+      decision: "ask_user",
+      rationale: `Assessment rejected step ${failedBoundary.stepId}; user input is required before a safe repair can proceed.`,
+      question: failedBoundaryQuestion(failedBoundary),
+    };
+  }
+  if (failedBoundary.suggestedRepairShape === "fail" || plan === undefined) {
+    return {
+      ...base,
+      decision: "fail",
+      rationale: `Assessment rejected step ${failedBoundary.stepId}; no safe bounded repair leaf can be created.`,
+    };
+  }
+  const target = plan.steps.find((step) =>
+    step.id === failedBoundary.stepId
+    && step.retiredAt === undefined
+    && step.kind === "leaf"
+    && step.status !== "completed"
+  );
+  if (target === undefined) {
+    return {
+      ...base,
+      decision: "fail",
+      rationale: `Assessment failedBoundary points to ${failedBoundary.stepId}, but no unfinished active leaf matches it.`,
+    };
+  }
+  const activeDependents = plan.steps.filter((step) =>
+    step.retiredAt === undefined
+    && step.status !== "completed"
+    && step.dependencies.includes(target.id)
+  );
+  if (activeDependents.length > 0) {
+    return {
+      ...base,
+      decision: "ask_user",
+      rationale: `Assessment rejected step ${target.id}, but pending dependent steps require an explicit user decision before a local repair can safely replace it.`,
+      question: `Step ${target.id} failed assessment, and ${activeDependents.length} pending dependent step(s) still reference it. Confirm whether AgentLoop should create a repair leaf and replan the dependent work.`,
+    };
+  }
+  const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version);
+  const planRevision: PlanProposal = {
+    goal: plan.goal,
+    schema: "agentloop.outcomePlan/v2",
+    shape: "recovery_patch",
+    selectedSkillIds: plan.selectedSkillIds,
+    selectedSkillRoles: [],
+    steps: [
+      ...plan.steps
+        .filter((step) => step.retiredAt === undefined && step.id !== target.id)
+        .map((step): PlanStepProposal => ({
+          id: step.id,
+          kind: step.kind,
+          ...(step.parentId === undefined ? {} : { parentId: step.parentId }),
+          objective: step.objective,
+          dependencies: step.dependencies,
+          ...(step.role === undefined ? {} : { role: step.role }),
+          refinementState: step.refinementState,
+          requiredFacts: step.requiredFacts,
+          skillIds: step.skillIds,
+          requiredToolNames: step.requiredToolNames,
+          ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
+          successCriteria: step.successCriteria,
+        })),
+      repairStep,
+    ],
+  };
+  return {
+    ...base,
+    decision: "revise_plan",
+    rationale: `Create a targeted repair leaf for failed assessment boundary ${target.id}; do not rerun the first-round Planner.`,
+    planRevision,
+  };
+}
+
+function failedBoundaryFromRecoveryAction(action: RuntimeActionRecord): FailedBoundary | undefined {
+  const reason = typeof action.metadata.reason === "string" ? action.metadata.reason : undefined;
+  if (reason !== "assessment_failed_boundary") return undefined;
+  return failedBoundaryFromErrorDetails({ failedBoundary: action.metadata.failedBoundary });
+}
+
+function repairLeafForFailedBoundary(
+  target: ExecutionPlan["steps"][number],
+  failedBoundary: FailedBoundary,
+  planVersion: number,
+): PlanStepProposal {
+  const repairId = repairLeafId(target.id, planVersion);
+  const missing = failedBoundary.missingEvidenceKinds.length === 0
+    ? "the rejected evidence boundary"
+    : failedBoundary.missingEvidenceKinds.join(", ");
+  return {
+    id: repairId,
+    kind: "leaf",
+    objective: `Repair step ${target.id} by producing the missing assessment evidence: ${missing}.`,
+    dependencies: target.dependencies,
+    role: "repair",
+    refinementState: "not_refinable",
+    requiredFacts: target.requiredFacts,
+    skillIds: target.skillIds,
+    requiredToolNames: target.requiredToolNames,
+    ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
+    successCriteria: target.successCriteria,
+  };
+}
+
+function repairLeafId(stepId: string, planVersion: number): string {
+  const suffix = `.repair.${planVersion + 1}`;
+  const maximumBase = 128 - suffix.length;
+  const base = stepId.slice(0, Math.max(1, maximumBase)).replace(/[^A-Za-z0-9._-]/g, "_");
+  return `${base}${suffix}`;
+}
+
+function failedBoundaryQuestion(failedBoundary: FailedBoundary): string {
+  const missing = failedBoundary.missingEvidenceKinds.length === 0
+    ? "the missing evidence"
+    : failedBoundary.missingEvidenceKinds.join(", ");
+  return `Step ${failedBoundary.stepId} is missing ${missing}. Please provide the required information or confirm how to proceed.`;
+}
+
+export interface PlanningSkillRoleSelection {
+  readonly skill: PrivateSkill;
+  readonly selection: SelectedSkillRole;
+}
+
 export function selectPlanningSkills(
   skills: readonly PrivateSkill[],
   taskInput: string,
   boundSkillIds: readonly string[],
 ): PrivateSkill[] {
+  return selectPlanningSkillRoles(skills, taskInput, boundSkillIds).map((item) => item.skill);
+}
+
+export function selectPlanningSkillRoles(
+  skills: readonly PrivateSkill[],
+  taskInput: string,
+  boundSkillIds: readonly string[],
+): PlanningSkillRoleSelection[] {
   if (skills.length === 0) return [];
   // Conversation history is model context, not authorization or task scope.
   // Letting old deliverables select today's Skill leaks prior work into the
   // current capability decision.
   const signal = normalizePlanningSignal(taskInput);
-  const exactMatches = skills.filter((skill) => exactSkillMention(signal, skill));
-  if (exactMatches.length > 0) return exactMatches.slice(0, MAX_PLANNING_SKILLS);
+  const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
-  const scored = skills.map((skill, index) => ({
+  const roleEligibleSkills = skills.filter((skill) => {
+    const selection = selectFirstRoundSkillRole(skill, signal, exactSkillMention(signal, skill) || bound.has(skill.id));
+    if (selection === undefined) return false;
+    roleBySkillId.set(skill.id, selection);
+    return true;
+  });
+  if (roleEligibleSkills.length === 0) return [];
+  const exactMatches = roleEligibleSkills.filter((skill) => exactSkillMention(signal, skill));
+  if (exactMatches.length > 0) {
+    return exactMatches.slice(0, MAX_PLANNING_SKILLS).map((skill) => ({
+      skill,
+      selection: roleBySkillId.get(skill.id)!,
+    }));
+  }
+  const scored = roleEligibleSkills.map((skill, index) => ({
     skill,
     index,
     score: scorePlanningSkill(skill, signal, bound.has(skill.id)),
@@ -1919,14 +2333,27 @@ export function selectPlanningSkills(
     return scored
       .filter((entry) => entry.score === topScore)
       .slice(0, LOW_CONFIDENCE_PLANNING_SKILL_LIMIT)
-      .map((entry) => entry.skill);
+      .map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! }));
   }
   const secondScore = scored[1]?.score ?? 0;
   const strongWinner = topScore - secondScore >= STRONG_WINNER_GAP;
   const candidates = scored.filter((entry) => entry.score >= Math.max(MIN_PLANNING_SKILL_SCORE, topScore - 1));
-  return (strongWinner ? scored.slice(0, 1) : candidates)
-    .slice(0, MAX_PLANNING_SKILLS)
-    .map((entry) => entry.skill);
+  let selected = (strongWinner ? scored.slice(0, 1) : candidates)
+    .slice(0, MAX_PLANNING_SKILLS);
+  if (requestsArtifactBuild(signal) && !explicitStylingRequested(signal)) {
+    const hasPrimaryBuilder = selected.some((entry) => {
+      const text = normalizePlanningSignal(`${entry.skill.name}\n${entry.skill.description}`);
+      return !isStylingSupportSurface(text) && isPrimaryArtifactBuilderSkill(text);
+    });
+    if (hasPrimaryBuilder) {
+      selected = selected.filter((entry) => {
+        if (bound.has(entry.skill.id)) return true;
+        const text = normalizePlanningSignal(`${entry.skill.name}\n${entry.skill.description}`);
+        return !isStylingSupportSurface(text);
+      });
+    }
+  }
+  return selected.map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! }));
 }
 
 // This is a relevance prefilter, not a capability boundary. Keep enough
@@ -1937,6 +2364,79 @@ const MIN_PLANNING_SKILL_SCORE = 2;
 const LOW_CONFIDENCE_PLANNING_SKILL_SCORE = 1;
 const LOW_CONFIDENCE_PLANNING_SKILL_LIMIT = 2;
 const STRONG_WINNER_GAP = 2;
+
+function selectFirstRoundSkillRole(
+  skill: PrivateSkill,
+  signal: string,
+  explicitlyRequested: boolean,
+): SelectedSkillRole | undefined {
+  const metadata = skill.agentLoop;
+  if (metadata === undefined) return undefined;
+  const roles = new Set(metadata.roles);
+  const artifactKinds = new Set(metadata.artifactKinds);
+  if (roles.has("primary_builder") && (explicitlyRequested || matchesRequestedArtifactKind(signal, artifactKinds))) {
+    return {
+      skillId: skill.id,
+      role: "primary_builder",
+      reason: "Skill metadata declares primary_builder for the requested first-round artifact boundary.",
+    };
+  }
+  if (roles.has("source_provider") && requestsSourceWork(signal)) {
+    return {
+      skillId: skill.id,
+      role: "source_provider",
+      reason: "Skill metadata declares source_provider for requested source-grounded work.",
+    };
+  }
+  if (roles.has("support") && explicitSupportSkillRequested(signal)) {
+    return {
+      skillId: skill.id,
+      role: "support",
+      reason: "The user explicitly requested a support capability declared by Skill metadata.",
+    };
+  }
+  if (roles.has("qa") && explicitQaSkillRequested(signal)) {
+    return {
+      skillId: skill.id,
+      role: "qa",
+      reason: "The user explicitly requested a QA capability declared by Skill metadata.",
+    };
+  }
+  return undefined;
+}
+
+function matchesRequestedArtifactKind(signal: string, artifactKinds: ReadonlySet<string>): boolean {
+  if (artifactKinds.has("none")) return !requestsArtifactBuild(signal);
+  const requested = requestedArtifactKinds(signal);
+  if (requested.size === 0) return artifactKinds.size === 0;
+  for (const kind of requested) {
+    if (artifactKinds.has(kind)) return true;
+  }
+  return false;
+}
+
+function requestedArtifactKinds(signal: string): Set<string> {
+  const result = new Set<string>();
+  if (/(?:html|web\s?page|webpage|landing\s?page|网页|页面|浏览器|站点|website)/iu.test(signal)) result.add("html");
+  if (/(?:pptx?|slides?|deck|presentation|幻灯片|演示文稿|课件)/iu.test(signal)) result.add("presentation");
+  if (/(?:docx?|word|document|文档|报告书)/iu.test(signal)) result.add("document");
+  if (/(?:xlsx?|spreadsheet|sheet|csv|表格|工作簿)/iu.test(signal)) result.add("spreadsheet");
+  if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(signal)) result.add("image");
+  if (/(?:code|script|program|app|代码|脚本|程序|应用)/iu.test(signal)) result.add("code");
+  return result;
+}
+
+function requestsSourceWork(signal: string): boolean {
+  return /(?:source|research|lookup|cite|citation|standard|policy|regulation|rating|certification|api|database|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处|接口|数据源)/iu.test(signal);
+}
+
+function explicitSupportSkillRequested(signal: string): boolean {
+  return /(?:support skill|theme|styling|palette|font|visual identity|辅助技能|支撑技能|主题|样式|配色|字体|视觉规范)/iu.test(signal);
+}
+
+function explicitQaSkillRequested(signal: string): boolean {
+  return /(?:qa skill|quality assurance|independent qa|acceptance|review|audit|验收技能|质检技能|独立验收|质量审查|审计)/iu.test(signal);
+}
 
 function exactSkillMention(signal: string, skill: PrivateSkill): boolean {
   const normalizedName = skill.name.toLowerCase();
@@ -1965,7 +2465,56 @@ function scorePlanningSkill(skill: PrivateSkill, signal: string, bound: boolean)
   if (signal.includes("html") && text.includes("html")) score += 2;
   if (signal.includes("web") && text.includes("web")) score += 2;
   if (signal.includes("ppt") && text.includes("slide")) score += 2;
+  if (requestsHtmlPresentation(signal)) {
+    if (isHtmlArtifactBuilderSkill(text)) score += 6;
+    if (isPresentationBuilderSkill(text)) score += 3;
+  }
+  if (requestsArtifactBuild(signal)) {
+    if (isPrimaryArtifactBuilderSkill(text)) score += 3;
+    if (isStylingSupportSkill(text) && !explicitStylingRequested(signal)) score -= 4;
+  }
   return score;
+}
+
+function requestsHtmlPresentation(signal: string): boolean {
+  return /(?:\bhtml[-_ ]?ppt\b|\bhtml[-_ ]?(?:presentation|slides?|deck)\b|\b(?:presentation|slides?|deck)[-_ ]?html\b|html.{0,24}(?:演示|课件|幻灯片)|(?:演示|课件|幻灯片).{0,24}html)/iu.test(signal);
+}
+
+function requestsArtifactBuild(signal: string): boolean {
+  return /(?:\b(?:make|create|build|generate|produce|deliver|write|export|design)\b|做|制作|创建|生成|产出|输出|交付|写|设计)/iu.test(signal)
+    && /(?:\b(?:html|web\s?page|webpage|pptx?|slides?|deck|presentation|artifact|file|dashboard|report|image|visual|canvas|poster|artwork)\b|材料|课件|演示|幻灯片|页面|文件|产物|报告|看板|海报|图片|图像|视觉|画布)/iu.test(signal);
+}
+
+function explicitStylingRequested(signal: string): boolean {
+  return /(?:\b(?:theme|style|styling|visual|palette|font|brand|polish|design)\b|主题|样式|视觉|配色|字体|品牌|美化|排版|设计)/iu.test(signal);
+}
+
+function isHtmlArtifactBuilderSkill(text: string): boolean {
+  return /(?:web-artifacts-builder|html artifacts?|single html|frontend|react|vite|tailwind|网页|页面)/iu.test(text)
+    && /(?:build|create|generate|produce|bundle|artifact|构建|创建|生成|产物)/iu.test(text);
+}
+
+function isPresentationBuilderSkill(text: string): boolean {
+  return /(?:presentation-skill|powerpoint|pptx|slide[- ]?deck|deck builder|presentation generator|slides?|演示文稿|幻灯片)/iu.test(text)
+    && /(?:build|create|generate|produce|render|export|editable|构建|创建|生成|渲染|导出)/iu.test(text);
+}
+
+function isPrimaryArtifactBuilderSkill(text: string): boolean {
+  return isHtmlArtifactBuilderSkill(text)
+    || isPresentationBuilderSkill(text)
+    || /(?:build-dashboard|dashboard|report|document|pdf|docx|xlsx|canvas|image|visual|poster|artwork|artifact).{0,160}(?:build|create|generate|produce|render|export|write|design|构建|创建|生成|渲染|导出|写入|设计)/iu.test(text)
+    || /(?:build|create|generate|produce|render|export|write|design|构建|创建|生成|渲染|导出|写入|设计).{0,160}(?:canvas|image|visual|poster|artwork|artifact|dashboard|report|document|pdf|docx|xlsx)/iu.test(text);
+}
+
+function isStylingSupportSkill(text: string): boolean {
+  return isStylingSupportSurface(text)
+    && !isHtmlArtifactBuilderSkill(text)
+    && !isPresentationBuilderSkill(text);
+}
+
+function isStylingSupportSurface(text: string): boolean {
+  return /(?:theme-factory|theme|styling|palette|font|color|visual identity|主题|样式|配色|字体)/iu.test(text)
+    && /(?:apply|styling|style|choose|colors|fonts|应用|选择|配色|字体)/iu.test(text);
 }
 
 function planningSkillAliases(skill: PrivateSkill): string[] {
@@ -2189,13 +2738,14 @@ function commitCompletedPlan(
   plan: ExecutionPlan,
   runId: string,
   output: string,
-): void {
+): string {
   const reasonCode = completionCaveatReasonCode(plan, assessments);
   if (reasonCode === undefined) {
     terminal.commitCompleted(runId, plan.id, output);
-    return;
+    return "plan_assessed_and_completed";
   }
   terminal.commitCompletedWithCaveats(runId, plan.id, output, reasonCode);
+  return reasonCode;
 }
 
 function completionCaveatReasonCode(
@@ -2204,6 +2754,9 @@ function completionCaveatReasonCode(
 ): string | undefined {
   if (plan.steps.some((step) => step.evidence?.completionCaveat?.reason === "repair_limit")) {
     return "completed_with_repair_limit_caveat";
+  }
+  if (plan.steps.some((step) => step.evidence?.completionCaveat?.reason === "evidence_boundary")) {
+    return "completed_with_evidence_boundary";
   }
   const latestByStep = new Map<string, SkillComplianceAssessment>();
   for (const assessment of assessments) latestByStep.set(assessment.stepId, assessment);
@@ -2232,6 +2785,66 @@ function shouldDeferValidationToUser(input: {
   if (!input.assessment.skills.some((skill) => skill.status === "skipped_unavailable")) return false;
   if (artifactExtensionsProducedByEvidence(input.evidence.toolCalls).size === 0) return false;
   return input.assessment.criteria.some((criterion) => !criterion.satisfied);
+}
+
+function shouldCompleteWithEvidenceBoundary(input: {
+  assessment: SkillComplianceAssessment;
+  assessmentAttempt: number;
+  step: ExecutionPlan["steps"][number];
+  evidence: StepEvidence;
+}): boolean {
+  if (input.assessment.approved) return false;
+  if (input.assessmentAttempt < 2) return false;
+  if (!stepUsesExternalSourceTools(input.step)) return false;
+  if (stepRequiresFileOutput(input.step) && artifactExtensionsProducedByEvidence(input.evidence.toolCalls).size === 0) {
+    return false;
+  }
+  if (!hasSuccessfulExternalSourceEvidence(input.evidence.toolCalls)) return false;
+  const boundaryText = [
+    input.step.objective,
+    ...input.step.successCriteria.map((criterion) => criterion.description),
+    input.evidence.candidateOutput,
+    input.assessment.feedback,
+    ...input.assessment.criteria.map((criterion) => criterion.rationale),
+  ].join("\n");
+  if (matchesRiskSensitiveAssessment(boundaryText)) return false;
+  if (requiresStrictExternalSourceCompletion(boundaryText)) return false;
+  if (!acknowledgesEvidenceBoundary(boundaryText)) return false;
+  return hasUnavailableExternalSourceEvidence(input.evidence.toolCalls)
+    || acknowledgesMissingSourceFacts(boundaryText);
+}
+
+function stepUsesExternalSourceTools(step: ExecutionPlan["steps"][number]): boolean {
+  return step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
+}
+
+function hasSuccessfulExternalSourceEvidence(toolCalls: readonly ToolEvidence[]): boolean {
+  return toolCalls.some((toolCall) =>
+    !toolCall.isError && (toolCall.toolName === "websearch" || toolCall.toolName === "webfetch")
+  );
+}
+
+function hasUnavailableExternalSourceEvidence(toolCalls: readonly ToolEvidence[]): boolean {
+  return toolCalls.some((toolCall) =>
+    (toolCall.toolName === "websearch" || toolCall.toolName === "webfetch")
+    && toolCall.isError
+    && /(?:\b(?:403|404|429|500|502|503|504)\b|forbidden|not found|timeout|timed out|unavailable|refused|blocked|denied|network|fetching|无法|不可访问|拒绝|超时|不可用|失败)/iu.test(toolCall.result)
+  );
+}
+
+function acknowledgesEvidenceBoundary(value: string): boolean {
+  return /(?:未核验|未取得|无法取得|不可获取|不可访问|尚未取得|尚未核验|访问受限|权威.*缺|缺少.*权威|有限|局部|部分|不足以|不足|边界|降级|无法|403|404|429|500|502|503|504|\bnot verified\b|\bunverified\b|\bunavailable\b|\binaccessible\b|\blimited\b|\binsufficient\b|\bpartial\b|\bboundary\b)/iu
+    .test(value);
+}
+
+function acknowledgesMissingSourceFacts(value: string): boolean {
+  return /(?:标准全文未|全文未|未(?:取得|获得|提供|公开|核验|验证|确认|查到).*(?:全文|权威|标准|来源|资料|事实|条款|要求|细则)|无法(?:取得|获得|访问|核验|验证|确认|公开确认|可靠核实).*(?:全文|权威|标准|来源|资料|事实|条款|要求|细则)|(?:不可用|未验证|未核验|未确认|无法公开确认|无法可靠核实).{0,24}(?:事实|内容|要求|条款|细则|全文)|没有.*(?:权威|充分).*证据|缺少.*(?:权威|来源|事实|条款|全文|要求|细则)|不可作为.*(?:标准事实|已确认事实)|不能.*(?:作为|认定|批准).*事实|不得.*(?:标为|写成).*事实|仍待核验|待核验|not claim.*verified|missing source facts|source facts remain unverified|full text remains unverified)/iu
+    .test(value);
+}
+
+function requiresStrictExternalSourceCompletion(value: string): boolean {
+  return /(?:必须(?:严格)?(?:依据|按照|基于).*(?:全文|原文|逐条|条款|最新|现行|权威)|不得使用.*(?:模型|自身知识|通用知识)|不能使用.*(?:模型|自身知识|通用知识)|只(?:能|允许).*(?:权威|官方|标准全文|原文)|strictly.*(?:official|authoritative|standard|clause)|must.*(?:official|authoritative|standard text|exact clause)|only.*(?:official|authoritative|standard text|exact clause))/iu
+    .test(value);
 }
 
 function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment): boolean {
@@ -2562,19 +3175,32 @@ function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<unknown
   };
 }
 
-function buildStepSystemPrompt(systemPrompt: string): string {
-  const sections = [systemPrompt.trim()];
-  sections.push([
-    "<runtime_contract>",
-    "Work only on the current admitted Plan step.",
-    "The runtime owns authorization, persistence, assessment, Plan progression, and terminal completion.",
-    "Do not perform work reserved for a pending downstream Plan step unless the current step objective or success criteria explicitly require that same artifact.",
-    "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
-    "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
-    "Use only currently exposed tools. Tool success alone does not prove the step is complete.",
-    "</runtime_contract>",
-  ].join("\n"));
-  return sections.join("\n\n");
+function executionTaskProfile(operationProfile: DynamicPromptProfile, skillBound: boolean): TaskProfile {
+  return buildTaskProfile({
+    phase: "execution",
+    intent: "execute",
+    operations: [operationProfile],
+    skillBound,
+  });
+}
+
+function buildStepSystemPrompt(
+  systemPrompt: string,
+  taskProfile: TaskProfile,
+): string {
+  return buildDynamicSystemPrompt({
+    phase: "execution",
+    baseInstructions: [systemPrompt.trim()],
+    contractLines: [
+      "Work only on the current admitted Plan step.",
+      "The runtime owns authorization, persistence, assessment, Plan progression, and terminal completion.",
+      "Do not perform work reserved for a pending downstream Plan step unless the current step objective or success criteria explicitly require that same artifact.",
+      "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
+      "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
+      "Use only currently exposed tools. Tool success alone does not prove the step is complete.",
+    ],
+    taskProfile,
+  });
 }
 
 function buildStepRuntimeContext(
@@ -2584,10 +3210,16 @@ function buildStepRuntimeContext(
   workspaceRoot: string,
   visibleDirectories: readonly VisibleDirectoryGrant[] = [],
   skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
+  taskProfile: TaskProfile = executionTaskProfile(executionOperationProfile({
+    objective: step.objective,
+    successCriteria: step.successCriteria,
+    requiredToolNames: step.requiredToolNames,
+    skillNames: skills.map((skill) => skill.name),
+  }), skills.length > 0),
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const skillCatalog = formatAvailableSkills(skills);
   const usesWebTools = step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
-  const operationProfile = executionOperationProfile({
+  const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
     successCriteria: step.successCriteria,
     requiredToolNames: step.requiredToolNames,
@@ -2639,11 +3271,18 @@ function buildStepRuntimeContext(
               + "Never re-search by splitting single words or characters out of result titles. "
               + "Judge relevance from the snippet; to broaden coverage raise numResults (max 10) in one "
               + "search instead of searching repeatedly. Fetch 2-3 of the returned URLs with webfetch and "
-              + "read the full text. Issue at most 1-2 searches per step.",
+              + "read the full text. Issue at most 1-2 searches per step. If key authoritative sources are "
+              + "unavailable, forbidden, paywalled, or do not expose full text after bounded attempts, treat that "
+              + "as an evidence boundary rather than the user's goal. Do not invent the missing facts. Submit a "
+              + "limited-evidence candidate that separates verified source facts, unavailable or unverified facts, "
+              + "and any model-organized structure or practice advice so downstream artifact work can continue "
+              + "with visible caveats when appropriate. Treat external evidence as a required blocker only when "
+              + "the user or current step explicitly requires exact/current/official source facts as the deliverable.",
           }
           : {}),
       }),
       "</execution_context>",
+      formatDynamicPromptContext(taskProfile),
       skillCatalog,
     ].filter(Boolean).join("\n"),
   };
@@ -2656,8 +3295,14 @@ function buildRecoveredStepRuntimeContext(
   workspaceRoot: string,
   recoveryFacts: unknown,
   skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
+  taskProfile: TaskProfile = executionTaskProfile(executionOperationProfile({
+    objective: step.objective,
+    successCriteria: step.successCriteria,
+    requiredToolNames: step.requiredToolNames,
+    skillNames: skills.map((skill) => skill.name),
+  }), skills.length > 0),
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
-  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot, [], skillExecutionRoots);
+  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot, [], skillExecutionRoots, taskProfile);
   return {
     ...base,
     content: [

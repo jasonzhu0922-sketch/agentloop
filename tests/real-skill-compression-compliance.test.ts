@@ -206,13 +206,13 @@ class CompressionComplianceModel implements ModelAdapter {
   }
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
-    if (request.systemPrompt.includes("planning phase of a plan-first agent runtime")) {
+    if (request.systemPrompt.includes("Planner for a Plan-first Runtime")) {
       return this.plan(request);
     }
     if (request.systemPrompt.includes("context summarization component inside an agent runtime")) {
       return this.summarize(request);
     }
-    if (request.systemPrompt.includes("independent completion assessor in a plan-first agent runtime")) {
+    if (request.phase === "assessment") {
       return this.assess(request);
     }
     return this.execute(request);
@@ -221,19 +221,29 @@ class CompressionComplianceModel implements ModelAdapter {
   private plan(request: ModelInvocation): ModelResponse {
     this.plannerCalls += 1;
     assert.equal(this.plannerCalls, 1);
-    assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_plan"]);
+    assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
     assert.match(request.runtimeContext?.content ?? "", new RegExp(`<name>${this.scenario.skillName}</name>`));
     this.assertSkillIsNotVisible(request);
-    return toolResponse("planner-submit", "submit_plan", {
+    return toolResponse("planner-submit", "submit_outcome_plan", {
+      schema: "agentloop.outcomePlan/v2",
       goal: this.scenario.task,
-      selectedSkillIds: [this.skillId],
-      steps: [{
+      shape: "single_leaf",
+      selectedSkillRoles: [{
+        skillId: this.skillId,
+        role: "primary_builder",
+        reason: "The requested delivery must follow the selected real Skill package.",
+      }],
+      leaves: [{
         id: `deliver-${this.scenario.skillName}`,
         objective: this.scenario.criterion,
-        dependencies: [],
+        dependsOn: [],
+        role: "produce",
         skillIds: [this.skillId],
         requiredToolNames: [DELIVERY_TOOL],
-        successCriteria: [{ id: "delivery", description: this.scenario.criterion }],
+        evidenceContract: {
+          requiredKinds: ["delivery_receipt"],
+          caveatPolicy: "none",
+        },
       }],
     });
   }
@@ -300,7 +310,7 @@ class CompressionComplianceModel implements ModelAdapter {
       assert.match(assessmentInput.evidence.candidateOutput, /INTENTIONALLY-OVERLONG-UNVERIFIED-DRAFT/);
       return toolResponse("assessment-reject", "submit_assessment", {
         criteria: [{
-          criterionId: "delivery",
+          criterionId: "delivery_receipt",
           satisfied: false,
           rationale: "The first candidate is intentionally unverified and does not cite the controlled delivery.",
           evidenceRefs: [],
@@ -319,7 +329,7 @@ class CompressionComplianceModel implements ModelAdapter {
     assert.equal(assessmentInput.evidence.candidateOutput, this.scenario.finalOutput);
     return toolResponse("assessment-approve", "submit_assessment", {
       criteria: [{
-        criterionId: "delivery",
+        criterionId: "delivery_receipt",
         satisfied: true,
         rationale: "The final candidate cites the controlled delivery and its Skill-specific design decisions.",
         evidenceRefs: ["candidateOutput", "test-record-delivery"],
