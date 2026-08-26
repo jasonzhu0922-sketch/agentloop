@@ -8,7 +8,7 @@ import { AuthService } from "../src/auth/auth-service.ts";
 import type { Planner, StepAssessor } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
-import { inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
+import { copySkillPackage, inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
@@ -153,6 +153,60 @@ test("a discovered Skill directory supersedes an old same-name private Skill rec
       }),
       /A discovered Skill named "directory-demo" already exists/,
     );
+  } finally {
+    database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("startup pruning removes legacy directory package records after source deletion", async () => {
+  const fixture = await createDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const owner = await auth.register("legacy-directory-prune@example.com", "legacy directory prune secure password");
+    const skills = new SkillService(database, {
+      packageStoreRoot: fixture.packageStore,
+      skillDirectory: fixture.skillDirectory,
+    });
+    const inspection = await inspectSkillPackage(fixture.sourcePackage);
+    const ownerPackageRoot = resolve(fixture.packageStore, owner.user.id);
+    await fs.mkdir(ownerPackageRoot, { recursive: true });
+    const copied = await copySkillPackage(inspection, resolve(ownerPackageRoot, randomUUID()));
+    const now = Date.now();
+    database.prepare(`
+      INSERT INTO skills(
+        id, owner_user_id, name, description, instructions, source_kind,
+        source_url, source_revision, package_root, entrypoint_path,
+        package_hash, package_file_count, package_total_bytes,
+        content_hash, version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'package', NULL, NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      "legacy-directory-demo",
+      owner.user.id,
+      copied.name,
+      copied.description,
+      copied.instructions,
+      copied.root,
+      copied.entrypointPath,
+      copied.packageHash,
+      copied.fileCount,
+      copied.totalBytes,
+      copied.packageHash,
+      now,
+      now,
+    );
+
+    await fs.rm(fixture.sourcePackage, { recursive: true, force: true });
+    await skills.refreshSkillDirectory();
+    assert.deepEqual((await skills.listAvailable(owner.user.id)).map((skill) => skill.id), ["legacy-directory-demo"]);
+
+    const pruned = await skills.pruneLegacyDirectoryPackageSkills();
+
+    assert.equal(pruned, 1);
+    assert.deepEqual(await skills.listAvailable(owner.user.id), []);
+    await assert.rejects(() => fs.stat(copied.root), /ENOENT/);
   } finally {
     database.close();
     await removeSkillPackage(fixture.packageStore).catch(() => undefined);

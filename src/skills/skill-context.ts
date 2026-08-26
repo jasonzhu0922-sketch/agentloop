@@ -56,6 +56,7 @@ export function formatLoadedSkill(
         ...(executionCwd === undefined ? [] : [
           `Runtime execution cwd for this Skill: ${executionCwd}`,
           `The ${executionCwd} token is a Runtime command-root alias, not an operating-system path.`,
+          `For read-only Skill reference files, use ${executionCwd}/... paths with computer_read_file, computer_list_directory, computer_find_files, or computer_search_text.`,
           `Use ${executionCwd} only as computer_run_command.cwd. Do not write ${executionCwd}/... into generated scripts, config files, or ordinary command arguments.`,
           `When running package scripts with computer_run_command, set cwd to "${executionCwd}" and pass script paths relative to that Skill root.`,
         ]),

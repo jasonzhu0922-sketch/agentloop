@@ -168,9 +168,19 @@ interface ResolvedReadableFile {
   readonly requestedPath?: string;
 }
 
+interface ResolvedReadablePath extends ResolvedReadableFile {
+  readonly rootPath: string;
+  readonly rootWorkspacePath: string;
+}
+
 interface LocatedReadableFile extends ResolvedReadableFile {
   readonly directoryPriority: number;
   readonly depth: number;
+}
+
+interface SearchPathProjection {
+  readonly root: string;
+  readonly displayRoot: string;
 }
 
 export interface CommandRootMount {
@@ -256,7 +266,7 @@ export class ComputerExecutor {
   }
 
   async listDirectory(path: string): Promise<Array<{ name: string; type: string }>> {
-    const target = await this.resolveExisting(path);
+    const target = (await this.resolveReadablePath(path)).absolutePath;
     const entries = await fs.readdir(target, { withFileTypes: true });
     return entries.slice(0, 2_000).map((entry) => ({
       name: entry.name,
@@ -377,7 +387,8 @@ export class ComputerExecutor {
     truncated: boolean;
   }> {
     if (pattern.trim().length === 0) throw badRequest("pattern must be non-empty");
-    const root = await this.resolveExisting(path);
+    const resolvedRoot = await this.resolveReadablePath(path);
+    const root = resolvedRoot.absolutePath;
     const rootStat = await fs.stat(root);
     const limit = Math.min(Math.max(1, options.limit ?? FIND_DEFAULT_LIMIT), FIND_MAX_LIMIT);
     const matcher = globMatcher(pattern);
@@ -385,10 +396,10 @@ export class ComputerExecutor {
     let totalMatches = 0;
     const addMatch = (absolutePath: string): void => {
       const rel = relative(root, absolutePath).split(sep).join("/") || ".";
-      const workspaceRel = relative(this.workspaceRoot, absolutePath).split(sep).join("/") || ".";
-      if (matcher(rel) || matcher(workspaceRel)) {
+      const readablePath = displayPathWithinRoot(absolutePath, resolvedRoot.rootPath, resolvedRoot.rootWorkspacePath);
+      if (matcher(rel) || matcher(readablePath)) {
         totalMatches += 1;
-        if (matches.length < limit) matches.push(workspaceRel);
+        if (matches.length < limit) matches.push(readablePath);
       }
     };
     if (rootStat.isFile()) {
@@ -741,7 +752,8 @@ export class ComputerExecutor {
     query: string,
     options: { maxFiles?: number; maxMatches?: number; contextBefore?: number; contextAfter?: number } = {},
   ): Promise<SearchMatch[]> {
-    const root = await this.resolveExisting(path);
+    const resolvedRoot = await this.resolveReadablePath(path);
+    const root = resolvedRoot.absolutePath;
     const maxFiles = options.maxFiles ?? 5_000;
     const maxMatches = options.maxMatches ?? 200;
     const contextBefore = Math.min(options.contextBefore ?? 0, SEARCH_CONTEXT_MAX_LINES);
@@ -752,14 +764,14 @@ export class ComputerExecutor {
     let matches: SearchMatch[];
     if (binary !== undefined) {
       try {
-        matches = sortSearchMatches(await this.searchWithBinary(binary, rg !== undefined, root, query, maxMatches));
+        matches = sortSearchMatches(await this.searchWithBinary(binary, rg !== undefined, resolvedRoot, query, maxMatches));
         return await this.attachSearchContext(matches, contextBefore, contextAfter);
       } catch {
         // The trusted search binary could not run (e.g. it vanished after startup);
         // fall through to the portable pure-JS walk below.
       }
     }
-    matches = sortSearchMatches(await this.searchWithWalk(root, query, maxFiles, maxMatches));
+    matches = sortSearchMatches(await this.searchWithWalk(resolvedRoot, query, maxFiles, maxMatches));
     return await this.attachSearchContext(matches, contextBefore, contextAfter);
   }
 
@@ -771,7 +783,7 @@ export class ComputerExecutor {
   private async searchWithBinary(
     binary: string,
     ripgrep: boolean,
-    root: string,
+    root: ResolvedReadablePath,
     query: string,
     maxMatches: number,
   ): Promise<SearchMatch[]> {
@@ -781,15 +793,17 @@ export class ComputerExecutor {
     const args = ripgrep
       ? [
         "--json", "-F", "-e", query, "-m", String(maxMatches),
-        "--max-filesize", "1M", "-g", "!node_modules", "-g", "!.git", root,
+        "--max-filesize", "1M", "-g", "!node_modules", "-g", "!.git", root.absolutePath,
       ]
       : [
         "-RHIn", "-F", "-e", query, "-m", String(maxMatches),
-        "--exclude-dir=node_modules", "--exclude-dir=.git", root,
+        "--exclude-dir=node_modules", "--exclude-dir=.git", root.absolutePath,
       ];
     const parseLine = ripgrep
-      ? (line: string): SearchMatch | undefined => parseRgJsonLine(line, this.workspaceRoot)
-      : (line: string): SearchMatch | undefined => parseGrepLine(line, root, this.workspaceRoot);
+      ? (line: string): SearchMatch | undefined =>
+        parseRgJsonLine(line, this.workspaceRoot, { root: root.rootPath, displayRoot: root.rootWorkspacePath })
+      : (line: string): SearchMatch | undefined =>
+        parseGrepLine(line, root.absolutePath, this.workspaceRoot, root.rootPath, root.rootWorkspacePath);
     return new Promise<SearchMatch[]>((resolve, reject) => {
       let settled = false;
       let stdoutBuffer = "";
@@ -835,17 +849,17 @@ export class ComputerExecutor {
 
   /** Portable fallback: bounded-parallel traversal + streaming line match. */
   private async searchWithWalk(
-    root: string,
+    root: ResolvedReadablePath,
     query: string,
     maxFiles: number,
     maxMatches: number,
   ): Promise<SearchMatch[]> {
     const files: string[] = [];
-    const rootStat = await fs.stat(root);
+    const rootStat = await fs.stat(root.absolutePath);
     if (rootStat.isFile()) {
-      files.push(root);
+      files.push(root.absolutePath);
     } else {
-      const dirQueue: string[] = [root];
+      const dirQueue: string[] = [root.absolutePath];
       while (dirQueue.length > 0 && files.length < maxFiles) {
         const batch = dirQueue.splice(0, SEARCH_FILE_CONCURRENCY);
         const scanned = await Promise.all(batch.map(async (directory) => {
@@ -894,7 +908,7 @@ export class ComputerExecutor {
           if (lineText.endsWith("\r")) lineText = lineText.slice(0, -1);
           if (lineText.includes(query)) {
             results.push({
-              path: relative(this.workspaceRoot, file) || ".",
+              path: displayPathWithinRoot(file, root.rootPath, root.rootWorkspacePath),
               line: lineNumber,
               text: lineText.slice(0, 2_000),
             });
@@ -1229,11 +1243,7 @@ export class ComputerExecutor {
 
   private async resolveReadableFile(path: string): Promise<ResolvedReadableFile> {
     try {
-      const absolutePath = await this.resolveExisting(path);
-      return {
-        absolutePath,
-        workspacePath: relative(this.workspaceRoot, absolutePath).split(sep).join("/") || ".",
-      };
+      return await this.resolveReadablePath(path);
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== "NOT_FOUND" || !isBareFilename(path)) throw error;
       const candidates = await this.locateReadableFilesByBasename(path);
@@ -1255,6 +1265,45 @@ export class ComputerExecutor {
       }
       return { absolutePath: best.absolutePath, workspacePath: best.workspacePath, requestedPath: path };
     }
+  }
+
+  private async resolveReadablePath(path: string): Promise<ResolvedReadablePath> {
+    const mounted = await this.resolveReadableSkillRootPath(path);
+    if (mounted !== undefined) return mounted;
+    const absolutePath = await this.resolveExisting(path);
+    return {
+      absolutePath,
+      workspacePath: relative(this.workspaceRoot, absolutePath).split(sep).join("/") || ".",
+      rootPath: this.workspaceRoot,
+      rootWorkspacePath: ".",
+    };
+  }
+
+  private async resolveReadableSkillRootPath(path: string): Promise<ResolvedReadablePath | undefined> {
+    const normalized = path.replace(/\\/g, "/").replace(/\/+$/u, "") || ".";
+    if (!normalized.startsWith("@skills/")) return undefined;
+    const matchingRoot = this.commandRoots.find((root) =>
+      root.id.startsWith("@skills/")
+      && (normalized === root.id || normalized.startsWith(`${root.id}/`))
+    );
+    if (matchingRoot === undefined) {
+      throw forbidden(`Skill root is not authorized for this run: ${normalized.split("/").slice(0, 2).join("/")}`);
+    }
+    const suffix = normalized === matchingRoot.id ? "." : normalized.slice(matchingRoot.id.length + 1);
+    const target = resolve(matchingRoot.path, suffix);
+    const canonical = await fs.realpath(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        throw new AppError("NOT_FOUND", `Path not found: ${path}`, 404);
+      }
+      throw error;
+    });
+    assertInsideRoot(canonical, matchingRoot.path, `Skill root ${matchingRoot.id}`);
+    return {
+      absolutePath: canonical,
+      workspacePath: displayPathWithinRoot(canonical, matchingRoot.path, matchingRoot.id),
+      rootPath: matchingRoot.path,
+      rootWorkspacePath: matchingRoot.id,
+    };
   }
 
   private async locateReadableFilesByBasename(name: string): Promise<LocatedReadableFile[]> {
@@ -1341,6 +1390,10 @@ export class ComputerExecutor {
   ): Promise<void> {
     const allowedRoots = [this.workspaceRoot, ...this.commandRoots.map((root) => root.path)];
     for (const argument of args) {
+      const normalizedArgument = argument.replace(/\\/g, "/");
+      if (normalizedArgument.startsWith("@skills/") || normalizedArgument.startsWith("@visible/")) {
+        throw forbidden("Virtual command-root aliases may only be used as computer_run_command.cwd, not as command arguments");
+      }
       for (const candidate of absolutePathCandidates(argument)) {
         const normalized = resolve(candidate);
         const canonical = await fs.realpath(normalized).catch((error: NodeJS.ErrnoException) => {
@@ -1363,6 +1416,10 @@ export class ComputerExecutor {
   }
 
   private async resolveWritable(path: string): Promise<string> {
+    const normalized = path.replace(/\\/g, "/");
+    if (normalized.startsWith("@skills/") || normalized.startsWith("@visible/")) {
+      throw forbidden("Virtual command-root aliases are read-only and cannot be used as computer write targets");
+    }
     const target = this.lexicalPath(path);
     this.assertNotReadOnly(target);
     const parentTarget = dirname(target);
@@ -1666,6 +1723,19 @@ function readFileResolutionMetadata(
     : { requestedPath: resolvedFile.requestedPath, resolvedPath: resolvedFile.workspacePath };
 }
 
+function displayPathWithinRoot(absolutePath: string, root: string, displayRoot: string): string {
+  const rel = relative(root, absolutePath).split(sep).join("/") || ".";
+  if (displayRoot === ".") return rel;
+  return rel === "." ? displayRoot : `${displayRoot}/${rel}`;
+}
+
+function projectSearchPath(absolutePath: string, workspaceRoot: string, projection?: SearchPathProjection): string {
+  if (projection !== undefined && isInsideRoot(absolutePath, projection.root)) {
+    return displayPathWithinRoot(absolutePath, projection.root, projection.displayRoot);
+  }
+  return relative(workspaceRoot, absolutePath).split(sep).join("/") || ".";
+}
+
 function normalizeReadLineRanges(ranges: readonly ReadLineRange[]): NormalizedReadLineRange[] {
   if (ranges.length === 0 || ranges.length > READ_RANGE_MAX_RANGES) {
     throw badRequest(`ranges must contain between 1 and ${READ_RANGE_MAX_RANGES} entries`);
@@ -1955,7 +2025,11 @@ function escapeRegExp(value: string): string {
  * keeps the path, line number and line text in distinct fields, so neither a
  * Windows drive letter nor a `:` inside a path/text can corrupt the parse.
  */
-export function parseRgJsonLine(line: string, workspaceRoot: string): SearchMatch | undefined {
+export function parseRgJsonLine(
+  line: string,
+  workspaceRoot: string,
+  projection?: SearchPathProjection,
+): SearchMatch | undefined {
   let record: unknown;
   try {
     record = JSON.parse(line);
@@ -1972,7 +2046,7 @@ export function parseRgJsonLine(line: string, workspaceRoot: string): SearchMatc
   const rawText = (data?.lines as Record<string, unknown> | undefined)?.text;
   const text = typeof rawText === "string" ? rawText.replace(/\r?\n$/, "") : "";
   return {
-    path: relative(workspaceRoot, path) || ".",
+    path: projectSearchPath(path, workspaceRoot, projection),
     line: lineNumber as number,
     text: text.slice(0, 2_000),
   };
@@ -1984,7 +2058,13 @@ export function parseRgJsonLine(line: string, workspaceRoot: string): SearchMatc
  * the root) is not mistaken for a field separator; the remaining relative path
  * cannot contain `:` on Windows.
  */
-export function parseGrepLine(line: string, searchRoot: string, workspaceRoot: string): SearchMatch | undefined {
+export function parseGrepLine(
+  line: string,
+  searchRoot: string,
+  workspaceRoot: string,
+  projectionRoot?: string,
+  projectionDisplayRoot?: string,
+): SearchMatch | undefined {
   let remainder = line;
   if (remainder.startsWith(searchRoot)) {
     remainder = remainder.slice(searchRoot.length).replace(/^[\\/]+/, "");
@@ -1996,8 +2076,12 @@ export function parseGrepLine(line: string, searchRoot: string, workspaceRoot: s
   const relativePath = remainder.slice(0, firstColon);
   const lineNumber = Number(remainder.slice(firstColon + 1, secondColon));
   if (!Number.isSafeInteger(lineNumber) || lineNumber < 1) return undefined;
+  const absolutePath = resolve(searchRoot, relativePath);
+  const projection = projectionRoot === undefined || projectionDisplayRoot === undefined
+    ? undefined
+    : { root: projectionRoot, displayRoot: projectionDisplayRoot };
   return {
-    path: relative(workspaceRoot, resolve(searchRoot, relativePath)) || ".",
+    path: projectSearchPath(absolutePath, workspaceRoot, projection),
     line: lineNumber,
     text: remainder.slice(secondColon + 1).slice(0, 2_000),
   };

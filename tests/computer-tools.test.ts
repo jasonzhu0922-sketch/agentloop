@@ -1360,9 +1360,129 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
       () => unbound.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, unbound.input),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
     );
+
+    const aliasArgument = allowed.prepare({
+      id: "skill-alias-argument",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["@skills/demo-skill/SKILL.md"],
+        cwd: ".",
+        timeoutMs: 2_000,
+      },
+    });
+    await assert.rejects(
+      () => aliasArgument.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, aliasArgument.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(skillRoot, { recursive: true, force: true });
+  }
+});
+
+test("computer read tools share authorized Skill root path semantics with command cwd", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-readable-skill-workspace-"));
+  const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-readable-skill-package-"));
+  const outside = await fs.mkdtemp(join(tmpdir(), "agentloop-readable-skill-outside-"));
+  try {
+    await fs.mkdir(join(skillRoot, "references"), { recursive: true });
+    await fs.writeFile(join(skillRoot, "SKILL.md"), "# Demo Skill\n");
+    await fs.writeFile(join(skillRoot, "references", "outline_schema.md"), "# Outline\nneedle: skill reference\n");
+    await fs.writeFile(join(outside, "secret.txt"), "outside\n");
+    await fs.symlink(outside, join(skillRoot, "escape"));
+
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const tools = [
+      "computer_read_file",
+      "computer_list_directory",
+      "computer_find_files",
+      "computer_search_text",
+      "computer_write_file",
+    ];
+    const allowed = registry.materialize(skillRootGrant(tools, skillRoot));
+
+    const read = allowed.prepare({
+      id: "read-skill-reference",
+      name: "computer_read_file",
+      arguments: { path: "@skills/demo-skill/references/outline_schema.md" },
+    });
+    const readResult = await read.tool.execute(
+      { grant: skillRootGrant(tools, skillRoot) },
+      read.input,
+    ) as { content: string };
+    assert.equal(readResult.content, "# Outline\nneedle: skill reference\n");
+
+    const list = allowed.prepare({
+      id: "list-skill-reference-directory",
+      name: "computer_list_directory",
+      arguments: { path: "@skills/demo-skill/references" },
+    });
+    const listResult = await list.tool.execute(
+      { grant: skillRootGrant(tools, skillRoot) },
+      list.input,
+    ) as Array<{ name: string; type: string }>;
+    assert.deepEqual(listResult, [{ name: "outline_schema.md", type: "file" }]);
+
+    const find = allowed.prepare({
+      id: "find-skill-reference",
+      name: "computer_find_files",
+      arguments: { path: "@skills/demo-skill", pattern: "references/*.md" },
+    });
+    const findResult = await find.tool.execute(
+      { grant: skillRootGrant(tools, skillRoot) },
+      find.input,
+    ) as { matches: string[] };
+    assert.deepEqual(findResult.matches, ["@skills/demo-skill/references/outline_schema.md"]);
+
+    const search = allowed.prepare({
+      id: "search-skill-reference",
+      name: "computer_search_text",
+      arguments: { path: "@skills/demo-skill", query: "needle" },
+    });
+    const searchResult = await search.tool.execute(
+      { grant: skillRootGrant(tools, skillRoot) },
+      search.input,
+    ) as Array<{ path: string; line: number; text: string }>;
+    assert.deepEqual(searchResult, [{
+      path: "@skills/demo-skill/references/outline_schema.md",
+      line: 2,
+      text: "needle: skill reference",
+    }]);
+
+    const unbound = allowed.prepare({
+      id: "read-unbound-skill-reference",
+      name: "computer_read_file",
+      arguments: { path: "@skills/other-skill/SKILL.md" },
+    });
+    await assert.rejects(
+      () => unbound.tool.execute({ grant: skillRootGrant(tools, skillRoot) }, unbound.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+
+    const escaped = allowed.prepare({
+      id: "read-skill-escape",
+      name: "computer_read_file",
+      arguments: { path: "@skills/demo-skill/escape/secret.txt" },
+    });
+    await assert.rejects(
+      () => escaped.tool.execute({ grant: skillRootGrant(tools, skillRoot) }, escaped.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+
+    const write = allowed.prepare({
+      id: "write-skill-reference",
+      name: "computer_write_file",
+      arguments: { path: "@skills/demo-skill/generated.txt", content: "bad\n" },
+    });
+    await assert.rejects(
+      () => write.tool.execute({ grant: skillRootGrant(tools, skillRoot) }, write.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(skillRoot, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
   }
 });
 

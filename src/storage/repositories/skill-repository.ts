@@ -52,6 +52,17 @@ export class SkillRepository {
       .all() as unknown as SkillRow[];
   }
 
+  listPackageSkillsWithoutSourceProvenance(): SkillRow[] {
+    return this.connection.prepare(`
+      SELECT ${SKILL_COLUMNS}
+      FROM skills
+      WHERE source_kind = 'package'
+        AND source_url IS NULL
+        AND source_revision IS NULL
+      ORDER BY owner_user_id, name
+    `).all() as unknown as SkillRow[];
+  }
+
   findByIdAndOwner(skillId: string, ownerUserId: string): SkillRow | undefined {
     return this.connection.prepare(`SELECT ${SKILL_COLUMNS} FROM skills WHERE id = ? AND owner_user_id = ?`)
       .get(skillId, ownerUserId) as SkillRow | undefined;
@@ -148,5 +159,9 @@ export class SkillRepository {
       }
       throw error;
     }
+  }
+
+  deletePackageSkillById(id: string): void {
+    this.connection.prepare("DELETE FROM skills WHERE id = ? AND source_kind = 'package'").run(id);
   }
 }

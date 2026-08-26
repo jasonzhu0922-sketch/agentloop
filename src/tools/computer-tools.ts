@@ -32,7 +32,7 @@ export function createComputerTools(
   const tools: RuntimeTool<unknown>[] = [
     {
       name: "computer_list_directory",
-      description: "List entries under the configured workspace root. path must be relative to the workspace root; absolute paths are rejected.",
+      description: "List entries under the configured workspace root or an authorized read-only @skills/<skill-name> root. path must be relative to an authorized root; absolute paths are rejected.",
       inputSchema: objectSchema(["path"], { path: { type: "string" } }),
       executionMode: "parallel",
       replaySafe: true,
@@ -42,8 +42,9 @@ export function createComputerTools(
     {
       name: "computer_read_file",
       description: [
-        "Read a UTF-8 file under the configured workspace root.",
-        "path must be relative to the workspace root; absolute paths are rejected.",
+        "Read a UTF-8 file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
+        "path must be relative to an authorized root; absolute paths are rejected.",
+        "For loaded Skill reference files, use @skills/<skill-name>/... paths with this tool instead of shell cat/sed loops.",
         "If a bare filename is missing at the workspace root, the tool searches authorized subdirectories by basename; unique ranked matches are read and ambiguous matches return candidate paths.",
         "Use optional 1-indexed offset and limit for one line window, or ranges for multiple line windows; do not combine ranges with offset or limit.",
       ].join(" "),
@@ -92,9 +93,9 @@ export function createComputerTools(
     {
       name: "computer_find_files",
       description: [
-        "Find files under the configured workspace root using a glob pattern; respects workspace containment and skips .git and node_modules.",
+        "Find files under the configured workspace root or an authorized read-only @skills/<skill-name> root using a glob pattern; respects root containment and skips .git and node_modules.",
         "Use this for low-noise discovery before reading files or running commands.",
-        "path is optional and relative to the workspace root; pattern supports *, **, and ?; limit defaults to 1000.",
+        "path is optional and relative to an authorized root; pattern supports *, **, and ?; limit defaults to 1000.",
       ].join(" "),
       inputSchema: objectSchema(["pattern"], {
         pattern: { type: "string" },
@@ -159,8 +160,8 @@ export function createComputerTools(
     {
       name: "computer_search_text",
       description: [
-        "Search literal text recursively under the configured workspace root.",
-        "path must be relative to the workspace root; absolute paths are rejected.",
+        "Search literal text recursively under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
+        "path must be relative to an authorized root; absolute paths are rejected.",
         "Use this low-noise search tool instead of running shell grep/cat loops for file discovery.",
         "Use optional contextBefore/contextAfter to return small evidence windows around each match.",
       ].join(" "),

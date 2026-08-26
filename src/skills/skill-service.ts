@@ -103,6 +103,23 @@ export class SkillService {
     return this.discovered();
   }
 
+  async pruneLegacyDirectoryPackageSkills(): Promise<number> {
+    const discoveredNames = new Set(this.directoryEntries.map((entry) => entry.inspection.name));
+    const staleRows = this.skills.listPackageSkillsWithoutSourceProvenance()
+      .filter((row) => !discoveredNames.has(row.name));
+    for (const row of staleRows) {
+      this.skills.deletePackageSkillById(row.id);
+      if (this.packageStore === undefined || row.package_root === null) continue;
+      try {
+        assertPathInside(resolve(row.package_root), this.packageStore, "Skill package root");
+      } catch {
+        continue;
+      }
+      await removeSkillPackage(row.package_root).catch(() => undefined);
+    }
+    return staleRows.length;
+  }
+
   discovered(): DiscoveredSkillSummary[] {
     return this.directoryEntries.map((entry) => ({
       name: entry.inspection.name,
