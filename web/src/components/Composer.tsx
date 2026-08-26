@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import type { LocalDirectoryListing } from "../lib/types";
+import type { LocalDirectoryListing, SourceSummary } from "../lib/types";
 import { useAgentLoop } from "../state/context";
+
+const SOURCE_FILE_ACCEPT = ".txt,.md,.csv,.json,.html,.htm,.pdf,.docx,.xlsx,.pptx";
 
 function Thinking(): React.ReactNode {
   return (
@@ -21,15 +23,26 @@ function FolderIcon(): React.ReactNode {
   );
 }
 
+function FileIcon(): React.ReactNode {
+  return (
+    <span className="file-icon" aria-hidden="true">
+      <span />
+    </span>
+  );
+}
+
 export function Composer(): React.ReactNode {
   const { state, actions } = useAgentLoop();
   const [draft, setDraft] = useState("");
   const [visibleDirectories, setVisibleDirectories] = useState<readonly string[]>([]);
+  const [sources, setSources] = useState<readonly SourceSummary[]>([]);
+  const [uploadingCount, setUploadingCount] = useState(0);
   const [directoryModalOpen, setDirectoryModalOpen] = useState(false);
   const [directoryListing, setDirectoryListing] = useState<LocalDirectoryListing | null>(null);
   const [directoryLoading, setDirectoryLoading] = useState(false);
   const [directoryError, setDirectoryError] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationDirectoryFingerprint = state.conversation?.conversation.visibleDirectories.join("\n") ?? "";
 
   useEffect(() => {
@@ -53,7 +66,7 @@ export function Composer(): React.ReactNode {
   }, [state.conversation?.conversation.id, conversationDirectoryFingerprint]);
 
   const inConv = state.conversation !== null;
-  const canSend = !state.running && state.models.length > 0;
+  const canSend = !state.running && state.models.length > 0 && uploadingCount === 0;
 
   const submit = (event: React.FormEvent): void => {
     event.preventDefault();
@@ -63,7 +76,9 @@ export function Composer(): React.ReactNode {
       return;
     }
     setDraft("");
-    void actions.startRun(input, visibleDirectories);
+    const sourceIds = sources.map((source) => source.id);
+    setSources([]);
+    void actions.startRun(input, visibleDirectories, sourceIds);
   };
 
   const autoGrow = (ta: HTMLTextAreaElement): void => {
@@ -100,6 +115,38 @@ export function Composer(): React.ReactNode {
   const addVisibleDirectoryScope = (): void => {
     setDirectoryModalOpen(true);
     void loadDirectory();
+  };
+
+  const uploadFiles = async (files: FileList | null): Promise<void> => {
+    const selected = [...(files ?? [])].slice(0, Math.max(0, 20 - sources.length));
+    if (selected.length === 0) return;
+    setUploadingCount((count) => count + selected.length);
+    try {
+      for (const file of selected) {
+        try {
+          const body = await api.uploadSource(state.token, file, {
+            ...(state.conversation?.conversation.id === undefined ? {} : {
+              conversationId: state.conversation.conversation.id,
+            }),
+          });
+          if (body.source.status === "ready") {
+            setSources((previous) => mergeSources(previous, [body.source]));
+          } else {
+            actions.note(`${body.source.originalName} 暂不可用：${body.source.status}`);
+          }
+        } catch (error) {
+          actions.note(error instanceof Error ? error.message : "上传文件失败");
+        } finally {
+          setUploadingCount((count) => Math.max(0, count - 1));
+        }
+      }
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const removeSource = (id: string): void => {
+    setSources((previous) => previous.filter((source) => source.id !== id));
   };
 
   const loadDirectory = async (path?: string): Promise<void> => {
@@ -140,6 +187,28 @@ export function Composer(): React.ReactNode {
             ))}
           </div>
         ) : null}
+        {sources.length > 0 || uploadingCount > 0 ? (
+          <div className="source-row" aria-label="本次上传文件">
+            {sources.map((source) => (
+              <span className="source-chip" key={source.id} title={source.summary ?? source.originalName}>
+                <FileIcon />
+                <span>{source.originalName}</span>
+                <small>{formatBytes(source.byteSize)}</small>
+                <button
+                  type="button"
+                  aria-label={`移除 ${source.originalName}`}
+                  disabled={state.running}
+                  onClick={() => removeSource(source.id)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {uploadingCount > 0 ? (
+              <span className="source-chip muted"><FileIcon /><span>上传中 {uploadingCount}</span></span>
+            ) : null}
+          </div>
+        ) : null}
         <textarea
           ref={textareaRef}
           id="input"
@@ -171,6 +240,25 @@ export function Composer(): React.ReactNode {
             >
               <FolderIcon />
               <span>添加目录</span>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept={SOURCE_FILE_ACCEPT}
+              multiple
+              onChange={(event) => void uploadFiles(event.target.files)}
+            />
+            <button
+              type="button"
+              className="dir-picker-btn"
+              disabled={state.running || uploadingCount > 0 || sources.length >= 20}
+              title="上传文件"
+              aria-label="上传文件"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <FileIcon />
+              <span>上传文件</span>
             </button>
             <label className="chip">
               模型
@@ -313,6 +401,23 @@ function mergeDirectoryPaths(existingDirectories: readonly string[], addedDirect
     next.push(path);
   }
   return next;
+}
+
+function mergeSources(existingSources: readonly SourceSummary[], addedSources: readonly SourceSummary[]): SourceSummary[] {
+  const seen = new Set(existingSources.map((source) => source.id));
+  const next = [...existingSources];
+  for (const source of addedSources) {
+    if (seen.has(source.id)) continue;
+    seen.add(source.id);
+    next.push(source);
+  }
+  return next.slice(0, 20);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function directoryKey(path: string): string {

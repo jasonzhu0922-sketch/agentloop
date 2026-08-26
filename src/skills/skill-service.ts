@@ -13,6 +13,7 @@ import {
   readSkillAgentLoopMetadata,
   removeSkillPackage,
 } from "./skill-package.ts";
+import { discoveredSkillId } from "./skill-identity.ts";
 import type { SkillAgentLoopMetadata } from "./skill-package.ts";
 import { discoverSkillDirectory } from "./skill-directory.ts";
 import type { SkillDirectoryEntry } from "./skill-directory.ts";
@@ -20,7 +21,6 @@ import type { SkillDirectoryEntry } from "./skill-directory.ts";
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SOURCE_REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const DISCOVERED_SKILL_ID_PREFIX = "discovered:";
 
 export type SkillSourceKind = "inline" | "package";
 
@@ -481,10 +481,6 @@ function parsePackageSource(row: SkillRow): SkillPackageSource {
 function parseSourceKind(value: string): SkillSourceKind {
   if (value === "inline" || value === "package") return value;
   throw new Error(`Stored Skill has invalid source kind ${value}`);
-}
-
-function discoveredSkillId(name: string): string {
-  return `${DISCOVERED_SKILL_ID_PREFIX}${name}`;
 }
 
 function requireHttpsUrl(value: unknown): string {

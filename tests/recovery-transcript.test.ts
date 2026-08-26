@@ -66,3 +66,28 @@ test("recovery keeps the committed assistant path unchanged when the full checkp
     { role: "tool", toolCallId: "call-1", name: "read_file", content: "hello", isError: false },
   ]);
 });
+
+test("recovery preserves committed provider reasoning continuation", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "repair the rejected candidate",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["assistant.committed", {
+        step: 1,
+        content: "",
+        finishReason: "tool_calls",
+        reasoningContent: "opaque-thinking-state",
+        toolCalls: [{ id: "call-1", name: "read_file", arguments: { path: "a.txt" } }],
+      }],
+      ["tool.completed", { step: 1, toolCallId: "call-1", toolName: "read_file", result: "hello" }],
+    ),
+  });
+
+  assert.deepEqual(transcript.messages[1], {
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id: "call-1", name: "read_file", arguments: { path: "a.txt" } }],
+    reasoningContent: "opaque-thinking-state",
+  });
+});

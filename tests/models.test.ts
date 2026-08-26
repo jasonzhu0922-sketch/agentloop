@@ -659,7 +659,7 @@ test("Responses streaming adapter preserves function calls when final response o
       'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_plan","call_id":"call-plan","name":"submit_plan","arguments":""}}\n\n',
       'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"{\\"goal\\":\\"analyze\\",\\"selectedSkillIds\\":[],"}\n\n',
       'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"steps\\":[{\\"id\\":\\"extract\\",\\"objective\\":\\"extract evidence\\",\\"dependencies\\":[],"}\n\n',
-      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"skillIds\\":[],\\"requiredToolNames\\":[],\\"successCriteria\\":[{\\"id\\":\\"done\\",\\"description\\":\\"evidence exists\\"}]}]}"}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"skillIds\\":[],\\"recommendedToolNames\\":[],\\"successCriteria\\":[{\\"id\\":\\"done\\",\\"description\\":\\"evidence exists\\"}]}]}"}\n\n',
       'data: {"type":"response.function_call_arguments.done","item_id":"fc_plan","output_index":1}\n\n',
       'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":12,"output_tokens":4}}}\n\n',
     ]);
@@ -698,7 +698,7 @@ test("Responses streaming adapter preserves function calls when final response o
           objective: "extract evidence",
           dependencies: [],
           skillIds: [],
-          requiredToolNames: [],
+          recommendedToolNames: [],
           successCriteria: [{ id: "done", description: "evidence exists" }],
         }],
       },
@@ -1073,6 +1073,56 @@ test("Responses adapter replays assistant tool calls without a synthetic empty a
       },
     ]);
     assert.equal(capturedBody?.stream, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter does not forward Chat Completions reasoning_content fields", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "done" }],
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "server-secret",
+      model: "deepseek-v4-pro",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    await model.complete({
+      runId: "run-responses-chat-reasoning-ignored",
+      systemPrompt: "System instructions",
+      messages: [
+        { role: "user", content: "Check" },
+        {
+          role: "assistant",
+          content: "intermediate",
+          reasoningContent: "chat-only-opaque-state",
+        },
+      ],
+      tools: [],
+    });
+
+    assert.equal(JSON.stringify(capturedBody).includes("reasoning_content"), false);
+    assert.deepEqual(capturedBody?.input, [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Check" }] },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "intermediate" }],
+      },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -1,6 +1,6 @@
 export type DynamicPromptPhase = "planning" | "execution" | "assessment" | "compaction";
 export type TaskIntent = "reply" | "execute" | "continue" | "recover" | "clarify";
-export type EvidenceProfile = "deterministic" | "lookup_lite" | "source_grounded" | "risk_sensitive";
+export type EvidenceProfile = "deterministic" | "evidence_gate" | "lookup_lite" | "source_grounded" | "risk_sensitive";
 export type RiskProfile =
   | "no_tool"
   | "read_only"
@@ -11,6 +11,7 @@ export type RiskProfile =
 export type PlanShape = "single_leaf" | "fact_then_produce" | "multi_deliverable" | "pipeline" | "recovery_patch" | "human_blocked";
 export type ArtifactKind = "html" | "document" | "presentation" | "spreadsheet" | "image" | "code" | "none";
 export type SourceNeed = "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
+export type DeliverySurface = "conversation" | "workspace_artifact";
 
 export interface DynamicPromptProfile {
   readonly id: string;
@@ -31,6 +32,7 @@ export interface TaskProfile {
   readonly planShape?: PlanShape;
   readonly artifactKind?: ArtifactKind;
   readonly sourceNeed?: SourceNeed;
+  readonly deliverySurface?: DeliverySurface;
   readonly skillBound: boolean;
   readonly responseOnly?: boolean;
 }
@@ -46,6 +48,7 @@ export function buildTaskProfile(input: {
   readonly planShape?: PlanShape;
   readonly artifactKind?: ArtifactKind;
   readonly sourceNeed?: SourceNeed;
+  readonly deliverySurface?: DeliverySurface;
   readonly skillBound?: boolean;
   readonly responseOnly?: boolean;
 }): TaskProfile {
@@ -59,6 +62,7 @@ export function buildTaskProfile(input: {
     ...(input.planShape === undefined ? {} : { planShape: input.planShape }),
     ...(input.artifactKind === undefined ? {} : { artifactKind: input.artifactKind }),
     ...(input.sourceNeed === undefined ? {} : { sourceNeed: input.sourceNeed }),
+    ...(input.deliverySurface === undefined ? {} : { deliverySurface: input.deliverySurface }),
     skillBound: input.skillBound === true,
     ...(input.responseOnly === undefined ? {} : { responseOnly: input.responseOnly }),
   };
@@ -106,6 +110,7 @@ function taskProfileSystemSection(taskProfile: TaskProfile | undefined): string 
     ...(taskProfile.planShape === undefined ? {} : { shape: taskProfile.planShape }),
     ...(taskProfile.artifactKind === undefined ? {} : { artifactKind: taskProfile.artifactKind }),
     ...(taskProfile.sourceNeed === undefined ? {} : { sourceNeed: taskProfile.sourceNeed }),
+    ...(taskProfile.deliverySurface === undefined ? {} : { deliverySurface: taskProfile.deliverySurface }),
     skillBound: taskProfile.skillBound,
     ...(taskProfile.responseOnly === undefined ? {} : { responseOnly: taskProfile.responseOnly }),
   };

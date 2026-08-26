@@ -71,6 +71,54 @@ test("Agent Loop discovers an unlocked Skill directory and exposes the exact pac
   }
 });
 
+test("discovered Skill references stay canonical across admission, grant, and load_skill", async () => {
+  const fixture = await createDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database, {
+      packageStoreRoot: fixture.packageStore,
+      skillDirectory: fixture.skillDirectory,
+    });
+    const owner = await auth.register("directory-id-owner@example.com", "directory id owner secure password");
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: fixture.root,
+      modelFactory: () => new DirectorySkillModel("discovered:directory-demo"),
+      plannerFactory: () => directoryReferencePlanner(),
+      assessorFactory: () => approvingAssessor(),
+    });
+
+    const run = await runs.execute(owner.user.id, "apply the discovered workflow");
+
+    assert.equal(run.status, "completed");
+    const plan = runs.plan(owner.user.id, run.id).plan;
+    assert.deepEqual(plan.selectedSkillIds, ["discovered:directory-demo"]);
+    assert.deepEqual(plan.steps[0].skillIds, ["discovered:directory-demo"]);
+    const events = runs.events(owner.user.id, run.id);
+    const available = events.find((event) => event.type === "skill.activation.available");
+    assert.deepEqual(available?.data.skills, [{
+      id: "discovered:directory-demo",
+      name: "directory-demo",
+      contentHash: fixture.packageHash,
+    }]);
+    assert.equal(events.some((event) =>
+      event.type === "tool.failed"
+      && event.data.toolName === "load_skill"
+    ), false);
+    assert.equal(events.some((event) =>
+      event.type === "skill.activated"
+      && event.data.skillId === "discovered:directory-demo"
+      && event.data.name === "directory-demo"
+    ), true);
+  } finally {
+    database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("a discovered Skill directory supersedes an old same-name private Skill record", async () => {
   const fixture = await createDirectoryFixture();
   const database = new AppDatabase(":memory:");
@@ -105,6 +153,66 @@ test("a discovered Skill directory supersedes an old same-name private Skill rec
       }),
       /A discovered Skill named "directory-demo" already exists/,
     );
+  } finally {
+    database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("RunService refreshes the discovered Skill directory before planning a new Run", async () => {
+  const fixture = await createDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const owner = await auth.register("directory-refresh@example.com", "directory refresh secure password");
+    const skills = new SkillService(database, {
+      packageStoreRoot: fixture.packageStore,
+      skillDirectory: fixture.skillDirectory,
+    });
+    await skills.refreshSkillDirectory();
+    await fs.writeFile(resolve(fixture.sourcePackage, "SKILL.md"), [
+      "---",
+      "name: directory-demo",
+      "description: Query an internal API catalog for source-grounded API parameter information.",
+      "agentloop:",
+      "  roles:",
+      "    - source_provider",
+      "  artifactKinds:",
+      "    - none",
+      "  sourceKinds:",
+      "    - api",
+      "  qaKinds: []",
+      "---",
+      "",
+      "# Directory Demo",
+      "",
+      "UPDATED-SOURCE-PROVIDER-BODY",
+      "",
+    ].join("\n"));
+
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: fixture.root,
+      modelFactory: () => new RefreshedDirectorySkillModel(),
+      plannerFactory: () => refreshedDirectoryPlanner(),
+      assessorFactory: () => approvingAssessor(),
+    });
+    const run = await runs.execute(owner.user.id, "查询宝武集团数据中台中合同备案 API 的参数信息");
+
+    assert.equal(run.status, "completed");
+    const plan = runs.plan(owner.user.id, run.id).plan;
+    assert.deepEqual(plan.selectedSkillIds, ["discovered:directory-demo"]);
+    const selectedEvent = runs.events(owner.user.id, run.id).find((event) =>
+      event.type === "planning.skills.role_selected"
+    );
+    assert.deepEqual(selectedEvent?.data.skills, [{
+      id: "discovered:directory-demo",
+      name: "directory-demo",
+      role: "source_provider",
+      reason: "Skill metadata declares source_provider for requested source-grounded work.",
+    }]);
   } finally {
     database.close();
     await removeSkillPackage(fixture.packageStore).catch(() => undefined);
@@ -252,7 +360,7 @@ function directoryPlanner(): Planner {
           objective: "Load and follow the discovered workflow",
           dependencies: [],
           skillIds: [skill.id],
-          requiredToolNames: [],
+          recommendedToolNames: [],
           successCriteria: [{
             id: "loaded",
             description: "The exact discovered Skill body is loaded before completion",
@@ -264,9 +372,82 @@ function directoryPlanner(): Planner {
   };
 }
 
+function directoryReferencePlanner(): Planner {
+  return {
+    plan: async (task) => {
+      assert.equal(task.availableSkills.length, 1);
+      const skill = task.availableSkills[0];
+      assert.equal(skill.id, "discovered:directory-demo");
+      assert.equal(skill.name, "directory-demo");
+      return {
+        goal: "Apply the discovered Skill",
+        selectedSkillIds: [skill.name],
+        steps: [{
+          id: "apply-directory-skill",
+          objective: "Load and follow the discovered workflow",
+          dependencies: [],
+          skillIds: [skill.name],
+          recommendedToolNames: [],
+          successCriteria: [{
+            id: "loaded",
+            description: "The exact discovered Skill body is loaded before completion",
+            source: "planner",
+          }],
+        }],
+      };
+    },
+  };
+}
+
+function refreshedDirectoryPlanner(): Planner {
+  return {
+    plan: async (task) => {
+      assert.equal(task.availableSkills.length, 1);
+      const skill = task.availableSkills[0];
+      assert.equal(skill.id, "discovered:directory-demo");
+      assert.equal(skill.name, "directory-demo");
+      assert.match(skill.instructions, /UPDATED-SOURCE-PROVIDER-BODY/);
+      assert.deepEqual(skill.agentLoop, {
+        roles: ["source_provider"],
+        artifactKinds: ["none"],
+        sourceKinds: ["api"],
+        qaKinds: [],
+      });
+      assert.deepEqual(task.selectedSkillRoles, [{
+        skillId: skill.id,
+        role: "source_provider",
+        reason: "Skill metadata declares source_provider for requested source-grounded work.",
+      }]);
+      return {
+        goal: "Query the internal API catalog",
+        selectedSkillRoles: task.selectedSkillRoles,
+        selectedSkillIds: [skill.id],
+        steps: [{
+          id: "query-api-catalog",
+          objective: "Load and apply the source-provider Skill to query API parameter information",
+          dependencies: [],
+          role: "produce",
+          skillIds: [skill.id],
+          recommendedToolNames: [],
+          successCriteria: [{
+            id: "loaded",
+            description: "The refreshed discovered Skill body is loaded before completion",
+            source: "planner",
+          }],
+        }],
+      };
+    },
+  };
+}
+
 class DirectorySkillModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   private calls = 0;
+  private readonly loadSkillArgument: string;
+
+  constructor(loadSkillArgument = "directory-demo") {
+    this.loadSkillArgument = loadSkillArgument;
+  }
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     this.calls += 1;
@@ -278,7 +459,7 @@ class DirectorySkillModel implements ModelAdapter {
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{ id: "load-directory", name: "load_skill", arguments: { name: "directory-demo" } }],
+        toolCalls: [{ id: "load-directory", name: "load_skill", arguments: { name: this.loadSkillArgument } }],
       };
     }
     const loaded = request.messages.find((message) =>
@@ -289,6 +470,30 @@ class DirectorySkillModel implements ModelAdapter {
     assert.match(loaded?.content ?? "", /<skill_package package_sha256=/);
     assert.doesNotMatch(loaded?.content ?? "", /source_url=/);
     return { content: "directory Skill loaded and followed", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class RefreshedDirectorySkillModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      assert.match(request.runtimeContext?.content ?? "", /directory-demo/);
+      assert.doesNotMatch(request.runtimeContext?.content ?? "", /UPDATED-SOURCE-PROVIDER-BODY/);
+      assert.ok(request.tools.some((tool) => tool.name === "load_skill"));
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "load-refreshed-directory", name: "load_skill", arguments: { name: "directory-demo" } }],
+      };
+    }
+    const loaded = request.messages.find((message) =>
+      message.role === "tool" && message.name === "load_skill"
+    );
+    assert.match(loaded?.content ?? "", /UPDATED-SOURCE-PROVIDER-BODY/);
+    return { content: "refreshed directory Skill loaded and followed", finishReason: "stop", toolCalls: [] };
   }
 }
 

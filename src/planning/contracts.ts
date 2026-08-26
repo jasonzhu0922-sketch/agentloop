@@ -1,5 +1,5 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { ModelMessage, RuntimeEventSink } from "../runtime/contracts.ts";
+import type { ModelMessage, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -23,6 +23,7 @@ export type EvidenceKind =
   | "source_urls"
   | "artifact_path"
   | "artifact_non_empty"
+  | "artifact_acceptance"
   | "artifact_openable"
   | "format_matches_request"
   | "basic_navigation"
@@ -53,6 +54,7 @@ export interface TaskSpec {
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly workspaceFacts?: PlanningWorkspaceFacts;
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
+  readonly sources?: readonly UploadedSourceSummary[];
   /**
    * A conversational answer is still persisted through the canonical Plan
    * lifecycle, but it may neither select capabilities nor execute Tools.
@@ -79,6 +81,7 @@ export interface PlanningWorkspaceFacts {
   readonly entryCount?: number;
   readonly sampleEntries?: readonly string[];
   readonly visibleDirectoryCount: number;
+  readonly sourceCount?: number;
   readonly guidance: string;
 }
 
@@ -90,7 +93,7 @@ export interface ConversationWorkingSet {
   readonly planCursors: readonly ConversationPlanCursor[];
   readonly reusableArtifacts: readonly ConversationReusableArtifact[];
   readonly failedBoundaries: readonly ConversationFailedBoundary[];
-  readonly requiredCapabilities: ConversationRequiredCapabilities;
+  readonly recommendedCapabilities: ConversationRecommendedCapabilities;
   readonly resumeSuggestion?: string;
 }
 
@@ -134,6 +137,8 @@ export interface ConversationReusableArtifact {
   readonly sourceTool: string;
   readonly sourceToolCallId?: string;
   readonly sourcePlanStepId?: string;
+  readonly sourceSkillIds?: readonly string[];
+  readonly sourceToolNames?: readonly string[];
   readonly reusable: boolean;
 }
 
@@ -147,7 +152,7 @@ export interface ConversationFailedBoundary {
   readonly category: "provider" | "planning" | "assessment" | "tool" | "runtime" | "cancelled" | "unknown";
 }
 
-export interface ConversationRequiredCapabilities {
+export interface ConversationRecommendedCapabilities {
   readonly skillIds: readonly string[];
   readonly toolNames: readonly string[];
 }
@@ -187,7 +192,7 @@ export interface PlanStepProposal {
   readonly refinementState?: RefinementState;
   readonly requiredFacts?: readonly RequiredFact[];
   readonly skillIds: readonly string[];
-  readonly requiredToolNames: readonly string[];
+  readonly recommendedToolNames: readonly string[];
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
 }
@@ -274,6 +279,7 @@ export interface FailedBoundary {
 
 export type AssessmentProfileId =
   | "deterministic"
+  | "evidence_gate"
   | "lookup_lite"
   | "source_grounded"
   | "risk_sensitive";

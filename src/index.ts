@@ -4,9 +4,45 @@ export { BatchService } from "./batch/batch-service.ts";
 export type { BatchItemRecord, BatchRecord } from "./batch/batch-service.ts";
 export { ComputerExecutor } from "./computer/computer-executor.ts";
 export type { ComputerDriver, ComputerSnapshot } from "./computer/computer-driver.ts";
-export { createComputerTools, DANGEROUS_COMPUTER_TOOL_NAMES } from "./computer/computer-tools.ts";
-export { createWebTools } from "./web/web-tools.ts";
-export type { WebToolsOptions } from "./web/web-tools.ts";
+export { ArtifactAcceptanceService } from "./acceptance/artifact-acceptance.ts";
+export type {
+  ArtifactAcceptanceCheck,
+  ArtifactAcceptanceEvidence,
+  ArtifactAcceptanceInput,
+  ArtifactAcceptanceKind,
+} from "./acceptance/artifact-acceptance.ts";
+export type {
+  ArtifactAcceptanceProvider,
+  ArtifactAcceptanceProviderQuery,
+  ArtifactAcceptanceProviderRequest,
+  ArtifactAcceptanceProviderResult,
+} from "./acceptance/artifact-acceptance-provider.ts";
+export { createPlaywrightArtifactAcceptanceProvider } from "./acceptance/playwright-artifact-acceptance-provider.ts";
+export type { PlaywrightArtifactAcceptanceProviderOptions } from "./acceptance/playwright-artifact-acceptance-provider.ts";
+export {
+  assertNoDuplicateTools,
+  composeRunTools,
+  createComputerTools,
+  createCoreTools,
+  createSkillLoader,
+  createSourceTools,
+  createVisibleDirectoryTools,
+  createWebTools,
+  DANGEROUS_COMPUTER_TOOL_NAMES,
+  SKILL_LOADER_TOOL_NAME,
+  skillExecutionCwd,
+  ToolRegistry,
+  VISIBLE_DIRECTORY_TOOL_NAMES,
+} from "./tools/index.ts";
+export type {
+  ComposeRunToolsOptions,
+  CoreToolsOptions,
+  MaterializedTools,
+  PreparedToolCall,
+  RuntimeTool,
+  ToolExecutionContext,
+  WebToolsOptions,
+} from "./tools/index.ts";
 export { createAgentLoopServer } from "./http/server.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";
@@ -31,8 +67,6 @@ export { RecoveryRepository } from "./runtime/recovery-repository.ts";
 export type { PlanRevisionAssessmentRecord, RecoveryDecisionRecord, RecoveryUserResponse, RunRecoveryState } from "./runtime/recovery-repository.ts";
 export { reconstructRecoveryTranscript } from "./runtime/recovery-transcript.ts";
 export type { RecoveryTranscript } from "./runtime/recovery-transcript.ts";
-export { ToolRegistry } from "./runtime/tool-registry.ts";
-export type { RuntimeTool, ToolExecutionContext } from "./runtime/tool-registry.ts";
 export { SkillService } from "./skills/skill-service.ts";
 export type {
   DiscoveredSkillSummary,

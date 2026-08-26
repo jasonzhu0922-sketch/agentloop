@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { AuthService } from "../src/auth/auth-service.ts";
 import { BatchService } from "../src/batch/batch-service.ts";
@@ -11,6 +14,7 @@ import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+import type { RuntimeTool } from "../src/tools/index.ts";
 
 test("RunEventHub delivers to subscribers and stops after unsubscribe", () => {
   const hub = new RunEventHub();
@@ -89,6 +93,71 @@ test("RunService persists model.retry events reported by the provider adapter", 
   }
 });
 
+test("RunService projects large tool arguments to refs before durable event storage", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "agentloop-tool-args-ref-"));
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("large-args@example.com", "large args secure password");
+    const largeContent = "BEGIN-" + "x".repeat(16_000) + "-END";
+    let executedContent = "";
+    const tool: RuntimeTool<unknown> = {
+      name: "record_large_arg",
+      description: "Record a large argument",
+      inputSchema: { type: "object" },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async (_context, value) => {
+        executedContent = String((value as { content?: unknown }).content ?? "");
+        return "recorded";
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot,
+      modelFactory: () => new LargeArgumentModel({ path: "report.md", content: largeContent }),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+      tools: [tool],
+    });
+
+    const run = await runs.execute(owner.user.id, "record the payload");
+    assert.equal(executedContent, largeContent);
+
+    const rows = database.prepare("SELECT type, payload_json FROM run_events WHERE run_id = ? ORDER BY seq").all(run.id) as Array<{
+      type: string;
+      payload_json: string;
+    }>;
+    assert.equal(rows.some((row) => row.payload_json.includes("-END")), false);
+    const plannedRow = rows.find((row) => row.type === "tool.planned");
+    assert.notEqual(plannedRow, undefined);
+    assert.equal(plannedRow!.payload_json.length < 2_500, true);
+
+    const events = runs.events(owner.user.id, run.id);
+    const planned = events.find((event) => event.type === "tool.planned");
+    assert.equal(typeof planned?.data.argumentsRef, "object");
+    const plannedArgs = planned?.data.arguments as { path?: string; content?: { schema?: string; preview?: string } };
+    assert.equal(plannedArgs.path, "report.md");
+    assert.equal(plannedArgs.content?.schema, "agentloop.toolArgumentTextProjection/v1");
+    assert.equal(plannedArgs.content?.preview?.startsWith("BEGIN-"), true);
+
+    const committed = events.find((event) => event.type === "assistant.committed");
+    const committedCalls = committed?.data.toolCalls as Array<{ argumentsRef?: unknown }> | undefined;
+    assert.equal(typeof committedCalls?.[0]?.argumentsRef, "object");
+
+    const full = await runs.readToolArguments(owner.user.id, run.id, "large-arg-call");
+    assert.deepEqual(full.arguments, { path: "report.md", content: largeContent });
+    assert.equal(full.content.includes("-END"), true);
+    assert.equal(full.path?.startsWith(".agentloop/tool-arguments/"), true);
+  } finally {
+    database.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("RunService binds each Run to an admitted model key", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -162,6 +231,60 @@ test("RunService writes safe terminal summaries for durable run events when conf
     assert.equal(lines.some((line) => line.includes("event=assistant.committed") && line.includes("finish=\"stop\"") && line.includes("inputTokens=11") && line.includes("outputTokens=3")), true);
     assert.equal(lines.some((line) => line.includes("event=run.completed")), true);
     assert.equal(lines.some((line) => line.includes("do not print this private task")), false);
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService keeps provider reasoning continuation out of public events", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("reasoning-events@example.com", "reasoning events secure password");
+    let releaseModel: (() => void) | undefined;
+    const modelStarted = new Promise<void>((resolve) => {
+      releaseModel = resolve;
+    });
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        async complete() {
+          await modelStarted;
+          return {
+            content: "done",
+            finishReason: "stop",
+            toolCalls: [],
+            reasoningContent: "opaque-thinking-state",
+          };
+        },
+      }),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.start(owner.user.id, "keep provider state private");
+    const liveEvents: LiveRunEvent[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for run completion")), 5_000);
+      const unsubscribe = runs.subscribeRunEvents(run.id, (event) => {
+        liveEvents.push(event);
+        if (event.type === "run.completed") {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+    releaseModel?.();
+    await completed;
+
+    const storedCommitted = runs.events(owner.user.id, run.id).find((event) => event.type === "assistant.committed");
+    const liveCommitted = liveEvents.find((event) => event.type === "assistant.committed");
+    assert.equal(storedCommitted?.data.reasoningContent, undefined);
+    assert.equal(liveCommitted?.data.reasoningContent, undefined);
   } finally {
     database.close();
   }
@@ -374,7 +497,7 @@ test("an informational follow-up does not inherit Skills or execution Tools from
               objective: "Answer the latest user message",
               dependencies: [],
               skillIds: [],
-              requiredToolNames: [],
+              recommendedToolNames: [],
               successCriteria: [{ id: "answered", description: "Return a direct answer" }],
             }],
           };
@@ -432,7 +555,7 @@ test("a textual request that needs local file state is execution, not response-o
               objective: "Inspect the referenced local file and describe its behavior.",
               dependencies: [],
               skillIds: [],
-              requiredToolNames: [],
+              recommendedToolNames: [],
               successCriteria: [{ id: "classified-for-execution", description: "The planner received the execution tool catalog" }],
             }],
           };
@@ -524,6 +647,32 @@ test("conversations group multiple turns over HTTP", async () => {
 class StaticCompletionModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   async complete(): Promise<ModelResponse> {
+    return { content: "done", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class LargeArgumentModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+  private readonly argumentsValue: Record<string, unknown>;
+
+  constructor(argumentsValue: Record<string, unknown>) {
+    this.argumentsValue = argumentsValue;
+  }
+
+  async complete(): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "large-arg-call",
+          name: "record_large_arg",
+          arguments: this.argumentsValue,
+        }],
+      };
+    }
     return { content: "done", finishReason: "stop", toolCalls: [] };
   }
 }

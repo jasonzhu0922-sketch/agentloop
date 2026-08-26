@@ -16,8 +16,16 @@ export interface ProcessArtifact {
   readonly name: string;
   readonly bytes: number;
   readonly mimeType: string;
-  readonly sourceTool: "computer_write_file" | "computer_run_command";
+  readonly sourceTool: ArtifactSourceTool;
   readonly previewable: boolean;
+}
+
+type ArtifactSourceTool = "computer_write_file" | "computer_run_command" | "materialize_paginated_html";
+
+function sourceToolPriority(sourceTool: ArtifactSourceTool): number {
+  if (sourceTool === "materialize_paginated_html") return 0;
+  if (sourceTool === "computer_write_file") return 1;
+  return 2;
 }
 
 export type ProcessArtifactPreview =
@@ -56,12 +64,12 @@ export async function collectProcessArtifacts(input: {
   readonly events: readonly StoredRunEvent[];
 }): Promise<ProcessArtifact[]> {
   const candidates = collectCandidatePaths(input.events);
-  const artifacts: ProcessArtifact[] = [];
+  const artifacts = new Map<string, ProcessArtifact>();
   for (const candidate of candidates) {
     const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, candidate.path);
     if (file === undefined) continue;
     const path = file.path;
-    artifacts.push({
+    const artifact = {
       id: artifactId(input.runId, path),
       path,
       name: basename(path),
@@ -69,9 +77,13 @@ export async function collectProcessArtifacts(input: {
       mimeType: mimeTypeFor(path),
       sourceTool: candidate.sourceTool,
       previewable: isPreviewable(path),
-    });
+    };
+    const existing = artifacts.get(path);
+    if (existing === undefined || sourceToolPriority(artifact.sourceTool) < sourceToolPriority(existing.sourceTool)) {
+      artifacts.set(path, artifact);
+    }
   }
-  return artifacts.sort((left, right) => left.path.localeCompare(right.path, "en"));
+  return [...artifacts.values()].sort((left, right) => left.path.localeCompare(right.path, "en"));
 }
 
 export async function readProcessArtifact(input: {
@@ -129,16 +141,16 @@ export function artifactId(runId: string, path: string): string {
 
 function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
   path: string;
-  sourceTool: "computer_write_file" | "computer_run_command";
+  sourceTool: ArtifactSourceTool;
 }> {
-  const candidates = new Map<string, "computer_write_file" | "computer_run_command">();
+  const candidates = new Map<string, ArtifactSourceTool>();
   for (const event of events) {
     if (event.type !== "tool.completed") continue;
     const toolName = typeof event.data.toolName === "string" ? event.data.toolName : "";
     const result = parseResult(event.data.result);
-    if (toolName === "computer_write_file") {
+    if (toolName === "computer_write_file" || toolName === "materialize_paginated_html") {
       const path = result !== undefined && typeof result.path === "string" ? result.path : undefined;
-      if (path !== undefined && isSafeRelativePath(path)) candidates.set(path, "computer_write_file");
+      if (path !== undefined && isSafeRelativePath(path)) candidates.set(path, toolName);
       continue;
     }
     if (toolName !== "computer_run_command" || result?.exitCode !== 0 || typeof result.stdout !== "string") continue;
@@ -409,9 +421,21 @@ function xmlText(xml: string): string {
 
 function decodeXml(value: string): string {
   return value
+    .replace(/&#x([0-9a-f]+);/giu, (_, hex: string) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return isValidCodePoint(codePoint) ? String.fromCodePoint(codePoint) : "";
+    })
+    .replace(/&#([0-9]+);/gu, (_, decimal: string) => {
+      const codePoint = Number.parseInt(decimal, 10);
+      return isValidCodePoint(codePoint) ? String.fromCodePoint(codePoint) : "";
+    })
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, "&");
+}
+
+function isValidCodePoint(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value <= 0x10ffff;
 }

@@ -3,11 +3,12 @@ import { dirname, resolve } from "node:path";
 import { AuthService } from "./auth/auth-service.ts";
 import { BatchService } from "./batch/batch-service.ts";
 import { createAgentLoopServer } from "./http/server.ts";
+import { createPlaywrightArtifactAcceptanceProvider } from "./acceptance/playwright-artifact-acceptance-provider.ts";
 import { LlmProviderRegistry } from "./runtime/provider-registry.ts";
 import { RunService } from "./runtime/run-service.ts";
 import { SkillService } from "./skills/skill-service.ts";
 import { AppDatabase } from "./storage/database.ts";
-import { createWebTools } from "./web/web-tools.ts";
+import { createWebTools } from "./tools/web-tools.ts";
 
 const port = parseInteger(process.env.PORT, 8787, 1, 65_535);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -20,6 +21,13 @@ const skillDirectory = resolve(process.env.SKILL_DIRECTORY ?? resolve(process.cw
 const packageStoreRoot = resolve(
   process.env.SKILL_PACKAGE_STORE_ROOT ?? resolve(workspaceRoot, ".agentloop/skill-packages"),
 );
+const acceptanceProviders = process.env.ARTIFACT_ACCEPTANCE_PLAYWRIGHT === "1"
+  ? [createPlaywrightArtifactAcceptanceProvider({
+      ...(process.env.ARTIFACT_ACCEPTANCE_PLAYWRIGHT_EXECUTABLE_PATH === undefined
+        ? {}
+        : { executablePath: process.env.ARTIFACT_ACCEPTANCE_PLAYWRIGHT_EXECUTABLE_PATH }),
+    })]
+  : [];
 if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
 
 const database = new AppDatabase(databasePath);
@@ -43,6 +51,7 @@ const runs = new RunService({
   defaultModelKey: providers.defaultModelKey,
   modelKeys: providers.modelKeys(),
   workspaceRoot,
+  acceptanceProviders,
   computerExecutableAliases: parseExecutableAliases(process.env.TRUSTED_EXECUTABLE_ALIASES_JSON),
   computerCommandEnvironment: parseCommandEnvironment(process.env.TRUSTED_COMMAND_ENV_JSON),
   tools: process.env.WEB_SEARCH_DISABLED === "1"

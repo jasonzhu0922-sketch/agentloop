@@ -114,7 +114,7 @@ interface PlanNode {
   requiredFacts: RequiredFact[];
   successCriteria: SuccessCriterion[];
   skillIds: string[];
-  requiredToolNames: string[];
+  recommendedToolNames: string[];
 }
 ```
 
@@ -412,7 +412,7 @@ plan_nodes(
   required_facts_json,
   refinement_state,
   skill_ids_json,
-  required_tool_names_json,
+  recommended_tool_names_json,
   success_criteria_json,
   status,
   output,

@@ -2,6 +2,13 @@
 name: pdf
 description: Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill.
 license: Proprietary. LICENSE.txt has complete terms
+agentloop:
+  roles:
+    - primary_builder
+  artifactKinds:
+    - document
+  sourceKinds: []
+  qaKinds: []
 ---
 
 # PDF Processing Guide
@@ -166,6 +173,19 @@ story.append(Paragraph("Content for page 2", styles['Normal']))
 doc.build(story)
 ```
 
+#### Table of Contents
+
+For short PDFs, prefer a static manually written table of contents. If using
+ReportLab `TableOfContents`, do not append it alone and expect it to populate
+itself: the document must register heading flowables and use a multi-pass build.
+
+Required pattern:
+- subclass `SimpleDocTemplate` or `BaseDocTemplate`
+- in `afterFlowable()`, detect heading `Paragraph` styles such as `H1` / `H2`
+- call `self.notify("TOCEntry", (level, flowable.getPlainText(), self.page))`
+- call `doc.multiBuild(story, ...)`
+- verify extracted PDF text does not contain `Placeholder for table of contents`
+
 #### Subscripts and Superscripts
 
 **IMPORTANT**: Never use Unicode subscript/superscript characters (₀₁₂₃₄₅₆₇₈₉, ⁰¹²³⁴⁵⁶⁷⁸⁹) in ReportLab PDFs. The built-in fonts do not include these glyphs, causing them to render as solid black boxes.
@@ -182,6 +202,24 @@ chemical = Paragraph("H<sub>2</sub>O", styles['Normal'])
 
 # Superscripts: use <super> tag
 squared = Paragraph("x<super>2</super> + y<super>2</super>", styles['Normal'])
+```
+
+If markup appears inside a ReportLab `Table`, wrap each marked-up cell in a `Paragraph`. Raw table strings are not parsed as paragraph markup and will leak literal tags such as `<super>` into the PDF text layer:
+
+```python
+from reportlab.platypus import Paragraph, Table
+
+rows = [
+    [
+        Paragraph("Speed", styles["Normal"]),
+        Paragraph("v = s / t", styles["Normal"]),
+    ],
+    [
+        Paragraph("Density", styles["Normal"]),
+        Paragraph("rho = m / V", styles["Normal"]),
+    ],
+]
+table = Table(rows)
 ```
 
 For canvas-drawn text (not Paragraph objects), manually adjust font the size and position rather than using Unicode subscripts/superscripts.

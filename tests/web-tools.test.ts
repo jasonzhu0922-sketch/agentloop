@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
-import { ToolRegistry } from "../src/runtime/tool-registry.ts";
+import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import {
   createWebTools,
   extractRedirectTarget,
@@ -12,7 +12,7 @@ import {
   normalizeSearchPayload,
   parseBaiduResults,
   parseRssItems,
-} from "../src/web/web-tools.ts";
+} from "../src/tools/web-tools.ts";
 
 test("web tools are registered and materialized as parallel replay-safe tools", () => {
   const registry = new ToolRegistry(createWebTools());
@@ -94,14 +94,27 @@ test("websearch rejects degenerate queries and caches repeated identical searche
     const allowed = registry.materialize(grant(["websearch"]));
     const execute = async (query: string) => {
       const prepared = allowed.prepare({ id: "search-exec", name: "websearch", arguments: { query } });
-      return prepared.tool.execute(grantContext(["websearch"]), prepared.input) as Promise<Array<{ title: string }>>;
+      return prepared.tool.execute(grantContext(["websearch"]), prepared.input) as Promise<{
+        schema: string;
+        returned: number;
+        results: Array<{ title: string }>;
+        evidenceReceipt: {
+          schema: string;
+          evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+        };
+      }>;
     };
     await assert.rejects(
       () => execute("宝"),
       (error: unknown) => hasCode(error, "BAD_REQUEST") && error instanceof Error && /at least 2 characters/.test(error.message),
     );
     const first = await execute("中国宝武 数据底座");
-    assert.equal(first.length, 1);
+    assert.equal(first.schema, "agentloop.webSearch/v1");
+    assert.equal(first.returned, 1);
+    assert.equal(first.results.length, 1);
+    assert.equal(first.evidenceReceipt.schema, "agentloop.toolEvidenceReceipt/v1");
+    assert.deepEqual(first.evidenceReceipt.evidenceKinds.satisfied, ["source_urls"]);
+    assert.deepEqual(first.evidenceReceipt.evidenceKinds.caveated, ["explicit_caveats"]);
     assert.equal(hits, 1);
     await execute("中国宝武 数据底座");
     assert.equal(hits, 1, "a repeated identical query within the same run must hit the per-run cache");
@@ -223,17 +236,30 @@ test("webfetch follows a meta-refresh redirect and extracts readable content end
       arguments: { url: `http://127.0.0.1:${port}/redirect`, format: "markdown" },
     });
     const result = await prepared.tool.execute(grantContext(["webfetch"]), prepared.input) as {
+      schema: string;
       url: string;
       title: string | undefined;
       content: string;
       bytes: number;
       truncated: boolean;
+      evidenceReceipt: {
+        schema: string;
+        sourceRefs: unknown[];
+        facts: Array<{ kind?: string }>;
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+      };
     };
+    assert.equal(result.schema, "agentloop.webFetch/v1");
     assert.equal(result.title, "宝武发布");
     assert.ok(result.url.endsWith("/target"));
     assert.match(result.content, /数据底座与超级智能体/);
     assert.match(result.content, /8 月 30 日/);
     assert.equal(result.truncated, false);
+    assert.equal(result.evidenceReceipt.schema, "agentloop.toolEvidenceReceipt/v1");
+    assert.equal(result.evidenceReceipt.sourceRefs.length, 1);
+    assert.equal(result.evidenceReceipt.facts.some((fact) => fact.kind === "source_summary"), true);
+    assert.deepEqual(result.evidenceReceipt.evidenceKinds.satisfied, ["source_read", "source_summary", "source_urls"]);
+    assert.deepEqual(result.evidenceReceipt.evidenceKinds.caveated, ["explicit_caveats"]);
   } finally {
     await close(server);
   }

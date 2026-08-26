@@ -240,8 +240,9 @@ stateDiagram-v2
 allowedTools  = 全部已注册工具
              − 危险 Computer 工具（除非 allowDangerousTools）
 rootGrant     = { actor, workspace, allowedTools, allowedSkillIds }
-stepTools     = step.requiredToolNames ∩ rootGrant.allowedToolNames
-             ∪ { load_skill }  // 仅当 step 绑定 Skill 时
+recommendedTools = step.recommendedToolNames  // 推荐清单，不是授权边界
+stepTools     = rootGrant.allowedToolNames
+             − { load_skill }  // 当 step 未绑定 Skill 时
 ```
 
 ### 8.2 会话与轮次

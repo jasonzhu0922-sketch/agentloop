@@ -135,6 +135,91 @@ test("Conversation visible directories persist across follow-up runs until expli
   }
 });
 
+test("Uploaded sources are bound to a run and read through source tools", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-upload-source-workspace-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("uploaded-source@example.com", "uploaded source secure password");
+    const planner = new UploadedSourcePlanner();
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: workspace,
+      modelFactory: () => new UploadedSourceReadModel(),
+      plannerFactory: () => planner,
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "revenue.csv",
+      mimeType: "text/csv",
+      content: Buffer.from("region,revenue\nNorth,120\nSouth,80\n", "utf8"),
+    });
+
+    const run = await runs.execute(owner.user.id, "分析上传文件中的收入", {
+      allowDangerousTools: true,
+      sourceIds: [source.id],
+    });
+
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /read_source/);
+    assert.equal(planner.sourceCount, 1);
+    assert.equal(planner.readSourceAvailable, true);
+    const started = runs.events(owner.user.id, run.id).find((event) => event.type === "run.started");
+    assert.equal(Array.isArray(started?.data.sources), true);
+    const sourceRead = runs.events(owner.user.id, run.id).find((event) =>
+      event.type === "tool.completed" && event.data.toolName === "read_source"
+    );
+    assert.match(String(sourceRead?.data.result ?? ""), /North,120/);
+    assert.equal(runs.source(owner.user.id, source.id).chunkCount, 1);
+  } finally {
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("Uploaded source query matches separated search terms instead of one literal phrase", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-upload-source-query-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("uploaded-source-query@example.com", "uploaded source query secure password");
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: workspace,
+      modelFactory: () => new UploadedSourceQueryModel(),
+      plannerFactory: () => new UploadedSourcePlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "foreign-affairs-plan.md",
+      mimeType: "text/markdown",
+      content: Buffer.from([
+        "打造智能化因公出国数字化管理平台。",
+        "应用RPA等技术自动化高频流程，利用AI进行风险预警与合规检查。",
+        "第一阶段推进风险国别AI预警、照片AI质检和材料智能预审。",
+      ].join("\n"), "utf8"),
+    });
+
+    const run = await runs.execute(owner.user.id, "总结外事业务 AI 规划", {
+      allowDangerousTools: true,
+      sourceIds: [source.id],
+    });
+
+    assert.equal(run.status, "completed");
+    const sourceRead = runs.events(owner.user.id, run.id).find((event) =>
+      event.type === "tool.completed" && event.data.toolName === "read_source"
+    );
+    assert.match(String(sourceRead?.data.result ?? ""), /利用AI进行风险预警/);
+  } finally {
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 class ConversationWriteModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   private calls = 0;
@@ -176,7 +261,7 @@ class VisibleDirectoryPlanner implements Planner {
         objective: "Find and read market-brief.md from the authorized visible directory.",
         dependencies: [],
         skillIds: [],
-        requiredToolNames: ["visible_find_files", "visible_read_file"],
+        recommendedToolNames: ["visible_find_files", "visible_read_file"],
         successCriteria: [{ id: "read", description: "The visible directory file content was read.", source: "planner" }],
       }],
     };
@@ -198,7 +283,7 @@ class RecordingVisibleDirectoryPlanner implements Planner {
         objective: "Record whether visible directory bindings were supplied to this run.",
         dependencies: [],
         skillIds: [],
-        requiredToolNames: hasVisibleTools ? ["visible_find_files"] : [],
+        recommendedToolNames: hasVisibleTools ? ["visible_find_files"] : [],
         successCriteria: [{
           id: "recorded",
           description: "The visible directory binding count was observed by the planner.",
@@ -240,6 +325,90 @@ class VisibleDirectoryReadModel implements ModelAdapter {
     }
     return {
       content: "Read market-brief.md: local visible directory evidence.",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class UploadedSourcePlanner implements Planner {
+  sourceCount = 0;
+  readSourceAvailable = false;
+
+  async plan(task: TaskSpec): Promise<PlanProposal> {
+    this.sourceCount = task.sources?.length ?? 0;
+    this.readSourceAvailable = task.availableToolNames.includes("read_source");
+    return {
+      goal: "read uploaded source",
+      selectedSkillIds: [],
+      steps: [{
+        id: "read-uploaded-source",
+        objective: "Read the uploaded revenue source and summarize the observed rows.",
+        dependencies: [],
+        skillIds: [],
+        recommendedToolNames: ["read_source"],
+        successCriteria: [{ id: "read-source", description: "The uploaded source chunk was read.", source: "planner" }],
+      }],
+    };
+  }
+}
+
+class UploadedSourceReadModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    assert.match(request.runtimeContext?.content ?? "", /"sources":\[/);
+    this.calls += 1;
+    if (this.calls === 1) {
+      const context = request.runtimeContext?.content ?? "";
+      const sourceId = /"id":"(src_[a-f0-9]{32})"/.exec(context)?.[1];
+      assert.ok(sourceId);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "read-source",
+          name: "read_source",
+          arguments: { sourceId, chunkIndex: 0 },
+        }],
+      };
+    }
+    return {
+      content: "Uploaded source read through read_source.",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class UploadedSourceQueryModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      const context = request.runtimeContext?.content ?? "";
+      const sourceId = /"id":"(src_[a-f0-9]{32})"/.exec(context)?.[1];
+      assert.ok(sourceId);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "read-source-query",
+          name: "read_source",
+          arguments: {
+            sourceId,
+            chunkIndex: 0,
+            query: "人工智能 AI 智能化 规划",
+            maxChunks: 10,
+          },
+        }],
+      };
+    }
+    return {
+      content: "Uploaded source query matched AI planning evidence.",
       finishReason: "stop",
       toolCalls: [],
     };

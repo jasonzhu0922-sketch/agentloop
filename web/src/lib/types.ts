@@ -33,6 +33,28 @@ export interface LocalDirectoryEntry {
   readonly path: string;
 }
 
+export type SourceStatus =
+  | "uploaded"
+  | "ready"
+  | "unsupported"
+  | "oversized"
+  | "unreadable"
+  | "extract_failed"
+  | "deleted";
+
+export interface SourceSummary {
+  readonly id: string;
+  readonly originalName: string;
+  readonly mimeType: string;
+  readonly extension: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+  readonly status: SourceStatus;
+  readonly summary?: string;
+  readonly chunkCount: number;
+  readonly truncated: boolean;
+}
+
 export interface SkillSummary {
   readonly id: string;
   readonly name: string;
@@ -74,6 +96,35 @@ export interface RunEvent {
   readonly createdAt: number;
 }
 
+export interface CommandOutputContent {
+  readonly toolCallId: string;
+  readonly stream: "stdout" | "stderr";
+  readonly content: string;
+  readonly path?: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+}
+
+export interface ToolArgumentsReference {
+  readonly schema?: "agentloop.toolArgumentsReference/v1";
+  readonly path: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+  readonly previewCharacters?: number;
+}
+
+export interface ToolArgumentsContent {
+  readonly toolCallId: string;
+  readonly arguments: unknown;
+  readonly content: string;
+  readonly path?: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+}
+
 export interface PlanStep {
   readonly id: string;
   readonly kind?: "leaf" | "milestone";
@@ -83,7 +134,7 @@ export interface PlanStep {
   readonly refinementState?: "not_refinable" | "pending_facts" | "ready_to_refine" | "refining" | "refined";
   readonly dependencies?: readonly string[];
   readonly requiredFacts?: readonly { readonly id: string; readonly description: string; readonly evidenceKinds: readonly string[] }[];
-  readonly requiredToolNames?: readonly string[];
+  readonly recommendedToolNames?: readonly string[];
   readonly successCriteria?: readonly { readonly id: string; readonly description: string }[];
   readonly output?: string;
 }

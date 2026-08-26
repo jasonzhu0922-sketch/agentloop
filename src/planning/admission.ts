@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
+  "materialize_paginated_html",
   "computer_write_file",
   "computer_run_command",
 ]);
@@ -26,16 +28,21 @@ export function admitPlan(input: {
   if (invalidRoleSelections.length > 0) {
     reject(`Initial OutcomePlan cannot expose support/qa Skill roles (${invalidRoleSelections.map((selection) => selection.skillId).join(", ")})`);
   }
-  const availableSkills = new Map(input.availableSkills.map((skill) => [skill.id, skill]));
-  assertUnique(proposal.selectedSkillIds, "selected skill IDs");
-  for (const skillId of proposal.selectedSkillIds) {
+  const availableSkills = buildSkillReferenceMap(input.availableSkills);
+  const selectedSkillIds = proposal.selectedSkillIds.map((skillReference) => {
+    const skill = availableSkills.get(skillReference);
+    if (skill === undefined) reject(`Plan selected unavailable Skill ${skillReference}`);
+    return skill.id;
+  });
+  assertUnique(selectedSkillIds, "selected skill IDs");
+  for (const skillId of selectedSkillIds) {
     if (!availableSkills.has(skillId)) reject(`Plan selected unavailable Skill ${skillId}`);
   }
 
   const stepIds = proposal.steps.map((step) => step.id);
   assertUnique(stepIds, "step IDs");
   const stepIdSet = new Set(stepIds);
-  const selectedSet = new Set(proposal.selectedSkillIds);
+  const selectedSet = new Set(selectedSkillIds);
   const boundSkillIds = new Set<string>();
   const canProduceFiles = hasFileProducer(input.availableToolNames);
 
@@ -44,8 +51,13 @@ export function admitPlan(input: {
     const refinementState = normalizeRefinementState(kind, step.refinementState);
     const requiredFacts = step.requiredFacts ?? [];
     assertUnique(step.dependencies, `dependencies for step ${step.id}`);
-    assertUnique(step.skillIds, `Skill bindings for step ${step.id}`);
-    assertUnique(step.requiredToolNames, `tools for step ${step.id}`);
+    const stepSkillIds = step.skillIds.map((skillReference) => {
+      const skill = availableSkills.get(skillReference);
+      if (skill === undefined) reject(`Step ${step.id} binds unavailable Skill ${skillReference}`);
+      return skill.id;
+    });
+    assertUnique(stepSkillIds, `Skill bindings for step ${step.id}`);
+    assertUnique(step.recommendedToolNames, `recommended tools for step ${step.id}`);
     if (!recoveryPlan && step.role === "repair") {
       reject(`Initial OutcomePlan cannot contain repair leaf ${step.id}`);
     }
@@ -60,14 +72,14 @@ export function admitPlan(input: {
     assertUnique(requiredFacts.map((fact) => fact.id), `required facts for step ${step.id}`);
     for (const fact of requiredFacts) assertRequiredFact(step.id, fact);
     if (kind === "milestone") {
-      if (step.requiredToolNames.length > 0) {
-        reject(`Milestone ${step.id} cannot require execution Tools; refine it into leaf steps first`);
+      if (step.recommendedToolNames.length > 0) {
+        reject(`Milestone ${step.id} cannot recommend execution Tools; refine it into leaf steps first`);
       }
       if (refinementState === "not_refinable") {
         reject(`Milestone ${step.id} must be refinable`);
       }
     }
-    if (kind === "leaf" && step.skillIds.length > 0 && isPureSkillActivationStep(step)) {
+    if (kind === "leaf" && stepSkillIds.length > 0 && isPureSkillActivationStep(step)) {
       reject(
         `Step ${step.id} is only a Skill activation step; bind the Skill to a concrete user-deliverable step instead`,
       );
@@ -78,18 +90,26 @@ export function admitPlan(input: {
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
       );
     }
-    const mergedTools = new Set(step.requiredToolNames);
-    if (kind === "leaf" && step.skillIds.length > 0) mergedTools.add("load_skill");
+    const mergedTools = new Set(step.recommendedToolNames);
+    if (kind === "leaf" && stepSkillIds.length > 0) mergedTools.add("load_skill");
+    if (
+      kind === "leaf"
+      && step.evidenceContract?.requiredKinds.includes("artifact_acceptance")
+      && input.availableToolNames.has("verify_artifact_acceptance")
+    ) {
+      mergedTools.add("verify_artifact_acceptance");
+    }
     const criteria: SuccessCriterion[] = [...step.successCriteria];
-    for (const skillId of step.skillIds) {
+    for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
       const skill = availableSkills.get(skillId);
       if (skill === undefined) reject(`Step ${step.id} binds unavailable Skill ${skillId}`);
       boundSkillIds.add(skillId);
+      for (const toolName of toolNamesRequiredBySkill(skill)) mergedTools.add(toolName);
     }
     for (const toolName of mergedTools) {
       if (!input.availableToolNames.has(toolName)) {
-        reject(`Step ${step.id} requires unavailable Tool ${toolName}`);
+        reject(`Step ${step.id} recommends unavailable Tool ${toolName}`);
       }
     }
     if (criteria.length === 0) reject(`Step ${step.id} has no success criteria`);
@@ -98,9 +118,10 @@ export function admitPlan(input: {
       ...step,
       kind,
       position,
+      skillIds: stepSkillIds,
       refinementState,
       requiredFacts,
-      requiredToolNames: [...mergedTools],
+      recommendedToolNames: [...mergedTools],
       successCriteria: criteria,
       status: "pending",
     };
@@ -120,7 +141,7 @@ export function admitPlan(input: {
     runId: input.runId,
     version: 1,
     goal: proposal.goal,
-    selectedSkillIds: [...proposal.selectedSkillIds],
+    selectedSkillIds,
     status: "admitted",
     steps,
     createdAt: now,
@@ -209,7 +230,7 @@ function assertUnique(values: readonly string[], label: string): void {
 }
 
 function isPureSkillActivationStep(step: PlanProposal["steps"][number]): boolean {
-  const nonActivationTools = step.requiredToolNames.filter((name) => name !== "load_skill");
+  const nonActivationTools = step.recommendedToolNames.filter((name) => name !== "load_skill");
   if (nonActivationTools.length > 0) return false;
   const id = normalizePlanText(step.id);
   const objective = normalizePlanText(step.objective);
@@ -232,6 +253,13 @@ function isPureSkillActivationStep(step: PlanProposal["steps"][number]): boolean
 function containsCompoundDeliverable(value: string): boolean {
   return /\b(and|then)\b.+\b(apply|follow|use|provide|validate|create|produce|design|build|generate|write|verify|deliver|implement|analyze|summarize)\b/.test(value)
     || /(并|并且|然后).*(应用|遵循|使用|提供|创建|生成|设计|输出|实现|完成|分析|总结|验证|交付)/.test(value);
+}
+
+function toolNamesRequiredBySkill(skill: PrivateSkill): string[] {
+  const profiles = skill.agentLoop?.executionProfiles ?? [];
+  const tools = new Set<string>();
+  if (profiles.includes("local_script")) tools.add("computer_run_command");
+  return [...tools];
 }
 
 function normalizePlanText(value: string): string {

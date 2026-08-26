@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
 import type {
   AgentLoopResult,
@@ -16,8 +17,8 @@ import type {
   RuntimeEvent,
   RuntimeEventSink,
 } from "./contracts.ts";
-import type { PreparedToolCall } from "./tool-registry.ts";
-import { ToolRegistry } from "./tool-registry.ts";
+import type { PreparedToolCall } from "../tools/tool-registry.ts";
+import { ToolRegistry } from "../tools/tool-registry.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
 
@@ -49,9 +50,14 @@ export interface AgentLoopOptions {
   readonly maxToolResultCharacters?: number;
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
+  readonly convergencePrompt?: string;
+  readonly convergenceMaxOutputTokens?: number;
   readonly shouldConvergeAfterToolStep?: (
     context: ToolStepConvergenceContext,
   ) => boolean | ToolStepConvergenceDecision | Promise<boolean | ToolStepConvergenceDecision>;
+  readonly shouldUseFinalConvergence?: (
+    context: ToolStepConvergenceContext,
+  ) => boolean | Promise<boolean>;
   readonly signal?: AbortSignal;
   readonly emit?: RuntimeEventSink;
   readonly actionTracker?: {
@@ -142,11 +148,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
   const graceSteps = Math.max(0, options.convergenceGraceSteps ?? DEFAULT_CONVERGENCE_GRACE_STEPS);
   const candidateRepairGraceSteps = Math.max(0, options.candidateRepairGraceSteps ?? 0);
+  const convergenceMaxOutputTokens = Math.max(1, options.convergenceMaxOutputTokens ?? CONVERGENCE_MAX_OUTPUT_TOKENS);
+  const convergencePrompt = options.convergencePrompt ?? CONVERGENCE_PROMPT;
   const candidateRepairAssessmentLimit = Math.max(
     0,
     options.candidateRepairAssessmentLimit ?? DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT,
   );
   let grantedCandidateRepairGraceSteps = 0;
+  let grantedFinalConvergenceGraceSteps = 0;
   let rejectedCandidateAssessments = 0;
   const messages: ModelMessage[] = [
     ...(options.conversationHistory ?? []),
@@ -155,7 +164,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       : options.initialMessages),
   ];
   const toolEvidence: AgentLoopToolEvidence[] = [...(options.initialToolEvidence ?? [])];
-  const availableSkills = new Map((options.availableSkills ?? []).map((skill) => [skill.name, skill]));
+  const availableSkillList = options.availableSkills ?? [];
+  const availableSkills = buildSkillReferenceMap(availableSkillList);
   const activatedSkillNames = new Set(
     collectActivatedSkillNames(options.initialMessages ?? [], availableSkills),
   );
@@ -175,11 +185,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     type: "loop.started",
     data: { runId: options.runId, depth: options.grant.depth },
   });
-  if (availableSkills.size > 0) {
+  if (availableSkillList.length > 0) {
     await emit({
       type: "skill.activation.available",
       data: {
-        skills: [...availableSkills.values()].map((skill) => ({
+        skills: availableSkillList.map((skill) => ({
           id: skill.id,
           name: skill.name,
           contentHash: skill.contentHash,
@@ -192,6 +202,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let previousToolSignature: string | undefined;
   let stalled = false;
   let requestedConvergenceReason: string | undefined;
+  const currentLimit = (): number =>
+    currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps, grantedFinalConvergenceGraceSteps);
   const evaluateCandidate = async (
     step: number,
     context: CandidateCompletionContext,
@@ -211,15 +223,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     return evaluation;
   };
-  for (let step = 1; step <= currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps); step += 1) {
+  for (let step = 1; step <= currentLimit(); step += 1) {
     throwIfAborted(options.signal);
     const inGrace = step > options.maxSteps;
-    const hardLimit = currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps);
+    const hardLimit = currentLimit();
+    const finalConvergenceAllowed = requestedConvergenceReason !== undefined
+      || step !== hardLimit
+      || await shouldUseFinalConvergence(options.shouldUseFinalConvergence, {
+        step,
+        messages,
+        toolEvidence,
+        latestToolEvidence: toolEvidence,
+        activatedSkillNames: [...activatedSkillNames],
+      });
     const convergenceOnly = toolEvidence.length > 0
-      && (requestedConvergenceReason !== undefined || step === hardLimit);
+      && (requestedConvergenceReason !== undefined || (step === hardLimit && finalConvergenceAllowed));
     if (convergenceOnly) {
       convergenceRequested = true;
-      contextAssembler.setRuntimeDirective(CONVERGENCE_PROMPT);
+      contextAssembler.setRuntimeDirective(convergencePrompt);
       await emit({
         type: "loop.convergence_requested",
         data: {
@@ -253,7 +274,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           ? {}
           : { toolChoice: "auto" as const }),
         maxOutputTokens: Math.min(
-          convergenceOnly ? CONVERGENCE_MAX_OUTPUT_TOKENS : MODEL_STEP_MAX_OUTPUT_TOKENS,
+          convergenceOnly ? convergenceMaxOutputTokens : MODEL_STEP_MAX_OUTPUT_TOKENS,
           options.model.limits.maxOutputTokens,
         ),
       };
@@ -307,6 +328,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         content: response.content,
         finishReason: response.finishReason,
         toolCalls: response.toolCalls,
+        ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
         ...(response.usage === undefined ? {} : { usage: response.usage }),
       },
     });
@@ -315,23 +337,39 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       if (response.finishReason !== "stop") {
         const feedback = `Completion candidate was not accepted because the model finished with ${response.finishReason}`;
         await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
-        contextAssembler.setRuntimeDirective(feedback);
+        removeRejectedAssistantCandidate(messages, assistantMessage);
+        if (candidateRepairGraceSteps > grantedCandidateRepairGraceSteps) {
+          grantedCandidateRepairGraceSteps = candidateRepairGraceSteps;
+          await emit({
+            type: "loop.candidate_repair_grace_granted",
+            data: {
+              step,
+              candidateRepairGraceSteps,
+              hardLimit: currentLimit(),
+              feedback,
+            },
+          });
+        }
+        contextAssembler.setRuntimeDirective([
+          feedback,
+          "Return a complete, shorter completion candidate using the available evidence.",
+          "Do not request or emit tool calls.",
+        ].join("\n"));
         continue;
       }
-      // A converged turn has no tools, so a model that is still mid-execution
-      // tends to emit its next tool call as literal text. That is not a
-      // completion candidate: reject it so it never reaches the assessor (which
-      // would otherwise resume the execution instead of assessing it). The
-      // loop then exits and reports the budget exhaustion accurately.
-      if (convergenceOnly && isTextToolInvocation(response.content)) {
+      // A no-tool turn cannot execute a provider protocol envelope. Treat a
+      // literal rendered tool call as an invalid completion candidate before it
+      // reaches the assessor or direct-answer delivery.
+      if (isTextToolInvocation(response.content)) {
         await emit({
           type: "candidate.rejected",
           data: {
             step,
             output: response.content,
-            feedback: "Completion candidate was an unexecuted tool invocation; the step budget was exhausted while the model was still working",
+            feedback: "Completion candidate was an unexecuted tool invocation; the model must either call an available Tool structurally or provide a real completion statement",
           },
         });
+        removeRejectedAssistantCandidate(messages, assistantMessage);
         continue;
       }
       const evaluation = await evaluateCandidate(step, {
@@ -411,7 +449,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             },
           );
         }
-        const output = repairLimitCompletionOutput(response.content, evaluation.feedback, candidateRepairAssessmentLimit);
+        const output = repairLimitCompletionOutput(response.content, candidateRepairAssessmentLimit);
         const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
         await emit({
           type: "candidate.completion_caveated",
@@ -435,6 +473,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         };
       }
       requestedConvergenceReason = undefined;
+      removeRejectedAssistantCandidate(messages, assistantMessage);
       if (candidateRepairGraceSteps > grantedCandidateRepairGraceSteps) {
         grantedCandidateRepairGraceSteps = candidateRepairGraceSteps;
         await emit({
@@ -442,7 +481,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           data: {
             step,
             candidateRepairGraceSteps,
-            hardLimit: currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps),
+            hardLimit: currentLimit(),
             feedback: evaluation.feedback,
           },
         });
@@ -708,11 +747,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             },
           );
         }
-        const output = repairLimitCompletionOutput(
-          structuredCandidate.output,
-          evaluation.feedback,
-          candidateRepairAssessmentLimit,
-        );
+        const output = repairLimitCompletionOutput(structuredCandidate.output, candidateRepairAssessmentLimit);
         const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
         await emit({
           type: "candidate.completion_caveated",
@@ -753,8 +788,29 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       requestedConvergenceReason = convergenceDecision.reason ?? "tool_evidence_ready";
       await emit({
         type: "loop.convergence_queued",
-        data: { step, reason: requestedConvergenceReason, priorToolResultCount: toolEvidence.length },
+        data: {
+          step,
+          reason: requestedConvergenceReason,
+          priorToolResultCount: toolEvidence.length,
+          sourceAcquisition: sourceAcquisitionMetrics(toolEvidence),
+          latestSourceAcquisition: sourceAcquisitionMetrics(latestToolEvidence),
+        },
       });
+      if (step === hardLimit && grantedFinalConvergenceGraceSteps === 0) {
+        grantedFinalConvergenceGraceSteps = 1;
+        await emit({
+          type: "loop.final_convergence_grace_granted",
+          data: {
+            step,
+            reason: requestedConvergenceReason,
+            finalConvergenceGraceSteps: grantedFinalConvergenceGraceSteps,
+            hardLimit: currentLimit(),
+          },
+        });
+      }
+    }
+    if (!convergenceDecision.converge) {
+      contextAssembler.setRuntimeDirective(executionFeedbackDirective(latestToolEvidence));
     }
   }
 
@@ -764,9 +820,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       maxSteps: options.maxSteps,
       convergenceGraceSteps: graceSteps,
       candidateRepairGraceSteps,
+      finalConvergenceGraceSteps: grantedFinalConvergenceGraceSteps,
       candidateRepairAssessmentLimit,
       grantedCandidateRepairGraceSteps,
-      hardLimit: currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps),
+      hardLimit: currentLimit(),
       convergenceRequested,
       stalled,
     },
@@ -775,7 +832,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     "RUN_LIMIT_EXCEEDED",
     stalled
       ? `Run stopped extending its budget: the model repeated identical tool calls without forward progress (${options.maxSteps} primary + ${graceSteps} convergence grace)`
-      : `Run exceeded its ${currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps)}-step limit (${options.maxSteps} primary + ${graceSteps} convergence grace + ${grantedCandidateRepairGraceSteps} candidate repair grace)`,
+      : `Run exceeded its ${currentLimit()}-step limit (${options.maxSteps} primary + ${graceSteps} convergence grace + ${grantedCandidateRepairGraceSteps} candidate repair grace + ${grantedFinalConvergenceGraceSteps} final convergence grace)`,
     409,
     {
       maxSteps: options.maxSteps,
@@ -783,7 +840,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       candidateRepairGraceSteps,
       candidateRepairAssessmentLimit,
       grantedCandidateRepairGraceSteps,
-      hardLimit: currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps),
+      finalConvergenceGraceSteps: grantedFinalConvergenceGraceSteps,
+      hardLimit: currentLimit(),
       stalled,
     },
   );
@@ -793,8 +851,17 @@ function currentHardLimit(
   maxSteps: number,
   convergenceGraceSteps: number,
   candidateRepairGraceSteps: number,
+  finalConvergenceGraceSteps = 0,
 ): number {
-  return maxSteps + convergenceGraceSteps + candidateRepairGraceSteps;
+  return maxSteps + convergenceGraceSteps + candidateRepairGraceSteps + finalConvergenceGraceSteps;
+}
+
+async function shouldUseFinalConvergence(
+  predicate: AgentLoopOptions["shouldUseFinalConvergence"],
+  context: ToolStepConvergenceContext,
+): Promise<boolean> {
+  if (predicate === undefined) return true;
+  return await predicate(context);
 }
 
 function deferredValidationOutput(output: string, feedback: string): string {
@@ -813,11 +880,17 @@ function evidenceBoundaryOutput(output: string, feedback: string): string {
   return `${trimmedOutput}\n\nEvidence boundary note: ${trimmedFeedback}`;
 }
 
-function repairLimitCompletionOutput(output: string, feedback: string, repairLimit: number): string {
+function repairLimitCompletionOutput(output: string, repairLimit: number): string {
   const trimmedOutput = output.trim();
-  const trimmedFeedback = feedback.trim();
   const caveat = `Repair caveat: the candidate was assessed again after ${repairLimit} repair attempt(s), but the remaining issue did not converge. The latest deliverable is accepted with this caveat instead of continuing the repair loop.`;
-  return [trimmedOutput, caveat, trimmedFeedback].filter((part) => part.length > 0).join("\n\n");
+  return [trimmedOutput, caveat].filter((part) => part.length > 0).join("\n\n");
+}
+
+function removeRejectedAssistantCandidate(messages: ModelMessage[], candidate: ModelMessage): void {
+  const last = messages[messages.length - 1];
+  if (last !== candidate || last.role !== "assistant") return;
+  if ((last.toolCalls?.length ?? 0) > 0) return;
+  messages.pop();
 }
 
 async function evaluateToolStepConvergence(
@@ -902,6 +975,82 @@ function projectStructuredCandidateEvidence(
       result: candidate.projection,
     };
   });
+}
+
+function executionFeedbackDirective(
+  latestToolEvidence: readonly AgentLoopToolEvidence[],
+): string | undefined {
+  if (latestToolEvidence.length === 0) return undefined;
+  const lines = [
+    "<runtime_execution_feedback>",
+    "The previous tool step produced canonical execution results. Consume these results before choosing the next action.",
+    "If any tool failed, address the concrete failure cause or change strategy before continuing.",
+    "If any command created or modified files, treat fileChanges paths as artifact facts to inspect or verify next.",
+    "If required evidence is still missing, call the appropriate current-step tool to produce that evidence; do not submit completion from assumptions.",
+    "Recent tool results:",
+  ];
+  for (const item of latestToolEvidence.slice(-6)) {
+    lines.push(`- ${summarizeToolEvidenceForDirective(item)}`);
+  }
+  lines.push("</runtime_execution_feedback>");
+  return lines.join("\n");
+}
+
+function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string {
+  const parsed = parseJsonRecord(item.result);
+  const details: string[] = [];
+  let commandFailed = false;
+  if (parsed !== undefined) {
+    const exitCode = parsed.exitCode;
+    if (typeof exitCode === "number" || exitCode === null) {
+      details.push(`exitCode=${String(exitCode)}`);
+      commandFailed = typeof exitCode === "number" && exitCode !== 0;
+    }
+    const fileChanges = summarizeFileChanges(parsed.fileChanges);
+    if (fileChanges.length > 0) details.push(`fileChanges=${fileChanges.join(",")}`);
+    const stdout = shortStringField(parsed, "stdout");
+    if (stdout !== undefined) details.push(`stdout="${stdout}"`);
+    const stderr = shortStringField(parsed, "stderr");
+    if (stderr !== undefined) details.push(`stderr="${stderr}"`);
+    const path = shortStringField(parsed, "path");
+    if (path !== undefined) details.push(`path=${path}`);
+  } else {
+    details.push(`result="${truncateForDirective(item.result, 180)}"`);
+  }
+  if (details.length === 0) details.push(`result="${truncateForDirective(item.result, 180)}"`);
+  return [
+    item.isError || commandFailed ? "failed" : "succeeded",
+    `toolCallId=${item.toolCallId}`,
+    `tool=${item.toolName}`,
+    details.join(" "),
+  ].join(" ");
+}
+
+function summarizeFileChanges(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const changes: string[] = [];
+  for (const change of value.slice(0, 8)) {
+    if (!isPlainRecord(change)) continue;
+    const path = typeof change.path === "string" ? change.path : undefined;
+    const changeType = typeof change.changeType === "string" ? change.changeType : undefined;
+    if (path === undefined || changeType === undefined) continue;
+    changes.push(`${changeType}:${truncateForDirective(path, 80)}`);
+  }
+  if (value.length > changes.length) changes.push(`and_${value.length - changes.length}_more`);
+  return changes;
+}
+
+function shortStringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  return truncateForDirective(trimmed.replace(/\s+/g, " "), 180);
+}
+
+function truncateForDirective(value: string, maxCharacters: number): string {
+  if (value.length <= maxCharacters) return value;
+  return `${value.slice(0, Math.max(0, maxCharacters - 3))}...`;
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | undefined {
@@ -1134,13 +1283,14 @@ async function executePrepared(
         timeoutMs: tool.timeoutMs,
       }, execute);
     const content = serializeToolResult(value, tool.maxResultCharacters ?? maxCharacters);
+    const metrics = toolEvidenceMetrics(call.name, content);
     await emit({
       type: "tool.result_committed",
-      data: { step, toolCallId: call.id, toolName: call.name, result: content },
+      data: { step, toolCallId: call.id, toolName: call.name, result: content, ...metrics },
     });
     await emit({
       type: "tool.completed",
-      data: { step, toolCallId: call.id, toolName: call.name, result: content },
+      data: { step, toolCallId: call.id, toolName: call.name, result: content, ...metrics },
     });
     return { call, content, isError: false };
   } catch (error) {
@@ -1200,14 +1350,165 @@ function toolCallSignature(calls: readonly ModelToolCall[]): string {
 
 function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fallback: string): string {
   const feedback = evaluation.feedback || fallback;
-  if (evaluation.assessmentReused !== true) return feedback;
-  return [
+  const lines = [
+    "<runtime_candidate_repair>",
     feedback,
-    "The exact completion candidate was already assessed against the same evidence. Do not resubmit it; gather new evidence or provide a materially changed candidate.",
-  ].join("\n");
+    "Repair only the current admitted Plan step described in runtime context.",
+    "The rejected completion candidate was internal Runtime material, not a user-visible assistant answer. Return a complete standalone replacement now.",
+    "Do not refer to an earlier answer, previous message, prior candidate, or already delivered result as the final answer.",
+    "Do not start pending downstream Plan steps, load downstream Skills, or produce downstream artifacts unless the current step objective explicitly requires the same work.",
+    "Use only the tools exposed on the current turn; if no tools are exposed, return a bounded candidate from existing canonical evidence and state any unmet evidence truthfully.",
+    "Tool success, model prose, and artifact text are not completion; the assessor and Terminal Committer remain authoritative.",
+  ];
+  if (evaluation.assessmentReused === true) {
+    lines.push(
+      "The exact completion candidate was already assessed against the same evidence. Do not resubmit it; gather new evidence with current-step tools or provide a materially changed candidate.",
+    );
+  }
+  lines.push("</runtime_candidate_repair>");
+  return lines.join("\n");
 }
 
+function toolEvidenceMetrics(toolName: string, content: string): Record<string, unknown> {
+  const parsed = parseJsonRecord(content);
+  if (parsed === undefined) return {};
+  const receipt = isPlainRecord(parsed.evidenceReceipt) ? parsed.evidenceReceipt : undefined;
+  const sourceRefs = Array.isArray(receipt?.sourceRefs) ? receipt.sourceRefs : [];
+  const facts = Array.isArray(receipt?.facts) ? receipt.facts : [];
+  const sourceCharactersRead = sumSourceRefCharacters(sourceRefs);
+  return {
+    ...(receipt === undefined ? {} : {
+      evidenceReceiptSchema: typeof receipt.schema === "string" ? receipt.schema : undefined,
+      evidenceReceiptId: typeof receipt.receiptId === "string" ? receipt.receiptId : undefined,
+      evidenceSourceType: typeof receipt.sourceType === "string" ? receipt.sourceType : undefined,
+      sourceRefCount: sourceRefs.length,
+      factCount: facts.length,
+    }),
+    ...(isSourceContentReadToolName(toolName) ? {
+      sourceReadCount: sourceReadCountFromResult(parsed, sourceRefs),
+      sourceBatchReadCount: toolName === "visible_read_files" ? sourceReadCountFromResult(parsed, sourceRefs) : undefined,
+      sourceCharactersRead,
+    } : {}),
+    ...(isSourceDiscoveryToolName(toolName) ? {
+      discoveredSourceCount: discoveredSourceCountFromResult(parsed, sourceRefs),
+    } : {}),
+  };
+}
 
+function sourceAcquisitionMetrics(evidence: readonly AgentLoopToolEvidence[]): Record<string, number> {
+  const seen = new Set<string>();
+  let sourceReadCount = 0;
+  let repeatedSourceReadCount = 0;
+  let batchCount = 0;
+  let sourceCharactersRead = 0;
+  let discoveredSourceCount = 0;
+  let sourceSummaryReceiptCount = 0;
+  for (const item of evidence) {
+    if (item.isError) continue;
+    const parsed = parseJsonRecord(item.result);
+    if (parsed === undefined) continue;
+    const receipt = isPlainRecord(parsed.evidenceReceipt) ? parsed.evidenceReceipt : undefined;
+    const sourceRefs = Array.isArray(receipt?.sourceRefs) ? receipt.sourceRefs : [];
+    const facts = Array.isArray(receipt?.facts) ? receipt.facts : [];
+    if (facts.some((fact) => isPlainRecord(fact) && fact.kind === "source_summary")) {
+      sourceSummaryReceiptCount += 1;
+    }
+    if (isSourceDiscoveryToolName(item.toolName)) {
+      discoveredSourceCount = Math.max(discoveredSourceCount, discoveredSourceCountFromResult(parsed, sourceRefs));
+    }
+    if (!isSourceContentReadToolName(item.toolName)) continue;
+    const keys = sourceKeysFromResult(parsed, sourceRefs);
+    const fallbackReadCount = sourceReadCountFromResult(parsed, sourceRefs);
+    if (item.toolName === "visible_read_files" || keys.length > 1 || fallbackReadCount > 1) {
+      batchCount += 1;
+    }
+    sourceCharactersRead += sumSourceRefCharacters(sourceRefs);
+    if (keys.length === 0) {
+      sourceReadCount += fallbackReadCount;
+      continue;
+    }
+    for (const key of keys) {
+      sourceReadCount += 1;
+      if (seen.has(key)) {
+        repeatedSourceReadCount += 1;
+      } else {
+        seen.add(key);
+      }
+    }
+  }
+  return {
+    toolResultCount: evidence.length,
+    discoveredSourceCount,
+    sourceReadCount,
+    uniqueSourceReadCount: seen.size === 0 ? sourceReadCount : seen.size,
+    repeatedSourceReadCount,
+    batchCount,
+    sourceCharactersRead,
+    sourceSummaryReceiptCount,
+  };
+}
+
+function isSourceContentReadToolName(name: string): boolean {
+  return name === "webfetch"
+    || name === "visible_read_file"
+    || name === "visible_read_files"
+    || /(?:^|_)read_(?:file|files|source|sources)(?:_|$)/i.test(name);
+}
+
+function isSourceDiscoveryToolName(name: string): boolean {
+  return name === "websearch"
+    || name === "visible_find_files"
+    || name === "visible_index_directory"
+    || name === "visible_search_text"
+    || name === "visible_list_directory"
+    || /(?:^|_)(?:find|index|search|list|query)(?:_|$)/i.test(name);
+}
+
+function sourceReadCountFromResult(parsed: Record<string, unknown>, sourceRefs: readonly unknown[]): number {
+  return Math.max(
+    integerValue(parsed.returned) ?? 0,
+    Array.isArray(parsed.files) ? parsed.files.length : 0,
+    sourceRefs.length,
+    1,
+  );
+}
+
+function discoveredSourceCountFromResult(parsed: Record<string, unknown>, sourceRefs: readonly unknown[]): number {
+  return Math.max(
+    integerValue(parsed.totalMatches) ?? 0,
+    integerValue(parsed.returnedMatches) ?? 0,
+    integerValue(parsed.returned) ?? 0,
+    sourceRefs.length,
+  );
+}
+
+function sourceKeysFromResult(parsed: Record<string, unknown>, sourceRefs: readonly unknown[]): string[] {
+  const keys = sourceRefs.flatMap((ref) => {
+    if (!isPlainRecord(ref)) return [];
+    const sourceRefId = typeof ref.sourceRefId === "string" ? ref.sourceRefId : undefined;
+    const rootId = typeof ref.rootId === "string" ? ref.rootId : "";
+    const path = typeof ref.path === "string" ? ref.path : undefined;
+    const url = typeof ref.url === "string" ? ref.url : undefined;
+    if (sourceRefId !== undefined) return [sourceRefId];
+    if (path !== undefined && path.trim().length > 0) return [`${rootId}:${path}`];
+    if (url !== undefined && url.trim().length > 0) return [`url:${url}`];
+    return [];
+  });
+  if (keys.length > 0) return [...new Set(keys)];
+  const path = typeof parsed.path === "string" ? parsed.path : undefined;
+  return path === undefined ? [] : [path];
+}
+
+function sumSourceRefCharacters(sourceRefs: readonly unknown[]): number {
+  return sourceRefs.reduce((sum, ref) => {
+    if (!isPlainRecord(ref)) return sum;
+    return sum + (integerValue(ref.characters) ?? 0);
+  }, 0);
+}
+
+function integerValue(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
+}
 
 function serializeToolResult(value: unknown, maximum: number): string {
   let serialized: string;

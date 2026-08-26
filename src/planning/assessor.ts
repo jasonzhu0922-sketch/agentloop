@@ -209,11 +209,12 @@ export class RuleBasedStepAssessor implements StepAssessor {
 export class ProfiledRuleStepAssessor implements StepAssessor {
   private readonly profile: AssessmentProfileId;
 
-  constructor(profile: Extract<AssessmentProfileId, "deterministic" | "lookup_lite">) {
+  constructor(profile: Extract<AssessmentProfileId, "deterministic" | "evidence_gate" | "lookup_lite">) {
     this.profile = profile;
   }
 
   async assess(input: StepAssessmentInput): Promise<SkillComplianceAssessment> {
+    if (this.profile === "evidence_gate") return this.assessEvidenceGate(input);
     const candidateOutput = input.evidence.candidateOutput.trim();
     const nonEmpty = candidateOutput.length > 0;
     const successfulToolRefs = input.evidence.toolCalls
@@ -276,6 +277,149 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     }
     return "The candidate does not satisfy the lightweight assessment policy.";
   }
+
+  private assessEvidenceGate(input: StepAssessmentInput): SkillComplianceAssessment {
+    const candidateOutput = input.evidence.candidateOutput.trim();
+    const nonEmpty = candidateOutput.length > 0;
+    const successfulToolRefs = input.evidence.toolCalls
+      .filter((toolCall) => !toolCall.isError)
+      .map((toolCall) => toolCall.toolCallId);
+    const receipts = runtimeEvidenceReceipts(input.evidence.toolCalls);
+    const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
+    const requiredKindsSatisfied = requiredKinds.every((kind) =>
+      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs)
+    );
+    const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
+      const satisfied = nonEmpty && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs);
+      return {
+        criterionId: criterion.id,
+        satisfied,
+        rationale: satisfied
+          ? "The required Runtime evidence receipts satisfy the principle assessment gate; detailed QA remains owned by the producing Skill or Tool."
+          : rejectedEvidenceGateRationale(nonEmpty, receipts, requiredKinds, successfulToolRefs),
+        evidenceRefs: satisfied
+          ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId)]
+          : successfulToolRefs,
+      };
+    });
+    const skills: SkillAssessment[] = input.skills.map((skill) => ({
+      skillId: skill.id,
+      status: requiredKindsSatisfied && nonEmpty ? "followed" : "not_followed",
+      followed: requiredKindsSatisfied && nonEmpty,
+      rationale: requiredKindsSatisfied && nonEmpty
+        ? "Runtime principle assessment accepted the Skill-bound step because the required QA/delivery receipt is present; it did not reperform Skill QA."
+        : "The required QA/delivery receipt is missing or failed, so the Skill-bound step cannot pass the principle gate.",
+      evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`, ...receipts.map((receipt) => receipt.toolCallId)],
+    }));
+    const feedback = criteria.every((criterion) => criterion.satisfied) && skills.every((skill) => skill.followed)
+      ? ""
+      : "Completion rejected by principle assessment; provide the missing Runtime evidence receipt or repair the failed receipt.";
+    return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
+  }
+}
+
+interface RuntimeEvidenceReceipt {
+  readonly toolCallId: string;
+  readonly schema: string;
+  readonly verdict?: string;
+  readonly satisfied: ReadonlySet<string>;
+  readonly caveated: ReadonlySet<string>;
+  readonly failed: ReadonlySet<string>;
+}
+
+function runtimeEvidenceReceipts(toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string }[]): RuntimeEvidenceReceipt[] {
+  const receipts: RuntimeEvidenceReceipt[] = [];
+  for (const toolCall of toolCalls) {
+    if (toolCall.isError) continue;
+    const parsed = parseToolResultObject(toolCall.result);
+    const topLevelSchema = typeof parsed?.schema === "string" ? parsed.schema : undefined;
+    const nestedReceipt = parseToolResultObject(parsed?.evidenceReceipt);
+    const schema = topLevelSchema === "agentloop.artifactAcceptance/v1" || topLevelSchema === "agentloop.sourceSummary/v1"
+      ? topLevelSchema
+      : typeof nestedReceipt?.schema === "string"
+        ? nestedReceipt.schema
+        : undefined;
+    if (
+      schema !== "agentloop.artifactAcceptance/v1"
+      && schema !== "agentloop.sourceSummary/v1"
+      && schema !== "agentloop.toolEvidenceReceipt/v1"
+    ) continue;
+    const evidenceKinds = parseToolResultObject(nestedReceipt?.evidenceKinds ?? parsed?.evidenceKinds);
+    const verdict = typeof parsed.verdict === "string" ? parsed.verdict : undefined;
+    receipts.push({
+      toolCallId: toolCall.toolCallId,
+      schema,
+      verdict,
+      satisfied: new Set(stringArrayField(evidenceKinds, "satisfied")),
+      caveated: new Set(stringArrayField(evidenceKinds, "caveated")),
+      failed: new Set(stringArrayField(evidenceKinds, "failed")),
+    });
+  }
+  return receipts;
+}
+
+function criterionSatisfiedByEvidenceGate(
+  criterionId: string,
+  requiredKinds: readonly string[],
+  requiredKindsSatisfied: boolean,
+  receipts: readonly RuntimeEvidenceReceipt[],
+  successfulToolRefs: readonly string[],
+): boolean {
+  if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs);
+  if (requiredKinds.length > 0) return requiredKindsSatisfied;
+  return successfulToolRefs.length > 0;
+}
+
+function evidenceKindSatisfiedByGate(
+  kind: string,
+  receipts: readonly RuntimeEvidenceReceipt[],
+  successfulToolRefs: readonly string[],
+): boolean {
+  if (kind === "delivery_receipt") return successfulToolRefs.length > 0;
+  if (kind === "artifact_acceptance") {
+    const acceptance = receipts.find((receipt) => receipt.schema === "agentloop.artifactAcceptance/v1");
+    return acceptance !== undefined
+      && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
+      && acceptance.failed.size === 0;
+  }
+  return receipts.some((receipt) => {
+    if (receipt.failed.has(kind)) return false;
+    if (kind === "explicit_caveats") return receipt.satisfied.has(kind) || receipt.caveated.has(kind);
+    return receipt.satisfied.has(kind);
+  });
+}
+
+function rejectedEvidenceGateRationale(
+  nonEmpty: boolean,
+  receipts: readonly RuntimeEvidenceReceipt[],
+  requiredKinds: readonly string[],
+  successfulToolRefs: readonly string[],
+): string {
+  if (!nonEmpty) return "The candidate output is empty.";
+  if (successfulToolRefs.length === 0) return "No successful Runtime evidence receipts are available.";
+  if (receipts.length === 0) return "No structured Runtime evidence receipt is available for the principle assessment gate.";
+  const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs));
+  if (missing.length > 0) return `The principle assessment gate is missing required evidence kind(s): ${missing.join(", ")}.`;
+  return "The Runtime evidence receipts do not satisfy the principle assessment gate.";
+}
+
+function parseToolResultObject(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parseToolResultObject(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringArrayField(record: Record<string, unknown> | undefined, field: string): string[] {
+  const value = record?.[field];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function parseAssessment(input: StepAssessmentInput, value: unknown): SkillComplianceAssessment {
@@ -425,7 +569,7 @@ function uniqueStrings(values: readonly string[]): string[] {
 }
 
 function stepRequiresLookupEvidence(input: StepAssessmentInput): boolean {
-  if (input.step.requiredToolNames.length > 0) return true;
+  if (input.step.recommendedToolNames.length > 0) return true;
   return input.step.successCriteria.some((criterion) =>
     /(?:\b(?:source|url|cite|citation|current|latest|lookup|search|fetch)\b|来源|网址|引用|最新|当前|查询|检索|搜索)/iu
       .test(criterion.description),
@@ -476,7 +620,7 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
         "If the only remaining Skill gap is process discipline such as planning-before-coding, review-before-build, ordering, or evidence-capture timing, and all criteria are satisfied, use process_caveat instead of not_followed unless the user or step criteria make that discipline a blocking requirement.",
     };
   }
-  if (input.step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+  if (input.step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
     policy.sourceCaveats = {
       evidenceBoundary:
         "If authoritative external sources were attempted and remain unavailable, forbidden, paywalled, or missing full text: do not approve criteria that require those missing facts. In feedback, explicitly separate verified facts from unavailable or unverified facts so Runtime can decide whether a limited-evidence delivery is acceptable. Treat source evidence as blocking only when exact/current/official source facts are the user's required deliverable; otherwise it is auxiliary grounding for the core artifact.",
@@ -492,7 +636,7 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
  * redact that shape defensively before it reaches the model.
  */
 function sanitizeStepEvidence(evidence: StepEvidence): StepEvidence {
-  return { ...evidence, candidateOutput: redactToolInvocation(evidence.candidateOutput) };
+  return { ...evidence, candidateOutput: projectCandidateOutput(redactToolInvocation(evidence.candidateOutput)) };
 }
 
 function redactToolInvocation(value: string): string {
@@ -501,6 +645,24 @@ function redactToolInvocation(value: string): string {
     return "[The completion candidate was an unexecuted tool invocation, not a completion statement; it was redacted from assessment evidence.]";
   }
   return value;
+}
+
+function projectCandidateOutput(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 2_000) return value;
+  const lines = trimmed.split(/\r?\n/);
+  const outline = lines
+    .map((line, index) => ({ line: index + 1, text: line.trim() }))
+    .filter((line) => /^(?:#{1,6}\s|\d+\.\s|[-*]\s|\|.+\|$)/u.test(line.text))
+    .slice(0, 80);
+  return JSON.stringify({
+    schema: "agentloop.candidateProjection/v1",
+    characters: value.length,
+    sha256: createHash("sha256").update(value).digest("hex"),
+    preview: trimmed.slice(0, 1_000),
+    outline,
+    caveat: "Full candidate output is persisted in canonical evidence; assessment model projection is limited to summary, outline, and hash.",
+  });
 }
 
 function assessmentRuntimeContext(

@@ -1,6 +1,13 @@
 ---
 name: presentation-skill
 description: "Build, edit, redesign, render, and verify polished editable PowerPoint `.pptx` decks from a prompt, structured `outline.json`, local data, or a saved workspace. Use for presentation and slide-deck generation, lab/clinical/scientific reports, board and investor decks, editorial briefs, charts/tables/figures, template-inspired redesign, geometry/readability QA, rendered visual review, and reproducible deck workspaces. Aliases: PowerPoint skill, PPTX skill, presentation generator, slide-deck generator, deck builder, powerpoint-deck-builder, pptx-skill."
+agentloop:
+  roles:
+    - primary_builder
+  artifactKinds:
+    - presentation
+  sourceKinds: []
+  qaKinds: []
 ---
 
 # Presentation Skill

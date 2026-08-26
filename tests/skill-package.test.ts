@@ -8,8 +8,9 @@ import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 import type { StepAssessor } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
+import { formatAvailableSkills } from "../src/skills/skill-context.ts";
 import { inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
-import { SkillService } from "../src/skills/skill-service.ts";
+import { SkillService, type PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
@@ -56,6 +57,8 @@ test("AgentLoop role metadata is parsed from Skill package frontmatter", async (
       "  artifactKinds:",
       "    - html",
       "  sourceKinds: []",
+      "  executionProfiles:",
+      "    - local_script",
       "  qaKinds:",
       "    - openability",
       "---",
@@ -70,10 +73,44 @@ test("AgentLoop role metadata is parsed from Skill package frontmatter", async (
       artifactKinds: ["html"],
       sourceKinds: [],
       qaKinds: ["openability"],
+      executionProfiles: ["local_script"],
     });
   } finally {
     await removeSkillPackage(workspace);
   }
+});
+
+test("AgentLoop execution profiles are exposed in the available Skill catalog", () => {
+  const skill: PrivateSkill = {
+    id: "discovered:api-query",
+    ownerUserId: "user-1",
+    name: "api-query",
+    description: "Query API catalog metadata.",
+    instructions: "SECRET BODY",
+    sourceKind: "package",
+    version: 1,
+    contentHash: "hash",
+    updatedAt: 1,
+    agentLoop: {
+      roles: ["source_provider"],
+      artifactKinds: ["none"],
+      sourceKinds: ["api"],
+      qaKinds: [],
+      executionProfiles: ["local_script"],
+    },
+    package: {
+      root: "/skills/api-query",
+      entrypointPath: "SKILL.md",
+      packageHash: "hash",
+      fileCount: 1,
+      totalBytes: 10,
+    },
+  };
+
+  const context = formatAvailableSkills([skill]);
+  assert.match(context, /AgentLoop executionProfiles/);
+  assert.match(context, /<agentloop[^>]*execution_profiles="local_script"/);
+  assert.doesNotMatch(context, /SECRET BODY/);
 });
 
 test("an existing Skill package is copied byte-for-byte, hashed as a whole, and made read-only", async () => {
@@ -421,8 +458,11 @@ class InspectPackageModel implements ModelAdapter {
       this.sawPackageEnvelope = (loaded?.content.includes(`Base directory for this Skill: ${this.packageRoot}`) ?? false)
         && (loaded?.content.includes(`package_sha256=\"${this.packageHash}\"`) ?? false)
         && (loaded?.content.includes('read_only="true"') ?? false);
-      this.sawRuntimeExecutionCwd = loaded?.content.includes("Runtime execution cwd for this Skill: @skills/runtime-package") ?? false;
+      this.sawRuntimeExecutionCwd = (loaded?.content.includes("Runtime execution cwd for this Skill: @skills/runtime-package") ?? false)
+        && (loaded?.content.includes("The @skills/runtime-package token is a Runtime command-root alias, not an operating-system path.") ?? false)
+        && (loaded?.content.includes("Script-readable Skill root environment variable: AGENTLOOP_SKILL_ROOT_RUNTIME_PACKAGE") ?? false);
       assert.match(request.runtimeContext?.content ?? "", /"cwd":"@skills\/runtime-package"/);
+      assert.match(request.runtimeContext?.content ?? "", /"env":"AGENTLOOP_SKILL_ROOT_RUNTIME_PACKAGE"/);
       assert.ok(request.tools.some((tool) => tool.name === "computer_run_command"));
       return {
         content: "",

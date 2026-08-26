@@ -6,7 +6,7 @@ import test from "node:test";
 import { AuthService } from "../src/auth/auth-service.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
-import type { RuntimeTool } from "../src/runtime/tool-registry.ts";
+import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { removeSkillPackage } from "../src/skills/skill-package.ts";
 import { AppDatabase } from "../src/storage/database.ts";
@@ -85,7 +85,7 @@ const SCENARIOS: readonly SkillScenario[] = [
   },
 ];
 
-test("real frontend-design and canvas-design packages survive compaction and require renewed compliance", async (t) => {
+test("real frontend-design and canvas-design packages require exact Skill compliance after candidate repair", async (t) => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-real-skill-compression-"));
   const packageStore = join(workspace, ".agentloop", "skill-packages");
   const database = new AppDatabase(":memory:");
@@ -100,7 +100,7 @@ test("real frontend-design and canvas-design packages survive compaction and req
     const available = await skills.listAvailable(owner.user.id);
 
     for (const scenario of SCENARIOS) {
-      await t.test(`${scenario.skillName} is reloaded after its exact body leaves the context tail`, async () => {
+      await t.test(`${scenario.skillName} uses exact loaded Skill instructions during candidate repair`, async () => {
         const skill = available.find((candidate) => candidate.name === scenario.skillName);
         assert.notEqual(skill, undefined);
         const model = new CompressionComplianceModel(scenario, skill!.id);
@@ -117,9 +117,9 @@ test("real frontend-design and canvas-design packages survive compaction and req
         });
         assert.equal(run.status, "completed");
         assert.equal(run.output, scenario.finalOutput);
-        assert.equal(model.summaryCalls, 1);
+        assert.equal(model.summaryCalls, 0);
         assert.equal(model.assessmentCalls, 2);
-        assert.equal(model.executionCalls, 5);
+        assert.equal(model.executionCalls, 4);
 
         for (const file of scenario.deliveryFiles) {
           assert.equal(await fs.readFile(join(workspace, file.path), "utf8"), file.content);
@@ -136,16 +136,9 @@ test("real frontend-design and canvas-design packages survive compaction and req
 
         const events = runs.events(owner.user.id, run.id);
         const activated = events.filter((event) => event.type === "skill.activated");
-        assert.equal(activated.length, 2);
+        assert.equal(activated.length, 1);
         assert.equal(activated.every((event) => event.data.name === scenario.skillName), true);
-        const compacted = events.filter((event) => event.type === "context.compacted");
-        assert.equal(compacted.length, 1);
-        assert.deepEqual(compacted[0].data.expiredSkillNames, [scenario.skillName]);
-        assert.equal(events.some((event) =>
-          event.type === "skill.activation.expired"
-          && event.data.name === scenario.skillName
-          && event.data.reason === "load_skill_result_compacted"
-        ), true);
+        assert.equal(events.some((event) => event.type === "context.compacted"), false);
         assert.equal(events.filter((event) => event.type === "skill.compliance.assessed").length, 2);
         assert.equal(events.at(-1)?.type, "run.completed");
       });
@@ -192,7 +185,7 @@ function createDeliveryTool(workspace: string, scenario: SkillScenario): Runtime
 }
 
 class CompressionComplianceModel implements ModelAdapter {
-  readonly limits = { contextWindowTokens: 20_000, maxOutputTokens: 1_024 } as const;
+  readonly limits = { contextWindowTokens: 25_000, maxOutputTokens: 1_024 } as const;
   readonly scenario: SkillScenario;
   readonly skillId: string;
   plannerCalls = 0;
@@ -239,7 +232,7 @@ class CompressionComplianceModel implements ModelAdapter {
         dependsOn: [],
         role: "produce",
         skillIds: [this.skillId],
-        requiredToolNames: [DELIVERY_TOOL],
+        recommendedToolNames: [DELIVERY_TOOL],
         evidenceContract: {
           requiredKinds: ["delivery_receipt"],
           caveatPolicy: "none",
@@ -325,7 +318,7 @@ class CompressionComplianceModel implements ModelAdapter {
       });
     }
     assert.equal(this.assessmentCalls, 2);
-    assert.equal(typeof assessmentInput.contextSummary, "string");
+    assert.equal("contextSummary" in assessmentInput, false);
     assert.equal(assessmentInput.evidence.candidateOutput, this.scenario.finalOutput);
     return toolResponse("assessment-approve", "submit_assessment", {
       criteria: [{
@@ -367,18 +360,15 @@ class CompressionComplianceModel implements ModelAdapter {
       };
     }
     if (this.executionCalls === 4) {
+      // File-producing Skills receive candidate-repair grace, so the final
+      // candidate is produced on a tool-enabled turn rather than a stripped
+      // convergence turn; the model still stops and is assessed normally.
       assertExecutionTools(tools);
-      assert.match(request.runtimeContext?.content ?? "", /structured_summary/);
-      this.assertSkillIsNotVisible(request);
-      return toolResponse("step-reload", "load_skill", { name: this.scenario.skillName });
+      assert.doesNotMatch(request.runtimeContext?.content ?? "", /structured_summary/);
+      this.assertExactLoadedSkill(request);
+      return { content: this.scenario.finalOutput, toolCalls: [], finishReason: "stop" };
     }
-    assert.equal(this.executionCalls, 5);
-    // File-producing Skills receive convergence grace steps, so the final
-    // candidate is produced on a tool-enabled turn rather than a stripped
-    // convergence turn; the model still stops and is assessed normally.
-    assertExecutionTools(tools);
-    this.assertExactLoadedSkill(request);
-    return { content: this.scenario.finalOutput, toolCalls: [], finishReason: "stop" };
+    throw new Error(`unexpected execution call ${this.executionCalls}`);
   }
 
   private assertExactLoadedSkill(request: ModelInvocation): void {

@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
-import type { RuntimeTool } from "../runtime/tool-registry.ts";
+import type { RuntimeTool } from "./tool-registry.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MIN_TIMEOUT_MS = 1_000;
@@ -22,6 +23,38 @@ interface SearchResult {
   readonly title: string;
   readonly url: string;
   readonly snippet: string;
+}
+
+interface WebSearchResult {
+  readonly schema: "agentloop.webSearch/v1";
+  readonly query: string;
+  readonly returned: number;
+  readonly results: readonly SearchResult[];
+  readonly evidenceReceipt: WebToolEvidenceReceipt;
+}
+
+interface WebFetchResult {
+  readonly schema: "agentloop.webFetch/v1";
+  readonly url: string;
+  readonly title: string | undefined;
+  readonly content: string;
+  readonly bytes: number;
+  readonly truncated: boolean;
+  readonly evidenceReceipt: WebToolEvidenceReceipt;
+}
+
+interface WebToolEvidenceReceipt {
+  readonly schema: "agentloop.toolEvidenceReceipt/v1";
+  readonly sourceType: "web_search" | "web_page";
+  readonly receiptId: string;
+  readonly sourceRefs: readonly Record<string, unknown>[];
+  readonly facts: readonly Record<string, unknown>[];
+  readonly caveats: readonly string[];
+  readonly evidenceKinds: {
+    readonly satisfied: readonly string[];
+    readonly caveated: readonly string[];
+    readonly failed: readonly string[];
+  };
 }
 
 /**
@@ -72,8 +105,8 @@ function createFetchTool(
   return {
     name: "webfetch",
     description: [
-      "Fetch a web page by URL and return its readable content as markdown (default) or plain text.",
-      "Follows redirects including JavaScript and meta-refresh redirects; returns { url, title, content, bytes, truncated }.",
+      "Fetch a web page by URL and return readable content plus a canonical evidenceReceipt.",
+      "Follows redirects including JavaScript and meta-refresh redirects; returns { schema, url, title, content, bytes, truncated, evidenceReceipt }.",
       "Prefer this over computer_run_command + curl for reading articles, documentation, or search result pages.",
     ].join(" "),
     inputSchema: objectSchema(["url"], {
@@ -105,7 +138,8 @@ function createSearchTool(
   return {
     name: "websearch",
     description: [
-      "Search the web and return structured results as an array of { title, url, snippet } objects.",
+      "Search the web and return structured results plus a canonical evidenceReceipt.",
+      "Returns { schema, query, returned, results: [{ title, url, snippet }], evidenceReceipt }.",
       "Search once with a complete query phrase reflecting the user's intent; do not re-search by splitting single words or characters out of result titles.",
       "The snippet is enough to judge relevance; for broader coverage raise numResults (up to 10) in one search instead of repeating it.",
       "Prefer webfetch on the returned URLs to read full article text, and avoid repeated searches on the same topic.",
@@ -137,7 +171,7 @@ async function fetchWebPage(
   format: "markdown" | "text",
   options: WebToolsOptions,
   timeoutMs: number,
-): Promise<{ url: string; title: string | undefined; content: string; bytes: number; truncated: boolean }> {
+): Promise<WebFetchResult> {
   let current = url;
   for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop++) {
     const fetched = await httpGet(current, options, timeoutMs);
@@ -146,13 +180,16 @@ async function fetchWebPage(
       current = new URL(redirectTarget, fetched.url).toString();
       continue;
     }
-    return {
+    const content = format === "markdown" ? htmlToMarkdown(fetched.html) : htmlToText(fetched.html);
+    const result = {
+      schema: "agentloop.webFetch/v1" as const,
       url: fetched.url,
       title: extractTitle(fetched.html),
-      content: format === "markdown" ? htmlToMarkdown(fetched.html) : htmlToText(fetched.html),
+      content,
       bytes: fetched.html.length,
       truncated: fetched.truncated,
     };
+    return { ...result, evidenceReceipt: webFetchReceipt(result) };
   }
   throw badRequest(`Too many redirects while fetching ${url}`);
 }
@@ -163,7 +200,7 @@ async function executeSearch(
   numResults: number,
   options: WebToolsOptions,
   timeoutMs: number,
-): Promise<SearchResult[]> {
+): Promise<WebSearchResult> {
   const trimmed = query.trim();
   if (trimmed.length < QUERY_MIN_CHARACTERS) {
     throw badRequest(
@@ -181,14 +218,119 @@ async function executeSearch(
     searchCacheByRun.set(runId, runCache);
   }
   const cached = runCache.get(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return webSearchResult(trimmed, cached);
   const results = await searchWeb(trimmed, numResults, options, timeoutMs);
   if (runCache.size >= SEARCH_CACHE_MAX_PER_RUN) {
     const oldestQuery = runCache.keys().next().value as string;
     runCache.delete(oldestQuery);
   }
   runCache.set(key, results);
-  return results;
+  return webSearchResult(trimmed, results);
+}
+
+function webSearchResult(query: string, results: readonly SearchResult[]): WebSearchResult {
+  return {
+    schema: "agentloop.webSearch/v1",
+    query,
+    returned: results.length,
+    results,
+    evidenceReceipt: webSearchReceipt(query, results),
+  };
+}
+
+function webSearchReceipt(query: string, results: readonly SearchResult[]): WebToolEvidenceReceipt {
+  const sourceRefs = results.map((result) => webSourceRef(result.url, {
+    title: result.title,
+    snippetCharacters: result.snippet.length,
+  }));
+  const failed = results.length === 0 ? ["source_urls"] : [];
+  return buildWebToolEvidenceReceipt({
+    sourceType: "web_search",
+    sourceRefs,
+    facts: [{
+      kind: "source_urls",
+      query,
+      returned: results.length,
+      urls: results.map((result) => ({ title: result.title, url: result.url })),
+    }],
+    caveats: [
+      "Search results are discovery metadata; fetch source URLs before treating snippets as verified source facts.",
+    ],
+    satisfied: results.length === 0 ? [] : ["source_urls"],
+    failed,
+  });
+}
+
+function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebToolEvidenceReceipt {
+  const contentSha256 = createHash("sha256").update(result.content).digest("hex");
+  return buildWebToolEvidenceReceipt({
+    sourceType: "web_page",
+    sourceRefs: [webSourceRef(result.url, {
+      title: result.title,
+      bytes: result.bytes,
+      characters: result.content.length,
+      sha256: contentSha256,
+      truncated: result.truncated,
+    })],
+    facts: [{
+      kind: "source_summary",
+      url: result.url,
+      title: result.title,
+      characters: result.content.length,
+      bytes: result.bytes,
+      sha256: contentSha256,
+      truncated: result.truncated,
+      textPreview: result.content.slice(0, 800),
+    }],
+    caveats: [
+      "Full Tool result remains in canonical events; model context may receive only this structured receipt.",
+      ...(result.truncated ? ["Web page read was truncated; fetch a narrower source before citing omitted text."] : []),
+    ],
+    satisfied: ["source_read", "source_summary", "source_urls"],
+  });
+}
+
+function webSourceRef(url: string, extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    sourceRefId: `web:${createHash("sha256").update(url).digest("hex")}`,
+    url,
+    path: url,
+    ...omitUndefined(extra),
+  };
+}
+
+function buildWebToolEvidenceReceipt(input: {
+  readonly sourceType: "web_search" | "web_page";
+  readonly sourceRefs: readonly Record<string, unknown>[];
+  readonly facts: readonly Record<string, unknown>[];
+  readonly caveats: readonly string[];
+  readonly satisfied: readonly string[];
+  readonly failed?: readonly string[];
+}): WebToolEvidenceReceipt {
+  const material = JSON.stringify({
+    sourceType: input.sourceType,
+    sourceRefs: input.sourceRefs,
+    facts: input.facts,
+    caveats: input.caveats,
+    failed: input.failed ?? [],
+  });
+  return {
+    schema: "agentloop.toolEvidenceReceipt/v1",
+    sourceType: input.sourceType,
+    receiptId: createHash("sha256").update(material).digest("hex"),
+    sourceRefs: input.sourceRefs,
+    facts: input.facts,
+    caveats: input.caveats,
+    evidenceKinds: {
+      satisfied: input.satisfied,
+      caveated: input.caveats.length === 0 ? [] : ["explicit_caveats"],
+      failed: input.failed ?? [],
+    },
+  };
+}
+
+function omitUndefined(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }
 
 async function searchWeb(

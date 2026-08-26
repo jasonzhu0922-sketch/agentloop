@@ -104,6 +104,8 @@ interface TaskProfile {
     | "recovery_patch";
   evidenceProfile:
     | "deterministic"
+    | "evidence_gate"
+    | "lookup_lite"
     | "source_grounded"
     | "risk_sensitive";
   riskProfile:
@@ -125,6 +127,8 @@ artifactKind = html
 planShape = fact_then_produce
 evidenceProfile = source_grounded
 ```
+
+其中 `source_grounded` 用于 DCMM 事实整理；生产 leaf 如果要求 `artifact_acceptance` receipt，Assessment profile 应收敛为 `evidence_gate`，只做原则性证据门校验。
 
 ### 4.2 SkillRoleSelection
 
@@ -172,7 +176,7 @@ interface OutcomeLeaf {
   dependsOn: string[];
   role: "fact_acquisition" | "produce" | "deliver" | "repair";
   skillIds: string[];
-  requiredToolNames: string[];
+  recommendedToolNames: string[];
   evidenceContract: EvidenceContract;
 }
 ```
@@ -186,6 +190,7 @@ interface EvidenceContract {
     | "source_urls"
     | "artifact_path"
     | "artifact_non_empty"
+    | "artifact_acceptance"
     | "artifact_openable"
     | "format_matches_request"
     | "basic_navigation"
@@ -327,16 +332,14 @@ tool.result_committed
 
 ### 5.8 Assessment
 
-Assessment 判断 evidence contract，而不是判断 Planner 是否预写了完整 workflow。
+Assessment 判断 evidence contract，而不是判断 Planner 是否预写了完整 workflow。QA 属于 Skill / Tool / acceptance provider；Assessment 只确认 Runtime 终结所需的 receipt 存在、可解析、未失败，并且 caveat 符合策略。
 
 HTML presentation 类产物的核心证据示例：
 
 ```text
 artifact_path
 artifact_non_empty
-artifact_openable
-format_matches_request
-basic_navigation
+artifact_acceptance
 source_urls
 explicit_caveats
 delivery_receipt
@@ -442,7 +445,7 @@ OutcomePlan：
       "dependsOn": [],
       "role": "fact_acquisition",
       "skillIds": [],
-      "requiredToolNames": ["websearch", "webfetch"],
+      "recommendedToolNames": ["websearch", "webfetch"],
       "evidenceContract": {
         "requiredKinds": ["source_summary", "source_urls", "explicit_caveats"],
         "caveatPolicy": "mark_unverified_facts"
@@ -454,14 +457,12 @@ OutcomePlan：
       "dependsOn": ["research_dcmm_level4"],
       "role": "produce",
       "skillIds": ["discovered:web-artifacts-builder"],
-      "requiredToolNames": ["load_skill", "computer_write_file", "computer_run_command", "computer_read_file"],
+      "recommendedToolNames": ["load_skill", "materialize_paginated_html", "verify_artifact_acceptance"],
       "evidenceContract": {
         "requiredKinds": [
           "artifact_path",
           "artifact_non_empty",
-          "artifact_openable",
-          "format_matches_request",
-          "basic_navigation",
+          "artifact_acceptance",
           "delivery_receipt"
         ],
         "caveatPolicy": "mark_unverified_facts"

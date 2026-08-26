@@ -46,6 +46,12 @@ When writing the code, be careful of structuring your CSS selector specificities
 
 Try to do a lot of this planning and iteration in your thinking, and only show ideas to the user when you have higher confidence it'll delight them.
 
+## AgentLoop paginated HTML contract
+
+This Skill describes design intent, artifact capability needs, and evidence expectations; it does not register, authorize, name, or require Runtime Tools by itself. Do not treat structured page materialization as the default way to build HTML. Use a structured page-materialization capability only when the user or current Plan step explicitly asks for paginated HTML, HTML-PPT, slide decks, training materials, or another page-by-page artifact that can be represented without losing the requested layout or interaction.
+
+For HTML-PPT requests that fit a structured page contract, request slide-like rendering and slide-deck acceptance evidence. For non-PPT paginated HTML, request generic HTML acceptance evidence. For ordinary standalone pages, distinctive visual design, dashboards, apps, custom interactions, or layouts that need authored markup/CSS/JS, build the HTML through the appropriate code/file capability and preserve final artifact acceptance evidence when the Runtime provides such a capability.
+
 ## Restraint and self-critique
 
 Spend your boldness in one place. Let the signature element be the one memorable thing, keep everything around it quiet and disciplined, and cut any decoration that does not serve the brief. Not taking a risk can be a risk itself! Build to a quality floor without announcing it: responsive down to mobile, visible keyboard focus, reduced motion respected. Critique your own work as you build, taking screenshots if your environment supports it – a picture is worth 1000 tokens. Consider Chanel's advice: before leaving the house, take a look in the mirror and remove one accessory. Human creators have memory and always try to do something new, so if you have a space to quickly jot down notes about what you've tried, it can help you in future passes.

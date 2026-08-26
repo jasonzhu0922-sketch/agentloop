@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { renderMarkdown } from "../md";
+import { artifactPreviewMode, prioritizedArtifacts, usesBlobPreview } from "../artifact-preview";
+import { commandActivities, commandLine, commandSummary, fullCommandLine } from "../command-activity";
 import { eventLabel, fmtBytes, toolAction, truncate } from "../format";
 import { plannedEventMap, translateRunEvent, translatedTimeline } from "../event-translator";
 import { executionInsights, livePlan, currentStepWhy, failureSummary, stepToolPurposes, toolActivityItems } from "../live";
 import { mergeRunIntoConversation, projectConversationRun } from "../../state/run-state";
 import type { ConversationDetail, RunEvent, RunRecord } from "../types";
+import type { ProcessArtifact } from "../types";
 
 describe("renderMarkdown", () => {
   it("renders headings, lists and inline emphasis", () => {
@@ -78,7 +81,108 @@ describe("format", () => {
   });
 });
 
+describe("artifact preview routing", () => {
+  const artifact = (name: string, mimeType: string): ProcessArtifact => ({
+    id: "artifact-id",
+    path: `artifacts/${name}`,
+    name,
+    bytes: 128,
+    mimeType,
+    sourceTool: "computer_write_file",
+    previewable: true,
+  });
+
+  it("renders HTML through a blob preview instead of the text preview API", () => {
+    const html = artifact("deck.html", "text/html; charset=utf-8");
+
+    expect(artifactPreviewMode(html)).toBe("html");
+    expect(usesBlobPreview(html)).toBe(true);
+  });
+
+  it("keeps native browser formats on blob preview and document formats on structured preview", () => {
+    expect(artifactPreviewMode(artifact("poster.png", "image/png"))).toBe("image");
+    expect(artifactPreviewMode(artifact("report.pdf", "application/pdf"))).toBe("pdf");
+    expect(artifactPreviewMode(artifact("notes.md", "text/markdown; charset=utf-8"))).toBe("structured");
+    expect(artifactPreviewMode(artifact("weekly.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))).toBe("structured");
+    expect(artifactPreviewMode(artifact("plan.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))).toBe("structured");
+  });
+
+  it("prioritizes artifacts named in the final answer before auxiliary stdout and json files", () => {
+    const artifacts: ProcessArtifact[] = [
+      artifact("17b037675b3180a8140771641d55d6cb22455dbceb334354cc82dfe5fa452a3a.stdout.txt", "text/plain; charset=utf-8"),
+      artifact("api_query_result.json", "application/json; charset=utf-8"),
+      artifact("build_report.py", "text/plain; charset=utf-8"),
+      artifact("宝武数据中台_差旅API参数信息报告.md", "text/markdown; charset=utf-8"),
+      artifact("inspect_details.py", "text/plain; charset=utf-8"),
+    ];
+
+    const ordered = prioritizedArtifacts(
+      artifacts,
+      "随 后生成 Markdown 报告：宝武数据中台_差旅API参数信息报告.md",
+    ).map((item) => item.name);
+    expect(ordered[0]).toBe("宝武数据中台_差旅API参数信息报告.md");
+    expect(ordered.slice(0, 4)).toContain("宝武数据中台_差旅API参数信息报告.md");
+  });
+});
+
 describe("live projection", () => {
+  it("aggregates command calls with status, duration and output refs", () => {
+    const events: RunEvent[] = [
+      {
+        seq: 1,
+        type: "assistant.tool_call.committed",
+        createdAt: 1000,
+        data: {
+          step: 3,
+          toolCallId: "call-command",
+          name: "computer_run_command",
+          arguments: {
+            command: "python3",
+            args: ["-c", "print('secret inline body')"],
+            cwd: "@skills/api-query",
+            timeoutMs: 300000,
+          },
+        },
+      },
+      {
+        seq: 2,
+        type: "tool.dispatched",
+        createdAt: 1200,
+        data: { step: 3, toolCallId: "call-command", toolName: "computer_run_command" },
+      },
+      {
+        seq: 3,
+        type: "tool.completed",
+        createdAt: 4200,
+        data: {
+          step: 3,
+          toolCallId: "call-command",
+          toolName: "computer_run_command",
+          result: JSON.stringify({
+            exitCode: 0,
+            signal: null,
+            stdout: "stored as content-addressed evidence",
+            stderr: "",
+            stdoutRef: { path: ".agentloop/tool-results/aa/stdout.txt", bytes: 99839, characters: 99839 },
+          }),
+        },
+      },
+    ];
+
+    const commands = commandActivities(events);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].status).toBe("completed");
+    expect(commands[0].durationMs).toBe(3000);
+    expect(commands[0].cwd).toBe("@skills/api-query");
+    expect(commands[0].timeoutMs).toBe(300000);
+    expect(commands[0].stdoutRef?.path).toContain(".agentloop/tool-results");
+    expect(commandLine(commands[0])).toContain("[inline script]");
+    expect(commandLine(commands[0])).not.toContain("secret inline body");
+    expect(fullCommandLine(commands[0])).toContain("secret inline body");
+    expect(commandSummary(commands[0])).toContain("stdout");
+  });
+
   it("translates raw run events into user-readable timeline copy", () => {
     const events: RunEvent[] = [
       { seq: 1, type: "planning.started", createdAt: 0, data: { availableSkillCount: 2, availableToolCount: 4 } },
@@ -120,7 +224,7 @@ describe("live projection", () => {
             id: "profile-data",
             objective: "识别工作表、字段和记录范围。",
             status: "pending",
-            requiredToolNames: ["computer_list_directory", "computer_run_command"],
+            recommendedToolNames: ["computer_list_directory", "computer_run_command"],
             successCriteria: [{ id: "scope", description: "确认源文件、工作表、字段和有效记录数。" }],
           }],
         },
@@ -175,10 +279,10 @@ describe("live projection", () => {
       artifactCount: 1,
     });
 
-    expect(summary.title).toContain("未完成");
-    expect(summary.reason).toContain("步数上限");
-    expect(summary.progress).toContain("1/2");
-    expect(summary.nextAction).toContain("预览");
+    expect(summary.title).toContain("没有生成最终结果");
+    expect(summary.reason).toContain("最终提交前先停下");
+    expect(summary.progress).toContain("已完成 1 个阶段");
+    expect(summary.nextAction).toContain("下方已有本轮产生的文件");
   });
 });
 

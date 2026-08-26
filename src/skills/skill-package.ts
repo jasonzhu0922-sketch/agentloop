@@ -24,15 +24,18 @@ const TRANSIENT_FILE_EXTENSIONS = new Set([".pyc", ".pyo"]);
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SKILL_ROLE_VALUES = new Set(["primary_builder", "source_provider", "support", "qa"]);
 const ARTIFACT_KIND_VALUES = new Set(["html", "document", "presentation", "spreadsheet", "image", "code", "none"]);
+const EXECUTION_PROFILE_VALUES = new Set(["local_script"]);
 
 export type SkillAgentLoopRole = "primary_builder" | "source_provider" | "support" | "qa";
 export type SkillAgentLoopArtifactKind = "html" | "document" | "presentation" | "spreadsheet" | "image" | "code" | "none";
+export type SkillAgentLoopExecutionProfile = "local_script";
 
 export interface SkillAgentLoopMetadata {
   readonly roles: readonly SkillAgentLoopRole[];
   readonly artifactKinds: readonly SkillAgentLoopArtifactKind[];
   readonly sourceKinds: readonly string[];
   readonly qaKinds: readonly string[];
+  readonly executionProfiles?: readonly SkillAgentLoopExecutionProfile[];
 }
 
 export interface SkillPackageInspection {
@@ -340,12 +343,15 @@ function parseAgentLoopFrontmatter(lines: readonly string[], closing: number): S
     .map((value) => parseAgentLoopArtifactKind(value));
   const sourceKinds = normalizeAgentLoopStrings(fields.get("sourceKinds") ?? [], "sourceKinds");
   const qaKinds = normalizeAgentLoopStrings(fields.get("qaKinds") ?? [], "qaKinds");
+  const executionProfiles = (fields.get("executionProfiles") ?? [])
+    .map((value) => parseAgentLoopExecutionProfile(value));
   if (roles.length === 0) throw invalidPackage("agentloop.roles must declare at least one role");
   return {
     roles: unique(roles),
     artifactKinds: unique(artifactKinds),
     sourceKinds: unique(sourceKinds),
     qaKinds: unique(qaKinds),
+    ...(executionProfiles.length === 0 ? {} : { executionProfiles: unique(executionProfiles) }),
   };
 }
 
@@ -363,6 +369,11 @@ function parseAgentLoopRole(value: string): SkillAgentLoopRole {
 function parseAgentLoopArtifactKind(value: string): SkillAgentLoopArtifactKind {
   if (ARTIFACT_KIND_VALUES.has(value)) return value as SkillAgentLoopArtifactKind;
   throw invalidPackage(`agentloop.artifactKinds contains unsupported artifact kind ${value}`);
+}
+
+function parseAgentLoopExecutionProfile(value: string): SkillAgentLoopExecutionProfile {
+  if (EXECUTION_PROFILE_VALUES.has(value)) return value as SkillAgentLoopExecutionProfile;
+  throw invalidPackage(`agentloop.executionProfiles contains unsupported execution profile ${value}`);
 }
 
 function normalizeAgentLoopStrings(values: readonly string[], key: string): string[] {

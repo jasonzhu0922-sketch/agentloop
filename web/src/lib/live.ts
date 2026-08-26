@@ -20,7 +20,7 @@ export interface FailureSummary {
   readonly reason: string;
   readonly progress: string;
   readonly nextAction: string;
-  readonly rawMessage: string;
+  readonly rawMessage?: string;
 }
 
 export function admittedPlan(events: readonly RunEvent[]): { goal: string; steps: readonly PlanStep[] } | null {
@@ -67,12 +67,22 @@ export function latestStreaming(events: readonly RunEvent[]): RunEvent | null {
 }
 
 export function streamingToolProgress(stream: RunEvent | null): string {
-  const calls = stream?.data && Array.isArray(stream.data.toolCalls) ? (stream.data.toolCalls as Array<{ name?: string; arguments?: string }>) : [];
+  const calls = stream?.data && Array.isArray(stream.data.toolCalls) ? (stream.data.toolCalls as Array<{ name?: string; arguments?: unknown; argumentsRef?: { characters?: number } }>) : [];
   if (!calls.length) return "";
   const call = calls[calls.length - 1] ?? {};
   const name = call.name ?? "工具";
-  const chars = typeof call.arguments === "string" ? call.arguments.length : 0;
+  const chars = toolArgumentCharacters(call.arguments, call.argumentsRef);
   return "正在生成工具调用：" + name + (chars ? " · 参数 " + chars + " 字符" : "");
+}
+
+function toolArgumentCharacters(argumentsValue: unknown, ref: { readonly characters?: number } | undefined): number {
+  if (typeof argumentsValue === "string") return argumentsValue.length;
+  if (ref?.characters !== undefined) return ref.characters;
+  if (argumentsValue !== null && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
+    const record = argumentsValue as Record<string, unknown>;
+    if (typeof record.originalCharacters === "number") return record.originalCharacters;
+  }
+  return 0;
 }
 
 export function currentStep(plan: LivePlan | null): PlanStep | null {
@@ -88,13 +98,13 @@ export function currentStepWhy(step: PlanStep | null): string {
   const criteria = step.successCriteria ?? [];
   const firstCriterion = criteria[0]?.description;
   if (firstCriterion) return "为了满足：" + clip(firstCriterion, 96);
-  if ((step.requiredToolNames ?? []).length > 0) return "为了产出本步骤可评估的工具证据。";
+  if ((step.recommendedToolNames ?? []).length > 0) return "为了产出本步骤可评估的工具证据。";
   return "为了推进当前计划步骤的完成判断。";
 }
 
 export function stepToolPurposes(step: PlanStep | null): readonly string[] {
   if (!step) return [];
-  return (step.requiredToolNames ?? []).slice(0, 6).map((name) => toolPurpose(name));
+  return (step.recommendedToolNames ?? []).slice(0, 6).map((name) => toolPurpose(name));
 }
 
 export function executionInsights(events: readonly RunEvent[], limit = 7): readonly ExecutionInsight[] {
@@ -237,35 +247,50 @@ export function failureSummary(input: {
 
   const cancelled = input.status === "cancelled" || errorCode === "CANCELLED";
   const stalled = limit?.data?.stalled === true;
-  const limitText = limit
-    ? "已执行到系统设置的步数上限"
-      + (typeof limit.data?.hardLimit === "number" ? "（" + limit.data.hardLimit + " 步）" : "")
-      + "，为避免继续无效消耗，任务被停止。"
-    : "";
   const title = cancelled
     ? "任务已取消"
     : errorCode === "RUN_LIMIT_EXCEEDED"
-      ? "任务已停止，当前结果未完成"
-      : "任务未完成，但已有过程信息可查看";
+      ? "这次没有生成最终结果"
+      : "这次没有完成";
   const reason = cancelled
     ? "任务在完成前被取消，系统没有提交最终结果。"
     : errorCode === "RUN_LIMIT_EXCEEDED"
       ? stalled
-        ? "系统检测到连续步骤没有形成新的有效进展，因此停止本轮执行。"
-        : limitText || "执行超过系统允许的步数上限，因此没有进入最终提交。"
+        ? "处理过程中连续几次没有形成新的有效进展，所以本轮先停下了。"
+        : "这次处理的内容比较长，任务在完成最终提交前先停下了。"
       : friendlyErrorReason(errorCode, rawMessage);
   const progress = total > 0
-    ? "已完成 " + completed + "/" + total + " 个规划步骤"
-      + (stoppedAt ? "，停在：" + clip(stoppedAt.objective || stoppedAt.id, 90) : "。")
+    ? progressSentence(completed, total, stoppedAt)
     : input.events.length > 0
-      ? "已记录 " + input.events.length + " 条执行事件，可在时间线中查看过程。"
+      ? "本轮已经开始执行，但没有留下可提交的最终结果。"
       : "尚未加载本轮详细执行记录。";
   const nextAction = artifactCount > 0
-    ? "可以先预览下方已生成的过程产物；如需继续，建议基于这些产物发起一次更小范围的后续任务。"
+    ? "下方已有本轮产生的文件，可以先查看；继续时可以直接让系统接着完成剩余内容。"
     : errorCode === "RUN_LIMIT_EXCEEDED"
-      ? "建议缩小任务范围，或让系统先只完成读取、提取、生成报告中的一个阶段。"
-      : "建议查看技术细节后重试；如果问题重复出现，需要检查模型、工具权限或输入文件。";
+      ? "可以直接继续处理，或把任务拆成先提取信息、再生成文件两步。"
+      : "可以调整输入后重试；如果连续失败，请让维护者查看右侧运行记录。";
   return { title, reason, progress, nextAction, rawMessage };
+}
+
+function progressSentence(completed: number, total: number, stoppedAt: PlanStep | null): string {
+  const current = stoppedAt === null ? "" : userFacingStepText(stoppedAt.objective || stoppedAt.id);
+  if (completed <= 0 && current) return "已经开始处理，但还没有完成第一个阶段：" + current + "。";
+  if (completed <= 0) return "已经开始处理，但还没有完成第一个阶段。";
+  if (completed >= total) return "主要处理阶段已经走完，但最终结果还没有被提交。";
+  if (current) return "已完成 " + completed + " 个阶段，还停留在：" + current + "。";
+  return "已完成 " + completed + " 个阶段，还有后续内容没有处理完。";
+}
+
+function userFacingStepText(value: string): string {
+  return clip(value, 90)
+    .replace(/\bvisible\s*目录\b/giu, "已选择的目录")
+    .replace(/\bvisible\s+director(?:y|ies)\b/giu, "已选择的目录")
+    .replace(/\bPDF\s*Skill\b/giu, "PDF 处理流程")
+    .replace(/\bSkill\b/gu, "处理流程")
+    .replace(/通过脚本/g, "")
+    .replace(/利用\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function latestFailureMessage(events: readonly RunEvent[]): string {

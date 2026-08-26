@@ -497,6 +497,70 @@ def _delivery_markdown(keyword, details):
     return "\n".join(lines)
 
 
+def _evidence_receipt(keyword, details, assessment_projection):
+    source_refs = [
+        {
+            "kind": "api_endpoint",
+            "url": "https://eplat.baocloud.cn/service/D_A_BSTABD00_SHUTU_AGENT",
+            "data_domain": "SZ_IBM-DB2",
+        },
+        {
+            "kind": "catalog_table",
+            "table": T_MAIN,
+            "role": "api_catalog",
+        },
+        {
+            "kind": "catalog_table",
+            "table": "BSTAMOBWSD.T_ODS_TBEDM12",
+            "role": "parameter_catalog",
+        },
+    ]
+    source_refs.extend(
+        {
+            "kind": "api_catalog_entry",
+            "api_id": item["api_id"],
+            "api_cname": item.get("api_cname"),
+            "api_name": item.get("api_name"),
+            "related_tables": item.get("related_tables") or [],
+        }
+        for item in details
+    )
+    facts = [
+        {
+            "kind": "source_summary",
+            "query": keyword,
+            "match_count": len(details),
+            "primary_api_id": assessment_projection["primary_api_id"],
+            "api_ids": assessment_projection["api_ids"],
+            "registered_param_row_count": assessment_projection["registered_param_row_count"],
+            "output_field_counts": assessment_projection["output_field_counts"],
+            "related_tables": assessment_projection["related_tables"],
+        }
+    ]
+    caveats = [
+        "API catalog matches are ranked by registered metadata and parsed SQL; confirm with an exact API_ID when the requested Chinese name is not an exact catalog name.",
+        "Computed SQL expressions may not map to physical column remarks and are labeled from aliases or parser output.",
+    ]
+    material = json.dumps(
+        {"sourceRefs": source_refs, "facts": facts, "caveats": caveats},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return {
+        "schema": "agentloop.toolEvidenceReceipt/v1",
+        "sourceType": "api_catalog",
+        "receiptId": sha256(material.encode("utf-8")).hexdigest(),
+        "sourceRefs": source_refs,
+        "facts": facts,
+        "caveats": caveats,
+        "evidenceKinds": {
+            "satisfied": ["source_summary", "source_urls", "source_refs"],
+            "caveated": ["explicit_caveats"],
+            "failed": [],
+        },
+    }
+
+
 def answer_payload(keyword, limit=10):
     matches = [row for row in _search_ranked(keyword, limit) if row.get("API_STATUS") == "normal"]
     api_ids = [row.get("API_ID") for row in matches if row.get("API_ID")]
@@ -523,6 +587,7 @@ def answer_payload(keyword, limit=10):
         "output_field_counts": {item["api_id"]: len(item.get("output_columns") or []) for item in details},
         "related_tables": {item["api_id"]: item.get("related_tables", []) for item in details},
     }
+    evidence_receipt = _evidence_receipt(keyword, details, assessment_projection)
     return {
         "schema": "api_catalog_result/v1",
         "query": keyword,
@@ -542,6 +607,7 @@ def answer_payload(keyword, limit=10):
         "apis": details,
         "delivery_markdown": markdown,
         "assessment_summary": assessment_projection,
+        "evidenceReceipt": evidence_receipt,
         "deliveryCandidate": {
             "output": markdown,
             "format": "markdown",

@@ -173,6 +173,7 @@ export interface CapabilityGrant {
   readonly depth: number;
   readonly workspaceRoot?: string;
   readonly visibleDirectories: readonly VisibleDirectoryGrant[];
+  readonly uploadedSources: readonly UploadedSourceSummary[];
   readonly skillExecutionRoots: readonly SkillExecutionRootGrant[];
   readonly allowedToolNames: ReadonlySet<string>;
   readonly allowedSkillIds: ReadonlySet<string>;
@@ -182,6 +183,28 @@ export interface VisibleDirectoryGrant {
   readonly id: string;
   readonly name: string;
   readonly path: string;
+}
+
+export type UploadedSourceStatus =
+  | "uploaded"
+  | "ready"
+  | "unsupported"
+  | "oversized"
+  | "unreadable"
+  | "extract_failed"
+  | "deleted";
+
+export interface UploadedSourceSummary {
+  readonly id: string;
+  readonly originalName: string;
+  readonly mimeType: string;
+  readonly extension: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+  readonly status: UploadedSourceStatus;
+  readonly summary?: string;
+  readonly chunkCount: number;
+  readonly truncated: boolean;
 }
 
 export interface SkillExecutionRootGrant {

@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
-import { createComputerTools, DANGEROUS_COMPUTER_TOOL_NAMES } from "../computer/computer-tools.ts";
-import { createVisibleDirectoryTools } from "../computer/visible-directory-tools.ts";
+import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
+import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptance-provider.ts";
 import { admitPlan, hasFileProducer } from "../planning/admission.ts";
 import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import type {
@@ -29,16 +30,19 @@ import { ModelPlanner } from "../planning/planner.ts";
 import { PlanRepository } from "../planning/plan-repository.ts";
 import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
 import { DependencyScheduler } from "../planning/scheduler.ts";
-import { formatAvailableSkills, formatLoadedSkill } from "../skills/skill-context.ts";
+import { formatAvailableSkills } from "../skills/skill-context.ts";
+import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
+import { SourceRepository } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
 import type { ContextPolicy } from "./context-assembler.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
+import { classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange } from "./task-intent.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -51,8 +55,21 @@ import type {
   RuntimeContextSnapshot,
   RuntimeEvent,
   SkillExecutionRootGrant,
+  UploadedSourceSummary,
   VisibleDirectoryGrant,
 } from "./contracts.ts";
+import { SourceIntakeService } from "./source-intake-service.ts";
+import {
+  assertNoDuplicateTools,
+  composeRunTools,
+  createCoreTools,
+  DANGEROUS_COMPUTER_TOOL_NAMES,
+  SKILL_LOADER_TOOL_NAME,
+  skillExecutionCwd,
+  skillExecutionRootEnvName,
+  ToolRegistry,
+  type RuntimeTool,
+} from "../tools/index.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
@@ -79,8 +96,6 @@ import {
   type ProcessArtifactPreview,
 } from "./process-artifacts.ts";
 import { executionOperationProfile } from "./operation-profiles.ts";
-import { ToolRegistry } from "./tool-registry.ts";
-import type { RuntimeTool } from "./tool-registry.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
 export type PlannerFactory = (model: ModelAdapter) => Planner;
@@ -101,6 +116,11 @@ export const DEFAULT_MAX_STEPS = 12;
 
 const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
 const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
+const MAX_COMMAND_OUTPUT_REFERENCE_BYTES = 50 * 1024 * 1024;
+const TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES = 8 * 1024;
+const TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS = 600;
+const MAX_TOOL_ARGUMENT_REFERENCE_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS = 10;
 
 export interface RunRecord {
   readonly id: string;
@@ -116,6 +136,26 @@ export interface RunRecord {
   readonly errorCode?: string;
   readonly createdAt: number;
   readonly finishedAt?: number;
+}
+
+export interface CommandOutputContent {
+  readonly toolCallId: string;
+  readonly stream: "stdout" | "stderr";
+  readonly content: string;
+  readonly path?: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+}
+
+export interface ToolArgumentsContent {
+  readonly toolCallId: string;
+  readonly arguments: unknown;
+  readonly content: string;
+  readonly path?: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
 }
 
 export interface ConversationSummary {
@@ -141,6 +181,7 @@ interface ExecuteOptions {
   readonly conversationIntent?: "auto";
   readonly modelKey?: string;
   readonly visibleDirectories: readonly string[];
+  readonly sourceIds: readonly string[];
 }
 
 export interface RecoveryDetail {
@@ -166,9 +207,10 @@ export class RunService {
   private readonly defaultModelKey?: string;
   private readonly allowedModelKeys?: ReadonlySet<string>;
   private readonly workspaceRoot: string;
-  private readonly computerTools: readonly RuntimeTool<unknown>[];
-  private readonly pluginTools: readonly RuntimeTool<unknown>[];
+  private readonly coreTools: readonly RuntimeTool<unknown>[];
   private readonly plans: PlanRepository;
+  private readonly sources: SourceRepository;
+  private readonly sourceIntake: SourceIntakeService;
   private readonly scheduler = new DependencyScheduler();
   private readonly terminal: TerminalCommitter;
   private readonly actions: RuntimeActionRepository;
@@ -187,6 +229,7 @@ export class RunService {
     planRevisionAssessorFactory?: PlanRevisionAssessorFactory;
     workspaceRoot?: string;
     computerDriver?: ComputerDriver;
+    acceptanceProviders?: readonly ArtifactAcceptanceProvider[];
     computerExecutableAliases?: Readonly<Record<string, string>>;
     computerCommandEnvironment?: Readonly<Record<string, string>>;
     tools?: readonly RuntimeTool<unknown>[];
@@ -216,13 +259,19 @@ export class RunService {
       readOnlyRoots: skillReadOnlyRoots,
     });
     this.workspaceRoot = computerExecutor.workspaceRoot;
-    this.computerTools = createComputerTools(
-      computerExecutor,
-      options.computerDriver,
-    );
-    this.pluginTools = options.tools ?? [];
+    const acceptanceService = new ArtifactAcceptanceService({
+      providers: options.acceptanceProviders,
+    });
+    this.coreTools = createCoreTools({
+      executor: computerExecutor,
+      driver: options.computerDriver,
+      acceptanceService,
+      pluginTools: options.tools,
+    });
     this.runs = new RunRepository(options.database);
     this.plans = new PlanRepository(options.database);
+    this.sources = new SourceRepository(options.database);
+    this.sourceIntake = new SourceIntakeService(this.sources, this.workspaceRoot);
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database));
     this.actions = new RuntimeActionRepository(options.database);
     this.recovery = new RecoveryRepository(options.database);
@@ -356,6 +405,27 @@ export class RunService {
     );
   }
 
+  async uploadSource(
+    actorUserId: string,
+    input: { originalName: string; mimeType?: string; content: Buffer; conversationId?: string },
+  ): Promise<UploadedSourceSummary> {
+    if (input.conversationId !== undefined) {
+      const conversation = this.runs.findConversation(actorUserId, input.conversationId);
+      if (conversation === undefined) throw notFound("Conversation");
+    }
+    return this.sourceIntake.upload({
+      ownerUserId: actorUserId,
+      originalName: input.originalName,
+      mimeType: input.mimeType,
+      content: input.content,
+      ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
+    });
+  }
+
+  source(actorUserId: string, sourceId: string): UploadedSourceSummary {
+    return this.sourceIntake.summary(this.sources.requireByOwner(actorUserId, sourceId));
+  }
+
   deleteConversation(actorUserId: string, conversationId: string): void {
     this.actions.reconcileRunningRuns();
     this.runs.deleteConversation(actorUserId, conversationId);
@@ -396,7 +466,7 @@ export class RunService {
     const reusableArtifacts: ConversationReusableArtifact[] = [];
     const failedBoundaries: ConversationFailedBoundary[] = [];
     const requiredSkillIds = new Set<string>();
-    const requiredToolNames = new Set<string>();
+    const recommendedToolNames = new Set<string>();
     let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
 
     for (const run of consideredRuns) {
@@ -428,7 +498,7 @@ export class RunService {
               objective: step.objective,
               dependencies: step.dependencies,
               skillIds: step.skillIds,
-              recommendedToolNames: step.requiredToolNames,
+              recommendedToolNames: step.recommendedToolNames,
               ...(step.output === undefined ? {} : { output: truncateWorkingSetText(step.output, 1_200) }),
               ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
             })),
@@ -446,7 +516,7 @@ export class RunService {
           };
           for (const step of unfinishedSteps) {
             for (const skillId of step.skillIds) requiredSkillIds.add(skillId);
-            for (const toolName of step.requiredToolNames) requiredToolNames.add(toolName);
+            for (const toolName of step.recommendedToolNames) recommendedToolNames.add(toolName);
           }
         }
       } else if (run.status !== "completed") {
@@ -468,6 +538,13 @@ export class RunService {
       });
       for (const artifact of artifacts) {
         const source = sourceByPath.get(artifact.path);
+        const sourcePlanStep = plan?.steps.find((step) =>
+          source?.stepId !== undefined
+          && step.id === source.stepId
+          && step.retiredAt === undefined
+        );
+        const sourceSkillIds = sourcePlanStep?.skillIds ?? [];
+        const sourceToolNames = sourcePlanStep?.recommendedToolNames ?? [];
         reusableArtifacts.push({
           runId: run.id,
           path: artifact.path,
@@ -477,12 +554,18 @@ export class RunService {
           sourceTool: artifact.sourceTool,
           ...(source?.toolCallId === undefined ? {} : { sourceToolCallId: source.toolCallId }),
           ...(source?.stepId === undefined ? {} : { sourcePlanStepId: source.stepId }),
+          ...(sourceSkillIds.length === 0 ? {} : { sourceSkillIds }),
+          ...(sourceToolNames.length === 0 ? {} : { sourceToolNames }),
           reusable: true,
         });
       }
     }
 
     const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
+    for (const artifact of boundedArtifacts) {
+      for (const skillId of artifact.sourceSkillIds ?? []) requiredSkillIds.add(skillId);
+      for (const toolName of artifact.sourceToolNames ?? []) recommendedToolNames.add(toolName);
+    }
     const resumeSuggestion = buildResumeSuggestion(activeGoal, planCursors, boundedArtifacts, failedBoundaries);
     return {
       schema: "conversation.workset/v1",
@@ -492,9 +575,9 @@ export class RunService {
       planCursors,
       reusableArtifacts: boundedArtifacts,
       failedBoundaries,
-      requiredCapabilities: {
+      recommendedCapabilities: {
         skillIds: [...requiredSkillIds],
-        toolNames: [...requiredToolNames],
+        toolNames: [...recommendedToolNames],
       },
       ...(resumeSuggestion === undefined ? {} : { resumeSuggestion }),
     };
@@ -573,7 +656,7 @@ export class RunService {
   events(actorUserId: string, runId: string): StoredRunEvent[] {
     this.get(actorUserId, runId);
     const rows = this.runs.eventsByRun(runId);
-    return this.eventsFromRows(rows);
+    return this.eventsFromRows(rows).map(redactPublicRunEvent);
   }
 
   private eventsFromRows(rows: readonly RunEventRow[]): StoredRunEvent[] {
@@ -583,6 +666,10 @@ export class RunService {
       data: JSON.parse(row.payload_json) as Record<string, unknown>,
       createdAt: row.created_at,
     }));
+  }
+
+  private runtimeEvents(runId: string): StoredRunEvent[] {
+    return this.eventsFromRows(this.runs.eventsByRun(runId));
   }
 
   private outcomeForRun(runId: string): { status: string; reasonCode: string; planId?: string } | undefined {
@@ -636,6 +723,79 @@ export class RunService {
     } catch {
       throw notFound("Process artifact");
     }
+  }
+
+  async readCommandOutput(
+    actorUserId: string,
+    runId: string,
+    toolCallId: string,
+    stream: "stdout" | "stderr",
+  ): Promise<CommandOutputContent> {
+    const run = this.get(actorUserId, runId);
+    const completedEvent = this.events(actorUserId, runId).find((event) => {
+      const data = event.data;
+      return event.type === "tool.completed"
+        && data.toolName === "computer_run_command"
+        && data.toolCallId === toolCallId;
+    });
+    if (completedEvent === undefined) throw notFound("Command output");
+    const result = parseCommandOutputResult(completedEvent.data.result);
+    if (result === undefined) throw notFound("Command output");
+    const ref = commandOutputReference(result[`${stream}Ref`]);
+    if (ref === undefined) {
+      const inlineContent = typeof result[stream] === "string" ? result[stream] : "";
+      return {
+        toolCallId,
+        stream,
+        content: inlineContent,
+        bytes: Buffer.byteLength(inlineContent),
+        characters: inlineContent.length,
+      };
+    }
+
+    const target = await resolveCommandOutputReference(this.runWorkspaceRoot(run), ref.path);
+    const stat = await fs.stat(target);
+    if (!stat.isFile() || stat.size > MAX_COMMAND_OUTPUT_REFERENCE_BYTES) throw notFound("Command output");
+    return {
+      toolCallId,
+      stream,
+      content: await fs.readFile(target, "utf8"),
+      path: ref.path,
+      ...(ref.sha256 === undefined ? {} : { sha256: ref.sha256 }),
+      ...(ref.bytes === undefined ? { bytes: stat.size } : { bytes: ref.bytes }),
+      ...(ref.characters === undefined ? {} : { characters: ref.characters }),
+    };
+  }
+
+  async readToolArguments(
+    actorUserId: string,
+    runId: string,
+    toolCallId: string,
+  ): Promise<ToolArgumentsContent> {
+    this.get(actorUserId, runId);
+    const events = this.eventsFromRows(this.runs.eventsByRun(runId));
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      const directToolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
+      if (directToolCallId === toolCallId) {
+        const ref = toolArgumentsReference(event.data.argumentsRef);
+        if (ref !== undefined) return this.readToolArgumentsReference(toolCallId, ref);
+        if ("arguments" in event.data) {
+          return inlineToolArgumentsContent(toolCallId, event.data.arguments);
+        }
+      }
+      if ((event.type === "assistant.committed" || event.type === "assistant.streaming") && Array.isArray(event.data.toolCalls)) {
+        const calls = event.data.toolCalls as readonly unknown[];
+        for (let callIndex = calls.length - 1; callIndex >= 0; callIndex -= 1) {
+          const call = asRecord(calls[callIndex]);
+          if (call?.id !== toolCallId) continue;
+          const ref = toolArgumentsReference(call.argumentsRef);
+          if (ref !== undefined) return this.readToolArgumentsReference(toolCallId, ref);
+          if ("arguments" in call) return inlineToolArgumentsContent(toolCallId, call.arguments);
+        }
+      }
+    }
+    throw notFound("Tool arguments");
   }
 
   /** Subscribe to live run events as they are durably appended. */
@@ -770,10 +930,14 @@ export class RunService {
     const transcript = reconstructRecoveryTranscript({
       userInput: run.input,
       stepId: targetStep.id,
-      events: this.events(actorUserId, runId),
+      events: await this.resolveToolArgumentReferences(this.runtimeEvents(runId)),
     });
     const privateSkills = await this.skills.resolveForConversation(actorUserId);
-    const allTools = this.createTools(privateSkills);
+    const allTools = composeRunTools({
+      coreTools: this.coreTools,
+      sourceRepository: this.sources,
+      privateSkills,
+    });
     assertNoDuplicateTools(allTools);
     const allowedToolNames = this.recoveryAvailableToolNames(privateSkills, run.allowDangerousTools);
     const rootGrant = createCapabilityGrant({
@@ -811,6 +975,7 @@ export class RunService {
         registry: new ToolRegistry(allTools),
         emit,
         visibleDirectories: [],
+        sources: [],
         ...(run.conversationId === undefined
           ? {}
           : { conversationHistory: this.conversationHistory(run.conversationId) }),
@@ -840,7 +1005,7 @@ export class RunService {
   }
 
   toolCatalog(): Array<{ name: string; dangerous: boolean; description: string }> {
-    return [...this.computerTools, ...this.pluginTools].map((tool) => ({
+    return this.coreTools.map((tool) => ({
       name: tool.name,
       dangerous: DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name),
       description: tool.description,
@@ -892,15 +1057,28 @@ export class RunService {
     const conversationWorkingSet = conversationId === undefined
       ? undefined
       : await this.buildConversationWorkingSet(conversationId);
-    this.runs.insertRun({
-      id: runId,
-      ownerUserId: actorUserId,
-      conversationId,
-      allowDangerousTools: executeOptions.allowDangerousTools,
-      ...(modelKey === undefined ? {} : { modelKey }),
-      input,
-      createdAt: Date.now(),
+    const createdAt = Date.now();
+    this.database.transaction(() => {
+      this.runs.insertRun({
+        id: runId,
+        ownerUserId: actorUserId,
+        conversationId,
+        allowDangerousTools: executeOptions.allowDangerousTools,
+        ...(modelKey === undefined ? {} : { modelKey }),
+        input,
+        createdAt,
+      });
+      this.sources.bindRunSources({
+        ownerUserId: actorUserId,
+        conversationId,
+        runId,
+        sourceIds: executeOptions.sourceIds,
+        createdAt,
+      });
     });
+    const availableSources = mergeUploadedSources(
+      this.sources.listForConversation(actorUserId, conversationId).map((row) => this.sourceIntake.summary(row)),
+    );
     this.activeRunControllers.set(runId, runController);
 
     const emit = async (event: RuntimeEvent): Promise<void> => {
@@ -917,6 +1095,7 @@ export class RunService {
         ...(conversationId === undefined ? {} : { conversationId }),
         workspaceRoot: runWorkspaceRoot,
         visibleDirectories,
+        sources: availableSources.map((source) => sourceEventSummary(source)),
       },
     });
     onRunStarted?.(this.get(actorUserId, runId));
@@ -926,7 +1105,9 @@ export class RunService {
     try {
       throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
-      const responseOnly = executeOptions.conversationIntent === "auto"
+      const responseOnly = availableSources.length === 0
+        && executeOptions.conversationIntent === "auto"
+        && !requiresConversationWorksetExecution(input, conversationWorkingSet)
         && await classifyConversationTurn(rawModel, input, conversationHistory, runController.signal);
       throwIfRunCancelled(this.runs, runId, runController.signal);
       if (executeOptions.conversationIntent === "auto") {
@@ -934,6 +1115,9 @@ export class RunService {
           type: "conversation.intent.classified",
           data: { kind: responseOnly ? "reply" : "execute" },
         });
+      }
+      if (!responseOnly && this.skills.skillDirectory !== undefined) {
+        await this.skills.refreshSkillDirectory();
       }
       const privateSkills = responseOnly
         ? []
@@ -976,7 +1160,13 @@ export class RunService {
         });
       }
 
-      const allTools = this.createTools(privateSkills, visibleDirectories);
+      const allTools = composeRunTools({
+        coreTools: this.coreTools,
+        sourceRepository: this.sources,
+        privateSkills,
+        visibleDirectories,
+        uploadedSources: availableSources,
+      });
       assertNoDuplicateTools(allTools);
       const allowedToolNames = responseOnly
         ? []
@@ -991,6 +1181,7 @@ export class RunService {
         depth: 0,
         workspaceRoot: runWorkspaceRoot,
         visibleDirectories,
+        uploadedSources: availableSources,
         allowedToolNames,
         allowedSkillIds: privateSkills.map((skill) => skill.id),
       });
@@ -1000,7 +1191,7 @@ export class RunService {
       const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
         input,
-        conversationWorkingSet?.requiredCapabilities.skillIds ?? [],
+        conversationWorkingSet?.recommendedCapabilities.skillIds ?? [],
       );
       const planningSkills = planningSkillRoles.map((item) => item.skill);
       if (planningSkills.some((skill) => skillRequiresFileOutput(skill)) && !canProduceFiles(allowedToolNames)) {
@@ -1038,8 +1229,9 @@ export class RunService {
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
-        workspaceFacts: await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId),
+        workspaceFacts: await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId, availableSources),
         visibleDirectories,
+        sources: availableSources,
         ...(responseOnly ? { responseOnly: true } : {}),
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
@@ -1079,6 +1271,7 @@ export class RunService {
         registry,
         emit,
         visibleDirectories,
+        sources: availableSources,
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         signal: runController.signal,
         onStepChanged: (stepId) => {
@@ -1160,16 +1353,6 @@ export class RunService {
     }
   }
 
-  private createTools(
-    privateSkills: readonly PrivateSkill[],
-    visibleDirectories: readonly VisibleDirectoryGrant[] = [],
-  ): RuntimeTool<unknown>[] {
-    const tools: RuntimeTool<unknown>[] = [...this.computerTools, ...this.pluginTools];
-    if (visibleDirectories.length > 0) tools.push(...createVisibleDirectoryTools());
-    if (privateSkills.length > 0) tools.push(createSkillLoader(privateSkills));
-    return tools;
-  }
-
   private async executePlanSteps(input: {
     actorUserId: string;
     runId: string;
@@ -1183,6 +1366,7 @@ export class RunService {
     registry: ToolRegistry;
     emit: (event: RuntimeEvent) => Promise<void>;
     visibleDirectories: readonly VisibleDirectoryGrant[];
+    sources: readonly UploadedSourceSummary[];
     conversationHistory?: readonly ModelMessage[];
     initialRecovery?: Readonly<{
       stepId: string;
@@ -1208,12 +1392,17 @@ export class RunService {
       input.onStepChanged(step.id);
       if (step.status === "pending") plan = this.plans.startStep(plan.id, step.id);
       const activeStep = plan.steps.find((item) => item.id === step.id)!;
+      const skillsByReference = buildSkillReferenceMap(input.privateSkills);
       const stepSkills = activeStep.skillIds.map((skillId) => {
-        const skill = input.privateSkills.find((item) => item.id === skillId);
+        const skill = skillsByReference.get(skillId);
         if (skill === undefined) throw new AppError("PLAN_NOT_ADMITTED", `Skill ${skillId} disappeared`, 409);
         return skill;
       });
+      const stepSkillIds = stepSkills.map((skill) => skill.id);
       const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
+      const stepAllowedToolNames = [...input.rootGrant.allowedToolNames].filter((name) =>
+        name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0
+      );
       const stepGrant = createCapabilityGrant({
         actorUserId: input.actorUserId,
         runId: input.runId,
@@ -1221,18 +1410,19 @@ export class RunService {
         depth: input.rootGrant.depth,
         ...(input.rootGrant.workspaceRoot === undefined ? {} : { workspaceRoot: input.rootGrant.workspaceRoot }),
         visibleDirectories: input.visibleDirectories,
+        uploadedSources: input.sources,
         skillExecutionRoots,
-        allowedToolNames: input.rootGrant.allowedToolNames,
-        allowedSkillIds: activeStep.skillIds,
+        allowedToolNames: stepAllowedToolNames,
+        allowedSkillIds: stepSkillIds,
       });
       await input.emit({
         type: "plan.step.started",
         data: {
           planId: plan.id,
           stepId: activeStep.id,
-          skillIds: activeStep.skillIds,
+          skillIds: stepSkillIds,
           toolNames: [...stepGrant.allowedToolNames],
-          recommendedToolNames: activeStep.requiredToolNames,
+          recommendedToolNames: activeStep.recommendedToolNames,
           ...(skillExecutionRoots.length === 0 ? {} : {
             skillExecutionRoots: skillExecutionRoots.map((root) => ({
               id: root.id,
@@ -1254,7 +1444,7 @@ export class RunService {
       const stepOperationProfile = executionOperationProfile({
         objective: activeStep.objective,
         successCriteria: activeStep.successCriteria,
-        requiredToolNames: activeStep.requiredToolNames,
+        recommendedToolNames: activeStep.recommendedToolNames,
         skillNames: stepSkills.map((skill) => skill.name),
       });
       const stepTaskProfile = executionTaskProfile(stepOperationProfile, stepSkills.length > 0);
@@ -1268,6 +1458,7 @@ export class RunService {
             stepSkills,
             input.rootGrant.workspaceRoot ?? this.workspaceRoot,
             input.visibleDirectories,
+            input.sources,
             skillExecutionRoots,
             stepTaskProfile,
           )
@@ -1296,10 +1487,20 @@ export class RunService {
           ? { convergenceGraceSteps: FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
           : {}),
         ...(fileOutputStep ? { contextPolicy: FILE_OUTPUT_CONTEXT_POLICY } : {}),
+        ...(lookupEvidenceStep && stepAllowsSourceSummaryCandidateConvergence(activeStep) ? {
+          convergencePrompt: SOURCE_SUMMARY_CONVERGENCE_PROMPT,
+          convergenceMaxOutputTokens: SOURCE_SUMMARY_CONVERGENCE_MAX_OUTPUT_TOKENS,
+        } : {}),
+        ...(lookupEvidenceStep
+          && !stepAllowsSourceSummaryCandidateConvergence(activeStep)
+          && stepUsesUploadedSourceEvidence(activeStep) ? {
+            convergencePrompt: SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT,
+          } : {}),
         ...(fileOutputStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterFileEvidence(activeStep, context),
+          shouldUseFinalConvergence: (context) => shouldUseFinalFileConvergence(activeStep, context),
         } : lookupEvidenceStep ? {
-          shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context),
+          shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context, input.sources),
         } : {}),
         emit: input.emit,
         signal: input.signal,
@@ -1577,7 +1778,11 @@ export class RunService {
     const runWorkspaceRoot = input.run.conversationId === undefined
       ? this.workspaceRoot
       : await this.ensureConversationWorkspace(input.run.conversationId);
-    const allTools = this.createTools(privateSkills);
+    const allTools = composeRunTools({
+      coreTools: this.coreTools,
+      sourceRepository: this.sources,
+      privateSkills,
+    });
     assertNoDuplicateTools(allTools);
     const rootGrant = createCapabilityGrant({
       actorUserId: input.actorUserId,
@@ -1604,6 +1809,7 @@ export class RunService {
         registry: new ToolRegistry(allTools),
         emit: async (event) => this.appendRunEvent(input.run.id, event),
         visibleDirectories: [],
+        sources: [],
         ...(input.run.conversationId === undefined
           ? {}
           : { conversationHistory: this.conversationHistory(input.run.conversationId) }),
@@ -1658,8 +1864,8 @@ export class RunService {
     privateSkills: readonly PrivateSkill[],
     allowDangerousTools: boolean,
   ): Set<string> {
-    const allowed = new Set([...this.computerTools, ...this.pluginTools].map((tool) => tool.name));
-    if (privateSkills.length > 0) allowed.add("load_skill");
+    const allowed = new Set(this.coreTools.map((tool) => tool.name));
+    if (privateSkills.length > 0) allowed.add(SKILL_LOADER_TOOL_NAME);
     return new Set([...allowed].filter((name) => allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
   }
 
@@ -1714,14 +1920,139 @@ export class RunService {
 
   private appendRunEvent(runId: string, event: RuntimeEvent): void {
     const createdAt = Date.now();
-    const seq = this.runs.appendEvent(runId, { type: event.type, data: event.data, createdAt });
-    this.eventHub.publish(runId, {
+    const data = this.projectRunEventDataForStorage(event);
+    const projectedEvent: RuntimeEvent = { type: event.type, data };
+    const seq = this.runs.appendEvent(runId, { type: event.type, data, createdAt });
+    this.eventHub.publish(runId, redactPublicRunEvent({
       seq,
       type: event.type,
-      data: event.data,
+      data,
       createdAt,
-    });
-    this.logRunEvent(runId, seq, event, createdAt);
+    }));
+    this.logRunEvent(runId, seq, projectedEvent, createdAt);
+  }
+
+  private projectRunEventDataForStorage(event: RuntimeEvent): Readonly<Record<string, unknown>> {
+    if (event.type === "assistant.tool_call.committed" || event.type === "tool.planned") {
+      const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
+      if (!("arguments" in event.data)) return event.data;
+      const projection = this.projectToolArguments(event.data.arguments);
+      if (projection.argumentsRef === undefined) return event.data;
+      return {
+        ...event.data,
+        toolCallId,
+        arguments: projection.arguments,
+        argumentsRef: projection.argumentsRef,
+      };
+    }
+    if (event.type === "assistant.committed" || event.type === "assistant.streaming") {
+      if (!Array.isArray(event.data.toolCalls)) return event.data;
+      let changed = false;
+      const toolCalls = event.data.toolCalls.map((item) => {
+        const call = asRecord(item);
+        if (call === undefined || !("arguments" in call)) return item;
+        const projection = this.projectToolArguments(call.arguments);
+        if (projection.argumentsRef === undefined) return item;
+        changed = true;
+        return {
+          ...call,
+          arguments: projection.arguments,
+          argumentsRef: projection.argumentsRef,
+        };
+      });
+      return changed ? { ...event.data, toolCalls } : event.data;
+    }
+    return event.data;
+  }
+
+  private projectToolArguments(argumentsValue: unknown): {
+    readonly arguments: unknown;
+    readonly argumentsRef?: ToolArgumentsReference;
+  } {
+    const serialized = serializeToolArguments(argumentsValue);
+    const bytes = Buffer.byteLength(serialized);
+    if (bytes <= TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES) return { arguments: argumentsValue };
+    const reference = this.writeToolArgumentsReference(serialized);
+    const projected = projectToolArgumentsValue(argumentsValue, reference, serialized);
+    return { arguments: projected, argumentsRef: reference };
+  }
+
+  private writeToolArgumentsReference(serialized: string): ToolArgumentsReference {
+    const sha256 = createHash("sha256").update(serialized).digest("hex");
+    const directory = resolve(this.workspaceRoot, ".agentloop", "tool-arguments", sha256.slice(0, 2));
+    this.assertInsideServerWorkspace(directory);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const target = resolve(directory, `${sha256}.json`);
+    this.assertInsideServerWorkspace(target);
+    try {
+      writeFileSync(target, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    return {
+      schema: "agentloop.toolArgumentsReference/v1",
+      path: relative(this.workspaceRoot, target),
+      sha256,
+      bytes: Buffer.byteLength(serialized),
+      characters: serialized.length,
+      previewCharacters: TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS,
+    };
+  }
+
+  private async readToolArgumentsReference(toolCallId: string, ref: ToolArgumentsReference): Promise<ToolArgumentsContent> {
+    const target = await resolveToolArgumentsReference(this.workspaceRoot, ref.path);
+    const stat = await fs.stat(target);
+    if (!stat.isFile() || stat.size > MAX_TOOL_ARGUMENT_REFERENCE_BYTES) throw notFound("Tool arguments");
+    const serialized = await fs.readFile(target, "utf8");
+    if (ref.sha256 !== undefined) {
+      const actual = createHash("sha256").update(serialized).digest("hex");
+      if (actual !== ref.sha256) throw notFound("Tool arguments");
+    }
+    const argumentsValue = parseStoredToolArguments(serialized);
+    return {
+      toolCallId,
+      arguments: argumentsValue,
+      content: formatToolArgumentsContent(argumentsValue),
+      path: ref.path,
+      ...(ref.sha256 === undefined ? {} : { sha256: ref.sha256 }),
+      ...(ref.bytes === undefined ? { bytes: stat.size } : { bytes: ref.bytes }),
+      ...(ref.characters === undefined ? { characters: serialized.length } : { characters: ref.characters }),
+    };
+  }
+
+  private async resolveToolArgumentReferences(events: readonly StoredRunEvent[]): Promise<StoredRunEvent[]> {
+    const resolved: StoredRunEvent[] = [];
+    for (const event of events) {
+      const data = await this.resolveToolArgumentReferencesInData(event.data);
+      resolved.push(data === event.data ? event : { ...event, data });
+    }
+    return resolved;
+  }
+
+  private async resolveToolArgumentReferencesInData(data: Readonly<Record<string, unknown>>): Promise<Readonly<Record<string, unknown>>> {
+    const directRef = toolArgumentsReference(data.argumentsRef);
+    let next: Record<string, unknown> | undefined;
+    if (directRef !== undefined) {
+      next = { ...data, arguments: (await this.readToolArgumentsReference(String(data.toolCallId ?? ""), directRef)).arguments };
+    }
+    const toolCallsValue = (next ?? data).toolCalls;
+    if (Array.isArray(toolCallsValue)) {
+      let changed = false;
+      const toolCalls = [];
+      for (const item of toolCallsValue) {
+        const call = asRecord(item);
+        const ref = toolArgumentsReference(call?.argumentsRef);
+        if (call === undefined || ref === undefined) {
+          toolCalls.push(item);
+          continue;
+        }
+        const resolved = await this.readToolArgumentsReference(String(call.id ?? ""), ref);
+        toolCalls.push({ ...call, arguments: resolved.arguments });
+        changed = true;
+      }
+      if (changed) next = { ...(next ?? data), toolCalls };
+    }
+    return next ?? data;
   }
 
   private logRunEvent(runId: string, seq: number, event: RuntimeEvent, createdAt: number): void {
@@ -1746,6 +2077,7 @@ const TERMINAL_EVENT_TYPES = new Set([
   "planning.turn.completed",
   "context.assembled",
   "context.compaction.started",
+  "context.compaction.skipped",
   "context.compacted",
   "context.tool_outputs_pruned",
   "skill.activation.expired",
@@ -1785,6 +2117,12 @@ const TERMINAL_EVENT_TYPES = new Set([
 
 function shouldLogRunEvent(type: string): boolean {
   return TERMINAL_EVENT_TYPES.has(type);
+}
+
+function redactPublicRunEvent(event: StoredRunEvent): StoredRunEvent {
+  if (event.type !== "assistant.committed" || !("reasoningContent" in event.data)) return event;
+  const { reasoningContent: _reasoningContent, ...data } = event.data;
+  return { ...event, data };
 }
 
 function formatRunEventLogLine(runId: string, seq: number, event: RuntimeEvent, createdAt: number): string {
@@ -1862,6 +2200,13 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     addNumber(details, "before", data.estimatedTokensBefore);
     addNumber(details, "from", data.summarizeFromMessageIndex);
     addNumber(details, "to", data.summarizeToMessageIndexExclusive);
+  }
+  if (type === "context.compaction.skipped") {
+    addNumber(details, "epoch", data.contextEpoch);
+    addNumber(details, "estimatedInputTokens", data.estimatedInputTokens);
+    addNumber(details, "usableInputTokens", data.usableInputTokens);
+    addString(details, "reason", data.reason);
+    addString(details, "code", data.code);
   }
   if (type === "context.compacted") {
     addNumber(details, "epoch", data.contextEpoch);
@@ -2044,7 +2389,7 @@ function artifactSourceByPath(
 
 function artifactPathsFromToolResult(toolName: string | undefined, result: Readonly<Record<string, unknown>> | undefined): string[] {
   if (result === undefined) return [];
-  if (toolName === "computer_write_file") {
+  if (toolName === "computer_write_file" || toolName === "materialize_paginated_html") {
     const path = typeof result.path === "string" ? result.path : undefined;
     return path === undefined ? [] : [normalizeArtifactPath(path)];
   }
@@ -2223,7 +2568,7 @@ function failedBoundaryRecoveryDecision(
           refinementState: step.refinementState,
           requiredFacts: step.requiredFacts,
           skillIds: step.skillIds,
-          requiredToolNames: step.requiredToolNames,
+          recommendedToolNames: step.recommendedToolNames,
           ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
           successCriteria: step.successCriteria,
         })),
@@ -2262,7 +2607,7 @@ function repairLeafForFailedBoundary(
     refinementState: "not_refinable",
     requiredFacts: target.requiredFacts,
     skillIds: target.skillIds,
-    requiredToolNames: target.requiredToolNames,
+    recommendedToolNames: target.recommendedToolNames,
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
     successCriteria: target.successCriteria,
   };
@@ -2416,14 +2761,7 @@ function matchesRequestedArtifactKind(signal: string, artifactKinds: ReadonlySet
 }
 
 function requestedArtifactKinds(signal: string): Set<string> {
-  const result = new Set<string>();
-  if (/(?:html|web\s?page|webpage|landing\s?page|网页|页面|浏览器|站点|website)/iu.test(signal)) result.add("html");
-  if (/(?:pptx?|slides?|deck|presentation|幻灯片|演示文稿|课件)/iu.test(signal)) result.add("presentation");
-  if (/(?:docx?|word|document|文档|报告书)/iu.test(signal)) result.add("document");
-  if (/(?:xlsx?|spreadsheet|sheet|csv|表格|工作簿)/iu.test(signal)) result.add("spreadsheet");
-  if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(signal)) result.add("image");
-  if (/(?:code|script|program|app|代码|脚本|程序|应用)/iu.test(signal)) result.add("code");
-  return result;
+  return requestedArtifactKindsFromIntent(signal);
 }
 
 function requestsSourceWork(signal: string): boolean {
@@ -2470,6 +2808,7 @@ function scorePlanningSkill(skill: PrivateSkill, signal: string, bound: boolean)
     if (isPresentationBuilderSkill(text)) score += 3;
   }
   if (requestsArtifactBuild(signal)) {
+    if (matchesRequestedArtifactKind(signal, new Set(skill.agentLoop?.artifactKinds ?? []))) score += 4;
     if (isPrimaryArtifactBuilderSkill(text)) score += 3;
     if (isStylingSupportSkill(text) && !explicitStylingRequested(signal)) score -= 4;
   }
@@ -2481,8 +2820,7 @@ function requestsHtmlPresentation(signal: string): boolean {
 }
 
 function requestsArtifactBuild(signal: string): boolean {
-  return /(?:\b(?:make|create|build|generate|produce|deliver|write|export|design)\b|做|制作|创建|生成|产出|输出|交付|写|设计)/iu.test(signal)
-    && /(?:\b(?:html|web\s?page|webpage|pptx?|slides?|deck|presentation|artifact|file|dashboard|report|image|visual|canvas|poster|artwork)\b|材料|课件|演示|幻灯片|页面|文件|产物|报告|看板|海报|图片|图像|视觉|画布)/iu.test(signal);
+  return requestsArtifactBuildFromIntent(signal);
 }
 
 function explicitStylingRequested(signal: string): boolean {
@@ -2581,23 +2919,62 @@ function normalizePlanningSignal(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+const cjkPlanningStopwords = new Set([
+  "查询", "了解", "相关", "信息", "这个", "那个", "哪些", "什么", "怎么",
+  "为什么", "一下", "进行", "需要", "帮我", "请问",
+]);
+
+const cjkPlanningSegmenter = typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter("zh", { granularity: "word" })
+  : undefined;
+
 function tokenizePlanningSignal(value: string): string[] {
   const stopwords = new Set([
     "the", "and", "for", "with", "from", "into", "this", "that", "you", "your",
     "please", "help", "need", "make", "create", "build", "task", "work", "more",
     "a", "an", "to", "of", "in", "on", "at", "by", "or", "is", "are", "be",
   ]);
-  return [...new Set(
-    value
-      .split(/[^a-z0-9\u4e00-\u9fff]+/i)
-      .map((token) => token.trim())
-      .filter((token) => {
-        if (token.length === 0) return false;
-        if (/[\u4e00-\u9fff]/.test(token)) return true;
-        if (token.length <= 2) return false;
-        return !stopwords.has(token);
-      }),
-  )];
+  const tokens: string[] = [];
+  for (const rawToken of value.split(/[^a-z0-9\u4e00-\u9fff]+/i)) {
+    const token = rawToken.trim();
+    if (token.length === 0) continue;
+    if (/[\u4e00-\u9fff]/.test(token)) {
+      tokens.push(token, ...extractCjkPlanningPhrases(token));
+      continue;
+    }
+    if (token.length <= 2 || stopwords.has(token)) continue;
+    tokens.push(token);
+  }
+  return [...new Set(tokens)];
+}
+
+function extractCjkPlanningPhrases(token: string): string[] {
+  const phrases: string[] = [];
+  for (const run of token.match(/[\u4e00-\u9fff]+/gu) ?? []) {
+    const words = segmentCjkPlanningWords(run);
+    phrases.push(...words);
+    for (let start = 0; start < words.length; start += 1) {
+      for (let size = 2; size <= 4 && start + size <= words.length; size += 1) {
+        phrases.push(words.slice(start, start + size).join(""));
+      }
+    }
+  }
+  return [...new Set(phrases.filter(isInformativeCjkPlanningPhrase))];
+}
+
+function segmentCjkPlanningWords(run: string): string[] {
+  if (cjkPlanningSegmenter === undefined) return [];
+  const words: string[] = [];
+  for (const segment of cjkPlanningSegmenter.segment(run)) {
+    if (!segment.isWordLike) continue;
+    const word = segment.segment.trim();
+    if (word.length > 0) words.push(word);
+  }
+  return words;
+}
+
+function isInformativeCjkPlanningPhrase(phrase: string): boolean {
+  return phrase.length >= 2 && !cjkPlanningStopwords.has(phrase);
 }
 
 class ActionTrackedModel implements ModelAdapter {
@@ -2697,6 +3074,7 @@ async function planningWorkspaceFacts(
   workspaceRoot: string,
   visibleDirectories: readonly VisibleDirectoryGrant[],
   conversationId: string | undefined,
+  sources: readonly UploadedSourceSummary[] = [],
 ): Promise<PlanningWorkspaceFacts> {
   try {
     const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
@@ -2712,8 +3090,9 @@ async function planningWorkspaceFacts(
       entryCount: entries.length,
       sampleEntries: names,
       visibleDirectoryCount: visibleDirectories.length,
-      guidance: entries.length === 0 && visibleDirectories.length === 0
-        ? "The workspace is empty and has no visible external directories. Do not create a workspace inspection Plan step unless the user asks to inspect an existing project; plan direct artifact creation when file-writing tools are available."
+      sourceCount: sources.length,
+      guidance: entries.length === 0 && visibleDirectories.length === 0 && sources.length === 0
+        ? "The workspace is empty and has no visible external directories or uploaded sources. Do not create a workspace inspection Plan step unless the user asks to inspect an existing project; plan direct artifact creation when file-writing tools are available."
         : "Use these workspace facts as planning context. Create an inspection Plan step only when existing files or visible directories must be understood to satisfy the user request.",
     };
   } catch (error) {
@@ -2723,6 +3102,7 @@ async function planningWorkspaceFacts(
       rootLabel: conversationId === undefined ? "configured workspace root" : "conversation workspace",
       state: "unavailable",
       visibleDirectoryCount: visibleDirectories.length,
+      sourceCount: sources.length,
       guidance: `Workspace facts could not be read before planning: ${error instanceof Error ? error.message : "unknown error"}. Create an inspection step only if the user request depends on workspace contents.`,
     };
   }
@@ -2815,7 +3195,7 @@ function shouldCompleteWithEvidenceBoundary(input: {
 }
 
 function stepUsesExternalSourceTools(step: ExecutionPlan["steps"][number]): boolean {
-  return step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
+  return step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch");
 }
 
 function hasSuccessfulExternalSourceEvidence(toolCalls: readonly ToolEvidence[]): boolean {
@@ -2862,8 +3242,37 @@ function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment)
  */
 const FILE_OUTPUT_CONVERGENCE_GRACE_STEPS = 8;
 const CANDIDATE_REPAIR_GRACE_STEPS = 4;
+const SOURCE_SUMMARY_CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
+const SOURCE_SUMMARY_CONVERGENCE_PROMPT = [
+  "<runtime_source_summary_convergence>",
+  "This is the final model step for a source/fact acquisition leaf.",
+  "No execution tools are available on this turn.",
+  "Use only the canonical tool evidence already present in the conversation.",
+  "Return one concise JSON object with schema agentloop.sourceSummaryCandidate/v1.",
+  "Required keys: schema, coveredTopics, facts, missingOrUnverified, recommendedNextStep.",
+  "coveredTopics must contain at most 5 short strings.",
+  "facts must contain at most 6 objects with claim, sourceRefs, and confidence.",
+  "Each claim must be at most 160 Chinese characters or 80 English words.",
+  "Use sourceRefs/toolCallIds instead of raw excerpts. Put unknown or weakly supported items in missingOrUnverified.",
+  "The model context may show structured evidence projections instead of raw file bodies; that means the Runtime has preserved the full canonical tool evidence, not that the read failed.",
+  "Do not wrap the JSON in markdown fences.",
+  "Do not write the final user-facing report here; produce a bounded source summary for the next Plan leaf.",
+  "Do not request or emit tool calls.",
+  "</runtime_source_summary_convergence>",
+].join("\n");
+const SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT = [
+  "<runtime_source_evidence_convergence>",
+  "No execution tools are available on this turn.",
+  "The Runtime has determined that the current source evidence is sufficient for a completion candidate.",
+  "Use only the canonical tool evidence already present in the conversation.",
+  "Produce the requested user-facing answer for the current Plan step, with explicit caveats for any missing or unverified facts.",
+  "Do not call read_source again for chunks already covered.",
+  "This response is only a candidate: the independent assessor and Terminal Committer remain authoritative.",
+  "</runtime_source_evidence_convergence>",
+].join("\n");
 const FILE_OUTPUT_CONTEXT_POLICY: ContextPolicy = {
   proactiveCompactionTokens: 24_000,
+  deferProactiveCompactionForArtifactEvidence: true,
   preserveRecentTokens: 12_000,
   pruneProtectTokens: 8_000,
   summaryToolResultCharacters: 1_500,
@@ -2877,17 +3286,20 @@ function skillRequiresFileOutput(skill: Pick<PrivateSkill, "name" | "description
 
 function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
   return artifactExtensionsRequiredByStep(step).size > 0
-    || step.requiredToolNames.some((name) => name === "computer_write_file" || name === "computer_run_command");
+    || step.recommendedToolNames.some((name) =>
+      name === "computer_write_file" || name === "computer_run_command" || name === "materialize_paginated_html"
+    );
 }
 
 function stepCanConvergeFromLookupEvidence(step: ExecutionPlan["steps"][number]): boolean {
-  return step.requiredToolNames.length > 0
-    && step.requiredToolNames.every((name) => isLookupToolName(name));
+  return step.recommendedToolNames.length > 0
+    && step.recommendedToolNames.every((name) => isLookupToolName(name));
 }
 
 function shouldConvergeAfterLookupEvidence(
   step: ExecutionPlan["steps"][number],
   context: ToolStepConvergenceContext,
+  sources: readonly UploadedSourceSummary[] = [],
 ): { converge: boolean; reason?: string } {
   if (!stepCanConvergeFromLookupEvidence(step)) return { converge: false };
   const latestSuccessfulLookupEvidence = context.latestToolEvidence
@@ -2898,8 +3310,51 @@ function shouldConvergeAfterLookupEvidence(
     .filter((item) => !item.isError && isLookupToolName(item.toolName));
   const webSearchCount = successfulLookupEvidence.filter((item) => item.toolName === "websearch").length;
   const webFetchCount = successfulLookupEvidence.filter((item) => item.toolName === "webfetch").length;
-  const webStep = step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
+  const webStep = step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch");
+  const requiresContentRead = step.recommendedToolNames.some((name) => isSourceContentReadToolName(name));
+  const sourceReadKeys = lookupSourceReadKeys(successfulLookupEvidence);
+  const sourceReadCount = sourceReadKeys.size;
+  const minimumSourceReads = minimumSourceReadsForLookupStep(step, successfulLookupEvidence);
+  if (stepUsesUploadedSourceEvidence(step)) {
+    const coverage = uploadedSourceCoverageSummary(successfulLookupEvidence, sources);
+    if (coverage.knownSourceCount > 0) {
+      if (coverage.incompleteSourceCount === 0 && coverage.completeSourceCount > 0) {
+        return { converge: true, reason: "lookup_evidence_ready:uploaded_source_coverage_complete" };
+      }
+      if (
+        coverage.coveredChunkCount > 0
+        && latestUploadedSourceReadAddsNoNewChunks(context.toolEvidence, context.latestToolEvidence)
+      ) {
+        return { converge: true, reason: "lookup_evidence_ready:repeat_source_chunks" };
+      }
+      if (coverage.totalChunkCount <= MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS) {
+        return { converge: false };
+      }
+    }
+  }
+  if (stepAllowsSourceSummaryCandidateConvergence(step)) {
+    if (requiresContentRead && sourceReadCount < minimumSourceReads) {
+      if (
+        sourceReadCount >= 3
+        && latestSourceReadAddsNoNewSources(context.toolEvidence, context.latestToolEvidence)
+      ) {
+        return { converge: true, reason: "lookup_evidence_ready:repeat_source_reads" };
+      }
+      return { converge: false };
+    }
+    return { converge: true, reason: "lookup_evidence_ready:bounded_source_reads" };
+  }
   if (!webStep && successfulLookupEvidence.length >= 1) {
+    if (
+      requiresContentRead
+      && sourceReadCount >= 3
+      && latestSourceReadAddsNoNewSources(context.toolEvidence, context.latestToolEvidence)
+    ) {
+      return { converge: true, reason: "lookup_evidence_ready:repeat_source_reads" };
+    }
+    if (requiresContentRead && sourceReadCount < minimumSourceReads) {
+      return { converge: false };
+    }
     return { converge: true, reason: "lookup_evidence_ready" };
   }
   if (webFetchCount >= 1) {
@@ -2919,6 +3374,9 @@ function shouldConvergeAfterFileEvidence(
   context: ToolStepConvergenceContext,
 ): { converge: boolean; reason?: string } {
   if (!stepAllowsFileArtifactConvergence(step)) return { converge: false };
+  if (stepRequiresArtifactAcceptance(step) && !hasSuccessfulArtifactAcceptance(context.toolEvidence)) {
+    return { converge: false };
+  }
   const requiredExtensions = artifactExtensionsRequiredByStep(step);
   if (requiredExtensions.size === 0) return { converge: false };
   const producedExtensions = artifactExtensionsProducedByEvidence(context.toolEvidence);
@@ -2931,13 +3389,31 @@ function shouldConvergeAfterFileEvidence(
   };
 }
 
+function shouldUseFinalFileConvergence(
+  step: ExecutionPlan["steps"][number],
+  context: ToolStepConvergenceContext,
+): boolean {
+  return !stepRequiresArtifactAcceptance(step) || hasSuccessfulArtifactAcceptance(context.toolEvidence);
+}
+
+function stepRequiresArtifactAcceptance(step: ExecutionPlan["steps"][number]): boolean {
+  return step.recommendedToolNames.includes("verify_artifact_acceptance")
+    || (step.evidenceContract?.requiredKinds.includes("artifact_acceptance") ?? false);
+}
+
+function hasSuccessfulArtifactAcceptance(evidence: readonly AgentLoopToolEvidence[]): boolean {
+  return evidence.some((item) => !item.isError && item.toolName === "verify_artifact_acceptance");
+}
+
 function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number]): boolean {
   const text = [
     step.id,
     step.objective,
     ...step.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
   ].join("\n").toLowerCase();
-  const productionTool = step.requiredToolNames.some((name) => name === "computer_write_file");
+  const productionTool = step.recommendedToolNames.some((name) =>
+    name === "computer_write_file" || name === "materialize_paginated_html"
+  );
   if (productionTool) return true;
   const productionIntent =
     /\b(?:create|generate|write|build|rebuild|export|save|produce|output|materialize|render)\b/i.test(text)
@@ -2946,7 +3422,7 @@ function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number])
   const verificationIntent =
     /\b(?:verify|validate|check|inspect|review|qa|quality|compare|readback)\b/i.test(text)
     || /(?:验证|校验|检查|审查|终检|验收|质量|对比|问题清单)/u.test(text);
-  const onlyCommandOrLookup = step.requiredToolNames.every((name) =>
+  const onlyCommandOrLookup = step.recommendedToolNames.every((name) =>
     name === "computer_run_command" || isLookupToolName(name) || name === "load_skill"
   );
   if (verificationIntent && onlyCommandOrLookup && !/\b(?:build|rebuild|export|save|write|generate|create|produce|output)\b/i.test(text)
@@ -2976,12 +3452,13 @@ function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEv
     if (item.isError) continue;
     if (
       item.toolName !== "computer_write_file"
+      && item.toolName !== "materialize_paginated_html"
       && item.toolName !== "computer_list_directory"
       && item.toolName !== "computer_run_command"
     ) continue;
     const parsed = parseToolResult(item.result);
     if (
-      item.toolName === "computer_write_file"
+      (item.toolName === "computer_write_file" || item.toolName === "materialize_paginated_html")
       && isPlainRecord(parsed)
       && typeof parsed.path === "string"
     ) {
@@ -3013,7 +3490,245 @@ function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEv
 
 function isLookupToolName(name: string): boolean {
   if (name === "websearch" || name === "webfetch") return true;
-  return /(?:^|_)(read|list|search|fetch|inspect|get|query)(?:_|$)/i.test(name);
+  if (
+    name === "visible_find_files"
+    || name === "visible_index_directory"
+    || name === "visible_search_text"
+    || name === "visible_read_file"
+    || name === "visible_read_files"
+    || name === "visible_list_directory"
+  ) return true;
+  return /(?:^|_)(read|list|find|index|search|fetch|inspect|get|query)(?:_|$)/i.test(name);
+}
+
+function isSourceContentReadToolName(name: string): boolean {
+  return name === "webfetch"
+    || name === "visible_read_file"
+    || name === "visible_read_files"
+    || /(?:^|_)read_(?:file|files|source|sources)(?:_|$)/i.test(name);
+}
+
+function stepRequiresSourceSummary(step: ExecutionPlan["steps"][number]): boolean {
+  return step.evidenceContract?.requiredKinds.includes("source_summary") ?? false;
+}
+
+function stepUsesUploadedSourceEvidence(step: ExecutionPlan["steps"][number]): boolean {
+  return step.recommendedToolNames.includes("read_source") && stepRequiresSourceSummary(step);
+}
+
+function stepAllowsSourceSummaryCandidateConvergence(step: ExecutionPlan["steps"][number]): boolean {
+  return step.role === "fact_acquisition" && stepRequiresSourceSummary(step);
+}
+
+function minimumSourceReadsForLookupStep(
+  step: ExecutionPlan["steps"][number],
+  evidence: readonly AgentLoopToolEvidence[],
+): number {
+  if (!step.recommendedToolNames.some((name) => isSourceContentReadToolName(name))) return 0;
+  const defaultMinimum = stepAllowsSourceSummaryCandidateConvergence(step) ? 5 : 1;
+  const discovered = discoveredSourceCount(evidence);
+  if (discovered === undefined) return defaultMinimum;
+  return Math.max(1, Math.min(defaultMinimum, discovered));
+}
+
+interface UploadedSourceCoverageSummary {
+  readonly knownSourceCount: number;
+  readonly completeSourceCount: number;
+  readonly incompleteSourceCount: number;
+  readonly coveredChunkCount: number;
+  readonly totalChunkCount: number;
+  readonly repeatedChunkReadCount: number;
+}
+
+interface MutableUploadedSourceCoverage {
+  totalChunks?: number;
+  readonly coveredChunks: Set<number>;
+  repeatedChunkReadCount: number;
+}
+
+function uploadedSourceCoverageSummary(
+  evidence: readonly AgentLoopToolEvidence[],
+  sources: readonly UploadedSourceSummary[] = [],
+): UploadedSourceCoverageSummary {
+  const bySource = new Map<string, MutableUploadedSourceCoverage>();
+  for (const source of sources) {
+    if (source.status !== "ready" || source.chunkCount <= 0) continue;
+    bySource.set(source.id, { totalChunks: source.chunkCount, coveredChunks: new Set(), repeatedChunkReadCount: 0 });
+  }
+  for (const item of evidence) {
+    if (item.isError || item.toolName !== "read_source") continue;
+    const parsed = parseJsonRecord(item.result);
+    if (parsed === undefined || parsed.schema !== "agentloop.uploadedSourceRead/v1") continue;
+    const sourceId = typeof parsed.sourceId === "string" ? parsed.sourceId : undefined;
+    if (sourceId === undefined || sourceId.trim().length === 0) continue;
+    const current = bySource.get(sourceId) ?? { coveredChunks: new Set<number>(), repeatedChunkReadCount: 0 };
+    const totalChunks = numberValue(parsed.totalChunks);
+    if (totalChunks !== undefined) current.totalChunks = totalChunks;
+    for (const chunkIndex of uploadedSourceChunkIndexes(parsed)) {
+      if (current.coveredChunks.has(chunkIndex)) current.repeatedChunkReadCount += 1;
+      current.coveredChunks.add(chunkIndex);
+    }
+    bySource.set(sourceId, current);
+  }
+  const ledgers = [...bySource.values()].filter((item) => item.totalChunks !== undefined || item.coveredChunks.size > 0);
+  let completeSourceCount = 0;
+  let coveredChunkCount = 0;
+  let totalChunkCount = 0;
+  let repeatedChunkReadCount = 0;
+  for (const ledger of ledgers) {
+    const totalChunks = ledger.totalChunks ?? ledger.coveredChunks.size;
+    coveredChunkCount += ledger.coveredChunks.size;
+    totalChunkCount += totalChunks;
+    repeatedChunkReadCount += ledger.repeatedChunkReadCount;
+    if (totalChunks > 0 && ledger.coveredChunks.size >= totalChunks) completeSourceCount += 1;
+  }
+  return {
+    knownSourceCount: ledgers.length,
+    completeSourceCount,
+    incompleteSourceCount: ledgers.length - completeSourceCount,
+    coveredChunkCount,
+    totalChunkCount,
+    repeatedChunkReadCount,
+  };
+}
+
+function uploadedSourceChunkIndexes(parsed: Record<string, unknown>): Set<number> {
+  const indexes = new Set<number>();
+  const chunks = Array.isArray(parsed.chunks) ? parsed.chunks : [];
+  for (const chunk of chunks) {
+    const record = parseJsonRecord(chunk);
+    const chunkIndex = numberValue(record?.chunkIndex);
+    if (chunkIndex !== undefined) indexes.add(chunkIndex);
+  }
+  const receipt = parseJsonRecord(parsed.evidenceReceipt);
+  const refs = Array.isArray(receipt?.sourceRefs) ? receipt.sourceRefs : [];
+  for (const ref of refs) {
+    const record = parseJsonRecord(ref);
+    const chunkIndex = numberValue(record?.chunkIndex);
+    if (chunkIndex !== undefined) indexes.add(chunkIndex);
+  }
+  const facts = Array.isArray(receipt?.facts) ? receipt.facts : [];
+  for (const fact of facts) {
+    const record = parseJsonRecord(fact);
+    const returned = Array.isArray(record?.returnedChunkIndexes) ? record.returnedChunkIndexes : [];
+    for (const value of returned) {
+      const chunkIndex = numberValue(value);
+      if (chunkIndex !== undefined) indexes.add(chunkIndex);
+    }
+  }
+  return indexes;
+}
+
+function latestUploadedSourceReadAddsNoNewChunks(
+  allEvidence: readonly AgentLoopToolEvidence[],
+  latestEvidence: readonly AgentLoopToolEvidence[],
+): boolean {
+  const latestReadEvidence = latestEvidence.filter((item) => !item.isError && item.toolName === "read_source");
+  if (latestReadEvidence.length === 0) return false;
+  const latestKeys = lookupSourceReadKeys(latestReadEvidence);
+  if (latestKeys.size === 0) return false;
+  const latestIds = new Set(latestReadEvidence.map((item) => item.toolCallId));
+  const priorKeys = lookupSourceReadKeys(allEvidence.filter((item) => !latestIds.has(item.toolCallId)));
+  return [...latestKeys].every((key) => priorKeys.has(key));
+}
+
+function discoveredSourceCount(evidence: readonly AgentLoopToolEvidence[]): number | undefined {
+  let count: number | undefined;
+  for (const item of evidence) {
+    const parsed = parseJsonRecord(item.result);
+    if (parsed === undefined) continue;
+    for (const value of [
+      numberValue(parsed.totalMatches),
+      numberValue(parsed.returnedMatches),
+      numberValue(parsed.returned),
+      sourceRefCount(parsed),
+    ]) {
+      if (value === undefined || value <= 0) continue;
+      count = count === undefined ? value : Math.max(count, value);
+    }
+  }
+  return count;
+}
+
+function distinctLookupSourceReadCount(evidence: readonly AgentLoopToolEvidence[]): number {
+  return lookupSourceReadKeys(evidence).size;
+}
+
+function lookupSourceReadKeys(evidence: readonly AgentLoopToolEvidence[]): Set<string> {
+  const paths = new Set<string>();
+  let opaqueReadCount = 0;
+  for (const item of evidence) {
+    if (!isSourceContentReadToolName(item.toolName)) continue;
+    const parsed = parseJsonRecord(item.result);
+    if (parsed === undefined) {
+      opaqueReadCount += 1;
+      continue;
+    }
+    const receipt = parseJsonRecord(parsed.evidenceReceipt);
+    const refs = Array.isArray(receipt?.sourceRefs) ? receipt.sourceRefs : [];
+    for (const ref of refs) {
+      const record = parseJsonRecord(ref);
+      const sourceRefId = typeof record?.sourceRefId === "string" ? record.sourceRefId : undefined;
+      const sourceId = typeof record?.sourceId === "string" ? record.sourceId : undefined;
+      const chunkIndex = numberValue(record?.chunkIndex);
+      const path = typeof record?.path === "string" ? record.path : undefined;
+      const rootId = typeof record?.rootId === "string" ? record.rootId : "";
+      const url = typeof record?.url === "string" ? record.url : undefined;
+      if (sourceRefId !== undefined && sourceRefId.trim().length > 0) {
+        paths.add(sourceRefId);
+        continue;
+      }
+      if (sourceId !== undefined && sourceId.trim().length > 0 && chunkIndex !== undefined) {
+        paths.add(`uploaded:${sourceId}:${chunkIndex}`);
+        continue;
+      }
+      if (path !== undefined && path.trim().length > 0) {
+        paths.add(`${rootId}:${path}`);
+        continue;
+      }
+      if (url !== undefined && url.trim().length > 0) paths.add(`url:${url}`);
+    }
+    if (paths.size === 0) {
+      if (parsed.schema === "agentloop.uploadedSourceRead/v1") {
+        const sourceId = typeof parsed.sourceId === "string" ? parsed.sourceId : undefined;
+        if (sourceId !== undefined) {
+          for (const chunkIndex of uploadedSourceChunkIndexes(parsed)) paths.add(`uploaded:${sourceId}:${chunkIndex}`);
+        }
+      }
+      const path = typeof parsed.path === "string" ? parsed.path : undefined;
+      if (path !== undefined) paths.add(path);
+    }
+  }
+  for (let index = 0; index < opaqueReadCount; index += 1) paths.add(`opaque:${index}`);
+  return paths;
+}
+
+function latestSourceReadAddsNoNewSources(
+  allEvidence: readonly AgentLoopToolEvidence[],
+  latestEvidence: readonly AgentLoopToolEvidence[],
+): boolean {
+  const latestReadEvidence = latestEvidence.filter((item) => !item.isError && isSourceContentReadToolName(item.toolName));
+  if (latestReadEvidence.length === 0) return false;
+  const latestKeys = lookupSourceReadKeys(latestReadEvidence);
+  if (latestKeys.size === 0) return false;
+  const latestIds = new Set(latestReadEvidence.map((item) => item.toolCallId));
+  const priorKeys = lookupSourceReadKeys(allEvidence.filter((item) => !latestIds.has(item.toolCallId)));
+  return [...latestKeys].every((key) => priorKeys.has(key));
+}
+
+function sourceRefCount(value: Record<string, unknown>): number | undefined {
+  const receipt = parseJsonRecord(value.evidenceReceipt);
+  if (Array.isArray(receipt?.sourceRefs)) return receipt.sourceRefs.length;
+  return undefined;
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") return parseToolResult(value) as Record<string, unknown> | undefined;
+  return isPlainRecord(value) ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
 }
 
 function artifactExtensionsFromText(text: string): Set<string> {
@@ -3077,10 +3792,6 @@ function skillExecutionRootsForSkills(skills: readonly PrivateSkill[]): SkillExe
   });
 }
 
-function skillExecutionCwd(skill: PrivateSkill): string {
-  return `@skills/${skill.name}`;
-}
-
 function stepAssessmentSignature(input: {
   stepId: string;
   assessmentProfile: AssessmentProfileId;
@@ -3121,13 +3832,14 @@ function selectAssessmentProfile(
     ...step.successCriteria.map((criterion) => criterion.description),
   ].join("\n");
   if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
-  if (activatedSkills.length > 0) return "source_grounded";
-  if (matchesSourceGroundedAssessment(text)) return "source_grounded";
-  if (step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+  if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
+  if (step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
     return "lookup_lite";
   }
-  if (step.requiredToolNames.length === 0) return "deterministic";
-  if (step.requiredToolNames.every((name) => /(?:read|list|search|fetch|inspect|get|query)/i.test(name))) {
+  if (matchesSourceGroundedAssessment(text)) return "source_grounded";
+  if (activatedSkills.length > 0) return "source_grounded";
+  if (step.recommendedToolNames.length === 0) return "deterministic";
+  if (step.recommendedToolNames.every((name) => /(?:read|list|search|fetch|inspect|get|query)/i.test(name))) {
     return "lookup_lite";
   }
   return "source_grounded";
@@ -3135,8 +3847,15 @@ function selectAssessmentProfile(
 
 function isProfiledRuleAssessmentProfile(
   profile: AssessmentProfileId,
-): profile is Extract<AssessmentProfileId, "deterministic" | "lookup_lite"> {
-  return profile === "deterministic" || profile === "lookup_lite";
+): profile is Extract<AssessmentProfileId, "deterministic" | "evidence_gate" | "lookup_lite"> {
+  return profile === "deterministic" || profile === "evidence_gate" || profile === "lookup_lite";
+}
+
+function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): boolean {
+  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+  return step.recommendedToolNames.includes("verify_artifact_acceptance")
+    || requiredKinds.includes("artifact_acceptance")
+    || requiredKinds.includes("source_summary");
 }
 
 function matchesRiskSensitiveAssessment(value: string): boolean {
@@ -3147,32 +3866,6 @@ function matchesRiskSensitiveAssessment(value: string): boolean {
 function matchesSourceGroundedAssessment(value: string): boolean {
   return /(?:\b(?:compare|comparison|conflict|contradiction|multi[-\s]?source|research|report|briefing|analysis|synthesize|citation|cite|sources?|published|publication date)\b|对比|比较|冲突|矛盾|多源|多个来源|研究|调研|报告|简报|分析|综合|引用|来源|发布日期)/iu
     .test(value);
-}
-
-function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<unknown> {
-  const byName = new Map(skills.map((skill) => [skill.name, skill]));
-  return {
-    name: "load_skill",
-    description: [
-      "Load the exact authorized private Skill version bound to the current Plan step.",
-      "Use this before applying a Skill; its output injects the authoritative instructions and package-relative path base into the conversation.",
-    ].join(" "),
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["name"],
-      properties: { name: { type: "string" } },
-    },
-    executionMode: "parallel",
-    replaySafe: true,
-    maxResultCharacters: 250_000,
-    parse: (value) => ({ name: requireString(requireRecord(value).name, "name", { max: 80 }) }),
-    execute: async (context, value) => {
-      const skill = byName.get((value as { name: string }).name);
-      if (skill === undefined || !context.grant.allowedSkillIds.has(skill.id)) throw notFound("Skill");
-      return formatLoadedSkill(skill, { executionCwd: skillExecutionCwd });
-    },
-  };
 }
 
 function executionTaskProfile(operationProfile: DynamicPromptProfile, skillBound: boolean): TaskProfile {
@@ -3209,20 +3902,23 @@ function buildStepRuntimeContext(
   skills: readonly PrivateSkill[],
   workspaceRoot: string,
   visibleDirectories: readonly VisibleDirectoryGrant[] = [],
+  sources: readonly UploadedSourceSummary[] = [],
   skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
   taskProfile: TaskProfile = executionTaskProfile(executionOperationProfile({
     objective: step.objective,
     successCriteria: step.successCriteria,
-    requiredToolNames: step.requiredToolNames,
+    recommendedToolNames: step.recommendedToolNames,
     skillNames: skills.map((skill) => skill.name),
   }), skills.length > 0),
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const skillCatalog = formatAvailableSkills(skills);
-  const usesWebTools = step.requiredToolNames.some((name) => name === "websearch" || name === "webfetch");
+  const usesWebTools = step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch");
+  const usesVisibleDirectoryTools = step.recommendedToolNames.some((name) => name.startsWith("visible_"));
+  const usesSourceTools = step.recommendedToolNames.some((name) => name === "read_source");
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
     successCriteria: step.successCriteria,
-    requiredToolNames: step.requiredToolNames,
+    recommendedToolNames: step.recommendedToolNames,
     skillNames: skills.map((skill) => skill.name),
   });
   return {
@@ -3230,10 +3926,15 @@ function buildStepRuntimeContext(
     content: [
       "<execution_context source=\"server\">",
       JSON.stringify({
+        toolSelectionPolicy: {
+          recommendedToolNamesAreAdvisory: true,
+          instruction: "Use the recommended tools as a starting point, but choose any currently exposed tool when it better satisfies the current step evidence contract.",
+          beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
+        },
         currentPlanStep: {
           id: step.id,
           objective: step.objective,
-          recommendedToolNames: step.requiredToolNames,
+          recommendedToolNames: step.recommendedToolNames,
           successCriteria: step.successCriteria,
         },
         downstreamPlanSteps: plan.steps
@@ -3247,7 +3948,7 @@ function buildStepRuntimeContext(
             id: item.id,
             objective: item.objective,
             status: item.status,
-            recommendedToolNames: item.requiredToolNames,
+            recommendedToolNames: item.recommendedToolNames,
             successCriteria: item.successCriteria,
           })),
         dependencyOutputs: step.dependencies.map((dependencyId) => {
@@ -3256,11 +3957,19 @@ function buildStepRuntimeContext(
         }),
         workspace: { root: workspaceRoot, filePolicy: "workspace-write" },
         visibleDirectories,
+        visibleCommandRoots: visibleDirectories.map((root) => ({
+          rootId: root.id,
+          name: root.name,
+          cwd: `@visible/${root.id}`,
+          readOnly: true,
+        })),
+        sources,
         skillExecutionRoots: skillExecutionRoots.map((root) => ({
           id: root.id,
           skillId: root.skillId,
           name: root.name,
           cwd: root.cwd,
+          env: skillExecutionRootEnvName(root),
           readOnly: true,
         })),
         operationProfile,
@@ -3278,6 +3987,30 @@ function buildStepRuntimeContext(
               + "and any model-organized structure or practice advice so downstream artifact work can continue "
               + "with visible caveats when appropriate. Treat external evidence as a required blocker only when "
               + "the user or current step explicitly requires exact/current/official source facts as the deliverable.",
+          }
+          : {}),
+        ...(usesVisibleDirectoryTools
+          ? {
+            visibleSourceDiscipline:
+              "Use visible_* tools for user-authorized visibleDirectories. Treat visible_read_file and visible_read_files "
+              + "results as successful source reads even when later context shows only structured evidence projections; "
+              + "the full canonical tool evidence remains persisted for assessment. Prefer visible_read_files batches for "
+              + "multiple sourceRefs. Do not switch to computer_read_file for visible directory sources; computer_read_file "
+              + "reads the workspace root, not the visible directory grant. If computer_run_command is needed to process "
+              + "visible source files with a local parser, set cwd to the matching read-only @visible/<rootId> command root "
+              + "from visibleCommandRoots and pass the relative paths/sourceRefs returned by visible_* tools. Do not reconstruct "
+              + "absolute visible-directory paths, and do not use ls/find for visible source discovery.",
+          }
+          : {}),
+        ...(usesSourceTools
+          ? {
+            uploadedSourceDiscipline:
+              "Use read_source for uploaded sources listed in sources. Treat read_source results as canonical "
+              + "source evidence. When reading consecutive uploaded chunks, pass chunkIndex as the start and "
+              + "maxChunks as the window size. "
+              + "Do not use computer_read_file for uploaded sources; uploaded source storage "
+              + "paths are not a workspace authorization surface. Do not claim complete file analysis beyond "
+              + "the summary and chunks actually inspected.",
           }
           : {}),
       }),
@@ -3298,11 +4031,11 @@ function buildRecoveredStepRuntimeContext(
   taskProfile: TaskProfile = executionTaskProfile(executionOperationProfile({
     objective: step.objective,
     successCriteria: step.successCriteria,
-    requiredToolNames: step.requiredToolNames,
+    recommendedToolNames: step.recommendedToolNames,
     skillNames: skills.map((skill) => skill.name),
   }), skills.length > 0),
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
-  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot, [], skillExecutionRoots, taskProfile);
+  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot, [], [], skillExecutionRoots, taskProfile);
   return {
     ...base,
     content: [
@@ -3376,13 +4109,40 @@ function mergeVisibleDirectories(
   return merged;
 }
 
+function mergeUploadedSources(sources: readonly UploadedSourceSummary[]): UploadedSourceSummary[] {
+  const seen = new Set<string>();
+  const merged: UploadedSourceSummary[] = [];
+  for (const source of sources) {
+    if (seen.has(source.id)) continue;
+    seen.add(source.id);
+    merged.push(source);
+  }
+  return merged;
+}
+
+function sourceEventSummary(source: UploadedSourceSummary): Record<string, unknown> {
+  return {
+    id: source.id,
+    originalName: source.originalName,
+    mimeType: source.mimeType,
+    extension: source.extension,
+    byteSize: source.byteSize,
+    sha256: source.sha256,
+    status: source.status,
+    chunkCount: source.chunkCount,
+    truncated: source.truncated,
+    ...(source.summary === undefined ? {} : { summary: source.summary }),
+  };
+}
+
 function parseExecuteOptions(value: unknown): ExecuteOptions {
-  if (value === undefined) return { allowDangerousTools: false, visibleDirectories: [] };
+  if (value === undefined) return { allowDangerousTools: false, visibleDirectories: [], sourceIds: [] };
   const record = requireRecord(value, "run options");
   if (record.allowDangerousTools !== undefined && typeof record.allowDangerousTools !== "boolean") {
     throw new AppError("BAD_REQUEST", "allowDangerousTools must be boolean", 400);
   }
   const visibleDirectories = parseVisibleDirectoryPaths(record.visibleDirectories);
+  const sourceIds = parseSourceIds(record.sourceIds);
   const conversationId = record.conversationId === undefined || record.conversationId === null
     ? undefined
     : requireString(record.conversationId, "conversationId", { max: 128 });
@@ -3395,10 +4155,25 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
   return {
     allowDangerousTools: record.allowDangerousTools === true,
     visibleDirectories,
+    sourceIds,
     ...(conversationId === undefined ? {} : { conversationId }),
     ...(modelKey === undefined ? {} : { modelKey }),
     ...(record.conversationIntent === "auto" ? { conversationIntent: "auto" as const } : {}),
   };
+}
+
+function parseSourceIds(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new AppError("BAD_REQUEST", "sourceIds must be an array with at most 20 entries", 400);
+  }
+  const result = value.map((item, index) =>
+    requireString(item, `sourceIds[${index}]`, { max: 80, pattern: /^src_[a-f0-9]{32}$/ })
+  );
+  if (new Set(result).size !== result.length) {
+    throw new AppError("BAD_REQUEST", "sourceIds must not contain duplicates", 400);
+  }
+  return result;
 }
 
 function parseVisibleDirectoryPaths(value: unknown): string[] {
@@ -3520,17 +4295,21 @@ function requiresExternalState(input: string): boolean {
       .test(signal);
 }
 
+function requiresConversationWorksetExecution(
+  input: string,
+  conversationWorkingSet: ConversationWorkingSet | undefined,
+): boolean {
+  if (conversationWorkingSet === undefined || conversationWorkingSet.reusableArtifacts.length === 0) return false;
+  if (requestsPriorArtifactChange(input)) return true;
+  return classifyTaskIntent({
+    objective: input,
+    recommendedToolNames: conversationWorkingSet.recommendedCapabilities.toolNames,
+  }).wantsArtifact;
+}
+
 function hasLocalPathReference(input: string): boolean {
   return /(?:^|[\s"'`([{（【])(?:~\/|\.{1,2}\/|\/[a-z0-9._-]+\/|[a-z]:[\\/]|[a-z0-9._-]+\/[a-z0-9._/-]+)/iu
     .test(input);
-}
-
-function assertNoDuplicateTools(tools: readonly RuntimeTool<unknown>[]): void {
-  const names = new Set<string>();
-  for (const tool of tools) {
-    if (names.has(tool.name)) throw new TypeError(`Duplicate tool name: ${tool.name}`);
-    names.add(tool.name);
-  }
 }
 
 function isSafeWorkspaceSegment(value: string): boolean {
@@ -3540,6 +4319,191 @@ function isSafeWorkspaceSegment(value: string): boolean {
     && !value.includes("\\")
     && value !== "."
     && value !== "..";
+}
+
+function parseCommandOutputResult(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parseCommandOutputResult(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+interface ToolArgumentsReference {
+  readonly schema: "agentloop.toolArgumentsReference/v1";
+  readonly path: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+  readonly previewCharacters?: number;
+}
+
+function toolArgumentsReference(value: unknown): ToolArgumentsReference | undefined {
+  const record = parseCommandOutputResult(value);
+  if (record === undefined || typeof record.path !== "string") return undefined;
+  return {
+    schema: "agentloop.toolArgumentsReference/v1",
+    path: record.path,
+    ...(typeof record.sha256 === "string" ? { sha256: record.sha256 } : {}),
+    ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
+    ...(typeof record.characters === "number" ? { characters: record.characters } : {}),
+    ...(typeof record.previewCharacters === "number" ? { previewCharacters: record.previewCharacters } : {}),
+  };
+}
+
+function inlineToolArgumentsContent(toolCallId: string, argumentsValue: unknown): ToolArgumentsContent {
+  const content = formatToolArgumentsContent(argumentsValue);
+  return {
+    toolCallId,
+    arguments: argumentsValue,
+    content,
+    bytes: Buffer.byteLength(content),
+    characters: content.length,
+  };
+}
+
+function serializeToolArguments(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? JSON.stringify(String(value)) : serialized;
+  } catch {
+    return JSON.stringify(String(value));
+  }
+}
+
+function parseStoredToolArguments(serialized: string): unknown {
+  try {
+    return JSON.parse(serialized) as unknown;
+  } catch {
+    throw notFound("Tool arguments");
+  }
+}
+
+function formatToolArgumentsContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  const formatted = JSON.stringify(value, null, 2);
+  return formatted === undefined ? String(value) : formatted;
+}
+
+function projectToolArgumentsValue(
+  value: unknown,
+  reference: ToolArgumentsReference,
+  serialized: string,
+): unknown {
+  const summarized = summarizeToolArgumentValue(value);
+  if (Buffer.byteLength(serializeToolArguments(summarized)) <= TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES) return summarized;
+  return {
+    schema: "agentloop.toolArgumentsProjection/v1",
+    projected: true,
+    originalBytes: reference.bytes,
+    originalCharacters: reference.characters,
+    sha256: reference.sha256,
+    preview: serialized.slice(0, TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
+    omittedCharacters: Math.max(0, serialized.length - TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
+    outline: outlineToolArguments(value),
+  };
+}
+
+function summarizeToolArgumentValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (Buffer.byteLength(value) <= TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES) return value;
+    const sha256 = createHash("sha256").update(value).digest("hex");
+    return {
+      schema: "agentloop.toolArgumentTextProjection/v1",
+      projected: true,
+      originalBytes: Buffer.byteLength(value),
+      originalCharacters: value.length,
+      sha256,
+      preview: value.slice(0, TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
+      omittedCharacters: Math.max(0, value.length - TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
+    };
+  }
+  if (Array.isArray(value)) return value.map((item) => summarizeToolArgumentValue(item));
+  const record = asRecord(value);
+  if (record === undefined) return value;
+  const projected: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(record)) projected[key] = summarizeToolArgumentValue(item);
+  return projected;
+}
+
+function outlineToolArguments(value: unknown): unknown {
+  if (typeof value === "string") {
+    return { type: "string", characters: value.length, bytes: Buffer.byteLength(value) };
+  }
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      items: value.slice(0, 8).map((item) => outlineToolArguments(item)),
+      truncated: value.length > 8,
+    };
+  }
+  const record = asRecord(value);
+  if (record === undefined) return { type: value === null ? "null" : typeof value };
+  const entries = Object.entries(record);
+  return {
+    type: "object",
+    keys: entries.slice(0, 24).map(([key, item]) => ({
+      key,
+      outline: outlineToolArguments(item),
+    })),
+    truncated: entries.length > 24,
+  };
+}
+
+async function resolveToolArgumentsReference(workspaceRoot: string, path: string): Promise<string> {
+  if (path.length === 0 || path.includes("\0") || isAbsolute(path)) throw notFound("Tool arguments");
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw notFound("Tool arguments");
+  }
+  if (!normalized.startsWith(".agentloop/tool-arguments/")) throw notFound("Tool arguments");
+  const root = await fs.realpath(workspaceRoot);
+  const target = resolve(root, normalized);
+  const realTarget = await fs.realpath(target);
+  const fromRoot = relative(root, realTarget);
+  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw notFound("Tool arguments");
+  }
+  return realTarget;
+}
+
+function commandOutputReference(value: unknown): {
+  readonly path: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+} | undefined {
+  const record = parseCommandOutputResult(value);
+  if (record === undefined || typeof record.path !== "string") return undefined;
+  return {
+    path: record.path,
+    ...(typeof record.sha256 === "string" ? { sha256: record.sha256 } : {}),
+    ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
+    ...(typeof record.characters === "number" ? { characters: record.characters } : {}),
+  };
+}
+
+async function resolveCommandOutputReference(workspaceRoot: string, path: string): Promise<string> {
+  if (path.length === 0 || path.includes("\0") || isAbsolute(path)) throw notFound("Command output");
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw notFound("Command output");
+  }
+  const root = await fs.realpath(workspaceRoot);
+  const target = resolve(root, normalized);
+  const realTarget = await fs.realpath(target);
+  const fromRoot = relative(root, realTarget);
+  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw notFound("Command output");
+  }
+  return realTarget;
 }
 
 const MAX_CONVERSATION_HISTORY_MESSAGES = 16;

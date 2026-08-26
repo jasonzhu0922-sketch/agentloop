@@ -347,7 +347,7 @@ class DeferredRunModel implements ModelAdapter {
           dependsOn: [],
           role: "deliver",
           skillIds: [],
-          requiredToolNames: [],
+          recommendedToolNames: [],
           evidenceContract: {
             requiredKinds: ["delivery_receipt"],
             caveatPolicy: "none",

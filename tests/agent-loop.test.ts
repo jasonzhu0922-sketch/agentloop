@@ -10,8 +10,8 @@ import type {
   ModelStreamSink,
   RuntimeEvent,
 } from "../src/runtime/contracts.ts";
-import { ToolRegistry } from "../src/runtime/tool-registry.ts";
-import type { RuntimeTool } from "../src/runtime/tool-registry.ts";
+import { ToolRegistry } from "../src/tools/tool-registry.ts";
+import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
 test("parallel tools settle into model source order while completion events stay truthful", async () => {
@@ -42,6 +42,89 @@ test("parallel tools settle into model source order while completion events stay
     .filter((event) => event.type === "tool.completed")
     .map((event) => event.data.toolName);
   assert.deepEqual(completionNames, ["fast_square", "slow_double"]);
+});
+
+test("batch source reads are observed as one tool action with many source receipts", async () => {
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "read-35",
+            name: "visible_read_files",
+            arguments: {
+              rootId: "visible_dir_1",
+              files: Array.from({ length: 35 }, (_, index) => ({ path: `kb-${index + 1}.md` })),
+            },
+          }],
+        };
+      }
+      return { content: "source summary ready", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const registry = new ToolRegistry([{
+    name: "visible_read_files",
+    description: "read many files",
+    inputSchema: {
+      type: "object",
+      required: ["files"],
+      properties: { files: { type: "array" } },
+    },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (input) => input,
+    execute: async (_context, input) => {
+      const files = (input as { files: Array<{ path: string }> }).files;
+      const sourceRefs = files.map((file, index) => ({
+        sourceRefId: `visible_dir_1:${file.path}`,
+        rootId: "visible_dir_1",
+        path: file.path,
+        characters: 100 + index,
+      }));
+      return {
+        schema: "agentloop.visibleReadFiles/v1",
+        requested: files.length,
+        returned: files.length,
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          sourceType: "visible_files",
+          receiptId: "receipt-35",
+          sourceRefs,
+          facts: files.map((file) => ({ kind: "source_summary", path: file.path })),
+          caveats: [],
+          evidenceKinds: { satisfied: ["source_read", "source_refs"], caveated: [], failed: [] },
+        },
+      };
+    },
+  }]);
+
+  await runAgentLoop({
+    runId: "run-batch-source-observed",
+    systemPrompt: "Test agent",
+    input: "read sources",
+    model,
+    tools: registry,
+    grant: makeGrant(["visible_read_files"]),
+    maxSteps: 4,
+    shouldConvergeAfterToolStep: () => ({ converge: true, reason: "lookup_evidence_ready" }),
+    emit: (event) => events.push(event),
+  });
+
+  const completed = events.find((event) => event.type === "tool.completed");
+  assert.equal(completed?.data.toolName, "visible_read_files");
+  assert.equal(completed?.data.sourceBatchReadCount, 35);
+  assert.equal(completed?.data.sourceReadCount, 35);
+  assert.equal(completed?.data.sourceRefCount, 35);
+  const queued = events.find((event) => event.type === "loop.convergence_queued");
+  assert.equal((queued?.data.sourceAcquisition as { batchCount?: number })?.batchCount, 1);
+  assert.equal((queued?.data.sourceAcquisition as { sourceReadCount?: number })?.sourceReadCount, 35);
+  assert.equal((queued?.data.sourceAcquisition as { uniqueSourceReadCount?: number })?.uniqueSourceReadCount, 35);
 });
 
 test("tool calls from a length-truncated model response are never dispatched", async () => {
@@ -149,6 +232,72 @@ test("the final budgeted turn converges without tools and submits existing evide
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("the final budgeted turn can execute missing required evidence before convergence", async () => {
+  let produceExecutions = 0;
+  let acceptExecutions = 0;
+  const produceTool: RuntimeTool<unknown> = {
+    name: "produce_artifact",
+    description: "Produce an artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      produceExecutions += 1;
+      return { path: "poster.png", bytes: 12 };
+    },
+  };
+  const acceptTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify artifact acceptance",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      acceptExecutions += 1;
+      return {
+        verdict: "accepted",
+        evidenceKinds: { satisfied: ["artifact_acceptance"], caveated: [], failed: [] },
+      };
+    },
+  };
+  const model = new FinalEvidenceAtLimitModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["produce_artifact", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify the artifact.",
+    input: "make poster",
+    model,
+    tools: new ToolRegistry([produceTool, acceptTool]),
+    grant,
+    maxSteps: 2,
+    convergenceGraceSteps: 0,
+    candidateRepairGraceSteps: 0,
+    shouldUseFinalConvergence: (context) =>
+      context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.latestToolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      reason: "artifact_acceptance_observed",
+    }),
+    emit: (event) => events.push(event),
+    evaluateCandidate: async (candidate) => ({
+      approved: candidate.output.includes("poster.png accepted")
+        && candidate.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      feedback: "",
+    }),
+  });
+
+  assert.equal(result.output, "poster.png accepted with artifact_acceptance evidence");
+  assert.equal(produceExecutions, 1);
+  assert.equal(acceptExecutions, 1);
+  assert.equal(model.calls, 3);
+  assert.equal(events.filter((event) => event.type === "loop.final_convergence_grace_granted").length, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
 test("structured tool candidates go directly to assessment without a final model rewrite", async () => {
   let executions = 0;
   let assessmentCalls = 0;
@@ -207,6 +356,73 @@ test("structured tool candidates go directly to assessment without a final model
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
+test("structured stdout candidates from command-style tools go directly to assessment", async () => {
+  let executions = 0;
+  let assessmentCalls = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "lookup_api",
+    description: "Return command-style API lookup evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: JSON.stringify({
+          schema: "api_catalog_result/v1",
+          deliveryCandidate: {
+            output: "员工画像标签人员查询 API has countNum and sql inputs.",
+          },
+          assessmentProjection: {
+            match_count: 1,
+            primary_api_id: "M_ADS_FACT_MDYG_USER_TRIP_LABEL.D_A_BSTAMDYG_CL002",
+          },
+          stdoutRef: {
+            path: ".agentloop/tool-results/aa/example.stdout.txt",
+            sha256: "a".repeat(64),
+            characters: 30_000,
+            bytes: 30_000,
+            previewCharacters: 2_000,
+          },
+        }),
+        stderr: "",
+      };
+    },
+  };
+  const model = new StructuredCandidateModel();
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["lookup_api"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete the admitted step.",
+    input: "query employee profile API",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 4,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async (candidate) => {
+      assessmentCalls += 1;
+      assert.match(candidate.output, /countNum/);
+      const projected = candidate.projectedToolEvidence.find((item) => item.toolCallId === "lookup-1");
+      assert.match(projected?.result ?? "", /api_catalog_result\/v1/);
+      assert.match(projected?.result ?? "", /primary_api_id/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /员工画像标签人员查询/);
+  assert.equal(executions, 1);
+  assert.equal(model.calls, 1);
+  assert.equal(assessmentCalls, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 1);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
 test("an empty completion candidate is repaired within the same budgeted step", async () => {
   let executions = 0;
   const tool: RuntimeTool<unknown> = {
@@ -242,6 +458,29 @@ test("an empty completion candidate is repaired within the same budgeted step", 
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
   assert.equal(events.filter((event) => event.type === "step.started").length, 2);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a length-truncated completion candidate receives bounded repair grace", async () => {
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["collect_evidence"]);
+  const registry = new ToolRegistry([
+    numberTool("collect_evidence", 1, (value) => value),
+  ]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete concisely",
+    input: "collect then summarize",
+    model: new LengthCompletionRepairModel(),
+    tools: registry,
+    grant,
+    maxSteps: 2,
+    candidateRepairGraceSteps: 2,
+    emit: (event) => events.push(event),
+  });
+
+  assert.equal(result.output, "short complete candidate");
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
 });
 
 test("a rejected assessed candidate grants bounded tool repair grace", async () => {
@@ -286,6 +525,51 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
   assert.equal(assessments, 2);
   assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("rejected completion candidates are not projected as prior assistant answers during repair", async () => {
+  let calls = 0;
+  const rejectedText = "最终用户可见结果即为上一条消息中的结构化分析总结";
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return { content: rejectedText, finishReason: "stop", toolCalls: [] };
+      }
+      assert.equal(
+        request.messages.some((message) =>
+          message.role === "assistant" && message.content.includes(rejectedText)
+        ),
+        false,
+      );
+      assert.match(request.runtimeContext?.content ?? "", /standalone replacement/);
+      return { content: "完整总结：已基于当前证据直接交付分析结果。", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Summarize the uploaded source.",
+    input: "分析总结外事业务在十五五 AI 领域的工作计划",
+    model,
+    tools: new ToolRegistry([]),
+    grant,
+    maxSteps: 3,
+    emit: (event) => events.push(event),
+    evaluateCandidate: async (candidate) => ({
+      approved: !candidate.output.includes("上一条消息"),
+      feedback: "Return the full user-facing summary without referencing a prior candidate.",
+    }),
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.output, "完整总结：已基于当前证据直接交付分析结果。");
+  assert.equal(result.messages.some((message) =>
+    message.role === "assistant" && message.content.includes(rejectedText)
+  ), false);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
 });
 
 test("deferred validation candidate stops repair loop with a caveat", async () => {
@@ -407,6 +691,7 @@ test("candidate repair assessment limit accepts the latest output with a caveat"
   assert.equal(assessments, 3);
   assert.equal(result.completionCaveat?.reason, "repair_limit");
   assert.match(result.output, /Repair caveat/);
+  assert.doesNotMatch(result.output, /Quality issue remained after repair/);
   assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 1);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
@@ -559,6 +844,78 @@ test("tool evidence can queue an early convergence turn before the hard limit", 
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("next model turn receives explicit execution feedback for failures and file changes", async () => {
+  let calls = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "run_step",
+    description: "Run one scripted step",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, value) => {
+      const action = (value as { action?: string }).action;
+      if (action === "fail") {
+        return {
+          exitCode: 2,
+          stdout: "",
+          stderr: "No such file or directory: input.pdf",
+          fileChanges: [],
+        };
+      }
+      return {
+        exitCode: 0,
+        stdout: "Successfully exported 26 records to output.xlsx",
+        stderr: "",
+        fileChanges: [{ changeType: "created", path: "output.xlsx", bytes: 7364 }],
+      };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "run-fail", name: "run_step", arguments: { action: "fail" } }],
+        };
+      }
+      if (calls === 2) {
+        const runtimeContext = request.runtimeContext?.content ?? "";
+        assert.match(runtimeContext, /runtime_execution_feedback/);
+        assert.match(runtimeContext, /failed toolCallId=run-fail tool=run_step/);
+        assert.match(runtimeContext, /No such file or directory/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "run-export", name: "run_step", arguments: { action: "export" } }],
+        };
+      }
+      const runtimeContext = request.runtimeContext?.content ?? "";
+      assert.match(runtimeContext, /runtime_execution_feedback/);
+      assert.match(runtimeContext, /succeeded toolCallId=run-export tool=run_step/);
+      assert.match(runtimeContext, /fileChanges=created:output\.xlsx/);
+      assert.match(runtimeContext, /Successfully exported 26 records/);
+      return { content: "output.xlsx is ready", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["run_step"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Run until the artifact is ready.",
+    input: "export",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 4,
+  });
+
+  assert.equal(result.output, "output.xlsx is ready");
+  assert.equal(calls, 3);
+});
+
 test("a looping model stops extending grace once it repeats identical tool calls", async () => {
   let executions = 0;
   const tool: RuntimeTool<unknown> = {
@@ -646,6 +1003,83 @@ test("a converged turn that emits an unexecuted tool invocation never reaches th
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 1);
 });
 
+test("a converged Kimi-style text tool invocation never reaches the assessor", async () => {
+  let executions = 0;
+  let assessments = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "render",
+    description: "Render the artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return "ok";
+    },
+  };
+  const model = new ConvergedToolInvocationModel(
+    '我需要重新生成并验证海报。<|tool_calls_section_begin|><|tool_call_begin|>functions.verify_artifact_acceptance:1<|tool_call_argument_begin|>{"artifactPath":"poster_output.png"}<|tool_call_end|><|tool_calls_section_end|>',
+  );
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["render"]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Verify the artifact.",
+      input: "verify",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant,
+      maxSteps: 2,
+      emit: (event) => events.push(event),
+      evaluateCandidate: async () => {
+        assessments += 1;
+        return { approved: false, feedback: "never assessed" };
+      },
+    }),
+    (error: unknown) => error !== null
+      && typeof error === "object"
+      && "code" in error
+      && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED",
+  );
+  assert.equal(executions, 1);
+  assert.equal(assessments, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  assert.equal(events.some((event) => event.type === "candidate.approved"), false);
+});
+
+test("a no-tool candidate with embedded provider tool protocol is rejected before assessment", async () => {
+  let assessments = 0;
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Answer directly.",
+      input: "regenerate the artifact",
+      model: new TextToolInvocationOnlyModel(
+        '我需要重新生成。<|tool_calls_section_begin|><|tool_call_begin|>functions.web_research:0<|tool_call_argument_begin|>{"query":"test"}<|tool_call_end|><|tool_calls_section_end|>',
+      ),
+      tools: new ToolRegistry([]),
+      grant,
+      maxSteps: 1,
+      emit: (event) => events.push(event),
+      evaluateCandidate: async () => {
+        assessments += 1;
+        return { approved: true, feedback: "never assessed" };
+      },
+    }),
+    (error: unknown) => error !== null
+      && typeof error === "object"
+      && "code" in error
+      && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED",
+  );
+  assert.equal(assessments, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  assert.equal(events.some((event) => event.type === "candidate.approved"), false);
+});
+
 test("streaming turns emit live deltas before the durable assistant checkpoint", async () => {
   const events: RuntimeEvent[] = [];
   const tool: RuntimeTool<unknown> = {
@@ -681,6 +1115,34 @@ test("streaming turns emit live deltas before the durable assistant checkpoint",
     .map(({ index }) => index);
   assert.equal(streamingIndices.every((index) => index < committedIndex), true);
   assert.equal(events.some((event) => event.type === "tool.completed"), true);
+});
+
+test("assistant checkpoints persist provider reasoning continuation", async () => {
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "done",
+      finishReason: "stop",
+      toolCalls: [],
+      reasoningContent: "opaque-thinking-state",
+    }),
+  };
+
+  const result = await runAgentLoop({
+    runId: "run-reasoning-checkpoint",
+    systemPrompt: "Reasoning checkpoint",
+    input: "finish",
+    model,
+    tools: new ToolRegistry([]),
+    grant: makeGrant([]),
+    maxSteps: 1,
+    emit: (event) => events.push(event),
+  });
+
+  assert.equal(result.output, "done");
+  const committed = events.find((event) => event.type === "assistant.committed");
+  assert.equal(committed?.data.reasoningContent, "opaque-thinking-state");
 });
 
 test("tool_call_ready dispatches the tool before the full assistant checkpoint", async () => {
@@ -817,6 +1279,68 @@ class ConvergenceScenarioModel implements ModelAdapter {
     assert.match(evidence?.content ?? "", /\"artifact\":\"ready\"/);
     return {
       content: "artifact ready; QA passed; evidence: collect_evidence",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class FinalEvidenceAtLimitModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      assert.equal(request.tools.some((tool) => tool.name === "produce_artifact"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "produce-1", name: "produce_artifact", arguments: {} }],
+      };
+    }
+    if (this.calls === 2) {
+      assert.equal(request.tools.some((tool) => tool.name === "verify_artifact_acceptance"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "accept-1", name: "verify_artifact_acceptance", arguments: { artifactPath: "poster.png" } }],
+      };
+    }
+    assert.deepEqual(request.tools, []);
+    assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
+    return {
+      content: "poster.png accepted with artifact_acceptance evidence",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class LengthCompletionRepairModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "collect", name: "collect_evidence", arguments: { value: 1 } }],
+      };
+    }
+    if (this.calls === 2) {
+      assert.deepEqual(request.tools, []);
+      return {
+        content: "long incomplete candidate",
+        finishReason: "length",
+        toolCalls: [],
+      };
+    }
+    assert.match(request.runtimeContext?.content ?? "", /shorter completion candidate/);
+    return {
+      content: "short complete candidate",
       finishReason: "stop",
       toolCalls: [],
     };
@@ -999,6 +1523,13 @@ class LoopingGraceModel implements ModelAdapter {
 class ConvergedToolInvocationModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   calls = 0;
+  private readonly textInvocation: string;
+
+  constructor(
+    textInvocation = '<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="render">\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>',
+  ) {
+    this.textInvocation = textInvocation;
+  }
 
   async complete(): Promise<ModelResponse> {
     this.calls += 1;
@@ -1010,7 +1541,24 @@ class ConvergedToolInvocationModel implements ModelAdapter {
       };
     }
     return {
-      content: '<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="render">\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>',
+      content: this.textInvocation,
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class TextToolInvocationOnlyModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private readonly content: string;
+
+  constructor(content: string) {
+    this.content = content;
+  }
+
+  async complete(): Promise<ModelResponse> {
+    return {
+      content: this.content,
       finishReason: "stop",
       toolCalls: [],
     };

@@ -34,7 +34,7 @@ interface StepRow {
   refinement_state: "not_refinable" | "pending_facts" | "ready_to_refine" | "refining" | "refined";
   required_facts_json: string;
   skill_ids_json: string;
-  required_tool_names_json: string;
+  recommended_tool_names_json: string;
   evidence_contract_json: string | null;
   success_criteria_json: string;
   status: PlanStepStatus;
@@ -81,7 +81,7 @@ export class PlanRepository {
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
           role, refinement_state, required_facts_json, skill_ids_json,
-          required_tool_names_json, evidence_contract_json, success_criteria_json, status
+          recommended_tool_names_json, evidence_contract_json, success_criteria_json, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const step of plan.steps) {
@@ -97,7 +97,7 @@ export class PlanRepository {
           step.refinementState,
           JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
-          JSON.stringify(step.requiredToolNames),
+          JSON.stringify(step.recommendedToolNames),
           step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
           JSON.stringify(step.successCriteria),
           step.status,
@@ -267,7 +267,7 @@ export class PlanRepository {
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
           role, refinement_state, required_facts_json, skill_ids_json,
-          required_tool_names_json, evidence_contract_json, success_criteria_json, status
+          recommended_tool_names_json, evidence_contract_json, success_criteria_json, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
       `);
       let nextPosition = Math.max(-1, ...current.steps.map((step) => step.position)) + 1;
@@ -285,7 +285,7 @@ export class PlanRepository {
           step.refinementState,
           JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
-          JSON.stringify(step.requiredToolNames),
+          JSON.stringify(step.recommendedToolNames),
           step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
           JSON.stringify(step.successCriteria),
         );
@@ -339,7 +339,7 @@ export class PlanRepository {
         refinementState: step.refinementState,
         requiredFacts: step.requiredFacts,
         skillIds: step.skillIds,
-        requiredToolNames: step.requiredToolNames,
+        recommendedToolNames: step.recommendedToolNames,
         ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
         successCriteria: step.successCriteria,
         status: step.status,
@@ -356,6 +356,7 @@ export class PlanRepository {
 function parseAssessmentProfile(value: string | undefined): AssessmentProfileId {
   if (
     value === "deterministic"
+    || value === "evidence_gate"
     || value === "lookup_lite"
     || value === "source_grounded"
     || value === "risk_sensitive"
@@ -381,7 +382,7 @@ function toStep(row: StepRow): PlanStep {
     refinementState: row.refinement_state ?? "not_refinable",
     requiredFacts: row.required_facts_json === undefined ? [] : JSON.parse(row.required_facts_json),
     skillIds: JSON.parse(row.skill_ids_json),
-    requiredToolNames: JSON.parse(row.required_tool_names_json),
+    recommendedToolNames: JSON.parse(row.recommended_tool_names_json),
     ...(row.evidence_contract_json === null ? {} : { evidenceContract: JSON.parse(row.evidence_contract_json) }),
     successCriteria: JSON.parse(row.success_criteria_json),
     status: row.status,
@@ -404,7 +405,7 @@ function samePlanStepDefinition(left: PlanStep, right: PlanStep): boolean {
     && left.refinementState === right.refinementState
     && JSON.stringify(left.requiredFacts) === JSON.stringify(right.requiredFacts)
     && JSON.stringify(left.skillIds) === JSON.stringify(right.skillIds)
-    && JSON.stringify(left.requiredToolNames) === JSON.stringify(right.requiredToolNames)
+    && JSON.stringify(left.recommendedToolNames) === JSON.stringify(right.recommendedToolNames)
     && JSON.stringify(left.evidenceContract ?? null) === JSON.stringify(right.evidenceContract ?? null)
     && JSON.stringify(left.successCriteria) === JSON.stringify(right.successCriteria);
 }

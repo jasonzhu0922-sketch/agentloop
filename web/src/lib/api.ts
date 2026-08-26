@@ -6,10 +6,13 @@ import type {
   PlanDetail,
   ProcessArtifact,
   ArtifactPreview,
+  CommandOutputContent,
+  ToolArgumentsContent,
   ProviderSummary,
   RunEvent,
   RunRecord,
   SkillSummary,
+  SourceSummary,
   ToolSummary,
   User,
 } from "./types";
@@ -118,6 +121,38 @@ export const api = {
   localDirectories(token: string, path?: string): Promise<LocalDirectoryListing> {
     return request(`/v1/local-directories${path === undefined ? "" : `?path=${encodeURIComponent(path)}`}`, { token });
   },
+  async uploadSource(
+    token: string,
+    file: File,
+    options: { conversationId?: string } = {},
+  ): Promise<{ source: SourceSummary }> {
+    const form = new FormData();
+    form.append("file", file);
+    if (options.conversationId !== undefined) form.append("conversationId", options.conversationId);
+    const response = await fetch("/v1/uploads", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+      body: form,
+    });
+    const text = await response.text();
+    let body: unknown = {};
+    try {
+      body = text === "" ? {} : JSON.parse(text);
+    } catch {
+      throw new ApiError("服务返回了无效 JSON", response.status);
+    }
+    if (!response.ok) {
+      const payload = body as { error?: { code?: string; message?: string; traceId?: string } };
+      const trace = payload.error?.traceId ? ` (traceId: ${payload.error.traceId})` : "";
+      throw new ApiError(
+        (payload.error?.message ?? response.statusText) + trace,
+        response.status,
+        payload.error?.code,
+        payload.error?.traceId,
+      );
+    }
+    return body as { source: SourceSummary };
+  },
   providers(token: string): Promise<{
     providers: readonly ProviderSummary[];
     models?: readonly ModelSummary[];
@@ -154,6 +189,7 @@ export const api = {
       conversationId?: string;
       modelKey?: string;
       visibleDirectories?: readonly string[];
+      sourceIds?: readonly string[];
     } = {},
   ): Promise<{ run: RunRecord }> {
     return request("/v1/runs/async", {
@@ -167,6 +203,9 @@ export const api = {
         ...(options.visibleDirectories === undefined || options.visibleDirectories.length === 0
           ? {}
           : { visibleDirectories: options.visibleDirectories }),
+        ...(options.sourceIds === undefined || options.sourceIds.length === 0
+          ? {}
+          : { sourceIds: options.sourceIds }),
         ...(options.conversationId === undefined ? {} : { conversationId: options.conversationId }),
       },
     });
@@ -179,6 +218,27 @@ export const api = {
   },
   runEvents(token: string, id: string): Promise<{ events: readonly RunEvent[] }> {
     return request(`/v1/runs/${encodeURIComponent(id)}/events`, { token });
+  },
+  runCommandOutput(
+    token: string,
+    runId: string,
+    toolCallId: string,
+    stream: "stdout" | "stderr",
+  ): Promise<{ output: CommandOutputContent }> {
+    return request(
+      `/v1/runs/${encodeURIComponent(runId)}/commands/${encodeURIComponent(toolCallId)}/${stream}`,
+      { token },
+    );
+  },
+  runToolArguments(
+    token: string,
+    runId: string,
+    toolCallId: string,
+  ): Promise<{ arguments: ToolArgumentsContent }> {
+    return request(
+      `/v1/runs/${encodeURIComponent(runId)}/tool-arguments/${encodeURIComponent(toolCallId)}`,
+      { token },
+    );
   },
   runPlan(token: string, id: string): Promise<PlanDetail> {
     return request(`/v1/runs/${encodeURIComponent(id)}/plan`, { token });

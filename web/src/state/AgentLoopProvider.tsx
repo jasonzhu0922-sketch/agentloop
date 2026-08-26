@@ -230,7 +230,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
   }, [token]);
 
   const startRun = useCallback(
-    async (input: string, visibleDirectories: readonly string[] = []): Promise<void> => {
+    async (input: string, visibleDirectories: readonly string[] = [], sourceIds: readonly string[] = []): Promise<void> => {
       const conversationId = conversation?.conversation.id;
       const nextVisibleDirectories = mergeDirectoryPaths(
         conversation?.conversation.visibleDirectories ?? [],
@@ -241,6 +241,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
         const body = await api.startRun(token, input, {
           ...(selectedModelKey === "" ? {} : { modelKey: selectedModelKey }),
           ...(visibleDirectories.length === 0 ? {} : { visibleDirectories }),
+          ...(sourceIds.length === 0 ? {} : { sourceIds }),
           ...(conversationId === undefined ? {} : { conversationId }),
         });
         run = body.run;

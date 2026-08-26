@@ -4,6 +4,16 @@ description: >
   查询集团（宝武数据中台）API 目录信息。Use when 用户要了解某个 API/接口/服务是干什么的、
   有哪些入参、哪些出参、涉及哪些数据表，或要检索现有 API。触发词：查API、查接口、API入参出参、
   这个接口是干啥的、接口涉及哪些表、API目录检索。数据源为数智域通用 SQL API。
+agentloop:
+  roles:
+    - source_provider
+  artifactKinds:
+    - none
+  sourceKinds:
+    - api
+  executionProfiles:
+    - local_script
+  qaKinds: []
 ---
 
 # API 目录检索技能

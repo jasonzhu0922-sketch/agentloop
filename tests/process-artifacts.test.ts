@@ -102,6 +102,91 @@ test("process artifacts include successful command file changes when stdout omit
   }
 });
 
+test("process artifacts deduplicate candidates that resolve to the same workspace file", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-duplicate-artifacts-"));
+  try {
+    const createdAt = Date.now();
+    await fs.mkdir(join(workspace, "artifacts"), { recursive: true });
+    const reportPath = join(workspace, "artifacts", "宝武数据中台_差旅API参数信息报告.md");
+    const jsonPath = join(workspace, "api_query_result.json");
+    await fs.writeFile(reportPath, "# report\n");
+    await fs.writeFile(jsonPath, "{\"ok\":true}\n");
+
+    const artifacts = await collectProcessArtifacts({
+      runId: "run-duplicate-artifacts",
+      workspaceRoot: workspace,
+      runCreatedAt: createdAt,
+      events: [{
+        seq: 1,
+        type: "tool.completed",
+        createdAt,
+        data: {
+          toolName: "computer_run_command",
+          result: JSON.stringify({
+            exitCode: 0,
+            stdout: [
+              `wrote ${reportPath}`,
+              "wrote artifacts/宝武数据中台_差旅API参数信息报告.md",
+              `wrote ${jsonPath}`,
+              "wrote api_query_result.json",
+            ].join("\n"),
+            fileChanges: [
+              { path: "artifacts/宝武数据中台_差旅API参数信息报告.md", changeType: "created", bytes: 9 },
+              { path: "api_query_result.json", changeType: "created", bytes: 12 },
+            ],
+          }),
+        },
+      }],
+    });
+
+    assert.deepEqual(artifacts.map((artifact) => artifact.path), [
+      "api_query_result.json",
+      "artifacts/宝武数据中台_差旅API参数信息报告.md",
+    ]);
+    assert.equal(new Set(artifacts.map((artifact) => artifact.id)).size, artifacts.length);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("process artifacts include paginated HTML materializer output", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-materializer-artifacts-"));
+  try {
+    const createdAt = Date.now();
+    await fs.mkdir(join(workspace, "deliverables"), { recursive: true });
+    await fs.writeFile(join(workspace, "deliverables", "deck.html"), "<!doctype html><section class=\"slide\">One</section>");
+
+    const artifacts = await collectProcessArtifacts({
+      runId: "run-materializer-artifacts",
+      workspaceRoot: workspace,
+      runCreatedAt: createdAt,
+      events: [{
+        seq: 1,
+        type: "tool.completed",
+        createdAt,
+        data: {
+          toolName: "materialize_paginated_html",
+          result: JSON.stringify({
+            schema: "agentloop.paginatedHtmlMaterialization/v1",
+            artifactKind: "html",
+            renderMode: "slides",
+            acceptanceProfile: "html_ppt",
+            path: "deliverables/deck.html",
+            pageCount: 1,
+          }),
+        },
+      }],
+    });
+
+    assert.deepEqual(artifacts.map((artifact) => artifact.path), ["deliverables/deck.html"]);
+    assert.equal(artifacts[0].sourceTool, "materialize_paginated_html");
+    assert.equal(artifacts[0].mimeType, "text/html; charset=utf-8");
+    assert.equal(artifacts[0].previewable, true);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("process artifacts include conversation workspace files mentioned by absolute path", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-conversation-artifacts-"));
   const database = new AppDatabase(":memory:");
@@ -169,8 +254,11 @@ test("process artifact API serves owner evidence and denies another user", async
     modelFactory: () => { throw new Error("model is not used"); },
   });
   const runId = randomUUID();
+  const toolCallId = "command-large-stdout";
   const createdAt = Date.now();
   await fs.writeFile(join(workspace, "poster.pdf"), "PDF PROCESS ARTIFACT");
+  await fs.mkdir(join(workspace, ".agentloop", "tool-results", "aa"), { recursive: true });
+  await fs.writeFile(join(workspace, ".agentloop", "tool-results", "aa", "large.stdout.txt"), "complete stdout\nline 2\n");
   database.prepare(`
     INSERT INTO runs(id, owner_user_id, depth, allow_dangerous_tools, status, input, created_at)
     VALUES (?, ?, 0, 0, 'failed', ?, ?)
@@ -179,8 +267,18 @@ test("process artifact API serves owner evidence and denies another user", async
     INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
     VALUES (?, 1, 'tool.completed', ?, ?)
   `).run(runId, JSON.stringify({
+    toolCallId,
     toolName: "computer_run_command",
-    result: JSON.stringify({ exitCode: 0, stdout: "saved poster.pdf\n" }),
+    result: JSON.stringify({
+      exitCode: 0,
+      stdout: "saved poster.pdf\n[full stdout stored separately]",
+      stdoutRef: {
+        path: ".agentloop/tool-results/aa/large.stdout.txt",
+        sha256: "aa",
+        bytes: Buffer.byteLength("complete stdout\nline 2\n"),
+        characters: "complete stdout\nline 2\n".length,
+      },
+    }),
   }), createdAt);
   const batches = new BatchService(database, runs);
   const server = createAgentLoopServer({ auth, skills, runs, batches });
@@ -211,10 +309,22 @@ test("process artifact API serves owner evidence and denies another user", async
     assert.equal(previewBody.preview.kind, "binary");
     assert.equal(previewBody.preview.mimeType, "application/pdf");
 
+    const output = await fetch(`${baseUrl}/v1/runs/${runId}/commands/${toolCallId}/stdout`, {
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    assert.equal(output.status, 200);
+    const outputBody = await output.json() as { output: { content: string; path?: string } };
+    assert.equal(outputBody.output.content, "complete stdout\nline 2\n");
+    assert.equal(outputBody.output.path, ".agentloop/tool-results/aa/large.stdout.txt");
+
     const hidden = await fetch(`${baseUrl}/v1/runs/${runId}/artifacts`, {
       headers: { authorization: `Bearer ${stranger.token}` },
     });
     assert.equal(hidden.status, 404);
+    const hiddenOutput = await fetch(`${baseUrl}/v1/runs/${runId}/commands/${toolCallId}/stdout`, {
+      headers: { authorization: `Bearer ${stranger.token}` },
+    });
+    assert.equal(hiddenOutput.status, 404);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     database.close();
@@ -310,7 +420,7 @@ test("process artifact preview extracts docx paragraphs and xlsx rows", async ()
       "xl/sharedStrings.xml": "<sst><si><t>事项</t></si><si><t>完成率</t></si><si><t>登录优化</t></si></sst>",
       "xl/worksheets/sheet1.xml": [
         "<worksheet><sheetData>",
-        "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"s\"><v>1</v></c></row>",
+        "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"s\"><v>1</v></c><c r=\"C1\" t=\"inlineStr\"><is><t>&#24207;&#21495;</t></is></c></row>",
         "<row r=\"2\"><c r=\"A2\" t=\"s\"><v>2</v></c><c r=\"B2\"><v>100%</v></c></row>",
         "</sheetData></worksheet>",
       ].join(""),
@@ -349,7 +459,7 @@ test("process artifact preview extracts docx paragraphs and xlsx rows", async ()
     if (xlsxPreview.kind === "xlsx") {
       assert.equal(xlsxPreview.sheets[0]?.name, "计划");
       assert.deepEqual(xlsxPreview.sheets[0]?.rows, [
-        ["事项", "完成率"],
+        ["事项", "完成率", "序号"],
         ["登录优化", "100%"],
       ]);
     }

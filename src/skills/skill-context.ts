@@ -3,6 +3,7 @@ import type { PrivateSkill } from "./skill-service.ts";
 export interface SkillContextOptions {
   readonly packageRoot?: (skill: PrivateSkill) => string;
   readonly executionCwd?: (skill: PrivateSkill) => string | undefined;
+  readonly executionRootEnvName?: (skill: PrivateSkill) => string | undefined;
 }
 
 /**
@@ -21,6 +22,7 @@ export function formatAvailableSkills(
     "Skills provide specialized instructions and workflows for matching tasks.",
     "Use load_skill to load the exact body of a Skill before applying that Skill; do not load unrelated catalog entries.",
     "The content returned by load_skill is authoritative; do not reconstruct or expand it from the catalog.",
+    "AgentLoop executionProfiles are stable Runtime capability profiles; local_script means a Skill-bound leaf needs computer_run_command plus load_skill.",
     "<available_skills>",
     ...skills.flatMap((skill) => [
       "  <skill>",
@@ -28,6 +30,7 @@ export function formatAvailableSkills(
       `    <name>${escapeXml(skill.name)}</name>`,
       `    <description>${escapeXml(skill.description)}</description>`,
       `    <version>${skill.version}</version>`,
+      ...formatAgentLoopCatalog(skill),
       `    <location>${escapeXml(skillLocation(skill, options))}</location>`,
       "  </skill>",
     ]),
@@ -44,6 +47,7 @@ export function formatLoadedSkill(
     ? undefined
     : options.packageRoot?.(skill) ?? skill.package.root;
   const executionCwd = skill.package === undefined ? undefined : options.executionCwd?.(skill);
+  const executionRootEnvName = skill.package === undefined ? undefined : options.executionRootEnvName?.(skill);
   const metadata = skill.package === undefined
     ? []
     : [
@@ -51,7 +55,13 @@ export function formatLoadedSkill(
         `<skill_package${formatSourceAttributes(skill.package.url, skill.package.revision)} package_sha256="${escapeXml(skill.package.packageHash)}" read_only="true" />`,
         ...(executionCwd === undefined ? [] : [
           `Runtime execution cwd for this Skill: ${executionCwd}`,
+          `The ${executionCwd} token is a Runtime command-root alias, not an operating-system path.`,
+          `Use ${executionCwd} only as computer_run_command.cwd. Do not write ${executionCwd}/... into generated scripts, config files, or ordinary command arguments.`,
           `When running package scripts with computer_run_command, set cwd to "${executionCwd}" and pass script paths relative to that Skill root.`,
+        ]),
+        ...(executionRootEnvName === undefined ? [] : [
+          `Script-readable Skill root environment variable: ${executionRootEnvName}`,
+          `Generated scripts that need read-only Skill assets should read process.env.${executionRootEnvName} / os.environ["${executionRootEnvName}"] and join package-relative asset paths from there.`,
         ]),
         `Base directory for this Skill: ${packageRoot}`,
         `Read-only package directory for this Skill: ${packageRoot}`,
@@ -77,6 +87,23 @@ function skillLocation(skill: PrivateSkill, options: SkillContextOptions): strin
   if (skill.package === undefined) return `private-skill:${skill.id}`;
   const root = options.packageRoot?.(skill) ?? skill.package.root;
   return `${root.replace(/[\\/]+$/, "")}/${skill.package.entrypointPath}`;
+}
+
+function formatAgentLoopCatalog(skill: PrivateSkill): string[] {
+  const metadata = skill.agentLoop;
+  if (metadata === undefined) return [];
+  const attributes = [
+    `roles="${escapeXml(metadata.roles.join(","))}"`,
+    `artifact_kinds="${escapeXml(metadata.artifactKinds.join(","))}"`,
+    `source_kinds="${escapeXml(metadata.sourceKinds.join(","))}"`,
+    `qa_kinds="${escapeXml(metadata.qaKinds.join(","))}"`,
+    ...(metadata.executionProfiles === undefined
+      ? []
+      : [`execution_profiles="${escapeXml(metadata.executionProfiles.join(","))}"`]),
+  ];
+  return [
+    `    <agentloop ${attributes.join(" ")} />`,
+  ];
 }
 
 function escapeXml(value: string): string {

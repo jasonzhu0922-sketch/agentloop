@@ -15,6 +15,7 @@ import { AppError, asAppError, badRequest, notFound } from "../shared/errors.ts"
 import { requireRecord } from "../shared/validation.ts";
 
 const MAX_REQUEST_BYTES = 1_000_000;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024 + 16_384;
 const execFileAsync = promisify(execFile);
 
 export interface HttpDependencies {
@@ -96,6 +97,23 @@ export function createAgentLoopServer(
         const path = url.searchParams.get("path") ?? undefined;
         return sendJson(response, 200, await listLocalDirectories(path));
       }
+      if (request.method === "POST" && url.pathname === "/v1/uploads") {
+        const upload = await readMultipartUpload(request);
+        return sendJson(response, 201, {
+          source: await dependencies.runs.uploadSource(user.id, {
+            originalName: upload.filename,
+            mimeType: upload.contentType,
+            content: upload.content,
+            ...(upload.conversationId === undefined ? {} : { conversationId: upload.conversationId }),
+          }),
+        });
+      }
+      const sourceMatch = url.pathname.match(/^\/v1\/sources\/([^/]+)$/);
+      if (request.method === "GET" && sourceMatch !== null) {
+        return sendJson(response, 200, {
+          source: dependencies.runs.source(user.id, decodeURIComponent(sourceMatch[1])),
+        });
+      }
 
       if (request.method === "GET" && url.pathname === "/v1/skills") {
         return sendJson(response, 200, { skills: await dependencies.skills.listAvailable(user.id) });
@@ -135,6 +153,7 @@ export function createAgentLoopServer(
           allowDangerousTools: body.allowDangerousTools,
           ...(body.modelKey === undefined ? {} : { modelKey: body.modelKey }),
           ...(body.visibleDirectories === undefined ? {} : { visibleDirectories: body.visibleDirectories }),
+          ...(body.sourceIds === undefined ? {} : { sourceIds: body.sourceIds }),
           ...(body.conversationId === undefined ? {} : { conversationId: body.conversationId }),
           ...(body.conversationIntent === undefined ? {} : { conversationIntent: body.conversationIntent }),
         });
@@ -146,6 +165,7 @@ export function createAgentLoopServer(
           allowDangerousTools: body.allowDangerousTools,
           ...(body.modelKey === undefined ? {} : { modelKey: body.modelKey }),
           ...(body.visibleDirectories === undefined ? {} : { visibleDirectories: body.visibleDirectories }),
+          ...(body.sourceIds === undefined ? {} : { sourceIds: body.sourceIds }),
           ...(body.conversationId === undefined ? {} : { conversationId: body.conversationId }),
           ...(body.conversationIntent === undefined ? {} : { conversationIntent: body.conversationIntent }),
         });
@@ -195,6 +215,27 @@ export function createAgentLoopServer(
       if (request.method === "GET" && runEventsMatch !== null) {
         return sendJson(response, 200, {
           events: dependencies.runs.events(user.id, decodeURIComponent(runEventsMatch[1])),
+        });
+      }
+      const runCommandOutputMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/commands\/([^/]+)\/(stdout|stderr)$/);
+      if (request.method === "GET" && runCommandOutputMatch !== null) {
+        return sendJson(response, 200, {
+          output: await dependencies.runs.readCommandOutput(
+            user.id,
+            decodeURIComponent(runCommandOutputMatch[1]),
+            decodeURIComponent(runCommandOutputMatch[2]),
+            runCommandOutputMatch[3] as "stdout" | "stderr",
+          ),
+        });
+      }
+      const runToolArgumentsMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/tool-arguments\/([^/]+)$/);
+      if (request.method === "GET" && runToolArgumentsMatch !== null) {
+        return sendJson(response, 200, {
+          arguments: await dependencies.runs.readToolArguments(
+            user.id,
+            decodeURIComponent(runToolArgumentsMatch[1]),
+            decodeURIComponent(runToolArgumentsMatch[2]),
+          ),
         });
       }
       const runEventsStreamMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/events\/stream$/);
@@ -306,20 +347,117 @@ function authenticate(
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
+  const body = await readRequestBody(request, MAX_REQUEST_BYTES);
+  if (body.length === 0) return {};
+  return JSON.parse(body.toString("utf8"));
+}
+
+interface MultipartUpload {
+  readonly filename: string;
+  readonly contentType?: string;
+  readonly content: Buffer;
+  readonly conversationId?: string;
+}
+
+async function readMultipartUpload(request: IncomingMessage): Promise<MultipartUpload> {
+  const contentType = request.headers["content-type"] ?? "";
+  const boundaryMatch = /^multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))$/i.exec(contentType);
+  const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
+  if (boundary === undefined || boundary.length === 0) throw badRequest("Upload must use multipart/form-data");
+  const body = await readRequestBody(request, MAX_UPLOAD_BYTES);
+  const parts = parseMultipart(body, boundary);
+  const file = parts.find((part) => part.name === "file");
+  if (file === undefined || file.filename === undefined) throw badRequest("Upload requires a file field");
+  return {
+    filename: file.filename,
+    contentType: file.contentType,
+    content: file.content,
+    conversationId: parts.find((part) => part.name === "conversationId")?.content.toString("utf8").trim() || undefined,
+  };
+}
+
+interface MultipartPart {
+  readonly name: string;
+  readonly filename?: string;
+  readonly contentType?: string;
+  readonly content: Buffer;
+}
+
+function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
+  const marker = `--${boundary}`;
+  const raw = body.toString("binary");
+  const sections = raw.split(marker).slice(1, -1);
+  const parts: MultipartPart[] = [];
+  for (const section of sections) {
+    const trimmed = section.startsWith("\r\n") ? section.slice(2) : section;
+    const headerEnd = trimmed.indexOf("\r\n\r\n");
+    if (headerEnd < 0) continue;
+    const headerText = trimmed.slice(0, headerEnd);
+    const contentText = trimmed.slice(headerEnd + 4).replace(/\r\n$/, "");
+    const headers = new Map(headerText.split("\r\n").map((line) => {
+      const index = line.indexOf(":");
+      return index < 0
+        ? ["", ""] as const
+        : [line.slice(0, index).trim().toLowerCase(), line.slice(index + 1).trim()] as const;
+    }));
+    const disposition = headers.get("content-disposition") ?? "";
+    const name = dispositionParameter(disposition, "name");
+    if (name === undefined) continue;
+    parts.push({
+      name,
+      filename: dispositionFilename(disposition),
+      contentType: headers.get("content-type"),
+      content: Buffer.from(contentText, "binary"),
+    });
+  }
+  return parts;
+}
+
+function dispositionFilename(disposition: string): string | undefined {
+  const encoded = dispositionParameter(disposition, "filename*");
+  if (encoded !== undefined) return decodeRFC5987MultipartValue(encoded);
+  const filename = dispositionParameter(disposition, "filename");
+  return filename === undefined ? undefined : decodeMultipartHeaderUtf8(filename);
+}
+
+function dispositionParameter(disposition: string, key: string): string | undefined {
+  const pattern = new RegExp(`${escapeRegExp(key)}=(?:"([^"]*)"|([^;\\s]*))`, "i");
+  const match = pattern.exec(disposition);
+  return match?.[1] ?? match?.[2];
+}
+
+function decodeMultipartHeaderUtf8(value: string): string {
+  return Buffer.from(value, "binary").toString("utf8");
+}
+
+function decodeRFC5987MultipartValue(value: string): string {
+  const match = /^utf-8''(.+)$/i.exec(value);
+  if (match === null) return decodeMultipartHeaderUtf8(value);
+  try {
+    return decodeURIComponent(match[1] ?? "");
+  } catch {
+    return decodeMultipartHeaderUtf8(value);
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function readRequestBody(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
   const declaredLength = Number(request.headers["content-length"] ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
-    throw badRequest(`Request body exceeds ${MAX_REQUEST_BYTES} bytes`);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw badRequest(`Request body exceeds ${maxBytes} bytes`);
   }
   const chunks: Buffer[] = [];
   let length = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     length += buffer.length;
-    if (length > MAX_REQUEST_BYTES) throw badRequest(`Request body exceeds ${MAX_REQUEST_BYTES} bytes`);
+    if (length > maxBytes) throw badRequest(`Request body exceeds ${maxBytes} bytes`);
     chunks.push(buffer);
   }
-  if (length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return Buffer.concat(chunks);
 }
 
 function setSecurityHeaders(response: ServerResponse, traceId: string, allowedOrigin: string | undefined): void {

@@ -3,7 +3,7 @@ import type {
   JsonSchema,
   ModelToolCall,
   ModelToolDefinition,
-} from "./contracts.ts";
+} from "../runtime/contracts.ts";
 import { badRequest, forbidden } from "../shared/errors.ts";
 
 export interface ToolExecutionContext {

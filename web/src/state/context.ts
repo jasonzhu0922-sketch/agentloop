@@ -34,7 +34,7 @@ export interface AppState {
 export interface AppActions {
   setToken(token: string): void;
   logout(): Promise<void>;
-  startRun(input: string, visibleDirectories?: readonly string[]): Promise<void>;
+  startRun(input: string, visibleDirectories?: readonly string[], sourceIds?: readonly string[]): Promise<void>;
   cancelRun(): Promise<void>;
   openConversation(id: string): Promise<void>;
   deleteConversation(id: string, title: string): Promise<void>;

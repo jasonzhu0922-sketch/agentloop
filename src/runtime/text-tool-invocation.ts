@@ -5,11 +5,9 @@
  */
 export function isTextToolInvocation(content: string): boolean {
   const normalized = content
-    .trimStart()
     .replaceAll("＜", "<")
     .replaceAll("＞", ">")
     .replaceAll("｜", "|")
     .toLowerCase();
-  if (!normalized.startsWith("<")) return false;
-  return /^<(?:antml:)?(?:invoke|parameter)|^<tool_calls?\b|^<\|*dsml\|*(?:tool_calls?|invoke|function_call)\b/.test(normalized);
+  return /<(?:antml:)?(?:invoke|parameter)\b|<tool_calls?\b|<\|*(?:dsml\|*)?(?:tool_calls?(?:_section_begin)?|tool_call_begin|invoke|function_call)\b/.test(normalized);
 }

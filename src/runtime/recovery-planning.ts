@@ -216,7 +216,7 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
     objective: requireString(record.objective, `planRevision.steps[${index}].objective`, { max: 20_000 }),
     dependencies: requireStringArray(record.dependencies, `planRevision.steps[${index}].dependencies`, 100),
     skillIds: requireStringArray(record.skillIds, `planRevision.steps[${index}].skillIds`, 100),
-    requiredToolNames: requireStringArray(record.requiredToolNames, `planRevision.steps[${index}].requiredToolNames`, 100),
+    recommendedToolNames: requireStringArray(record.recommendedToolNames, `planRevision.steps[${index}].recommendedToolNames`, 100),
     successCriteria: record.successCriteria.map((criterion, criterionIndex): SuccessCriterion => {
       const row = requireRecord(criterion, `planRevision.steps[${index}].successCriteria[${criterionIndex}]`);
       return {

@@ -2,9 +2,21 @@
 name: web-artifacts-builder
 description: Suite of tools for creating elaborate, multi-component claude.ai HTML artifacts using modern frontend web technologies (React, Tailwind CSS, shadcn/ui). Use for complex artifacts requiring state management, routing, or shadcn/ui components - not for simple single-file HTML/JSX artifacts.
 license: Complete terms in LICENSE.txt
+agentloop:
+  roles:
+    - primary_builder
+  artifactKinds:
+    - html
+    - code
+  sourceKinds: []
+  qaKinds: []
 ---
 
 # Web Artifacts Builder
+
+Use this Skill for complex browser artifacts that need state management, routing, component systems, custom interactions, or authored visual systems. The Skill describes when this heavier frontend stack is useful; Tool registration and authorization still come from the AgentLoop Runtime and Plan Step. Do not collapse generic HTML work into a structured page-materialization capability.
+
+Use a structured page-materialization capability only for explicit paginated HTML, HTML-PPT, slide decks, training materials, or other page-by-page artifacts that fit a bounded page specification without losing requested layout or interaction. For ordinary standalone HTML, distinctive landing pages, dashboards, apps, or custom interactions, initialize/build the frontend artifact or write the appropriate HTML/CSS/JS directly, then preserve matching artifact acceptance evidence when the Runtime provides that capability.
 
 To build powerful frontend claude.ai artifacts, follow these steps:
 1. Initialize the frontend repo using `scripts/init-artifact.sh`

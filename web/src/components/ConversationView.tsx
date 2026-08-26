@@ -3,7 +3,6 @@ import { useAgentLoop } from "../state/context";
 import { projectConversationRun } from "../state/run-state";
 import { Markdown } from "./Markdown";
 import {
-  failureDetails,
   failureSummary,
   latestProgressEvent,
   latestStreaming,
@@ -58,8 +57,8 @@ function PlanStepsPanel({ id, steps }: { readonly id: string; readonly steps: re
               {step.dependencies?.length ? (
                 <div className="live-plan-meta">依赖：{step.dependencies.join("、")}</div>
               ) : null}
-              {step.requiredToolNames?.length ? (
-                <div className="live-plan-meta">工具：{step.requiredToolNames.join("、")}</div>
+              {step.recommendedToolNames?.length ? (
+                <div className="live-plan-meta">推荐工具：{step.recommendedToolNames.join("、")}</div>
               ) : null}
               {step.successCriteria?.length ? (
                 <ul className="live-plan-criteria">
@@ -161,13 +160,15 @@ function TurnArtifacts({
   readonly artifacts: readonly ProcessArtifact[];
   readonly loaded: boolean;
 }): React.ReactNode {
-  const { actions } = useAgentLoop();
-  if (loaded) return <ArtifactLinks artifacts={artifacts} runId={run.id} />;
+  const { state, actions } = useAgentLoop();
+  const isCurrentRun = state.currentRun?.run.id === run.id;
+  if (loaded && isCurrentRun) return <ArtifactLinks artifacts={artifacts} runId={run.id} output={run.output} />;
   return (
     <div className="turn-footer">
       <button type="button" className="text-btn" onClick={() => void actions.selectRun(run.id)}>
         查看本轮产物
       </button>
+      {loaded ? <ArtifactLinks artifacts={artifacts} runId={run.id} output={run.output} /> : null}
     </div>
   );
 }
@@ -215,31 +216,16 @@ function ErrorMessage({
     steps,
     artifactCount: artifacts.length,
   });
-  const diag = failureDetails(events);
   return (
     <article className="msg assistant">
       <div className="msg-avatar">A</div>
       <div className="msg-body">
         <div className="failure-card">
-          <div className="msg-heading error">任务未完成</div>
+          <div className="msg-heading error">未完成</div>
           <strong className="failure-title">{summary.title}</strong>
           <p>{summary.reason}</p>
-          <div className="failure-grid">
-            <div>
-              <span>当前进度</span>
-              <p>{summary.progress}</p>
-            </div>
-            <div>
-              <span>建议下一步</span>
-              <p>{summary.nextAction}</p>
-            </div>
-          </div>
-          <details className="failure-technical">
-            <summary>技术细节</summary>
-            {run.errorCode ? <div className="mono">{run.errorCode}</div> : null}
-            {summary.rawMessage ? <div className="muted">{summary.rawMessage}</div> : null}
-            {diag ? <div className="muted mono">{diag}</div> : null}
-          </details>
+          <p>{summary.progress}</p>
+          <p>{summary.nextAction}</p>
         </div>
         <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>

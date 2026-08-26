@@ -1,8 +1,11 @@
 import { badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
-import type { RuntimeTool, ToolExecutionContext } from "../runtime/tool-registry.ts";
-import type { ComputerDriver } from "./computer-driver.ts";
-import { ComputerExecutor, type CommandRootMount } from "./computer-executor.ts";
+import { buildArtifactReceipt } from "../runtime/artifact-receipt.ts";
+import type { RuntimeTool, ToolExecutionContext } from "./tool-registry.ts";
+import { ArtifactAcceptanceService, type ArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
+import type { ComputerDriver } from "../computer/computer-driver.ts";
+import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
+import { parsePaginatedHtmlMaterializeInput, renderPaginatedHtml } from "./paginated-html-materializer.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
 const MAX_COMMAND_ARGUMENT_CHARACTERS = 4_096;
@@ -12,6 +15,7 @@ const MIN_COMMAND_TIMEOUT_MS = 100;
 const MAX_COMMAND_TIMEOUT_MS = 300_000;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
+  "materialize_paginated_html",
   "computer_write_file",
   "computer_run_command",
   "computer_click",
@@ -20,7 +24,11 @@ export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
   "computer_navigate",
 ]);
 
-export function createComputerTools(executor: ComputerExecutor, driver?: ComputerDriver): RuntimeTool<unknown>[] {
+export function createComputerTools(
+  executor: ComputerExecutor,
+  driver?: ComputerDriver,
+  acceptanceService = new ArtifactAcceptanceService(),
+): RuntimeTool<unknown>[] {
   const tools: RuntimeTool<unknown>[] = [
     {
       name: "computer_list_directory",
@@ -28,7 +36,7 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       inputSchema: objectSchema(["path"], { path: { type: "string" } }),
       executionMode: "parallel",
       replaySafe: true,
-      parse: (value) => ({ path: fieldString(value, "path", 4_000) }),
+      parse: (value) => ({ path: rootPathString(value, "path", 4_000) }),
       execute: async (context, value) => executorForContext(executor, context).listDirectory((value as { path: string }).path),
     },
     {
@@ -109,6 +117,46 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       },
     },
     {
+      name: "verify_artifact_acceptance",
+      description: [
+        "Produce one aggregate artifact acceptance evidence object for a file under the workspace root.",
+        "Use this after creating or locating a deliverable to record artifact_path, artifact_non_empty, artifact_openable, format_matches_request, explicit caveats, and artifact_acceptance evidence.",
+        "Profiles cover generic_file, html, html_ppt, docx, xlsx, pptx, pdf, markdown, image, and json.",
+        "This read-only tool performs deterministic local structure/package checks; browser, PDF, Office, or image render checks are reported as skipped_unavailable unless a renderer is later wired into this same acceptance boundary.",
+      ].join(" "),
+      inputSchema: objectSchema(["artifactPath"], {
+        artifactPath: { type: "string" },
+        artifactKind: artifactKindSchema(),
+        profileId: artifactKindSchema(),
+        checks: {
+          type: "array",
+          maxItems: MAX_ACCEPTANCE_CHECKS,
+          items: { type: "string", maxLength: MAX_ACCEPTANCE_CHECK_CHARACTERS },
+        },
+      }),
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => {
+        const record = requireRecord(value, "verify_artifact_acceptance arguments");
+        return {
+          artifactPath: requireString(record.artifactPath, "artifactPath", { max: 4_000 }),
+          artifactKind: optionalArtifactKind(record.artifactKind, "artifactKind"),
+          profileId: optionalArtifactKind(record.profileId, "profileId"),
+          checks: parseOptionalStringArray(record.checks, "checks", MAX_ACCEPTANCE_CHECKS, MAX_ACCEPTANCE_CHECK_CHARACTERS),
+        };
+      },
+      execute: async (context, value) => acceptanceService.verify(
+        executorForContext(executor, context),
+        value as {
+          artifactPath: string;
+          artifactKind?: ArtifactAcceptanceKind;
+          profileId?: ArtifactAcceptanceKind;
+          checks?: readonly string[];
+        },
+        { signal: context.signal },
+      ),
+    },
+    {
       name: "computer_search_text",
       description: [
         "Search literal text recursively under the configured workspace root.",
@@ -128,7 +176,7 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       parse: (value) => {
         const record = requireRecord(value, "computer_search_text arguments");
         return {
-          path: requireString(record.path, "path", { max: 4_000 }),
+          path: rootPathString(record, "path", 4_000),
           query: requireString(record.query, "query", { max: 2_000 }),
           maxMatches: optionalBoundedInteger(record.maxMatches, "maxMatches", 1, 200),
           contextBefore: optionalBoundedInteger(record.contextBefore, "contextBefore", 0, 20),
@@ -149,7 +197,9 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       description: [
         "Create or overwrite a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
-        "For very large content, prefer several smaller write_file calls over one oversized call so the arguments do not exceed the output budget.",
+        "For explicitly paginated HTML, HTML-PPT, or browser slide decks that fit a compact page spec, use materialize_paginated_html instead of streaming the full generated document here.",
+        "For ordinary standalone HTML, custom visual pages, dashboards, apps, or interactions, this Tool may write the authored HTML/CSS/JS file directly.",
+        "For other very large content, prefer reusable scripts or several smaller write_file calls over one oversized call so the arguments do not exceed the output budget.",
         "The result includes sha256, line count, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),
       inputSchema: objectSchema(["path", "content"], {
@@ -173,7 +223,92 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       },
       execute: async (_context, value) => {
         const input = value as { path: string; content: string; overwrite: boolean };
-        return executorForContext(executor, _context).writeFile(input.path, input.content, input.overwrite);
+        const receipt = await executorForContext(executor, _context).writeFile(input.path, input.content, input.overwrite);
+        return {
+          ...receipt,
+          artifactReceipt: buildArtifactReceipt("computer_write_file", receipt),
+        };
+      },
+    },
+    {
+      name: "materialize_paginated_html",
+      description: [
+        "Create or overwrite a browser-presentable paginated HTML file under the workspace root from a compact structured page specification; requires dangerous-tool consent.",
+        "Use only for explicit paginated reports, HTML-PPT, slide decks, training materials, and page-by-page artifacts where each page can be represented as title/subtitle/body/bullets/callout/sourceRefs.",
+        "Do not use for ordinary standalone HTML, distinctive visual pages, dashboards, apps, or custom interactions that require authored markup, CSS, or JavaScript beyond the page spec.",
+        "Set renderMode to slides for deck-like output; set acceptanceProfile to html_ppt only when the requested artifact is specifically an HTML-PPT or slide deck, otherwise use html.",
+        "Do not stream a full HTML document through computer_write_file for this case; pass the page spec here, then verify the resulting file with verify_artifact_acceptance using the same acceptanceProfile.",
+        "path must be relative to the workspace root; absolute paths are rejected.",
+        "The result includes schema, artifactKind, renderMode, acceptanceProfile, pageCount, specSha256, and the normal write-after-inspection receipt for the generated HTML file.",
+      ].join(" "),
+      inputSchema: objectSchema(["path", "title", "renderMode", "acceptanceProfile", "pages"], {
+        path: { type: "string" },
+        title: { type: "string", maxLength: 240 },
+        subtitle: { type: "string", maxLength: 500 },
+        renderMode: { type: "string", enum: ["slides"] },
+        acceptanceProfile: { type: "string", enum: ["html", "html_ppt"] },
+        theme: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            accent: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
+            background: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
+            text: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
+            surface: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
+          },
+        },
+        pages: {
+          type: "array",
+          minItems: 1,
+          maxItems: 80,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["title"],
+            properties: {
+              eyebrow: { type: "string", maxLength: 120 },
+              title: { type: "string", maxLength: 240 },
+              subtitle: { type: "string", maxLength: 500 },
+              body: { type: "string", maxLength: 2_000 },
+              bullets: {
+                type: "array",
+                maxItems: 12,
+                items: { type: "string", maxLength: 500 },
+              },
+              callout: { type: "string", maxLength: 1_000 },
+              sourceRefs: {
+                type: "array",
+                maxItems: 12,
+                items: { type: "string", maxLength: 500 },
+              },
+            },
+          },
+        },
+        overwrite: { type: "boolean" },
+      }),
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: parsePaginatedHtmlMaterializeInput,
+      execute: async (context, value) => {
+        const input = value as ReturnType<typeof parsePaginatedHtmlMaterializeInput>;
+        const rendered = renderPaginatedHtml(input);
+        const receipt = await executorForContext(executor, context).writeFile(input.path, rendered.content, input.overwrite);
+        return {
+          schema: "agentloop.paginatedHtmlMaterialization/v1",
+          artifactKind: "html",
+          renderMode: input.renderMode,
+          acceptanceProfile: input.acceptanceProfile,
+          pageCount: rendered.pageCount,
+          specSha256: rendered.specSha256,
+          ...receipt,
+          artifactReceipt: buildArtifactReceipt("materialize_paginated_html", receipt, {
+            artifactKind: "html",
+            renderMode: input.renderMode,
+            acceptanceProfile: input.acceptanceProfile,
+            pageCount: rendered.pageCount,
+            specSha256: rendered.specSha256,
+          }),
+        };
       },
     },
     {
@@ -181,7 +316,10 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
       description: [
         "Spawn an executable with an argument array and no shell; requires dangerous-tool consent.",
         "command must be a bare executable name (no path separators or shell syntax).",
-        "cwd must be relative to the workspace root; absolute paths are rejected. For an authorized package Skill, cwd may also be the Runtime-provided @skills/<skill-name> execution root shown by load_skill.",
+        "cwd must be relative to the workspace root; absolute paths are rejected. For an authorized package Skill, cwd may also be the Runtime-provided @skills/<skill-name> execution root shown by load_skill; for an authorized visible directory, cwd may be the Runtime-provided @visible/<root-id> command root.",
+        "@skills/<skill-name> and @visible/<root-id> are virtual cwd aliases only; do not pass @skills/... or @visible/... as command arguments or write them into generated scripts as file paths.",
+        "Generated scripts that need read-only Skill assets should read the AGENTLOOP_SKILL_ROOT_* environment variable shown in execution context and join package-relative asset paths from there.",
+        "Command arguments must not reference filesystem paths outside the workspace root, the current command root, or another authorized command root.",
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
@@ -223,10 +361,16 @@ export function createComputerTools(executor: ComputerExecutor, driver?: Compute
 }
 
 function executorForContext(executor: ComputerExecutor, context: ToolExecutionContext): ComputerExecutor {
-  const commandRoots: CommandRootMount[] = context.grant.skillExecutionRoots.map((root) => ({
-    id: root.cwd,
-    path: root.path,
-  }));
+  const commandRoots: CommandRootMount[] = [
+    ...context.grant.skillExecutionRoots.map((root) => ({
+      id: root.cwd,
+      path: root.path,
+    })),
+    ...context.grant.visibleDirectories.map((root) => ({
+      id: `@visible/${root.id}`,
+      path: root.path,
+    })),
+  ];
   if (context.grant.workspaceRoot !== undefined) {
     return executor.withWorkspaceRoot(context.grant.workspaceRoot, { commandRoots });
   }
@@ -262,6 +406,10 @@ function optionalPositiveInteger(value: unknown, field: string): number | undefi
   return value as number;
 }
 
+function directoryPath(value: string): string {
+  return value === "" || value === "/" ? "." : value;
+}
+
 function optionalBoundedInteger(value: unknown, field: string, min: number, max: number): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
@@ -282,6 +430,41 @@ function parseReadRanges(value: unknown): Array<{ offset: number; limit?: number
       limit: optionalBoundedInteger(record.limit, `ranges[${index}].limit`, 1, 2_000),
     };
   });
+}
+
+const ARTIFACT_ACCEPTANCE_KINDS = [
+  "auto",
+  "generic_file",
+  "html",
+  "html_ppt",
+  "docx",
+  "xlsx",
+  "pptx",
+  "pdf",
+  "markdown",
+  "image",
+  "json",
+] as const satisfies readonly ArtifactAcceptanceKind[];
+const MAX_ACCEPTANCE_CHECKS = 50;
+const MAX_ACCEPTANCE_CHECK_CHARACTERS = 512;
+
+function artifactKindSchema(): Record<string, unknown> {
+  return { type: "string", enum: ARTIFACT_ACCEPTANCE_KINDS };
+}
+
+function optionalArtifactKind(value: unknown, field: string): ArtifactAcceptanceKind | undefined {
+  if (value === undefined) return undefined;
+  const kind = requireString(value, field, { max: 64 });
+  if ((ARTIFACT_ACCEPTANCE_KINDS as readonly string[]).includes(kind)) return kind as ArtifactAcceptanceKind;
+  throw badRequest(`${field} must be one of ${ARTIFACT_ACCEPTANCE_KINDS.join(", ")}`);
+}
+
+function parseOptionalStringArray(value: unknown, field: string, maximum: number, itemMaximum = 128): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw badRequest(`${field} must be an array with at most ${maximum} entries`);
+  }
+  return value.map((item, index) => requireString(item, `${field}[${index}]`, { max: itemMaximum }));
 }
 
 function requireBoundedInteger(value: unknown, field: string, min: number, max: number): number {
@@ -334,6 +517,14 @@ function driverTextTool(
 
 function fieldString(value: unknown, field: string, max: number): string {
   return requireString(requireRecord(value)[field], field, { max });
+}
+
+function rootPathString(value: unknown, field: string, max: number): string {
+  const item = requireRecord(value)[field];
+  if (typeof item !== "string" || item.length > max) {
+    throw badRequest(`${field} must be a string of at most ${max} characters`);
+  }
+  return directoryPath(item);
 }
 
 function objectSchema(required: readonly string[], properties: Record<string, unknown>): Record<string, unknown> {

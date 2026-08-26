@@ -21,6 +21,7 @@ interface AssistantCheckpoint {
   readonly event: RecoveryEvent;
   readonly content: string;
   readonly toolCalls: readonly ModelToolCall[];
+  readonly reasoningContent?: string;
 }
 
 interface ToolOutcome {
@@ -45,7 +46,15 @@ export function reconstructRecoveryTranscript(input: {
     if (event.type === "assistant.committed") {
       const content = typeof event.data.content === "string" ? event.data.content : "";
       const toolCalls = asToolCalls(event.data.toolCalls);
-      assistants.push({ event, content, toolCalls });
+      const reasoningContent = typeof event.data.reasoningContent === "string" && event.data.reasoningContent.length > 0
+        ? event.data.reasoningContent
+        : undefined;
+      assistants.push({
+        event,
+        content,
+        toolCalls,
+        ...(reasoningContent === undefined ? {} : { reasoningContent }),
+      });
       for (const call of toolCalls) coveredToolCallIds.add(call.id);
       if (toolCalls.length === 0 && content.length > 0) candidateOutputs.push(content);
       continue;
@@ -86,7 +95,12 @@ export function reconstructRecoveryTranscript(input: {
       }
       continue;
     }
-    messages.push({ role: "assistant", content: assistant.content, toolCalls: assistant.toolCalls });
+    messages.push({
+      role: "assistant",
+      content: assistant.content,
+      toolCalls: assistant.toolCalls,
+      ...(assistant.reasoningContent === undefined ? {} : { reasoningContent: assistant.reasoningContent }),
+    });
     for (const call of assistant.toolCalls) {
       const outcome = outcomes.get(call.id)!;
       messages.push({

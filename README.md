@@ -170,12 +170,16 @@ npm start
 | `computer_list_directory` | 只读 | 列出当前会话 Workspace 目录 |
 | `computer_read_file` | 只读 | 有上限地读取当前会话目录中的 UTF-8 文件 |
 | `computer_search_text` | 只读 | 在当前会话目录中递归字面量搜索 |
+| `verify_artifact_acceptance` | 只读 | 对交付物生成统一 `artifact_acceptance` 证据；支持 HTML/HTML-PPT、DOCX、XLSX、PPTX、PDF、Markdown、图片、JSON 和通用文件的本地结构验收，并显式记录未接入渲染器的 `skipped_unavailable` caveat |
+| `materialize_paginated_html` | 危险 | 从结构化 page spec 物化分页 HTML 文件；HTML-PPT 通过 `renderMode: "slides"` 和 `acceptanceProfile: "html_ppt"` 限定，避免模型把完整 HTML 作为 `computer_write_file.content` 长时间流式输出 |
 | `computer_write_file` | 危险 | 在当前会话目录创建/覆盖文件 |
 | `computer_run_command` | 危险 | 在当前会话目录中 `spawn(command, args)`，不使用 Shell 字符串 |
 | `computer_snapshot` | 只读 | 由 ComputerDriver 截屏 |
 | `computer_click/type_text/press_key/navigate` | 危险 | 由 ComputerDriver 控制 GUI/浏览器 |
 
 一个 Tool 只有同时满足“已注册、当前 Plan Step 已声明、Run 已授权危险工具”才会出现在模型 Tool Schema 中。
+
+`verify_artifact_acceptance` 的渲染验收通过 Runtime 内部 provider 注入扩展，不直接增加模型可见 Tool。设置 `ARTIFACT_ACCEPTANCE_PLAYWRIGHT=1` 会把 Playwright provider 注入 RunService；如需复用系统浏览器，可设置 `ARTIFACT_ACCEPTANCE_PLAYWRIGHT_EXECUTABLE_PATH`。若运行时未安装或无法启动 Playwright/Chromium，对应浏览器 checks 会保持 `skipped_unavailable` caveat。
 
 ## API
 

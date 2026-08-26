@@ -194,7 +194,7 @@ export class AppDatabase implements SqlConnection {
           CHECK(refinement_state IN ('not_refinable', 'pending_facts', 'ready_to_refine', 'refining', 'refined')),
         required_facts_json TEXT NOT NULL DEFAULT '[]',
         skill_ids_json TEXT NOT NULL,
-        required_tool_names_json TEXT NOT NULL,
+        recommended_tool_names_json TEXT NOT NULL,
         evidence_contract_json TEXT,
         success_criteria_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed')),
@@ -246,7 +246,7 @@ export class AppDatabase implements SqlConnection {
         step_id TEXT NOT NULL,
         attempt INTEGER NOT NULL,
         assessment_profile TEXT NOT NULL DEFAULT 'source_grounded'
-          CHECK(assessment_profile IN ('deterministic', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
+          CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
         assessment_method TEXT NOT NULL DEFAULT 'model'
           CHECK(assessment_method IN ('rule', 'model')),
         approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
@@ -269,6 +269,60 @@ export class AppDatabase implements SqlConnection {
         output TEXT,
         reason_code TEXT NOT NULL,
         committed_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sources (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+        original_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        extension TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        storage_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+          'uploaded',
+          'ready',
+          'unsupported',
+          'oversized',
+          'unreadable',
+          'extract_failed',
+          'deleted'
+        )),
+        summary TEXT,
+        token_estimate INTEGER NOT NULL DEFAULT 0,
+        character_count INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0 CHECK(truncated IN (0, 1)),
+        error_code TEXT,
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS sources_owner_conversation_idx
+        ON sources(owner_user_id, conversation_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS sources_sha_idx ON sources(owner_user_id, sha256);
+
+      CREATE TABLE IF NOT EXISTS source_chunks (
+        source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('text', 'table', 'metadata')),
+        locator TEXT NOT NULL,
+        content TEXT NOT NULL,
+        token_estimate INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(source_id, chunk_index)
+      );
+
+      CREATE TABLE IF NOT EXISTS run_sources (
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user_supplied', 'derived')),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(run_id, source_id),
+        UNIQUE(run_id, position)
       );
 
       CREATE TABLE IF NOT EXISTS batches (
@@ -317,6 +371,7 @@ export class AppDatabase implements SqlConnection {
     // Forward-only schema migration for databases created by the initial
     // vertical slice. The new runtime has one canonical schema after migration;
     // no dual-read or compatibility behavior is retained.
+    this.renameColumnIfNeeded("plan_steps", "required_tool_names_json", "recommended_tool_names_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("skills", "source_kind", "TEXT NOT NULL DEFAULT 'inline'");
     this.ensureColumn("skills", "source_url", "TEXT");
     this.ensureColumn("skills", "source_revision", "TEXT");
@@ -338,6 +393,7 @@ export class AppDatabase implements SqlConnection {
     this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
     this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
     this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
+    this.ensureSkillAssessmentProfileConstraint();
     this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
   }
 
@@ -345,5 +401,59 @@ export class AppDatabase implements SqlConnection {
     const columns = this.connection.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
     if (columns.some((item) => item.name === column)) return;
     this.connection.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private renameColumnIfNeeded(table: string, oldColumn: string, newColumn: string, newDefinition: string): void {
+    const columns = this.connection.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+    const hasOld = columns.some((item) => item.name === oldColumn);
+    const hasNew = columns.some((item) => item.name === newColumn);
+    if (hasNew) return;
+    if (hasOld) {
+      this.connection.exec(`ALTER TABLE ${table} RENAME COLUMN ${oldColumn} TO ${newColumn}`);
+      return;
+    }
+    this.connection.exec(`ALTER TABLE ${table} ADD COLUMN ${newColumn} ${newDefinition}`);
+  }
+
+  private ensureSkillAssessmentProfileConstraint(): void {
+    const row = this.connection.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skill_compliance_assessments'
+    `).get() as { sql?: string } | undefined;
+    if (row?.sql?.includes("'evidence_gate'")) return;
+    this.connection.transaction(() => {
+      this.connection.exec(`
+        ALTER TABLE skill_compliance_assessments RENAME TO skill_compliance_assessments_old;
+        CREATE TABLE skill_compliance_assessments (
+          id TEXT PRIMARY KEY,
+          plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+          step_id TEXT NOT NULL,
+          attempt INTEGER NOT NULL,
+          assessment_profile TEXT NOT NULL DEFAULT 'source_grounded'
+            CHECK(assessment_profile IN ('deterministic', 'evidence_gate', 'lookup_lite', 'source_grounded', 'risk_sensitive')),
+          assessment_method TEXT NOT NULL DEFAULT 'model'
+            CHECK(assessment_method IN ('rule', 'model')),
+          approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
+          criteria_json TEXT NOT NULL,
+          skills_json TEXT NOT NULL,
+          evidence_digest TEXT NOT NULL,
+          feedback TEXT NOT NULL,
+          failed_boundary_json TEXT,
+          created_at INTEGER NOT NULL,
+          UNIQUE(plan_id, step_id, attempt),
+          FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
+        );
+        INSERT INTO skill_compliance_assessments(
+          id, plan_id, step_id, attempt, assessment_profile, assessment_method,
+          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, created_at
+        )
+        SELECT
+          id, plan_id, step_id, attempt, assessment_profile, assessment_method,
+          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, created_at
+        FROM skill_compliance_assessments_old;
+        DROP TABLE skill_compliance_assessments_old;
+        CREATE INDEX IF NOT EXISTS skill_assessment_step_idx
+          ON skill_compliance_assessments(plan_id, step_id, attempt DESC);
+      `);
+    });
   }
 }

@@ -3,10 +3,12 @@ import { requireRecord, requireString, requireStringArray } from "../shared/vali
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { inferOperationProfile, operationProfileCatalogForPlanning } from "../runtime/operation-profiles.ts";
+import { classifyTaskIntent } from "../runtime/task-intent.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type {
   CaveatPolicy,
+  ConversationReusableArtifact,
   EvidenceContract,
   EvidenceKind,
   OutcomeLeafRole,
@@ -17,13 +19,14 @@ import type {
   SelectedSkillRole,
   TaskSpec,
 } from "./contracts.ts";
-import { admitPlan } from "./admission.ts";
+import { admitPlan, hasFileProducer } from "./admission.ts";
 
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
   "source_urls",
   "artifact_path",
   "artifact_non_empty",
+  "artifact_acceptance",
   "artifact_openable",
   "format_matches_request",
   "basic_navigation",
@@ -40,14 +43,14 @@ const CAVEAT_POLICY_VALUES = [
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["id", "objective", "dependsOn", "role", "skillIds", "requiredToolNames", "evidenceContract"],
+  required: ["id", "objective", "dependsOn", "role", "skillIds", "recommendedToolNames", "evidenceContract"],
   properties: {
     id: { type: "string" },
     objective: { type: "string" },
     dependsOn: { type: "array", items: { type: "string" } },
     role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
-    requiredToolNames: { type: "array", uniqueItems: true, items: { type: "string" } },
+    recommendedToolNames: { type: "array", uniqueItems: true, items: { type: "string" } },
     evidenceContract: {
       type: "object",
       additionalProperties: false,
@@ -218,99 +221,109 @@ export class ModelPlanner implements Planner {
       ],
       taskProfile,
     });
-    const turn = 1;
-    await emit?.({
-      type: "planning.turn.started",
-      data: {
-        turn,
-        loadedSkillCount: 0,
-        pendingSkillCount: 0,
-        hasRuntimeDirective: false,
-        toolCount: 1,
-        repairMode: "none",
-        messageCount: messages.length,
-      },
-    });
-    const invocation: ModelInvocation = {
-      runId: task.runId,
-      systemPrompt,
-      phase: "planning",
-      runtimeContext: planningRuntimeContext(task, turn, undefined, taskProfile, selectedSkillRoles),
-      messages,
-      tools: [SUBMIT_OUTCOME_PLAN_TOOL],
-      toolChoice: { name: SUBMIT_OUTCOME_PLAN_TOOL.name },
-      maxOutputTokens: Math.min(PLANNING_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
-    };
-    const response = emit === undefined
-      ? await this.model.complete(invocation, signal)
-      : await completeWithStreaming({
-        model: this.model,
-        invocation,
-        emit,
-        signal,
-        base: { phase: "planning", turn },
-      });
-    const outcomePlanCalls = response.toolCalls.filter((call) => call.name === SUBMIT_OUTCOME_PLAN_TOOL.name);
-    await emit?.({
-      type: "planning.turn.completed",
-      data: {
-        turn,
-        finishReason: response.finishReason,
-        toolCallCount: response.toolCalls.length,
-        loadSkillCallCount: 0,
-        submitOutcomePlanCallCount: outcomePlanCalls.length,
-        submitPlanPatchCallCount: 0,
-        loadedSkillCount: 0,
-        contentLength: response.content.length,
-        repairMode: "none",
-      },
-    });
-
-    try {
-      if (response.finishReason === "length") {
-        throw planningResponseError("Planner response was truncated", turn, response);
-      }
-      if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) {
-        throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
-      }
-      const proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
-      assertInitialOutcomePlanShape(proposal, task);
+    let runtimeDirective: string | undefined;
+    for (let turn = 1; turn <= 2; turn += 1) {
       await emit?.({
-        type: "planning.outcome_plan.submitted",
+        type: "planning.turn.started",
         data: {
-          schema: proposal.schema,
-          shape: proposal.shape,
-          selectedSkillRoles: proposal.selectedSkillRoles ?? [],
-          leafCount: proposal.steps.length,
+          turn,
+          loadedSkillCount: 0,
+          pendingSkillCount: 0,
+          hasRuntimeDirective: runtimeDirective !== undefined,
+          toolCount: 1,
+          repairMode: runtimeDirective === undefined ? "none" : "contract_retry",
+          messageCount: messages.length,
         },
       });
-      admitPlan({
+      const invocation: ModelInvocation = {
         runId: task.runId,
-        proposal,
-        availableSkills: task.availableSkills,
-        availableToolNames: new Set(task.availableToolNames),
-      });
+        systemPrompt,
+        phase: "planning",
+        runtimeContext: planningRuntimeContext(task, turn, runtimeDirective, taskProfile, selectedSkillRoles),
+        messages,
+        tools: [SUBMIT_OUTCOME_PLAN_TOOL],
+        toolChoice: { name: SUBMIT_OUTCOME_PLAN_TOOL.name },
+        maxOutputTokens: Math.min(PLANNING_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
+      };
+      const response = emit === undefined
+        ? await this.model.complete(invocation, signal)
+        : await completeWithStreaming({
+          model: this.model,
+          invocation,
+          emit,
+          signal,
+          base: { phase: "planning", turn },
+        });
+      const outcomePlanCalls = response.toolCalls.filter((call) => call.name === SUBMIT_OUTCOME_PLAN_TOOL.name);
       await emit?.({
-        type: "planning.outcome_plan.admitted",
+        type: "planning.turn.completed",
         data: {
-          shape: proposal.shape,
-          leafCount: proposal.steps.length,
+          turn,
+          finishReason: response.finishReason,
+          toolCallCount: response.toolCalls.length,
+          loadSkillCallCount: 0,
+          submitOutcomePlanCallCount: outcomePlanCalls.length,
+          submitPlanPatchCallCount: 0,
+          loadedSkillCount: 0,
+          contentLength: response.content.length,
+          repairMode: runtimeDirective === undefined ? "none" : "contract_retry",
         },
       });
-      return proposal;
-    } catch (error) {
-      const planningError = error instanceof AppError && error.code === "PLANNING_ERROR"
-        ? error
-        : new AppError("PLANNING_ERROR", error instanceof Error ? error.message : "Invalid OutcomePlan", 422);
-      await emit?.({
-        type: "planning.contract_failed",
-        data: {
-          validationError: summarizePlanningError(planningError.message),
-          planningTurn: turn,
-        },
-      });
-      throw planningError;
+
+      try {
+        if (response.finishReason === "length") {
+          throw planningResponseError("Planner response was truncated", turn, response);
+        }
+        if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) {
+          throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
+        }
+        const proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
+        assertInitialOutcomePlanShape(proposal, task);
+        await emit?.({
+          type: "planning.outcome_plan.submitted",
+          data: {
+            schema: proposal.schema,
+            shape: proposal.shape,
+            selectedSkillRoles: proposal.selectedSkillRoles ?? [],
+            leafCount: proposal.steps.length,
+          },
+        });
+        admitPlan({
+          runId: task.runId,
+          proposal,
+          availableSkills: task.availableSkills,
+          availableToolNames: new Set(task.availableToolNames),
+        });
+        await emit?.({
+          type: "planning.outcome_plan.admitted",
+          data: {
+            shape: proposal.shape,
+            leafCount: proposal.steps.length,
+          },
+        });
+        return proposal;
+      } catch (error) {
+        const planningError = error instanceof AppError && error.code === "PLANNING_ERROR"
+          ? error
+          : new AppError("PLANNING_ERROR", error instanceof Error ? error.message : "Invalid OutcomePlan", 422);
+        await emit?.({
+          type: "planning.contract_failed",
+          data: {
+            validationError: summarizePlanningError(planningError.message),
+            planningTurn: turn,
+          },
+        });
+        const retryDirective = turn === 1
+          ? plannerContractRetryDirective(planningError, response, outcomePlanCalls, task.availableToolNames)
+          : undefined;
+        if (retryDirective !== undefined) {
+          runtimeDirective = retryDirective;
+          continue;
+        }
+        throw planningError;
+      }
     }
+    throw new AppError("PLANNING_ERROR", "Planner did not produce an OutcomePlan", 422);
   }
 }
 
@@ -327,7 +340,7 @@ function responseOnlyPlan(input: string): PlanProposal {
       dependencies: [],
       role: "deliver",
       skillIds: [],
-      requiredToolNames: [],
+      recommendedToolNames: [],
       evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
       successCriteria: [{ id: "answered", description: "A non-empty direct answer is returned." }],
     }],
@@ -349,10 +362,88 @@ function planningResponseError(
   });
 }
 
+function shouldRetryPlannerToolContract(
+  response: Awaited<ReturnType<ModelAdapter["complete"]>>,
+  outcomePlanCallCount: number,
+  availableToolNames: readonly string[],
+): boolean {
+  if (response.finishReason === "length") return false;
+  if (response.toolCalls.length === 0) return false;
+  if (response.toolCalls.length === 1 && outcomePlanCallCount === 1) return false;
+  const availableExecutionTools = new Set(availableToolNames);
+  return response.toolCalls.some((call) => availableExecutionTools.has(call.name));
+}
+
+function plannerContractRetryDirective(
+  planningError: AppError,
+  response: Awaited<ReturnType<ModelAdapter["complete"]>>,
+  outcomePlanCalls: readonly ModelToolCall[],
+  availableToolNames: readonly string[],
+): string | undefined {
+  if (shouldRetryPlannerToolContract(response, outcomePlanCalls.length, availableToolNames)) {
+    return plannerToolContractDirective(response);
+  }
+  if (shouldRetryOutcomePlanArgumentsContract(planningError, response, outcomePlanCalls)) {
+    return plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError);
+  }
+  return undefined;
+}
+
+function shouldRetryOutcomePlanArgumentsContract(
+  planningError: AppError,
+  response: Awaited<ReturnType<ModelAdapter["complete"]>>,
+  outcomePlanCalls: readonly ModelToolCall[],
+): boolean {
+  if (response.finishReason === "length") return false;
+  if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) return false;
+  if (isJsonObject(outcomePlanCalls[0].arguments)) return false;
+  return planningError.message === "submit_outcome_plan arguments must be a JSON object";
+}
+
+function plannerToolContractDirective(response: Awaited<ReturnType<ModelAdapter["complete"]>>): string {
+  const attemptedTools = [...new Set(response.toolCalls.map((call) => call.name))]
+    .sort()
+    .join(", ");
+  return [
+    "Your previous planning response attempted tool calls that are not callable in the planning phase.",
+    `Attempted tools: ${attemptedTools || "none"}.`,
+    "Do not inspect files, read artifacts, run commands, load Skills, or execute any work during planning.",
+    "Submit exactly one submit_outcome_plan call. Put advisory execution tools in each leaf's recommendedToolNames.",
+    "For a user-reported defect in a prior artifact, plan a repair leaf that locates the prior artifact, verifies the defect, regenerates or edits the artifact, and records artifact_acceptance evidence.",
+  ].join("\n");
+}
+
+function plannerOutcomePlanArgumentsDirective(call: ModelToolCall, planningError: AppError): string {
+  return [
+    "Your previous submit_outcome_plan tool call was rejected because its arguments were not a JSON object.",
+    `Validation error: ${summarizePlanningError(planningError.message)}.`,
+    `Observed argument type: ${plannerArgumentType(call.arguments)}.`,
+    "Call submit_outcome_plan again with arguments as a structured object, not as a JSON string or prose.",
+    "Do not embed raw double quotes inside string fields; escape quotation marks or omit them.",
+    "The arguments object must include schema, goal, shape, selectedSkillRoles, and leaves.",
+  ].join("\n");
+}
+
+function plannerArgumentType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function planningTaskProfile(task: TaskSpec): TaskProfile {
+  const taskIntent = classifyTaskIntent({
+    objective: task.input,
+    recommendedToolNames: task.availableToolNames,
+    skillNames: task.availableSkills.map((skill) => skill.name),
+    responseOnly: task.responseOnly,
+  });
   const operationProfiles = relevantOperationProfiles(task);
-  const artifactKind = inferArtifactKind(task.input);
-  const sourceNeed = inferSourceNeed(task.input);
+  const artifactKind = taskIntent.artifactKind;
+  const sourceNeed = taskIntent.sourceNeed;
   const recovery = task.conversationWorkingSet?.failedBoundaries.length
     || task.conversationWorkingSet?.activeGoal?.unfinished === true;
   const planShape = recovery
@@ -373,32 +464,18 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     planShape,
     artifactKind,
     sourceNeed,
+    deliverySurface: taskIntent.deliverySurface,
     skillBound: task.availableSkills.length > 0,
-    responseOnly: false,
+    responseOnly: task.responseOnly === true,
   });
 }
 
 function inferArtifactKind(input: string): NonNullable<TaskProfile["artifactKind"]> {
-  const text = normalizePlannerText(input).toLowerCase();
-  if (/(?:html|web\s?page|webpage|landing\s?page|网页|页面|浏览器|站点|website)/iu.test(text)) return "html";
-  if (/(?:pptx?|slides?|deck|presentation|幻灯片|演示文稿|课件)/iu.test(text)) return "presentation";
-  if (/(?:docx?|word|document|文档|报告书)/iu.test(text)) return "document";
-  if (/(?:xlsx?|spreadsheet|sheet|csv|表格|工作簿)/iu.test(text)) return "spreadsheet";
-  if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(text)) return "image";
-  if (/(?:code|script|program|app|代码|脚本|程序|应用)/iu.test(text)) return "code";
-  return "none";
+  return classifyTaskIntent({ objective: input }).artifactKind;
 }
 
 function inferSourceNeed(input: string): NonNullable<TaskProfile["sourceNeed"]> {
-  const text = normalizePlannerText(input).toLowerCase();
-  if (/(?:strict source|official source|authoritative|标准全文|官方|权威|严格来源|精确条款|逐条核验)/iu.test(text)) {
-    return "strict_user_source";
-  }
-  if (/(?:source[- ]grounded|research|lookup|cite|citation|standard|policy|regulation|rating|certification|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处)/iu.test(text)) {
-    return "source_grounded";
-  }
-  if (/(?:latest|current|today|recent|最新|当前|今天|近期)/iu.test(text)) return "lookup_lite";
-  return "none";
+  return classifyTaskIntent({ objective: input }).sourceNeed;
 }
 
 function inferRiskProfile(toolNames: readonly string[]): NonNullable<TaskProfile["riskProfile"]> {
@@ -453,13 +530,17 @@ function planningRuntimeContext(
         availableTools: task.availableTools ?? task.availableToolNames.map((name) => ({ name })),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         visibleDirectories: task.visibleDirectories ?? [],
+        sources: task.sources ?? [],
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
+        ...artifactFollowupContextField(task),
         stepGranularity: STEP_GRANULARITY_GUIDANCE,
         operationProfiles: taskProfile.operations,
         taskProfile,
         selectedSkillRoles,
         outcomePlanContract: {
           schema: "agentloop.outcomePlan/v2",
+          callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
+          executionToolCatalogSemantics: "Execution tools are plan references only in this phase; they are not callable by the Planner.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -484,6 +565,18 @@ function planningRuntimeContext(
 
 function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationProfileCatalogForPlanning> {
   const catalog = operationProfileCatalogForPlanning();
+  const artifactFollowup = buildArtifactFollowupContext(task);
+  const taskIntent = classifyTaskIntent({
+    objective: [
+      task.input,
+      task.conversationWorkingSet?.activeGoal?.goal ?? "",
+      task.conversationWorkingSet?.resumeSuggestion ?? "",
+    ].join("\n"),
+    successCriteria: [],
+    recommendedToolNames: task.conversationWorkingSet?.recommendedCapabilities.toolNames ?? [],
+    skillNames: task.availableSkills.map((skill) => skill.name),
+    responseOnly: task.responseOnly,
+  });
   const selected = inferOperationProfile({
     objective: [
       task.input,
@@ -491,15 +584,23 @@ function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationP
       task.conversationWorkingSet?.resumeSuggestion ?? "",
     ].join("\n"),
     successCriteria: [],
-    requiredToolNames: [
-      ...task.availableToolNames,
-      ...(task.conversationWorkingSet?.requiredCapabilities.toolNames ?? []),
-    ],
+    recommendedToolNames: task.conversationWorkingSet?.recommendedCapabilities.toolNames ?? [],
     skillNames: task.availableSkills.map((skill) => skill.name),
   });
   const selectedIds = new Set([selected.id]);
+  if (artifactFollowup !== undefined && taskIntent.sourceNeed === "none") {
+    selectedIds.clear();
+    selectedIds.add("artifact_build");
+  } else if (taskIntent.deliverySurface === "workspace_artifact") {
+    selectedIds.delete("direct_answer");
+    selectedIds.add("artifact_build");
+  }
+  if (artifactFollowup === undefined && (taskIntent.sourceNeed !== "none" || (task.sources?.length ?? 0) > 0)) {
+    selectedIds.delete("direct_answer");
+    selectedIds.add("web_research");
+  }
   const hasSkillExecutionSurface = task.availableSkills.length > 0
-    || (task.conversationWorkingSet?.requiredCapabilities.skillIds.length ?? 0) > 0;
+    || (task.conversationWorkingSet?.recommendedCapabilities.skillIds.length ?? 0) > 0;
   if (selected.id === "direct_answer" && hasSkillExecutionSurface) {
     selectedIds.delete("direct_answer");
     selectedIds.add("content_generation");
@@ -508,11 +609,153 @@ function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationP
   return catalog.filter((profile) => selectedIds.has(profile.id));
 }
 
+function artifactFollowupContextField(task: TaskSpec): { readonly artifactFollowup?: ReturnType<typeof buildArtifactFollowupContext> } {
+  const artifactFollowup = buildArtifactFollowupContext(task);
+  return artifactFollowup === undefined ? {} : { artifactFollowup };
+}
+
+function buildArtifactFollowupContext(task: TaskSpec): {
+  readonly schema: "agentloop.artifactFollowup/v1";
+  readonly intent: "convert_to_pdf" | "edit_existing_artifact" | "artifact_followup";
+  readonly requestedOutputFormat?: string;
+  readonly candidateSourceArtifacts: readonly {
+    readonly path: string;
+    readonly name: string;
+    readonly mimeType: string;
+    readonly bytes: number;
+    readonly runId: string;
+    readonly reason: string;
+  }[];
+  readonly fallbackDeliveryText?: string;
+  readonly sourceSelectionPolicy: readonly string[];
+} | undefined {
+  const workset = task.conversationWorkingSet;
+  if (workset === undefined) return undefined;
+  const text = normalizePlannerText(task.input).toLowerCase();
+  const requestedOutputFormat = requestedOutputFormatFromText(text);
+  const artifactMentioned = /(?:\b(?:artifact|file|pdf|markdown|md|html|docx|txt)\b|文件|产物|这个|该|上(?:一|个)轮|刚才)/iu.test(text);
+  const conversionRequested = requestedOutputFormat !== undefined
+    && /(?:\b(?:convert|export|render|generate|create|save|produce|make)\b|转|转换|导出|生成|创建|保存|输出|产出|制作)/iu.test(text);
+  const editRequested = artifactMentioned
+    && /(?:\b(?:edit|update|modify|change|correct|rename|title)\b|修改|更改|改为|改成|标题|重命名|修正)/iu.test(text);
+  if (!conversionRequested && !editRequested) return undefined;
+
+  const artifacts = [...workset.reusableArtifacts].reverse();
+  const candidates = artifacts
+    .map((artifact) => {
+      const reason = artifactFollowupReason(artifact, text, requestedOutputFormat, editRequested);
+      return reason === undefined ? undefined : {
+        path: artifact.path,
+        name: artifact.name,
+        mimeType: artifact.mimeType,
+        bytes: artifact.bytes,
+        runId: artifact.runId,
+        reason,
+      };
+    })
+    .filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== undefined)
+    .slice(0, 5);
+
+  const fallbackDeliveryText = latestCompletedDeliveryText(workset);
+  if (candidates.length === 0 && fallbackDeliveryText === undefined) return undefined;
+  return {
+    schema: "agentloop.artifactFollowup/v1",
+    intent: editRequested ? "edit_existing_artifact" : requestedOutputFormat === "pdf" ? "convert_to_pdf" : "artifact_followup",
+    ...(requestedOutputFormat === undefined ? {} : { requestedOutputFormat }),
+    candidateSourceArtifacts: candidates,
+    ...(fallbackDeliveryText === undefined ? {} : { fallbackDeliveryText }),
+    sourceSelectionPolicy: [
+      "Prefer an explicitly referenced reusable artifact path or file name from conversationWorkingSet.reusableArtifacts.",
+      "For PDF conversion, prefer reusable Markdown, HTML, text, or document artifacts as the conversion source before completed delivery text.",
+      "Use completed delivery text only when no reusable artifact can provide the requested content or the user explicitly asks to convert the answer text.",
+      "Use uploaded or original sources only when the user explicitly asks to reanalyze, regenerate from source data, or change source-grounded content.",
+    ],
+  };
+}
+
+function artifactFollowupReason(
+  artifact: ConversationReusableArtifact,
+  text: string,
+  requestedOutputFormat: string | undefined,
+  editRequested: boolean,
+): string | undefined {
+  const path = artifact.path.toLowerCase();
+  const name = artifact.name.toLowerCase();
+  if (path.length > 0 && text.includes(path)) return "explicit_path_match";
+  if (name.length > 0 && text.includes(name)) return "explicit_name_match";
+  if (editRequested && requestedOutputFormat !== undefined && artifactExtension(path) === requestedOutputFormat) {
+    return "requested_existing_artifact_format";
+  }
+  if (requestedOutputFormat === "pdf" && isPdfConvertibleArtifact(artifact.path, artifact.mimeType)) {
+    return "preferred_pdf_conversion_source";
+  }
+  if (requestedOutputFormat !== undefined && artifactExtension(path) === requestedOutputFormat) {
+    return "requested_output_format_artifact";
+  }
+  return undefined;
+}
+
+function latestCompletedDeliveryText(workset: NonNullable<TaskSpec["conversationWorkingSet"]>): string | undefined {
+  for (const cursor of [...workset.planCursors].reverse()) {
+    for (const step of [...cursor.steps].reverse()) {
+      if (step.status === "completed" && step.output !== undefined && step.output.trim().length > 0) {
+        return truncatePlannerContextText(step.output, 1_200);
+      }
+    }
+  }
+  return undefined;
+}
+
+function truncatePlannerContextText(value: string, maximum: number): string {
+  return value.length <= maximum ? value : `${value.slice(0, maximum - 3)}...`;
+}
+
+function requestedOutputFormatFromText(text: string): string | undefined {
+  const targetMatch = text.match(
+    /(?:\b(?:convert|export|render|save|generate|create|produce|make)(?:\s+to|\s+as)?\b|转\s*(?:成|为)?|转换\s*(?:成|为)?|导出\s*(?:成|为)?|输出\s*(?:成|为)?|生成\s*(?:一份|一个)?|创建\s*(?:一份|一个)?|保存\s*(?:成|为)?).{0,24}\b(pdf|markdown|md|html|docx|txt)\b/iu,
+  );
+  const value = targetMatch?.[1] ?? [...text.matchAll(/\b(pdf|markdown|md|html|docx|txt)\b/giu)].at(-1)?.[1];
+  if (value === undefined) return undefined;
+  return value.toLowerCase() === "md" ? "markdown" : value.toLowerCase();
+}
+
+function isPdfConvertibleArtifact(path: string, mimeType: string): boolean {
+  const extension = artifactExtension(path);
+  if (extension === "pdf") return false;
+  if (extension === "markdown" || extension === "md" || extension === "html" || extension === "htm" || extension === "txt" || extension === "docx") {
+    return true;
+  }
+  return /(?:markdown|html|plain|wordprocessingml|msword)/iu.test(mimeType);
+}
+
+function artifactExtension(path: string): string | undefined {
+  const match = path.toLowerCase().match(/\.([a-z0-9]+)$/u);
+  return match?.[1];
+}
+
 function summarizePlanningError(message: string): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
+  const taskIntent = classifyTaskIntent({
+    objective: task.input,
+    recommendedToolNames: task.availableToolNames,
+    skillNames: task.availableSkills.map((skill) => skill.name),
+    responseOnly: task.responseOnly,
+  });
+  if (
+    taskIntent.deliverySurface === "workspace_artifact"
+    && hasFileProducer(new Set(task.availableToolNames))
+    && proposal.steps.every((step) => !stepCanProduceObservableArtifact(step))
+  ) {
+    throw new AppError(
+      "PLANNING_ERROR",
+      "OutcomePlan turns a requested workspace artifact into a text-only delivery; include an artifact-producing leaf with observable artifact evidence",
+      422,
+      { artifactKind: taskIntent.artifactKind, deliverySurface: taskIntent.deliverySurface },
+    );
+  }
   if (isEmptyConversationWorkspace(task) && !explicitWorkspaceInspectionRequested(task.input)) {
     const inspectionStep = proposal.steps.find((step) => isWorkspaceInspectionStep(step));
     if (inspectionStep !== undefined) {
@@ -541,6 +784,23 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
       422,
     );
   }
+}
+
+function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {
+  if (step.skillIds.length > 0) return true;
+  if (step.recommendedToolNames.some((name) =>
+    name === "materialize_paginated_html"
+    || name === "computer_write_file"
+    || name === "computer_run_command"
+    || /(^|_)(write|create|generate|render|export|save)(_|$)/.test(name)
+  )) return true;
+  return step.evidenceContract?.requiredKinds.some((kind) =>
+    kind === "artifact_path"
+    || kind === "artifact_non_empty"
+    || kind === "artifact_acceptance"
+    || kind === "artifact_openable"
+    || kind === "format_matches_request"
+  ) === true;
 }
 
 function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): PlanProposal {
@@ -579,7 +839,8 @@ function isEmptyConversationWorkspace(task: TaskSpec): boolean {
   return task.workspaceFacts?.schema === "planning.workspaceFacts/v1"
     && task.workspaceFacts.kind === "conversation_workspace"
     && task.workspaceFacts.state === "empty"
-    && task.workspaceFacts.visibleDirectoryCount === 0;
+    && task.workspaceFacts.visibleDirectoryCount === 0
+    && (task.workspaceFacts.sourceCount ?? 0) === 0;
 }
 
 function explicitWorkspaceInspectionRequested(input: string): boolean {
@@ -595,7 +856,7 @@ function isWorkspaceInspectionStep(step: PlanStepProposal): boolean {
     ...step.successCriteria.map((criterion) => criterion.description),
   ].join("\n"));
   if (isArtifactDeliveryReceiptStep(step, text)) return false;
-  const usesInspectionTools = step.requiredToolNames.some((tool) =>
+  const usesInspectionTools = step.recommendedToolNames.some((tool) =>
     tool === "computer_list_directory"
     || tool === "computer_find_files"
     || tool === "computer_search_text"
@@ -616,7 +877,7 @@ function isArtifactDeliveryReceiptStep(step: PlanStepProposal, text: string): bo
 }
 
 function isArtifactProducingStep(step: PlanStepProposal): boolean {
-  return step.requiredToolNames.some((tool) =>
+  return step.recommendedToolNames.some((tool) =>
     /(?:write|create|generate|render|export|build|patch|edit|image|pdf|docx|pptx|artifact)/iu.test(tool)
   );
 }
@@ -679,10 +940,7 @@ function normalizePlannerText(value: string): string {
 function parseOutcomePlanProposal(call: ModelToolCall): PlanProposal {
   try {
     const value = requireRecord(call.arguments, "submit_outcome_plan arguments");
-    const schema = requireString(value.schema, "schema", { max: 128 });
-    if (schema !== "agentloop.outcomePlan/v2") {
-      throw badRequest("schema must be agentloop.outcomePlan/v2");
-    }
+    parseOutcomePlanSchema(value.schema);
     const shape = parseOutcomePlanShape(value.shape);
     const selectedSkillRoles = parseSelectedSkillRoles(value.selectedSkillRoles);
     if (!Array.isArray(value.leaves) || value.leaves.length === 0 || value.leaves.length > 20) {
@@ -716,6 +974,15 @@ function parseOutcomePlanShape(value: unknown): OutcomePlanShape {
     return shape;
   }
   throw badRequest("shape is invalid");
+}
+
+function parseOutcomePlanSchema(value: unknown): "agentloop.outcomePlan/v2" {
+  if (value === undefined) return "agentloop.outcomePlan/v2";
+  const schema = requireString(value, "schema", { max: 128 });
+  if (schema !== "agentloop.outcomePlan/v2") {
+    throw badRequest("schema must be agentloop.outcomePlan/v2");
+  }
+  return schema;
 }
 
 function parseSelectedSkillRoles(value: unknown): SelectedSkillRole[] {
@@ -755,7 +1022,7 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     dependencies: requireStringArray(record.dependsOn, `leaves[${index}].dependsOn`, 100),
     role: parseOutcomeLeafRole(record.role, index),
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
-    requiredToolNames: canonicalStringSet(record.requiredToolNames, `leaves[${index}].requiredToolNames`, 100),
+    recommendedToolNames: canonicalStringSet(record.recommendedToolNames, `leaves[${index}].recommendedToolNames`, 100),
     evidenceContract,
     successCriteria: evidenceContract.requiredKinds.map((kind) => ({
       id: kind,
@@ -804,6 +1071,8 @@ function evidenceCriterionDescription(kind: EvidenceKind, caveatPolicy: CaveatPo
       return "The delivered artifact path is recorded.";
     case "artifact_non_empty":
       return "The delivered artifact is non-empty.";
+    case "artifact_acceptance":
+      return "A structured artifact acceptance evidence object records the applicable file, format, openability, navigation/render status, and caveats.";
     case "artifact_openable":
       return "The delivered artifact can be opened by the appropriate local/browser tool.";
     case "format_matches_request":

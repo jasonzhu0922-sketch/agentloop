@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream, promises as fs, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { AppError, badRequest, conflict, forbidden } from "../shared/errors.ts";
 
 const DEFAULT_OUTPUT_LIMIT = 100_000;
 const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
 const COMMAND_OUTPUT_REFERENCE_PREVIEW = 2_000;
+const STRUCTURED_STDOUT_PROJECTION_THRESHOLD = 8_000;
 const EXECUTABLE_NAME_PATTERN = /^[A-Za-z0-9._+-]+$/;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const SENSITIVE_ENVIRONMENT_NAME_PATTERN = /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|AUTH|CREDENTIAL)/;
@@ -18,6 +19,18 @@ const SEARCH_MAX_FILE_BYTES = 1_000_000;
 const FIND_FILE_CONCURRENCY = 8;
 const FIND_DEFAULT_LIMIT = 1_000;
 const FIND_MAX_LIMIT = 10_000;
+const DIRECTORY_PROFILE_SAMPLE_LIMIT = 50;
+const DIRECTORY_PROFILE_GROUP_LIMIT = 120;
+const DIRECTORY_PROFILE_SCAN_LIMIT = 50_000;
+const DIRECTORY_PROFILE_FIELD_FILE_LIMIT = 5_000;
+const DIRECTORY_PROFILE_FIELD_PREFIX_BYTES = 4_096;
+const DIRECTORY_PROFILE_FIELD_LINE_LIMIT = 40;
+const DIRECTORY_PROFILE_FIELD_LIMIT = 6;
+const DIRECTORY_PROFILE_FIELD_VALUE_LIMIT = 50;
+const DIRECTORY_PROFILE_FIELD_HIERARCHY_LIMIT = 80;
+const DIRECTORY_PROFILE_FIELD_SAMPLE_LIMIT = 2;
+const READ_FILES_MAX_FILES = 50;
+const READ_FILES_MAX_CHARACTERS = 200_000;
 const READ_RANGE_DEFAULT_LIMIT = 200;
 const READ_RANGE_MAX_LIMIT = 2_000;
 const READ_RANGE_MAX_RANGES = 20;
@@ -41,7 +54,7 @@ const BASENAME_LOOKUP_DIRECTORY_PRIORITY = [
   "output",
   "data",
 ] as const;
-const COMMAND_ROOT_ID_PATTERN = /^@skills\/[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const COMMAND_ROOT_ID_PATTERN = /^@(?:skills\/[a-z0-9]+(?:-[a-z0-9]+)*|visible\/[A-Za-z0-9._-]+)$/;
 
 interface SearchMatch {
   readonly path: string;
@@ -49,6 +62,32 @@ interface SearchMatch {
   readonly text: string;
   readonly context?: SearchMatchContext;
   readonly readRange?: ReadLineRange;
+}
+
+interface DirectoryFileEntry {
+  readonly path: string;
+  readonly bytes: number;
+}
+
+interface DirectoryFieldProfile {
+  readonly field: string;
+  readonly observed: number;
+  readonly uniqueValues: number;
+  readonly topValues: Array<{ value: string; count: number; samplePaths: string[] }>;
+  readonly hierarchy?: {
+    readonly delimiter: ">";
+    readonly nodes: Array<{ path: string[]; count: number }>;
+  };
+}
+
+interface TextEvidenceFact {
+  readonly path: string;
+  readonly title?: string;
+  readonly outline: Array<{ readonly line: number; readonly text: string }>;
+  readonly fields: Array<{ readonly name: string; readonly value: string }>;
+  readonly sections: Array<{ readonly name: string; readonly value: string }>;
+  readonly excerpt: string;
+  readonly truncated: boolean;
 }
 
 interface SearchMatchContext {
@@ -98,6 +137,7 @@ interface CommandFileChange {
 
 interface CommandRootResolution {
   readonly path: string;
+  readonly authorizationRoot: string;
   readonly readOnlyRoot?: CommandRootMount;
 }
 
@@ -193,7 +233,7 @@ export class ComputerExecutor {
     this.readOnlyRoots = Object.freeze((options.readOnlyRoots ?? []).map((root) => realpathSync(resolve(root))));
     this.commandRoots = Object.freeze((options.commandRoots ?? []).map((root) => {
       if (!COMMAND_ROOT_ID_PATTERN.test(root.id)) {
-        throw new TypeError(`Command root id must use the @skills/<skill-name> form: ${root.id}`);
+        throw new TypeError(`Command root id must use the @skills/<skill-name> or @visible/<root-id> form: ${root.id}`);
       }
       const canonical = realpathSync(resolve(root.path));
       if (!statSync(canonical).isDirectory()) {
@@ -278,6 +318,53 @@ export class ComputerExecutor {
     }
   }
 
+  async inspectFile(path: string): Promise<{
+    path: string;
+    bytes: number;
+    sha256: string;
+    resolvedPath?: string;
+    requestedPath?: string;
+  }> {
+    const resolvedFile = await this.resolveReadableFile(path);
+    const stat = await fs.stat(resolvedFile.absolutePath);
+    if (!stat.isFile()) throw badRequest("path must identify a regular file");
+    return {
+      path: resolvedFile.workspacePath,
+      bytes: stat.size,
+      sha256: await sha256File(resolvedFile.absolutePath),
+      ...readFileResolutionMetadata(resolvedFile),
+    };
+  }
+
+  async readFileBytes(
+    path: string,
+    maximumBytes = 5_000_000,
+  ): Promise<{
+    content: Buffer;
+    bytes: number;
+    truncated: boolean;
+    resolvedPath?: string;
+    requestedPath?: string;
+  }> {
+    const resolvedFile = await this.resolveReadableFile(path);
+    const stat = await fs.stat(resolvedFile.absolutePath);
+    if (!stat.isFile()) throw badRequest("path must identify a regular file");
+    const handle = await fs.open(resolvedFile.absolutePath, "r");
+    try {
+      const length = Math.min(stat.size, maximumBytes);
+      const content = Buffer.alloc(length);
+      await handle.read(content, 0, length, 0);
+      return {
+        content,
+        bytes: stat.size,
+        truncated: stat.size > maximumBytes,
+        ...readFileResolutionMetadata(resolvedFile),
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+
   async findFiles(
     path: string,
     pattern: string,
@@ -285,6 +372,8 @@ export class ComputerExecutor {
   ): Promise<{
     matches: string[];
     limit: number;
+    returned: number;
+    totalMatches: number;
     truncated: boolean;
   }> {
     if (pattern.trim().length === 0) throw badRequest("pattern must be non-empty");
@@ -293,25 +382,28 @@ export class ComputerExecutor {
     const limit = Math.min(Math.max(1, options.limit ?? FIND_DEFAULT_LIMIT), FIND_MAX_LIMIT);
     const matcher = globMatcher(pattern);
     const matches: string[] = [];
-    let truncated = false;
+    let totalMatches = 0;
     const addMatch = (absolutePath: string): void => {
       const rel = relative(root, absolutePath).split(sep).join("/") || ".";
       const workspaceRel = relative(this.workspaceRoot, absolutePath).split(sep).join("/") || ".";
       if (matcher(rel) || matcher(workspaceRel)) {
-        if (matches.length >= limit) {
-          truncated = true;
-          return;
-        }
-        matches.push(workspaceRel);
+        totalMatches += 1;
+        if (matches.length < limit) matches.push(workspaceRel);
       }
     };
     if (rootStat.isFile()) {
       addMatch(root);
-      return { matches: matches.sort(), limit, truncated };
+      return {
+        matches: matches.sort(),
+        limit,
+        returned: matches.length,
+        totalMatches,
+        truncated: totalMatches > matches.length,
+      };
     }
     if (!rootStat.isDirectory()) throw badRequest("path must identify a file or directory");
     const queue: string[] = [root];
-    while (queue.length > 0 && !truncated) {
+    while (queue.length > 0) {
       const batch = queue.splice(0, FIND_FILE_CONCURRENCY);
       const scanned = await Promise.all(batch.map(async (directory) => {
         const entries = await fs.readdir(directory, { withFileTypes: true });
@@ -328,13 +420,320 @@ export class ComputerExecutor {
       for (const { directories, files } of scanned) {
         for (const file of files) {
           addMatch(file);
-          if (truncated) break;
         }
-        if (truncated) break;
         for (const directory of directories) queue.push(directory);
       }
     }
-    return { matches: matches.sort(), limit, truncated };
+    return {
+      matches: matches.sort(),
+      limit,
+      returned: matches.length,
+      totalMatches,
+      truncated: totalMatches > matches.length,
+    };
+  }
+
+  async profileDirectory(
+    path: string,
+    options: { sampleLimit?: number; groupPrefixLength?: number; maxFiles?: number; fieldProfile?: boolean } = {},
+  ): Promise<{
+    schema: "agentloop.sourceSummary/v1";
+    sourceType: "visible_directory";
+    path: string;
+    totalFiles: number;
+    scannedFiles: number;
+    totalBytes: number;
+    truncated: boolean;
+    extensions: Record<string, number>;
+    samplePaths: string[];
+    groups: Array<{ key: string; count: number }>;
+    fieldProfiles: DirectoryFieldProfile[];
+    indexRef: string;
+    sha256: string;
+    caveats: string[];
+    evidenceKinds: {
+      satisfied: string[];
+      caveated: string[];
+      failed: string[];
+    };
+  }> {
+    const root = await this.resolveExisting(path);
+    const rootStat = await fs.stat(root);
+    const maxFiles = Math.min(Math.max(1, options.maxFiles ?? DIRECTORY_PROFILE_SCAN_LIMIT), DIRECTORY_PROFILE_SCAN_LIMIT);
+    const sampleLimit = Math.min(Math.max(1, options.sampleLimit ?? DIRECTORY_PROFILE_SAMPLE_LIMIT), 500);
+    const groupPrefixLength = Math.min(Math.max(1, options.groupPrefixLength ?? 7), 80);
+    const collectedFiles = rootStat.isFile()
+      ? [await this.fileEntry(root)]
+      : await this.collectFileEntries(root, maxFiles + 1);
+    const truncated = !rootStat.isFile() && collectedFiles.length > maxFiles;
+    const files = truncated ? collectedFiles.slice(0, maxFiles) : collectedFiles;
+    const sorted = files.sort((a, b) => a.path.localeCompare(b.path));
+    const extensions: Record<string, number> = {};
+    const groups = new Map<string, number>();
+    let totalBytes = 0;
+    for (const file of sorted) {
+      totalBytes += file.bytes;
+      const extension = extname(file.path).toLowerCase() || "[none]";
+      extensions[extension] = (extensions[extension] ?? 0) + 1;
+      const base = basename(file.path);
+      const key = base.length <= groupPrefixLength ? base : base.slice(0, groupPrefixLength);
+      groups.set(key, (groups.get(key) ?? 0) + 1);
+    }
+    const indexMaterial = sorted.map((file) => `${file.path}\0${file.bytes}`).join("\n");
+    const sha256 = createHash("sha256").update(indexMaterial).digest("hex");
+    const fieldProfiles = options.fieldProfile === false ? [] : await this.profileDirectoryFields(sorted);
+    const caveats = [
+      "Directory profile records file metadata and representative paths; it does not read every file body.",
+      ...(options.fieldProfile === false
+        ? []
+        : [`Directory field profile scans only the first ${DIRECTORY_PROFILE_FIELD_PREFIX_BYTES} bytes / ${DIRECTORY_PROFILE_FIELD_LINE_LIMIT} lines of up to ${DIRECTORY_PROFILE_FIELD_FILE_LIMIT} text-like files.`]),
+      ...(truncated ? [`Directory scan stopped at ${maxFiles} files; additional files may exist.`] : []),
+      ...(fieldProfiles.length > 0 && sorted.length > DIRECTORY_PROFILE_FIELD_FILE_LIMIT
+        ? [`Directory field profile stopped at ${DIRECTORY_PROFILE_FIELD_FILE_LIMIT} files; additional field values may exist.`]
+        : []),
+    ];
+    return {
+      schema: "agentloop.sourceSummary/v1",
+      sourceType: "visible_directory",
+      path: relative(this.workspaceRoot, root).split(sep).join("/") || ".",
+      totalFiles: sorted.length,
+      scannedFiles: sorted.length,
+      totalBytes,
+      truncated,
+      extensions: Object.fromEntries(Object.entries(extensions).sort(([a], [b]) => a.localeCompare(b))),
+      samplePaths: sorted.slice(0, sampleLimit).map((file) => file.path),
+      groups: [...groups.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, DIRECTORY_PROFILE_GROUP_LIMIT)
+        .map(([key, count]) => ({ key, count })),
+      fieldProfiles,
+      indexRef: `visible-directory-index:${sha256}`,
+      sha256,
+      caveats,
+      evidenceKinds: {
+        satisfied: ["source_summary"],
+        caveated: caveats.length === 0 ? [] : ["explicit_caveats"],
+        failed: [],
+      },
+    };
+  }
+
+  private async profileDirectoryFields(files: readonly DirectoryFileEntry[]): Promise<DirectoryFieldProfile[]> {
+    const fields = new Map<string, Map<string, { count: number; samples: string[] }>>();
+    const candidates = files
+      .filter((file) => isTextLikePath(file.path) && file.bytes <= SEARCH_MAX_FILE_BYTES)
+      .slice(0, DIRECTORY_PROFILE_FIELD_FILE_LIMIT);
+    const mergeFile = async (file: DirectoryFileEntry): Promise<void> => {
+      const content = await this.readFilePrefix(file.path, DIRECTORY_PROFILE_FIELD_PREFIX_BYTES);
+      if (content === undefined || content.includes("\0")) return;
+      const lines = content.split(/\r?\n/).slice(0, DIRECTORY_PROFILE_FIELD_LINE_LIMIT);
+      for (const line of lines) {
+        const parsed = parseProfileFieldLine(line);
+        if (parsed === undefined) continue;
+        let values = fields.get(parsed.field);
+        if (values === undefined) {
+          values = new Map();
+          fields.set(parsed.field, values);
+        }
+        const current = values.get(parsed.value) ?? { count: 0, samples: [] };
+        current.count += 1;
+        if (current.samples.length < DIRECTORY_PROFILE_FIELD_SAMPLE_LIMIT && !current.samples.includes(file.path)) {
+          current.samples.push(file.path);
+        }
+        values.set(parsed.value, current);
+      }
+    };
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(SEARCH_FILE_CONCURRENCY, candidates.length) }, async () => {
+      for (;;) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= candidates.length) return;
+        await mergeFile(candidates[index]);
+      }
+    });
+    await Promise.all(workers);
+    return [...fields.entries()]
+      .map(([field, values]) => {
+        const topValues = [...values.entries()]
+          .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+          .slice(0, DIRECTORY_PROFILE_FIELD_VALUE_LIMIT)
+          .map(([value, data]) => ({ value, count: data.count, samplePaths: data.samples }));
+        const profile: DirectoryFieldProfile = {
+          field,
+          observed: [...values.values()].reduce((sum, data) => sum + data.count, 0),
+          uniqueValues: values.size,
+          topValues,
+          ...(buildFieldHierarchy(values) ?? {}),
+        };
+        return profile;
+      })
+      .sort((a, b) => b.observed - a.observed || a.field.localeCompare(b.field))
+      .slice(0, DIRECTORY_PROFILE_FIELD_LIMIT);
+  }
+
+  private async readFilePrefix(path: string, bytes: number): Promise<string | undefined> {
+    const absolute = resolve(this.workspaceRoot, path);
+    const handle = await fs.open(absolute, "r").catch(() => undefined);
+    if (handle === undefined) return undefined;
+    try {
+      const buffer = Buffer.alloc(bytes);
+      const result = await handle.read(buffer, 0, bytes, 0);
+      return buffer.subarray(0, result.bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async readFiles(
+    files: readonly Array<{ path: string; offset?: number; limit?: number; ranges?: readonly ReadLineRange[] }>,
+    options: { maxTotalCharacters?: number } = {},
+  ): Promise<{
+    schema: "agentloop.visibleReadFiles/v1";
+    files: Array<{
+      path: string;
+      content: string;
+      sha256: string;
+      bytes: number;
+      characters: number;
+      truncated: boolean;
+      resolvedPath?: string;
+      requestedPath?: string;
+      offset?: number;
+      limit?: number;
+      totalLines?: number;
+      nextOffset?: number;
+      ranges?: ReadFileRangeResult[];
+    }>;
+    requested: number;
+    returned: number;
+    truncated: boolean;
+    maxTotalCharacters: number;
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1";
+      sourceType: "visible_files";
+      receiptId: string;
+      sourceRefs: Array<{
+        path: string;
+        sha256: string;
+        bytes: number;
+        characters: number;
+        truncated: boolean;
+        resolvedPath?: string;
+        requestedPath?: string;
+        offset?: number;
+        limit?: number;
+        totalLines?: number;
+        nextOffset?: number;
+      }>;
+      facts: TextEvidenceFact[];
+      caveats: string[];
+      evidenceKinds: {
+        satisfied: string[];
+        caveated: string[];
+        failed: string[];
+      };
+    };
+  }> {
+    if (files.length === 0) throw badRequest("files must contain at least one entry");
+    if (files.length > READ_FILES_MAX_FILES) throw badRequest(`files must contain at most ${READ_FILES_MAX_FILES} entries`);
+    const maxTotalCharacters = Math.min(
+      Math.max(1, options.maxTotalCharacters ?? READ_FILES_MAX_CHARACTERS),
+      READ_FILES_MAX_CHARACTERS,
+    );
+    const results: Array<{
+      path: string;
+      content: string;
+      sha256: string;
+      bytes: number;
+      characters: number;
+      truncated: boolean;
+      resolvedPath?: string;
+      requestedPath?: string;
+      offset?: number;
+      limit?: number;
+      totalLines?: number;
+      nextOffset?: number;
+      ranges?: ReadFileRangeResult[];
+    }> = [];
+    let usedCharacters = 0;
+    let truncated = false;
+    for (const entry of files) {
+      if (usedCharacters >= maxTotalCharacters) {
+        truncated = true;
+        break;
+      }
+      const remaining = maxTotalCharacters - usedCharacters;
+      const result = await this.readFile(entry.path, Math.min(remaining, 200_000), {
+        offset: entry.offset,
+        limit: entry.limit,
+        ranges: entry.ranges,
+      });
+      let content = result.content;
+      let entryTruncated = result.truncated;
+      if (content.length > remaining) {
+        content = content.slice(0, remaining);
+        entryTruncated = true;
+        truncated = true;
+      }
+      usedCharacters += content.length;
+      truncated = truncated || entryTruncated;
+      results.push({
+        path: result.resolvedPath ?? entry.path,
+        content,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        bytes: result.bytes,
+        characters: content.length,
+        truncated: entryTruncated,
+        ...(result.resolvedPath === undefined ? {} : { resolvedPath: result.resolvedPath }),
+        ...(result.requestedPath === undefined ? {} : { requestedPath: result.requestedPath }),
+        ...(result.offset === undefined ? {} : { offset: result.offset }),
+        ...(result.limit === undefined ? {} : { limit: result.limit }),
+        ...(result.totalLines === undefined ? {} : { totalLines: result.totalLines }),
+        ...(result.nextOffset === undefined ? {} : { nextOffset: result.nextOffset }),
+        ...(result.ranges === undefined ? {} : { ranges: result.ranges }),
+      });
+    }
+    const sourceRefs = results.map((result) => ({
+      path: result.path,
+      sha256: result.sha256,
+      bytes: result.bytes,
+      characters: result.characters,
+      truncated: result.truncated,
+      ...(result.resolvedPath === undefined ? {} : { resolvedPath: result.resolvedPath }),
+      ...(result.requestedPath === undefined ? {} : { requestedPath: result.requestedPath }),
+      ...(result.offset === undefined ? {} : { offset: result.offset }),
+      ...(result.limit === undefined ? {} : { limit: result.limit }),
+      ...(result.totalLines === undefined ? {} : { totalLines: result.totalLines }),
+      ...(result.nextOffset === undefined ? {} : { nextOffset: result.nextOffset }),
+    }));
+    const facts = results.map((result) => extractTextEvidenceFact(result.path, result.content, result.truncated));
+    const caveats = [
+      "Full Tool result remains in canonical events; model context may receive only this structured receipt.",
+      ...(truncated ? ["One or more file reads were truncated; reread explicit ranges before citing omitted text."] : []),
+    ];
+    const receiptMaterial = JSON.stringify({ sourceRefs, facts, caveats });
+    return {
+      schema: "agentloop.visibleReadFiles/v1",
+      files: results,
+      requested: files.length,
+      returned: results.length,
+      truncated,
+      maxTotalCharacters,
+      evidenceReceipt: {
+        schema: "agentloop.toolEvidenceReceipt/v1",
+        sourceType: "visible_files",
+        receiptId: createHash("sha256").update(receiptMaterial).digest("hex"),
+        sourceRefs,
+        facts,
+        caveats,
+        evidenceKinds: {
+          satisfied: ["source_read", "source_refs"],
+          caveated: caveats.length === 0 ? [] : ["explicit_caveats"],
+          failed: [],
+        },
+      },
+    };
   }
 
   async searchText(
@@ -599,18 +998,18 @@ export class ComputerExecutor {
     fileChangesTruncated: boolean;
     truncated: boolean;
     timedOut: boolean;
+    evidenceReceipt?: Record<string, unknown>;
   }> {
     if (!EXECUTABLE_NAME_PATTERN.test(input.command)) {
       throw badRequest("command must be an executable name without shell syntax or path separators");
     }
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
+    await this.assertCommandArgumentsDoNotEscape(input.args, cwdResolution);
     const cwd = cwdResolution.path;
     if (!(await fs.stat(cwd)).isDirectory()) throw badRequest("cwd must be a directory");
     const limit = DEFAULT_OUTPUT_LIMIT;
     const beforeFiles = await this.snapshotWorkspaceFiles();
-    const beforeReadOnlyRoot = cwdResolution.readOnlyRoot === undefined
-      ? undefined
-      : await snapshotReadOnlyRoot(cwdResolution.readOnlyRoot);
+    const beforeReadOnlyRoots = await snapshotCommandRoots(commandRootsToProtect(this.commandRoots, cwdResolution.readOnlyRoot));
     return new Promise((resolvePromise, rejectPromise) => {
       let stdout = Buffer.alloc(0);
       let stderr = Buffer.alloc(0);
@@ -621,7 +1020,10 @@ export class ComputerExecutor {
       const child = spawn(this.executableAliases.get(input.command) ?? input.command, [...input.args], {
         cwd,
         shell: false,
-        env: buildCommandEnvironment(this.commandEnvironment),
+        env: buildCommandEnvironment({
+          ...commandRootEnvironment(this.commandRoots),
+          ...this.commandEnvironment,
+        }),
         stdio: ["ignore", "pipe", "pipe"],
       });
       const collect = (current: Buffer, chunk: Buffer): Buffer => {
@@ -670,16 +1072,16 @@ export class ComputerExecutor {
           try {
             const afterFiles = await this.snapshotWorkspaceFiles();
             const fileChangeSummary = summarizeFileChanges(beforeFiles, afterFiles);
-            if (beforeReadOnlyRoot !== undefined && cwdResolution.readOnlyRoot !== undefined) {
-              const afterReadOnlyRoot = await snapshotReadOnlyRoot(cwdResolution.readOnlyRoot);
-              const rootChangeSummary = summarizeFileChanges(beforeReadOnlyRoot, afterReadOnlyRoot);
+            for (const beforeReadOnlyRoot of beforeReadOnlyRoots) {
+              const afterReadOnlyRoot = await snapshotReadOnlyRoot(beforeReadOnlyRoot.root);
+              const rootChangeSummary = summarizeFileChanges(beforeReadOnlyRoot.snapshot, afterReadOnlyRoot);
               if (rootChangeSummary.changes.length > 0 || rootChangeSummary.truncated) {
                 throw new AppError(
                   "SKILL_PACKAGE_MUTATED",
-                  `Command modified read-only Skill execution root ${cwdResolution.readOnlyRoot.id}`,
+                  `Command modified read-only command root ${beforeReadOnlyRoot.root.id}`,
                   409,
                   {
-                    skillExecutionRoot: cwdResolution.readOnlyRoot.id,
+                    skillExecutionRoot: beforeReadOnlyRoot.root.id,
                     changes: rootChangeSummary.changes,
                     changesTruncated: rootChangeSummary.truncated,
                   },
@@ -688,6 +1090,7 @@ export class ComputerExecutor {
             }
             const stdoutProjection = await this.projectCommandOutput("stdout", stdout.toString("utf8"));
             const stderrProjection = await this.projectCommandOutput("stderr", stderr.toString("utf8"));
+            const evidenceReceipt = extractStdoutEvidenceReceipt(stdout.toString("utf8"));
             resolvePromise({
               exitCode,
               signal,
@@ -699,6 +1102,7 @@ export class ComputerExecutor {
               fileChangesTruncated: fileChangeSummary.truncated,
               truncated,
               timedOut,
+              ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
             });
           } catch (error) {
             rejectPromise(error);
@@ -712,7 +1116,9 @@ export class ComputerExecutor {
     content: string;
     reference?: CommandOutputReference;
   }> {
-    if (content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD) return { content };
+    if (content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD && structuredCommandOutput(content, kind) === undefined) {
+      return { content };
+    }
     const sha256 = createHash("sha256").update(content).digest("hex");
     const directory = resolve(this.workspaceRoot, ".agentloop", "tool-results", sha256.slice(0, 2));
     this.assertContained(directory);
@@ -727,11 +1133,13 @@ export class ComputerExecutor {
     const path = relative(this.workspaceRoot, target);
     const bytes = Buffer.byteLength(content);
     return {
-      content: [
-        content.slice(0, COMMAND_OUTPUT_REFERENCE_PREVIEW),
-        "",
-        `[${kind} stored as content-addressed evidence; path=${path}; sha256=${sha256}; originalCharacters=${content.length}; bytes=${bytes}. Reuse this path/hash instead of rerunning the command solely to recover this output.]`,
-      ].join("\n"),
+      content: projectReferencedCommandOutput(kind, content, {
+        path,
+        sha256,
+        bytes,
+        characters: content.length,
+        previewCharacters: COMMAND_OUTPUT_REFERENCE_PREVIEW,
+      }),
       reference: {
         path,
         sha256,
@@ -774,6 +1182,42 @@ export class ComputerExecutor {
       }
     }
     return { files, truncated };
+  }
+
+  private async collectFileEntries(root: string, maxFiles: number): Promise<DirectoryFileEntry[]> {
+    const files: DirectoryFileEntry[] = [];
+    const queue: string[] = [root];
+    while (queue.length > 0 && files.length < maxFiles) {
+      const batch = queue.splice(0, FIND_FILE_CONCURRENCY);
+      const scanned = await Promise.all(batch.map(async (directory) => {
+        const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+        const directories: string[] = [];
+        const filePaths: string[] = [];
+        for (const entry of entries) {
+          if (entry.isSymbolicLink() || entry.name === ".git" || entry.name === "node_modules") continue;
+          const child = resolve(directory, entry.name);
+          if (entry.isDirectory()) directories.push(child);
+          else if (entry.isFile()) filePaths.push(child);
+        }
+        return { directories, filePaths };
+      }));
+      for (const { directories, filePaths } of scanned) {
+        for (const file of filePaths) {
+          if (files.length >= maxFiles) break;
+          files.push(await this.fileEntry(file));
+        }
+        for (const directory of directories) queue.push(directory);
+      }
+    }
+    return files;
+  }
+
+  private async fileEntry(file: string): Promise<DirectoryFileEntry> {
+    const stat = await fs.stat(file);
+    return {
+      path: relative(this.workspaceRoot, file).split(sep).join("/") || ".",
+      bytes: stat.size,
+    };
   }
 
   private lexicalPath(path: string): string {
@@ -865,15 +1309,15 @@ export class ComputerExecutor {
   private async resolveCommandCwd(path: string): Promise<CommandRootResolution> {
     const mounted = await this.resolveCommandRootPath(path);
     if (mounted !== undefined) return mounted;
-    return { path: await this.resolveExisting(path) };
+    return { path: await this.resolveExisting(path), authorizationRoot: this.workspaceRoot };
   }
 
   private async resolveCommandRootPath(path: string): Promise<CommandRootResolution | undefined> {
     const normalized = path.replace(/\\/g, "/").replace(/\/+$/u, "") || ".";
-    if (normalized.startsWith("@skills/") && !this.commandRoots.some((root) =>
+    if ((normalized.startsWith("@skills/") || normalized.startsWith("@visible/")) && !this.commandRoots.some((root) =>
       normalized === root.id || normalized.startsWith(`${root.id}/`)
     )) {
-      throw forbidden(`Skill execution root is not authorized for this run: ${normalized.split("/").slice(0, 2).join("/")}`);
+      throw forbidden(`Command root is not authorized for this run: ${normalized.split("/").slice(0, 2).join("/")}`);
     }
     for (const root of this.commandRoots) {
       if (normalized !== root.id && !normalized.startsWith(`${root.id}/`)) continue;
@@ -885,10 +1329,37 @@ export class ComputerExecutor {
         }
         throw error;
       });
-      assertInsideRoot(canonical, root.path, `Skill execution root ${root.id}`);
-      return { path: canonical, readOnlyRoot: root };
+      assertInsideRoot(canonical, root.path, `Command root ${root.id}`);
+      return { path: canonical, authorizationRoot: root.path, readOnlyRoot: root };
     }
     return undefined;
+  }
+
+  private async assertCommandArgumentsDoNotEscape(
+    args: readonly string[],
+    cwdResolution: CommandRootResolution,
+  ): Promise<void> {
+    const allowedRoots = [this.workspaceRoot, ...this.commandRoots.map((root) => root.path)];
+    for (const argument of args) {
+      for (const candidate of absolutePathCandidates(argument)) {
+        const normalized = resolve(candidate);
+        const canonical = await fs.realpath(normalized).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return normalized;
+          throw error;
+        });
+        if (allowedRoots.some((root) => isInsideRoot(canonical, root))) continue;
+        throw forbidden("Command arguments must not reference absolute filesystem paths outside the workspace root or authorized command roots");
+      }
+      for (const candidate of relativePathEscapeCandidates(argument)) {
+        const normalized = resolve(cwdResolution.path, candidate);
+        const canonical = await fs.realpath(normalized).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return normalized;
+          throw error;
+        });
+        if (isInsideRoot(canonical, cwdResolution.authorizationRoot)) continue;
+        throw forbidden("Command arguments must not reference relative filesystem paths outside the current command root");
+      }
+    }
   }
 
   private async resolveWritable(path: string): Promise<string> {
@@ -947,6 +1418,117 @@ export class ComputerExecutor {
   }
 }
 
+function projectReferencedCommandOutput(
+  kind: "stdout" | "stderr",
+  content: string,
+  reference: CommandOutputReference,
+): string {
+  const structured = structuredStdoutProjection(kind, content, reference);
+  if (structured !== undefined) return structured;
+  return [
+    content.slice(0, COMMAND_OUTPUT_REFERENCE_PREVIEW),
+    "",
+    commandOutputReferenceNotice(kind, reference),
+  ].join("\n");
+}
+
+function structuredStdoutProjection(
+  kind: "stdout" | "stderr",
+  content: string,
+  reference: CommandOutputReference,
+): string | undefined {
+  const structured = structuredCommandOutput(content, kind);
+  if (structured === undefined) return undefined;
+  const { parsed, deliveryCandidate, evidenceReceipt } = structured;
+  const contentLocation = {
+    kind: "content_addressed",
+    stream: kind,
+    path: reference.path,
+    sha256: reference.sha256,
+    bytes: reference.bytes,
+    characters: reference.characters,
+    previewCharacters: reference.previewCharacters,
+    instruction: "Read this path only when exact raw command output is needed; use evidenceReceipt first for assessment facts.",
+  };
+  const projection = {
+    schema: "agentloop.commandOutputProjection/v1",
+    stream: kind,
+    ...(typeof parsed.schema === "string" ? { sourceSchema: parsed.schema } : {}),
+    ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
+    ...(typeof parsed.delivery_markdown === "string" ? { delivery_markdown: parsed.delivery_markdown } : {}),
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+    ...(parsed.assessmentProjection === undefined ? {} : { assessmentProjection: parsed.assessmentProjection }),
+    ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
+    contentLocation,
+    stdoutRef: reference,
+    stdoutReferenceNotice: commandOutputReferenceNotice(kind, reference),
+  };
+  const serialized = JSON.stringify(projection, null, 2);
+  if (serialized.length <= STRUCTURED_STDOUT_PROJECTION_THRESHOLD) return serialized;
+  return JSON.stringify({
+    schema: "agentloop.commandOutputProjection/v1",
+    stream: kind,
+    ...(typeof parsed.schema === "string" ? { sourceSchema: parsed.schema } : {}),
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+    contentLocation,
+    stdoutRef: reference,
+    stdoutReferenceNotice: commandOutputReferenceNotice(kind, reference),
+  }, null, 2);
+}
+
+function structuredCommandOutput(content: string, kind: "stdout" | "stderr"): {
+  readonly parsed: Record<string, unknown>;
+  readonly deliveryCandidate?: Record<string, unknown>;
+  readonly evidenceReceipt?: Record<string, unknown>;
+} | undefined {
+  if (kind !== "stdout") return undefined;
+  const parsed = parseJsonRecord(content);
+  if (parsed === undefined) return undefined;
+  const deliveryCandidate = isPlainRecord(parsed.deliveryCandidate)
+    ? parsed.deliveryCandidate
+    : undefined;
+  const hasDeliveryOutput = typeof deliveryCandidate?.output === "string"
+    && deliveryCandidate.output.trim().length > 0;
+  const hasDeliveryMarkdown = typeof parsed.delivery_markdown === "string"
+    && parsed.delivery_markdown.trim().length > 0;
+  const evidenceReceipt = extractEvidenceReceipt(parsed);
+  if (!hasDeliveryOutput && !hasDeliveryMarkdown && evidenceReceipt === undefined) return undefined;
+  return {
+    parsed,
+    ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+  };
+}
+
+function commandOutputReferenceNotice(kind: "stdout" | "stderr", reference: CommandOutputReference): string {
+  return `[${kind} stored as content-addressed evidence; path=${reference.path}; sha256=${reference.sha256}; originalCharacters=${reference.characters}; bytes=${reference.bytes}. Reuse this path/hash instead of rerunning the command solely to recover this output.]`;
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value);
+    return isPlainRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractStdoutEvidenceReceipt(content: string): Record<string, unknown> | undefined {
+  const parsed = parseJsonRecord(content);
+  return parsed === undefined ? undefined : extractEvidenceReceipt(parsed);
+}
+
+function extractEvidenceReceipt(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const receipt = isPlainRecord(record.evidenceReceipt) ? record.evidenceReceipt : undefined;
+  if (receipt?.schema !== "agentloop.toolEvidenceReceipt/v1") return undefined;
+  if (!isPlainRecord(receipt.evidenceKinds)) return undefined;
+  return receipt;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function isFileAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST";
 }
@@ -1000,6 +1582,80 @@ function writtenFileSampleRanges(lines: readonly string[]): WrittenFileSampleRan
       truncated,
     };
   });
+}
+
+function extractTextEvidenceFact(path: string, content: string, truncated: boolean): TextEvidenceFact {
+  const lines = splitTextLines(content);
+  const outline = lines
+    .map((line, index) => ({ line: index + 1, text: line.trim() }))
+    .filter((entry) => /^#{1,6}\s+\S/u.test(entry.text))
+    .slice(0, 24);
+  const title = outline[0]?.text.replace(/^#{1,6}\s+/u, "");
+  return {
+    path,
+    ...(title === undefined ? {} : { title }),
+    outline,
+    fields: extractLabelFields(lines),
+    sections: extractLabelSections(lines),
+    excerpt: compactEvidenceExcerpt(content),
+    truncated,
+  };
+}
+
+function extractLabelFields(lines: readonly string[]): Array<{ readonly name: string; readonly value: string }> {
+  const fields: Array<{ name: string; value: string }> = [];
+  for (const raw of lines.slice(0, 80)) {
+    const line = raw.trim();
+    const match = /^([^:：#\n]{1,40})[:：]\s*(\S.{0,800})$/u.exec(line);
+    if (match === null) continue;
+    fields.push({ name: match[1].trim(), value: match[2].trim() });
+    if (fields.length >= 12) break;
+  }
+  return fields;
+}
+
+function extractLabelSections(lines: readonly string[]): Array<{ readonly name: string; readonly value: string }> {
+  const sections: Array<{ name: string; value: string }> = [];
+  let active: { name: string; lines: string[] } | undefined;
+  const flush = (): void => {
+    if (active === undefined) return;
+    const value = active.lines.join("\n").trim();
+    if (value.length > 0) {
+      sections.push({ name: active.name, value: value.length > 1_200 ? `${value.slice(0, 1_200)}\n[section truncated]` : value });
+    }
+    active = undefined;
+  };
+  for (const raw of lines.slice(0, 160)) {
+    const line = raw.trim();
+    const standalone = /^([^:：#\n]{1,40})[:：]\s*$/u.exec(line);
+    const inline = /^([^:：#\n]{1,40})[:：]\s*(\S.*)$/u.exec(line);
+    if (standalone !== null) {
+      flush();
+      active = { name: standalone[1].trim(), lines: [] };
+      continue;
+    }
+    if (inline !== null) {
+      flush();
+      sections.push({
+        name: inline[1].trim(),
+        value: inline[2].trim().slice(0, 1_200),
+      });
+      continue;
+    }
+    if (active !== undefined) active.lines.push(raw);
+    if (sections.length >= 12) break;
+  }
+  flush();
+  return sections.slice(0, 12);
+}
+
+function compactEvidenceExcerpt(content: string): string {
+  const normalized = content
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join("\n");
+  return normalized.length <= 1_200 ? normalized : `${normalized.slice(0, 1_200)}\n[excerpt truncated]`;
 }
 
 function readFileResolutionMetadata(
@@ -1180,10 +1836,82 @@ async function snapshotReadOnlyRoot(root: CommandRootMount): Promise<{
   return { files, truncated };
 }
 
+async function snapshotCommandRoots(roots: readonly CommandRootMount[]): Promise<Array<{
+  readonly root: CommandRootMount;
+  readonly snapshot: {
+    readonly files: ReadonlyMap<string, CommandFileSnapshotEntry>;
+    readonly truncated: boolean;
+  };
+}>> {
+  return await Promise.all(roots.map(async (root) => ({
+    root,
+    snapshot: await snapshotReadOnlyRoot(root),
+  })));
+}
+
+function commandRootEnvironment(roots: readonly CommandRootMount[]): Record<string, string> {
+  return Object.fromEntries(roots
+    .filter((root) => root.id.startsWith("@skills/"))
+    .map((root) => [commandRootEnvironmentName(root.id), root.path]));
+}
+
+function commandRootEnvironmentName(id: string): string {
+  const [kind, name] = id.replace(/^@/u, "").split("/", 2);
+  const normalized = (name ?? "ROOT").replace(/[^A-Za-z0-9]+/gu, "_").replace(/^_+|_+$/gu, "").toUpperCase() || "ROOT";
+  return kind === "skills"
+    ? `AGENTLOOP_SKILL_ROOT_${normalized}`
+    : `AGENTLOOP_VISIBLE_ROOT_${normalized}`;
+}
+
+function commandRootsToProtect(
+  roots: readonly CommandRootMount[],
+  currentRoot: CommandRootMount | undefined,
+): CommandRootMount[] {
+  const byId = new Map<string, CommandRootMount>();
+  for (const root of roots) {
+    if (root.id.startsWith("@skills/")) byId.set(root.id, root);
+  }
+  if (currentRoot !== undefined) byId.set(currentRoot.id, currentRoot);
+  return [...byId.values()];
+}
+
 function assertInsideRoot(candidate: string, root: string, label: string): void {
-  const offset = relative(root, candidate);
-  if (offset === "" || (!offset.startsWith(`..${sep}`) && offset !== ".." && !isAbsolute(offset))) return;
+  if (isInsideRoot(candidate, root)) return;
   throw forbidden(`${label} path escapes its authorized root`);
+}
+
+function isInsideRoot(candidate: string, root: string): boolean {
+  const offset = relative(root, candidate);
+  return offset === "" || (!offset.startsWith(`..${sep}`) && offset !== ".." && !isAbsolute(offset));
+}
+
+function absolutePathCandidates(value: string): string[] {
+  const candidates: string[] = [];
+  const pattern = /(?:^|[\s"'=([<{,])((?:\/[^\s"'`<>|;&),\]}]+)+)/gu;
+  for (const match of value.matchAll(pattern)) {
+    const candidate = match[1]?.replace(/[.:]+$/u, "");
+    if (candidate === undefined || candidate === "/" || candidate.startsWith("//")) continue;
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+
+function relativePathEscapeCandidates(value: string): string[] {
+  const candidates: string[] = [];
+  for (const token of value.split(/[\s"'`<>|;&(),\[\]{}]+/u)) {
+    const candidate = token.replace(/[.:]+$/u, "").replace(/\\/g, "/");
+    if (candidate === "" || isAbsolute(candidate) || candidate.includes("://")) continue;
+    if (
+      candidate === ".."
+      || candidate.startsWith("../")
+      || candidate.startsWith("./../")
+      || candidate.includes("/../")
+      || candidate.endsWith("/..")
+    ) {
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
 }
 
 function globMatcher(pattern: string): (path: string) => boolean {
@@ -1299,9 +2027,77 @@ export function buildCommandEnvironment(commandEnvironment: Readonly<Record<stri
   return { ...env, ...commandEnvironment };
 }
 
+function sha256File(path: string): Promise<string> {
+  return new Promise((resolveHash, rejectHash) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", rejectHash);
+    stream.on("end", () => resolveHash(hash.digest("hex")));
+  });
+}
+
 function sortSearchMatches(matches: SearchMatch[]): SearchMatch[] {
   return matches.sort((left, right) => {
     if (left.path !== right.path) return left.path < right.path ? -1 : 1;
     return left.line - right.line;
   });
+}
+
+function isTextLikePath(path: string): boolean {
+  const extension = extname(path).toLowerCase();
+  return extension === ""
+    || [
+      ".csv",
+      ".json",
+      ".log",
+      ".md",
+      ".mdx",
+      ".rst",
+      ".text",
+      ".tsv",
+      ".txt",
+      ".yaml",
+      ".yml",
+    ].includes(extension);
+}
+
+function parseProfileFieldLine(line: string): { field: string; value: string } | undefined {
+  const match = /^\s{0,3}([^:#：|<>{}\[\]`*_-][^:：\n]{0,40})\s*[:：]\s*(\S.{0,400})\s*$/u.exec(line);
+  if (match === null) return undefined;
+  const field = normalizeFieldProfileText(match[1]);
+  const value = normalizeFieldProfileText(match[2]);
+  if (field.length === 0 || value.length === 0) return undefined;
+  if (/^(?:https?|file|mailto)$/iu.test(field)) return undefined;
+  return { field, value };
+}
+
+function normalizeFieldProfileText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function buildFieldHierarchy(
+  values: ReadonlyMap<string, { count: number; samples: readonly string[] }>,
+): { hierarchy: DirectoryFieldProfile["hierarchy"] } | undefined {
+  const nodes = new Map<string, { path: string[]; count: number }>();
+  for (const [value, data] of values) {
+    if (!value.includes(">")) continue;
+    const parts = value.split(">").map((part) => normalizeFieldProfileText(part)).filter(Boolean).slice(0, 8);
+    for (let index = 0; index < parts.length; index += 1) {
+      const path = parts.slice(0, index + 1);
+      const key = path.join(" > ");
+      const current = nodes.get(key) ?? { path, count: 0 };
+      current.count += data.count;
+      nodes.set(key, current);
+    }
+  }
+  if (nodes.size === 0) return undefined;
+  return {
+    hierarchy: {
+      delimiter: ">",
+      nodes: [...nodes.values()]
+        .sort((a, b) => b.count - a.count || a.path.join(" > ").localeCompare(b.path.join(" > ")))
+        .slice(0, DIRECTORY_PROFILE_FIELD_HIERARCHY_LIMIT),
+    },
+  };
 }

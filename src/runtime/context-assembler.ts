@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import { ARTIFACT_RECEIPT_SCHEMA, CONTEXT_ARTIFACT_PROJECTION_SCHEMA } from "./artifact-receipt.ts";
 import type {
   AgentLoopToolEvidence,
   ModelAdapter,
@@ -15,6 +16,7 @@ export interface ContextPolicy {
   readonly outputReserveTokens?: number;
   readonly safetyMarginTokens?: number;
   readonly proactiveCompactionTokens?: number;
+  readonly deferProactiveCompactionForArtifactEvidence?: boolean;
   readonly preserveRecentTokens?: number;
   readonly pruneProtectTokens?: number;
   readonly summaryMaxOutputTokens?: number;
@@ -36,6 +38,7 @@ interface ResolvedContextPolicy {
   readonly outputReserveTokens: number;
   readonly safetyMarginTokens: number;
   readonly proactiveCompactionTokens: number;
+  readonly deferProactiveCompactionForArtifactEvidence: boolean;
   readonly preserveRecentTokens: number;
   readonly pruneProtectTokens: number;
   readonly summaryMaxOutputTokens: number;
@@ -50,9 +53,10 @@ interface PrunedToolResult {
   readonly toolName: string;
   readonly originalCharacters: number;
   readonly sha256: string;
-  readonly reason: "budget" | "large_tool_result";
+  readonly reason: "budget" | "large_tool_result" | "structured_evidence" | "structured_tool_result";
   readonly preview?: string;
   readonly previewCharacters?: number;
+  readonly structuredEvidence?: string;
 }
 
 const SUMMARY_SYSTEM_PROMPT = [
@@ -194,6 +198,30 @@ export class ContextAssembler {
       });
     }
 
+    const newlyStructured = this.projectStructuredEvidenceToolResults(canonicalMessages);
+    if (newlyStructured.length > 0) {
+      await this.emitEvent({
+        type: "context.tool_outputs_projected",
+        data: {
+          contextEpoch: this.contextEpoch,
+          reason: "structured_evidence",
+          toolResults: newlyStructured,
+        },
+      });
+    }
+
+    const newlyStructuredResults = this.projectStructuredToolResults(canonicalMessages);
+    if (newlyStructuredResults.length > 0) {
+      await this.emitEvent({
+        type: "context.tool_outputs_projected",
+        data: {
+          contextEpoch: this.contextEpoch,
+          reason: "structured_tool_result",
+          toolResults: newlyStructuredResults,
+        },
+      });
+    }
+
     const newlyProjected = this.projectLargeToolResults(canonicalMessages);
     if (newlyProjected.length > 0) {
       await this.emitEvent({
@@ -234,8 +262,41 @@ export class ContextAssembler {
 
     let compactions = 0;
     const targetInputTokens = Math.min(usableInputTokens, this.policy.proactiveCompactionTokens);
-    while (estimatedInputTokens > targetInputTokens && compactions < 3) {
-      const compacted = await this.compact(canonicalMessages, tools, runtimeContext, estimatedInputTokens, signal);
+    const deferProactiveCompaction = estimatedInputTokens > targetInputTokens
+      && estimatedInputTokens <= usableInputTokens
+      && this.policy.deferProactiveCompactionForArtifactEvidence
+      && hasArtifactEvidenceBoundary(canonicalMessages, this.firstKeptMessageIndex);
+    if (deferProactiveCompaction) {
+      await this.emitEvent({
+        type: "context.compaction.skipped",
+        data: {
+          contextEpoch: this.contextEpoch,
+          estimatedInputTokens,
+          usableInputTokens,
+          targetInputTokens,
+          reason: "artifact_evidence_within_usable_window",
+        },
+      });
+    }
+    while (!deferProactiveCompaction && estimatedInputTokens > targetInputTokens && compactions < 3) {
+      let compacted = false;
+      try {
+        compacted = await this.compact(canonicalMessages, tools, runtimeContext, estimatedInputTokens, signal);
+      } catch (error) {
+        if (estimatedInputTokens > usableInputTokens) throw error;
+        await this.emitEvent({
+          type: "context.compaction.skipped",
+          data: {
+            contextEpoch: this.contextEpoch,
+            estimatedInputTokens,
+            usableInputTokens,
+            targetInputTokens,
+            reason: "nonessential_compaction_failed",
+            ...errorEventDetails(error),
+          },
+        });
+        break;
+      }
       if (!compacted) break;
       compactions += 1;
       projection = this.buildProjection(canonicalMessages);
@@ -293,6 +354,12 @@ export class ContextAssembler {
       if (!compacted && pruned === undefined) return item;
       const sha256 = pruned?.sha256 ?? digest(item.result);
       const originalCharacters = pruned?.originalCharacters ?? item.result.length;
+      if (pruned?.structuredEvidence !== undefined) {
+        return {
+          ...item,
+          result: prunedToolMarker(pruned),
+        };
+      }
       return {
         ...item,
         result: [
@@ -305,7 +372,15 @@ export class ContextAssembler {
   }
 
   private buildProjection(canonicalMessages: readonly ModelMessage[]): ModelMessage[] {
-    const tail = canonicalMessages.slice(this.firstKeptMessageIndex).map((message) => {
+    return this.buildProjectionFrom(canonicalMessages, this.firstKeptMessageIndex);
+  }
+
+  private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
+    const artifactArgumentProjections = artifactToolCallArgumentProjections(canonicalMessages, startIndex);
+    const tail = canonicalMessages.slice(startIndex).map((message) => {
+      if (message.role === "assistant") {
+        return projectAssistantToolCallArguments(message, artifactArgumentProjections);
+      }
       if (message.role !== "tool") return message;
       const pruned = this.prunedToolResults.get(message.toolCallId);
       if (pruned === undefined) return message;
@@ -370,6 +445,20 @@ export class ContextAssembler {
         || message.content.length <= this.policy.largeToolResultProjectionCharacters
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
+      const structuredEvidence = structuredToolResultProjection(message.name, message.content);
+      if (structuredEvidence !== undefined) {
+        const record: PrunedToolResult = {
+          toolCallId: message.toolCallId,
+          toolName: message.name,
+          originalCharacters: message.content.length,
+          sha256: digest(message.content),
+          reason: "structured_tool_result",
+          structuredEvidence,
+        };
+        this.prunedToolResults.set(message.toolCallId, record);
+        newlyProjected.push(record);
+        continue;
+      }
       const preview = message.content.slice(0, this.policy.largeToolResultPreviewCharacters);
       const record: PrunedToolResult = {
         toolCallId: message.toolCallId,
@@ -379,6 +468,58 @@ export class ContextAssembler {
         reason: "large_tool_result",
         preview,
         previewCharacters: preview.length,
+      };
+      this.prunedToolResults.set(message.toolCallId, record);
+      newlyProjected.push(record);
+    }
+    return newlyProjected;
+  }
+
+  private projectStructuredToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
+    const newlyProjected: PrunedToolResult[] = [];
+    for (let index = this.firstKeptMessageIndex; index < canonicalMessages.length; index += 1) {
+      const message = canonicalMessages[index];
+      if (
+        message.role !== "tool"
+        || message.name === "load_skill"
+        || message.isError
+        || this.prunedToolResults.has(message.toolCallId)
+      ) continue;
+      const structuredEvidence = structuredToolResultProjection(message.name, message.content);
+      if (structuredEvidence === undefined) continue;
+      const record: PrunedToolResult = {
+        toolCallId: message.toolCallId,
+        toolName: message.name,
+        originalCharacters: message.content.length,
+        sha256: digest(message.content),
+        reason: "structured_tool_result",
+        structuredEvidence,
+      };
+      this.prunedToolResults.set(message.toolCallId, record);
+      newlyProjected.push(record);
+    }
+    return newlyProjected;
+  }
+
+  private projectStructuredEvidenceToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
+    const newlyProjected: PrunedToolResult[] = [];
+    for (let index = this.firstKeptMessageIndex; index < canonicalMessages.length; index += 1) {
+      const message = canonicalMessages[index];
+      if (
+        message.role !== "tool"
+        || message.name === "load_skill"
+        || message.isError
+        || this.prunedToolResults.has(message.toolCallId)
+      ) continue;
+      const structuredEvidence = structuredToolEvidenceProjection(message.content);
+      if (structuredEvidence === undefined) continue;
+      const record: PrunedToolResult = {
+        toolCallId: message.toolCallId,
+        toolName: message.name,
+        originalCharacters: message.content.length,
+        sha256: digest(message.content),
+        reason: "structured_evidence",
+        structuredEvidence,
       };
       this.prunedToolResults.set(message.toolCallId, record);
       newlyProjected.push(record);
@@ -472,11 +613,7 @@ export class ContextAssembler {
     // empty provider-transcript tail after it has been summarized.
     candidates.push(canonicalMessages.length);
     for (const index of candidates) {
-      const tail = canonicalMessages.slice(index).map((message) => {
-        if (message.role !== "tool") return message;
-        const pruned = this.prunedToolResults.get(message.toolCallId);
-        return pruned === undefined ? message : { ...message, content: prunedToolMarker(pruned) };
-      });
+      const tail = this.buildProjectionFrom(canonicalMessages, index);
       const tailTokens = this.estimateInvocationTokens(tools, runtimeContext, tail) - baseInputTokens;
       if (tailTokens <= tailBudget) return index;
     }
@@ -694,6 +831,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
   const usable = contextWindowTokens - outputReserveTokens - safetyMarginTokens;
   if (usable < 2_000) throw new TypeError("Model limits leave fewer than 2000 usable input tokens");
   const proactiveCompactionTokens = Math.min(input?.proactiveCompactionTokens ?? usable, usable);
+  const deferProactiveCompactionForArtifactEvidence = input?.deferProactiveCompactionForArtifactEvidence === true;
   const preserveRecentTokens = input?.preserveRecentTokens
     ?? Math.min(20_000, Math.max(2_000, Math.floor(usable * 0.25)));
   const pruneProtectTokens = input?.pruneProtectTokens ?? preserveRecentTokens;
@@ -725,6 +863,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
     outputReserveTokens,
     safetyMarginTokens,
     proactiveCompactionTokens,
+    deferProactiveCompactionForArtifactEvidence,
     preserveRecentTokens,
     pruneProtectTokens,
     summaryMaxOutputTokens,
@@ -786,6 +925,10 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
   if (message.name === "load_skill") {
     return `[Tool result load_skill id=${message.toolCallId}]: Exact Skill body omitted from compaction input; reload after compaction; sha256=${digest(message.content)}; characters=${message.content.length}`;
   }
+  const structuredEvidence = structuredToolEvidenceProjection(message.content);
+  if (structuredEvidence !== undefined) {
+    return `[Tool evidence receipt ${message.name} id=${message.toolCallId}]: ${structuredToolEvidenceLedger(message.content) ?? structuredEvidence}`;
+  }
   return `[Tool ${message.isError ? "error" : "result"} ${message.name} id=${message.toolCallId}]: ${truncateForSummary(message.content, toolResultLimit)}`;
 }
 
@@ -817,10 +960,706 @@ function truncateForSummary(value: string, maximum: number): string {
 }
 
 function prunedToolMarker(record: PrunedToolResult): string {
+  if (record.structuredEvidence !== undefined) {
+    const label = record.reason === "structured_tool_result"
+      ? "structured projection"
+      : "structured evidence";
+    return [
+      record.structuredEvidence,
+      `[Tool result projected as ${label}; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; sha256=${record.sha256}; canonical event retained]`,
+    ].join("\n\n");
+  }
   const marker = record.reason === "large_tool_result"
     ? `[Large tool result projected for model context; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; previewCharacters=${record.previewCharacters ?? 0}; sha256=${record.sha256}; canonical event retained]`
     : `[Old tool result removed from model projection; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; sha256=${record.sha256}; canonical event retained]`;
   return record.preview === undefined ? marker : `${record.preview}\n\n${marker}`;
+}
+
+function structuredToolEvidenceProjection(content: string): string | undefined {
+  const value = parseJsonRecord(content);
+  if (value === undefined) return undefined;
+  const receipt = recordValue(value.evidenceReceipt);
+  if (receipt === undefined) return undefined;
+  const sourceRefs = Array.isArray(receipt.sourceRefs) ? receipt.sourceRefs : [];
+  const facts = Array.isArray(receipt.facts) ? receipt.facts : [];
+  const sourceType = stringValue(receipt.sourceType);
+  const sourceRefLimit = sourceRefProjectionLimit(sourceType, stringValue(value.schema));
+  const uploadedSource = sourceType === "uploaded_source" ? uploadedSourceProjection(value) : undefined;
+  const projection = {
+    schema: "agentloop.contextEvidenceProjection/v1",
+    sourceSchema: stringValue(value.schema),
+    requested: numberValue(value.requested),
+    returned: numberValue(value.returned),
+    truncated: booleanValue(value.truncated),
+    maxTotalCharacters: numberValue(value.maxTotalCharacters),
+    uploadedSource,
+    evidenceReceipt: {
+      schema: stringValue(receipt.schema),
+      sourceType,
+      receiptId: stringValue(receipt.receiptId),
+      sourceRefCount: sourceRefs.length,
+      factCount: facts.length,
+      sourceRefs: sourceRefLimit <= 0 ? undefined : sourceRefs.slice(0, sourceRefLimit).map(compactEvidenceSourceRef),
+      facts: facts.slice(0, 24).map(compactEvidenceFactForProjection),
+      caveats: compactArray(receipt.caveats, 20),
+      evidenceKinds: recordValue(receipt.evidenceKinds),
+    },
+    instruction: sourceType === "uploaded_source"
+      ? "Use read_source with sourceId, chunkIndex, and maxChunks for uploaded source content; chunkIndex plus maxChunks reads a consecutive window starting at chunkIndex. Uploaded sources are not filesystem paths; do not search upload storage roots or other conversation directories to recover them."
+      : "Use these structured facts and sourceRefs. Reread explicit paths/ranges only when exact omitted text is required.",
+  };
+  return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+const UPLOADED_SOURCE_CONTENT_PROJECTION_LIMIT = 12_000;
+
+function uploadedSourceProjection(value: Record<string, unknown>): unknown {
+  const chunks = Array.isArray(value.chunks) ? value.chunks : [];
+  let remainingCharacters = UPLOADED_SOURCE_CONTENT_PROJECTION_LIMIT;
+  let omittedContentCount = 0;
+  const projectedChunks = chunks.slice(0, 12).map((item) => {
+    const chunk = recordValue(item);
+    if (chunk === undefined) return item;
+    const content = stringValue(chunk.content);
+    const includeContent = content !== undefined && content.length <= remainingCharacters;
+    if (includeContent) remainingCharacters -= content.length;
+    else if (content !== undefined) omittedContentCount += 1;
+    return omitUndefinedDeep({
+      chunkIndex: numberValue(chunk.chunkIndex),
+      kind: stringValue(chunk.kind),
+      locator: stringValue(chunk.locator),
+      sha256: stringValue(chunk.sha256),
+      contentCharacters: content?.length,
+      contentSha256: content === undefined ? undefined : digest(content),
+      content: includeContent ? content : undefined,
+      contentOmitted: content === undefined ? undefined : !includeContent,
+    });
+  });
+  return omitUndefinedDeep({
+    sourceId: stringValue(value.sourceId),
+    originalName: stringValue(value.originalName),
+    totalChunks: numberValue(value.totalChunks),
+    selectedChunks: numberValue(value.selectedChunks),
+    returnedChunks: numberValue(value.returnedChunks),
+    truncated: booleanValue(value.truncated),
+    chunks: projectedChunks,
+    omittedContentCount: omittedContentCount === 0 ? undefined : omittedContentCount,
+    contentProjectionLimit: UPLOADED_SOURCE_CONTENT_PROJECTION_LIMIT,
+  });
+}
+
+function structuredToolResultProjection(toolName: string, content: string): string | undefined {
+  const value = parseJsonRecord(content);
+  if (value === undefined) return undefined;
+  const artifactReceipt = recordValue(value.artifactReceipt);
+  if (artifactReceipt !== undefined) {
+    return artifactReceiptProjection(artifactReceipt, stringValue(value.schema));
+  }
+  if (recordValue(value.evidenceReceipt) !== undefined) return undefined;
+  const schema = stringValue(value.schema);
+  if (schema === "agentloop.paginatedHtmlMaterialization/v1") {
+    return paginatedHtmlMaterializationProjection(value);
+  }
+  if (schema === "agentloop.artifactAcceptance/v1") {
+    return artifactAcceptanceProjection(value);
+  }
+  if (toolName === "computer_write_file") {
+    return writtenArtifactProjection(value, toolName);
+  }
+  if (toolName === "visible_list_directory") return visibleListDirectoryProjection(value);
+  return undefined;
+}
+
+function artifactToolCallArgumentProjections(
+  canonicalMessages: readonly ModelMessage[],
+  startIndex: number,
+): ReadonlyMap<string, Record<string, unknown>> {
+  const projections = new Map<string, Record<string, unknown>>();
+  for (let index = startIndex; index < canonicalMessages.length; index += 1) {
+    const message = canonicalMessages[index];
+    if (message.role !== "tool" || message.isError) continue;
+    const projection = artifactToolCallArgumentProjection(message.name, message.content);
+    if (projection !== undefined) projections.set(message.toolCallId, projection);
+  }
+  return projections;
+}
+
+function projectAssistantToolCallArguments(
+  message: Extract<ModelMessage, { role: "assistant" }>,
+  projections: ReadonlyMap<string, Record<string, unknown>>,
+): ModelMessage {
+  if (message.toolCalls === undefined || message.toolCalls.length === 0) return message;
+  let changed = false;
+  const toolCalls = message.toolCalls.map((call) => {
+    const projection = projections.get(call.id);
+    if (projection === undefined) return call;
+    changed = true;
+    return {
+      ...call,
+      arguments: artifactToolCallArgumentsProjection(projection, call.arguments),
+    };
+  });
+  return changed ? { ...message, toolCalls } : message;
+}
+
+function artifactToolCallArgumentProjection(toolName: string, content: string): Record<string, unknown> | undefined {
+  const value = parseJsonRecord(content);
+  if (value === undefined) return undefined;
+  const receipt = recordValue(value.artifactReceipt);
+  if (receipt === undefined || stringValue(receipt.schema) !== ARTIFACT_RECEIPT_SCHEMA) return undefined;
+  const artifact = recordValue(receipt.artifact);
+  if (artifact === undefined) return undefined;
+  const inspection = recordValue(receipt.inspection);
+  const projection = omitUndefinedDeep({
+    schema: "agentloop.contextArtifactToolCallArguments/v1",
+    sourceSchema: stringValue(value.schema),
+    successfulArtifactWrite: true,
+    receiptId: stringValue(receipt.receiptId),
+    sourceTool: stringValue(receipt.sourceTool) ?? toolName,
+    artifact: compactArtifactReceiptArtifact(artifact),
+    inspection: inspection === undefined ? undefined : compactArtifactReceiptInspection(inspection),
+    evidenceKinds: recordValue(receipt.evidenceKinds),
+    instruction: "Original artifact content arguments are omitted from this model-context projection after a successful write. Use artifact receipt fields; read the artifact path only when exact content is required.",
+  });
+  return recordValue(projection);
+}
+
+function artifactToolCallArgumentsProjection(
+  projection: Record<string, unknown>,
+  originalArguments: unknown,
+): Record<string, unknown> {
+  const serializedArguments = JSON.stringify(originalArguments ?? null);
+  const originalRecord = recordValue(originalArguments);
+  const originalContent = stringValue(originalRecord?.content);
+  return omitUndefinedDeep({
+    ...projection,
+    originalArguments: {
+      sha256: digest(serializedArguments),
+      characters: serializedArguments.length,
+      contentCharacters: originalContent?.length,
+      contentSha256: originalContent === undefined ? undefined : digest(originalContent),
+      omittedFields: originalContent === undefined ? undefined : ["content"],
+      canonicalArgumentsPersisted: true,
+    },
+  }) as Record<string, unknown>;
+}
+
+function hasArtifactEvidenceBoundary(
+  canonicalMessages: readonly ModelMessage[],
+  firstKeptMessageIndex: number,
+): boolean {
+  for (let index = canonicalMessages.length - 1; index >= firstKeptMessageIndex; index -= 1) {
+    const message = canonicalMessages[index];
+    if (message.role !== "tool" || message.isError) continue;
+    const value = parseJsonRecord(message.content);
+    if (value === undefined) continue;
+    if (recordValue(value.artifactReceipt) !== undefined) return true;
+    const schema = stringValue(value.schema);
+    if (schema === "agentloop.artifactAcceptance/v1" || schema === "agentloop.paginatedHtmlMaterialization/v1") {
+      return true;
+    }
+    if (
+      message.name === "computer_write_file"
+      && stringValue(value.path) !== undefined
+      && stringValue(value.sha256) !== undefined
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function artifactReceiptProjection(receipt: Record<string, unknown>, sourceSchema: string | undefined): string | undefined {
+  if (stringValue(receipt.schema) !== ARTIFACT_RECEIPT_SCHEMA) return undefined;
+  const artifact = recordValue(receipt.artifact);
+  if (artifact === undefined) return undefined;
+  const inspection = recordValue(receipt.inspection);
+  const projection = {
+    schema: CONTEXT_ARTIFACT_PROJECTION_SCHEMA,
+    sourceSchema,
+    artifactReceipt: {
+      schema: stringValue(receipt.schema),
+      receiptId: stringValue(receipt.receiptId),
+      sourceTool: stringValue(receipt.sourceTool),
+      artifact: compactArtifactReceiptArtifact(artifact),
+      inspection: inspection === undefined ? undefined : compactArtifactReceiptInspection(inspection),
+      evidenceKinds: recordValue(receipt.evidenceKinds),
+      canonicalEvidence: recordValue(receipt.canonicalEvidence),
+    },
+    instruction: "Use this artifact receipt for generated file facts. Read the artifact path explicitly only when exact file content is needed.",
+  };
+  return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+function compactArtifactReceiptArtifact(artifact: Record<string, unknown>): unknown {
+  return omitUndefinedDeep({
+    path: stringValue(artifact.path),
+    artifactKind: stringValue(artifact.artifactKind),
+    renderMode: stringValue(artifact.renderMode),
+    acceptanceProfile: stringValue(artifact.acceptanceProfile),
+    pageCount: numberValue(artifact.pageCount),
+    bytes: numberValue(artifact.bytes),
+    characters: numberValue(artifact.characters),
+    totalLines: numberValue(artifact.totalLines),
+    sha256: stringValue(artifact.sha256),
+    specSha256: stringValue(artifact.specSha256),
+  });
+}
+
+function compactArtifactReceiptInspection(inspection: Record<string, unknown>): unknown {
+  return omitUndefinedDeep({
+    sha256: stringValue(inspection.sha256),
+    characters: numberValue(inspection.characters),
+    totalLines: numberValue(inspection.totalLines),
+    outline: compactArray(inspection.outline, 12),
+    outlineTruncated: booleanValue(inspection.outlineTruncated),
+    sampleRangeCount: numberValue(inspection.sampleRangeCount),
+  });
+}
+
+function paginatedHtmlMaterializationProjection(value: Record<string, unknown>): string | undefined {
+  const path = stringValue(value.path);
+  if (path === undefined) return undefined;
+  const inspection = recordValue(value.inspection);
+  const projection = {
+    schema: CONTEXT_ARTIFACT_PROJECTION_SCHEMA,
+    sourceSchema: stringValue(value.schema),
+    artifact: {
+      path,
+      artifactKind: stringValue(value.artifactKind),
+      renderMode: stringValue(value.renderMode),
+      acceptanceProfile: stringValue(value.acceptanceProfile),
+      pageCount: numberValue(value.pageCount),
+      bytes: numberValue(value.bytes),
+      characters: numberValue(value.characters),
+      totalLines: numberValue(value.totalLines),
+      sha256: stringValue(value.sha256),
+      specSha256: stringValue(value.specSha256),
+    },
+    inspection: inspection === undefined ? undefined : {
+      sha256: stringValue(inspection.sha256),
+      characters: numberValue(inspection.characters),
+      totalLines: numberValue(inspection.totalLines),
+      outline: compactArray(inspection.outline, 12),
+      outlineTruncated: booleanValue(inspection.outlineTruncated),
+      sampleRangeCount: Array.isArray(inspection.sampleRanges) ? inspection.sampleRanges.length : undefined,
+    },
+    instruction: "Use this artifact receipt for generated file facts. Read the artifact path explicitly only when exact file content is needed.",
+  };
+  return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+function writtenArtifactProjection(value: Record<string, unknown>, toolName: string): string | undefined {
+  const path = stringValue(value.path);
+  const sha256 = stringValue(value.sha256);
+  if (path === undefined || sha256 === undefined) return undefined;
+  const inspection = recordValue(value.inspection);
+  const projection = {
+    schema: CONTEXT_ARTIFACT_PROJECTION_SCHEMA,
+    sourceTool: toolName,
+    artifact: {
+      path,
+      bytes: numberValue(value.bytes),
+      characters: numberValue(value.characters),
+      totalLines: numberValue(value.totalLines),
+      sha256,
+    },
+    inspection: inspection === undefined ? undefined : {
+      sha256: stringValue(inspection.sha256),
+      characters: numberValue(inspection.characters),
+      totalLines: numberValue(inspection.totalLines),
+      outline: compactArray(inspection.outline, 12),
+      outlineTruncated: booleanValue(inspection.outlineTruncated),
+      sampleRangeCount: Array.isArray(inspection.sampleRanges) ? inspection.sampleRanges.length : undefined,
+    },
+    instruction: "Use this artifact receipt for written file facts. Read the artifact path explicitly only when exact file content is needed.",
+  };
+  return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+function artifactAcceptanceProjection(value: Record<string, unknown>): string | undefined {
+  const artifact = recordValue(value.artifact);
+  if (artifact === undefined) return undefined;
+  const checks = Array.isArray(value.checks) ? value.checks : [];
+  const projection = {
+    schema: "agentloop.contextArtifactAcceptanceProjection/v1",
+    sourceSchema: stringValue(value.schema),
+    artifact: {
+      path: stringValue(artifact.path),
+      requestedPath: stringValue(artifact.requestedPath),
+      resolvedPath: stringValue(artifact.resolvedPath),
+      bytes: numberValue(artifact.bytes),
+      sha256: stringValue(artifact.sha256),
+      kind: stringValue(artifact.kind),
+      profileId: stringValue(artifact.profileId),
+      inspectionTruncated: booleanValue(artifact.inspectionTruncated),
+    },
+    verdict: stringValue(value.verdict),
+    evidenceKinds: recordValue(value.evidenceKinds),
+    checks: checks.slice(0, 24).map(compactArtifactAcceptanceCheck),
+    caveats: compactArray(value.caveats, 12),
+    requestedChecks: compactArray(value.requestedChecks, 12),
+    instruction: "Use this acceptance receipt for artifact status and caveats. Do not infer skipped checks as passed; request the missing capability only when strict validation is required.",
+  };
+  return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+function compactArtifactAcceptanceCheck(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return value;
+  return omitUndefinedDeep({
+    id: stringValue(record.id),
+    status: stringValue(record.status),
+    evidence: compactArtifactAcceptanceEvidence(record.evidence),
+    diagnostics: compactDiagnostic(record.diagnostics),
+  });
+}
+
+function compactArtifactAcceptanceEvidence(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  return omitUndefinedDeep({
+    requestedPath: stringValue(record.requestedPath),
+    path: stringValue(record.path),
+    resolvedPath: stringValue(record.resolvedPath),
+    bytes: numberValue(record.bytes),
+    sha256: stringValue(record.sha256),
+    expected: stringValue(record.expected),
+    mode: stringValue(record.mode),
+    extensionMatches: booleanValue(record.extensionMatches),
+    hasHtmlShape: booleanValue(record.hasHtmlShape),
+    contentTruncated: booleanValue(record.contentTruncated),
+    slideCount: numberValue(record.slideCount),
+    signals: compactArray(record.signals, 12),
+    staticSignals: compactArray(record.staticSignals, 12),
+    requiredCapability: stringValue(record.requiredCapability),
+    reason: compactDiagnostic(record.reason),
+    providerId: stringValue(record.providerId),
+  });
+}
+
+function compactDiagnostic(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  if (normalized.length <= 240) return normalized;
+  return `${normalized.slice(0, 240)}...`;
+}
+
+function visibleListDirectoryProjection(value: Record<string, unknown>): string | undefined {
+  const entries = Array.isArray(value.entries) ? value.entries : undefined;
+  if (entries === undefined) return undefined;
+  const typeCounts: Record<string, number> = {};
+  const nameSamples: string[] = [];
+  for (const entry of entries) {
+    const record = recordValue(entry);
+    const type = stringValue(record?.type) ?? "unknown";
+    typeCounts[type] = (typeCounts[type] ?? 0) + 1;
+    const name = stringValue(record?.name);
+    if (name !== undefined && nameSamples.length < 8) nameSamples.push(name);
+  }
+  const projection = {
+    schema: "agentloop.contextDirectoryListingProjection/v1",
+    rootId: stringValue(value.rootId),
+    entryCount: entries.length,
+    typeCounts,
+    nameSamples,
+    sha256: digest(JSON.stringify(entries)),
+    instruction: "Use this directory listing summary for navigation. Call find/index/read tools for exact paths or file contents.",
+  };
+  return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+function sourceRefProjectionLimit(sourceType: string | undefined, sourceSchema: string | undefined): number {
+  if (sourceType === "visible_search_text") return 4;
+  if (sourceType === "visible_file_discovery") return 5;
+  if (sourceType === "visible_directory") return 5;
+  if (sourceSchema === "agentloop.visibleSearchSummary/v1" || sourceSchema === "agentloop.visibleSearchText/v1") return 4;
+  if (sourceSchema === "agentloop.visibleFindFiles/v1") return 5;
+  return 12;
+}
+
+function sourceRefLedgerLimit(sourceType: string | undefined, sourceSchema: string | undefined): number {
+  if (sourceType === "visible_search_text") return 3;
+  if (sourceType === "visible_file_discovery") return 3;
+  if (sourceType === "visible_directory") return 3;
+  if (sourceSchema === "agentloop.visibleSearchSummary/v1" || sourceSchema === "agentloop.visibleSearchText/v1") return 3;
+  if (sourceSchema === "agentloop.visibleFindFiles/v1") return 3;
+  return 8;
+}
+
+function compactEvidenceSourceRef(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return value;
+  const matchedBy = recordValue(record.matchedBy);
+  return omitUndefinedDeep({
+    sourceRefId: stringValue(record.sourceRefId),
+    path: stringValue(record.path),
+    rootId: stringValue(record.rootId),
+    sha256: stringValue(record.sha256),
+    bytes: numberValue(record.bytes),
+    characters: numberValue(record.characters),
+    truncated: booleanValue(record.truncated),
+    requestedPath: stringValue(record.requestedPath),
+    resolvedPath: stringValue(record.resolvedPath),
+    offset: numberValue(record.offset),
+    limit: numberValue(record.limit),
+    totalLines: numberValue(record.totalLines),
+    nextOffset: numberValue(record.nextOffset),
+    matchedBy: matchedBy === undefined ? undefined : omitUndefinedDeep({
+      path: stringValue(matchedBy.path),
+      pattern: stringValue(matchedBy.pattern),
+    }),
+    lines: Array.isArray(record.lines) ? record.lines.slice(0, 12) : undefined,
+  });
+}
+
+function compactEvidenceFactForProjection(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return value;
+  const base = compactEvidenceFactForLedger(record);
+  const baseRecord = recordValue(base);
+  if (baseRecord === undefined) return base;
+  return omitUndefinedDeep({
+    ...baseRecord,
+    fields: compactNameValueArray(record.fields, 12, 300),
+    sections: compactNameValueArray(record.sections, 8, 700),
+  });
+}
+
+function structuredToolEvidenceLedger(content: string): string | undefined {
+  const value = parseJsonRecord(content);
+  if (value === undefined) return undefined;
+  const receipt = recordValue(value.evidenceReceipt);
+  if (receipt === undefined) return undefined;
+  const sourceRefs = Array.isArray(receipt.sourceRefs) ? receipt.sourceRefs : [];
+  const facts = Array.isArray(receipt.facts) ? receipt.facts : [];
+  const caveats = Array.isArray(receipt.caveats) ? receipt.caveats : [];
+  const sourceType = stringValue(receipt.sourceType);
+  const sourceRefLimit = sourceRefLedgerLimit(sourceType, stringValue(value.schema));
+  const ledger = {
+    schema: "agentloop.contextEvidenceLedger/v1",
+    sourceSchema: stringValue(value.schema),
+    requested: numberValue(value.requested),
+    returned: numberValue(value.returned),
+    truncated: booleanValue(value.truncated),
+    evidenceReceipt: {
+      schema: stringValue(receipt.schema),
+      sourceType,
+      receiptId: stringValue(receipt.receiptId),
+      sourceRefCount: sourceRefs.length,
+      factCount: facts.length,
+      sourceRefSamples: sourceRefLimit <= 0 ? undefined : sourceRefs.slice(0, sourceRefLimit).map(compactEvidenceSourceRef),
+      factSummaries: facts.slice(0, 12).map(compactEvidenceFactForLedger),
+      caveats: caveats.slice(0, 12),
+      evidenceKinds: recordValue(receipt.evidenceKinds),
+    },
+    instruction: "Carry this receipt ledger forward without rewriting raw source facts. Use receiptId/sourceRefs to request exact rereads only when needed.",
+  };
+  return JSON.stringify(omitUndefinedDeep(ledger));
+}
+
+function compactEvidenceFactForLedger(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return value;
+  const hasTextGroups = Array.isArray(record.textGroups) && record.textGroups.length > 0;
+  const samplePaths = Array.isArray(record.samplePaths) ? record.samplePaths.slice(0, 12) : undefined;
+  const sampleMatches = Array.isArray(record.sampleMatches)
+    ? record.sampleMatches.slice(0, hasTextGroups ? 3 : 8).map((item) => {
+      const match = recordValue(item);
+      if (match === undefined) return item;
+      return omitUndefinedDeep({
+        path: stringValue(match.path),
+        line: numberValue(match.line),
+        text: hasTextGroups ? undefined : typeof match.text === "string" ? match.text.slice(0, 240) : undefined,
+        readRange: match.readRange,
+      });
+    })
+    : undefined;
+  const outline = Array.isArray(record.outline) ? record.outline.slice(0, 8) : undefined;
+  const fields = compactNameValueArray(record.fields, 8, 180);
+  const sections = compactNameValueArray(record.sections, 6, 240);
+  return omitUndefinedDeep({
+    kind: stringValue(record.kind),
+    rootId: stringValue(record.rootId),
+    path: stringValue(record.path),
+    title: stringValue(record.title),
+    query: stringValue(record.query),
+    pattern: stringValue(record.pattern),
+    limit: numberValue(record.limit),
+    maxMatches: numberValue(record.maxMatches),
+    returned: numberValue(record.returned),
+    returnedMatches: numberValue(record.returnedMatches),
+    totalMatches: numberValue(record.totalMatches),
+    totalFiles: numberValue(record.totalFiles),
+    scannedFiles: numberValue(record.scannedFiles),
+    totalBytes: numberValue(record.totalBytes),
+    indexRef: stringValue(record.indexRef),
+    matchesRef: stringValue(record.matchesRef),
+    sha256: stringValue(record.sha256),
+    truncated: booleanValue(record.truncated),
+    compacted: booleanValue(record.compacted),
+    extensions: recordValue(record.extensions),
+    groups: compactCountGroups(record.groups, 20),
+    fieldProfiles: compactFieldProfiles(record.fieldProfiles, 8, 8),
+    textGroups: compactTextGroups(record.textGroups, 12, 240, 2),
+    pathGroups: compactPathGroups(record.pathGroups, 12),
+    samplePaths,
+    sampleMatches,
+    outline,
+    fields,
+    sections,
+    excerptCharacters: typeof record.excerpt === "string" ? record.excerpt.length : undefined,
+    excerptSha256: typeof record.excerpt === "string" ? digest(record.excerpt) : undefined,
+  });
+}
+
+function compactTextGroups(value: unknown, maximum: number, textCharacters: number, maxSamplePaths: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    return omitUndefinedDeep({
+      text: typeof record.text === "string" ? truncateSingleLine(record.text, textCharacters) : undefined,
+      textCharacters: typeof record.text === "string" ? record.text.length : undefined,
+      textSha256: typeof record.text === "string" && record.text.length > textCharacters ? digest(record.text) : undefined,
+      count: numberValue(record.count),
+      samplePaths: Array.isArray(record.samplePaths) ? record.samplePaths.slice(0, maxSamplePaths) : undefined,
+    });
+  });
+}
+
+function compactPathGroups(value: unknown, maximum: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    return omitUndefinedDeep({
+      prefix: stringValue(record.prefix),
+      count: numberValue(record.count),
+    });
+  });
+}
+
+function compactCountGroups(value: unknown, maximum: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    return omitUndefinedDeep({
+      key: stringValue(record.key),
+      prefix: stringValue(record.prefix),
+      value: stringValue(record.value),
+      count: numberValue(record.count),
+    });
+  });
+}
+
+function compactFieldProfiles(value: unknown, maximum: number, maxTopValues: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    return omitUndefinedDeep({
+      field: stringValue(record.field),
+      observed: numberValue(record.observed),
+      uniqueValues: numberValue(record.uniqueValues),
+      topValues: compactFieldProfileTopValues(record.topValues, maxTopValues),
+      hierarchy: compactFieldProfileHierarchy(record.hierarchy, 12),
+    });
+  });
+}
+
+function compactFieldProfileTopValues(value: unknown, maximum: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    return omitUndefinedDeep({
+      value: typeof record.value === "string" ? truncateSingleLine(record.value, 180) : undefined,
+      valueCharacters: typeof record.value === "string" ? record.value.length : undefined,
+      count: numberValue(record.count),
+      samplePaths: Array.isArray(record.samplePaths) ? record.samplePaths.slice(0, 2) : undefined,
+    });
+  });
+}
+
+function compactFieldProfileHierarchy(value: unknown, maximumNodes: number): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  const nodes = Array.isArray(record.nodes)
+    ? record.nodes.slice(0, maximumNodes).map((item) => {
+      const node = recordValue(item);
+      if (node === undefined) return item;
+      return omitUndefinedDeep({
+        path: Array.isArray(node.path) ? node.path.slice(0, 6) : undefined,
+        count: numberValue(node.count),
+      });
+    })
+    : undefined;
+  return omitUndefinedDeep({
+    delimiter: stringValue(record.delimiter),
+    nodes,
+  });
+}
+
+function compactNameValueArray(value: unknown, maximum: number, valueCharacters: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    const value = typeof record.value === "string" ? record.value : undefined;
+    return omitUndefinedDeep({
+      name: stringValue(record.name),
+      value: value === undefined ? undefined : truncateSingleLine(value, valueCharacters),
+      valueCharacters: value === undefined ? undefined : value.length,
+      valueSha256: value === undefined || value.length <= valueCharacters ? undefined : digest(value),
+    });
+  });
+}
+
+function truncateSingleLine(value: string, maximum: number): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum)}...`;
+}
+
+function parseJsonRecord(content: string): Record<string, unknown> | undefined {
+  try {
+    return recordValue(JSON.parse(content));
+  } catch {
+    return undefined;
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function compactArray(value: unknown, maximum: number): unknown[] | undefined {
+  return Array.isArray(value) ? value.slice(0, maximum) : undefined;
+}
+
+function omitUndefinedDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitUndefinedDeep);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [key, omitUndefinedDeep(item)]),
+  );
 }
 
 function skillNameFromArguments(value: unknown): string | undefined {
@@ -857,4 +1696,18 @@ function digest(value: string): string {
 
 function contextBudgetError(message: string, details?: Readonly<Record<string, unknown>>): AppError {
   return new AppError("MODEL_ERROR", message, 502, details);
+}
+
+function errorEventDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof AppError) {
+    return {
+      code: error.code,
+      message: error.message,
+      ...(error.details === undefined ? {} : { details: error.details }),
+    };
+  }
+  if (error instanceof Error) {
+    return { code: "INTERNAL_ERROR", message: error.message };
+  }
+  return { code: "INTERNAL_ERROR", message: String(error) };
 }

@@ -1,4 +1,5 @@
 import type { SuccessCriterion } from "../planning/contracts.ts";
+import { classifyTaskIntent } from "./task-intent.ts";
 
 export type OperationProfileId =
   | "data_analysis"
@@ -20,7 +21,7 @@ export interface OperationProfile {
 export interface OperationProfileInput {
   readonly objective: string;
   readonly successCriteria: readonly Pick<SuccessCriterion, "id" | "description">[];
-  readonly requiredToolNames: readonly string[];
+  readonly recommendedToolNames: readonly string[];
   readonly skillNames?: readonly string[];
 }
 
@@ -117,18 +118,23 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     planningRules: [
       "Success criteria must name the required artifact type and observable delivery evidence.",
       "When the user requests an artifact format, treat its minimum usable shape as core evidence: openable/readable output, requested type, workspace path, and non-empty receipt.",
-      "For browser-presentable, presentation-style, or document-like artifacts, basic navigation between pages, sections, or slides is format evidence; advanced interactions and visual polish remain best-effort unless explicitly requested.",
+      "For browser-presentable, presentation-style, or document-like artifacts, basic openability and requested navigation affordances are format evidence; advanced interactions and visual polish remain best-effort unless explicitly requested.",
+      "Do not force a structured page-spec producer for generic HTML artifacts. Plan only the requested artifact boundary; the loaded Skill or execution Tool choice decides whether the artifact is custom code, a standalone file, or an explicitly paginated materialization.",
+      "Prefer one aggregate artifact_acceptance evidence object over separate QA leaves when the available Tool catalog exposes verify_artifact_acceptance.",
       "Do not plan artifact delivery unless a file-producing tool is available.",
       "Advanced navigation, responsive polish, charts, visual refinements, and render/browser checks are best-effort execution preferences unless the user or loaded Skill explicitly requires them.",
     ],
     executionRules: [
       "Establish the output path and expected format before producing the artifact.",
+      "Use materialize_paginated_html only when the current step explicitly asks for paginated HTML, HTML-PPT, slide/training material, or another page-by-page artifact that fits its structured page spec. For ordinary standalone HTML, distinctive visual pages, apps, dashboards, or custom interactions, use the appropriate code/file production path.",
       "After generation, record existence, size, and any format evidence required by the current leaf or loaded Skill contract.",
+      "When verify_artifact_acceptance is available, call it once for the final artifact and preserve its checks, verdict, satisfied evidence kinds, failed evidence kinds, and explicit skipped_unavailable caveats.",
       "Use the artifact path as evidence; command stdout that only mentions a filename is not delivery evidence by itself.",
     ],
     successEvidence: [
       "artifact path",
       "existence/size evidence",
+      "aggregate artifact acceptance evidence when available",
       "format evidence required by the leaf or loaded Skill contract",
     ],
   },
@@ -164,13 +170,14 @@ export function operationProfileCatalogForPlanning(): readonly Pick<
 }
 
 export function inferOperationProfile(input: OperationProfileInput): OperationProfile {
+  const intent = classifyTaskIntent(input);
   const text = normalize([
     input.objective,
     ...input.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
     ...(input.skillNames ?? []),
   ].join("\n"));
-  const tools = new Set(input.requiredToolNames);
-  if (tools.has("websearch") || tools.has("webfetch") || matchesWebResearch(text)) {
+  const tools = new Set(input.recommendedToolNames);
+  if (tools.has("websearch") || tools.has("webfetch") || intent.sourceNeed !== "none") {
     return profile("web_research");
   }
   if (matchesCodeChange(text)) {
@@ -179,7 +186,7 @@ export function inferOperationProfile(input: OperationProfileInput): OperationPr
   if (matchesDataAnalysis(text)) {
     return profile("data_analysis");
   }
-  if (matchesArtifactBuild(text) || hasFileProducerTool(tools)) {
+  if (intent.deliverySurface === "workspace_artifact" || hasFileProducerTool(tools)) {
     return profile("artifact_build");
   }
   if (matchesContentGeneration(text)) {
@@ -230,18 +237,9 @@ function matchesCodeChange(value: string): boolean {
     .test(value);
 }
 
-function matchesWebResearch(value: string): boolean {
-  return /(?:\b(?:web|search|fetch|source|url|internet|browser|news|latest|cite|citation)\b|联网|网页|搜索|检索|来源|网址|新闻|最新|引用)/iu
-    .test(value);
-}
-
-function matchesArtifactBuild(value: string): boolean {
-  return /(?:\.(?:png|pdf|md|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv|json|txt)\b|\b(?:file|artifact|render|export|save|generate|create|produce|build|output)\b|文件|产物|渲染|导出|保存|生成|创建|制作|输出)/iu
-    .test(value);
-}
-
 function hasFileProducerTool(tools: ReadonlySet<string>): boolean {
   for (const name of tools) {
+    if (name === "materialize_paginated_html") return true;
     if (name === "computer_write_file") return true;
     if (/(^|_)(write|create|generate|render|export|save)(_|$)/.test(name)) return true;
   }

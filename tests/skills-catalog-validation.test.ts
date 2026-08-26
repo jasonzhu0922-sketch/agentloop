@@ -25,6 +25,7 @@ const EXPECTED_SKILL_NAMES = [
   "mcp-builder",
   "pdf",
   "presentation-skill",
+  "review-contract",
   "skill-creator",
   "slack-gif-creator",
   "statistical-analysis",
@@ -52,6 +53,13 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
       assert.match(entry.inspection.packageHash, /^[0-9a-f]{64}$/);
       assert.ok(entry.inspection.files.includes("SKILL.md"));
     }
+
+    const canvasDesign = discovered.find((entry) => entry.inspection.name === "canvas-design");
+    assert.notEqual(canvasDesign, undefined);
+    assert.match(canvasDesign!.inspection.instructions, /glyph coverage/i);
+    assert.match(canvasDesign!.inspection.instructions, /\bCJK\b/);
+    assert.match(canvasDesign!.inspection.instructions, /fail fast/i);
+    assert.match(canvasDesign!.inspection.instructions, /tofu|missing-glyph boxes/i);
 
     const auth = new AuthService(database);
     const owner = await auth.register("real-skills@example.com", "real skills secure password");
