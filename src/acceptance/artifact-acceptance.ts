@@ -310,7 +310,7 @@ function verifyOfficePackageProfile(
   const missingEntries = requiredEntries.filter((entry) => !presentEntries.has(entry));
   const packageLooksValid = !truncated && zipEntries.length > 0 && missingEntries.length === 0;
   const structuralCounts = officeStructuralCounts(kind, zipEntries);
-  return [
+  const checks: ArtifactAcceptanceCheck[] = [
     checkStatus("format_matches_request", extensionMatches && packageLooksValid, {
       expected: kind,
       extensionMatches,
@@ -325,10 +325,17 @@ function verifyOfficePackageProfile(
       missingEntries,
       ...structuralCounts,
     }),
-    skipped("rendered_open", {
-      requiredCapability: `${kind}_renderer`,
-    }, `${kind.toUpperCase()} visual/application render acceptance is unavailable in this runtime.`),
   ];
+  if (kind === "pptx") {
+    checks.push(checkStatus("basic_navigation", packageLooksValid && structuralCounts.slideCount > 0, {
+      mode: "openxml_slide_sequence",
+      slideCount: structuralCounts.slideCount,
+    }));
+  }
+  checks.push(skipped("rendered_open", {
+    requiredCapability: `${kind}_renderer`,
+  }, `${kind.toUpperCase()} visual/application render acceptance is unavailable in this runtime.`));
+  return checks;
 }
 
 function verifyPdfProfile(path: string, content: Buffer, truncated: boolean): ArtifactAcceptanceCheck[] {

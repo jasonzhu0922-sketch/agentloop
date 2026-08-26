@@ -661,6 +661,42 @@ test("verify_artifact_acceptance validates OpenXML package structure through the
   }
 });
 
+test("verify_artifact_acceptance records PPTX slide sequence as basic navigation evidence", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-pptx-navigation-"));
+  try {
+    const deck = storedZip([
+      ["[Content_Types].xml", "<Types></Types>"],
+      ["ppt/presentation.xml", "<p:presentation><p:sldIdLst><p:sldId id=\"256\"/><p:sldId id=\"257\"/></p:sldIdLst></p:presentation>"],
+      ["ppt/slides/slide1.xml", "<p:sld></p:sld>"],
+      ["ppt/slides/slide2.xml", "<p:sld></p:sld>"],
+    ]);
+    await fs.writeFile(join(root, "deck.pptx"), deck);
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["verify_artifact_acceptance"]));
+    const prepared = allowed.prepare({
+      id: "accept-pptx",
+      name: "verify_artifact_acceptance",
+      arguments: { artifactPath: "deck.pptx", artifactKind: "pptx" },
+    });
+
+    const result = await prepared.tool.execute(grantContext(["verify_artifact_acceptance"]), prepared.input) as {
+      verdict: string;
+      evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+      checks: Array<{ id: string; status: string; evidence: Record<string, unknown> }>;
+    };
+
+    assert.equal(result.verdict, "caveated");
+    assert.ok(result.evidenceKinds.satisfied.includes("basic_navigation"));
+    assert.equal(result.evidenceKinds.caveated.includes("basic_navigation"), false);
+    assert.equal(check(result, "basic_navigation")?.status, "passed");
+    assert.equal(check(result, "basic_navigation")?.evidence.mode, "openxml_slide_sequence");
+    assert.equal(check(result, "basic_navigation")?.evidence.slideCount, 2);
+    assert.equal(check(result, "rendered_open")?.status, "skipped_unavailable");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verify_artifact_acceptance rejects PDF text-layer markup leaks", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-pdf-markup-"));
   try {
