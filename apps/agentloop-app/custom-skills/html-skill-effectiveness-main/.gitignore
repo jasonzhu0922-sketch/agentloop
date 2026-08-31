@@ -1,0 +1,17 @@
+# HTML Effectiveness Skill
+
+# Build artifacts / generated files
+build_*.js
+build_*.py
+fix_encoding.js
+i18n_data.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor temp files
+*.swp
+*.swo
+*~

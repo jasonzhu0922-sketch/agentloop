@@ -1,8 +1,13 @@
 # AgentLoop 内核化交付改造方案
 
-> 状态：方案评审稿 v2（未实施）
+> 状态：v3 · 已交付为 npm workspaces monorepo：内核 `packages/agentloop`（`@zhujun/agentloop`，headless，无 HTTP/auth）+ 参考应用 `apps/agentloop-app`（经包依赖引入内核）。本文 P0 的"单包子路径出口"方案已被该结构取代，P1（MCP 桥接）待启动
 > 目标读者：agentloop 维护团队
-> 关联文档：[架构设计](ARCHITECTURE.md)、[部署边界](../README.md)
+> 关联文档：[架构设计](ARCHITECTURE.md)、[集成指南](INTEGRATION.md)、[部署边界](../README.md)
+
+## 实施期发现的两处关键修正
+
+1. **TS 源码直发不可行**。Node 的类型剥离硬编码排除 `node_modules`（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）。P0-5 改为在 `packages/agentloop` 内用 `tsc -p tsconfig.json` 构建发布产物：利用 TS 5.4+ 的 `rewriteRelativeImportExtensions` 把源码内 `.ts` 相对导入重写为 `.js`，exports 指向 `dist/*.js + .d.ts`。构建同时让全部源码首次通过真实类型检查（修复 24 处历史类型错误）。
+2. **内核只认不透明 userId，认证表归宿主应用所有**。原 schema 中 skills/conversations/runs/sources/batches/audit_events 的属主列 `REFERENCES users(id)`，且 SQLite 连接开启 `PRAGMA foreign_keys = ON`——宿主传入的外部 userId 无法写入，违背"内核只认不透明 userId"契约。已改为：内核新库 DDL 不创建 `users/auth_sessions`，业务表也不含 users 外键；旧库由 `AppDatabase.migrate()` 前向重建六张业务表（保留全部数据，并保留宿主已有的认证表但不管理它们）。参考应用在 `apps/agentloop-app/src/auth/auth-repository.ts` 内自行创建和访问 `users/auth_sessions`。测试见 tests/user-boundary-migration.test.ts。
 
 ## 1. 背景与目标
 
@@ -28,16 +33,15 @@
 ### 2.1 资产 → 出口映射
 
 ```text
-@yourorg/agentloop（单一包，子路径出口）
-├── "."            → src/index.ts      内核：RunService / SkillService /
+@zhujun/agentloop（内核包）
+├── "."            → packages/agentloop/dist/index.js
+│                                       内核：RunService / SkillService /
 │                                      planning / tools / skills / storage / mcp
-├── "./server"     → src/server.ts     可选层：createAgentLoopServer +
-│                                      AuthService（独立部署场景才需要）
 ├── skills/        随包发布的内置 Skill 集合，宿主配进 skillDirectories 即生效
 └── web/           不进包。前端本就走 HTTP API，作为独立 React 应用单独交付
 ```
 
-内核内部新增模块：`src/mcp/`（MCP 客户端桥接）、`src/storage/stores/`（SkillStore 默认实现）。
+参考应用的 HTTP/auth 层位于 `apps/agentloop-app`，不属于内核包。内核内部模块位于 `packages/agentloop/src`，其中包括 `storage/stores/`（SkillStore 默认实现）。
 
 ### 2.2 边界契约
 
@@ -51,7 +55,7 @@
 agentloop 内核（userId 不解释、不验证；持久化经 SPI 抽象）
 ```
 
-内置 email+密码 `AuthService` 仅属于 `./server` 可选层；嵌入式宿主不创建它。
+内置 email+密码 `AuthService` 仅属于参考应用 `apps/agentloop-app`；嵌入式宿主不创建它。
 
 **持久化（两级抽象）**：
 
@@ -64,14 +68,14 @@ agentloop 内核（userId 不解释、不验证；持久化经 SPI 抽象）
 
 注意事项（写入集成文档）：SQLite 单写者；嵌入式场景每应用实例独立库文件，禁止多进程共享同一库文件。
 
-**配置**：嵌入模式下一切经构造参数（`skillDirectories`、`skillStore`、`mcpServers`、`tools`、`workspaceRoot`、`systemPrompt` 等）；环境变量解析只存在于 `./server` 层的 `app.ts`。
+**配置**：嵌入模式下一切经构造参数（`skillDirectories`、`skillStore`、`tools`、`workspaceRoot`、`systemPrompt` 等）；环境变量解析只存在于参考应用 `apps/agentloop-app/src/main.ts`。
 
 ### 2.3 宿主装配形态
 
 ```ts
 import {
   AppDatabase, RunService, SkillService, LlmProviderRegistry, createWebTools,
-} from "@yourorg/agentloop";
+} from "@zhujun/agentloop";
 import { contractTools } from "@team/contract-tools";
 import { HostAppSkillStore } from "./host-skill-store";   // 宿主自己的 DAL 实现
 
@@ -81,7 +85,7 @@ const providers = await LlmProviderRegistry.fromConfigFile("./llm-providers.json
 const skills = new SkillService(database, {
   // 内核自带 skills/（随包路径）+ 团队自己的目录共存（P0-1）
   skillDirectories: [
-    resolve(require.resolve("@yourorg/agentloop/package.json"), "../skills"),
+    resolve(require.resolve("@zhujun/agentloop/package.json"), "../skills"),
     "/srv/team-app/skills",
   ],
   // skill 持久化交给宿主数据访问层（P0-3；缺省则用内核默认 SQLite 存储）
@@ -261,14 +265,14 @@ export interface DiscoveredSkillRecord {
 
 | 文件 | 改动 |
 |---|---|
-| `package.json` | `"exports": { ".": "./src/index.ts", "./server": "./src/server.ts" }`；`"files": ["src", "skills", "README.md", "THIRD_PARTY_NOTICES.md"]`；发布前去除 `"private": true`；`engines.node: ">=26"` 保留并写明原因（TS 源码直发，Node 原生类型剥离运行） |
-| `src/index.ts:1-2` | `AuthService` 导出迁移到 server 出口；主入口保留一行过渡 re-export，注释标注迁移目标 |
-| `src/index.ts:46` | `createAgentLoopServer` 同上处理 |
-| 新增 `src/server.ts` | re-export server 层全部符号，作为正式出口 |
+| `packages/agentloop/package.json` | `"exports"` 指向编译产物（`.` → `dist/index.js+d.ts`）；`"files": ["dist", "skills", "README.md", "THIRD_PARTY_NOTICES.md"]`；发布前去除 `"private": true` |
+| `packages/agentloop/tsconfig.json` | TS7 构建：`rewriteRelativeImportExtensions` 重写 `.ts` 相对导入、输出声明文件；构建即全量类型检查 |
+| `packages/agentloop/src/index.ts` | 只导出 headless 内核 API；`AuthService`、`createAgentLoopServer` 等 HTTP/auth 能力归 `apps/agentloop-app` |
+> 实施修正：原方案"TS 源码直发"被 Node 的 node_modules 类型剥离禁令否决，详见篇首"实施期发现"。
 
 **发布渠道**：私有 npm registry 为主，git tag 兜底，monorepo `file:` 用于联调。
 
-**验收**：`npm pack` tarball 在干净目录 `file:` 安装后跑通 §2.3 裁剪版装配脚本；`import("agentloop")` 与 `import("agentloop/server")` 均可解析。
+**验收**：`npm pack` tarball 在干净目录 `file:` 安装后跑通 §2.3 裁剪版装配脚本；`import("@zhujun/agentloop")` 可解析，参考应用通过同一包入口使用内核。
 
 ### P0-6 集成契约文档 `docs/INTEGRATION.md`
 
@@ -276,7 +280,7 @@ export interface DiscoveredSkillRecord {
 1. 五分钟装配示例（§2.3 完整版）
 2. **userId 契约**：不透明字符串、宿主全权负责鉴权与授权
 3. **持久化契约**：两级抽象（`SqlConnection` / `SkillStore` SPI）、默认 schema 归属、SQLite 单写者限制、宿主 DAL 实现指引与 conflict 语义
-4. **SKILL.md 契约**：frontmatter 必填字段、`agentloop:` metadata 字段表（roles / artifactKinds / sourceKinds / qaKinds / executionProfiles 枚举）、无 metadata = 不会参选规划的行为说明
+4. **SKILL.md 契约**：frontmatter 必填字段、`agentloop:` metadata 字段表（roles / artifactKinds / sourceKinds / qaKinds / executionProfiles 枚举；权威定义位于 `packages/agentloop/src/skills/agentloop-metadata.ts`）、无 metadata = 不会参选规划的行为说明
 5. **RuntimeTool 规范**：接口字段语义（executionMode / replaySafe / timeoutMs / maxResultCharacters）、危险工具门控、`web-tools.ts` 参考实现
 6. **MCP 注册规范**（P1-1 落地后）：服务配置、工具命名、风险分级、超时与截断
 7. **配置与密钥专章**（§P0-7）：模型四条路、搜索 key 注入、apiKeyEnv 引用模式、environment 自定义密钥源、密钥红线
@@ -362,10 +366,10 @@ interface McpServerRegistration {
 ## 5. 兼容性承诺
 
 1. `SKILL_DIRECTORY` 单数环境变量与 `skillDirectory` 选项持续生效
-2. 主入口既有导出符号不删除（auth/server 符号保留过渡期 re-export）
+2. 内核包主入口只保留 headless 内核导出；HTTP/auth 由参考应用自行提供
 3. 全部现有测试（`npm test`）零修改通过
-4. 未配置新选项时（`skillStore`/`mcpServers`/钩子等），运行时行为与改造前逐字节一致
-5. 内核 schema 变更仅限**新增** `discovered_skills` 表，不改既有表
+4. 未配置新选项时（`skillStore`/钩子/多目录等），运行时行为与改造前逐字节一致
+5. 内核 schema 变更：新增 `discovered_skills` 表；旧库六张业务表前向重建以解除 users 外键（数据全量保留）
 
 ## 6. 实施顺序
 
@@ -388,7 +392,7 @@ interface McpServerRegistration {
 | # | 事项 | 建议 |
 |---|---|---|
 | 1 | 跨目录重名策略 | fail-closed（§P0-1） |
-| 2 | 包名 | `@yourorg/agentloop`（占位，定正式 scope） |
+| 2 | 包名 | `@zhujun/agentloop`（占位，定正式 scope） |
 | 3 | 发布渠道 | 私有 registry 优先，git tag 兜底 |
 | 4 | 是否允许终端用户自建内联 Skill 与全局共存 | 默认允许；严格领域由宿主设 `allowInlineSkills: false` |
 | 5 | 内联创建 metadata 强校验是否默认开启 | 默认关闭，集成文档强烈建议开启 |

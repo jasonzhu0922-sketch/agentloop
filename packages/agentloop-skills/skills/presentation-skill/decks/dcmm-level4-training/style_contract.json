@@ -1,0 +1,5811 @@
+{
+  "workspace_version": 2,
+  "deck_title": "DCMM 4级（量化管理级）培训课件",
+  "deck_slug": "dcmm-4",
+  "build": {
+    "style_preset": "executive-clinical",
+    "font_pair": null,
+    "palette_key": null,
+    "output_pptx": "build/dcmm-4.pptx",
+    "qa_dir": "build/qa",
+    "qa_report": "build/qa/report.json"
+  },
+  "layout_rules": {
+    "alignment_first": true,
+    "zero_overlap_required": true,
+    "title_subtitle_stack_dynamic": true,
+    "footer_safe_region_required": true,
+    "cards_use_measured_text_fit": true
+  },
+  "preset_tokens": {
+    "name": "executive-clinical",
+    "palette": {
+      "bg_primary": "F4F8FB",
+      "bg_dark": "071E3A",
+      "surface": "FFFFFF",
+      "text_primary": "0F172A",
+      "text_muted": "475569",
+      "accent_primary": "1493A4",
+      "accent_secondary": "F59E0B",
+      "line": "D5DEE8"
+    },
+    "typography": {
+      "title_max": 44,
+      "title_min": 34,
+      "section_max": 30,
+      "section_min": 24,
+      "body_max": 22,
+      "body_min": 15,
+      "caption_max": 14,
+      "caption_min": 11
+    },
+    "layout": {
+      "margin_x": 0.7,
+      "top_safe": 0.95,
+      "bottom_safe": 0.35,
+      "gutter": 0.28,
+      "rhythm": 0.24,
+      "rail_height": 0.1,
+      "radius_style": "rounded-rectangle",
+      "edge_tolerance": 0.06,
+      "gutter_tolerance": 0.06,
+      "max_density": 0.78,
+      "max_empty_ratio": 0.62
+    },
+    "allowed_layout_families": [
+      "hero-opener",
+      "card-grid",
+      "split-panel",
+      "timeline",
+      "process-flow",
+      "closing-summary"
+    ]
+  },
+  "style_reference": {
+    "catalog_version": "style_reference_catalog_v1",
+    "reference_id": "ref-exec-clinical-evidence-brief",
+    "reference_name": "Clinical Evidence Executive Brief",
+    "source_status": "synthetic_original_publish_safe",
+    "style_dna": "Quiet hospital-grade executive pages: large evidence headline, one controlled clinical accent, and clear implication blocks.",
+    "style_metric_profile": {
+      "density_level": "medium-high evidence brief",
+      "whitespace_ratio_target": 0.24,
+      "body_words_per_content_slide": [
+        34,
+        58
+      ],
+      "max_primary_objects": 3,
+      "visual_hierarchy": "chart or protocol table first, implication rail second, caveat/source always visible",
+      "evidence_object_mix": {
+        "chart": 0.34,
+        "table": 0.28,
+        "figure": 0.24,
+        "prose": 0.14
+      },
+      "source_burden": "high; compact source IDs on evidence slides plus editable references when needed",
+      "footer_posture": "source-line with report, cohort, n/r, or data-cut cues",
+      "artifact_bias": [
+        "editable clinical chart",
+        "protocol/status table",
+        "figure with implication rail"
+      ],
+      "readability_bias": [
+        "body 12-15 pt",
+        "caption 7.5-9 pt",
+        "avoid patient-detail prose blocks"
+      ],
+      "metric_profile_version": "style_reference_metric_profile_v1",
+      "style_preset": "executive-clinical",
+      "metric_signature": "2a4e8fc8cd294afcc74ce2b2fb87eca4946b280b6e83a27c67525251397beb8f"
+    },
+    "layout_playbook_version": "style_reference_layout_playbook_v1",
+    "preferred_variants": [
+      "title",
+      "chart",
+      "lab-run-results",
+      "comparison-2col",
+      "image-sidebar",
+      "table",
+      "standard"
+    ],
+    "starter_outline_version": "style_reference_starter_outline_v1"
+  },
+  "style_atom_context": {
+    "schema_version": "normal_workflow_atom_context_v1",
+    "route_id": "atom_composition",
+    "status": "resolved",
+    "decision": {
+      "status": "accepted",
+      "mode": "deterministic",
+      "reason": "Explicit/workspace preset remains primary; topic-aware atoms and composition grammar supply bounded treatment and rhythm choices."
+    },
+    "strict_json_instruction": "Use strict JSON only. Return no markdown, comments, or prose.",
+    "target_family": "executive-clinical",
+    "selection_basis": "requested_style_preset",
+    "slide_count": 8,
+    "topic_terms": [
+      "dcmm",
+      "不要都是文字",
+      "帮我做一个",
+      "生成pptx格式",
+      "设计好一点",
+      "评级的培训材料"
+    ],
+    "preferred_variants": [
+      "title",
+      "standard",
+      "flow",
+      "scientific-figure",
+      "chart",
+      "image-sidebar",
+      "comparison-2col",
+      "table",
+      "stats",
+      "kpi-hero",
+      "lab-run-results"
+    ],
+    "narrative_arc": [
+      "title",
+      "cohort",
+      "endpoints",
+      "outcomes",
+      "risk-benefit",
+      "decision"
+    ],
+    "deck_style_delta": {
+      "page_system": "clinical-rail",
+      "structural_motif": "clinical-stages",
+      "title_layout": "split-hero",
+      "footer_mode": "source-line",
+      "chart_treatment": "threshold-band",
+      "table_treatment": "readout-sidecar",
+      "figure_table_treatment": "figure-first",
+      "stats_mode": "feature-left",
+      "matrix_mode": "cards",
+      "summary_callout_mode": "lab-box",
+      "image_sidebar_mode": "evidence-mosaic",
+      "comparison_mode": "scorecard",
+      "header_mode": "lab-clean",
+      "visual_density": "medium",
+      "decorative_signals": [
+        "focus-box-right",
+        "wide-margin-quiet-page",
+        "eyebrow-tag-above-title"
+      ],
+      "arc_beats": [
+        "title",
+        "cohort",
+        "endpoints",
+        "outcomes",
+        "risk-benefit",
+        "decision"
+      ],
+      "style_seed_families": [
+        "executive-clinical"
+      ],
+      "composition_mode": "deterministic-fallback"
+    },
+    "design_brief_delta": {
+      "palette_signals": [
+        "status-accent"
+      ],
+      "typography_signals": [
+        "executive-headings"
+      ],
+      "layout_signals": [
+        "decision-readout",
+        "clinical-kpi-strip"
+      ],
+      "rhythm_signature": "evidence-brief-with-decision-strip",
+      "style_atom_composition": {
+        "schema_version": "style_atom_composition_v1",
+        "target_family": "executive-clinical",
+        "source_families": [
+          "executive-clinical"
+        ],
+        "composition_mode": "deterministic-fallback",
+        "topic_terms": [
+          "dcmm",
+          "不要都是文字",
+          "帮我做一个",
+          "生成pptx格式",
+          "设计好一点",
+          "评级的培训材料"
+        ],
+        "palette": "palette:status-accent",
+        "typography": "typography:executive-headings",
+        "layout_motifs": [
+          "layout_motif:decision-readout",
+          "layout_motif:clinical-kpi-strip"
+        ],
+        "chart_treatment": "chart_treatment:threshold-band",
+        "table_treatment": "table_treatment:readout-sidecar",
+        "header_treatment": "header_treatment:lab-clean",
+        "footer_treatment": "footer_treatment:source-line",
+        "decorative_motifs": [
+          "decorative_motif:focus-box-right",
+          "decorative_motif:wide-margin-quiet-page",
+          "decorative_motif:eyebrow-tag-above-title"
+        ],
+        "density": "density:medium",
+        "arc_beats": [
+          "arc_beat:title",
+          "arc_beat:cohort",
+          "arc_beat:endpoints",
+          "arc_beat:outcomes",
+          "arc_beat:risk-benefit",
+          "arc_beat:decision"
+        ],
+        "rhythm_signature": "rhythm_signature:evidence-brief-with-decision-strip",
+        "preferred_variants": [
+          "title",
+          "kpi-hero",
+          "stats",
+          "lab-run-results",
+          "comparison-2col",
+          "table",
+          "scientific-figure"
+        ],
+        "artifact_density": 0.85
+      }
+    },
+    "style_atom_composition": {
+      "schema_version": "style_atom_composition_v1",
+      "target_family": "executive-clinical",
+      "source_families": [
+        "executive-clinical"
+      ],
+      "composition_mode": "deterministic-fallback",
+      "topic_terms": [
+        "dcmm",
+        "不要都是文字",
+        "帮我做一个",
+        "生成pptx格式",
+        "设计好一点",
+        "评级的培训材料"
+      ],
+      "palette": "palette:status-accent",
+      "typography": "typography:executive-headings",
+      "layout_motifs": [
+        "layout_motif:decision-readout",
+        "layout_motif:clinical-kpi-strip"
+      ],
+      "chart_treatment": "chart_treatment:threshold-band",
+      "table_treatment": "table_treatment:readout-sidecar",
+      "header_treatment": "header_treatment:lab-clean",
+      "footer_treatment": "footer_treatment:source-line",
+      "decorative_motifs": [
+        "decorative_motif:focus-box-right",
+        "decorative_motif:wide-margin-quiet-page",
+        "decorative_motif:eyebrow-tag-above-title"
+      ],
+      "density": "density:medium",
+      "arc_beats": [
+        "arc_beat:title",
+        "arc_beat:cohort",
+        "arc_beat:endpoints",
+        "arc_beat:outcomes",
+        "arc_beat:risk-benefit",
+        "arc_beat:decision"
+      ],
+      "rhythm_signature": "rhythm_signature:evidence-brief-with-decision-strip",
+      "preferred_variants": [
+        "title",
+        "kpi-hero",
+        "stats",
+        "lab-run-results",
+        "comparison-2col",
+        "table",
+        "scientific-figure"
+      ],
+      "artifact_density": 0.85
+    },
+    "composition_grammar_route": {
+      "route_version": "composition_grammar_route_v1",
+      "catalog_version": "composition_grammar_catalog_v1",
+      "requested_variants": [],
+      "primary": {
+        "grammar_id": "clinical-care-pathway",
+        "style_preset": "executive-clinical",
+        "style_presets": [
+          "executive-clinical"
+        ],
+        "family": "clinical-executive",
+        "lane": "pathway-led",
+        "description": "Move from population and care state through evidence gates to a bounded clinical action.",
+        "rhythm_treatments": [
+          "title",
+          "section",
+          "evidence",
+          "comparison",
+          "data",
+          "decision",
+          "references"
+        ],
+        "rhythm_pattern": [
+          "title",
+          "standard",
+          "scientific-figure",
+          "comparison-2col",
+          "chart",
+          "flow",
+          "table"
+        ],
+        "role_variant_map": {
+          "title": "title",
+          "section": "standard",
+          "evidence": "scientific-figure",
+          "comparison": "comparison-2col",
+          "data": "chart",
+          "decision": "flow",
+          "references": "table"
+        },
+        "preferred_variants": [
+          "title",
+          "standard",
+          "flow",
+          "scientific-figure",
+          "chart",
+          "image-sidebar",
+          "comparison-2col",
+          "table",
+          "stats"
+        ],
+        "renderer_bias": {
+          "page_system": "clinical-rail",
+          "structural_motif": "clinical-stages",
+          "title_layout": "split-hero",
+          "footer_mode": "source-line",
+          "chart_treatment": "threshold-band",
+          "table_treatment": "readout-sidecar",
+          "figure_table_treatment": "figure-first",
+          "stats_mode": "feature-left",
+          "matrix_mode": "cards",
+          "summary_callout_mode": "lab-box",
+          "image_sidebar_mode": "evidence-mosaic",
+          "comparison_mode": "scorecard"
+        },
+        "renderer_role_systems_v1": {
+          "schema_version": "renderer_role_systems_v1",
+          "catalog_version": "taste_grammar_catalog_v1",
+          "composition_grammar_id": "clinical-care-pathway",
+          "style_preset": "executive-clinical",
+          "narrative_arc": {
+            "arc_id": "population-state-evidence-care-action",
+            "stages": [
+              "population",
+              "current state",
+              "evidence gate",
+              "care options",
+              "action",
+              "monitoring"
+            ]
+          },
+          "density": {
+            "level": "medium-high",
+            "distribution": "stage bands with one dominant clinical evidence object"
+          },
+          "grid": {
+            "columns": 12,
+            "gutter": "0.22-0.28in",
+            "anchor": "care-stage rail and outcome field"
+          },
+          "reading_path": [
+            "patient or cohort state",
+            "evidence gate",
+            "care decision",
+            "monitoring implication"
+          ],
+          "preferred_role_variants": {
+            "title": [
+              "title"
+            ],
+            "section": [
+              "standard",
+              "flow"
+            ],
+            "evidence": [
+              "scientific-figure",
+              "chart",
+              "image-sidebar"
+            ],
+            "comparison": [
+              "comparison-2col",
+              "table"
+            ],
+            "data": [
+              "chart",
+              "table",
+              "stats"
+            ],
+            "decision": [
+              "flow",
+              "table"
+            ],
+            "references": [
+              "table"
+            ]
+          },
+          "invariant_moves": [
+            "Identify the patient or cohort state before discussing intervention.",
+            "Separate evidence threshold from care recommendation.",
+            "Make safety, monitoring, and escalation explicit."
+          ],
+          "forbidden_moves": [
+            "Do not imply clinical certainty beyond the cited evidence.",
+            "Do not hide contraindications or unresolved safety signals."
+          ],
+          "title_system_id": "title-clinical-status",
+          "section_system_id": "section-care-stage",
+          "evidence_system_id": "evidence-clinical-cohort",
+          "comparison_system_id": "comparison-care-options",
+          "data_system_id": "data-clinical-outcomes",
+          "decision_system_id": "decision-care-gate",
+          "references_system_id": "references-clinical-evidence"
+        },
+        "renderer_role_contracts_v2": {
+          "schema_version": "renderer_role_contracts_v2",
+          "catalog_version": "renderer_role_contract_catalog_v2",
+          "composition_grammar_id": "clinical-care-pathway",
+          "style_preset": "executive-clinical",
+          "supported_layout_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "roles": {
+            "title": {
+              "system_id": "title-clinical-status",
+              "layout_family": "clinical-status",
+              "coordinate_space": "slide",
+              "reading_order": [
+                "status",
+                "headline",
+                "support",
+                "pathway"
+              ],
+              "anchor_slot": "status",
+              "density": {
+                "level": "medium",
+                "max_items": 4
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "title-clinical-status"
+              },
+              "slots": {
+                "status": [
+                  0.04,
+                  0.08,
+                  0.12,
+                  0.78
+                ],
+                "headline": [
+                  0.22,
+                  0.18,
+                  0.55,
+                  0.28
+                ],
+                "support": [
+                  0.22,
+                  0.54,
+                  0.5,
+                  0.14
+                ],
+                "pathway": [
+                  0.82,
+                  0.16,
+                  0.14,
+                  0.66
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "title"
+            },
+            "section": {
+              "system_id": "section-care-stage",
+              "layout_family": "care-stage",
+              "coordinate_space": "slide",
+              "reading_order": [
+                "stage",
+                "headline",
+                "support"
+              ],
+              "anchor_slot": "stage",
+              "density": {
+                "level": "medium",
+                "max_items": 3
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "section-care-stage"
+              },
+              "slots": {
+                "stage": [
+                  0.05,
+                  0.18,
+                  0.14,
+                  0.58
+                ],
+                "headline": [
+                  0.25,
+                  0.24,
+                  0.6,
+                  0.24
+                ],
+                "support": [
+                  0.25,
+                  0.58,
+                  0.54,
+                  0.16
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "section"
+            },
+            "evidence": {
+              "system_id": "evidence-clinical-cohort",
+              "layout_family": "clinical-cohort",
+              "coordinate_space": "body",
+              "reading_order": [
+                "evidence_0",
+                "evidence_1",
+                "evidence_2"
+              ],
+              "anchor_slot": "evidence_0",
+              "density": {
+                "level": "medium-high",
+                "max_items": 5
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "evidence-clinical-cohort"
+              },
+              "slots": {
+                "evidence_0": [
+                  0.0,
+                  0.0,
+                  1.0,
+                  0.22
+                ],
+                "evidence_1": [
+                  0.0,
+                  0.3,
+                  0.47,
+                  0.7
+                ],
+                "evidence_2": [
+                  0.53,
+                  0.3,
+                  0.47,
+                  0.7
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "evidence"
+            },
+            "comparison": {
+              "system_id": "comparison-care-options",
+              "layout_family": "care-options",
+              "coordinate_space": "body",
+              "reading_order": [
+                "option_0",
+                "option_1",
+                "verdict"
+              ],
+              "anchor_slot": "option_0",
+              "density": {
+                "level": "medium-high",
+                "max_items": 7
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "comparison-care-options"
+              },
+              "slots": {
+                "option_0": [
+                  0.0,
+                  0.0,
+                  1.0,
+                  0.35
+                ],
+                "option_1": [
+                  0.0,
+                  0.43,
+                  1.0,
+                  0.35
+                ],
+                "verdict": [
+                  0.48,
+                  0.84,
+                  0.52,
+                  0.16
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "comparison"
+            },
+            "chart": {
+              "system_id": "data-clinical-outcomes",
+              "layout_family": "clinical-outcomes",
+              "coordinate_space": "body",
+              "reading_order": [
+                "insight",
+                "facts",
+                "chart",
+                "register"
+              ],
+              "anchor_slot": "chart",
+              "density": {
+                "level": "medium-high",
+                "max_items": 5
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "data-clinical-outcomes"
+              },
+              "slots": {
+                "insight": [
+                  0.0,
+                  0.0,
+                  1.0,
+                  0.2
+                ],
+                "chart": [
+                  0.0,
+                  0.28,
+                  0.66,
+                  0.72
+                ],
+                "facts": [
+                  0.72,
+                  0.28,
+                  0.28,
+                  0.38
+                ],
+                "register": [
+                  0.72,
+                  0.7,
+                  0.28,
+                  0.3
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "chart"
+            },
+            "table": {
+              "system_id": "table-clinical-cohort",
+              "layout_family": "clinical-cohort-ledger",
+              "coordinate_space": "body",
+              "reading_order": [
+                "index",
+                "table",
+                "readout"
+              ],
+              "anchor_slot": "table",
+              "density": {
+                "level": "medium-high",
+                "max_items": 9
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "data-clinical-outcomes"
+              },
+              "slots": {
+                "index": [
+                  0.0,
+                  0.0,
+                  0.17,
+                  1.0
+                ],
+                "table": [
+                  0.22,
+                  0.0,
+                  0.78,
+                  0.72
+                ],
+                "readout": [
+                  0.22,
+                  0.8,
+                  0.78,
+                  0.2
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "table"
+            },
+            "decision": {
+              "system_id": "decision-care-gate",
+              "layout_family": "care-gate",
+              "coordinate_space": "body",
+              "reading_order": [
+                "decision_0",
+                "decision_1",
+                "decision_2",
+                "decision_3",
+                "commitment"
+              ],
+              "anchor_slot": "commitment",
+              "density": {
+                "level": "medium-high",
+                "max_items": 5
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "decision-care-gate"
+              },
+              "slots": {
+                "decision_0": [
+                  0.0,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "decision_1": [
+                  0.26,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "decision_2": [
+                  0.52,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "decision_3": [
+                  0.78,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "commitment": [
+                  0.26,
+                  0.76,
+                  0.74,
+                  0.2
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "decision"
+            },
+            "references": {
+              "system_id": "references-clinical-evidence",
+              "layout_family": "clinical-evidence",
+              "coordinate_space": "body",
+              "reading_order": [
+                "index",
+                "register",
+                "notes"
+              ],
+              "anchor_slot": "register",
+              "density": {
+                "level": "medium-high",
+                "max_items": 10
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "references-clinical-evidence"
+              },
+              "slots": {
+                "index": [
+                  0.0,
+                  0.0,
+                  0.17,
+                  1.0
+                ],
+                "register": [
+                  0.22,
+                  0.0,
+                  0.78,
+                  0.68
+                ],
+                "notes": [
+                  0.22,
+                  0.76,
+                  0.78,
+                  0.24
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "references"
+            }
+          }
+        },
+        "title_system_id": "title-clinical-status",
+        "section_system_id": "section-care-stage",
+        "evidence_system_id": "evidence-clinical-cohort",
+        "comparison_system_id": "comparison-care-options",
+        "data_system_id": "data-clinical-outcomes",
+        "decision_system_id": "decision-care-gate",
+        "references_system_id": "references-clinical-evidence",
+        "narrative_arc": {
+          "arc_id": "population-state-evidence-care-action",
+          "stages": [
+            "population",
+            "current state",
+            "evidence gate",
+            "care options",
+            "action",
+            "monitoring"
+          ]
+        },
+        "density": {
+          "level": "medium-high",
+          "distribution": "stage bands with one dominant clinical evidence object"
+        },
+        "grid": {
+          "columns": 12,
+          "gutter": "0.22-0.28in",
+          "anchor": "care-stage rail and outcome field"
+        },
+        "reading_path": [
+          "patient or cohort state",
+          "evidence gate",
+          "care decision",
+          "monitoring implication"
+        ],
+        "preferred_role_variants": {
+          "title": [
+            "title"
+          ],
+          "section": [
+            "standard",
+            "flow"
+          ],
+          "evidence": [
+            "scientific-figure",
+            "chart",
+            "image-sidebar"
+          ],
+          "comparison": [
+            "comparison-2col",
+            "table"
+          ],
+          "data": [
+            "chart",
+            "table",
+            "stats"
+          ],
+          "decision": [
+            "flow",
+            "table"
+          ],
+          "references": [
+            "table"
+          ]
+        },
+        "invariant_moves": [
+          "Identify the patient or cohort state before discussing intervention.",
+          "Separate evidence threshold from care recommendation.",
+          "Make safety, monitoring, and escalation explicit."
+        ],
+        "forbidden_moves": [
+          "Do not imply clinical certainty beyond the cited evidence.",
+          "Do not hide contraindications or unresolved safety signals."
+        ],
+        "distinctive_moves": [
+          "Identify the patient or cohort state before discussing intervention.",
+          "Separate evidence threshold from care recommendation.",
+          "Make safety, monitoring, and escalation explicit."
+        ],
+        "avoid": [
+          "Do not imply clinical certainty beyond the cited evidence.",
+          "Do not hide contraindications or unresolved safety signals."
+        ],
+        "mix_rule": "Keep one composition grammar coherent across the deck. Borrow isolated treatment ideas, but do not merge complete role systems or page systems.",
+        "max_consecutive_same_variant": 2,
+        "structural_signature": "6a974f3362445ad34b601e15c8d68be6140c70e3fd720987bf31ca4aaca9c854",
+        "route_score": 100,
+        "selection_reasons": [
+          "requested preset grammar"
+        ]
+      },
+      "alternatives": [
+        {
+          "grammar_id": "consulting-answer-pyramid",
+          "style_preset": "data-heavy-boardroom",
+          "style_presets": [
+            "data-heavy-boardroom",
+            "arctic-minimal"
+          ],
+          "family": "data-report",
+          "lane": "answer-led",
+          "description": "Lead with the answer, prove it with structured exhibits, and close on ownership.",
+          "rhythm_treatments": [
+            "title",
+            "section",
+            "evidence",
+            "comparison",
+            "data",
+            "decision",
+            "references"
+          ],
+          "rhythm_pattern": [
+            "title",
+            "standard",
+            "chart",
+            "comparison-2col",
+            "chart",
+            "table",
+            "table"
+          ],
+          "role_variant_map": {
+            "title": "title",
+            "section": "standard",
+            "evidence": "chart",
+            "comparison": "comparison-2col",
+            "data": "chart",
+            "decision": "table",
+            "references": "table"
+          },
+          "preferred_variants": [
+            "title",
+            "standard",
+            "kpi-hero",
+            "chart",
+            "table",
+            "comparison-2col",
+            "matrix",
+            "stats"
+          ],
+          "renderer_bias": {
+            "page_system": "board-ledger",
+            "structural_motif": "board-index",
+            "title_layout": "split-hero",
+            "footer_mode": "source-line",
+            "chart_treatment": "facts-right",
+            "table_treatment": "compact-ledger",
+            "figure_table_treatment": "table-first",
+            "stats_mode": "policy-bands",
+            "matrix_mode": "open-quadrants",
+            "summary_callout_mode": "default",
+            "image_sidebar_mode": "analysis-rail",
+            "comparison_mode": "scorecard"
+          },
+          "renderer_role_systems_v1": {
+            "schema_version": "renderer_role_systems_v1",
+            "catalog_version": "taste_grammar_catalog_v1",
+            "composition_grammar_id": "consulting-answer-pyramid",
+            "style_preset": "data-heavy-boardroom",
+            "narrative_arc": {
+              "arc_id": "answer-context-proof-action",
+              "stages": [
+                "answer",
+                "context",
+                "proof",
+                "tradeoffs",
+                "action"
+              ]
+            },
+            "density": {
+              "level": "high",
+              "distribution": "dense exhibits with short interpretive headlines"
+            },
+            "grid": {
+              "columns": 12,
+              "gutter": "0.22-0.28in",
+              "anchor": "left claim rail and aligned exhibit edge"
+            },
+            "reading_path": [
+              "headline answer",
+              "primary exhibit",
+              "implication and owner"
+            ],
+            "preferred_role_variants": {
+              "title": [
+                "title"
+              ],
+              "section": [
+                "standard",
+                "kpi-hero"
+              ],
+              "evidence": [
+                "chart",
+                "table"
+              ],
+              "comparison": [
+                "comparison-2col",
+                "matrix"
+              ],
+              "data": [
+                "chart",
+                "table",
+                "stats"
+              ],
+              "decision": [
+                "table",
+                "standard"
+              ],
+              "references": [
+                "table"
+              ]
+            },
+            "invariant_moves": [
+              "State the governing answer before supporting detail.",
+              "Attach every exhibit to an explicit implication.",
+              "End with a named decision, owner, or next action."
+            ],
+            "forbidden_moves": [
+              "Do not delay the recommendation until the final slide.",
+              "Do not use decorative cards as a substitute for evidence hierarchy."
+            ],
+            "title_system_id": "title-answer-ledger",
+            "section_system_id": "section-claim-chapters",
+            "evidence_system_id": "evidence-proof-stack",
+            "comparison_system_id": "comparison-option-scorecard",
+            "data_system_id": "data-executive-exhibit",
+            "decision_system_id": "decision-owner-commitment",
+            "references_system_id": "references-executive-notes"
+          },
+          "renderer_role_contracts_v2": {
+            "schema_version": "renderer_role_contracts_v2",
+            "catalog_version": "renderer_role_contract_catalog_v2",
+            "composition_grammar_id": "consulting-answer-pyramid",
+            "style_preset": "data-heavy-boardroom",
+            "supported_layout_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "roles": {
+              "title": {
+                "system_id": "title-answer-ledger",
+                "layout_family": "answer-ledger",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "headline",
+                  "support",
+                  "anchor"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "medium",
+                  "max_items": 3
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "title-answer-ledger"
+                },
+                "slots": {
+                  "headline": [
+                    0.18,
+                    0.17,
+                    0.52,
+                    0.31
+                  ],
+                  "support": [
+                    0.18,
+                    0.55,
+                    0.42,
+                    0.14
+                  ],
+                  "anchor": [
+                    0.76,
+                    0.12,
+                    0.2,
+                    0.76
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "title"
+              },
+              "section": {
+                "system_id": "section-claim-chapters",
+                "layout_family": "claim-chapter",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "index",
+                  "headline",
+                  "support"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "low",
+                  "max_items": 3
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "section-claim-chapters"
+                },
+                "slots": {
+                  "index": [
+                    0.04,
+                    0.18,
+                    0.12,
+                    0.18
+                  ],
+                  "headline": [
+                    0.2,
+                    0.2,
+                    0.56,
+                    0.32
+                  ],
+                  "support": [
+                    0.2,
+                    0.58,
+                    0.48,
+                    0.18
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "section"
+              },
+              "evidence": {
+                "system_id": "evidence-proof-stack",
+                "layout_family": "proof-stack",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "evidence_0",
+                  "evidence_1",
+                  "evidence_2",
+                  "evidence_3"
+                ],
+                "anchor_slot": "evidence_0",
+                "density": {
+                  "level": "high",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "evidence-proof-stack"
+                },
+                "slots": {
+                  "evidence_0": [
+                    0.0,
+                    0.0,
+                    0.3,
+                    1.0
+                  ],
+                  "evidence_1": [
+                    0.35,
+                    0.0,
+                    0.65,
+                    0.29
+                  ],
+                  "evidence_2": [
+                    0.35,
+                    0.355,
+                    0.65,
+                    0.29
+                  ],
+                  "evidence_3": [
+                    0.35,
+                    0.71,
+                    0.65,
+                    0.29
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "evidence"
+              },
+              "comparison": {
+                "system_id": "comparison-option-scorecard",
+                "layout_family": "criteria-scorecard",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "option_0",
+                  "option_1",
+                  "verdict"
+                ],
+                "anchor_slot": "option_0",
+                "density": {
+                  "level": "high",
+                  "max_items": 7
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "comparison-option-scorecard"
+                },
+                "slots": {
+                  "option_0": [
+                    0.0,
+                    0.0,
+                    0.47,
+                    0.62
+                  ],
+                  "option_1": [
+                    0.53,
+                    0.0,
+                    0.47,
+                    0.62
+                  ],
+                  "verdict": [
+                    0.0,
+                    0.7,
+                    1.0,
+                    0.24
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "comparison"
+              },
+              "chart": {
+                "system_id": "data-executive-exhibit",
+                "layout_family": "executive-exhibit",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "chart",
+                  "insight",
+                  "facts"
+                ],
+                "anchor_slot": "chart",
+                "density": {
+                  "level": "high",
+                  "max_items": 4
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-executive-exhibit"
+                },
+                "slots": {
+                  "chart": [
+                    0.0,
+                    0.0,
+                    0.72,
+                    1.0
+                  ],
+                  "insight": [
+                    0.77,
+                    0.0,
+                    0.23,
+                    0.42
+                  ],
+                  "facts": [
+                    0.77,
+                    0.49,
+                    0.23,
+                    0.51
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "chart"
+              },
+              "table": {
+                "system_id": "table-executive-ledger",
+                "layout_family": "executive-ledger",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "table",
+                  "readout"
+                ],
+                "anchor_slot": "table",
+                "density": {
+                  "level": "high",
+                  "max_items": 8
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-executive-exhibit"
+                },
+                "slots": {
+                  "table": [
+                    0.0,
+                    0.0,
+                    0.72,
+                    1.0
+                  ],
+                  "readout": [
+                    0.77,
+                    0.0,
+                    0.23,
+                    1.0
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "table"
+              },
+              "decision": {
+                "system_id": "decision-owner-commitment",
+                "layout_family": "owner-commitment",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "decision_0",
+                  "decision_1",
+                  "decision_2",
+                  "decision_3",
+                  "commitment"
+                ],
+                "anchor_slot": "commitment",
+                "density": {
+                  "level": "high",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "decision-owner-commitment"
+                },
+                "slots": {
+                  "decision_0": [
+                    0.0,
+                    0.0,
+                    0.46,
+                    0.34
+                  ],
+                  "decision_1": [
+                    0.54,
+                    0.0,
+                    0.46,
+                    0.34
+                  ],
+                  "decision_2": [
+                    0.0,
+                    0.42,
+                    0.46,
+                    0.3
+                  ],
+                  "decision_3": [
+                    0.54,
+                    0.42,
+                    0.46,
+                    0.3
+                  ],
+                  "commitment": [
+                    0.0,
+                    0.8,
+                    1.0,
+                    0.2
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "decision"
+              },
+              "references": {
+                "system_id": "references-executive-notes",
+                "layout_family": "executive-notes",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "register",
+                  "notes"
+                ],
+                "anchor_slot": "register",
+                "density": {
+                  "level": "high",
+                  "max_items": 10
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "references-executive-notes"
+                },
+                "slots": {
+                  "register": [
+                    0.0,
+                    0.0,
+                    0.74,
+                    1.0
+                  ],
+                  "notes": [
+                    0.79,
+                    0.0,
+                    0.21,
+                    1.0
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "references"
+              }
+            }
+          },
+          "title_system_id": "title-answer-ledger",
+          "section_system_id": "section-claim-chapters",
+          "evidence_system_id": "evidence-proof-stack",
+          "comparison_system_id": "comparison-option-scorecard",
+          "data_system_id": "data-executive-exhibit",
+          "decision_system_id": "decision-owner-commitment",
+          "references_system_id": "references-executive-notes",
+          "narrative_arc": {
+            "arc_id": "answer-context-proof-action",
+            "stages": [
+              "answer",
+              "context",
+              "proof",
+              "tradeoffs",
+              "action"
+            ]
+          },
+          "density": {
+            "level": "high",
+            "distribution": "dense exhibits with short interpretive headlines"
+          },
+          "grid": {
+            "columns": 12,
+            "gutter": "0.22-0.28in",
+            "anchor": "left claim rail and aligned exhibit edge"
+          },
+          "reading_path": [
+            "headline answer",
+            "primary exhibit",
+            "implication and owner"
+          ],
+          "preferred_role_variants": {
+            "title": [
+              "title"
+            ],
+            "section": [
+              "standard",
+              "kpi-hero"
+            ],
+            "evidence": [
+              "chart",
+              "table"
+            ],
+            "comparison": [
+              "comparison-2col",
+              "matrix"
+            ],
+            "data": [
+              "chart",
+              "table",
+              "stats"
+            ],
+            "decision": [
+              "table",
+              "standard"
+            ],
+            "references": [
+              "table"
+            ]
+          },
+          "invariant_moves": [
+            "State the governing answer before supporting detail.",
+            "Attach every exhibit to an explicit implication.",
+            "End with a named decision, owner, or next action."
+          ],
+          "forbidden_moves": [
+            "Do not delay the recommendation until the final slide.",
+            "Do not use decorative cards as a substitute for evidence hierarchy."
+          ],
+          "distinctive_moves": [
+            "State the governing answer before supporting detail.",
+            "Attach every exhibit to an explicit implication.",
+            "End with a named decision, owner, or next action."
+          ],
+          "avoid": [
+            "Do not delay the recommendation until the final slide.",
+            "Do not use decorative cards as a substitute for evidence hierarchy."
+          ],
+          "mix_rule": "Keep one composition grammar coherent across the deck. Borrow isolated treatment ideas, but do not merge complete role systems or page systems.",
+          "max_consecutive_same_variant": 2,
+          "structural_signature": "1c5d82610a55e56e92f80271ccc4b11f606294363eae7821e74fe2489726c4b6",
+          "route_score": 0,
+          "selection_reasons": [
+            "stable catalog fallback"
+          ]
+        },
+        {
+          "grammar_id": "editorial-spread",
+          "style_preset": "editorial-minimal",
+          "style_presets": [
+            "editorial-minimal",
+            "paper-journal"
+          ],
+          "family": "editorial-report",
+          "lane": "narrative-led",
+          "description": "Use editorial pacing, strong hierarchy, and selective evidence to build a readable argument.",
+          "rhythm_treatments": [
+            "title",
+            "section",
+            "evidence",
+            "comparison",
+            "data",
+            "decision",
+            "references"
+          ],
+          "rhythm_pattern": [
+            "title",
+            "standard",
+            "image-sidebar",
+            "split",
+            "chart",
+            "standard",
+            "table"
+          ],
+          "role_variant_map": {
+            "title": "title",
+            "section": "standard",
+            "evidence": "image-sidebar",
+            "comparison": "split",
+            "data": "chart",
+            "decision": "standard",
+            "references": "table"
+          },
+          "preferred_variants": [
+            "title",
+            "standard",
+            "generated-image",
+            "image-sidebar",
+            "scientific-figure",
+            "split",
+            "comparison-2col",
+            "chart",
+            "table"
+          ],
+          "renderer_bias": {
+            "page_system": "editorial-field",
+            "structural_motif": "editorial-rule",
+            "title_layout": "broadsheet",
+            "footer_mode": "standard",
+            "chart_treatment": "minimal",
+            "table_treatment": "journal-grid",
+            "figure_table_treatment": "image-sidebar",
+            "stats_mode": "feature-left",
+            "matrix_mode": "open-quadrants",
+            "summary_callout_mode": "default",
+            "image_sidebar_mode": "editorial-atlas",
+            "comparison_mode": "open-columns"
+          },
+          "renderer_role_systems_v1": {
+            "schema_version": "renderer_role_systems_v1",
+            "catalog_version": "taste_grammar_catalog_v1",
+            "composition_grammar_id": "editorial-spread",
+            "style_preset": "editorial-minimal",
+            "narrative_arc": {
+              "arc_id": "premise-scene-evidence-turn-close",
+              "stages": [
+                "premise",
+                "scene",
+                "evidence",
+                "turn",
+                "implication",
+                "close"
+              ]
+            },
+            "density": {
+              "level": "medium",
+              "distribution": "alternating open spreads and evidence-rich features"
+            },
+            "grid": {
+              "columns": 10,
+              "gutter": "0.24-0.32in",
+              "anchor": "masthead baseline and asymmetric feature column"
+            },
+            "reading_path": [
+              "editorial headline",
+              "feature object",
+              "caption or annotation",
+              "closing implication"
+            ],
+            "preferred_role_variants": {
+              "title": [
+                "title"
+              ],
+              "section": [
+                "standard",
+                "generated-image"
+              ],
+              "evidence": [
+                "image-sidebar",
+                "generated-image",
+                "scientific-figure"
+              ],
+              "comparison": [
+                "split",
+                "comparison-2col"
+              ],
+              "data": [
+                "chart",
+                "table"
+              ],
+              "decision": [
+                "standard"
+              ],
+              "references": [
+                "table"
+              ]
+            },
+            "invariant_moves": [
+              "Alternate open narrative space with denser proof moments.",
+              "Use captions and annotations to connect visuals to the argument.",
+              "Keep one clear editorial turn per section."
+            ],
+            "forbidden_moves": [
+              "Do not repeat the same card grid across consecutive slides.",
+              "Do not use decorative imagery without an explanatory role."
+            ],
+            "title_system_id": "title-editorial-masthead",
+            "section_system_id": "section-editorial-folio",
+            "evidence_system_id": "evidence-captioned-feature",
+            "comparison_system_id": "comparison-editorial-columns",
+            "data_system_id": "data-annotated-graphic",
+            "decision_system_id": "decision-editorial-takeaway",
+            "references_system_id": "references-editorial-notes"
+          },
+          "renderer_role_contracts_v2": {
+            "schema_version": "renderer_role_contracts_v2",
+            "catalog_version": "renderer_role_contract_catalog_v2",
+            "composition_grammar_id": "editorial-spread",
+            "style_preset": "editorial-minimal",
+            "supported_layout_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "roles": {
+              "title": {
+                "system_id": "title-editorial-masthead",
+                "layout_family": "editorial-masthead",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "masthead",
+                  "headline",
+                  "support",
+                  "folio"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "medium",
+                  "max_items": 4
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "title-editorial-masthead"
+                },
+                "slots": {
+                  "masthead": [
+                    0.05,
+                    0.06,
+                    0.9,
+                    0.1
+                  ],
+                  "headline": [
+                    0.08,
+                    0.24,
+                    0.62,
+                    0.34
+                  ],
+                  "support": [
+                    0.08,
+                    0.66,
+                    0.48,
+                    0.14
+                  ],
+                  "folio": [
+                    0.82,
+                    0.24,
+                    0.12,
+                    0.56
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "title"
+              },
+              "section": {
+                "system_id": "section-editorial-folio",
+                "layout_family": "editorial-folio",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "folio",
+                  "headline",
+                  "support"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "low",
+                  "max_items": 3
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "section-editorial-folio"
+                },
+                "slots": {
+                  "folio": [
+                    0.05,
+                    0.12,
+                    0.14,
+                    0.72
+                  ],
+                  "headline": [
+                    0.27,
+                    0.26,
+                    0.62,
+                    0.26
+                  ],
+                  "support": [
+                    0.27,
+                    0.62,
+                    0.48,
+                    0.15
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "section"
+              },
+              "evidence": {
+                "system_id": "evidence-captioned-feature",
+                "layout_family": "captioned-feature",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "evidence_0",
+                  "evidence_1",
+                  "evidence_2",
+                  "evidence_3"
+                ],
+                "anchor_slot": "evidence_0",
+                "density": {
+                  "level": "medium",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "evidence-captioned-feature"
+                },
+                "slots": {
+                  "evidence_0": [
+                    0.0,
+                    0.0,
+                    0.57,
+                    1.0
+                  ],
+                  "evidence_1": [
+                    0.64,
+                    0.0,
+                    0.36,
+                    0.28
+                  ],
+                  "evidence_2": [
+                    0.64,
+                    0.36,
+                    0.36,
+                    0.28
+                  ],
+                  "evidence_3": [
+                    0.64,
+                    0.72,
+                    0.36,
+                    0.28
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "evidence"
+              },
+              "comparison": {
+                "system_id": "comparison-editorial-columns",
+                "layout_family": "editorial-juxtaposition",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "option_0",
+                  "option_1",
+                  "verdict"
+                ],
+                "anchor_slot": "option_0",
+                "density": {
+                  "level": "medium",
+                  "max_items": 6
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "comparison-editorial-columns"
+                },
+                "slots": {
+                  "option_0": [
+                    0.0,
+                    0.0,
+                    0.55,
+                    0.72
+                  ],
+                  "option_1": [
+                    0.61,
+                    0.16,
+                    0.39,
+                    0.56
+                  ],
+                  "verdict": [
+                    0.61,
+                    0.8,
+                    0.39,
+                    0.2
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "comparison"
+              },
+              "chart": {
+                "system_id": "data-annotated-graphic",
+                "layout_family": "annotated-graphic",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "insight",
+                  "chart",
+                  "facts"
+                ],
+                "anchor_slot": "chart",
+                "density": {
+                  "level": "medium",
+                  "max_items": 4
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-annotated-graphic"
+                },
+                "slots": {
+                  "chart": [
+                    0.0,
+                    0.0,
+                    0.68,
+                    0.76
+                  ],
+                  "insight": [
+                    0.74,
+                    0.0,
+                    0.26,
+                    0.48
+                  ],
+                  "facts": [
+                    0.74,
+                    0.58,
+                    0.26,
+                    0.42
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "chart"
+              },
+              "table": {
+                "system_id": "table-editorial-notes",
+                "layout_family": "editorial-ledger",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "index",
+                  "table",
+                  "readout"
+                ],
+                "anchor_slot": "table",
+                "density": {
+                  "level": "medium",
+                  "max_items": 8
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-annotated-graphic"
+                },
+                "slots": {
+                  "index": [
+                    0.0,
+                    0.0,
+                    0.2,
+                    1.0
+                  ],
+                  "table": [
+                    0.26,
+                    0.08,
+                    0.74,
+                    0.66
+                  ],
+                  "readout": [
+                    0.52,
+                    0.82,
+                    0.48,
+                    0.18
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "table"
+              },
+              "decision": {
+                "system_id": "decision-editorial-takeaway",
+                "layout_family": "editorial-takeaway",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "decision_0",
+                  "decision_1",
+                  "decision_2",
+                  "decision_3",
+                  "commitment"
+                ],
+                "anchor_slot": "decision_0",
+                "density": {
+                  "level": "medium",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "decision-editorial-takeaway"
+                },
+                "slots": {
+                  "decision_0": [
+                    0.0,
+                    0.0,
+                    0.54,
+                    0.36
+                  ],
+                  "decision_1": [
+                    0.12,
+                    0.48,
+                    0.42,
+                    0.28
+                  ],
+                  "decision_2": [
+                    0.62,
+                    0.1,
+                    0.38,
+                    0.3
+                  ],
+                  "decision_3": [
+                    0.62,
+                    0.48,
+                    0.38,
+                    0.28
+                  ],
+                  "commitment": [
+                    0.62,
+                    0.82,
+                    0.38,
+                    0.18
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "decision"
+              },
+              "references": {
+                "system_id": "references-editorial-notes",
+                "layout_family": "editorial-notes",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "notes",
+                  "register"
+                ],
+                "anchor_slot": "register",
+                "density": {
+                  "level": "medium",
+                  "max_items": 9
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "references-editorial-notes"
+                },
+                "slots": {
+                  "notes": [
+                    0.0,
+                    0.0,
+                    0.22,
+                    1.0
+                  ],
+                  "register": [
+                    0.29,
+                    0.08,
+                    0.71,
+                    0.84
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "references"
+              }
+            }
+          },
+          "title_system_id": "title-editorial-masthead",
+          "section_system_id": "section-editorial-folio",
+          "evidence_system_id": "evidence-captioned-feature",
+          "comparison_system_id": "comparison-editorial-columns",
+          "data_system_id": "data-annotated-graphic",
+          "decision_system_id": "decision-editorial-takeaway",
+          "references_system_id": "references-editorial-notes",
+          "narrative_arc": {
+            "arc_id": "premise-scene-evidence-turn-close",
+            "stages": [
+              "premise",
+              "scene",
+              "evidence",
+              "turn",
+              "implication",
+              "close"
+            ]
+          },
+          "density": {
+            "level": "medium",
+            "distribution": "alternating open spreads and evidence-rich features"
+          },
+          "grid": {
+            "columns": 10,
+            "gutter": "0.24-0.32in",
+            "anchor": "masthead baseline and asymmetric feature column"
+          },
+          "reading_path": [
+            "editorial headline",
+            "feature object",
+            "caption or annotation",
+            "closing implication"
+          ],
+          "preferred_role_variants": {
+            "title": [
+              "title"
+            ],
+            "section": [
+              "standard",
+              "generated-image"
+            ],
+            "evidence": [
+              "image-sidebar",
+              "generated-image",
+              "scientific-figure"
+            ],
+            "comparison": [
+              "split",
+              "comparison-2col"
+            ],
+            "data": [
+              "chart",
+              "table"
+            ],
+            "decision": [
+              "standard"
+            ],
+            "references": [
+              "table"
+            ]
+          },
+          "invariant_moves": [
+            "Alternate open narrative space with denser proof moments.",
+            "Use captions and annotations to connect visuals to the argument.",
+            "Keep one clear editorial turn per section."
+          ],
+          "forbidden_moves": [
+            "Do not repeat the same card grid across consecutive slides.",
+            "Do not use decorative imagery without an explanatory role."
+          ],
+          "distinctive_moves": [
+            "Alternate open narrative space with denser proof moments.",
+            "Use captions and annotations to connect visuals to the argument.",
+            "Keep one clear editorial turn per section."
+          ],
+          "avoid": [
+            "Do not repeat the same card grid across consecutive slides.",
+            "Do not use decorative imagery without an explanatory role."
+          ],
+          "mix_rule": "Keep one composition grammar coherent across the deck. Borrow isolated treatment ideas, but do not merge complete role systems or page systems.",
+          "max_consecutive_same_variant": 2,
+          "structural_signature": "49be8fb4fcb685c9b0a3bf639baefe76dd1bfaecbf2b3fe5c12458699a250380",
+          "route_score": 0,
+          "selection_reasons": [
+            "stable catalog fallback"
+          ]
+        }
+      ],
+      "selection_rule": "Use primary as the deck grammar. Borrow isolated treatments only when the content shape benefits; never merge complete role systems or page systems."
+    },
+    "renderer_role_systems_v1": {
+      "schema_version": "renderer_role_systems_v1",
+      "catalog_version": "taste_grammar_catalog_v1",
+      "composition_grammar_id": "clinical-care-pathway",
+      "style_preset": "executive-clinical",
+      "narrative_arc": {
+        "arc_id": "population-state-evidence-care-action",
+        "stages": [
+          "population",
+          "current state",
+          "evidence gate",
+          "care options",
+          "action",
+          "monitoring"
+        ]
+      },
+      "density": {
+        "level": "medium-high",
+        "distribution": "stage bands with one dominant clinical evidence object"
+      },
+      "grid": {
+        "columns": 12,
+        "gutter": "0.22-0.28in",
+        "anchor": "care-stage rail and outcome field"
+      },
+      "reading_path": [
+        "patient or cohort state",
+        "evidence gate",
+        "care decision",
+        "monitoring implication"
+      ],
+      "preferred_role_variants": {
+        "title": [
+          "title"
+        ],
+        "section": [
+          "standard",
+          "flow"
+        ],
+        "evidence": [
+          "scientific-figure",
+          "chart",
+          "image-sidebar"
+        ],
+        "comparison": [
+          "comparison-2col",
+          "table"
+        ],
+        "data": [
+          "chart",
+          "table",
+          "stats"
+        ],
+        "decision": [
+          "flow",
+          "table"
+        ],
+        "references": [
+          "table"
+        ]
+      },
+      "invariant_moves": [
+        "Identify the patient or cohort state before discussing intervention.",
+        "Separate evidence threshold from care recommendation.",
+        "Make safety, monitoring, and escalation explicit."
+      ],
+      "forbidden_moves": [
+        "Do not imply clinical certainty beyond the cited evidence.",
+        "Do not hide contraindications or unresolved safety signals."
+      ],
+      "title_system_id": "title-clinical-status",
+      "section_system_id": "section-care-stage",
+      "evidence_system_id": "evidence-clinical-cohort",
+      "comparison_system_id": "comparison-care-options",
+      "data_system_id": "data-clinical-outcomes",
+      "decision_system_id": "decision-care-gate",
+      "references_system_id": "references-clinical-evidence"
+    },
+    "renderer_role_contracts_v2": {
+      "schema_version": "renderer_role_contracts_v2",
+      "catalog_version": "renderer_role_contract_catalog_v2",
+      "composition_grammar_id": "clinical-care-pathway",
+      "style_preset": "executive-clinical",
+      "supported_layout_variants": [
+        "primary",
+        "alternate",
+        "dense"
+      ],
+      "roles": {
+        "title": {
+          "system_id": "title-clinical-status",
+          "layout_family": "clinical-status",
+          "coordinate_space": "slide",
+          "reading_order": [
+            "status",
+            "headline",
+            "support",
+            "pathway"
+          ],
+          "anchor_slot": "status",
+          "density": {
+            "level": "medium",
+            "max_items": 4
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "title-clinical-status"
+          },
+          "slots": {
+            "status": [
+              0.04,
+              0.08,
+              0.12,
+              0.78
+            ],
+            "headline": [
+              0.22,
+              0.18,
+              0.55,
+              0.28
+            ],
+            "support": [
+              0.22,
+              0.54,
+              0.5,
+              0.14
+            ],
+            "pathway": [
+              0.82,
+              0.16,
+              0.14,
+              0.66
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "title"
+        },
+        "section": {
+          "system_id": "section-care-stage",
+          "layout_family": "care-stage",
+          "coordinate_space": "slide",
+          "reading_order": [
+            "stage",
+            "headline",
+            "support"
+          ],
+          "anchor_slot": "stage",
+          "density": {
+            "level": "medium",
+            "max_items": 3
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "section-care-stage"
+          },
+          "slots": {
+            "stage": [
+              0.05,
+              0.18,
+              0.14,
+              0.58
+            ],
+            "headline": [
+              0.25,
+              0.24,
+              0.6,
+              0.24
+            ],
+            "support": [
+              0.25,
+              0.58,
+              0.54,
+              0.16
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "section"
+        },
+        "evidence": {
+          "system_id": "evidence-clinical-cohort",
+          "layout_family": "clinical-cohort",
+          "coordinate_space": "body",
+          "reading_order": [
+            "evidence_0",
+            "evidence_1",
+            "evidence_2"
+          ],
+          "anchor_slot": "evidence_0",
+          "density": {
+            "level": "medium-high",
+            "max_items": 5
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "evidence-clinical-cohort"
+          },
+          "slots": {
+            "evidence_0": [
+              0.0,
+              0.0,
+              1.0,
+              0.22
+            ],
+            "evidence_1": [
+              0.0,
+              0.3,
+              0.47,
+              0.7
+            ],
+            "evidence_2": [
+              0.53,
+              0.3,
+              0.47,
+              0.7
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "evidence"
+        },
+        "comparison": {
+          "system_id": "comparison-care-options",
+          "layout_family": "care-options",
+          "coordinate_space": "body",
+          "reading_order": [
+            "option_0",
+            "option_1",
+            "verdict"
+          ],
+          "anchor_slot": "option_0",
+          "density": {
+            "level": "medium-high",
+            "max_items": 7
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "comparison-care-options"
+          },
+          "slots": {
+            "option_0": [
+              0.0,
+              0.0,
+              1.0,
+              0.35
+            ],
+            "option_1": [
+              0.0,
+              0.43,
+              1.0,
+              0.35
+            ],
+            "verdict": [
+              0.48,
+              0.84,
+              0.52,
+              0.16
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "comparison"
+        },
+        "chart": {
+          "system_id": "data-clinical-outcomes",
+          "layout_family": "clinical-outcomes",
+          "coordinate_space": "body",
+          "reading_order": [
+            "insight",
+            "facts",
+            "chart",
+            "register"
+          ],
+          "anchor_slot": "chart",
+          "density": {
+            "level": "medium-high",
+            "max_items": 5
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "data-clinical-outcomes"
+          },
+          "slots": {
+            "insight": [
+              0.0,
+              0.0,
+              1.0,
+              0.2
+            ],
+            "chart": [
+              0.0,
+              0.28,
+              0.66,
+              0.72
+            ],
+            "facts": [
+              0.72,
+              0.28,
+              0.28,
+              0.38
+            ],
+            "register": [
+              0.72,
+              0.7,
+              0.28,
+              0.3
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "chart"
+        },
+        "table": {
+          "system_id": "table-clinical-cohort",
+          "layout_family": "clinical-cohort-ledger",
+          "coordinate_space": "body",
+          "reading_order": [
+            "index",
+            "table",
+            "readout"
+          ],
+          "anchor_slot": "table",
+          "density": {
+            "level": "medium-high",
+            "max_items": 9
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "data-clinical-outcomes"
+          },
+          "slots": {
+            "index": [
+              0.0,
+              0.0,
+              0.17,
+              1.0
+            ],
+            "table": [
+              0.22,
+              0.0,
+              0.78,
+              0.72
+            ],
+            "readout": [
+              0.22,
+              0.8,
+              0.78,
+              0.2
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "table"
+        },
+        "decision": {
+          "system_id": "decision-care-gate",
+          "layout_family": "care-gate",
+          "coordinate_space": "body",
+          "reading_order": [
+            "decision_0",
+            "decision_1",
+            "decision_2",
+            "decision_3",
+            "commitment"
+          ],
+          "anchor_slot": "commitment",
+          "density": {
+            "level": "medium-high",
+            "max_items": 5
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "decision-care-gate"
+          },
+          "slots": {
+            "decision_0": [
+              0.0,
+              0.0,
+              0.22,
+              0.66
+            ],
+            "decision_1": [
+              0.26,
+              0.0,
+              0.22,
+              0.66
+            ],
+            "decision_2": [
+              0.52,
+              0.0,
+              0.22,
+              0.66
+            ],
+            "decision_3": [
+              0.78,
+              0.0,
+              0.22,
+              0.66
+            ],
+            "commitment": [
+              0.26,
+              0.76,
+              0.74,
+              0.2
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "decision"
+        },
+        "references": {
+          "system_id": "references-clinical-evidence",
+          "layout_family": "clinical-evidence",
+          "coordinate_space": "body",
+          "reading_order": [
+            "index",
+            "register",
+            "notes"
+          ],
+          "anchor_slot": "register",
+          "density": {
+            "level": "medium-high",
+            "max_items": 10
+          },
+          "supported_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "fallback": {
+            "version": "renderer_role_systems_v1",
+            "system_id": "references-clinical-evidence"
+          },
+          "slots": {
+            "index": [
+              0.0,
+              0.0,
+              0.17,
+              1.0
+            ],
+            "register": [
+              0.22,
+              0.0,
+              0.78,
+              0.68
+            ],
+            "notes": [
+              0.22,
+              0.76,
+              0.78,
+              0.24
+            ]
+          },
+          "grammar_id": "clinical-care-pathway",
+          "role": "references"
+        }
+      }
+    },
+    "taste_narrative_arc": {
+      "arc_id": "population-state-evidence-care-action",
+      "stages": [
+        "population",
+        "current state",
+        "evidence gate",
+        "care options",
+        "action",
+        "monitoring"
+      ]
+    },
+    "style_execution_plan": {
+      "schema_version": "style_execution_plan_v1",
+      "requested_preset": "executive-clinical",
+      "resolved_primary_preset": "executive-clinical",
+      "explicit_style_lock": true,
+      "selection_basis": "requested_style_preset",
+      "decision": {
+        "status": "accepted",
+        "mode": "deterministic",
+        "reason": "Explicit/workspace preset remains primary; topic-aware atoms and composition grammar supply bounded treatment and rhythm choices."
+      },
+      "deck_style": {
+        "page_system": "clinical-rail",
+        "structural_motif": "clinical-stages",
+        "title_layout": "split-hero",
+        "footer_mode": "source-line",
+        "chart_treatment": "threshold-band",
+        "table_treatment": "readout-sidecar",
+        "figure_table_treatment": "figure-first",
+        "stats_mode": "feature-left",
+        "matrix_mode": "cards",
+        "summary_callout_mode": "lab-box",
+        "image_sidebar_mode": "evidence-mosaic",
+        "comparison_mode": "scorecard",
+        "header_mode": "lab-clean",
+        "visual_density": "medium",
+        "decorative_signals": [
+          "focus-box-right",
+          "wide-margin-quiet-page",
+          "eyebrow-tag-above-title"
+        ],
+        "arc_beats": [
+          "title",
+          "cohort",
+          "endpoints",
+          "outcomes",
+          "risk-benefit",
+          "decision"
+        ],
+        "style_seed_families": [
+          "executive-clinical"
+        ],
+        "composition_mode": "deterministic-fallback"
+      },
+      "composition_grammar": {
+        "grammar_id": "clinical-care-pathway",
+        "style_preset": "executive-clinical",
+        "style_presets": [
+          "executive-clinical"
+        ],
+        "family": "clinical-executive",
+        "lane": "pathway-led",
+        "description": "Move from population and care state through evidence gates to a bounded clinical action.",
+        "rhythm_treatments": [
+          "title",
+          "section",
+          "evidence",
+          "comparison",
+          "data",
+          "decision",
+          "references"
+        ],
+        "rhythm_pattern": [
+          "title",
+          "standard",
+          "scientific-figure",
+          "comparison-2col",
+          "chart",
+          "flow",
+          "table"
+        ],
+        "role_variant_map": {
+          "title": "title",
+          "section": "standard",
+          "evidence": "scientific-figure",
+          "comparison": "comparison-2col",
+          "data": "chart",
+          "decision": "flow",
+          "references": "table"
+        },
+        "preferred_variants": [
+          "title",
+          "standard",
+          "flow",
+          "scientific-figure",
+          "chart",
+          "image-sidebar",
+          "comparison-2col",
+          "table",
+          "stats"
+        ],
+        "renderer_bias": {
+          "page_system": "clinical-rail",
+          "structural_motif": "clinical-stages",
+          "title_layout": "split-hero",
+          "footer_mode": "source-line",
+          "chart_treatment": "threshold-band",
+          "table_treatment": "readout-sidecar",
+          "figure_table_treatment": "figure-first",
+          "stats_mode": "feature-left",
+          "matrix_mode": "cards",
+          "summary_callout_mode": "lab-box",
+          "image_sidebar_mode": "evidence-mosaic",
+          "comparison_mode": "scorecard"
+        },
+        "renderer_role_systems_v1": {
+          "schema_version": "renderer_role_systems_v1",
+          "catalog_version": "taste_grammar_catalog_v1",
+          "composition_grammar_id": "clinical-care-pathway",
+          "style_preset": "executive-clinical",
+          "narrative_arc": {
+            "arc_id": "population-state-evidence-care-action",
+            "stages": [
+              "population",
+              "current state",
+              "evidence gate",
+              "care options",
+              "action",
+              "monitoring"
+            ]
+          },
+          "density": {
+            "level": "medium-high",
+            "distribution": "stage bands with one dominant clinical evidence object"
+          },
+          "grid": {
+            "columns": 12,
+            "gutter": "0.22-0.28in",
+            "anchor": "care-stage rail and outcome field"
+          },
+          "reading_path": [
+            "patient or cohort state",
+            "evidence gate",
+            "care decision",
+            "monitoring implication"
+          ],
+          "preferred_role_variants": {
+            "title": [
+              "title"
+            ],
+            "section": [
+              "standard",
+              "flow"
+            ],
+            "evidence": [
+              "scientific-figure",
+              "chart",
+              "image-sidebar"
+            ],
+            "comparison": [
+              "comparison-2col",
+              "table"
+            ],
+            "data": [
+              "chart",
+              "table",
+              "stats"
+            ],
+            "decision": [
+              "flow",
+              "table"
+            ],
+            "references": [
+              "table"
+            ]
+          },
+          "invariant_moves": [
+            "Identify the patient or cohort state before discussing intervention.",
+            "Separate evidence threshold from care recommendation.",
+            "Make safety, monitoring, and escalation explicit."
+          ],
+          "forbidden_moves": [
+            "Do not imply clinical certainty beyond the cited evidence.",
+            "Do not hide contraindications or unresolved safety signals."
+          ],
+          "title_system_id": "title-clinical-status",
+          "section_system_id": "section-care-stage",
+          "evidence_system_id": "evidence-clinical-cohort",
+          "comparison_system_id": "comparison-care-options",
+          "data_system_id": "data-clinical-outcomes",
+          "decision_system_id": "decision-care-gate",
+          "references_system_id": "references-clinical-evidence"
+        },
+        "renderer_role_contracts_v2": {
+          "schema_version": "renderer_role_contracts_v2",
+          "catalog_version": "renderer_role_contract_catalog_v2",
+          "composition_grammar_id": "clinical-care-pathway",
+          "style_preset": "executive-clinical",
+          "supported_layout_variants": [
+            "primary",
+            "alternate",
+            "dense"
+          ],
+          "roles": {
+            "title": {
+              "system_id": "title-clinical-status",
+              "layout_family": "clinical-status",
+              "coordinate_space": "slide",
+              "reading_order": [
+                "status",
+                "headline",
+                "support",
+                "pathway"
+              ],
+              "anchor_slot": "status",
+              "density": {
+                "level": "medium",
+                "max_items": 4
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "title-clinical-status"
+              },
+              "slots": {
+                "status": [
+                  0.04,
+                  0.08,
+                  0.12,
+                  0.78
+                ],
+                "headline": [
+                  0.22,
+                  0.18,
+                  0.55,
+                  0.28
+                ],
+                "support": [
+                  0.22,
+                  0.54,
+                  0.5,
+                  0.14
+                ],
+                "pathway": [
+                  0.82,
+                  0.16,
+                  0.14,
+                  0.66
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "title"
+            },
+            "section": {
+              "system_id": "section-care-stage",
+              "layout_family": "care-stage",
+              "coordinate_space": "slide",
+              "reading_order": [
+                "stage",
+                "headline",
+                "support"
+              ],
+              "anchor_slot": "stage",
+              "density": {
+                "level": "medium",
+                "max_items": 3
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "section-care-stage"
+              },
+              "slots": {
+                "stage": [
+                  0.05,
+                  0.18,
+                  0.14,
+                  0.58
+                ],
+                "headline": [
+                  0.25,
+                  0.24,
+                  0.6,
+                  0.24
+                ],
+                "support": [
+                  0.25,
+                  0.58,
+                  0.54,
+                  0.16
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "section"
+            },
+            "evidence": {
+              "system_id": "evidence-clinical-cohort",
+              "layout_family": "clinical-cohort",
+              "coordinate_space": "body",
+              "reading_order": [
+                "evidence_0",
+                "evidence_1",
+                "evidence_2"
+              ],
+              "anchor_slot": "evidence_0",
+              "density": {
+                "level": "medium-high",
+                "max_items": 5
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "evidence-clinical-cohort"
+              },
+              "slots": {
+                "evidence_0": [
+                  0.0,
+                  0.0,
+                  1.0,
+                  0.22
+                ],
+                "evidence_1": [
+                  0.0,
+                  0.3,
+                  0.47,
+                  0.7
+                ],
+                "evidence_2": [
+                  0.53,
+                  0.3,
+                  0.47,
+                  0.7
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "evidence"
+            },
+            "comparison": {
+              "system_id": "comparison-care-options",
+              "layout_family": "care-options",
+              "coordinate_space": "body",
+              "reading_order": [
+                "option_0",
+                "option_1",
+                "verdict"
+              ],
+              "anchor_slot": "option_0",
+              "density": {
+                "level": "medium-high",
+                "max_items": 7
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "comparison-care-options"
+              },
+              "slots": {
+                "option_0": [
+                  0.0,
+                  0.0,
+                  1.0,
+                  0.35
+                ],
+                "option_1": [
+                  0.0,
+                  0.43,
+                  1.0,
+                  0.35
+                ],
+                "verdict": [
+                  0.48,
+                  0.84,
+                  0.52,
+                  0.16
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "comparison"
+            },
+            "chart": {
+              "system_id": "data-clinical-outcomes",
+              "layout_family": "clinical-outcomes",
+              "coordinate_space": "body",
+              "reading_order": [
+                "insight",
+                "facts",
+                "chart",
+                "register"
+              ],
+              "anchor_slot": "chart",
+              "density": {
+                "level": "medium-high",
+                "max_items": 5
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "data-clinical-outcomes"
+              },
+              "slots": {
+                "insight": [
+                  0.0,
+                  0.0,
+                  1.0,
+                  0.2
+                ],
+                "chart": [
+                  0.0,
+                  0.28,
+                  0.66,
+                  0.72
+                ],
+                "facts": [
+                  0.72,
+                  0.28,
+                  0.28,
+                  0.38
+                ],
+                "register": [
+                  0.72,
+                  0.7,
+                  0.28,
+                  0.3
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "chart"
+            },
+            "table": {
+              "system_id": "table-clinical-cohort",
+              "layout_family": "clinical-cohort-ledger",
+              "coordinate_space": "body",
+              "reading_order": [
+                "index",
+                "table",
+                "readout"
+              ],
+              "anchor_slot": "table",
+              "density": {
+                "level": "medium-high",
+                "max_items": 9
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "data-clinical-outcomes"
+              },
+              "slots": {
+                "index": [
+                  0.0,
+                  0.0,
+                  0.17,
+                  1.0
+                ],
+                "table": [
+                  0.22,
+                  0.0,
+                  0.78,
+                  0.72
+                ],
+                "readout": [
+                  0.22,
+                  0.8,
+                  0.78,
+                  0.2
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "table"
+            },
+            "decision": {
+              "system_id": "decision-care-gate",
+              "layout_family": "care-gate",
+              "coordinate_space": "body",
+              "reading_order": [
+                "decision_0",
+                "decision_1",
+                "decision_2",
+                "decision_3",
+                "commitment"
+              ],
+              "anchor_slot": "commitment",
+              "density": {
+                "level": "medium-high",
+                "max_items": 5
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "decision-care-gate"
+              },
+              "slots": {
+                "decision_0": [
+                  0.0,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "decision_1": [
+                  0.26,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "decision_2": [
+                  0.52,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "decision_3": [
+                  0.78,
+                  0.0,
+                  0.22,
+                  0.66
+                ],
+                "commitment": [
+                  0.26,
+                  0.76,
+                  0.74,
+                  0.2
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "decision"
+            },
+            "references": {
+              "system_id": "references-clinical-evidence",
+              "layout_family": "clinical-evidence",
+              "coordinate_space": "body",
+              "reading_order": [
+                "index",
+                "register",
+                "notes"
+              ],
+              "anchor_slot": "register",
+              "density": {
+                "level": "medium-high",
+                "max_items": 10
+              },
+              "supported_variants": [
+                "primary",
+                "alternate",
+                "dense"
+              ],
+              "fallback": {
+                "version": "renderer_role_systems_v1",
+                "system_id": "references-clinical-evidence"
+              },
+              "slots": {
+                "index": [
+                  0.0,
+                  0.0,
+                  0.17,
+                  1.0
+                ],
+                "register": [
+                  0.22,
+                  0.0,
+                  0.78,
+                  0.68
+                ],
+                "notes": [
+                  0.22,
+                  0.76,
+                  0.78,
+                  0.24
+                ]
+              },
+              "grammar_id": "clinical-care-pathway",
+              "role": "references"
+            }
+          }
+        },
+        "title_system_id": "title-clinical-status",
+        "section_system_id": "section-care-stage",
+        "evidence_system_id": "evidence-clinical-cohort",
+        "comparison_system_id": "comparison-care-options",
+        "data_system_id": "data-clinical-outcomes",
+        "decision_system_id": "decision-care-gate",
+        "references_system_id": "references-clinical-evidence",
+        "narrative_arc": {
+          "arc_id": "population-state-evidence-care-action",
+          "stages": [
+            "population",
+            "current state",
+            "evidence gate",
+            "care options",
+            "action",
+            "monitoring"
+          ]
+        },
+        "density": {
+          "level": "medium-high",
+          "distribution": "stage bands with one dominant clinical evidence object"
+        },
+        "grid": {
+          "columns": 12,
+          "gutter": "0.22-0.28in",
+          "anchor": "care-stage rail and outcome field"
+        },
+        "reading_path": [
+          "patient or cohort state",
+          "evidence gate",
+          "care decision",
+          "monitoring implication"
+        ],
+        "preferred_role_variants": {
+          "title": [
+            "title"
+          ],
+          "section": [
+            "standard",
+            "flow"
+          ],
+          "evidence": [
+            "scientific-figure",
+            "chart",
+            "image-sidebar"
+          ],
+          "comparison": [
+            "comparison-2col",
+            "table"
+          ],
+          "data": [
+            "chart",
+            "table",
+            "stats"
+          ],
+          "decision": [
+            "flow",
+            "table"
+          ],
+          "references": [
+            "table"
+          ]
+        },
+        "invariant_moves": [
+          "Identify the patient or cohort state before discussing intervention.",
+          "Separate evidence threshold from care recommendation.",
+          "Make safety, monitoring, and escalation explicit."
+        ],
+        "forbidden_moves": [
+          "Do not imply clinical certainty beyond the cited evidence.",
+          "Do not hide contraindications or unresolved safety signals."
+        ],
+        "distinctive_moves": [
+          "Identify the patient or cohort state before discussing intervention.",
+          "Separate evidence threshold from care recommendation.",
+          "Make safety, monitoring, and escalation explicit."
+        ],
+        "avoid": [
+          "Do not imply clinical certainty beyond the cited evidence.",
+          "Do not hide contraindications or unresolved safety signals."
+        ],
+        "mix_rule": "Keep one composition grammar coherent across the deck. Borrow isolated treatment ideas, but do not merge complete role systems or page systems.",
+        "max_consecutive_same_variant": 2,
+        "structural_signature": "6a974f3362445ad34b601e15c8d68be6140c70e3fd720987bf31ca4aaca9c854",
+        "route_score": 100,
+        "selection_reasons": [
+          "requested preset grammar"
+        ]
+      },
+      "renderer_role_systems_v1": {
+        "schema_version": "renderer_role_systems_v1",
+        "catalog_version": "taste_grammar_catalog_v1",
+        "composition_grammar_id": "clinical-care-pathway",
+        "style_preset": "executive-clinical",
+        "narrative_arc": {
+          "arc_id": "population-state-evidence-care-action",
+          "stages": [
+            "population",
+            "current state",
+            "evidence gate",
+            "care options",
+            "action",
+            "monitoring"
+          ]
+        },
+        "density": {
+          "level": "medium-high",
+          "distribution": "stage bands with one dominant clinical evidence object"
+        },
+        "grid": {
+          "columns": 12,
+          "gutter": "0.22-0.28in",
+          "anchor": "care-stage rail and outcome field"
+        },
+        "reading_path": [
+          "patient or cohort state",
+          "evidence gate",
+          "care decision",
+          "monitoring implication"
+        ],
+        "preferred_role_variants": {
+          "title": [
+            "title"
+          ],
+          "section": [
+            "standard",
+            "flow"
+          ],
+          "evidence": [
+            "scientific-figure",
+            "chart",
+            "image-sidebar"
+          ],
+          "comparison": [
+            "comparison-2col",
+            "table"
+          ],
+          "data": [
+            "chart",
+            "table",
+            "stats"
+          ],
+          "decision": [
+            "flow",
+            "table"
+          ],
+          "references": [
+            "table"
+          ]
+        },
+        "invariant_moves": [
+          "Identify the patient or cohort state before discussing intervention.",
+          "Separate evidence threshold from care recommendation.",
+          "Make safety, monitoring, and escalation explicit."
+        ],
+        "forbidden_moves": [
+          "Do not imply clinical certainty beyond the cited evidence.",
+          "Do not hide contraindications or unresolved safety signals."
+        ],
+        "title_system_id": "title-clinical-status",
+        "section_system_id": "section-care-stage",
+        "evidence_system_id": "evidence-clinical-cohort",
+        "comparison_system_id": "comparison-care-options",
+        "data_system_id": "data-clinical-outcomes",
+        "decision_system_id": "decision-care-gate",
+        "references_system_id": "references-clinical-evidence"
+      },
+      "renderer_role_contracts_v2": {
+        "schema_version": "renderer_role_contracts_v2",
+        "catalog_version": "renderer_role_contract_catalog_v2",
+        "composition_grammar_id": "clinical-care-pathway",
+        "style_preset": "executive-clinical",
+        "supported_layout_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "roles": {
+          "title": {
+            "system_id": "title-clinical-status",
+            "layout_family": "clinical-status",
+            "coordinate_space": "slide",
+            "reading_order": [
+              "status",
+              "headline",
+              "support",
+              "pathway"
+            ],
+            "anchor_slot": "status",
+            "density": {
+              "level": "medium",
+              "max_items": 4
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "title-clinical-status"
+            },
+            "slots": {
+              "status": [
+                0.04,
+                0.08,
+                0.12,
+                0.78
+              ],
+              "headline": [
+                0.22,
+                0.18,
+                0.55,
+                0.28
+              ],
+              "support": [
+                0.22,
+                0.54,
+                0.5,
+                0.14
+              ],
+              "pathway": [
+                0.82,
+                0.16,
+                0.14,
+                0.66
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "title"
+          },
+          "section": {
+            "system_id": "section-care-stage",
+            "layout_family": "care-stage",
+            "coordinate_space": "slide",
+            "reading_order": [
+              "stage",
+              "headline",
+              "support"
+            ],
+            "anchor_slot": "stage",
+            "density": {
+              "level": "medium",
+              "max_items": 3
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "section-care-stage"
+            },
+            "slots": {
+              "stage": [
+                0.05,
+                0.18,
+                0.14,
+                0.58
+              ],
+              "headline": [
+                0.25,
+                0.24,
+                0.6,
+                0.24
+              ],
+              "support": [
+                0.25,
+                0.58,
+                0.54,
+                0.16
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "section"
+          },
+          "evidence": {
+            "system_id": "evidence-clinical-cohort",
+            "layout_family": "clinical-cohort",
+            "coordinate_space": "body",
+            "reading_order": [
+              "evidence_0",
+              "evidence_1",
+              "evidence_2"
+            ],
+            "anchor_slot": "evidence_0",
+            "density": {
+              "level": "medium-high",
+              "max_items": 5
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "evidence-clinical-cohort"
+            },
+            "slots": {
+              "evidence_0": [
+                0.0,
+                0.0,
+                1.0,
+                0.22
+              ],
+              "evidence_1": [
+                0.0,
+                0.3,
+                0.47,
+                0.7
+              ],
+              "evidence_2": [
+                0.53,
+                0.3,
+                0.47,
+                0.7
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "evidence"
+          },
+          "comparison": {
+            "system_id": "comparison-care-options",
+            "layout_family": "care-options",
+            "coordinate_space": "body",
+            "reading_order": [
+              "option_0",
+              "option_1",
+              "verdict"
+            ],
+            "anchor_slot": "option_0",
+            "density": {
+              "level": "medium-high",
+              "max_items": 7
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "comparison-care-options"
+            },
+            "slots": {
+              "option_0": [
+                0.0,
+                0.0,
+                1.0,
+                0.35
+              ],
+              "option_1": [
+                0.0,
+                0.43,
+                1.0,
+                0.35
+              ],
+              "verdict": [
+                0.48,
+                0.84,
+                0.52,
+                0.16
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "comparison"
+          },
+          "chart": {
+            "system_id": "data-clinical-outcomes",
+            "layout_family": "clinical-outcomes",
+            "coordinate_space": "body",
+            "reading_order": [
+              "insight",
+              "facts",
+              "chart",
+              "register"
+            ],
+            "anchor_slot": "chart",
+            "density": {
+              "level": "medium-high",
+              "max_items": 5
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "data-clinical-outcomes"
+            },
+            "slots": {
+              "insight": [
+                0.0,
+                0.0,
+                1.0,
+                0.2
+              ],
+              "chart": [
+                0.0,
+                0.28,
+                0.66,
+                0.72
+              ],
+              "facts": [
+                0.72,
+                0.28,
+                0.28,
+                0.38
+              ],
+              "register": [
+                0.72,
+                0.7,
+                0.28,
+                0.3
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "chart"
+          },
+          "table": {
+            "system_id": "table-clinical-cohort",
+            "layout_family": "clinical-cohort-ledger",
+            "coordinate_space": "body",
+            "reading_order": [
+              "index",
+              "table",
+              "readout"
+            ],
+            "anchor_slot": "table",
+            "density": {
+              "level": "medium-high",
+              "max_items": 9
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "data-clinical-outcomes"
+            },
+            "slots": {
+              "index": [
+                0.0,
+                0.0,
+                0.17,
+                1.0
+              ],
+              "table": [
+                0.22,
+                0.0,
+                0.78,
+                0.72
+              ],
+              "readout": [
+                0.22,
+                0.8,
+                0.78,
+                0.2
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "table"
+          },
+          "decision": {
+            "system_id": "decision-care-gate",
+            "layout_family": "care-gate",
+            "coordinate_space": "body",
+            "reading_order": [
+              "decision_0",
+              "decision_1",
+              "decision_2",
+              "decision_3",
+              "commitment"
+            ],
+            "anchor_slot": "commitment",
+            "density": {
+              "level": "medium-high",
+              "max_items": 5
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "decision-care-gate"
+            },
+            "slots": {
+              "decision_0": [
+                0.0,
+                0.0,
+                0.22,
+                0.66
+              ],
+              "decision_1": [
+                0.26,
+                0.0,
+                0.22,
+                0.66
+              ],
+              "decision_2": [
+                0.52,
+                0.0,
+                0.22,
+                0.66
+              ],
+              "decision_3": [
+                0.78,
+                0.0,
+                0.22,
+                0.66
+              ],
+              "commitment": [
+                0.26,
+                0.76,
+                0.74,
+                0.2
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "decision"
+          },
+          "references": {
+            "system_id": "references-clinical-evidence",
+            "layout_family": "clinical-evidence",
+            "coordinate_space": "body",
+            "reading_order": [
+              "index",
+              "register",
+              "notes"
+            ],
+            "anchor_slot": "register",
+            "density": {
+              "level": "medium-high",
+              "max_items": 10
+            },
+            "supported_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "fallback": {
+              "version": "renderer_role_systems_v1",
+              "system_id": "references-clinical-evidence"
+            },
+            "slots": {
+              "index": [
+                0.0,
+                0.0,
+                0.17,
+                1.0
+              ],
+              "register": [
+                0.22,
+                0.0,
+                0.78,
+                0.68
+              ],
+              "notes": [
+                0.22,
+                0.76,
+                0.78,
+                0.24
+              ]
+            },
+            "grammar_id": "clinical-care-pathway",
+            "role": "references"
+          }
+        }
+      },
+      "treatment_plan": {
+        "title": {
+          "archetype_id": "clinical-status-rail-opener",
+          "content_goal": "Light clinical opener with one blue/teal status rail and compact context chips.",
+          "variant_pool": [
+            "title"
+          ],
+          "required_slots": [
+            "working title",
+            "scope/context label",
+            "audience or use context",
+            "one credibility chip"
+          ],
+          "data_roles": [
+            "topic",
+            "scope",
+            "date/period",
+            "audience"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Title must name the deck object, not a generic category.",
+            "Subtitle should lock scope or use context."
+          ]
+        },
+        "comparison": {
+          "archetype_id": "exec-clinical-evidence-brief-comparison-frame",
+          "content_goal": "Two care paths with decision criteria in a low-contrast center gutter.",
+          "variant_pool": [
+            "comparison-2col",
+            "split",
+            "matrix"
+          ],
+          "required_slots": [
+            "left state",
+            "right state",
+            "decision criterion",
+            "verdict"
+          ],
+          "data_roles": [
+            "baseline",
+            "target/comparator",
+            "difference driver",
+            "decision rule"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Both sides need comparable fields.",
+            "Verdict must be visible on the slide."
+          ]
+        },
+        "chart": {
+          "archetype_id": "exec-clinical-evidence-brief-chart-readout",
+          "content_goal": "Outcome chart with right-side clinical readout and n/r/source footnote.",
+          "variant_pool": [
+            "chart"
+          ],
+          "required_slots": [
+            "chart question",
+            "category/time labels",
+            "value series",
+            "readout/caveat",
+            "source id"
+          ],
+          "data_roles": [
+            "x/category field",
+            "numeric value field",
+            "target/threshold when available",
+            "source cut/version"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Axis labels must satisfy chart_label_min_pt.",
+            "Chart needs a written readout, not only bars/lines."
+          ]
+        },
+        "table": {
+          "archetype_id": "exec-clinical-evidence-brief-table-ledger",
+          "content_goal": "Protocol table with semantic pass/review/fail fills and short row labels.",
+          "variant_pool": [
+            "table",
+            "lab-run-results"
+          ],
+          "required_slots": [
+            "row entity",
+            "status/signal field",
+            "action/owner field",
+            "short source/provenance"
+          ],
+          "data_roles": [
+            "entity",
+            "metric/state",
+            "owner/action",
+            "method/source"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Cells stay phrase-length.",
+            "Split or summarize if table text would fall below body-size floor."
+          ]
+        },
+        "figure": {
+          "archetype_id": "exec-clinical-evidence-brief-figure-proof-object",
+          "content_goal": "Figure-first evidence panel with interpretation and caveat stack.",
+          "variant_pool": [
+            "image-sidebar",
+            "scientific-figure"
+          ],
+          "required_slots": [
+            "proof object",
+            "caption",
+            "interpretation",
+            "caveat or next action"
+          ],
+          "data_roles": [
+            "figure path or generated output id",
+            "caption source",
+            "interpretation",
+            "quality/crop rule"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Figure must be source-backed or synthetic/starter-labeled.",
+            "Caption and interpretation must remain readable."
+          ]
+        },
+        "dashboard": {
+          "archetype_id": "exec-clinical-evidence-brief-dashboard-state-board",
+          "content_goal": "Three clinical status bands: cohort, outcome, operational blocker.",
+          "variant_pool": [
+            "lab-run-results",
+            "stats"
+          ],
+          "required_slots": [
+            "primary metric",
+            "supporting metric",
+            "state/threshold",
+            "owner or implication"
+          ],
+          "data_roles": [
+            "primary KPI",
+            "secondary KPI",
+            "state/threshold",
+            "owner/action"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Use dashboard only when multiple metrics earn one slide.",
+            "Every metric needs a label and context."
+          ]
+        },
+        "decision": {
+          "archetype_id": "exec-clinical-evidence-brief-decision-record",
+          "content_goal": "Recommendation strip framed as clinical action, owner, and evidence confidence.",
+          "variant_pool": [
+            "table",
+            "standard"
+          ],
+          "required_slots": [
+            "decision/action",
+            "evidence trigger",
+            "owner",
+            "caveat/date"
+          ],
+          "data_roles": [
+            "action",
+            "evidence/trigger",
+            "owner",
+            "timing/risk"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Decision slide must make the action inspectable.",
+            "Avoid generic next-step prose without owner or trigger."
+          ]
+        },
+        "references": {
+          "archetype_id": "trial-report-id-footer",
+          "content_goal": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "variant_pool": [
+            "table"
+          ],
+          "required_slots": [
+            "source id",
+            "short source label",
+            "claim or artifact linked",
+            "full citation when needed"
+          ],
+          "data_roles": [
+            "source id",
+            "source title",
+            "claim/slide id",
+            "URL/DOI/path"
+          ],
+          "source_posture": "Source-line footer with trial/report IDs; full refs table only when needed.",
+          "authoring_checks": [
+            "Short IDs belong in footers.",
+            "Move long citations to editable references tables."
+          ]
+        }
+      },
+      "secondary_influences": [
+        {
+          "grammar_id": "consulting-answer-pyramid",
+          "style_preset": "data-heavy-boardroom",
+          "style_presets": [
+            "data-heavy-boardroom",
+            "arctic-minimal"
+          ],
+          "family": "data-report",
+          "lane": "answer-led",
+          "description": "Lead with the answer, prove it with structured exhibits, and close on ownership.",
+          "rhythm_treatments": [
+            "title",
+            "section",
+            "evidence",
+            "comparison",
+            "data",
+            "decision",
+            "references"
+          ],
+          "rhythm_pattern": [
+            "title",
+            "standard",
+            "chart",
+            "comparison-2col",
+            "chart",
+            "table",
+            "table"
+          ],
+          "role_variant_map": {
+            "title": "title",
+            "section": "standard",
+            "evidence": "chart",
+            "comparison": "comparison-2col",
+            "data": "chart",
+            "decision": "table",
+            "references": "table"
+          },
+          "preferred_variants": [
+            "title",
+            "standard",
+            "kpi-hero",
+            "chart",
+            "table",
+            "comparison-2col",
+            "matrix",
+            "stats"
+          ],
+          "renderer_bias": {
+            "page_system": "board-ledger",
+            "structural_motif": "board-index",
+            "title_layout": "split-hero",
+            "footer_mode": "source-line",
+            "chart_treatment": "facts-right",
+            "table_treatment": "compact-ledger",
+            "figure_table_treatment": "table-first",
+            "stats_mode": "policy-bands",
+            "matrix_mode": "open-quadrants",
+            "summary_callout_mode": "default",
+            "image_sidebar_mode": "analysis-rail",
+            "comparison_mode": "scorecard"
+          },
+          "renderer_role_systems_v1": {
+            "schema_version": "renderer_role_systems_v1",
+            "catalog_version": "taste_grammar_catalog_v1",
+            "composition_grammar_id": "consulting-answer-pyramid",
+            "style_preset": "data-heavy-boardroom",
+            "narrative_arc": {
+              "arc_id": "answer-context-proof-action",
+              "stages": [
+                "answer",
+                "context",
+                "proof",
+                "tradeoffs",
+                "action"
+              ]
+            },
+            "density": {
+              "level": "high",
+              "distribution": "dense exhibits with short interpretive headlines"
+            },
+            "grid": {
+              "columns": 12,
+              "gutter": "0.22-0.28in",
+              "anchor": "left claim rail and aligned exhibit edge"
+            },
+            "reading_path": [
+              "headline answer",
+              "primary exhibit",
+              "implication and owner"
+            ],
+            "preferred_role_variants": {
+              "title": [
+                "title"
+              ],
+              "section": [
+                "standard",
+                "kpi-hero"
+              ],
+              "evidence": [
+                "chart",
+                "table"
+              ],
+              "comparison": [
+                "comparison-2col",
+                "matrix"
+              ],
+              "data": [
+                "chart",
+                "table",
+                "stats"
+              ],
+              "decision": [
+                "table",
+                "standard"
+              ],
+              "references": [
+                "table"
+              ]
+            },
+            "invariant_moves": [
+              "State the governing answer before supporting detail.",
+              "Attach every exhibit to an explicit implication.",
+              "End with a named decision, owner, or next action."
+            ],
+            "forbidden_moves": [
+              "Do not delay the recommendation until the final slide.",
+              "Do not use decorative cards as a substitute for evidence hierarchy."
+            ],
+            "title_system_id": "title-answer-ledger",
+            "section_system_id": "section-claim-chapters",
+            "evidence_system_id": "evidence-proof-stack",
+            "comparison_system_id": "comparison-option-scorecard",
+            "data_system_id": "data-executive-exhibit",
+            "decision_system_id": "decision-owner-commitment",
+            "references_system_id": "references-executive-notes"
+          },
+          "renderer_role_contracts_v2": {
+            "schema_version": "renderer_role_contracts_v2",
+            "catalog_version": "renderer_role_contract_catalog_v2",
+            "composition_grammar_id": "consulting-answer-pyramid",
+            "style_preset": "data-heavy-boardroom",
+            "supported_layout_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "roles": {
+              "title": {
+                "system_id": "title-answer-ledger",
+                "layout_family": "answer-ledger",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "headline",
+                  "support",
+                  "anchor"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "medium",
+                  "max_items": 3
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "title-answer-ledger"
+                },
+                "slots": {
+                  "headline": [
+                    0.18,
+                    0.17,
+                    0.52,
+                    0.31
+                  ],
+                  "support": [
+                    0.18,
+                    0.55,
+                    0.42,
+                    0.14
+                  ],
+                  "anchor": [
+                    0.76,
+                    0.12,
+                    0.2,
+                    0.76
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "title"
+              },
+              "section": {
+                "system_id": "section-claim-chapters",
+                "layout_family": "claim-chapter",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "index",
+                  "headline",
+                  "support"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "low",
+                  "max_items": 3
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "section-claim-chapters"
+                },
+                "slots": {
+                  "index": [
+                    0.04,
+                    0.18,
+                    0.12,
+                    0.18
+                  ],
+                  "headline": [
+                    0.2,
+                    0.2,
+                    0.56,
+                    0.32
+                  ],
+                  "support": [
+                    0.2,
+                    0.58,
+                    0.48,
+                    0.18
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "section"
+              },
+              "evidence": {
+                "system_id": "evidence-proof-stack",
+                "layout_family": "proof-stack",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "evidence_0",
+                  "evidence_1",
+                  "evidence_2",
+                  "evidence_3"
+                ],
+                "anchor_slot": "evidence_0",
+                "density": {
+                  "level": "high",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "evidence-proof-stack"
+                },
+                "slots": {
+                  "evidence_0": [
+                    0.0,
+                    0.0,
+                    0.3,
+                    1.0
+                  ],
+                  "evidence_1": [
+                    0.35,
+                    0.0,
+                    0.65,
+                    0.29
+                  ],
+                  "evidence_2": [
+                    0.35,
+                    0.355,
+                    0.65,
+                    0.29
+                  ],
+                  "evidence_3": [
+                    0.35,
+                    0.71,
+                    0.65,
+                    0.29
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "evidence"
+              },
+              "comparison": {
+                "system_id": "comparison-option-scorecard",
+                "layout_family": "criteria-scorecard",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "option_0",
+                  "option_1",
+                  "verdict"
+                ],
+                "anchor_slot": "option_0",
+                "density": {
+                  "level": "high",
+                  "max_items": 7
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "comparison-option-scorecard"
+                },
+                "slots": {
+                  "option_0": [
+                    0.0,
+                    0.0,
+                    0.47,
+                    0.62
+                  ],
+                  "option_1": [
+                    0.53,
+                    0.0,
+                    0.47,
+                    0.62
+                  ],
+                  "verdict": [
+                    0.0,
+                    0.7,
+                    1.0,
+                    0.24
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "comparison"
+              },
+              "chart": {
+                "system_id": "data-executive-exhibit",
+                "layout_family": "executive-exhibit",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "chart",
+                  "insight",
+                  "facts"
+                ],
+                "anchor_slot": "chart",
+                "density": {
+                  "level": "high",
+                  "max_items": 4
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-executive-exhibit"
+                },
+                "slots": {
+                  "chart": [
+                    0.0,
+                    0.0,
+                    0.72,
+                    1.0
+                  ],
+                  "insight": [
+                    0.77,
+                    0.0,
+                    0.23,
+                    0.42
+                  ],
+                  "facts": [
+                    0.77,
+                    0.49,
+                    0.23,
+                    0.51
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "chart"
+              },
+              "table": {
+                "system_id": "table-executive-ledger",
+                "layout_family": "executive-ledger",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "table",
+                  "readout"
+                ],
+                "anchor_slot": "table",
+                "density": {
+                  "level": "high",
+                  "max_items": 8
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-executive-exhibit"
+                },
+                "slots": {
+                  "table": [
+                    0.0,
+                    0.0,
+                    0.72,
+                    1.0
+                  ],
+                  "readout": [
+                    0.77,
+                    0.0,
+                    0.23,
+                    1.0
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "table"
+              },
+              "decision": {
+                "system_id": "decision-owner-commitment",
+                "layout_family": "owner-commitment",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "decision_0",
+                  "decision_1",
+                  "decision_2",
+                  "decision_3",
+                  "commitment"
+                ],
+                "anchor_slot": "commitment",
+                "density": {
+                  "level": "high",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "decision-owner-commitment"
+                },
+                "slots": {
+                  "decision_0": [
+                    0.0,
+                    0.0,
+                    0.46,
+                    0.34
+                  ],
+                  "decision_1": [
+                    0.54,
+                    0.0,
+                    0.46,
+                    0.34
+                  ],
+                  "decision_2": [
+                    0.0,
+                    0.42,
+                    0.46,
+                    0.3
+                  ],
+                  "decision_3": [
+                    0.54,
+                    0.42,
+                    0.46,
+                    0.3
+                  ],
+                  "commitment": [
+                    0.0,
+                    0.8,
+                    1.0,
+                    0.2
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "decision"
+              },
+              "references": {
+                "system_id": "references-executive-notes",
+                "layout_family": "executive-notes",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "register",
+                  "notes"
+                ],
+                "anchor_slot": "register",
+                "density": {
+                  "level": "high",
+                  "max_items": 10
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "references-executive-notes"
+                },
+                "slots": {
+                  "register": [
+                    0.0,
+                    0.0,
+                    0.74,
+                    1.0
+                  ],
+                  "notes": [
+                    0.79,
+                    0.0,
+                    0.21,
+                    1.0
+                  ]
+                },
+                "grammar_id": "consulting-answer-pyramid",
+                "role": "references"
+              }
+            }
+          },
+          "title_system_id": "title-answer-ledger",
+          "section_system_id": "section-claim-chapters",
+          "evidence_system_id": "evidence-proof-stack",
+          "comparison_system_id": "comparison-option-scorecard",
+          "data_system_id": "data-executive-exhibit",
+          "decision_system_id": "decision-owner-commitment",
+          "references_system_id": "references-executive-notes",
+          "narrative_arc": {
+            "arc_id": "answer-context-proof-action",
+            "stages": [
+              "answer",
+              "context",
+              "proof",
+              "tradeoffs",
+              "action"
+            ]
+          },
+          "density": {
+            "level": "high",
+            "distribution": "dense exhibits with short interpretive headlines"
+          },
+          "grid": {
+            "columns": 12,
+            "gutter": "0.22-0.28in",
+            "anchor": "left claim rail and aligned exhibit edge"
+          },
+          "reading_path": [
+            "headline answer",
+            "primary exhibit",
+            "implication and owner"
+          ],
+          "preferred_role_variants": {
+            "title": [
+              "title"
+            ],
+            "section": [
+              "standard",
+              "kpi-hero"
+            ],
+            "evidence": [
+              "chart",
+              "table"
+            ],
+            "comparison": [
+              "comparison-2col",
+              "matrix"
+            ],
+            "data": [
+              "chart",
+              "table",
+              "stats"
+            ],
+            "decision": [
+              "table",
+              "standard"
+            ],
+            "references": [
+              "table"
+            ]
+          },
+          "invariant_moves": [
+            "State the governing answer before supporting detail.",
+            "Attach every exhibit to an explicit implication.",
+            "End with a named decision, owner, or next action."
+          ],
+          "forbidden_moves": [
+            "Do not delay the recommendation until the final slide.",
+            "Do not use decorative cards as a substitute for evidence hierarchy."
+          ],
+          "distinctive_moves": [
+            "State the governing answer before supporting detail.",
+            "Attach every exhibit to an explicit implication.",
+            "End with a named decision, owner, or next action."
+          ],
+          "avoid": [
+            "Do not delay the recommendation until the final slide.",
+            "Do not use decorative cards as a substitute for evidence hierarchy."
+          ],
+          "mix_rule": "Keep one composition grammar coherent across the deck. Borrow isolated treatment ideas, but do not merge complete role systems or page systems.",
+          "max_consecutive_same_variant": 2,
+          "structural_signature": "1c5d82610a55e56e92f80271ccc4b11f606294363eae7821e74fe2489726c4b6",
+          "route_score": 0,
+          "selection_reasons": [
+            "stable catalog fallback"
+          ]
+        },
+        {
+          "grammar_id": "editorial-spread",
+          "style_preset": "editorial-minimal",
+          "style_presets": [
+            "editorial-minimal",
+            "paper-journal"
+          ],
+          "family": "editorial-report",
+          "lane": "narrative-led",
+          "description": "Use editorial pacing, strong hierarchy, and selective evidence to build a readable argument.",
+          "rhythm_treatments": [
+            "title",
+            "section",
+            "evidence",
+            "comparison",
+            "data",
+            "decision",
+            "references"
+          ],
+          "rhythm_pattern": [
+            "title",
+            "standard",
+            "image-sidebar",
+            "split",
+            "chart",
+            "standard",
+            "table"
+          ],
+          "role_variant_map": {
+            "title": "title",
+            "section": "standard",
+            "evidence": "image-sidebar",
+            "comparison": "split",
+            "data": "chart",
+            "decision": "standard",
+            "references": "table"
+          },
+          "preferred_variants": [
+            "title",
+            "standard",
+            "generated-image",
+            "image-sidebar",
+            "scientific-figure",
+            "split",
+            "comparison-2col",
+            "chart",
+            "table"
+          ],
+          "renderer_bias": {
+            "page_system": "editorial-field",
+            "structural_motif": "editorial-rule",
+            "title_layout": "broadsheet",
+            "footer_mode": "standard",
+            "chart_treatment": "minimal",
+            "table_treatment": "journal-grid",
+            "figure_table_treatment": "image-sidebar",
+            "stats_mode": "feature-left",
+            "matrix_mode": "open-quadrants",
+            "summary_callout_mode": "default",
+            "image_sidebar_mode": "editorial-atlas",
+            "comparison_mode": "open-columns"
+          },
+          "renderer_role_systems_v1": {
+            "schema_version": "renderer_role_systems_v1",
+            "catalog_version": "taste_grammar_catalog_v1",
+            "composition_grammar_id": "editorial-spread",
+            "style_preset": "editorial-minimal",
+            "narrative_arc": {
+              "arc_id": "premise-scene-evidence-turn-close",
+              "stages": [
+                "premise",
+                "scene",
+                "evidence",
+                "turn",
+                "implication",
+                "close"
+              ]
+            },
+            "density": {
+              "level": "medium",
+              "distribution": "alternating open spreads and evidence-rich features"
+            },
+            "grid": {
+              "columns": 10,
+              "gutter": "0.24-0.32in",
+              "anchor": "masthead baseline and asymmetric feature column"
+            },
+            "reading_path": [
+              "editorial headline",
+              "feature object",
+              "caption or annotation",
+              "closing implication"
+            ],
+            "preferred_role_variants": {
+              "title": [
+                "title"
+              ],
+              "section": [
+                "standard",
+                "generated-image"
+              ],
+              "evidence": [
+                "image-sidebar",
+                "generated-image",
+                "scientific-figure"
+              ],
+              "comparison": [
+                "split",
+                "comparison-2col"
+              ],
+              "data": [
+                "chart",
+                "table"
+              ],
+              "decision": [
+                "standard"
+              ],
+              "references": [
+                "table"
+              ]
+            },
+            "invariant_moves": [
+              "Alternate open narrative space with denser proof moments.",
+              "Use captions and annotations to connect visuals to the argument.",
+              "Keep one clear editorial turn per section."
+            ],
+            "forbidden_moves": [
+              "Do not repeat the same card grid across consecutive slides.",
+              "Do not use decorative imagery without an explanatory role."
+            ],
+            "title_system_id": "title-editorial-masthead",
+            "section_system_id": "section-editorial-folio",
+            "evidence_system_id": "evidence-captioned-feature",
+            "comparison_system_id": "comparison-editorial-columns",
+            "data_system_id": "data-annotated-graphic",
+            "decision_system_id": "decision-editorial-takeaway",
+            "references_system_id": "references-editorial-notes"
+          },
+          "renderer_role_contracts_v2": {
+            "schema_version": "renderer_role_contracts_v2",
+            "catalog_version": "renderer_role_contract_catalog_v2",
+            "composition_grammar_id": "editorial-spread",
+            "style_preset": "editorial-minimal",
+            "supported_layout_variants": [
+              "primary",
+              "alternate",
+              "dense"
+            ],
+            "roles": {
+              "title": {
+                "system_id": "title-editorial-masthead",
+                "layout_family": "editorial-masthead",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "masthead",
+                  "headline",
+                  "support",
+                  "folio"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "medium",
+                  "max_items": 4
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "title-editorial-masthead"
+                },
+                "slots": {
+                  "masthead": [
+                    0.05,
+                    0.06,
+                    0.9,
+                    0.1
+                  ],
+                  "headline": [
+                    0.08,
+                    0.24,
+                    0.62,
+                    0.34
+                  ],
+                  "support": [
+                    0.08,
+                    0.66,
+                    0.48,
+                    0.14
+                  ],
+                  "folio": [
+                    0.82,
+                    0.24,
+                    0.12,
+                    0.56
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "title"
+              },
+              "section": {
+                "system_id": "section-editorial-folio",
+                "layout_family": "editorial-folio",
+                "coordinate_space": "slide",
+                "reading_order": [
+                  "folio",
+                  "headline",
+                  "support"
+                ],
+                "anchor_slot": "headline",
+                "density": {
+                  "level": "low",
+                  "max_items": 3
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "section-editorial-folio"
+                },
+                "slots": {
+                  "folio": [
+                    0.05,
+                    0.12,
+                    0.14,
+                    0.72
+                  ],
+                  "headline": [
+                    0.27,
+                    0.26,
+                    0.62,
+                    0.26
+                  ],
+                  "support": [
+                    0.27,
+                    0.62,
+                    0.48,
+                    0.15
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "section"
+              },
+              "evidence": {
+                "system_id": "evidence-captioned-feature",
+                "layout_family": "captioned-feature",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "evidence_0",
+                  "evidence_1",
+                  "evidence_2",
+                  "evidence_3"
+                ],
+                "anchor_slot": "evidence_0",
+                "density": {
+                  "level": "medium",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "evidence-captioned-feature"
+                },
+                "slots": {
+                  "evidence_0": [
+                    0.0,
+                    0.0,
+                    0.57,
+                    1.0
+                  ],
+                  "evidence_1": [
+                    0.64,
+                    0.0,
+                    0.36,
+                    0.28
+                  ],
+                  "evidence_2": [
+                    0.64,
+                    0.36,
+                    0.36,
+                    0.28
+                  ],
+                  "evidence_3": [
+                    0.64,
+                    0.72,
+                    0.36,
+                    0.28
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "evidence"
+              },
+              "comparison": {
+                "system_id": "comparison-editorial-columns",
+                "layout_family": "editorial-juxtaposition",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "option_0",
+                  "option_1",
+                  "verdict"
+                ],
+                "anchor_slot": "option_0",
+                "density": {
+                  "level": "medium",
+                  "max_items": 6
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "comparison-editorial-columns"
+                },
+                "slots": {
+                  "option_0": [
+                    0.0,
+                    0.0,
+                    0.55,
+                    0.72
+                  ],
+                  "option_1": [
+                    0.61,
+                    0.16,
+                    0.39,
+                    0.56
+                  ],
+                  "verdict": [
+                    0.61,
+                    0.8,
+                    0.39,
+                    0.2
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "comparison"
+              },
+              "chart": {
+                "system_id": "data-annotated-graphic",
+                "layout_family": "annotated-graphic",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "insight",
+                  "chart",
+                  "facts"
+                ],
+                "anchor_slot": "chart",
+                "density": {
+                  "level": "medium",
+                  "max_items": 4
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-annotated-graphic"
+                },
+                "slots": {
+                  "chart": [
+                    0.0,
+                    0.0,
+                    0.68,
+                    0.76
+                  ],
+                  "insight": [
+                    0.74,
+                    0.0,
+                    0.26,
+                    0.48
+                  ],
+                  "facts": [
+                    0.74,
+                    0.58,
+                    0.26,
+                    0.42
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "chart"
+              },
+              "table": {
+                "system_id": "table-editorial-notes",
+                "layout_family": "editorial-ledger",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "index",
+                  "table",
+                  "readout"
+                ],
+                "anchor_slot": "table",
+                "density": {
+                  "level": "medium",
+                  "max_items": 8
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "data-annotated-graphic"
+                },
+                "slots": {
+                  "index": [
+                    0.0,
+                    0.0,
+                    0.2,
+                    1.0
+                  ],
+                  "table": [
+                    0.26,
+                    0.08,
+                    0.74,
+                    0.66
+                  ],
+                  "readout": [
+                    0.52,
+                    0.82,
+                    0.48,
+                    0.18
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "table"
+              },
+              "decision": {
+                "system_id": "decision-editorial-takeaway",
+                "layout_family": "editorial-takeaway",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "decision_0",
+                  "decision_1",
+                  "decision_2",
+                  "decision_3",
+                  "commitment"
+                ],
+                "anchor_slot": "decision_0",
+                "density": {
+                  "level": "medium",
+                  "max_items": 5
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "decision-editorial-takeaway"
+                },
+                "slots": {
+                  "decision_0": [
+                    0.0,
+                    0.0,
+                    0.54,
+                    0.36
+                  ],
+                  "decision_1": [
+                    0.12,
+                    0.48,
+                    0.42,
+                    0.28
+                  ],
+                  "decision_2": [
+                    0.62,
+                    0.1,
+                    0.38,
+                    0.3
+                  ],
+                  "decision_3": [
+                    0.62,
+                    0.48,
+                    0.38,
+                    0.28
+                  ],
+                  "commitment": [
+                    0.62,
+                    0.82,
+                    0.38,
+                    0.18
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "decision"
+              },
+              "references": {
+                "system_id": "references-editorial-notes",
+                "layout_family": "editorial-notes",
+                "coordinate_space": "body",
+                "reading_order": [
+                  "notes",
+                  "register"
+                ],
+                "anchor_slot": "register",
+                "density": {
+                  "level": "medium",
+                  "max_items": 9
+                },
+                "supported_variants": [
+                  "primary",
+                  "alternate",
+                  "dense"
+                ],
+                "fallback": {
+                  "version": "renderer_role_systems_v1",
+                  "system_id": "references-editorial-notes"
+                },
+                "slots": {
+                  "notes": [
+                    0.0,
+                    0.0,
+                    0.22,
+                    1.0
+                  ],
+                  "register": [
+                    0.29,
+                    0.08,
+                    0.71,
+                    0.84
+                  ]
+                },
+                "grammar_id": "editorial-spread",
+                "role": "references"
+              }
+            }
+          },
+          "title_system_id": "title-editorial-masthead",
+          "section_system_id": "section-editorial-folio",
+          "evidence_system_id": "evidence-captioned-feature",
+          "comparison_system_id": "comparison-editorial-columns",
+          "data_system_id": "data-annotated-graphic",
+          "decision_system_id": "decision-editorial-takeaway",
+          "references_system_id": "references-editorial-notes",
+          "narrative_arc": {
+            "arc_id": "premise-scene-evidence-turn-close",
+            "stages": [
+              "premise",
+              "scene",
+              "evidence",
+              "turn",
+              "implication",
+              "close"
+            ]
+          },
+          "density": {
+            "level": "medium",
+            "distribution": "alternating open spreads and evidence-rich features"
+          },
+          "grid": {
+            "columns": 10,
+            "gutter": "0.24-0.32in",
+            "anchor": "masthead baseline and asymmetric feature column"
+          },
+          "reading_path": [
+            "editorial headline",
+            "feature object",
+            "caption or annotation",
+            "closing implication"
+          ],
+          "preferred_role_variants": {
+            "title": [
+              "title"
+            ],
+            "section": [
+              "standard",
+              "generated-image"
+            ],
+            "evidence": [
+              "image-sidebar",
+              "generated-image",
+              "scientific-figure"
+            ],
+            "comparison": [
+              "split",
+              "comparison-2col"
+            ],
+            "data": [
+              "chart",
+              "table"
+            ],
+            "decision": [
+              "standard"
+            ],
+            "references": [
+              "table"
+            ]
+          },
+          "invariant_moves": [
+            "Alternate open narrative space with denser proof moments.",
+            "Use captions and annotations to connect visuals to the argument.",
+            "Keep one clear editorial turn per section."
+          ],
+          "forbidden_moves": [
+            "Do not repeat the same card grid across consecutive slides.",
+            "Do not use decorative imagery without an explanatory role."
+          ],
+          "distinctive_moves": [
+            "Alternate open narrative space with denser proof moments.",
+            "Use captions and annotations to connect visuals to the argument.",
+            "Keep one clear editorial turn per section."
+          ],
+          "avoid": [
+            "Do not repeat the same card grid across consecutive slides.",
+            "Do not use decorative imagery without an explanatory role."
+          ],
+          "mix_rule": "Keep one composition grammar coherent across the deck. Borrow isolated treatment ideas, but do not merge complete role systems or page systems.",
+          "max_consecutive_same_variant": 2,
+          "structural_signature": "49be8fb4fcb685c9b0a3bf639baefe76dd1bfaecbf2b3fe5c12458699a250380",
+          "route_score": 0,
+          "selection_reasons": [
+            "stable catalog fallback"
+          ]
+        }
+      ]
+    },
+    "normal_workflow_contract": {
+      "decision_rule": "Use the resolved style_execution_plan_v1 as the authoring default. Refine only when the evidence shape or explicit user constraints make a recorded change necessary.",
+      "persist_when_used": [
+        "design_contract.json:choice_resolution.atom_composition",
+        "design_contract.json:style_execution_plan",
+        "design_contract.json:style_system.style_atom_composition",
+        "design_brief.json:style_atom_composition",
+        "design_brief.json:style_system.style_atom_preferred_variants",
+        "design_brief.json:style_system.style_atom_narrative_arc",
+        "design_brief.json:style_system.composition_grammar_route",
+        "design_brief.json:style_system.renderer_role_systems_v1",
+        "design_brief.json:style_system.renderer_role_contracts_v2",
+        "design_brief.json:structure_strategy.composition_grammar",
+        "style_contract.json:renderer_role_systems_v1",
+        "style_contract.json:renderer_role_contracts_v2",
+        "outline.json:deck_style supported fields from deck_style_delta",
+        "content_plan.json:narrative_arc or slide_plan variants where topic-fit"
+      ],
+      "do_not_force": [
+        "Do not use every preferred variant just because it appears in the atom packet.",
+        "Do not merge entire page systems from alternative composition grammars.",
+        "Do not override explicit user style, brand, source, or accessibility constraints.",
+        "Do not copy external slide geometry; atoms are descriptor-only grammar signals."
+      ]
+    },
+    "prompt_packet_summary": {
+      "schema_version": null,
+      "target_family": null,
+      "related_families": null,
+      "candidate_type_count": 0
+    }
+  },
+  "renderer_role_systems_v1": {
+    "schema_version": "renderer_role_systems_v1",
+    "catalog_version": "taste_grammar_catalog_v1",
+    "composition_grammar_id": "clinical-care-pathway",
+    "style_preset": "executive-clinical",
+    "narrative_arc": {
+      "arc_id": "population-state-evidence-care-action",
+      "stages": [
+        "population",
+        "current state",
+        "evidence gate",
+        "care options",
+        "action",
+        "monitoring"
+      ]
+    },
+    "density": {
+      "level": "medium-high",
+      "distribution": "stage bands with one dominant clinical evidence object"
+    },
+    "grid": {
+      "columns": 12,
+      "gutter": "0.22-0.28in",
+      "anchor": "care-stage rail and outcome field"
+    },
+    "reading_path": [
+      "patient or cohort state",
+      "evidence gate",
+      "care decision",
+      "monitoring implication"
+    ],
+    "preferred_role_variants": {
+      "title": [
+        "title"
+      ],
+      "section": [
+        "standard",
+        "flow"
+      ],
+      "evidence": [
+        "scientific-figure",
+        "chart",
+        "image-sidebar"
+      ],
+      "comparison": [
+        "comparison-2col",
+        "table"
+      ],
+      "data": [
+        "chart",
+        "table",
+        "stats"
+      ],
+      "decision": [
+        "flow",
+        "table"
+      ],
+      "references": [
+        "table"
+      ]
+    },
+    "invariant_moves": [
+      "Identify the patient or cohort state before discussing intervention.",
+      "Separate evidence threshold from care recommendation.",
+      "Make safety, monitoring, and escalation explicit."
+    ],
+    "forbidden_moves": [
+      "Do not imply clinical certainty beyond the cited evidence.",
+      "Do not hide contraindications or unresolved safety signals."
+    ],
+    "title_system_id": "title-clinical-status",
+    "section_system_id": "section-care-stage",
+    "evidence_system_id": "evidence-clinical-cohort",
+    "comparison_system_id": "comparison-care-options",
+    "data_system_id": "data-clinical-outcomes",
+    "decision_system_id": "decision-care-gate",
+    "references_system_id": "references-clinical-evidence"
+  },
+  "renderer_role_contracts_v2": {
+    "schema_version": "renderer_role_contracts_v2",
+    "catalog_version": "renderer_role_contract_catalog_v2",
+    "composition_grammar_id": "clinical-care-pathway",
+    "style_preset": "executive-clinical",
+    "supported_layout_variants": [
+      "primary",
+      "alternate",
+      "dense"
+    ],
+    "roles": {
+      "title": {
+        "system_id": "title-clinical-status",
+        "layout_family": "clinical-status",
+        "coordinate_space": "slide",
+        "reading_order": [
+          "status",
+          "headline",
+          "support",
+          "pathway"
+        ],
+        "anchor_slot": "status",
+        "density": {
+          "level": "medium",
+          "max_items": 4
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "title-clinical-status"
+        },
+        "slots": {
+          "status": [
+            0.04,
+            0.08,
+            0.12,
+            0.78
+          ],
+          "headline": [
+            0.22,
+            0.18,
+            0.55,
+            0.28
+          ],
+          "support": [
+            0.22,
+            0.54,
+            0.5,
+            0.14
+          ],
+          "pathway": [
+            0.82,
+            0.16,
+            0.14,
+            0.66
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "title"
+      },
+      "section": {
+        "system_id": "section-care-stage",
+        "layout_family": "care-stage",
+        "coordinate_space": "slide",
+        "reading_order": [
+          "stage",
+          "headline",
+          "support"
+        ],
+        "anchor_slot": "stage",
+        "density": {
+          "level": "medium",
+          "max_items": 3
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "section-care-stage"
+        },
+        "slots": {
+          "stage": [
+            0.05,
+            0.18,
+            0.14,
+            0.58
+          ],
+          "headline": [
+            0.25,
+            0.24,
+            0.6,
+            0.24
+          ],
+          "support": [
+            0.25,
+            0.58,
+            0.54,
+            0.16
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "section"
+      },
+      "evidence": {
+        "system_id": "evidence-clinical-cohort",
+        "layout_family": "clinical-cohort",
+        "coordinate_space": "body",
+        "reading_order": [
+          "evidence_0",
+          "evidence_1",
+          "evidence_2"
+        ],
+        "anchor_slot": "evidence_0",
+        "density": {
+          "level": "medium-high",
+          "max_items": 5
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "evidence-clinical-cohort"
+        },
+        "slots": {
+          "evidence_0": [
+            0.0,
+            0.0,
+            1.0,
+            0.22
+          ],
+          "evidence_1": [
+            0.0,
+            0.3,
+            0.47,
+            0.7
+          ],
+          "evidence_2": [
+            0.53,
+            0.3,
+            0.47,
+            0.7
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "evidence"
+      },
+      "comparison": {
+        "system_id": "comparison-care-options",
+        "layout_family": "care-options",
+        "coordinate_space": "body",
+        "reading_order": [
+          "option_0",
+          "option_1",
+          "verdict"
+        ],
+        "anchor_slot": "option_0",
+        "density": {
+          "level": "medium-high",
+          "max_items": 7
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "comparison-care-options"
+        },
+        "slots": {
+          "option_0": [
+            0.0,
+            0.0,
+            1.0,
+            0.35
+          ],
+          "option_1": [
+            0.0,
+            0.43,
+            1.0,
+            0.35
+          ],
+          "verdict": [
+            0.48,
+            0.84,
+            0.52,
+            0.16
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "comparison"
+      },
+      "chart": {
+        "system_id": "data-clinical-outcomes",
+        "layout_family": "clinical-outcomes",
+        "coordinate_space": "body",
+        "reading_order": [
+          "insight",
+          "facts",
+          "chart",
+          "register"
+        ],
+        "anchor_slot": "chart",
+        "density": {
+          "level": "medium-high",
+          "max_items": 5
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "data-clinical-outcomes"
+        },
+        "slots": {
+          "insight": [
+            0.0,
+            0.0,
+            1.0,
+            0.2
+          ],
+          "chart": [
+            0.0,
+            0.28,
+            0.66,
+            0.72
+          ],
+          "facts": [
+            0.72,
+            0.28,
+            0.28,
+            0.38
+          ],
+          "register": [
+            0.72,
+            0.7,
+            0.28,
+            0.3
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "chart"
+      },
+      "table": {
+        "system_id": "table-clinical-cohort",
+        "layout_family": "clinical-cohort-ledger",
+        "coordinate_space": "body",
+        "reading_order": [
+          "index",
+          "table",
+          "readout"
+        ],
+        "anchor_slot": "table",
+        "density": {
+          "level": "medium-high",
+          "max_items": 9
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "data-clinical-outcomes"
+        },
+        "slots": {
+          "index": [
+            0.0,
+            0.0,
+            0.17,
+            1.0
+          ],
+          "table": [
+            0.22,
+            0.0,
+            0.78,
+            0.72
+          ],
+          "readout": [
+            0.22,
+            0.8,
+            0.78,
+            0.2
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "table"
+      },
+      "decision": {
+        "system_id": "decision-care-gate",
+        "layout_family": "care-gate",
+        "coordinate_space": "body",
+        "reading_order": [
+          "decision_0",
+          "decision_1",
+          "decision_2",
+          "decision_3",
+          "commitment"
+        ],
+        "anchor_slot": "commitment",
+        "density": {
+          "level": "medium-high",
+          "max_items": 5
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "decision-care-gate"
+        },
+        "slots": {
+          "decision_0": [
+            0.0,
+            0.0,
+            0.22,
+            0.66
+          ],
+          "decision_1": [
+            0.26,
+            0.0,
+            0.22,
+            0.66
+          ],
+          "decision_2": [
+            0.52,
+            0.0,
+            0.22,
+            0.66
+          ],
+          "decision_3": [
+            0.78,
+            0.0,
+            0.22,
+            0.66
+          ],
+          "commitment": [
+            0.26,
+            0.76,
+            0.74,
+            0.2
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "decision"
+      },
+      "references": {
+        "system_id": "references-clinical-evidence",
+        "layout_family": "clinical-evidence",
+        "coordinate_space": "body",
+        "reading_order": [
+          "index",
+          "register",
+          "notes"
+        ],
+        "anchor_slot": "register",
+        "density": {
+          "level": "medium-high",
+          "max_items": 10
+        },
+        "supported_variants": [
+          "primary",
+          "alternate",
+          "dense"
+        ],
+        "fallback": {
+          "version": "renderer_role_systems_v1",
+          "system_id": "references-clinical-evidence"
+        },
+        "slots": {
+          "index": [
+            0.0,
+            0.0,
+            0.17,
+            1.0
+          ],
+          "register": [
+            0.22,
+            0.0,
+            0.78,
+            0.68
+          ],
+          "notes": [
+            0.22,
+            0.76,
+            0.78,
+            0.24
+          ]
+        },
+        "grammar_id": "clinical-care-pathway",
+        "role": "references"
+      }
+    }
+  }
+}

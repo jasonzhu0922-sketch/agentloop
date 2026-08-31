@@ -1,0 +1,406 @@
+{
+  "brief_version": "model_adaptive_deck_brief_v1",
+  "workspace": "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training",
+  "stable_prompt_id": "dcmm-4-pptx-13ae211e7b59",
+  "user_request": "帮我做一个 DCMM 4 评级的培训材料，设计好一点，不要都是文字，生成pptx格式",
+  "execution_profile": {
+    "requested": "balanced",
+    "resolved": "balanced",
+    "resolution_basis": "explicit",
+    "intent": "Produce a polished professional deck with one focused planning and repair loop.",
+    "delegation": {
+      "design_scout": "only_when_style_or_evidence_is_ambiguous",
+      "data_scout": "only_when_local_data_needs_analysis",
+      "visual_critic": "required_after_render"
+    },
+    "workflow": [
+      "resolve intake or record best-judgment assumptions",
+      "select one primary style route",
+      "author source files and required artifacts",
+      "run render-free QA",
+      "render, inspect, and repair once",
+      "run final delivery readiness"
+    ],
+    "render_policy": "render_final_candidate_and_review"
+  },
+  "autonomy": {
+    "local_actions": "Read and edit in-scope source files, run non-destructive builds and QA, and iterate without asking again.",
+    "confirmation_required": "External writes, destructive actions, purchases, or material scope expansion."
+  },
+  "intake": {
+    "ask_when_material": true,
+    "questions": [
+      {
+        "id": "style_density",
+        "question": "What style and density should I use?",
+        "options": [
+          "Figure-first report (Recommended)",
+          "Conference talk",
+          "Premium editorial"
+        ]
+      },
+      {
+        "id": "visual_source_policy",
+        "question": "How should visuals, palette, and sourcing be handled?",
+        "options": [
+          "Best judgment (Recommended)",
+          "Strict sources",
+          "Custom assets"
+        ]
+      }
+    ],
+    "auto_resolution_ms": 90000,
+    "fallback": "Proceed with best judgment, record assumptions under design_brief.user_intake, and keep the design contract explicit."
+  },
+  "routing": {
+    "active_routes": [
+      "intake_questions",
+      "design_contract",
+      "atom_composition",
+      "rendered_visual_review"
+    ],
+    "primary_style": {
+      "preset": "executive-clinical",
+      "family": "clinical-executive",
+      "background_system": "light clinical report",
+      "reference_id": "ref-exec-clinical-evidence-brief"
+    },
+    "atom_seed": {
+      "target_family": "executive-clinical",
+      "decision": {
+        "status": "accepted",
+        "mode": "deterministic",
+        "reason": "Explicit/workspace preset remains primary; topic-aware atoms and composition grammar supply bounded treatment and rhythm choices."
+      },
+      "preferred_variants": [
+        "title",
+        "standard",
+        "flow",
+        "scientific-figure",
+        "chart",
+        "image-sidebar",
+        "comparison-2col",
+        "table",
+        "stats",
+        "kpi-hero"
+      ],
+      "requested_content_shapes": [],
+      "narrative_arc": [
+        "title",
+        "cohort",
+        "endpoints",
+        "outcomes",
+        "risk-benefit",
+        "decision"
+      ],
+      "deck_style_delta": {
+        "page_system": "clinical-rail",
+        "structural_motif": "clinical-stages",
+        "title_layout": "split-hero",
+        "footer_mode": "source-line",
+        "chart_treatment": "threshold-band",
+        "table_treatment": "readout-sidecar",
+        "figure_table_treatment": "figure-first",
+        "stats_mode": "feature-left",
+        "matrix_mode": "cards",
+        "summary_callout_mode": "lab-box",
+        "image_sidebar_mode": "evidence-mosaic",
+        "comparison_mode": "scorecard",
+        "header_mode": "lab-clean",
+        "visual_density": "medium",
+        "decorative_signals": [
+          "focus-box-right",
+          "wide-margin-quiet-page",
+          "eyebrow-tag-above-title"
+        ],
+        "arc_beats": [
+          "title",
+          "cohort",
+          "endpoints",
+          "outcomes",
+          "risk-benefit",
+          "decision"
+        ],
+        "style_seed_families": [
+          "executive-clinical"
+        ],
+        "composition_mode": "deterministic-fallback"
+      }
+    },
+    "composition_grammar": {
+      "grammar_id": "clinical-care-pathway",
+      "lane": "pathway-led",
+      "rhythm_pattern": [
+        "title",
+        "standard",
+        "scientific-figure",
+        "comparison-2col",
+        "chart",
+        "flow",
+        "table"
+      ],
+      "role_variant_map": {
+        "title": "title",
+        "section": "standard",
+        "evidence": "scientific-figure",
+        "comparison": "comparison-2col",
+        "data": "chart",
+        "decision": "flow",
+        "references": "table"
+      },
+      "renderer_bias": {
+        "page_system": "clinical-rail",
+        "structural_motif": "clinical-stages",
+        "title_layout": "split-hero",
+        "footer_mode": "source-line",
+        "chart_treatment": "threshold-band",
+        "table_treatment": "readout-sidecar",
+        "figure_table_treatment": "figure-first",
+        "stats_mode": "feature-left",
+        "matrix_mode": "cards",
+        "summary_callout_mode": "lab-box",
+        "image_sidebar_mode": "evidence-mosaic",
+        "comparison_mode": "scorecard"
+      },
+      "distinctive_moves": [
+        "Identify the patient or cohort state before discussing intervention.",
+        "Separate evidence threshold from care recommendation.",
+        "Make safety, monitoring, and escalation explicit."
+      ],
+      "max_consecutive_same_variant": 2,
+      "alternatives": [
+        {
+          "grammar_id": "scientific-evidence-plate",
+          "lane": "evidence-led",
+          "style_preset": "lab-report"
+        },
+        {
+          "grammar_id": "operations-grid",
+          "lane": "state-led",
+          "style_preset": "lavender-ops"
+        }
+      ]
+    },
+    "style_execution_plan": {
+      "schema_version": "style_execution_plan_v1",
+      "resolved_primary_preset": "executive-clinical",
+      "explicit_style_lock": true,
+      "selection_basis": "requested_style_preset",
+      "decision": {
+        "status": "accepted",
+        "mode": "deterministic",
+        "reason": "Explicit/workspace preset remains primary; topic-aware atoms and composition grammar supply bounded treatment and rhythm choices."
+      },
+      "deck_style": {
+        "page_system": "clinical-rail",
+        "structural_motif": "clinical-stages",
+        "title_layout": "split-hero",
+        "footer_mode": "source-line",
+        "chart_treatment": "threshold-band",
+        "table_treatment": "readout-sidecar",
+        "figure_table_treatment": "figure-first",
+        "stats_mode": "feature-left",
+        "matrix_mode": "cards",
+        "summary_callout_mode": "lab-box",
+        "image_sidebar_mode": "evidence-mosaic",
+        "comparison_mode": "scorecard",
+        "header_mode": "lab-clean",
+        "visual_density": "medium",
+        "decorative_signals": [
+          "focus-box-right",
+          "wide-margin-quiet-page",
+          "eyebrow-tag-above-title"
+        ],
+        "arc_beats": [
+          "title",
+          "cohort",
+          "endpoints",
+          "outcomes",
+          "risk-benefit",
+          "decision"
+        ],
+        "style_seed_families": [
+          "executive-clinical"
+        ],
+        "composition_mode": "deterministic-fallback"
+      },
+      "treatment_keys": [
+        "title",
+        "comparison",
+        "chart",
+        "table",
+        "figure",
+        "dashboard",
+        "decision",
+        "references"
+      ],
+      "full_plan_location": "design_brief.json:style_system.style_execution_plan"
+    },
+    "source_inventory": {
+      "workspace": "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training",
+      "exists": true,
+      "data_file_count": 0,
+      "data_file_shown_count": 0,
+      "reference_pptx_count": 0,
+      "reference_pptx_shown_count": 0,
+      "artifact_ledger_count": 0,
+      "data_paths": [],
+      "reference_pptx_paths": [],
+      "artifact_ledger_paths": [],
+      "inventory_replay_path": "deck_start_packet.json:workspace_source_inventory"
+    }
+  },
+  "authoring_contract": {
+    "source_of_truth": [
+      "outline.json",
+      "design_brief.json",
+      "content_plan.json",
+      "evidence_plan.json",
+      "asset_plan.json",
+      "notes.md",
+      "data and figure scripts when present"
+    ],
+    "decide": [
+      "one primary visual grammar and bounded secondary influences",
+      "topic-specific slide sequence and composition rhythm",
+      "which claims need charts, tables, figures, or citations",
+      "which generated artifacts must stay editable and reproducible"
+    ],
+    "evidence_guardrails": [
+      "Do not invent factual values or citations when source data is missing.",
+      "Ask once when missing evidence changes the decision; otherwise label assumptions or synthetic illustrations explicitly.",
+      "Run PPTX style extraction only when an actual reference deck path exists."
+    ],
+    "do_not_copy": [
+      "full corpus records",
+      "full preset catalog",
+      "recipe signatures that do not change the slide",
+      "command ladders or replay ledgers into model answers"
+    ]
+  },
+  "quality_contract": {
+    "contract_version": "slide_quality_contract_v1",
+    "purpose": "Make readable text, whitespace discipline, evidence anchors, and artifact QA explicit before the design contract and outline are authored.",
+    "source_fields_to_lock": [
+      "design_brief.json:readability_contract",
+      "design_brief.json:qa_contract.required_checks",
+      "design_brief.json:qa_contract.fail_on",
+      "design_brief.json:speed_contract",
+      "design_brief.json:figure_export_contract",
+      "content_plan.json:slide_roles",
+      "evidence_plan.json:source_policy",
+      "asset_plan.json:charts/tables/images",
+      "outline.json:slide variants and evidence anchors"
+    ],
+    "readability_targets": {
+      "min_title_pt": 24,
+      "min_body_pt": 12,
+      "min_caption_pt": 7.5,
+      "chart_label_min_pt": 7,
+      "footer_reserved_inches": 0.25,
+      "max_title_lines": 2,
+      "max_slide_text_lines": 12,
+      "max_slide_words": 110,
+      "max_slide_chars": 780
+    },
+    "layout_targets": {
+      "evidence_anchor_required": true,
+      "avoid_repeated_card_grids": true,
+      "fail_on_awkward_whitespace": true,
+      "prefer_source_edit_over_pptx_patch": true,
+      "sparse_slide_allowed_only_when_intentional": true,
+      "source_footer_rule": "Use compact source/ref IDs in source-line footers; move long references to editable References table slides."
+    },
+    "artifact_quality_targets": {
+      "required_when_data_artifacts_active": false,
+      "must_record": [
+        "source data fingerprints",
+        "producer script fingerprints",
+        "selected columns or data slices",
+        "figure/chart/table output paths",
+        "target slide IDs and variants",
+        "target figure box",
+        "figure size and DPI",
+        "axis/chart label font assumptions",
+        "image whitespace measurement or trim rule",
+        "rerun and inspect commands"
+      ]
+    },
+    "qa_gates": {
+      "fail_on": [
+        "planning_warnings",
+        "preflight_errors",
+        "overflow",
+        "overlap",
+        "placeholder_text",
+        "whitespace_warnings",
+        "design_readability_warnings",
+        "visual_review_warnings_for_final_delivery"
+      ],
+      "required_commands": [
+        "python3 scripts/validate_planning.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training",
+        "python3 scripts/build_workspace.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --qa --skip-render --fail-on-planning-warnings --fail-on-whitespace-warnings --overwrite",
+        "python3 scripts/build_workspace.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --qa --fail-on-planning-warnings --fail-on-whitespace-warnings --overwrite",
+        "python3 scripts/report_delivery_readiness.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training"
+      ]
+    },
+    "replay_proof": [
+      "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/deck_start_packet.json:slide_quality_contract",
+      "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/design_contract.json:slide_quality_contract or qa_contract/readability_contract",
+      "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/design_brief.json:readability_contract",
+      "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/build/workspace_readiness.json",
+      "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/build/build_workspace_report.json",
+      "/Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/build/delivery_readiness.json"
+    ]
+  },
+  "commands": {
+    "intake": [
+      "python3 scripts/apply_deck_intake_answers.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --packet /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/deck_start_packet.json --answers /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/intake_answers.json --report /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/intake_apply_report.json"
+    ],
+    "design_contract": [
+      "python3 scripts/apply_design_contract.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --contract /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/design_contract.json --report /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/design_contract_apply_report.json"
+    ],
+    "outline_authoring": [
+      "python3 scripts/emit_outline_authoring_prompt.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --output /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/build/outline_authoring_prompt.md --user-prompt '帮我做一个 DCMM 4 评级的培训材料，设计好一点，不要都是文字，生成pptx格式'",
+      "python3 scripts/apply_outline_authoring_handoff.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --handoff /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/outline_authoring_handoff.json --report /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training/outline_authoring_handoff_apply_report.json"
+    ],
+    "source_readiness": [
+      "python3 scripts/validate_planning.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training",
+      "python3 scripts/report_workspace_readiness.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training"
+    ],
+    "fast_first_pass": [
+      "python3 scripts/build_workspace.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --qa --skip-render --fail-on-planning-warnings --fail-on-whitespace-warnings --overwrite"
+    ],
+    "rendered_visual_review": [
+      "python3 scripts/build_workspace.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --qa --visual-review --fail-on-planning-warnings --fail-on-whitespace-warnings --overwrite",
+      "python3 scripts/report_delivery_readiness.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --require-visual-review"
+    ],
+    "final_delivery": [
+      "python3 scripts/build_workspace.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training --qa --fail-on-planning-warnings --fail-on-whitespace-warnings --overwrite",
+      "python3 scripts/report_delivery_readiness.py --workspace /Users/zhujun/coding/agentloop/packages/agentloop-skills/skills/presentation-skill/decks/dcmm-level4-training"
+    ]
+  },
+  "completion_rubric": [
+    "Every content slide has a clear visual or evidence anchor.",
+    "Slide compositions vary with the argument; the deck is not a repeated card or bullet template.",
+    "Text is readable and no source/footer content intrudes into the body.",
+    "Charts, tables, figures, and images have source or rebuild metadata when required.",
+    "Geometry, rendered visual review, and placeholder checks pass.",
+    "The final PPTX is editable and reproducible from workspace source."
+  ],
+  "context_policy": {
+    "start_here": "Read this brief first.",
+    "load_on_demand": [
+      "references/outline_schema.md for fields and variants",
+      "DESIGN.md for the compact design contract",
+      "one selected style reference or artifact manifest",
+      "the specific QA report for a repair pass"
+    ],
+    "audit_only": "Open deck_start_packet.json only for recovery, audit, or a missing command."
+  },
+  "prompt_budget": {
+    "compact_json_chars": 14875,
+    "target_max_chars": 20000,
+    "within_budget": true
+  }
+}

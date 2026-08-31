@@ -1,20 +1,31 @@
 {
-  "name": "agentloop",
+  "name": "agentloop-monorepo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "AgentLoop monorepo: @zhujun/agentloop kernel package + agentloop-app reference application",
   "engines": {
     "node": ">=26"
   },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
-    "build": "npm run build --prefix web",
-    "dev": "node scripts/dev.mjs",
-    "start": "node --env-file-if-exists=.env src/app.ts",
-    "test": "node --test --test-isolation=process tests/*.test.ts",
-    "test:coverage": "node --test --experimental-test-coverage --test-isolation=process tests/*.test.ts"
+    "build:kernel": "npm run build --workspace @zhujun/agentloop",
+    "build:skills": "npm run build --workspace @zhujun/agentloop-skills",
+    "pack:kernel": "npm run build:kernel && npm pack ./packages/agentloop",
+    "pack:skills": "npm run build:skills && npm pack ./packages/agentloop-skills",
+    "build:web": "npm run build --prefix apps/agentloop-app/web",
+    "build": "npm run build:kernel && npm run build:skills && npm run build:web",
+    "dev": "npm run build:kernel && npm run build:skills && node apps/agentloop-app/scripts/dev.mjs",
+    "start": "npm run build:kernel && npm run build:skills && npm run start --workspace agentloop-app",
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   },
-  "dependencies": {
-    "docx": "^9.7.1",
-    "pptxgenjs": "^4.0.1"
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
   }
 }

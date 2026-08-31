@@ -1,0 +1,30 @@
+{
+  "name": "agentloop-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference AgentLoop application: HTTP API + auth + web frontend on top of the @zhujun/agentloop kernel",
+  "engines": {
+    "node": ">=26"
+  },
+  "dependencies": {
+    "@zhujun/agentloop": "*",
+    "@zhujun/agentloop-skills": "*",
+    "pptxgenjs": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.ts",
+    "test": "node --test --test-isolation=process tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

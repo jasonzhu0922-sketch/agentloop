@@ -22,6 +22,7 @@
 - `requiredFacts` 和 `refinementState` 第一阶段只作为可持久化的规划元数据，不作为强制事实门禁。
 - 自动 refinement、fact index、CAS Plan Revision 是后续增强层；启用前不能影响 leaf-only 执行和完成判定。
 - 完成仍只来自 leaf Step 的 Assessment、全局 Goal Assessment 和 Terminal Committer Outcome。
+- 每个 leaf 执行前由 Runtime 派生 `StepSemanticFrame`，把阶段角色、证据模式、证据来源、第一动作和 QA 所有权注入执行上下文；这是一层语义投影，不要求 Planner 手写复杂 schema，也不替代 Skill contract。
 
 这保留 Plan-first 的核心：运行前必须有可审计计划；同时避免让 Planner 在缺少证据时把“探索、生产、验证”硬塞进同一个可执行步骤。
 

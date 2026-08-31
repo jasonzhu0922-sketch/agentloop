@@ -237,6 +237,8 @@ agentloop:
     - openability
 ```
 
+Metadata 字段、类型和可选值由 `packages/agentloop/src/skills/agentloop-metadata.ts` 统一定义。`sourceKinds` 是通用源类型枚举（`api` / `database` / `dataset` / `document` / `repository` / `rubric` / `web`），不能写入领域业务分类；领域语义由 Skill 正文和 references 承载。
+
 没有角色声明的 Skill 不进入 Planner catalog。通过一次性 metadata 更新修正内置 Skill，不设计运行时 fallback 推断。
 
 ### 5.3 Dynamic Prompt

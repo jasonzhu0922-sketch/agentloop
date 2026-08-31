@@ -34,7 +34,7 @@ Tool 成功、模型文本、Artifact 或事件 Trace 都不能单独建立完�
 - Workspace containment、会话目录隔离、符号链接逃逸防护、命令参数数组、超时/强杀、输出上限。
 - 写文件、命令执行、点击/输入/导航等危险 Tool 默认不授权，Run/Batch 必须显式 `allowDangerousTools`。
 - Batch 一等实体：`Batch → BatchItem → Run → Plan`，支持 1–32 并发、幂等键、`continue`/`fail-fast` 和逐项结果。
-- 登录后用户级 Web 前端（独立 React + Vite 应用，位于 `web/`）：对话式智能助手（聊天、实时进度、计划与最终结果），支持在同一个对话流里连续下达多轮指令（后续 Run 会把此前轮次作为上下文喂给 Planner 与执行模型）。后端作为纯 HTTP API 对外服务。
+- 登录后用户级 Web 前端（独立 React + Vite 应用，位于 `apps/agentloop-app/web/`）：对话式智能助手（聊天、实时进度、计划与最终结果），支持在同一个对话流里连续下达多轮指令（后续 Run 会把此前轮次作为上下文喂给 Planner 与执行模型）。后端作为纯 HTTP API 对外服务。
 - OpenAI-compatible Model；所有 Provider Adapter 进入同一条结构化 Plan-first 主链。
 - SQLite 权威 Plan/Step/Evidence/Assessment/Outcome/Batch/Event 存储。
 
@@ -46,42 +46,58 @@ Tool 成功、模型文本、Artifact 或事件 Trace 都不能单独建立完�
 
 完整源码映射见 [上游核验](docs/UPSTREAM-RESEARCH.md)，MIT 归属见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
 
+## 仓库结构
+
+本仓库是 npm workspaces monorepo，分为两部分：
+
+```text
+agentloop/
+├── packages/agentloop/        内核 @zhujun/agentloop：可直接 npm publish 的
+│                              headless 智能体运行时（planning/runtime/tools/
+│                              skills/storage），身份只是不透明 userId 字符串，
+│                              不含 HTTP 与鉴权。
+├── apps/agentloop-app/        参考应用 agentloop-app：通过依赖
+│                              "@zhujun/agentloop" 引入内核包，组装 HTTP API、
+│                              邮箱+密码鉴权与 React 前端（apps/agentloop-app/web）。
+└── docs/                      设计文档
+```
+
+外部应用复用内核时只需 `npm install @zhujun/agentloop` 并按 [集成指南](docs/INTEGRATION.md) 装配；`apps/agentloop-app` 即官方的接入示范。
+
 ## 快速启动
 
-要求 Node.js 26 或更高版本，无第三方运行时依赖。
+要求 Node.js 26 或更高版本。仓库根目录执行：
 
 ```bash
-npm test
-npm start
+npm install
+npm test      # 依次运行内核与应用两个测试套件
+npm start     # 构建内核后从 apps/agentloop-app 启动 API
 ```
 
-后端现在只暴露纯 HTTP API（`/healthz` 与 `/v1/*`），不再托管前端页面。面向用户的对话式智能助手是独立的 React + Vite 前端，位于 `web/`。开发模式分两个进程启动：
+后端只暴露纯 HTTP API（`/healthz` 与 `/v1/*`），不托管前端页面。面向用户的对话式智能助手是独立的 React + Vite 前端，位于 `apps/agentloop-app/web`。开发模式一条命令拉起双进程：
 
 ```bash
-# 终端 1：启动 API
-npm start
-
-# 终端 2：启动前端开发服务器（自动代理 /v1/* 到 8787）
-cd web && npm install && npm run dev
+npm run dev   # API + Vite dev server（首次需先: cd apps/agentloop-app/web && npm install）
 ```
 
-然后打开 `http://localhost:5173/` 即可使用。登录后输入任务即可开始对话，界面展示实时进度、Plan 与最终结果。默认数据库是 `./data/agentloop.db`。`WORKSPACE_ROOT` 默认是启动目录，服务会为每个会话创建独立的 Computer Tool 根目录 `WORKSPACE_ROOT/conversations/<conversationId>`：
+然后打开 `http://localhost:5173/` 即可使用。登录后输入任务即可开始对话，界面展示实时进度、Plan 与最终结果。参考应用的运行配置和本地运行数据都归 `apps/agentloop-app` 所有：配置是 `apps/agentloop-app/.env`，数据库默认是 `apps/agentloop-app/data/agentloop.db`，工作区默认是 `apps/agentloop-app/workspace`。服务会为每个会话创建独立的 Computer Tool 根目录 `WORKSPACE_ROOT/conversations/<conversationId>`：
 
 ```bash
-WORKSPACE_ROOT=/absolute/workspace DATABASE_PATH=./data/agentloop.db npm start
+cd apps/agentloop-app
+WORKSPACE_ROOT=./workspace DATABASE_PATH=./data/agentloop.db npm start
 ```
 
-生产部署时，先 `cd web && npm run build` 产出 `web/dist`，再用任意静态服务器托管该目录，并把 `WEB_ORIGINS_JSON`（后端 `.env`）配置为前端的 Origin 以允许跨域 API 调用；或通过反向代理把 `dist/` 与 `/v1/*` 放在同一 Origin 下。
+生产部署时，先 `cd apps/agentloop-app/web && npm run build` 产出 `web/dist`，再用任意静态服务器托管该目录，并把 `WEB_ORIGINS_JSON`（后端 `apps/agentloop-app/.env`）配置为前端的 Origin 以允许跨域 API 调用；或通过反向代理把 `dist/` 与 `/v1/*` 放在同一 Origin 下。
 
 LLM Provider 由服务端 JSON 注册表配置，服务端按注册表决定 Run 使用的默认 Provider，模型 ID 可覆盖该 Provider 的默认模型；Run API 不能传任意 Base URL、密钥或超时参数。当前注册表支持 `openai-compatible` Adapter（例如 DeepSeek、OpenAI-compatible 网关和本地兼容服务），后续 Provider 以新的 Adapter 接入，不改变 Runtime 主链。
 
-先复制 [llm-providers.example.json](config/llm-providers.example.json) 为被 `.gitignore` 排除的 `config/llm-providers.json`，填写 Provider 类型、地址和默认模型；再把 `apiKeyEnv` 指向的 Key 写入本机 `.env` 或部署环境。`npm start` 会在 `.env` 存在时自动加载它，部署环境已注入的同名变量保持优先。模板不包含任何密钥：
+先复制 [apps/agentloop-app/.env.example](apps/agentloop-app/.env.example) 为被 `.gitignore` 排除的 `apps/agentloop-app/.env`，再复制 [llm-providers.example.json](apps/agentloop-app/config/llm-providers.example.json) 为被 `.gitignore` 排除的 `apps/agentloop-app/config/llm-providers.json`，填写 Provider 类型、地址和默认模型；再把 `apiKeyEnv` 指向的 Key 写入本机 `apps/agentloop-app/.env` 或部署环境。`npm start` 会在 app 目录的 `.env` 存在时自动加载它，部署环境已注入的同名变量保持优先。模板不包含任何密钥：
 
 ```bash
-cp config/llm-providers.example.json config/llm-providers.json
-# 编辑 config/llm-providers.json，并在 .env 或部署环境中设置：
+cp apps/agentloop-app/.env.example apps/agentloop-app/.env
+cp apps/agentloop-app/config/llm-providers.example.json apps/agentloop-app/config/llm-providers.json
+# 编辑 apps/agentloop-app/config/llm-providers.json，并在 apps/agentloop-app/.env 或部署环境中设置：
 export MY_LLM_API_KEY=server-secret
-LLM_PROVIDER_CONFIG_PATH=./config/llm-providers.json \
 npm start
 ```
 
@@ -115,11 +131,10 @@ TRUSTED_COMMAND_ENV_JSON='{"RUNTIME_NODE":"/absolute/path/to/trusted/node"}' npm
 
 Skill 原文是唯一领域工作流权威，不再有框架侧的规划提示、Tool 清单、完成标准或绑定模式副本。Planner 初始只看到当前用户的私有 Skill 与正式 `skills/` 目录自动发现并物化的 Skill 目录；目录只含名称、描述、版本和位置。Planner 依据这些元数据直接提交结构化 Plan，不在规划阶段加载 Skill 正文。每个 Skill-bound Step 开始时才开放 `load_skill`，原文进入该 Step 的 ToolResult 后再开放 Plan 授权的执行 Tool。Assessment 直接对照同一版本 Skill 原文和运行证据，Skill 仍不能扩张 Capability Grant。
 
-正式发现目录可通过 `SKILL_DIRECTORY` 指定，默认是启动目录下的 `skills/`。每个直接子目录只要以自己的 Skill 名命名并包含标准 `SKILL.md`，即可进入 Agent Loop；不要求同级 `.source.json`。若提供合法的 `<skill-name>.source.json`，其中的 HTTPS 来源、提交和 Package 指纹会作为可选溯源元数据记录，且始终放在 Package 外部，不改变第三方包的字节和 hash：
+内核自带 Skill 目录是包资产，由应用启动代码固定解析；额外的应用扩展目录统一通过 `CUSTOM_SKILL_DIRECTORIES_JSON` 指定。每个直接子目录只要以自己的 Skill 名命名并包含标准 `SKILL.md`，即可进入 Agent Loop；不要求同级 `.source.json`。若提供合法的 `<skill-name>.source.json`，其中的 HTTPS 来源、提交和 Package 指纹会作为可选溯源元数据记录，且始终放在 Package 外部，不改变第三方包的字节和 hash：
 
 ```bash
-SKILL_DIRECTORY=/srv/agentloop/skills \
-SKILL_PACKAGE_STORE_ROOT=/srv/agentloop-workspace/.agentloop/skill-packages \
+CUSTOM_SKILL_DIRECTORIES_JSON='["/srv/app/custom-skills"]' \
 npm start
 ```
 
@@ -129,7 +144,6 @@ Package 模式用于验证现成 Skill 本身；安装过程只提取标准 `SKI
 
 ```bash
 WORKSPACE_ROOT=/srv/agentloop-workspace \
-SKILL_PACKAGE_STORE_ROOT=/srv/agentloop-workspace/.agentloop/skill-packages \
 SKILL_IMPORT_ROOTS_JSON='["/srv/approved-skill-imports"]' \
 npm start
 ```
@@ -201,6 +215,12 @@ npm start
 | `GET` | `/v1/runs/:id` | Run 权威状态 |
 | `GET` | `/v1/runs/:id/plan` | Plan、Step、Evidence、Compliance |
 | `GET` | `/v1/runs/:id/events` | Run 事件日志 |
+| `GET` | `/v1/host/protocol` | 外部宿主 sidecar 协议描述 |
+| `POST` | `/v1/host/runs` | 执行 Run 并返回 `agentloop.hostRun/v1` 稳定投射 |
+| `POST` | `/v1/host/runs/async` | 异步启动 Run 并返回 host 投射 |
+| `GET` | `/v1/host/runs/:id` | 读取 Run/Outcome/Plan/Artifact 的 host 投射 |
+| `GET` | `/v1/host/runs/:id/events` | 读取 `agentloop.hostRunEvent/v1` 事件列表 |
+| `GET` | `/v1/host/runs/:id/events/stream` | SSE 订阅 host 事件 |
 | `POST` | `/v1/batches` | 创建并执行批次 |
 | `GET` | `/v1/batches/:id` | 批次汇总 |
 | `GET` | `/v1/batches/:id/items` | 批次逐项结果 |

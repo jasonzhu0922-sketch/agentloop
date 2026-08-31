@@ -1,0 +1,10 @@
+{
+  "topic": "DCMM 4\u7ea7\uff08\u91cf\u5316\u7ba1\u7406\u7ea7\uff09\u57f9\u8bad\u8bfe\u4ef6",
+  "__readme__": "Delete this __readme__ key and populate the arrays below with real image/chart/icon requests for THIS topic. See references/outline_schema.md and references/deck_workspace_mode.md for the schemas. If the deck doesn't need staged assets, delete this whole file.",
+  "images": [],
+  "backgrounds": [],
+  "charts": [],
+  "tables": [],
+  "generated_images": [],
+  "icons": []
+}

@@ -18,6 +18,8 @@
 
 真实契约是：从登录身份进入 Worker 后，所有模型调用、Skill 加载和 Tool 执行都必须服从同一份持久、可审计、不可由模型修改的授权事实；Run 只有在 Plan 全部步骤的成功标准与 Skill Compliance 都通过后，才能由 Terminal Committer 提交完成。
 
+每个执行 Step 还会由 Runtime 派生一份 `StepSemanticFrame`，作为执行上下文中的统一语义帧。它不改变 Plan schema，也不是 Admission 硬门槛；它把 Step 的阶段角色、证据来源、第一动作、完成边界和 QA 所有权投影给模型，避免模型在“获取证据、复用上游证据、生产产物、验收产物”之间反复猜测。详见 [Step Semantic Frame 设计标准](./STEP-SEMANTIC-FRAME.md)。
+
 ## 2. 范围与非目标
 
 ### 2.1 v1 必须具备
