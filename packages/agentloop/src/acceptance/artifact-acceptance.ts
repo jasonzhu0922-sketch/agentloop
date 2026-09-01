@@ -1,4 +1,5 @@
 import { extname } from "node:path";
+import { Script } from "node:vm";
 import type { ComputerExecutor } from "../computer/computer-executor.ts";
 import type {
   ArtifactAcceptanceProvider,
@@ -248,20 +249,24 @@ function verifyHtmlProfile(
   const hasHtmlShape = /<!doctype\s+html\b/i.test(text)
     || /<html\b/i.test(text)
     || (/<body\b/i.test(text) && /<\/body>/i.test(text));
+  const scriptSyntax = inspectInlineScriptSyntax(text);
   const slideCount = countHtmlSlides(text);
   const navigationSignals = htmlNavigationSignals(text);
   const checks: ArtifactAcceptanceCheck[] = [
-    checkStatus("format_matches_request", extensionMatches && hasHtmlShape, {
+    checkStatus("format_matches_request", extensionMatches && hasHtmlShape && scriptSyntax.valid, {
       expected: presentationMode ? "html_ppt" : "html",
       extensionMatches,
       hasHtmlShape,
+      inlineScriptSyntaxValid: scriptSyntax.valid,
       contentTruncated: truncated,
     }),
-    checkStatus("artifact_openable", hasHtmlShape, {
+    checkStatus("artifact_openable", hasHtmlShape && scriptSyntax.valid, {
       mode: "static_html_parse",
       hasHtmlShape,
+      inlineScriptSyntaxValid: scriptSyntax.valid,
       contentTruncated: truncated,
     }),
+    checkStatus("inline_script_syntax", scriptSyntax.valid, scriptSyntax.evidence),
   ];
   if (presentationMode) {
     checks.push(
@@ -308,6 +313,56 @@ function htmlSelfContainedRequested(checks: readonly string[]): boolean {
     /(?:self[-\s]?contained|no\s+(?:external|cdn)|inline\s+(?:css|js|javascript)|external\s+(?:cdn|resource|dependency)|自包含|不(?:联网|使用外部|引用外部|依赖外部)|外部\s*(?:cdn|资源|依赖)|内联\s*(?:css|js|javascript)|无外部\s*(?:cdn|资源|依赖))/iu
       .test(check)
   );
+}
+
+function inspectInlineScriptSyntax(text: string): {
+  readonly valid: boolean;
+  readonly evidence: Record<string, unknown>;
+} {
+  const scripts = [...text.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/giu)];
+  let checked = 0;
+  let skipped = 0;
+  for (let index = 0; index < scripts.length; index += 1) {
+    const [, attrs = "", body = ""] = scripts[index] ?? [];
+    if (!isClassicInlineScript(attrs)) {
+      skipped += 1;
+      continue;
+    }
+    checked += 1;
+    try {
+      new Script(body, { filename: `inline-script-${index + 1}.js` });
+    } catch (error) {
+      return {
+        valid: false,
+        evidence: {
+          mode: "node_vm_script_parse",
+          checkedScripts: checked,
+          skippedScripts: skipped,
+          failedScriptIndex: index + 1,
+          diagnostics: error instanceof Error ? error.message : "Inline script syntax parse failed",
+        },
+      };
+    }
+  }
+  return {
+    valid: true,
+    evidence: {
+      mode: "node_vm_script_parse",
+      checkedScripts: checked,
+      skippedScripts: skipped,
+    },
+  };
+}
+
+function isClassicInlineScript(attrs: string): boolean {
+  if (/\bsrc\s*=/iu.test(attrs)) return false;
+  const match = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/iu.exec(attrs);
+  const type = (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim().toLowerCase();
+  return type === ""
+    || type === "text/javascript"
+    || type === "application/javascript"
+    || type === "text/ecmascript"
+    || type === "application/ecmascript";
 }
 
 function verifyOfficePackageProfile(

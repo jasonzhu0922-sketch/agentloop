@@ -1374,6 +1374,7 @@ export class RunService {
         privateSkills,
         input,
         conversationWorkingSet?.recommendedCapabilities.skillIds ?? [],
+        availableSources,
       );
       const planningSkills = planningSkillRoles.map((item) => item.skill);
       if (planningSkills.some((skill) => skillRequiresFileOutput(skill)) && !canProduceFiles(new Set(allowedToolNames))) {
@@ -2673,8 +2674,17 @@ function artifactSourceForPath(
 
 function artifactPathsFromToolResult(toolName: string | undefined, result: Readonly<Record<string, unknown>> | undefined): string[] {
   if (result === undefined) return [];
-  if (toolName === "computer_write_file" || toolName === "materialize_paginated_html") {
+  if (toolName === "computer_write_file" || toolName === "computer_patch_file" || toolName === "materialize_paginated_html") {
     const path = typeof result.path === "string" ? result.path : undefined;
+    return path === undefined ? [] : [normalizeArtifactPath(path)];
+  }
+  if (toolName === "convert_artifact") {
+    const output = asRecord(result.output);
+    const path = typeof output?.path === "string"
+      ? output.path
+      : typeof result.path === "string"
+        ? result.path
+        : undefined;
     return path === undefined ? [] : [normalizeArtifactPath(path)];
   }
   if (toolName !== "computer_run_command") return [];
@@ -2975,14 +2985,16 @@ export function selectPlanningSkills(
   skills: readonly PrivateSkill[],
   taskInput: string,
   boundSkillIds: readonly string[],
+  sources: readonly UploadedSourceSummary[] = [],
 ): PrivateSkill[] {
-  return selectPlanningSkillRoles(skills, taskInput, boundSkillIds).map((item) => item.skill);
+  return selectPlanningSkillRoles(skills, taskInput, boundSkillIds, sources).map((item) => item.skill);
 }
 
 export function selectPlanningSkillRoles(
   skills: readonly PrivateSkill[],
   taskInput: string,
   boundSkillIds: readonly string[],
+  sources: readonly UploadedSourceSummary[] = [],
 ): PlanningSkillRoleSelection[] {
   if (skills.length === 0) return [];
   // Conversation history is model context, not authorization or task scope.
@@ -2991,8 +3003,14 @@ export function selectPlanningSkillRoles(
   const signal = normalizePlanningSignal(taskInput);
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
+  const sourceKinds = sourceKindsFromUploadedSources(sources);
   const roleEligibleSkills = skills.filter((skill) => {
-    const selection = selectFirstRoundSkillRole(skill, signal, exactSkillMention(signal, skill) || bound.has(skill.id));
+    const selection = selectFirstRoundSkillRole(
+      skill,
+      signal,
+      exactSkillMention(signal, skill) || bound.has(skill.id),
+      sourceKinds,
+    );
     if (selection === undefined) return false;
     roleBySkillId.set(skill.id, selection);
     return true;
@@ -3008,7 +3026,7 @@ export function selectPlanningSkillRoles(
   const scored = roleEligibleSkills.map((skill, index) => ({
     skill,
     index,
-    score: scorePlanningSkill(skill, signal, bound.has(skill.id)),
+    score: scorePlanningSkill(skill, signal, bound.has(skill.id), sourceKinds),
   }));
   scored.sort((left, right) => right.score - left.score || left.index - right.index);
   const topScore = scored[0]?.score ?? 0;
@@ -3053,19 +3071,28 @@ function selectFirstRoundSkillRole(
   skill: PrivateSkill,
   signal: string,
   explicitlyRequested: boolean,
+  sourceKinds: ReadonlySet<string>,
 ): SelectedSkillRole | undefined {
   const metadata = skill.agentLoop;
   if (metadata === undefined) return undefined;
   const roles = new Set(metadata.roles);
   const artifactKinds = new Set(metadata.artifactKinds);
-  if (roles.has("primary_builder") && (explicitlyRequested || matchesRequestedArtifactKind(signal, artifactKinds))) {
+  if (
+    roles.has("primary_builder")
+    && (explicitlyRequested || matchesRequestedArtifactKind(signal, artifactKinds))
+    && (explicitlyRequested || skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
+  ) {
     return {
       skillId: skill.id,
       role: "primary_builder",
       reason: "Skill metadata declares primary_builder for the requested first-round artifact boundary.",
     };
   }
-  if (roles.has("source_provider") && requestsSourceWork(signal)) {
+  if (
+    roles.has("source_provider")
+    && requestsSourceWork(signal)
+    && (explicitlyRequested || skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
+  ) {
     return {
       skillId: skill.id,
       role: "source_provider",
@@ -3121,7 +3148,12 @@ function exactSkillMention(signal: string, skill: PrivateSkill): boolean {
   return signal.includes(normalizedName) || signal.includes(humanizedName);
 }
 
-function scorePlanningSkill(skill: PrivateSkill, signal: string, bound: boolean): number {
+function scorePlanningSkill(
+  skill: PrivateSkill,
+  signal: string,
+  bound: boolean,
+  sourceKinds: ReadonlySet<string>,
+): number {
   const text = normalizePlanningSignal(`${skill.name}\n${skill.description}`);
   const signalTokens = tokenizePlanningSignal(signal);
   const textTokens = new Set(tokenizePlanningSignal(text));
@@ -3151,7 +3183,49 @@ function scorePlanningSkill(skill: PrivateSkill, signal: string, bound: boolean)
     if (isPrimaryArtifactBuilderSkill(text)) score += 3;
     if (isStylingSupportSkill(text) && !explicitStylingRequested(signal)) score -= 4;
   }
+  if (!bound && !exactSkillMention(signal, skill) && sourceKinds.size > 0) {
+    const skillSourceKinds = skill.agentLoop?.sourceKinds ?? [];
+    if (skillSourceKinds.some((kind) => sourceKinds.has(kind))) {
+      score += 3;
+    } else if (skillSourceKinds.length > 0) {
+      score -= 5;
+    }
+  }
   return score;
+}
+
+function skillSourceKindsCompatible(
+  skillSourceKinds: readonly string[],
+  sourceKinds: ReadonlySet<string>,
+): boolean {
+  if (sourceKinds.size === 0 || skillSourceKinds.length === 0) return true;
+  return skillSourceKinds.some((kind) => sourceKinds.has(kind));
+}
+
+function sourceKindsFromUploadedSources(sources: readonly UploadedSourceSummary[]): Set<string> {
+  const kinds = new Set<string>();
+  for (const source of sources) {
+    if (source.status !== "ready") continue;
+    const extension = source.extension.toLowerCase();
+    const mimeType = source.mimeType.toLowerCase();
+    const name = source.originalName.toLowerCase();
+    if (
+      [".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".json"].includes(extension)
+      || /(?:spreadsheet|excel|csv|json|tab-separated|comma-separated)/iu.test(mimeType)
+    ) {
+      kinds.add("dataset");
+    }
+    if (
+      [".docx", ".doc", ".pdf", ".md", ".markdown", ".txt"].includes(extension)
+      || /(?:wordprocessingml|msword|pdf|markdown|plain)/iu.test(mimeType)
+    ) {
+      kinds.add("document");
+    }
+    if (extension === ".sql" || /(?:database|sql|sqlite)/iu.test(mimeType) || /\.(?:sqlite|db)$/iu.test(name)) {
+      kinds.add("database");
+    }
+  }
+  return kinds;
 }
 
 function requestsHtmlPresentation(signal: string): boolean {
@@ -3618,7 +3692,7 @@ function skillRequiresFileOutput(skill: Pick<PrivateSkill, "name" | "description
 function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
   return artifactExtensionsRequiredByStep(step).size > 0
     || step.recommendedToolNames.some((name) =>
-      name === "computer_write_file" || name === "computer_run_command" || name === "materialize_paginated_html"
+      name === "computer_write_file" || name === "computer_patch_file" || name === "computer_run_command" || name === "materialize_paginated_html"
     );
 }
 
@@ -3757,7 +3831,7 @@ function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number])
     ...step.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
   ].join("\n").toLowerCase();
   const productionTool = step.recommendedToolNames.some((name) =>
-    name === "computer_write_file" || name === "materialize_paginated_html"
+    name === "computer_write_file" || name === "computer_patch_file" || name === "materialize_paginated_html" || name === "convert_artifact"
   );
   if (productionTool) return true;
   const productionIntent =
@@ -3797,17 +3871,23 @@ function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEv
     if (item.isError) continue;
     if (
       item.toolName !== "computer_write_file"
+      && item.toolName !== "computer_patch_file"
       && item.toolName !== "materialize_paginated_html"
+      && item.toolName !== "convert_artifact"
       && item.toolName !== "computer_list_directory"
       && item.toolName !== "computer_run_command"
     ) continue;
     const parsed = parseToolResult(item.result);
     if (
-      (item.toolName === "computer_write_file" || item.toolName === "materialize_paginated_html")
+      (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file" || item.toolName === "materialize_paginated_html")
       && isPlainRecord(parsed)
       && typeof parsed.path === "string"
     ) {
       addArtifactExtensions(extensions, parsed.path);
+    }
+    if (item.toolName === "convert_artifact" && isPlainRecord(parsed)) {
+      const output = asRecord(parsed.output);
+      if (typeof output?.path === "string") addArtifactExtensions(extensions, output.path);
     }
     if (item.toolName === "computer_list_directory" && Array.isArray(parsed)) {
       for (const entry of parsed) {

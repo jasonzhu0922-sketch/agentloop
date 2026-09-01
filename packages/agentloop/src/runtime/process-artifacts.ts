@@ -20,16 +20,20 @@ export interface ProcessArtifact {
   readonly name: string;
   readonly bytes: number;
   readonly mimeType: string;
+  readonly role: ProcessArtifactRole;
   readonly sourceTool: ArtifactSourceTool;
   readonly previewable: boolean;
 }
 
-type ArtifactSourceTool = "computer_write_file" | "computer_run_command" | "materialize_paginated_html";
+export type ProcessArtifactRole = "final" | "process";
+type ArtifactSourceTool = "computer_write_file" | "computer_patch_file" | "computer_run_command" | "materialize_paginated_html" | "convert_artifact";
 
 function sourceToolPriority(sourceTool: ArtifactSourceTool): number {
   if (sourceTool === "materialize_paginated_html") return 0;
-  if (sourceTool === "computer_write_file") return 1;
-  return 2;
+  if (sourceTool === "convert_artifact") return 1;
+  if (sourceTool === "computer_patch_file") return 2;
+  if (sourceTool === "computer_write_file") return 2;
+  return 3;
 }
 
 export type ProcessArtifactPreview =
@@ -115,11 +119,17 @@ export async function collectProcessArtifacts(input: {
   readonly events: readonly StoredRunEvent[];
 }): Promise<ProcessArtifact[]> {
   const candidates = collectCandidatePaths(input.events);
+  const finalPaths = await collectFinalArtifactPaths({
+    workspaceRoot: input.workspaceRoot,
+    runCreatedAt: input.runCreatedAt,
+    events: input.events,
+  });
   const artifacts = new Map<string, ProcessArtifact>();
   for (const candidate of candidates) {
     const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, candidate.path);
     if (file === undefined) continue;
     const path = file.path;
+    const role: ProcessArtifactRole = finalPaths.has(path) ? "final" : "process";
     const artifact = {
       runId: input.runId,
       id: artifactId(input.runId, path),
@@ -127,6 +137,7 @@ export async function collectProcessArtifacts(input: {
       name: basename(path),
       bytes: file.bytes,
       mimeType: mimeTypeFor(path),
+      role,
       sourceTool: candidate.sourceTool,
       previewable: isPreviewable(path),
     };
@@ -207,8 +218,14 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
     if (event.type !== "tool.completed") continue;
     const toolName = typeof event.data.toolName === "string" ? event.data.toolName : "";
     const result = parseResult(event.data.result);
-    if (toolName === "computer_write_file" || toolName === "materialize_paginated_html") {
+    if (toolName === "computer_write_file" || toolName === "computer_patch_file" || toolName === "materialize_paginated_html") {
       const path = result !== undefined && typeof result.path === "string" ? result.path : undefined;
+      if (path !== undefined && isSafeRelativePath(path)) candidates.set(path, toolName);
+      continue;
+    }
+    if (toolName === "convert_artifact") {
+      const output = recordValue(result?.output);
+      const path = stringValue(output?.path) ?? stringValue(result?.path);
       if (path !== undefined && isSafeRelativePath(path)) candidates.set(path, toolName);
       continue;
     }
@@ -223,6 +240,43 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
   return [...candidates.entries()].map(([path, sourceTool]) => ({ path, sourceTool }));
 }
 
+async function collectFinalArtifactPaths(input: {
+  readonly workspaceRoot: string;
+  readonly runCreatedAt: number;
+  readonly events: readonly StoredRunEvent[];
+}): Promise<Set<string>> {
+  const paths = new Set<string>();
+  for (const rawPath of collectAcceptedArtifactPaths(input.events)) {
+    const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, rawPath);
+    if (file !== undefined) paths.add(file.path);
+  }
+  return paths;
+}
+
+function collectAcceptedArtifactPaths(events: readonly StoredRunEvent[]): string[] {
+  const paths = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "tool.completed") continue;
+    if (event.data.toolName !== "verify_artifact_acceptance" || event.data.isError === true) continue;
+    const result = parseResult(event.data.result);
+    if (result === undefined || !isAcceptedArtifactAcceptanceResult(result)) continue;
+    const artifact = recordValue(result.artifact);
+    const path = stringValue(artifact?.path) ?? stringValue(artifact?.requestedPath) ?? stringValue(result.path);
+    if (path !== undefined && path.length > 0 && !path.includes("\0")) paths.add(path);
+  }
+  return [...paths];
+}
+
+function isAcceptedArtifactAcceptanceResult(result: Readonly<Record<string, unknown>>): boolean {
+  if (result.schema !== "agentloop.artifactAcceptance/v1") return false;
+  const evidenceKinds = recordValue(result.evidenceKinds);
+  const satisfied = stringArrayValue(evidenceKinds?.satisfied);
+  const failed = stringArrayValue(evidenceKinds?.failed);
+  if (failed.includes("artifact_acceptance")) return false;
+  const verdict = stringValue(result.verdict);
+  return satisfied.includes("artifact_acceptance") || verdict === "accepted" || verdict === "caveated";
+}
+
 function parseResult(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "string") return undefined;
   try {
@@ -233,6 +287,20 @@ function parseResult(value: unknown): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+function recordValue(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 export function artifactPathsMentionedInCommandOutput(stdout: string): string[] {

@@ -216,6 +216,24 @@ export class RunRepository {
           SELECT child.id FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
           WHERE child.owner_user_id = ?
         )
+        DELETE FROM run_sources WHERE run_id IN (SELECT id FROM run_tree)
+      `).run(conversationId, ownerUserId, ownerUserId);
+      await this.connection.prepare(`
+        DELETE FROM source_chunks
+        WHERE source_id IN (
+          SELECT id FROM sources WHERE conversation_id = ? AND owner_user_id = ?
+        )
+      `).run(conversationId, ownerUserId);
+      await this.connection.prepare(`
+        DELETE FROM sources WHERE conversation_id = ? AND owner_user_id = ?
+      `).run(conversationId, ownerUserId);
+      await this.connection.prepare(`
+        WITH RECURSIVE run_tree(id) AS (
+          SELECT id FROM runs WHERE conversation_id = ? AND owner_user_id = ?
+          UNION ALL
+          SELECT child.id FROM runs child JOIN run_tree parent ON child.parent_run_id = parent.id
+          WHERE child.owner_user_id = ?
+        )
         DELETE FROM runs WHERE id IN (SELECT id FROM run_tree)
       `).run(conversationId, ownerUserId, ownerUserId);
       await this.connection.prepare("DELETE FROM conversations WHERE id = ? AND owner_user_id = ?")

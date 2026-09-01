@@ -33,6 +33,7 @@ export { classifyRenderEnvironmentCredibility } from "./acceptance/render-enviro
 export {
   assertNoDuplicateTools,
   composeRunTools,
+  createArtifactConverterTools,
   createComputerTools,
   createCoreTools,
   createSkillLoader,
@@ -47,6 +48,7 @@ export {
 } from "./tools/index.ts";
 export type {
   ComposeRunToolsOptions,
+  ConvertArtifactInput,
   CoreToolsOptions,
   MaterializedTools,
   PreparedToolCall,
@@ -63,7 +65,13 @@ export type { LlmModelSummary, LlmProviderSummary } from "./runtime/provider-reg
 export { RunEventHub } from "./runtime/run-event-hub.ts";
 export type { LiveRunEvent } from "./runtime/run-event-hub.ts";
 export { collectProcessArtifacts, artifactId, previewProcessArtifact } from "./runtime/process-artifacts.ts";
-export type { ProcessArtifact, ProcessArtifactPreview, PptxPreviewElement, PptxPreviewTextRun } from "./runtime/process-artifacts.ts";
+export type {
+  ProcessArtifact,
+  ProcessArtifactPreview,
+  ProcessArtifactRole,
+  PptxPreviewElement,
+  PptxPreviewTextRun,
+} from "./runtime/process-artifacts.ts";
 export { RuntimeActionRepository } from "./runtime/runtime-action-repository.ts";
 export type {
   ReplayPolicy,

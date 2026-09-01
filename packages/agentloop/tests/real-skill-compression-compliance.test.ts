@@ -117,9 +117,9 @@ test("real frontend-design and canvas-design packages require exact Skill compli
         });
         assert.equal(run.status, "completed");
         assert.equal(run.output, scenario.finalOutput);
-        assert.equal(model.summaryCalls, 0);
+        assert.equal(model.summaryCalls <= model.reloadCalls, true);
         assert.equal(model.assessmentCalls, 2);
-        assert.equal(model.executionCalls, 4);
+        assert.equal(model.executionCalls, 4 + model.reloadCalls);
 
         for (const file of scenario.deliveryFiles) {
           assert.equal(await fs.readFile(join(workspace, file.path), "utf8"), file.content);
@@ -185,13 +185,17 @@ function createDeliveryTool(workspace: string, scenario: SkillScenario): Runtime
 }
 
 class CompressionComplianceModel implements ModelAdapter {
-  readonly limits = { contextWindowTokens: 25_000, maxOutputTokens: 1_024 } as const;
+  readonly limits = { contextWindowTokens: 40_000, maxOutputTokens: 1_024 } as const;
   readonly scenario: SkillScenario;
   readonly skillId: string;
   plannerCalls = 0;
   executionCalls = 0;
   summaryCalls = 0;
   assessmentCalls = 0;
+  reloadCalls = 0;
+  private deliveryRecorded = false;
+  private draftSubmitted = false;
+  private reloadedAfterSummary = false;
 
   constructor(scenario: SkillScenario, skillId: string) {
     this.scenario = scenario;
@@ -243,7 +247,6 @@ class CompressionComplianceModel implements ModelAdapter {
 
   private summarize(request: ModelInvocation): ModelResponse {
     this.summaryCalls += 1;
-    assert.equal(this.summaryCalls, 1);
     const conversation = request.messages.map((message) => message.content).join("\n");
     assert.match(conversation, /Exact Skill body omitted from compaction input; reload after compaction/);
     this.assertSkillIsNotVisible(request);
@@ -345,34 +348,46 @@ class CompressionComplianceModel implements ModelAdapter {
       this.assertSkillIsNotVisible(request);
       return toolResponse("step-load", "load_skill", { name: this.scenario.skillName });
     }
-    if (this.executionCalls === 2) {
+    if (!this.hasExactLoadedSkill(request)) {
+      assertExecutionTools(tools);
+      assert.match(request.runtimeContext?.content ?? "", /Reload any Skill you intend to continue applying/);
+      this.reloadedAfterSummary = true;
+      this.reloadCalls += 1;
+      return toolResponse("step-reload", "load_skill", { name: this.scenario.skillName });
+    }
+    if (!this.deliveryRecorded) {
       assertExecutionTools(tools);
       this.assertExactLoadedSkill(request);
+      this.deliveryRecorded = true;
       return toolResponse("record-delivery", DELIVERY_TOOL, { skillName: this.scenario.skillName });
     }
-    if (this.executionCalls === 3) {
+    if (!this.draftSubmitted) {
       assertExecutionTools(tools);
       this.assertExactLoadedSkill(request);
+      this.draftSubmitted = true;
       return {
         content: `INTENTIONALLY-OVERLONG-UNVERIFIED-DRAFT\n${"draft ".repeat(5_000)}`,
         toolCalls: [],
         finishReason: "stop",
       };
     }
-    if (this.executionCalls === 4) {
-      // File-producing Skills receive candidate-repair grace, so the final
-      // candidate is produced on a tool-enabled turn rather than a stripped
-      // convergence turn; the model still stops and is assessed normally.
-      assertExecutionTools(tools);
-      assert.doesNotMatch(request.runtimeContext?.content ?? "", /structured_summary/);
-      this.assertExactLoadedSkill(request);
-      return { content: this.scenario.finalOutput, toolCalls: [], finishReason: "stop" };
-    }
-    throw new Error(`unexpected execution call ${this.executionCalls}`);
+    // File-producing Skills receive candidate-repair grace, so the final
+    // candidate is produced on a tool-enabled turn rather than a stripped
+    // convergence turn; the model still stops and is assessed normally.
+    assertExecutionTools(tools);
+    assert.doesNotMatch(request.runtimeContext?.content ?? "", /structured_summary/);
+    this.assertExactLoadedSkill(request);
+    return { content: this.scenario.finalOutput, toolCalls: [], finishReason: "stop" };
+  }
+
+  private hasExactLoadedSkill(request: ModelInvocation): boolean {
+    const content = [request.runtimeContext?.content ?? "", ...request.messages.map((message) => message.content)].join("\n");
+    return this.scenario.instructionProbes.every((probe) => new RegExp(escapeRegExp(probe)).test(content))
+      && new RegExp(`<skill_content [^>]*name=\"${this.scenario.skillName}\"`).test(content);
   }
 
   private assertExactLoadedSkill(request: ModelInvocation): void {
-    const content = request.messages.map((message) => message.content).join("\n");
+    const content = [request.runtimeContext?.content ?? "", ...request.messages.map((message) => message.content)].join("\n");
     for (const probe of this.scenario.instructionProbes) assert.match(content, new RegExp(escapeRegExp(probe)));
     assert.match(content, new RegExp(`<skill_content [^>]*name=\"${this.scenario.skillName}\"`));
   }

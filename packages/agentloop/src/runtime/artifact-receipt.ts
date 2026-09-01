@@ -38,6 +38,13 @@ export interface ArtifactReceipt {
   readonly operation?: {
     readonly mode?: string;
     readonly writtenBytes?: number;
+    readonly replacementCount?: number;
+    readonly beforeSha256?: string;
+    readonly afterSha256?: string;
+    readonly conversionEngine?: string;
+    readonly sourcePath?: string;
+    readonly sourceFormat?: string;
+    readonly targetFormat?: string;
   };
 }
 
@@ -65,6 +72,13 @@ export interface ArtifactReceiptMetadata {
   readonly specSha256?: string;
   readonly writeMode?: string;
   readonly writtenBytes?: number;
+  readonly replacementCount?: number;
+  readonly beforeSha256?: string;
+  readonly afterSha256?: string;
+  readonly conversionEngine?: string;
+  readonly sourcePath?: string;
+  readonly sourceFormat?: string;
+  readonly targetFormat?: string;
 }
 
 export function buildArtifactReceipt(
@@ -112,15 +126,89 @@ export function buildArtifactReceipt(
       fullInspectionInToolResult: true,
     },
     ...(
-      metadata.writeMode === undefined && metadata.writtenBytes === undefined
+      metadata.writeMode === undefined
+        && metadata.writtenBytes === undefined
+        && metadata.replacementCount === undefined
+        && metadata.beforeSha256 === undefined
+        && metadata.afterSha256 === undefined
+        && metadata.conversionEngine === undefined
+        && metadata.sourcePath === undefined
+        && metadata.sourceFormat === undefined
+        && metadata.targetFormat === undefined
         ? {}
         : {
           operation: omitUndefined({
             mode: metadata.writeMode,
             writtenBytes: metadata.writtenBytes,
+            replacementCount: metadata.replacementCount,
+            beforeSha256: metadata.beforeSha256,
+            afterSha256: metadata.afterSha256,
+            conversionEngine: metadata.conversionEngine,
+            sourcePath: metadata.sourcePath,
+            sourceFormat: metadata.sourceFormat,
+            targetFormat: metadata.targetFormat,
           }) as NonNullable<ArtifactReceipt["operation"]>,
         }
     ),
+  };
+}
+
+export function buildOpaqueArtifactReceipt(
+  sourceTool: string,
+  artifact: {
+    readonly path: string;
+    readonly bytes: number;
+    readonly sha256: string;
+  },
+  metadata: ArtifactReceiptMetadata = {},
+): ArtifactReceipt {
+  return {
+    schema: ARTIFACT_RECEIPT_SCHEMA,
+    receiptId: artifactReceiptId(artifact.path, artifact.sha256),
+    sourceTool,
+    artifact: omitUndefined({
+      path: artifact.path,
+      artifactKind: metadata.artifactKind,
+      renderMode: metadata.renderMode,
+      acceptanceProfile: metadata.acceptanceProfile,
+      bytes: artifact.bytes,
+      characters: 0,
+      totalLines: 0,
+      sha256: artifact.sha256,
+      specSha256: metadata.specSha256,
+    }) as ArtifactReceipt["artifact"],
+    inspection: {
+      sha256: artifact.sha256,
+      characters: 0,
+      totalLines: 0,
+      outline: [],
+      outlineTruncated: false,
+      sampleRangeCount: 0,
+    },
+    evidenceKinds: {
+      satisfied: [
+        "artifact_path",
+        "artifact_non_empty",
+        "artifact_integrity",
+        ...(metadata.acceptanceProfile === undefined ? [] : ["format_matches_request"]),
+      ],
+      caveated: ["artifact_inspection_requires_acceptance"],
+      failed: [],
+    },
+    canonicalEvidence: {
+      fullInspectionInToolResult: true,
+    },
+    operation: omitUndefined({
+      mode: metadata.writeMode,
+      writtenBytes: metadata.writtenBytes,
+      replacementCount: metadata.replacementCount,
+      beforeSha256: metadata.beforeSha256,
+      afterSha256: metadata.afterSha256,
+      conversionEngine: metadata.conversionEngine,
+      sourcePath: metadata.sourcePath,
+      sourceFormat: metadata.sourceFormat,
+      targetFormat: metadata.targetFormat,
+    }) as NonNullable<ArtifactReceipt["operation"]>,
   };
 }
 

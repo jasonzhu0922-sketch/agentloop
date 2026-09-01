@@ -174,6 +174,7 @@ export class ContextAssembler {
     for (let index = this.firstKeptMessageIndex; index < messages.length; index += 1) {
       const message = messages[index];
       if (message.role !== "tool" || message.name !== "load_skill" || message.isError) continue;
+      if (this.prunedToolResults.has(message.toolCallId)) continue;
       const name = calls.get(message.toolCallId);
       if (name !== undefined) active.add(name);
     }
@@ -262,10 +263,16 @@ export class ContextAssembler {
 
     let compactions = 0;
     const targetInputTokens = Math.min(usableInputTokens, this.policy.proactiveCompactionTokens);
+    const artifactEvidenceWithinWindow = hasArtifactEvidenceBoundary(canonicalMessages, this.firstKeptMessageIndex);
+    const loadedSkillWithinWindow = hasUnprunedLoadedSkillResult(
+      canonicalMessages,
+      this.firstKeptMessageIndex,
+      this.prunedToolResults,
+    );
     const deferProactiveCompaction = estimatedInputTokens > targetInputTokens
       && estimatedInputTokens <= usableInputTokens
       && this.policy.deferProactiveCompactionForArtifactEvidence
-      && hasArtifactEvidenceBoundary(canonicalMessages, this.firstKeptMessageIndex);
+      && (artifactEvidenceWithinWindow || loadedSkillWithinWindow);
     if (deferProactiveCompaction) {
       await this.emitEvent({
         type: "context.compaction.skipped",
@@ -274,7 +281,9 @@ export class ContextAssembler {
           estimatedInputTokens,
           usableInputTokens,
           targetInputTokens,
-          reason: "artifact_evidence_within_usable_window",
+          reason: artifactEvidenceWithinWindow
+            ? "artifact_evidence_within_usable_window"
+            : "loaded_skill_within_usable_window",
         },
       });
     }
@@ -831,7 +840,7 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
   const usable = contextWindowTokens - outputReserveTokens - safetyMarginTokens;
   if (usable < 2_000) throw new TypeError("Model limits leave fewer than 2000 usable input tokens");
   const proactiveCompactionTokens = Math.min(input?.proactiveCompactionTokens ?? usable, usable);
-  const deferProactiveCompactionForArtifactEvidence = input?.deferProactiveCompactionForArtifactEvidence === true;
+  const deferProactiveCompactionForArtifactEvidence = input?.deferProactiveCompactionForArtifactEvidence ?? true;
   const preserveRecentTokens = input?.preserveRecentTokens
     ?? Math.min(20_000, Math.max(2_000, Math.floor(usable * 0.25)));
   const pruneProtectTokens = input?.pruneProtectTokens ?? preserveRecentTokens;
@@ -1122,7 +1131,7 @@ function projectAssistantToolCallArguments(
     changed = true;
     return {
       ...call,
-      arguments: artifactToolCallArgumentsProjection(projection, call.arguments),
+      arguments: artifactToolCallArgumentsProjection(call.name, projection, call.arguments),
     };
   });
   return changed ? { ...message, toolCalls } : message;
@@ -1151,13 +1160,14 @@ function artifactToolCallArgumentProjection(toolName: string, content: string): 
 }
 
 function artifactToolCallArgumentsProjection(
+  toolName: string,
   projection: Record<string, unknown>,
   originalArguments: unknown,
 ): Record<string, unknown> {
   const serializedArguments = JSON.stringify(originalArguments ?? null);
   const originalRecord = recordValue(originalArguments);
   const originalContent = stringValue(originalRecord?.content);
-  return omitUndefinedDeep({
+  const projectedMetadata = omitUndefinedDeep({
     ...projection,
     originalArguments: {
       sha256: digest(serializedArguments),
@@ -1167,6 +1177,14 @@ function artifactToolCallArgumentsProjection(
       omittedFields: originalContent === undefined ? undefined : ["content"],
       canonicalArgumentsPersisted: true,
     },
+  }) as Record<string, unknown>;
+  if (toolName !== "computer_write_file") return projectedMetadata;
+  const artifact = recordValue(projection.artifact);
+  return omitUndefinedDeep({
+    path: stringValue(originalRecord?.path) ?? stringValue(artifact?.path),
+    mode: stringValue(originalRecord?.mode),
+    overwrite: booleanValue(originalRecord?.overwrite),
+    content: "[Historical successful artifact write content omitted from model context. Use the following tool result artifact receipt as evidence; do not reuse this historical tool call as new input.]",
   }) as Record<string, unknown>;
 }
 
@@ -1191,6 +1209,20 @@ function hasArtifactEvidenceBoundary(
     ) {
       return true;
     }
+  }
+  return false;
+}
+
+function hasUnprunedLoadedSkillResult(
+  canonicalMessages: readonly ModelMessage[],
+  firstKeptMessageIndex: number,
+  prunedToolResults: ReadonlyMap<string, PrunedToolResult>,
+): boolean {
+  for (let index = canonicalMessages.length - 1; index >= firstKeptMessageIndex; index -= 1) {
+    const message = canonicalMessages[index];
+    if (message.role !== "tool" || message.name !== "load_skill" || message.isError) continue;
+    if (prunedToolResults.has(message.toolCallId)) continue;
+    return true;
   }
   return false;
 }

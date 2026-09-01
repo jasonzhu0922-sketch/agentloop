@@ -11,7 +11,6 @@ agentloop:
   sourceKinds:
     - document
     - rubric
-    - database
   qaKinds: []
 ---
 
@@ -19,7 +18,7 @@ agentloop:
 
 Use this skill when the task is to evaluate a City Carbon project, design the AI evaluation prompt/process, or produce AI evaluation advice from uploaded project materials.
 
-This skill is distilled from the current City Carbon assessment workflow and the production database assessment-model tables. Use [references/production-assessment-model.md](references/production-assessment-model.md) as the DB-derived rubric.
+This skill is distilled into a reusable City Carbon assessment method. Use [references/production-assessment-model.md](references/production-assessment-model.md) as the default rubric snapshot.
 
 ## Core Flow
 
@@ -29,7 +28,7 @@ The workflow is:
 assessment model + uploaded project materials -> AI indicator assessment -> structured score suggestions, evidence, confidence, review flags -> final evaluation, advice, and report
 ```
 
-The AI evaluation source is not the database. Storage and APIs are implementation details used by the application to persist or display results. For the evaluation itself, always build the model input from:
+For the evaluation itself, always build the model input from:
 
 - an assessment model: dimensions, indicators, weights, calculation methods, evaluation standards, contribution summaries, and evidence requirements;
 - user-uploaded project materials, primarily `项目说明` and `项目调查报告`;
@@ -47,7 +46,7 @@ Treat the assessment model as the rubric that guides the AI. Before scoring, rep
 - `contributionSummary`
 - `evidenceRequirements`
 
-Use [references/production-assessment-model.md](references/production-assessment-model.md) as the default City Carbon assessment model unless the user supplies a different model for the current evaluation. Do not substitute repository seed data for the production model.
+Use [references/production-assessment-model.md](references/production-assessment-model.md) as the default City Carbon assessment model unless the user supplies a different model for the current evaluation.
 
 ## Uploaded Materials
 
@@ -88,11 +87,10 @@ After scoring, generate improvement advice from low scores, large gaps, low conf
 
 ## Evaluation Report
 
-When the user asks for an assessment report, build it from the structured evaluation result rather than asking the model to freely write an untraceable report. Match the current system implementation:
+When the user asks for an assessment report, build it from the structured evaluation result rather than asking the model to freely write an untraceable report:
 
-- keep Markdown as the canonical text body;
 - support PDF, DOCX/Word, and Markdown outputs;
-- include charts or chart data, dimension summaries, indicator details, AI evidence, manual review, benchmark gaps, and AI optimization advice according to options;
+- include dimension summaries, indicator details, AI evidence, manual review, benchmark gaps, and AI optimization advice when requested;
 - preserve report traceability through project basics, assessment batch, model/rubric, score source, evidence, confidence, and generated time.
 
 Read [references/evaluation-report-output.md](references/evaluation-report-output.md) when generating or designing report output.

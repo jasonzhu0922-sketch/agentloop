@@ -9,6 +9,7 @@ import type { ArtifactAcceptanceProvider } from "../src/acceptance/artifact-acce
 import { createPlaywrightArtifactAcceptanceProvider } from "../src/acceptance/playwright-artifact-acceptance-provider.ts";
 import { buildCommandEnvironment, ComputerExecutor, parseGrepLine, parseRgJsonLine } from "../src/computer/computer-executor.ts";
 import { createComputerTools } from "../src/tools/computer-tools.ts";
+import { createCoreTools } from "../src/tools/compose.ts";
 import { createVisibleDirectoryTools } from "../src/tools/visible-directory-tools.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
@@ -134,8 +135,13 @@ test("dangerous computer tools remain unavailable until the Run grant explicitly
   try {
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
     const denied = registry.materialize(grant([]));
+    assert.equal(denied.definitions.some((tool) => tool.name === "computer_patch_file"), false);
     assert.equal(denied.definitions.some((tool) => tool.name === "computer_write_file"), false);
     assert.equal(denied.definitions.some((tool) => tool.name === "materialize_paginated_html"), false);
+    assert.throws(
+      () => denied.prepare({ id: "patch-1", name: "computer_patch_file", arguments: { path: "x", oldText: "x", newText: "y" } }),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
     assert.throws(
       () => denied.prepare({ id: "write-1", name: "computer_write_file", arguments: { path: "x", content: "x" } }),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
@@ -166,6 +172,160 @@ test("dangerous computer tools remain unavailable until the Run grant explicitly
     });
     await nested.tool.execute({ grant: grant(["computer_write_file"]) }, nested.input);
     assert.equal(await fs.readFile(join(root, "deliveries/issue-42/proof.txt"), "utf8"), "nested\n");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_write_file rejects read-only artifact evidence projections as executable arguments", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-write-projection-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_write_file"]));
+
+    assert.throws(
+      () => allowed.prepare({
+        id: "write-projection",
+        name: "computer_write_file",
+        arguments: {
+          schema: "agentloop.contextArtifactToolCallArguments/v1",
+          artifact: { path: "deliverables/report.md", bytes: 42_000 },
+          originalArguments: { contentCharacters: 42_000 },
+        },
+      }),
+      (error: unknown) => {
+        assert.equal(hasCode(error, "BAD_REQUEST"), true);
+        assert.match((error as Error).message, /read-only artifact evidence projection/);
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("convert_artifact converts an existing workspace artifact and returns a standard artifact receipt", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-artifact-"));
+  try {
+    await fs.writeFile(join(root, "report.md"), "# Report\n\nEvidence body.\n");
+    const pandoc = await writeExecutableFixture(root, "fake-pandoc.cjs", [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const args = process.argv.slice(2);",
+      "const output = args[args.indexOf('--output') + 1];",
+      "const input = args[args.indexOf('--output') - 1];",
+      "const source = fs.readFileSync(input, 'utf8');",
+      "fs.writeFileSync(output, '<!doctype html><title>Converted</title><main>' + source + '</main>');",
+      "",
+    ].join("\n"));
+    const weasyprint = await writeExecutableFixture(root, "fake-weasyprint.cjs", [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const [, , input, output] = process.argv;",
+      "const html = fs.readFileSync(input, 'utf8');",
+      "fs.writeFileSync(output, '%PDF-1.4\\n% converted ' + Buffer.byteLength(html) + '\\n%%EOF\\n');",
+      "",
+    ].join("\n"));
+    const executor = new ComputerExecutor(root, { executableAliases: { pandoc, weasyprint } });
+    const registry = new ToolRegistry(createCoreTools({ executor }));
+    const denied = registry.materialize(grant(["computer_write_file", "verify_artifact_acceptance"]));
+    assert.equal(denied.definitions.some((tool) => tool.name === "convert_artifact"), false);
+
+    const allowed = registry.materialize(grant(["convert_artifact", "verify_artifact_acceptance"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "convert_artifact");
+    assert.match(definition?.description ?? "", /Convert an existing artifact/);
+    assert.match(definition?.description ?? "", /verify_artifact_acceptance/);
+    const prepared = allowed.prepare({
+      id: "convert-report",
+      name: "convert_artifact",
+      arguments: {
+        inputPath: "report.md",
+        outputPath: "deliverables/report.pdf",
+        targetFormat: "pdf",
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["convert_artifact", "verify_artifact_acceptance"]), prepared.input) as {
+      schema: string;
+      source: { path: string; format: string; bytes: number; sha256: string };
+      output: { path: string; format: string; mimeType: string; bytes: number; sha256: string };
+      engine: string;
+      commands: Array<{ engine: string; args: readonly string[]; exitCode: number | null }>;
+      artifactReceipt: {
+        schema: string;
+        sourceTool: string;
+        artifact: { path: string; artifactKind: string; acceptanceProfile: string; bytes: number; sha256: string };
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+        operation: { mode: string; writtenBytes: number; conversionEngine: string; sourcePath: string; sourceFormat: string; targetFormat: string };
+      };
+    };
+
+    assert.equal(result.schema, "agentloop.artifactConversion/v1");
+    assert.equal(result.source.path, "report.md");
+    assert.equal(result.source.format, "markdown");
+    assert.equal(result.output.path, "deliverables/report.pdf");
+    assert.equal(result.output.format, "pdf");
+    assert.equal(result.output.mimeType, "application/pdf");
+    assert.equal(result.engine, "pandoc+weasyprint");
+    assert.deepEqual(result.commands.map((command) => command.engine), ["pandoc", "weasyprint"]);
+    assert.equal(result.artifactReceipt.schema, "agentloop.artifactReceipt/v1");
+    assert.equal(result.artifactReceipt.sourceTool, "convert_artifact");
+    assert.equal(result.artifactReceipt.artifact.path, "deliverables/report.pdf");
+    assert.equal(result.artifactReceipt.artifact.acceptanceProfile, "pdf");
+    assert.equal(result.artifactReceipt.evidenceKinds.satisfied.includes("artifact_path"), true);
+    assert.equal(result.artifactReceipt.evidenceKinds.satisfied.includes("format_matches_request"), true);
+    assert.equal(result.artifactReceipt.evidenceKinds.caveated.includes("artifact_inspection_requires_acceptance"), true);
+    assert.deepEqual(result.artifactReceipt.operation, {
+      mode: "create",
+      writtenBytes: result.output.bytes,
+      conversionEngine: "pandoc+weasyprint",
+      sourcePath: "report.md",
+      sourceFormat: "markdown",
+      targetFormat: "pdf",
+    });
+    assert.match(await fs.readFile(join(root, "deliverables", "report.pdf"), "utf8"), /^%PDF-1\.4/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("convert_artifact validates source and target paths before spawning converters", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-validate-"));
+  try {
+    await fs.writeFile(join(root, "report.md"), "# Report\n");
+    const executor = new ComputerExecutor(root);
+    const registry = new ToolRegistry(createCoreTools({ executor }));
+    const allowed = registry.materialize(grant(["convert_artifact"]));
+
+    assert.throws(
+      () => allowed.prepare({
+        id: "bad-extension",
+        name: "convert_artifact",
+        arguments: { inputPath: "report.md", outputPath: "report.html", targetFormat: "pdf" },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && String((error as Error).message).includes("outputPath extension"),
+    );
+
+    const outside = allowed.prepare({
+      id: "outside-source",
+      name: "convert_artifact",
+      arguments: { inputPath: "../report.md", outputPath: "report.pdf", targetFormat: "pdf" },
+    });
+    await assert.rejects(
+      () => outside.tool.execute(grantContext(["convert_artifact"]), outside.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+
+    const samePath = allowed.prepare({
+      id: "same-path",
+      name: "convert_artifact",
+      arguments: { inputPath: "report.md", outputPath: "report.md", targetFormat: "markdown" },
+    });
+    await assert.rejects(
+      () => samePath.tool.execute(grantContext(["convert_artifact"]), samePath.input),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && String((error as Error).message).includes("different from inputPath"),
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -398,6 +558,44 @@ test("verify_artifact_acceptance records aggregate HTML-PPT evidence and rendere
     assert.equal(check(result, "static_navigation_signals")?.status, "passed");
     assert.equal(check(result, "basic_navigation")?.status, "skipped_unavailable");
     assert.match(result.caveats.join("\n"), /Browser-rendered navigation was not executed/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verify_artifact_acceptance rejects HTML with invalid inline script syntax", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-html-script-"));
+  try {
+    await fs.writeFile(join(root, "report.html"), [
+      "<!doctype html>",
+      "<html><body>",
+      "<main><div id=\"kpi-row\"></div><table><tbody id=\"table-body\"></tbody></table></main>",
+      "<script>",
+      "const RAW_DATA = [{ n: 1, title: 'Project' }];",
+      "{n:2,title:'Duplicate tail'},",
+      "document.getElementById('table-body').innerHTML = RAW_DATA.map(row => '<tr><td>' + row.title + '</td></tr>').join('');",
+      "</script>",
+      "</body></html>",
+    ].join("\n"));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["verify_artifact_acceptance"]));
+    const prepared = allowed.prepare({
+      id: "accept-invalid-html-script",
+      name: "verify_artifact_acceptance",
+      arguments: { artifactPath: "report.html", profileId: "html" },
+    });
+
+    const result = await prepared.tool.execute(grantContext(["verify_artifact_acceptance"]), prepared.input) as {
+      verdict: string;
+      evidenceKinds: { satisfied: string[]; failed: string[] };
+      checks: Array<{ id: string; status: string; evidence: Record<string, unknown> }>;
+    };
+
+    assert.equal(result.verdict, "rejected");
+    assert.ok(result.evidenceKinds.failed.includes("artifact_acceptance"));
+    assert.ok(result.evidenceKinds.failed.includes("artifact_openable"));
+    assert.equal(check(result, "inline_script_syntax")?.status, "failed");
+    assert.match(String(check(result, "inline_script_syntax")?.evidence.diagnostics ?? ""), /Unexpected token/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -1055,6 +1253,154 @@ test("computer_write_file appends chunks and receipts the final file state", asy
       mode: "append",
       writtenBytes: Buffer.byteLength("## Tail\npart two\n"),
     });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_patch_file replaces one exact fragment and receipts the patched artifact", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-"));
+  try {
+    const before = [
+      "# Report",
+      "status: draft",
+      "<script>",
+      "const RAW_DATA = [{ n: 1 }];",
+      "{n:2},",
+      "render();",
+      "</script>",
+    ].join("\n");
+    await fs.mkdir(join(root, "reports"), { recursive: true });
+    await fs.writeFile(join(root, "reports", "report.html"), before);
+    const beforeSha256 = createHash("sha256").update(before).digest("hex");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_patch_file", "verify_artifact_acceptance"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_patch_file");
+    assert.match(definition?.description ?? "", /oldText must match the current file exactly once/);
+    assert.match(definition?.description ?? "", /verify_artifact_acceptance/);
+    const prepared = allowed.prepare({
+      id: "patch-report",
+      name: "computer_patch_file",
+      arguments: {
+        path: "reports/report.html",
+        oldText: "const RAW_DATA = [{ n: 1 }];\n{n:2},",
+        newText: "const RAW_DATA = [{ n: 1 }, { n: 2 }];",
+        expectedSha256: beforeSha256,
+      },
+    });
+
+    const result = await prepared.tool.execute(grantContext(["computer_patch_file", "verify_artifact_acceptance"]), prepared.input) as {
+      schema: string;
+      path: string;
+      operation: string;
+      replacements: number;
+      hunk: { startLine: number; oldLines: number; newLines: number };
+      before: { bytes: number; sha256: string; totalLines: number };
+      after: { bytes: number; sha256: string; totalLines: number };
+      delta: { bytes: number; totalLines: number };
+      artifactReceipt: {
+        schema: string;
+        sourceTool: string;
+        artifact: { path: string; bytes: number; sha256: string; totalLines: number };
+        operation?: { mode?: string; writtenBytes?: number; replacementCount?: number; beforeSha256?: string; afterSha256?: string };
+      };
+    };
+
+    const after = [
+      "# Report",
+      "status: draft",
+      "<script>",
+      "const RAW_DATA = [{ n: 1 }, { n: 2 }];",
+      "render();",
+      "</script>",
+    ].join("\n");
+    const afterSha256 = createHash("sha256").update(after).digest("hex");
+    assert.equal(await fs.readFile(join(root, "reports", "report.html"), "utf8"), after);
+    assert.equal(result.schema, "agentloop.filePatch/v1");
+    assert.equal(result.path, "reports/report.html");
+    assert.equal(result.operation, "replace_text");
+    assert.equal(result.replacements, 1);
+    assert.deepEqual(result.hunk, { startLine: 4, oldLines: 2, newLines: 1 });
+    assert.equal(result.before.sha256, beforeSha256);
+    assert.equal(result.before.bytes, Buffer.byteLength(before));
+    assert.equal(result.before.totalLines, 7);
+    assert.equal(result.after.sha256, afterSha256);
+    assert.equal(result.after.bytes, Buffer.byteLength(after));
+    assert.equal(result.after.totalLines, 6);
+    assert.equal(result.delta.totalLines, -1);
+    assert.equal(result.artifactReceipt.schema, "agentloop.artifactReceipt/v1");
+    assert.equal(result.artifactReceipt.sourceTool, "computer_patch_file");
+    assert.equal(result.artifactReceipt.artifact.path, "reports/report.html");
+    assert.equal(result.artifactReceipt.artifact.sha256, afterSha256);
+    assert.deepEqual(result.artifactReceipt.operation, {
+      mode: "patch",
+      writtenBytes: Buffer.byteLength("const RAW_DATA = [{ n: 1 }, { n: 2 }];"),
+      replacementCount: 1,
+      beforeSha256,
+      afterSha256,
+    });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_patch_file fails closed for stale, missing, and ambiguous patch preconditions", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-preconditions-"));
+  try {
+    await fs.writeFile(join(root, "report.txt"), "alpha\nneedle\nneedle\nomega\n");
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_patch_file"]));
+
+    const stale = allowed.prepare({
+      id: "patch-stale",
+      name: "computer_patch_file",
+      arguments: { path: "report.txt", oldText: "alpha", newText: "beta", expectedSha256: "0".repeat(64) },
+    });
+    await assert.rejects(
+      () => stale.tool.execute(grantContext(["computer_patch_file"]), stale.input),
+      (error: unknown) => hasCode(error, "CONFLICT")
+        && String((error as Error).message).includes("expectedSha256"),
+    );
+
+    const missing = allowed.prepare({
+      id: "patch-missing",
+      name: "computer_patch_file",
+      arguments: { path: "report.txt", oldText: "absent", newText: "present" },
+    });
+    await assert.rejects(
+      () => missing.tool.execute(grantContext(["computer_patch_file"]), missing.input),
+      (error: unknown) => hasCode(error, "NOT_FOUND")
+        && String((error as Error).message).includes("oldText"),
+    );
+
+    const ambiguous = allowed.prepare({
+      id: "patch-ambiguous",
+      name: "computer_patch_file",
+      arguments: { path: "report.txt", oldText: "needle", newText: "pin" },
+    });
+    await assert.rejects(
+      () => ambiguous.tool.execute(grantContext(["computer_patch_file"]), ambiguous.input),
+      (error: unknown) => hasCode(error, "CONFLICT")
+        && String((error as Error).message).includes("more than once"),
+    );
+
+    const absentParent = allowed.prepare({
+      id: "patch-absent-parent",
+      name: "computer_patch_file",
+      arguments: { path: "missing/report.txt", oldText: "x", newText: "y" },
+    });
+    await assert.rejects(
+      () => absentParent.tool.execute(grantContext(["computer_patch_file"]), absentParent.input),
+      (error: unknown) => hasCode(error, "NOT_FOUND"),
+    );
+    await assert.rejects(
+      () => fs.stat(join(root, "missing")),
+      (error: unknown) => error instanceof Error
+        && "code" in error
+        && (error as { code: unknown }).code === "ENOENT",
+    );
+
+    assert.equal(await fs.readFile(join(root, "report.txt"), "utf8"), "alpha\nneedle\nneedle\nomega\n");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -2818,6 +3164,13 @@ function assertReadFileSchemaForbidsMixedWindows(schema: unknown) {
     { not: { required: ["ranges", "offset"] } },
     { not: { required: ["ranges", "limit"] } },
   ]);
+}
+
+async function writeExecutableFixture(root: string, name: string, content: string): Promise<string> {
+  const path = join(root, name);
+  await fs.writeFile(path, content);
+  await fs.chmod(path, 0o700);
+  return path;
 }
 
 function hasCode(error: unknown, code: string): boolean {

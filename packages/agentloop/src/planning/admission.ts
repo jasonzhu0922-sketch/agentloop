@@ -6,6 +6,7 @@ import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, Refinemen
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
   "materialize_paginated_html",
+  "computer_patch_file",
   "computer_write_file",
   "computer_run_command",
 ]);
@@ -45,6 +46,11 @@ export function admitPlan(input: {
   assertUnique(stepIds, "step IDs");
   const stepIdSet = new Set(stepIds);
   const selectedSet = new Set(selectedSkillIds);
+  const selectedRoleBySkillId = new Map<string, string>();
+  for (const selection of proposal.selectedSkillRoles ?? []) {
+    const skill = availableSkills.get(selection.skillId);
+    selectedRoleBySkillId.set(skill?.id ?? selection.skillId, selection.role);
+  }
   const boundSkillIds = new Set<string>();
   const canProduceFiles = hasFileProducer(input.availableToolNames);
 
@@ -132,7 +138,12 @@ export function admitPlan(input: {
   });
 
   for (const skillId of selectedSet) {
-    if (!boundSkillIds.has(skillId)) reject(`Selected Skill ${skillId} is not bound to any Plan step`);
+    const selectedRole = selectedRoleBySkillId.get(skillId);
+    const nonExecutingRecoveryRole = recoveryPlan
+      && (selectedRole === "source_provider" || selectedRole === "support" || selectedRole === "qa");
+    if (!nonExecutingRecoveryRole && !boundSkillIds.has(skillId)) {
+      reject(`Selected Skill ${skillId} is not bound to any Plan step`);
+    }
   }
   if (steps.every((step) => step.kind !== "leaf")) {
     reject("Plan must contain at least one executable leaf step");

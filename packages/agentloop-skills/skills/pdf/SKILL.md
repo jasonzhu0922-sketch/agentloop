@@ -17,6 +17,36 @@ agentloop:
 
 This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see REFERENCE.md. If you need to fill out a PDF form, read FORMS.md and follow its instructions.
 
+## Report Generation Workflow
+
+When the user asks to generate a polished PDF report from an existing Markdown,
+HTML, text, or DOCX source, treat the final report file as the primary
+deliverable. Do not spend the run on open-ended renderer exploration.
+
+Preferred workflow:
+- Read the source document once and identify the output path before writing code.
+- Prefer a deterministic local generator using ReportLab/Platypus when it is
+  available, especially for Chinese/CJK reports. Use a known CJK-capable font
+  from `fc-list` or a system font path, and verify the extracted text layer.
+- Use WeasyPrint only if `weasyprint --version` succeeds. If it fails because
+  libraries such as Pango/Cairo are missing, immediately fall back to ReportLab
+  or PyMuPDF. Do not run package-manager installation commands such as
+  `brew install` inside the task unless the user explicitly asked to modify the
+  machine environment.
+- Use PyMuPDF Story only when its API has already been verified in the current
+  environment, or after one small smoke test. Do not spend more than one failed
+  smoke test on API exploration before switching to ReportLab.
+- Keep smoke-test files separate from the final deliverable. A test PDF does not
+  satisfy the task unless it is the requested report content and output path.
+- After writing the final `.pdf`, run `verify_artifact_acceptance` with
+  `artifactKind` or `profileId` set to `pdf`. Also check page count and
+  extractable text with `pypdf`, `pdfplumber`, or `pdftotext`.
+
+For "beautiful", "polished", or "professional" PDF reports, create visible
+structure in the final file: cover page, concise summary, section headings,
+tables styled with consistent colors, headers/footers or page numbers, and
+readable margins. Do not let visual refinement replace the acceptance evidence.
+
 ## Quick Start
 
 ```python

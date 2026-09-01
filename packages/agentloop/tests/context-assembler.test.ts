@@ -535,20 +535,21 @@ test("ContextAssembler projects successful artifact write arguments out of model
   );
   if (projectedAssistant === undefined) assert.fail("Projected assistant message is missing");
   const projectedArguments = projectedAssistant.toolCalls?.[0]?.arguments as {
+    path?: string;
+    content?: string;
+    mode?: string;
+    overwrite?: boolean;
     schema?: string;
-    artifact?: { path?: string; bytes?: number; sha256?: string; totalLines?: number };
-    inspection?: { outline?: Array<{ line: number; text: string }> };
-    originalArguments?: { contentCharacters?: number; canonicalArgumentsPersisted?: boolean };
   };
 
-  assert.equal(projectedArguments.schema, "agentloop.contextArtifactToolCallArguments/v1");
-  assert.equal(projectedArguments.artifact?.path, "deliverables/report.md");
-  assert.equal(projectedArguments.artifact?.bytes, 42_000);
-  assert.equal(projectedArguments.artifact?.sha256, "written-artifact-hash");
-  assert.equal(projectedArguments.inspection?.outline?.[0]?.text, "# Report");
-  assert.equal(projectedArguments.originalArguments?.contentCharacters, generatedMarkdown.length);
-  assert.equal(projectedArguments.originalArguments?.canonicalArgumentsPersisted, true);
+  assert.equal(projectedArguments.schema, undefined);
+  assert.equal(projectedArguments.path, "deliverables/report.md");
+  assert.match(projectedArguments.content ?? "", /Historical successful artifact write content omitted/);
+  assert.equal(projectedArguments.mode, undefined);
+  assert.equal(projectedArguments.overwrite, undefined);
   assert.doesNotMatch(JSON.stringify(assembly.messages), /analysis paragraph analysis paragraph analysis paragraph/);
+  assert.doesNotMatch(JSON.stringify(projectedAssistant.toolCalls), /agentloop\.contextArtifactToolCallArguments/);
+  assert.doesNotMatch(JSON.stringify(projectedAssistant.toolCalls), /written-artifact-hash|42000|# Report/);
   assert.equal((canonical[0] as unknown as { toolCalls: [{ arguments: { content: string } }] }).toolCalls[0].arguments.content, generatedMarkdown);
 });
 

@@ -4,6 +4,7 @@ import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { UploadedSourceSummary, VisibleDirectoryGrant } from "../runtime/contracts.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import { SourceRepository } from "../storage/repositories/source-repository.ts";
+import { createArtifactConverterTools } from "./artifact-converter.ts";
 import { createComputerTools } from "./computer-tools.ts";
 import { createSkillLoader } from "./skill-loader.ts";
 import { createSourceTools } from "./source-tools.ts";
@@ -20,6 +21,7 @@ export interface CoreToolsOptions {
 export function createCoreTools(options: CoreToolsOptions): readonly RuntimeTool<unknown>[] {
   return [
     ...createComputerTools(options.executor, options.driver, options.acceptanceService),
+    ...createArtifactConverterTools(options.executor),
     ...(options.pluginTools ?? []),
   ];
 }

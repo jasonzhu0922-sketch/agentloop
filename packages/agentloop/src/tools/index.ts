@@ -5,6 +5,8 @@ export type {
   RuntimeTool,
   ToolExecutionContext,
 } from "./tool-registry.ts";
+export { createArtifactConverterTools, parseConvertArtifactInput } from "./artifact-converter.ts";
+export type { ConvertArtifactInput } from "./artifact-converter.ts";
 export { createComputerTools, DANGEROUS_COMPUTER_TOOL_NAMES } from "./computer-tools.ts";
 export { VISIBLE_DIRECTORY_TOOL_NAMES, createVisibleDirectoryTools } from "./visible-directory-tools.ts";
 export { createWebTools } from "./web-tools.ts";

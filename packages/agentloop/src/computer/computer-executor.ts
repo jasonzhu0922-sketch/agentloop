@@ -36,6 +36,7 @@ const READ_RANGE_MAX_LIMIT = 2_000;
 const READ_RANGE_MAX_RANGES = 20;
 const SEARCH_CONTEXT_MAX_LINES = 20;
 const COMMAND_FILE_CHANGE_SCAN_LIMIT = 5_000;
+const PATCH_TEXT_MAX_CHARACTERS = 500_000;
 const COMMAND_FILE_CHANGE_RESULT_LIMIT = 200;
 const COMMAND_FILE_CHANGE_IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".agentloop"]);
 const READ_ONLY_ROOT_CHANGE_SCAN_LIMIT = 10_000;
@@ -163,6 +164,13 @@ interface WrittenFileSampleRange {
 }
 
 export type WriteFileMode = "create" | "overwrite" | "append";
+
+export interface PatchFileInput {
+  readonly path: string;
+  readonly oldText: string;
+  readonly newText: string;
+  readonly expectedSha256?: string;
+}
 
 interface ResolvedReadableFile {
   readonly absolutePath: string;
@@ -345,6 +353,27 @@ export class ComputerExecutor {
       bytes: stat.size,
       sha256: await sha256File(resolvedFile.absolutePath),
       ...readFileResolutionMetadata(resolvedFile),
+    };
+  }
+
+  async prepareWritableFile(path: string, mode: "create" | "overwrite"): Promise<{
+    path: string;
+    mode: "create" | "overwrite";
+  }> {
+    const target = await this.resolveWritable(path);
+    const targetStat = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (targetStat !== undefined) {
+      if (!targetStat.isFile()) throw badRequest("Write target must be a regular file");
+      if (mode === "create") {
+        throw conflict("File already exists; set overwrite=true to replace it");
+      }
+    }
+    return {
+      path: relative(this.workspaceRoot, target).split(sep).join("/"),
+      mode,
     };
   }
 
@@ -1012,6 +1041,103 @@ export class ComputerExecutor {
     };
   }
 
+  async patchFile(input: PatchFileInput): Promise<{
+    schema: "agentloop.filePatch/v1";
+    path: string;
+    operation: "replace_text";
+    replacements: number;
+    hunk: {
+      startLine: number;
+      oldLines: number;
+      newLines: number;
+    };
+    before: {
+      bytes: number;
+      sha256: string;
+      characters: number;
+      totalLines: number;
+    };
+    after: {
+      bytes: number;
+      sha256: string;
+      characters: number;
+      totalLines: number;
+    };
+    delta: {
+      bytes: number;
+      characters: number;
+      totalLines: number;
+    };
+    inspection: WrittenFileInspection;
+  }> {
+    if (input.oldText.length === 0) throw badRequest("oldText must not be empty");
+    if (input.oldText.length > PATCH_TEXT_MAX_CHARACTERS) {
+      throw badRequest(`oldText must contain at most ${PATCH_TEXT_MAX_CHARACTERS} characters`);
+    }
+    if (input.newText.length > PATCH_TEXT_MAX_CHARACTERS) {
+      throw badRequest(`newText must contain at most ${PATCH_TEXT_MAX_CHARACTERS} characters`);
+    }
+    const target = await this.resolveExistingWritableFile(input.path);
+    const canonicalTarget = await fs.realpath(target);
+    this.assertContained(canonicalTarget);
+    this.assertNotReadOnly(canonicalTarget);
+    const workspacePath = relative(this.workspaceRoot, canonicalTarget).split(sep).join("/");
+    const stat = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (stat === undefined) throw new AppError("NOT_FOUND", "Patch target file not found", 404);
+    if (!stat.isFile()) throw badRequest("Patch target must be a regular file");
+
+    const beforeContent = await fs.readFile(target, "utf8");
+    if (beforeContent.includes("\0")) throw badRequest("Patch target must be a UTF-8 text file");
+    const beforeInspection = inspectWrittenText(beforeContent);
+    if (input.expectedSha256 !== undefined && input.expectedSha256 !== beforeInspection.sha256) {
+      throw conflict("Patch precondition failed: expectedSha256 does not match current file");
+    }
+    const firstMatch = beforeContent.indexOf(input.oldText);
+    if (firstMatch === -1) throw new AppError("NOT_FOUND", "oldText was not found in the patch target", 404);
+    const secondMatch = beforeContent.indexOf(input.oldText, firstMatch + input.oldText.length);
+    if (secondMatch !== -1) {
+      throw conflict("oldText matched more than once; provide a larger unique surrounding fragment");
+    }
+    const afterContent = beforeContent.slice(0, firstMatch) + input.newText + beforeContent.slice(firstMatch + input.oldText.length);
+    if (afterContent === beforeContent) throw badRequest("Patch would not change the file");
+    await fs.writeFile(target, afterContent, { encoding: "utf8", flag: "w", mode: 0o600 });
+    const afterInspection = inspectWrittenText(afterContent);
+    const beforeBytes = Buffer.byteLength(beforeContent);
+    const afterBytes = Buffer.byteLength(afterContent);
+    return {
+      schema: "agentloop.filePatch/v1",
+      path: workspacePath,
+      operation: "replace_text",
+      replacements: 1,
+      hunk: {
+        startLine: lineNumberAtOffset(beforeContent, firstMatch),
+        oldLines: splitTextLines(input.oldText).length,
+        newLines: splitTextLines(input.newText).length,
+      },
+      before: {
+        bytes: beforeBytes,
+        sha256: beforeInspection.sha256,
+        characters: beforeInspection.characters,
+        totalLines: beforeInspection.totalLines,
+      },
+      after: {
+        bytes: afterBytes,
+        sha256: afterInspection.sha256,
+        characters: afterInspection.characters,
+        totalLines: afterInspection.totalLines,
+      },
+      delta: {
+        bytes: afterBytes - beforeBytes,
+        characters: afterInspection.characters - beforeInspection.characters,
+        totalLines: afterInspection.totalLines - beforeInspection.totalLines,
+      },
+      inspection: afterInspection,
+    };
+  }
+
   async runCommand(input: {
     command: string;
     args: readonly string[];
@@ -1452,6 +1578,23 @@ export class ComputerExecutor {
     return target;
   }
 
+  private async resolveExistingWritableFile(path: string): Promise<string> {
+    const normalized = path.replace(/\\/g, "/");
+    if (normalized.startsWith("@skills/") || normalized.startsWith("@visible/")) {
+      throw forbidden("Virtual command-root aliases are read-only and cannot be used as computer write targets");
+    }
+    const target = this.lexicalPath(path);
+    this.assertNotReadOnly(target);
+    const targetStat = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (targetStat === undefined) throw new AppError("NOT_FOUND", "Patch target file not found", 404);
+    if (targetStat.isSymbolicLink()) throw forbidden("Symbolic links are not writable computer targets");
+    if (!targetStat.isFile()) throw badRequest("Patch target must be a regular file");
+    return target;
+  }
+
   private async ensureWritableDirectory(directory: string): Promise<void> {
     this.assertContained(directory);
     this.assertNotReadOnly(directory);
@@ -1635,6 +1778,15 @@ function splitTextLines(content: string): string[] {
   const lines = content.split(/\r?\n/u);
   if (lines.at(-1) === "") lines.pop();
   return lines;
+}
+
+function lineNumberAtOffset(content: string, offset: number): number {
+  if (offset <= 0) return 1;
+  let line = 1;
+  for (let index = 0; index < offset; index += 1) {
+    if (content.charCodeAt(index) === 10) line += 1;
+  }
+  return line;
 }
 
 function writtenFileSampleRanges(lines: readonly string[]): WrittenFileSampleRange[] {

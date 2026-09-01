@@ -105,12 +105,13 @@ describe("format", () => {
 });
 
 describe("artifact preview routing", () => {
-  const artifact = (name: string, mimeType: string): ProcessArtifact => ({
+  const artifact = (name: string, mimeType: string, role?: ProcessArtifact["role"]): ProcessArtifact => ({
     id: "artifact-id",
     path: `artifacts/${name}`,
     name,
     bytes: 128,
     mimeType,
+    ...(role === undefined ? {} : { role }),
     sourceTool: "computer_write_file",
     previewable: true,
   });
@@ -147,6 +148,18 @@ describe("artifact preview routing", () => {
     ).map((item) => item.name);
     expect(ordered[0]).toBe("宝武数据中台_差旅API参数信息报告.md");
     expect(ordered.slice(0, 4)).toContain("宝武数据中台_差旅API参数信息报告.md");
+  });
+
+  it("prioritizes accepted final artifacts ahead of process candidates when the answer does not name one", () => {
+    const artifacts: ProcessArtifact[] = [
+      artifact("analysis-notes.md", "text/markdown; charset=utf-8", "process"),
+      artifact("accepted-report.html", "text/html; charset=utf-8", "final"),
+      artifact("command-log.txt", "text/plain; charset=utf-8", "process"),
+    ];
+
+    const ordered = prioritizedArtifacts(artifacts, "报告已生成并通过验收。").map((item) => item.name);
+
+    expect(ordered[0]).toBe("accepted-report.html");
   });
 });
 

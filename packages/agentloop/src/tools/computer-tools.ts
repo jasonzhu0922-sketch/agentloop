@@ -5,7 +5,7 @@ import type { RuntimeTool, ToolExecutionContext } from "./tool-registry.ts";
 import { ArtifactAcceptanceService, type ArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
-import type { WriteFileMode } from "../computer/computer-executor.ts";
+import type { PatchFileInput, WriteFileMode } from "../computer/computer-executor.ts";
 import { parsePaginatedHtmlMaterializeInput, renderPaginatedHtml } from "./paginated-html-materializer.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
@@ -16,7 +16,9 @@ const MIN_COMMAND_TIMEOUT_MS = 100;
 const MAX_COMMAND_TIMEOUT_MS = 300_000;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
+  "convert_artifact",
   "materialize_paginated_html",
+  "computer_patch_file",
   "computer_write_file",
   "computer_run_command",
   "computer_click",
@@ -219,8 +221,16 @@ export function createComputerTools(
           throw badRequest("overwrite must be boolean");
         }
         const mode = parseWriteFileMode(record.mode, record.overwrite);
-        if (typeof record.content !== "string" || record.content.length > 1_000_000) {
-          throw badRequest("content must be a string of at most 1000000 characters");
+        if (typeof record.content !== "string") {
+          if (typeof record.schema === "string" && record.schema.startsWith("agentloop.contextArtifact")) {
+            throw badRequest(
+              "content must be a string; received a read-only artifact evidence projection, not executable write_file arguments",
+            );
+          }
+          throw badRequest("content must be a string");
+        }
+        if (record.content.length > 1_000_000) {
+          throw badRequest("content must contain at most 1000000 characters");
         }
         return {
           path: requireString(record.path, "path", { max: 4_000 }),
@@ -236,6 +246,56 @@ export function createComputerTools(
           artifactReceipt: buildArtifactReceipt("computer_write_file", receipt, {
             writeMode: receipt.mode,
             writtenBytes: receipt.writtenBytes,
+          }),
+        };
+      },
+    },
+    {
+      name: "computer_patch_file",
+      description: [
+        "Patch an existing UTF-8 text file under the workspace root by replacing one exact fragment; requires dangerous-tool consent.",
+        "Use this for local repairs to an existing artifact or generated source file instead of rewriting the whole file with computer_write_file.",
+        "path must be relative to the workspace root; absolute paths and read-only virtual roots are rejected.",
+        "oldText must match the current file exactly once; zero matches or multiple matches fail closed. Provide a larger surrounding fragment when needed.",
+        "expectedSha256 is optional but should be set when a prior receipt or read result exposed the current file hash.",
+        "The result includes schema agentloop.filePatch/v1, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
+      ].join(" "),
+      inputSchema: objectSchema(["path", "oldText", "newText"], {
+        path: { type: "string" },
+        oldText: { type: "string", minLength: 1, maxLength: 500_000 },
+        newText: { type: "string", maxLength: 500_000 },
+        expectedSha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      }),
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: (value) => {
+        const record = requireRecord(value, "computer_patch_file arguments");
+        return {
+          path: requireString(record.path, "path", { max: 4_000 }),
+          oldText: requirePatchText(record.oldText, "oldText", { min: 1, max: 500_000 }),
+          newText: requirePatchText(record.newText, "newText", { min: 0, max: 500_000 }),
+          expectedSha256: record.expectedSha256 === undefined
+            ? undefined
+            : requireString(record.expectedSha256, "expectedSha256", { min: 64, max: 64, pattern: /^[0-9a-f]{64}$/u }),
+        };
+      },
+      execute: async (_context, value) => {
+        const receipt = await executorForContext(executor, _context).patchFile(value as PatchFileInput);
+        return {
+          ...receipt,
+          artifactReceipt: buildArtifactReceipt("computer_patch_file", {
+            path: receipt.path,
+            bytes: receipt.after.bytes,
+            sha256: receipt.after.sha256,
+            characters: receipt.after.characters,
+            totalLines: receipt.after.totalLines,
+            inspection: receipt.inspection,
+          }, {
+            writeMode: "patch",
+            writtenBytes: Buffer.byteLength((value as PatchFileInput).newText),
+            replacementCount: receipt.replacements,
+            beforeSha256: receipt.before.sha256,
+            afterSha256: receipt.after.sha256,
           }),
         };
       },
@@ -545,6 +605,13 @@ function parseWriteFileMode(mode: unknown, overwrite: unknown): WriteFileMode {
   if (mode === undefined) return overwrite === true ? "overwrite" : "create";
   if (mode === "create" || mode === "overwrite" || mode === "append") return mode;
   throw badRequest("mode must be one of create, overwrite, or append");
+}
+
+function requirePatchText(value: unknown, label: string, options: { min: number; max: number }): string {
+  if (typeof value !== "string") throw badRequest(`${label} must be a string`);
+  if (value.length < options.min) throw badRequest(`${label} must contain at least ${options.min} characters`);
+  if (value.length > options.max) throw badRequest(`${label} must contain at most ${options.max} characters`);
+  return value;
 }
 
 function objectSchema(required: readonly string[], properties: Record<string, unknown>): Record<string, unknown> {

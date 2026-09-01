@@ -10,6 +10,7 @@ import { RuntimeActionRepository } from "@zhujun/agentloop";
 import { RunService } from "@zhujun/agentloop";
 import { SkillService } from "@zhujun/agentloop";
 import { AppDatabase } from "@zhujun/agentloop";
+import { SourceRepository } from "@zhujun/agentloop";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
 
 test("conversation deletion is owner-scoped and cascades durable Run records", async () => {
@@ -47,6 +48,71 @@ test("conversation deletion is owner-scoped and cascades durable Run records", a
     assert.equal(await count(database, "plans"), 0);
     assert.equal(await count(database, "skill_compliance_assessments"), 0);
     assert.equal(await count(database, "run_outcomes"), 0);
+  } finally {
+    database.close();
+  }
+});
+
+test("conversation deletion removes uploaded sources bound to deleted runs", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const auth = new AuthService(database);
+    const skills = new SkillService(database);
+    const owner = await auth.register("conversation-source-delete@example.com", "conversation source delete secure password");
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticCompletionModel(),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const run = await runs.execute(owner.user.id, "delete this conversation with uploaded source");
+    assert.ok(run.conversationId);
+    const sources = new SourceRepository(database);
+    const now = Date.now();
+    const source = await sources.insertSource({
+      id: `src_${randomUUID().replaceAll("-", "")}`,
+      ownerUserId: owner.user.id,
+      conversationId: run.conversationId,
+      originalName: "场景清单.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 1024,
+      sha256: "source-delete-fixture",
+      storagePath: "/tmp/source-delete-fixture.xlsx",
+      status: "ready",
+      summary: "source summary",
+      tokenEstimate: 10,
+      characterCount: 40,
+      truncated: false,
+      createdAt: now,
+    });
+    await sources.replaceChunks(source.id, [{
+      chunk_index: 0,
+      kind: "table",
+      locator: "Sheet1!A1:B2",
+      content: "研发安排",
+      token_estimate: 4,
+      sha256: "chunk-delete-fixture",
+    }], now);
+    await sources.bindRunSources({
+      ownerUserId: owner.user.id,
+      conversationId: run.conversationId,
+      runId: run.id,
+      sourceIds: [source.id],
+      createdAt: now,
+    });
+    assert.equal(await count(database, "sources"), 1);
+    assert.equal(await count(database, "source_chunks"), 1);
+    assert.equal(await count(database, "run_sources"), 1);
+
+    await runs.deleteConversation(owner.user.id, run.conversationId);
+
+    assert.equal(await count(database, "conversations"), 0);
+    assert.equal(await count(database, "runs"), 0);
+    assert.equal(await count(database, "run_sources"), 0);
+    assert.equal(await count(database, "sources"), 0);
+    assert.equal(await count(database, "source_chunks"), 0);
   } finally {
     database.close();
   }

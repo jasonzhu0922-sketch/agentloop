@@ -39,6 +39,9 @@ interface WebFetchResult {
   readonly title: string | undefined;
   readonly content: string;
   readonly bytes: number;
+  readonly contentType?: string;
+  readonly binary?: boolean;
+  readonly sha256?: string;
   readonly truncated: boolean;
   readonly evidenceReceipt: WebToolEvidenceReceipt;
 }
@@ -175,6 +178,24 @@ async function fetchWebPage(
   let current = url;
   for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop++) {
     const fetched = await httpGet(current, options, timeoutMs);
+    if (fetched.binary) {
+      const result = {
+        schema: "agentloop.webFetch/v1" as const,
+        url: fetched.url,
+        title: undefined,
+        content: [
+          `[Binary web resource omitted from readable fetch output; url=${fetched.url};`,
+          `contentType=${fetched.contentType ?? "unknown"}; bytes=${fetched.bytes};`,
+          `sha256=${fetched.sha256}; truncated=${fetched.truncated}]`,
+        ].join(" "),
+        bytes: fetched.bytes,
+        ...(fetched.contentType === undefined ? {} : { contentType: fetched.contentType }),
+        binary: true,
+        sha256: fetched.sha256,
+        truncated: fetched.truncated,
+      };
+      return { ...result, evidenceReceipt: webFetchReceipt(result) };
+    }
     const redirectTarget = extractRedirectTarget(fetched.html);
     if (redirectTarget !== undefined) {
       current = new URL(redirectTarget, fetched.url).toString();
@@ -186,7 +207,10 @@ async function fetchWebPage(
       url: fetched.url,
       title: extractTitle(fetched.html),
       content,
-      bytes: fetched.html.length,
+      bytes: fetched.bytes,
+      ...(fetched.contentType === undefined ? {} : { contentType: fetched.contentType }),
+      binary: false,
+      sha256: fetched.sha256,
       truncated: fetched.truncated,
     };
     return { ...result, evidenceReceipt: webFetchReceipt(result) };
@@ -262,13 +286,15 @@ function webSearchReceipt(query: string, results: readonly SearchResult[]): WebT
 }
 
 function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebToolEvidenceReceipt {
-  const contentSha256 = createHash("sha256").update(result.content).digest("hex");
+  const contentSha256 = result.sha256 ?? createHash("sha256").update(result.content).digest("hex");
   return buildWebToolEvidenceReceipt({
     sourceType: "web_page",
     sourceRefs: [webSourceRef(result.url, {
       title: result.title,
       bytes: result.bytes,
       characters: result.content.length,
+      contentType: result.contentType,
+      binary: result.binary,
       sha256: contentSha256,
       truncated: result.truncated,
     })],
@@ -278,15 +304,19 @@ function webFetchReceipt(result: Omit<WebFetchResult, "evidenceReceipt">): WebTo
       title: result.title,
       characters: result.content.length,
       bytes: result.bytes,
+      contentType: result.contentType,
+      binary: result.binary,
       sha256: contentSha256,
       truncated: result.truncated,
       textPreview: result.content.slice(0, 800),
     }],
     caveats: [
       "Full Tool result remains in canonical events; model context may receive only this structured receipt.",
+      ...(result.binary === true ? ["Fetched resource is binary or non-text; readable page content was not extracted."] : []),
       ...(result.truncated ? ["Web page read was truncated; fetch a narrower source before citing omitted text."] : []),
     ],
-    satisfied: ["source_read", "source_summary", "source_urls"],
+    satisfied: result.binary === true ? ["source_urls"] : ["source_read", "source_summary", "source_urls"],
+    failed: result.binary === true ? ["source_summary"] : [],
   });
 }
 
@@ -480,7 +510,15 @@ async function httpGet(
   url: string,
   options: WebToolsOptions,
   timeoutMs: number,
-): Promise<{ html: string; url: string; truncated: boolean }> {
+): Promise<{
+  html: string;
+  url: string;
+  bytes: number;
+  contentType?: string;
+  binary: boolean;
+  sha256: string;
+  truncated: boolean;
+}> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -494,8 +532,12 @@ async function httpGet(
       signal: controller.signal,
     });
     if (!response.ok) throw badRequest(`HTTP ${response.status} while fetching ${url}`);
-    const { text, truncated } = await readBoundedText(response, MAX_FETCH_BYTES);
-    return { html: text, url: response.url, truncated };
+    const contentType = response.headers.get("content-type") ?? undefined;
+    const { bytes, truncated } = await readBoundedBytes(response, MAX_FETCH_BYTES);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const binary = isBinaryResponse(contentType, bytes);
+    const html = binary ? "" : new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    return { html, url: response.url, bytes: bytes.byteLength, contentType, binary, sha256, truncated };
   } catch (error) {
     if (error instanceof AppError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
@@ -511,14 +553,17 @@ async function httpGet(
   }
 }
 
-async function readBoundedText(
+async function readBoundedBytes(
   response: Response,
   maxBytes: number,
-): Promise<{ text: string; truncated: boolean }> {
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   const reader = response.body?.getReader();
   if (reader === undefined) {
-    const text = await response.text();
-    return { text: text.slice(0, maxBytes), truncated: text.length > maxBytes };
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return {
+      bytes: bytes.byteLength <= maxBytes ? bytes : bytes.slice(0, maxBytes),
+      truncated: bytes.byteLength > maxBytes,
+    };
   }
   const chunks: Uint8Array[] = [];
   let received = 0;
@@ -537,7 +582,45 @@ async function readBoundedText(
     combined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return { text: new TextDecoder("utf-8", { fatal: false }).decode(combined), truncated: received >= maxBytes };
+  return { bytes: combined, truncated: received >= maxBytes };
+}
+
+function isBinaryResponse(contentType: string | undefined, bytes: Uint8Array): boolean {
+  const normalized = (contentType ?? "").split(";")[0].trim().toLowerCase();
+  if (normalized.length > 0) {
+    if (
+      normalized.startsWith("text/")
+      || normalized === "application/json"
+      || normalized.endsWith("+json")
+      || normalized === "application/xml"
+      || normalized.endsWith("+xml")
+      || normalized === "application/xhtml+xml"
+      || normalized === "application/javascript"
+      || normalized === "application/x-javascript"
+    ) {
+      return false;
+    }
+    if (
+      normalized.startsWith("image/")
+      || normalized.startsWith("audio/")
+      || normalized.startsWith("video/")
+      || normalized.startsWith("font/")
+      || normalized === "application/pdf"
+      || normalized === "application/msword"
+      || normalized === "application/octet-stream"
+      || normalized.startsWith("application/vnd.")
+    ) {
+      return true;
+    }
+  }
+  const sample = bytes.slice(0, Math.min(bytes.byteLength, 512));
+  if (sample.byteLength === 0) return false;
+  let control = 0;
+  for (const byte of sample) {
+    if (byte === 0) return true;
+    if (byte < 0x09 || (byte > 0x0d && byte < 0x20)) control += 1;
+  }
+  return control / sample.byteLength > 0.08;
 }
 
 interface RssItem {

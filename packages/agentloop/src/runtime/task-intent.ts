@@ -198,7 +198,7 @@ function matchSignals(text: string, patterns: readonly [string, RegExp][]): stri
 }
 
 function isFileProducerToolName(name: string): boolean {
-  if (name === "materialize_paginated_html" || name === "computer_write_file" || name === "computer_run_command") return true;
+  if (name === "materialize_paginated_html" || name === "computer_patch_file" || name === "computer_write_file" || name === "computer_run_command") return true;
   return /(^|_)(write|create|generate|render|export|save)(_|$)/.test(name);
 }
 

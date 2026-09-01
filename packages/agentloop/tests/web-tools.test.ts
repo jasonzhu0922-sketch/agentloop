@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
@@ -260,6 +261,55 @@ test("webfetch follows a meta-refresh redirect and extracts readable content end
     assert.equal(result.evidenceReceipt.facts.some((fact) => fact.kind === "source_summary"), true);
     assert.deepEqual(result.evidenceReceipt.evidenceKinds.satisfied, ["source_read", "source_summary", "source_urls"]);
     assert.deepEqual(result.evidenceReceipt.evidenceKinds.caveated, ["explicit_caveats"]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("webfetch omits binary resources from readable output and records compact evidence", async () => {
+  const payload = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00, 0x00, 0x00, 0x00]);
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/msword" });
+    res.end(payload);
+  });
+  await listen(server);
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const registry = new ToolRegistry(createWebTools({ allowPrivateTargets: true }));
+    const allowed = registry.materialize(grant(["webfetch"]));
+    const prepared = allowed.prepare({
+      id: "fetch-binary",
+      name: "webfetch",
+      arguments: { url: `http://127.0.0.1:${port}/brief.doc`, format: "markdown" },
+    });
+    const result = await prepared.tool.execute(grantContext(["webfetch"]), prepared.input) as {
+      schema: string;
+      content: string;
+      bytes: number;
+      contentType?: string;
+      binary?: boolean;
+      sha256?: string;
+      truncated: boolean;
+      evidenceReceipt: {
+        sourceRefs: Array<{ binary?: boolean; contentType?: string; sha256?: string }>;
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+        caveats: string[];
+      };
+    };
+
+    assert.equal(result.schema, "agentloop.webFetch/v1");
+    assert.equal(result.binary, true);
+    assert.equal(result.bytes, payload.length);
+    assert.equal(result.contentType, "application/msword");
+    assert.match(result.content, /Binary web resource omitted/);
+    assert.doesNotMatch(result.content, /\u0000|\ufffd\ufffd/);
+    assert.equal(result.sha256, createHash("sha256").update(payload).digest("hex"));
+    assert.equal(result.truncated, false);
+    assert.deepEqual(result.evidenceReceipt.evidenceKinds.satisfied, ["source_urls"]);
+    assert.deepEqual(result.evidenceReceipt.evidenceKinds.failed, ["source_summary"]);
+    assert.equal(result.evidenceReceipt.sourceRefs[0]?.binary, true);
+    assert.equal(result.evidenceReceipt.sourceRefs[0]?.sha256, result.sha256);
+    assert.ok(result.evidenceReceipt.caveats.some((caveat) => /binary or non-text/.test(caveat)));
   } finally {
     await close(server);
   }

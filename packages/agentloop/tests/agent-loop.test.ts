@@ -46,6 +46,31 @@ test("parallel tools settle into model source order while completion events stay
   assert.deepEqual(completionNames, ["fast_square", "slow_double"]);
 });
 
+test("execution turns use the model-declared output budget", async () => {
+  let observedMaxOutputTokens: number | undefined;
+  const highOutputModel: ModelAdapter = {
+    limits: { contextWindowTokens: 128_000, maxOutputTokens: 32_768 },
+    complete: async (request) => {
+      observedMaxOutputTokens = request.maxOutputTokens;
+      return { content: "done", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant([]);
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Test agent",
+    input: "finish",
+    model: highOutputModel,
+    tools: new ToolRegistry([]),
+    grant,
+    maxSteps: 1,
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(observedMaxOutputTokens, 32_768);
+});
+
 test("batch source reads are observed as one tool action with many source receipts", async () => {
   const events: RuntimeEvent[] = [];
   let calls = 0;
@@ -565,6 +590,56 @@ test("a length-truncated completion candidate receives bounded repair grace", as
   assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
 });
 
+test("a length-truncated execution turn with tools receives a forward-action repair directive", async () => {
+  let calls = 0;
+  const grant = makeGrant(["collect_evidence"]);
+  const registry = new ToolRegistry([
+    numberTool("collect_evidence", 1, (value) => value),
+  ]);
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        assert.equal(request.tools.some((tool) => tool.name === "collect_evidence"), true);
+        return {
+          content: "",
+          reasoningContent: "long internal draft ".repeat(1_000),
+          finishReason: "length",
+          toolCalls: [],
+        };
+      }
+      if (calls === 2) {
+        assert.equal(request.tools.some((tool) => tool.name === "collect_evidence"), true);
+        assert.match(request.runtimeContext?.content ?? "", /one bounded forward action/);
+        assert.doesNotMatch(request.runtimeContext?.content ?? "", /Do not request or emit tool calls/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "collect", name: "collect_evidence", arguments: { value: 1 } }],
+        };
+      }
+      assert.deepEqual(request.tools, []);
+      return { content: "evidence collected", finishReason: "stop", toolCalls: [] };
+    },
+  };
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Collect evidence.",
+    input: "collect then summarize",
+    model,
+    tools: registry,
+    grant,
+    maxSteps: 3,
+    candidateRepairGraceSteps: 2,
+    shouldConvergeAfterToolStep: () => ({ converge: true, reason: "evidence_ready" }),
+  });
+
+  assert.equal(result.output, "evidence collected");
+  assert.equal(calls, 3);
+});
+
 test("a rejected assessed candidate grants bounded tool repair grace", async () => {
   let executions = 0;
   let assessments = 0;
@@ -935,6 +1010,8 @@ test("artifact grace rejects excessive read-only exploration and redirects to ev
         };
       }
       if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /Do not reread just-written artifact content/);
+        assert.match(request.runtimeContext?.content ?? "", /complete but lacks required acceptance evidence/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -1064,6 +1141,142 @@ test("artifact progress policy rejects excessive read-only exploration before gr
     event.type === "tool.rejected" && event.data.toolCallId === "read-4"
   );
   assert.equal(rejected?.data.reason, "Read-only exploratory tool calls exceeded the artifact step primary budget");
+  assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
+});
+
+test("artifact progress policy redirects read-only exploration to acceptance after artifact evidence", async () => {
+  const executions: string[] = [];
+  let calls = 0;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write the artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`write:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        path: "report.html",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "report.html", kind: "html" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const readTool: RuntimeTool<unknown> = {
+    name: "computer_read_file",
+    description: "Read artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`read:${JSON.stringify(input)}`);
+      return "artifact contents";
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify artifact acceptance",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`verify:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "report.html", kind: "html" },
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      });
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "write-report",
+            name: "computer_write_file",
+            arguments: { path: "report.html", content: "<html></html>" },
+          }],
+        };
+      }
+      if (calls === 2) {
+        const runtimeContext = request.runtimeContext?.content ?? "";
+        const semanticState = runtimeStepSemanticState(runtimeContext);
+        assert.equal(semanticState.schema, "agentloop.runtimeStepEvidenceState/v1");
+        assert.equal(semanticState.nextAction, "verify_existing_artifact");
+        assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["report.html"]);
+        assert.equal(semanticState.missingRequiredEvidenceKinds.includes("artifact_acceptance"), true);
+        assert.deepEqual(semanticState.evidenceProducingToolNames, ["verify_artifact_acceptance"]);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "read-report",
+            name: "computer_read_file",
+            arguments: { path: "report.html" },
+          }],
+        };
+      }
+      if (calls === 3) {
+        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_acceptance_repair/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "verify-report",
+            name: "verify_artifact_acceptance",
+            arguments: { artifactPath: "report.html" },
+          }],
+        };
+      }
+      assert.deepEqual(request.tools, []);
+      return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "computer_read_file", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify an artifact.",
+    input: "make report",
+    model,
+    tools: new ToolRegistry([writeTool, readTool, verifyTool]),
+    grant,
+    maxSteps: 4,
+    convergenceGraceSteps: 0,
+    progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_acceptance"]),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      reason: "artifact_acceptance_observed",
+    }),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "report.html accepted");
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "verify"]);
+  const rejected = events.find((event) =>
+    event.type === "tool.rejected" && event.data.toolCallId === "read-report"
+  );
+  assert.equal(rejected?.data.reason, "Artifact path evidence exists but artifact acceptance is still missing");
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
@@ -1705,7 +1918,7 @@ class ConvergenceScenarioModel implements ModelAdapter {
     }
     assert.deepEqual(request.tools, []);
     assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
-    assert.equal(request.maxOutputTokens, 768);
+    assert.equal(request.maxOutputTokens, 4_096);
     const evidence = request.messages.find((message) => message.role === "tool" && message.name === "collect_evidence");
     assert.match(evidence?.content ?? "", /\"artifact\":\"ready\"/);
     return {
@@ -1808,7 +2021,7 @@ class EmptyThenConvergedModel implements ModelAdapter {
       };
     }
     assert.deepEqual(request.tools, []);
-    assert.equal(request.maxOutputTokens, 768);
+    assert.equal(request.maxOutputTokens, 4_096);
     if (this.calls === 2) {
       return { content: "", finishReason: "stop", toolCalls: [] };
     }
@@ -2106,6 +2319,24 @@ function numberTool(
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return operation((input as { value: number }).value);
     },
+  };
+}
+
+function runtimeStepSemanticState(content: string): {
+  readonly schema: string;
+  readonly missingRequiredEvidenceKinds: readonly string[];
+  readonly knownArtifacts: readonly Array<{ readonly path: string }>;
+  readonly nextAction: string;
+  readonly evidenceProducingToolNames: readonly string[];
+} {
+  const match = content.match(/<runtime_step_semantic_state>\n(.*?)\n<\/runtime_step_semantic_state>/s);
+  assert.ok(match?.[1]);
+  return JSON.parse(match[1]) as {
+    readonly schema: string;
+    readonly missingRequiredEvidenceKinds: readonly string[];
+    readonly knownArtifacts: readonly Array<{ readonly path: string }>;
+    readonly nextAction: string;
+    readonly evidenceProducingToolNames: readonly string[];
   };
 }
 

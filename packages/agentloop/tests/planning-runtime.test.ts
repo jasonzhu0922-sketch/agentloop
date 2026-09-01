@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { promises as fs, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -313,6 +314,176 @@ test("ModelPlanner retries once when submit_outcome_plan arguments are not a JSO
   assert.equal(calls, 2);
   assert.deepEqual(plan.selectedSkillIds, ["discovered:api-query"]);
   assert.deepEqual(plan.steps.map((step) => step.id), ["query_api_params"]);
+});
+
+test("ModelPlanner retries once when Admission rejects an initial support Skill role", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("invalid-support-role", {
+            goal: "Build an HTML report from the uploaded spreadsheet.",
+            shape: "single_leaf",
+            selectedSkillRoles: [
+              {
+                skillId: "discovered:build-dashboard",
+                role: "primary_builder",
+                reason: "Dashboard builder owns the executable artifact.",
+              },
+              {
+                skillId: "discovered:web-artifacts-builder",
+                role: "support",
+                reason: "Use as optional HTML conventions.",
+              },
+            ],
+            steps: [{
+              id: "produce_report",
+              objective: "Read the uploaded spreadsheet and produce an accepted HTML report.",
+              dependencies: [],
+              role: "produce",
+              skillIds: ["discovered:build-dashboard"],
+              recommendedToolNames: ["read_source", "computer_write_file", "verify_artifact_acceptance"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "artifact_path", "artifact_non_empty", "artifact_acceptance"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+          })],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /rejected by Runtime Admission/);
+      assert.match(request.runtimeContext?.content ?? "", /support and qa roles are recovery-only/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("valid-initial-plan", {
+          goal: "Build an HTML report from the uploaded spreadsheet.",
+          shape: "single_leaf",
+          selectedSkillRoles: [{
+            skillId: "discovered:build-dashboard",
+            role: "primary_builder",
+            reason: "Dashboard builder owns the executable artifact.",
+          }],
+          steps: [{
+            id: "produce_report",
+            objective: "Read the uploaded spreadsheet and produce an accepted HTML report.",
+            dependencies: [],
+            role: "produce",
+            skillIds: ["discovered:build-dashboard"],
+            recommendedToolNames: ["read_source", "computer_write_file", "verify_artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "artifact_path", "artifact_non_empty", "artifact_acceptance"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+  const dashboard = skillFixture({
+    id: "discovered:build-dashboard",
+    name: "build-dashboard",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
+  });
+  const htmlBuilder = skillFixture({
+    id: "discovered:web-artifacts-builder",
+    name: "web-artifacts-builder",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
+  });
+
+  const plan = await planner.plan({
+    runId: "run-planner-admission-contract-retry",
+    input: "把这个 excel 的场景清单生成一份 html 格式的报告",
+    availableSkills: [dashboard, htmlBuilder],
+    availableToolNames: ["read_source", "load_skill", "computer_write_file", "verify_artifact_acceptance"],
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.selectedSkillIds, ["discovered:build-dashboard"]);
+  assert.deepEqual(plan.steps[0].skillIds, ["discovered:build-dashboard"]);
+});
+
+test("ModelPlanner treats bound uploaded sources as source-grounded artifact input", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const runtimeContext = request.runtimeContext?.content ?? "";
+      assert.match(runtimeContext, /"sourceNeed":"source_grounded"/);
+      assert.match(runtimeContext, /"planShape":"fact_then_produce"/);
+      assert.match(runtimeContext, /For data-to-report requests over files or bulk data/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("uploaded-source-fact-then-produce", {
+          goal: "Build an HTML report from the uploaded spreadsheet.",
+          shape: "fact_then_produce",
+          selectedSkillRoles: [{
+            skillId: "discovered:build-dashboard",
+            role: "primary_builder",
+            reason: "Dashboard builder owns the executable artifact.",
+          }],
+          steps: [{
+            id: "profile_uploaded_spreadsheet",
+            objective: "Read the uploaded spreadsheet and record bounded source summary evidence.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            recommendedToolNames: ["read_source"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }, {
+            id: "produce_html_report",
+            objective: "Build the final HTML report from the source summary and record artifact acceptance.",
+            dependencies: ["profile_uploaded_spreadsheet"],
+            role: "produce",
+            skillIds: ["discovered:build-dashboard"],
+            recommendedToolNames: ["load_skill", "computer_write_file", "verify_artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_openable", "format_matches_request", "artifact_acceptance", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+  const dashboard = skillFixture({
+    id: "discovered:build-dashboard",
+    name: "build-dashboard",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
+  });
+
+  const plan = await planner.plan({
+    runId: "run-planner-uploaded-source-fact-then-produce",
+    input: "把这个 excel 的场景清单生成一份 html 格式的报告",
+    availableSkills: [dashboard],
+    availableToolNames: ["read_source", "load_skill", "computer_write_file", "verify_artifact_acceptance"],
+    sources: [{
+      id: "src_uploaded",
+      originalName: "场景清单.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 250_732,
+      sha256: "a".repeat(64),
+      status: "ready",
+      summary: "场景清单.xlsx is a XLSX source with 264 lines.",
+      chunkCount: 4,
+      truncated: false,
+    }],
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["profile_uploaded_spreadsheet", "produce_html_report"]);
+  assert.deepEqual(plan.steps[1].dependencies, ["profile_uploaded_spreadsheet"]);
 });
 
 test("ModelPlanner canonicalizes duplicate names in the set-valued Tool capability field", async () => {
@@ -1192,9 +1363,9 @@ test("ModelPlanner prefers reusable Markdown artifacts over completed delivery t
   });
 
   assert.match(observedContext, /agentloop\.artifactFollowup\/v1/);
-  assert.match(observedContext, /"intent":"convert_to_pdf"/);
+  assert.match(observedContext, /"intent":"convert_artifact"/);
   assert.match(observedContext, /deliverables\/report\.md/);
-  assert.match(observedContext, /preferred_pdf_conversion_source/);
+  assert.match(observedContext, /preferred_artifact_conversion_source/);
   assert.match(observedContext, /completed delivery text only when no reusable artifact/i);
   assert.match(observedContext, /"artifactKind":"document"/);
   assert.match(observedContext, /"deliverySurface":"workspace_artifact"/);
@@ -2069,7 +2240,7 @@ test("ModelPlanner admits repair leaves only for recovery-shaped OutcomePlans", 
   assert.equal(plan.steps[0].role, "repair");
 });
 
-test("ModelPlanner rejects non-recovery repair leaves without a patch turn", async () => {
+test("ModelPlanner rejects non-recovery repair leaves after one admission correction turn", async () => {
   let calls = 0;
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
@@ -2108,7 +2279,7 @@ test("ModelPlanner rejects non-recovery repair leaves without a patch turn", asy
     (error: unknown) => hasCode(error, "PLANNING_ERROR")
       && String((error as Error).message).includes("repair leaves"),
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test("ModelPlanner accepts a broad artifact leaf instead of requesting patch repair", async () => {
@@ -2509,7 +2680,42 @@ test("selectPlanningSkills excludes undeclared and support-only Skills from ordi
   assert.deepEqual(selected.map((skill) => skill.name), ["web-artifacts-builder"]);
 });
 
-test("ModelPlanner fails closed on invalid OutcomePlan structure without a repair turn", async () => {
+test("selectPlanningSkills prefers source-kind compatible HTML builders for uploaded spreadsheets", () => {
+  const dashboard = skillFixture({
+    id: "dashboard",
+    name: "build-dashboard",
+    description: "Build an interactive HTML dashboard with charts, filters, and tables from query results or datasets.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"], ["dataset"]),
+  });
+  const projectAssessment = skillFixture({
+    id: "project-assessment",
+    name: "project-assessment",
+    description: "Evaluate project materials and produce structured assessment advice and reports.",
+    agentLoop: agentLoopMetadata(["primary_builder", "source_provider"], ["html", "document", "none"], ["document", "rubric"]),
+  });
+
+  const selected = selectPlanningSkills(
+    [projectAssessment, dashboard],
+    "帮我阅读分析这儿 excel，然后形成一份 html 格式的详细场景分析报告",
+    [],
+    [{
+      id: "src_uploaded",
+      originalName: "场景清单.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 250_732,
+      sha256: "a".repeat(64),
+      status: "ready",
+      summary: "场景清单.xlsx is a XLSX source with 264 lines.",
+      chunkCount: 4,
+      truncated: false,
+    }],
+  );
+
+  assert.deepEqual(selected.map((skill) => skill.name), ["build-dashboard"]);
+});
+
+test("ModelPlanner fails closed on invalid OutcomePlan structure after one admission correction turn", async () => {
   let calls = 0;
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
@@ -2553,7 +2759,7 @@ test("ModelPlanner fails closed on invalid OutcomePlan structure without a repai
     (error: unknown) => hasCode(error, "PLANNING_ERROR")
       && String((error as Error).message).includes("objective must be a string"),
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test("ModelPlanner selects Skills from the catalog and submits a Plan without loading Skill bodies", async () => {
@@ -2641,7 +2847,7 @@ test("ModelPlanner keeps optional refinement out of the terminal Plan scope", as
   assert.equal(plan.steps[0].id, "build-and-verify-homepage");
 });
 
-test("ModelPlanner rejects pure Skill activation leaves without a patch turn", async () => {
+test("ModelPlanner rejects pure Skill activation leaves after one admission correction turn", async () => {
   const skill = skillFixture({ id: "canvas-design", name: "canvas-design" });
   let calls = 0;
   const model: ModelAdapter = {
@@ -2681,7 +2887,7 @@ test("ModelPlanner rejects pure Skill activation leaves without a patch turn", a
       && String((error as Error).message).includes("only a Skill activation step"),
   );
 
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test("legacy interrupted Runs enter recovery review instead of being terminally failed on restart", async () => {
@@ -3869,6 +4075,66 @@ test("Admission allows Skill-bound steps that load and apply the workflow", () =
   });
   assert.equal(plan.steps[0].id, "apply-directory-skill");
   assert.deepEqual(plan.steps[0].recommendedToolNames, ["load_skill"]);
+});
+
+test("Admission allows unbound non-executing support Skills only for recovery patches", () => {
+  const sourceSkill = skillFixture({
+    id: "source-skill",
+    name: "source-skill",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["document"]),
+  });
+  const builderSkill = skillFixture({
+    id: "builder-skill",
+    name: "builder-skill",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"]),
+  });
+  const recoveryProposal: PlanProposal = {
+    goal: "Repair the prior artifact",
+    shape: "recovery_patch",
+    selectedSkillIds: [sourceSkill.id],
+    selectedSkillRoles: [{
+      skillId: sourceSkill.id,
+      role: "source_provider",
+      reason: "Use prior source workflow context while patching.",
+    }],
+    steps: [{
+      ...step("repair-artifact"),
+      role: "repair",
+      objective: "Patch the artifact using existing source evidence.",
+      recommendedToolNames: ["computer_write_file"],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-recovery-unbound-source",
+    proposal: recoveryProposal,
+    availableSkills: [sourceSkill],
+    availableToolNames: new Set(["computer_write_file"]),
+  });
+  assert.deepEqual(admitted.selectedSkillIds, [sourceSkill.id]);
+  assert.deepEqual(admitted.steps[0].skillIds, []);
+
+  assert.throws(
+    () => admitPlan({
+      runId: "run-recovery-unbound-builder",
+      proposal: {
+        ...recoveryProposal,
+        selectedSkillIds: [builderSkill.id],
+        selectedSkillRoles: [{
+          skillId: builderSkill.id,
+          role: "primary_builder",
+          reason: "Builder still owns executable production.",
+        }],
+      },
+      availableSkills: [builderSkill],
+      availableToolNames: new Set(["computer_write_file"]),
+    }),
+    (error: unknown) => {
+      assert.equal(hasCode(error, "PLAN_NOT_ADMITTED"), true);
+      assert.match((error as Error).message, /not bound to any Plan step/);
+      return true;
+    },
+  );
 });
 
 test("Admission adds local script execution tools for Skill-bound leaves", () => {
@@ -6555,6 +6821,14 @@ test("budgeted convergence still requires assessment before TerminalCommitter co
       "tool.result_committed",
       "tool.completed",
     ]);
+    const committed = events.find((event) => event.type === "tool.result_committed" && event.data.toolCallId === "proof-1");
+    const completed = events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "proof-1");
+    const completedResult = JSON.stringify({ artifact: "ready", validation: "passed" });
+    assert.equal(committed?.data.result, undefined);
+    assert.equal(committed?.data.resultCharacters, completedResult.length);
+    assert.equal(committed?.data.resultSha256, createHash("sha256").update(completedResult).digest("hex"));
+    assert.equal(committed?.data.resultPreview, completedResult);
+    assert.equal(completed?.data.result, completedResult);
     const terminalIndex = events.findIndex((event) => event.type === "terminal.delivery_committed");
     const completedIndex = events.findIndex((event) => event.type === "run.completed");
     assert.notEqual(terminalIndex, -1);

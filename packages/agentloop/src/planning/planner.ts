@@ -389,6 +389,9 @@ function plannerContractRetryDirective(
   if (shouldRetryOutcomePlanArgumentsContract(planningError, response, outcomePlanCalls)) {
     return plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError);
   }
+  if (shouldRetryOutcomePlanAdmissionContract(response, outcomePlanCalls)) {
+    return plannerOutcomePlanAdmissionDirective(planningError);
+  }
   return undefined;
 }
 
@@ -403,6 +406,14 @@ function shouldRetryOutcomePlanArgumentsContract(
   return planningError.message === "submit_outcome_plan arguments must be a JSON object";
 }
 
+function shouldRetryOutcomePlanAdmissionContract(
+  response: Awaited<ReturnType<ModelAdapter["complete"]>>,
+  outcomePlanCalls: readonly ModelToolCall[],
+): boolean {
+  if (response.finishReason === "length") return false;
+  return response.toolCalls.length === 1 && outcomePlanCalls.length === 1 && isJsonObject(outcomePlanCalls[0].arguments);
+}
+
 function plannerToolContractDirective(response: Awaited<ReturnType<ModelAdapter["complete"]>>): string {
   const attemptedTools = [...new Set(response.toolCalls.map((call) => call.name))]
     .sort()
@@ -413,6 +424,19 @@ function plannerToolContractDirective(response: Awaited<ReturnType<ModelAdapter[
     "Do not inspect files, read artifacts, run commands, load Skills, or execute any work during planning.",
     "Submit exactly one submit_outcome_plan call. Put advisory execution tools in each leaf's recommendedToolNames.",
     "For a user-reported defect in a prior artifact, plan a repair leaf that locates the prior artifact, verifies the defect, regenerates or edits the artifact, and records artifact_acceptance evidence.",
+  ].join("\n");
+}
+
+function plannerOutcomePlanAdmissionDirective(planningError: AppError): string {
+  return [
+    "Your previous submit_outcome_plan call was rejected by Runtime Admission.",
+    `Validation error: ${summarizePlanningError(planningError.message)}.`,
+    "Submit exactly one corrected submit_outcome_plan call for the same user goal.",
+    "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
+    "For initial execution plans, selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only.",
+    "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
+    "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
+    "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
   ].join("\n");
 }
 
@@ -449,7 +473,9 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
   });
   const operationProfiles = relevantOperationProfiles(task);
   const artifactKind = taskIntent.artifactKind;
-  const sourceNeed = taskIntent.sourceNeed;
+  const sourceNeed = taskIntent.sourceNeed === "none" && (task.sources?.length ?? 0) > 0 && task.responseOnly !== true
+    ? "source_grounded"
+    : taskIntent.sourceNeed;
   const recovery = task.conversationWorkingSet?.failedBoundaries.length
     || task.conversationWorkingSet?.activeGoal?.unfinished === true;
   const planShape = recovery
@@ -583,6 +609,8 @@ function planningRuntimeContext(
             "submit exactly one OutcomePlan",
             "do not submit plan patches",
             "do not create QA or repair leaves unless TaskProfile.planShape is recovery_patch",
+            "initial selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only",
+            "every initially selected primary_builder Skill must be bound to a concrete leaf that uses it",
           ],
         },
       }),
@@ -630,7 +658,7 @@ function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationP
     selectedIds.delete("direct_answer");
     selectedIds.add("artifact_build");
   }
-  if (artifactFollowup === undefined && (taskIntent.sourceNeed !== "none" || (task.sources?.length ?? 0) > 0)) {
+  if (artifactFollowup === undefined && taskIntent.sourceNeed !== "none") {
     selectedIds.delete("direct_answer");
     selectedIds.add("web_research");
   }
@@ -651,7 +679,7 @@ function artifactFollowupContextField(task: TaskSpec): { readonly artifactFollow
 
 function buildArtifactFollowupContext(task: TaskSpec): {
   readonly schema: "agentloop.artifactFollowup/v1";
-  readonly intent: "convert_to_pdf" | "edit_existing_artifact" | "create_file_from_delivery_text" | "artifact_followup";
+  readonly intent: "convert_artifact" | "edit_existing_artifact" | "create_file_from_delivery_text" | "artifact_followup";
   readonly requestedOutputFormat?: string;
   readonly candidateSourceArtifacts: readonly {
     readonly path: string;
@@ -706,8 +734,8 @@ function buildArtifactFollowupContext(task: TaskSpec): {
     schema: "agentloop.artifactFollowup/v1",
     intent: editRequested
       ? "edit_existing_artifact"
-      : requestedOutputFormat === "pdf"
-        ? "convert_to_pdf"
+      : conversionRequested
+        ? "convert_artifact"
         : candidates.length === 0 && deliveryTextFileRequested
           ? "create_file_from_delivery_text"
           : "artifact_followup",
@@ -716,7 +744,8 @@ function buildArtifactFollowupContext(task: TaskSpec): {
     ...(fallbackDeliveryText === undefined ? {} : { fallbackDeliveryText }),
     sourceSelectionPolicy: [
       "Prefer an explicitly referenced reusable artifact path or file name from conversationWorkingSet.reusableArtifacts.",
-      "For PDF conversion, prefer reusable Markdown, HTML, text, or document artifacts as the conversion source before completed delivery text.",
+      "For editing an existing artifact in place, use computer_patch_file when available and then verify the patched artifact; do not rewrite the whole file unless the required change cannot be expressed as a unique local patch.",
+      "For artifact conversion, use convert_artifact when available; prefer reusable Markdown, HTML, text, or document artifacts as the conversion source before completed delivery text.",
       "Use completed delivery text only when no reusable artifact can provide the requested content or the user explicitly asks to convert the answer text.",
       "When the user asks to generate or save a file from a prior answer and no reusable artifact exists, use the latest completed delivery text as the source content instead of restarting source acquisition.",
       "Use uploaded or original sources only when the user explicitly asks to reanalyze, regenerate from source data, or change source-grounded content.",
@@ -737,8 +766,8 @@ function artifactFollowupReason(
   if (editRequested && requestedOutputFormat !== undefined && artifactExtension(path) === requestedOutputFormat) {
     return "requested_existing_artifact_format";
   }
-  if (requestedOutputFormat === "pdf" && isPdfConvertibleArtifact(artifact.path, artifact.mimeType)) {
-    return "preferred_pdf_conversion_source";
+  if (requestedOutputFormat !== undefined && isConvertibleArtifact(artifact.path, artifact.mimeType, requestedOutputFormat)) {
+    return "preferred_artifact_conversion_source";
   }
   if (requestedOutputFormat !== undefined && artifactExtension(path) === requestedOutputFormat) {
     return "requested_output_format_artifact";
@@ -770,12 +799,15 @@ function requestedOutputFormatFromText(text: string): string | undefined {
   return value.toLowerCase() === "md" ? "markdown" : value.toLowerCase();
 }
 
-function isPdfConvertibleArtifact(path: string, mimeType: string): boolean {
+function isConvertibleArtifact(path: string, mimeType: string, requestedOutputFormat: string): boolean {
   const extension = artifactExtension(path);
-  if (extension === "pdf") return false;
-  if (extension === "markdown" || extension === "md" || extension === "html" || extension === "htm" || extension === "txt" || extension === "docx") {
+  const target = requestedOutputFormat === "md" ? "markdown" : requestedOutputFormat;
+  const source = extension === "md" ? "markdown" : extension === "htm" ? "html" : extension;
+  if (source === target) return false;
+  if (source === "markdown" || source === "html" || source === "txt" || source === "docx") {
     return true;
   }
+  if (!["docx", "pdf", "html", "markdown", "txt"].includes(target)) return false;
   return /(?:markdown|html|plain|wordprocessingml|msword)/iu.test(mimeType);
 }
 
@@ -841,6 +873,7 @@ function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {
   if (step.skillIds.length > 0) return true;
   if (step.recommendedToolNames.some((name) =>
     name === "materialize_paginated_html"
+    || name === "computer_patch_file"
     || name === "computer_write_file"
     || name === "computer_run_command"
     || /(^|_)(write|create|generate|render|export|save)(_|$)/.test(name)
@@ -929,7 +962,7 @@ function isArtifactDeliveryReceiptStep(step: PlanStepProposal, text: string): bo
 
 function isArtifactProducingStep(step: PlanStepProposal): boolean {
   return step.recommendedToolNames.some((tool) =>
-    /(?:write|create|generate|render|export|build|patch|edit|image|pdf|docx|pptx|artifact)/iu.test(tool)
+    /(?:write|create|generate|render|export|convert|build|patch|edit|image|pdf|docx|pptx|artifact)/iu.test(tool)
   );
 }
 

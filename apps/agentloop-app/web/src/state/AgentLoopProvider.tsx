@@ -19,6 +19,13 @@ import { AgentLoopContext, type AppState } from "./context";
 const THEME_KEY = "agentloop-theme";
 const CONVERSATION_PAGE_SIZE = 20;
 
+export interface PendingDeleteConversation {
+  readonly id: string;
+  readonly title: string;
+  readonly runCount: number;
+  readonly lastStatus: RunRecord["status"] | null;
+}
+
 function emptyDetail(): PlanDetail {
   return {
     state: "pending",
@@ -56,6 +63,9 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
   const [showDetails, setShowDetails] = useState(false);
   const [theme, setTheme] = useState<"auto" | "light" | "dark">(initialTheme);
   const [notice, setNotice] = useState<string>("");
+  const [pendingDelete, setPendingDelete] = useState<PendingDeleteConversation | null>(null);
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const noticeTimer = useRef<number | null>(null);
   const abortRef = useRef<Map<string, AbortController>>(new Map());
 
@@ -397,16 +407,42 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
 
   const deleteConversation = useCallback(
     async (id: string, title: string): Promise<void> => {
-      if (!window.confirm(`删除会话“${title}”？该会话的运行记录、计划与评估也会被删除。`)) return;
+      const summary = conversations.find((item) => item.id === id);
+      setDeleteError("");
+      setPendingDelete({
+        id,
+        title,
+        runCount: summary?.runCount ?? (conversation?.conversation.id === id ? conversation.runs.length : 0),
+        lastStatus: summary?.lastStatus ?? (conversation?.conversation.id === id
+          ? (conversation.runs[conversation.runs.length - 1]?.status ?? null)
+          : null),
+      });
+    },
+    [conversations, conversation],
+  );
+
+  const cancelDeleteConversation = useCallback((): void => {
+    if (deletingConversationId !== null) return;
+    setPendingDelete(null);
+    setDeleteError("");
+  }, [deletingConversationId]);
+
+  const confirmDeleteConversation = useCallback(
+    async (): Promise<void> => {
+      const target = pendingDelete;
+      if (target === null || deletingConversationId !== null) return;
+      setDeletingConversationId(target.id);
+      setDeleteError("");
       try {
-        await api.deleteConversation(token, id);
+        await api.deleteConversation(token, target.id);
       } catch (error) {
-        note(error instanceof Error ? error.message : "删除会话失败");
+        setDeleteError(error instanceof Error ? error.message : "删除会话失败");
+        setDeletingConversationId(null);
         return;
       }
-      setConversations((previous) => previous.filter((c) => c.id !== id));
+      setConversations((previous) => previous.filter((c) => c.id !== target.id));
       setConversationsNextOffset((previous) => Math.max(CONVERSATION_PAGE_SIZE, previous - 1));
-      if (conversation?.conversation.id === id) {
+      if (conversation?.conversation.id === target.id) {
         stopStreaming();
         setConversation(null);
         setCurrentRun(null);
@@ -415,9 +451,11 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
         setActiveRunIds([]);
         setShowDetails(false);
       }
+      setPendingDelete(null);
+      setDeletingConversationId(null);
       note("会话已删除");
     },
-    [token, conversation, stopStreaming, note],
+    [token, conversation, deletingConversationId, pendingDelete, stopStreaming, note],
   );
 
   const selectRun = useCallback(
@@ -592,8 +630,70 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       }}
     >
       {children}
+      <DeleteConversationDialog
+        conversation={pendingDelete}
+        deleting={deletingConversationId !== null}
+        error={deleteError}
+        onCancel={cancelDeleteConversation}
+        onConfirm={() => void confirmDeleteConversation()}
+      />
       <Notice message={notice} />
     </AgentLoopContext.Provider>
+  );
+}
+
+export function DeleteConversationDialog({
+  conversation,
+  deleting,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  readonly conversation: PendingDeleteConversation | null;
+  readonly deleting: boolean;
+  readonly error: string;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
+}): React.ReactNode {
+  if (conversation === null) return null;
+  const statusText = conversation.lastStatus === "running" ? "仍有运行记录显示为进行中" : "运行记录将一并删除";
+  return (
+    <div className="delete-dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div
+        className="delete-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-dialog-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="delete-dialog-mark" aria-hidden="true">!</div>
+        <div className="delete-dialog-copy">
+          <strong id="delete-dialog-title">删除这个会话？</strong>
+          <p className="delete-dialog-title">{conversation.title}</p>
+          <dl className="delete-dialog-facts">
+            <div>
+              <dt>范围</dt>
+              <dd>{conversation.runCount} 轮运行、计划、评估、事件和已上传来源</dd>
+            </div>
+            <div>
+              <dt>状态</dt>
+              <dd>{statusText}</dd>
+            </div>
+          </dl>
+          {error === "" ? null : (
+            <p className="delete-dialog-error" role="alert">{error}</p>
+          )}
+        </div>
+        <div className="delete-dialog-actions">
+          <button type="button" className="delete-dialog-cancel" disabled={deleting} onClick={onCancel}>
+            取消
+          </button>
+          <button type="button" className="delete-dialog-confirm" disabled={deleting} onClick={onConfirm}>
+            {deleting ? "删除中..." : "确认删除"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

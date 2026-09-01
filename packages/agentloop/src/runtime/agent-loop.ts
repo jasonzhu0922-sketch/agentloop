@@ -22,6 +22,7 @@ import { ToolRegistry } from "../tools/tool-registry.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
 import {
+  deriveRuntimeStepEvidenceState,
   evaluateRuntimeToolProgress,
   initialRuntimeToolProgressState,
   type RuntimeToolProgressPolicy,
@@ -110,12 +111,10 @@ interface StructuredToolCandidate {
   readonly schema?: string;
 }
 
-// Execution turns often need more room than planning because the assistant may
-// need to carry the full skill workflow plus the actual deliverable candidate.
-// A single large `computer_write_file` (e.g. a render script) must fit inside
-// one turn's output budget, so this matches the Provider's maxOutputTokens.
-const MODEL_STEP_MAX_OUTPUT_TOKENS = 16_384;
-const CONVERGENCE_MAX_OUTPUT_TOKENS = 768;
+// Execution turns need the model's declared room because reasoning-heavy
+// providers count hidden reasoning against the same output budget used for the
+// visible answer or tool-call arguments.
+const CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
 const EMPTY_CANDIDATE_REPAIR_ATTEMPTS = 2;
 // Extra tool-enabled steps granted after the primary budget when the model is
 // still actively executing. Defaults to 0 so the primary `maxSteps` budget is
@@ -289,10 +288,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ...(convergenceOnly || materialized.definitions.length === 0
           ? {}
           : { toolChoice: "auto" as const }),
-        maxOutputTokens: Math.min(
-          convergenceOnly ? convergenceMaxOutputTokens : MODEL_STEP_MAX_OUTPUT_TOKENS,
-          options.model.limits.maxOutputTokens,
-        ),
+        maxOutputTokens: convergenceOnly
+          ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
+          : options.model.limits.maxOutputTokens,
       };
       earlyOutcomes = new Map<string, ToolOutcome>();
       response = await completeWithStreamingAndDispatch({
@@ -385,11 +383,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             },
           });
         }
-        contextAssembler.setRuntimeDirective([
+        contextAssembler.setRuntimeDirective(lengthTruncationRepairDirective({
           feedback,
-          "Return a complete, shorter completion candidate using the available evidence.",
-          "Do not request or emit tool calls.",
-        ].join("\n"));
+          convergenceOnly,
+          toolAvailable: materialized.definitions.length > 0,
+        }));
         continue;
       }
       // A no-tool turn cannot execute a provider protocol envelope. Treat a
@@ -908,7 +906,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     }
     if (!convergenceDecision.converge) {
-      contextAssembler.setRuntimeDirective(executionFeedbackDirective(latestToolEvidence));
+      contextAssembler.setRuntimeDirective(executionFeedbackDirective({
+        latestToolEvidence,
+        toolEvidence,
+        progressPolicy: options.progressPolicy,
+      }));
     }
   }
 
@@ -1079,22 +1081,36 @@ function projectStructuredCandidateEvidence(
   });
 }
 
-function executionFeedbackDirective(
-  latestToolEvidence: readonly AgentLoopToolEvidence[],
-): string | undefined {
-  if (latestToolEvidence.length === 0) return undefined;
+function executionFeedbackDirective(input: {
+  readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
+  readonly toolEvidence: readonly AgentLoopToolEvidence[];
+  readonly progressPolicy?: RuntimeToolProgressPolicy;
+}): string | undefined {
+  if (input.latestToolEvidence.length === 0) return undefined;
+  const stepEvidenceState = deriveRuntimeStepEvidenceState({
+    policy: input.progressPolicy,
+    evidence: input.toolEvidence,
+  });
   const lines = [
     "<runtime_execution_feedback>",
     "The previous tool step produced canonical execution results. Consume these results before choosing the next action.",
     "If any tool failed, address the concrete failure cause or change strategy before continuing.",
-    "If any command created or modified files, treat fileChanges paths as artifact facts to inspect or verify next.",
+    "If any command created or modified files, treat fileChanges paths as artifact facts. Do not reread just-written artifact content unless a validator, build, render, or acceptance diagnostic names a concrete missing field, line range, or contract.",
+    "If a just-written artifact is known incomplete, continue with the next bounded file-producing patch. If it is complete but lacks required acceptance evidence, call the available acceptance or verification Tool.",
     "If required evidence is still missing, call the appropriate current-step tool to produce that evidence; do not submit completion from assumptions.",
     "Recent tool results:",
   ];
-  for (const item of latestToolEvidence.slice(-6)) {
+  if (stepEvidenceState !== undefined) {
+    lines.push(
+      "<runtime_step_semantic_state>",
+      JSON.stringify(stepEvidenceState),
+      "</runtime_step_semantic_state>",
+    );
+  }
+  for (const item of input.latestToolEvidence.slice(-6)) {
     lines.push(`- ${summarizeToolEvidenceForDirective(item)}`);
   }
-  const skillPackageMutation = latestToolEvidence.find((item) =>
+  const skillPackageMutation = input.latestToolEvidence.find((item) =>
     item.isError && /SKILL_PACKAGE_MUTATED/.test(item.result)
   );
   if (skillPackageMutation !== undefined) {
@@ -1396,7 +1412,7 @@ async function executePrepared(
     const metrics = toolEvidenceMetrics(call.name, content);
     await emit({
       type: "tool.result_committed",
-      data: { step, toolCallId: call.id, toolName: call.name, result: content, ...metrics },
+      data: { step, toolCallId: call.id, toolName: call.name, ...toolResultCommitSummary(content), ...metrics },
     });
     await emit({
       type: "tool.completed",
@@ -1479,6 +1495,29 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
   return lines.join("\n");
 }
 
+function lengthTruncationRepairDirective(input: {
+  readonly feedback: string;
+  readonly convergenceOnly: boolean;
+  readonly toolAvailable: boolean;
+}): string {
+  if (input.convergenceOnly || !input.toolAvailable) {
+    return [
+      input.feedback,
+      "Return a complete, shorter completion candidate using the available evidence.",
+      "Do not request or emit tool calls.",
+    ].join("\n");
+  }
+  return [
+    input.feedback,
+    "The previous execution turn spent its output budget before producing an accepted candidate or executable Tool call.",
+    "Do not continue long reasoning, restate source material, or draft large artifacts in assistant prose.",
+    "Use the current Plan step and canonical evidence to take one bounded forward action.",
+    "If the requested artifact is incomplete, call a file-producing Tool with the next bounded chunk or a purpose-built materialization Tool.",
+    "If the artifact appears complete but lacks acceptance evidence, call the available acceptance or verification Tool.",
+    "Use read-only Tools only for one specifically missing fact that is not already available from recent evidence.",
+  ].join("\n");
+}
+
 function toolEvidenceMetrics(toolName: string, content: string): Record<string, unknown> {
   const parsed = parseJsonRecord(content);
   if (parsed === undefined) return {};
@@ -1502,6 +1541,15 @@ function toolEvidenceMetrics(toolName: string, content: string): Record<string, 
     ...(isSourceDiscoveryToolName(toolName) ? {
       discoveredSourceCount: discoveredSourceCountFromResult(parsed, sourceRefs),
     } : {}),
+  };
+}
+
+function toolResultCommitSummary(content: string): Record<string, unknown> {
+  return {
+    resultCharacters: content.length,
+    resultSha256: createHash("sha256").update(content).digest("hex"),
+    resultPreview: content.length <= 512 ? content : content.slice(0, 512),
+    resultPreviewTruncated: content.length > 512,
   };
 }
 

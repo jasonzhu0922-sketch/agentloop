@@ -1,59 +1,20 @@
 # Evaluation Report Output
 
-Use this reference when the task asks for a City Carbon AI assessment report, report schema, export behavior, report prompt, or report content structure.
+Use this reference when the task asks for a City Carbon AI assessment report, report schema, report prompt, or report content structure.
 
-## Implementation Basis
+## Basis
 
-The current system's canonical report path is `ReportService.exportReport(...)`.
+The report is assembled from structured project and assessment results. Do not make the report a free-form AI essay unless the user explicitly asks for a separate narrative draft.
 
-Relevant implementation files:
+## Output Options
 
-- `backend/src/main/java/com/citycarbon/platform/report/service/ReportService.java`
-- `backend/src/main/java/com/citycarbon/platform/report/controller/ReportController.java`
-- `frontend/src/api/report.ts`
-- `frontend/src/views/ProjectAssessmentPage.vue`
+Supported output types:
 
-The regular report is assembled from structured project and assessment results. Do not make the report a free-form AI essay unless the user explicitly asks for a separate narrative draft. The existing `generateAiReport(...)` method creates AI-written Markdown text, but it is not the main controller export path.
-
-## Export Options
-
-The report export options are:
-
-```json
-{
-  "reportType": "pdf",
-  "includeOptimization": true,
-  "generateOptimizationIfMissing": false,
-  "includeAiEvidence": true,
-  "includeCharts": true
-}
-```
-
-Supported report types:
-
-- `pdf`: default; rendered from HTML with OpenHTMLToPDF and CJK font support.
+- `pdf`: default report format when the user asks for a PDF.
 - `docx` or `word`: generated as a real `.docx` package from Markdown content.
 - `md`: Markdown report.
 
-The system always writes a Markdown body first, then optionally renders PDF or DOCX.
-
-## Current API Shape
-
-Report export:
-
-```text
-POST /api/assessments/{assessmentId}/reports/export
-```
-
-Report center:
-
-```text
-GET /api/reports
-GET /api/reports/{reportId}
-GET /api/reports/{reportId}/download
-```
-
-The export response returns report metadata plus `contentText` and `downloadUrl`. The report record stores `reportNo`, `projectId`, `assessmentId`, `reportType`, `reportTitle`, `fileName`, `filePath`, `contentText`, `generatedBy`, and `generatedAt`.
+Keep the report body readable as Markdown first, then render PDF or DOCX if requested.
 
 ## Report Data Inputs
 
@@ -68,7 +29,7 @@ Build report data from:
 - optimization: current score, target score, projected score, reach-target flag, expert summary, suggested indicators;
 - generated timestamp.
 
-For standalone use outside the app, collect the same fields from the current evaluation object rather than querying a database as the source of truth.
+Use the current structured evaluation object as the source of truth for report fields.
 
 ## Report Sections
 
@@ -76,7 +37,7 @@ Follow the current report content structure:
 
 1. 报告封面: project code/name, city, assessment batch, model/rubric, benchmark source, generated time.
 2. 整体评价情况: total score, level, status, low-score warnings, manual-review count, manual correction count, AI evidence coverage.
-3. 评价图表数据: dimension and indicator chart data; PDF can include static rose charts when available.
+3. 评价图表数据: dimension and indicator chart data when available.
 4. 维度评价: each dimension's score, warning count, and indicator count.
 5. 指标评估明细: final value, score, weight, weighted score, benchmark score, gap, warning status, AI confidence.
 6. AI 证据与人工复核: include when `includeAiEvidence=true`; preserve evidence and manual correction text.
@@ -90,12 +51,11 @@ Follow the current report content structure:
 - Do not invent missing evidence to make a report look complete.
 - Mark unresolved or low-confidence indicators visibly.
 - Keep benchmark gaps separate from AI evidence: a benchmark gap is comparative analysis, not source evidence from uploaded materials.
-- If optimization is missing and `generateOptimizationIfMissing=false`, say it is not available instead of creating informal advice.
-- If `generateOptimizationIfMissing=true`, generate optimization through the same structured advice rules in `improvement-advice.md`.
+- If optimization is missing and the user did not ask to generate it, say it is not available instead of creating informal advice.
+- If the user asks to generate optimization, use the same structured advice rules in `improvement-advice.md`.
 
 ## Formatting Notes
 
-- Markdown is the canonical content body and should remain readable by itself.
-- PDF uses HTML rendering, embedded CJK font support, summary blocks, tables, and optional static rose charts.
-- DOCX is generated from Markdown headings, paragraphs, and tables; avoid relying on complex layout that the current simple DOCX writer cannot preserve.
+- Markdown should remain readable by itself.
+- PDF/DOCX outputs should preserve Chinese text, headings, tables, evidence, and page flow.
 - For PDF/DOCX quality-sensitive delivery, verify actual rendered output when possible, especially Chinese text, tables, and page flow.

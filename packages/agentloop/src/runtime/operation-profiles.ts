@@ -240,9 +240,11 @@ function matchesCodeChange(value: string): boolean {
 
 function hasFileProducerTool(tools: ReadonlySet<string>): boolean {
   for (const name of tools) {
+    if (name === "convert_artifact") return true;
     if (name === "materialize_paginated_html") return true;
+    if (name === "computer_patch_file") return true;
     if (name === "computer_write_file") return true;
-    if (/(^|_)(write|create|generate|render|export|save)(_|$)/.test(name)) return true;
+    if (/(^|_)(write|create|generate|render|export|convert|save)(_|$)/.test(name)) return true;
   }
   return false;
 }
