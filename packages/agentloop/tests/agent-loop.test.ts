@@ -325,9 +325,197 @@ test("the final budgeted turn can execute missing required evidence before conve
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("artifact receipts that satisfy required evidence complete without a final model rewrite", async () => {
+  let writeExecutions = 0;
+  let verifyExecutions = 0;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write artifact",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      writeExecutions += 1;
+      return {
+        path: "report.html",
+        bytes: 18,
+        sha256: "write-sha",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "report.html", kind: "html", bytes: 18, sha256: "write-sha" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      };
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify artifact acceptance",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      verifyExecutions += 1;
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "report.html", kind: "html", bytes: 18, sha256: "accepted-sha" },
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      };
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(request: ModelInvocation): Promise<ModelResponse> {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "report.html" } }],
+        };
+      }
+      if (modelCalls === 2) {
+        assert.equal(request.tools.some((tool) => tool.name === "verify_artifact_acceptance"), true);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "verify-report", name: "verify_artifact_acceptance", arguments: { artifactPath: "report.html" } }],
+        };
+      }
+      throw new Error("Runtime should complete from receipts without a final convergence model turn");
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "生成并验收产物。",
+    input: "生成一个报告页面",
+    model,
+    tools: new ToolRegistry([writeTool, verifyTool]),
+    grant,
+    maxSteps: 8,
+    convergenceGraceSteps: 4,
+    progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_non_empty", "artifact_acceptance"]),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.match(candidate.output, /已完成并通过当前步骤的验收检查/);
+      assert.match(candidate.output, /report\.html/);
+      assert.doesNotMatch(candidate.output, /Runtime evidence satisfies the current step evidence contract/);
+      assert.doesNotMatch(candidate.output, /Evidence tool calls/);
+      assert.equal(candidate.toolEvidence.some((item) => item.toolCallId === "write-report"), true);
+      assert.equal(candidate.toolEvidence.some((item) => item.toolCallId === "verify-report"), true);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /已完成并通过当前步骤的验收检查/);
+  assert.match(result.output, /report\.html/);
+  assert.doesNotMatch(result.output, /Runtime evidence satisfies the current step evidence contract/);
+  assert.doesNotMatch(result.output, /Evidence tool calls/);
+  assert.equal(writeExecutions, 1);
+  assert.equal(verifyExecutions, 1);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.evidence_completion_detected").length, 1);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_queued").length, 0);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
+test("source-only evidence receipts do not replace a produce step delivery candidate", async () => {
+  let readExecutions = 0;
+  let modelCalls = 0;
+  const readSourceTool: RuntimeTool<unknown> = {
+    name: "read_source",
+    description: "Read uploaded source",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      readExecutions += 1;
+      return {
+        schema: "agentloop.uploadedSourceRead/v1",
+        chunks: [{ chunkIndex: 0, content: "总分 7.46 / 100。评价等级：需重点整改。" }],
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          facts: [{ kind: "source_summary", sourceId: "src_report", returnedChunkCount: 1 }],
+          evidenceKinds: {
+            satisfied: ["source_summary", "explicit_caveats"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(): Promise<ModelResponse> {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "我先读取上传报告。",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "read-report", name: "read_source", arguments: { sourceId: "src_report" } }],
+        };
+      }
+      return {
+        content: "报告解读：总分 7.46/100，等级为需重点整改，重点关注交通部门低分预警。",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["read_source"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Interpret the uploaded report in Chinese.",
+    input: "解读一下这个文件",
+    model,
+    tools: new ToolRegistry([readSourceTool]),
+    grant,
+    maxSteps: 3,
+    progressPolicy: artifactStepToolProgressPolicy(["source_summary", "explicit_caveats"]),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.doesNotMatch(candidate.output, /Runtime evidence satisfies the current step evidence contract/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "报告解读：总分 7.46/100，等级为需重点整改，重点关注交通部门低分预警。");
+  assert.equal(readExecutions, 1);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.some((event) => event.type === "candidate.evidence_completion_detected"), false);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
 test("structured tool candidates go directly to assessment without a final model rewrite", async () => {
   let executions = 0;
   let assessmentCalls = 0;
+  const caveat = "目录结果需要以精确 API_ID 再确认。";
+  const delivery = [
+    "合同备案记录查询 API has sysId input and verified output fields.",
+    "",
+    "## 限制说明",
+    "",
+    `- ${caveat}`,
+  ].join("\n");
   const tool: RuntimeTool<unknown> = {
     name: "lookup_api",
     description: "Return structured API lookup evidence",
@@ -340,12 +528,20 @@ test("structured tool candidates go directly to assessment without a final model
       return {
         schema: "api_catalog_result/v1",
         deliveryCandidate: {
-          output: "合同备案记录查询 API has sysId input and verified output fields.",
+          output: delivery,
         },
         assessmentProjection: {
           match_count: 1,
           primary_api_id: "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001",
           output_field_counts: { "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001": 32 },
+        },
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          sourceType: "api_catalog",
+          receiptId: "api-receipt-with-visible-caveat",
+          facts: [{ kind: "source_summary", primary_api_id: "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001" }],
+          caveats: [caveat],
+          evidenceKinds: { satisfied: ["source_summary"], caveated: ["explicit_caveats"], failed: [] },
         },
         rawRows: "x".repeat(20_000),
       };
@@ -366,6 +562,7 @@ test("structured tool candidates go directly to assessment without a final model
     evaluateCandidate: async (candidate) => {
       assessmentCalls += 1;
       assert.match(candidate.output, /sysId/);
+      assert.equal(candidate.output.split(caveat).length - 1, 1);
       const projected = candidate.projectedToolEvidence.find((item) => item.toolCallId === "lookup-1");
       assert.match(projected?.result ?? "", /api_catalog_result\/v1/);
       assert.match(projected?.result ?? "", /primary_api_id/);
@@ -374,7 +571,7 @@ test("structured tool candidates go directly to assessment without a final model
     },
   });
 
-  assert.equal(result.output, "合同备案记录查询 API has sysId input and verified output fields.");
+  assert.equal(result.output, delivery);
   assert.equal(executions, 1);
   assert.equal(model.calls, 1);
   assert.equal(assessmentCalls, 1);
@@ -454,6 +651,7 @@ test("oversized structured stdout candidates from command projections go directl
   let executions = 0;
   let assessmentCalls = 0;
   const delivery = `合同备案记录查询 API has sysId input.\n${"出参字段 ".repeat(1200)}`;
+  const caveat = "Candidate ranking requires exact API_ID confirmation.";
   const tool: RuntimeTool<unknown> = {
     name: "lookup_api",
     description: "Return projected command-style API lookup evidence",
@@ -481,7 +679,7 @@ test("oversized structured stdout candidates from command projections go directl
             receiptId: "api-receipt-large-candidate",
             sourceRefs: [{ url: "https://eplat.baocloud.cn/service/D_A_BSTABD00_SHUTU_AGENT" }],
             facts: [{ kind: "source_summary", primary_api_id: "M_DWD_CONTRACT_RECORD_PLATFORM.D_A_BSTACW00_HTBA_001" }],
-            caveats: ["Candidate ranking requires exact API_ID confirmation."],
+            caveats: [caveat],
             evidenceKinds: { satisfied: ["source_summary", "source_urls"], caveated: ["explicit_caveats"], failed: [] },
           },
           contentLocation: {
@@ -512,7 +710,9 @@ test("oversized structured stdout candidates from command projections go directl
     emit: (event) => { events.push(event); },
     evaluateCandidate: async (candidate) => {
       assessmentCalls += 1;
-      assert.equal(candidate.output, delivery);
+      assert.match(candidate.output, /^合同备案记录查询 API has sysId input/);
+      assert.match(candidate.output, /## 限制说明/);
+      assert.match(candidate.output, new RegExp(caveat));
       const projected = candidate.projectedToolEvidence.find((item) => item.toolCallId === "lookup-1");
       assert.match(projected?.result ?? "", /api_catalog_result\/v1/);
       assert.match(projected?.result ?? "", /primary_api_id/);
@@ -521,7 +721,9 @@ test("oversized structured stdout candidates from command projections go directl
     },
   });
 
-  assert.equal(result.output, delivery);
+  assert.match(result.output, /^合同备案记录查询 API has sysId input/);
+  assert.match(result.output, /## 限制说明/);
+  assert.match(result.output, new RegExp(caveat));
   assert.equal(executions, 1);
   assert.equal(model.calls, 1);
   assert.equal(assessmentCalls, 1);
@@ -638,6 +840,140 @@ test("a length-truncated execution turn with tools receives a forward-action rep
 
   assert.equal(result.output, "evidence collected");
   assert.equal(calls, 3);
+});
+
+test("prepare-stage argument rejection receives a schema repair directive", async () => {
+  let calls = 0;
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write a file",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => {
+      const record = value as { mode?: string; overwrite?: boolean };
+      if (record.mode !== undefined && record.overwrite !== undefined) {
+        throw new AppError("BAD_REQUEST", "mode and overwrite cannot both be set; use exactly one", 400);
+      }
+      return value;
+    },
+    execute: async () => {
+      executions += 1;
+      return { path: "report.md", bytes: 6, sha256: "sha" };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "write-invalid",
+            name: "computer_write_file",
+            arguments: { path: "report.md", content: "hello\n", mode: "create", overwrite: false },
+          }],
+        };
+      }
+      if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /runtime_tool_argument_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /prefer `mode` and remove the legacy `overwrite` field/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "write-valid",
+            name: "computer_write_file",
+            arguments: { path: "report.md", content: "hello\n", mode: "create" },
+          }],
+        };
+      }
+      assert.deepEqual(request.tools, []);
+      return { content: "report written", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["computer_write_file"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Write the report.",
+    input: "write report",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 3,
+    shouldConvergeAfterToolStep: () => ({ converge: true, reason: "artifact_written" }),
+  });
+
+  assert.equal(result.output, "report written");
+  assert.equal(calls, 3);
+  assert.equal(executions, 1);
+});
+
+test("repeated prepare-stage argument rejection stops before burning the step budget", async () => {
+  let calls = 0;
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write a file",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => {
+      const record = value as { mode?: string; overwrite?: boolean };
+      if (record.mode !== undefined && record.overwrite !== undefined) {
+        throw new AppError("BAD_REQUEST", "mode and overwrite cannot both be set; use exactly one", 400);
+      }
+      return value;
+    },
+    execute: async () => {
+      executions += 1;
+      return { path: "report.md", bytes: 6, sha256: "sha" };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls > 1) {
+        assert.match(request.runtimeContext?.content ?? "", /runtime_tool_argument_repair/);
+      }
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: `write-invalid-${calls}`,
+          name: "computer_write_file",
+          arguments: { path: "report.md", content: "hello\n", mode: "create", overwrite: false },
+        }],
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file"]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Write the report.",
+      input: "write report",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant,
+      maxSteps: 8,
+      emit: (event) => { events.push(event); },
+    }),
+    (error: unknown) => error instanceof AppError
+      && error.code === "RUN_LIMIT_EXCEEDED"
+      && error.message.includes("without forward progress"),
+  );
+
+  assert.equal(calls, 3);
+  assert.equal(executions, 0);
+  const noProgress = events.filter((event) => event.type === "loop.no_progress");
+  assert.equal(noProgress.length, 2);
+  assert.equal(noProgress.at(-1)?.data.stalled, true);
 });
 
 test("a rejected assessed candidate grants bounded tool repair grace", async () => {
@@ -1724,6 +2060,32 @@ test("a no-tool candidate with embedded provider tool protocol is rejected befor
   assert.equal(events.some((event) => event.type === "candidate.approved"), false);
 });
 
+test("a no-tool candidate with internal Runtime evidence markup is repaired before assessment", async () => {
+  let assessments = 0;
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Answer directly.",
+    input: "answer from evidence",
+    model: new InternalEvidenceMarkupThenAnswerModel(),
+    tools: new ToolRegistry([]),
+    grant,
+    maxSteps: 2,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (context) => {
+      assessments += 1;
+      assert.doesNotMatch(context.output, /runtime_evidence_record|agentloop\.runtimeEvidenceRecord/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "宝信软件董事长是夏雪松。");
+  assert.equal(assessments, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  assert.equal(events.some((event) => event.type === "candidate.approved"), true);
+});
+
 test("streaming turns emit live deltas before the durable assistant checkpoint", async () => {
   const events: RuntimeEvent[] = [];
   const tool: RuntimeTool<unknown> = {
@@ -2218,6 +2580,33 @@ class TextToolInvocationOnlyModel implements ModelAdapter {
   async complete(): Promise<ModelResponse> {
     return {
       content: this.content,
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class InternalEvidenceMarkupThenAnswerModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    assert.deepEqual(request.tools, []);
+    if (this.calls === 1) {
+      return {
+        content: [
+          '<runtime_evidence_record source="server" kind="tool_call" encoding="json">',
+          '{"schema":"agentloop.runtimeEvidenceRecord/v1","kind":"tool_call","toolCallId":"call-1","toolName":"webfetch","arguments":{"url":"https://example.test"}}',
+          "</runtime_evidence_record>",
+        ].join("\n"),
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    }
+    assert.match(request.runtimeContext?.content ?? "", /internal Runtime evidence markup/);
+    return {
+      content: "宝信软件董事长是夏雪松。",
       finishReason: "stop",
       toolCalls: [],
     };

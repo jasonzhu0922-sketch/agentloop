@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { AppError, badRequest, conflict, forbidden } from "../shared/errors.ts";
+import {
+  extractSpreadsheetTables,
+  profileSpreadsheets,
+  type SpreadsheetDirectoryProfile,
+  type SpreadsheetExtractionPayload,
+} from "./spreadsheet-inspector.ts";
 
 const DEFAULT_OUTPUT_LIMIT = 100_000;
 const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
@@ -368,7 +374,7 @@ export class ComputerExecutor {
     if (targetStat !== undefined) {
       if (!targetStat.isFile()) throw badRequest("Write target must be a regular file");
       if (mode === "create") {
-        throw conflict("File already exists; set overwrite=true to replace it");
+        throw conflict("File already exists; set mode=\"overwrite\" to replace it");
       }
     }
     return {
@@ -477,7 +483,7 @@ export class ComputerExecutor {
 
   async profileDirectory(
     path: string,
-    options: { sampleLimit?: number; groupPrefixLength?: number; maxFiles?: number; fieldProfile?: boolean } = {},
+    options: { sampleLimit?: number; groupPrefixLength?: number; maxFiles?: number; fieldProfile?: boolean; spreadsheetProfile?: boolean } = {},
   ): Promise<{
     schema: "agentloop.sourceSummary/v1";
     sourceType: "visible_directory";
@@ -490,6 +496,7 @@ export class ComputerExecutor {
     samplePaths: string[];
     groups: Array<{ key: string; count: number }>;
     fieldProfiles: DirectoryFieldProfile[];
+    spreadsheetProfile?: SpreadsheetDirectoryProfile;
     indexRef: string;
     sha256: string;
     caveats: string[];
@@ -524,6 +531,7 @@ export class ComputerExecutor {
     const indexMaterial = sorted.map((file) => `${file.path}\0${file.bytes}`).join("\n");
     const sha256 = createHash("sha256").update(indexMaterial).digest("hex");
     const fieldProfiles = options.fieldProfile === false ? [] : await this.profileDirectoryFields(sorted);
+    const spreadsheetProfile = options.spreadsheetProfile === false ? undefined : await profileSpreadsheets(this.workspaceRoot, sorted);
     const caveats = [
       "Directory profile records file metadata and representative paths; it does not read every file body.",
       ...(options.fieldProfile === false
@@ -533,6 +541,7 @@ export class ComputerExecutor {
       ...(fieldProfiles.length > 0 && sorted.length > DIRECTORY_PROFILE_FIELD_FILE_LIMIT
         ? [`Directory field profile stopped at ${DIRECTORY_PROFILE_FIELD_FILE_LIMIT} files; additional field values may exist.`]
         : []),
+      ...(spreadsheetProfile?.caveats ?? []),
     ];
     return {
       schema: "agentloop.sourceSummary/v1",
@@ -549,15 +558,37 @@ export class ComputerExecutor {
         .slice(0, DIRECTORY_PROFILE_GROUP_LIMIT)
         .map(([key, count]) => ({ key, count })),
       fieldProfiles,
+      ...(spreadsheetProfile === undefined ? {} : { spreadsheetProfile }),
       indexRef: `visible-directory-index:${sha256}`,
       sha256,
       caveats,
       evidenceKinds: {
-        satisfied: ["source_summary"],
+        satisfied: [
+          "source_summary",
+          ...(spreadsheetProfile !== undefined && spreadsheetProfile.workbookCount > 0 ? ["schema_summary", "record_counts"] : []),
+        ],
         caveated: caveats.length === 0 ? [] : ["explicit_caveats"],
         failed: [],
       },
     };
+  }
+
+  async extractVisibleTables(
+    files: ReadonlyArray<{ path: string }>,
+    options: { maxRowsPerSheet?: number; maxTotalCells?: number } = {},
+  ): Promise<SpreadsheetExtractionPayload> {
+    if (files.length === 0) throw badRequest("files must contain at least one entry");
+    if (files.length > READ_FILES_MAX_FILES) throw badRequest(`files must contain at most ${READ_FILES_MAX_FILES} entries`);
+    const resolved = await Promise.all(files.map(async (file) => {
+      const resolvedFile = await this.resolveReadableFile(file.path);
+      const stat = await fs.stat(resolvedFile.absolutePath);
+      if (!stat.isFile()) throw badRequest(`Path is not a regular file: ${file.path}`);
+      return {
+        path: resolvedFile.workspacePath,
+        bytes: stat.size,
+      };
+    }));
+    return await extractSpreadsheetTables(this.workspaceRoot, resolved, options);
   }
 
   private async profileDirectoryFields(files: readonly DirectoryFileEntry[]): Promise<DirectoryFieldProfile[]> {
@@ -1023,7 +1054,7 @@ export class ComputerExecutor {
       await fs.writeFile(target, content, { encoding: "utf8", flag, mode: 0o600 });
     } catch (error) {
       if (writeMode === "create" && isFileAlreadyExistsError(error)) {
-        throw conflict("File already exists; set mode=\"overwrite\" or overwrite=true to replace it");
+        throw conflict("File already exists; set mode=\"overwrite\" to replace it");
       }
       throw error;
     }

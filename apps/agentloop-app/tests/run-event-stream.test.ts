@@ -285,6 +285,12 @@ test("RunService keeps provider reasoning continuation out of public events", as
     const liveCommitted = liveEvents.find((event) => event.type === "assistant.committed");
     assert.equal(storedCommitted?.data.reasoningContent, undefined);
     assert.equal(liveCommitted?.data.reasoningContent, undefined);
+    assert.deepEqual(storedCommitted?.data.privateReasoning, {
+      schema: "agentloop.privateReasoningProjection/v1",
+      redacted: true,
+      characters: "opaque-thinking-state".length,
+    });
+    assert.deepEqual(liveCommitted?.data.privateReasoning, storedCommitted?.data.privateReasoning);
   } finally {
     database.close();
   }

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { badRequest, forbidden } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import type { VisibleDirectoryGrant } from "../runtime/contracts.ts";
@@ -11,6 +12,9 @@ const VISIBLE_SEARCH_AUTO_COMPACT_CHARACTERS = 8_000;
 const VISIBLE_SEARCH_SUMMARY_SAMPLE_LIMIT = 12;
 const VISIBLE_SEARCH_SUMMARY_TEXT_GROUP_LIMIT = 30;
 const VISIBLE_SEARCH_SUMMARY_PATH_GROUP_LIMIT = 30;
+const TABLE_EXTRACTION_MANIFEST_TABLE_LIMIT = 200;
+const TABLE_EXTRACTION_MANIFEST_FIELD_LIMIT = 80;
+const TABLE_EXTRACTION_MANIFEST_SAMPLE_RECORD_LIMIT = 3;
 
 type VisibleSearchResultMode = "auto" | "matches" | "compact";
 
@@ -49,6 +53,7 @@ export const VISIBLE_DIRECTORY_TOOL_NAMES = new Set([
   "visible_list_directory",
   "visible_find_files",
   "visible_index_directory",
+  "visible_extract_tables",
   "visible_search_text",
   "visible_read_file",
   "visible_read_files",
@@ -127,8 +132,9 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
       description: [
         "Build a bounded metadata index for a user-authorized local visible directory.",
         "Use this before summarizing, analyzing, or reporting over many files in a directory.",
-        "Returns a structured source_summary receipt with counts, extension distribution, samples, groups, compact text field distributions, hash, and explicit caveats; it does not read every file body.",
-        "For metadata/category counts, use fieldProfiles from this result before issuing broad visible_search_text calls.",
+        "Returns a structured source_summary receipt with counts, extension distribution, samples, groups, compact text field distributions, spreadsheet schema summaries, hash, and explicit caveats; it does not read every file body.",
+        "For spreadsheet directories, use spreadsheetProfile to identify workbooks, sheets, dimensions, candidate headers, merged cells, value-kind distributions, and signature groups before extracting tables.",
+        "For metadata/category counts, use fieldProfiles or spreadsheetProfile from this result before issuing broad visible_search_text calls.",
       ].join(" "),
       inputSchema: objectSchema(["rootId"], {
         rootId: { type: "string" },
@@ -137,6 +143,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
         groupPrefixLength: { type: "integer", minimum: 1, maximum: 80 },
         maxFiles: { type: "integer", minimum: 1, maximum: 50_000 },
         fieldProfile: { type: "boolean" },
+        spreadsheetProfile: { type: "boolean" },
       }),
       executionMode: "parallel",
       replaySafe: true,
@@ -149,6 +156,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
           groupPrefixLength: optionalBoundedInteger(record.groupPrefixLength, "groupPrefixLength", 1, 80),
           maxFiles: optionalBoundedInteger(record.maxFiles, "maxFiles", 1, 50_000),
           fieldProfile: optionalBoolean(record.fieldProfile, "fieldProfile"),
+          spreadsheetProfile: optionalBoolean(record.spreadsheetProfile, "spreadsheetProfile"),
         };
       },
       execute: async (context, value) => {
@@ -159,6 +167,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
           groupPrefixLength?: number;
           maxFiles?: number;
           fieldProfile?: boolean;
+          spreadsheetProfile?: boolean;
         };
         const executor = await executorForVisibleRoot(context, input.rootId);
         const result = await executor.profileDirectory(input.path, {
@@ -166,11 +175,73 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
           groupPrefixLength: input.groupPrefixLength,
           maxFiles: input.maxFiles,
           fieldProfile: input.fieldProfile,
+          spreadsheetProfile: input.spreadsheetProfile,
         });
         return {
           rootId: input.rootId,
           ...result,
           evidenceReceipt: visibleDirectoryIndexReceipt(input.rootId, result),
+        };
+      },
+    },
+    {
+      name: "visible_extract_tables",
+      description: [
+        "Extract bounded generic table records from spreadsheet-like files in a user-authorized visible directory.",
+        "Use this after visible_index_directory has identified spreadsheet paths or sourceRefs.",
+        "Inputs are paths or sourceRefs returned by visible_index_directory/visible_find_files.",
+        "Writes a durable JSON extraction artifact in the Runtime workspace with schema, rows, cells, source ranges, counts, hashes, and caveats.",
+        "The tool reports structure and raw values only; domain interpretation belongs to the next analysis or writing step.",
+      ].join(" "),
+      inputSchema: objectSchema(["rootId", "files"], {
+        rootId: { type: "string" },
+        files: {
+          type: "array",
+          minItems: 1,
+          maxItems: 50,
+          items: sourceReadableBatchEntrySchema({
+            path: { type: "string" },
+            sourceRef: sourceRefSchema(),
+          }),
+        },
+        maxRowsPerSheet: { type: "integer", minimum: 1, maximum: 2_000 },
+        maxTotalCells: { type: "integer", minimum: 1, maximum: 100_000 },
+      }),
+      executionMode: "parallel",
+      replaySafe: true,
+      maxResultCharacters: 250_000,
+      parse: (value) => {
+        const record = requireRecord(value, "visible_extract_tables arguments");
+        return {
+          rootId: requireString(record.rootId, "rootId", { max: 80 }),
+          files: parseTableExtractionFiles(record.files),
+          maxRowsPerSheet: optionalBoundedInteger(record.maxRowsPerSheet, "maxRowsPerSheet", 1, 2_000),
+          maxTotalCells: optionalBoundedInteger(record.maxTotalCells, "maxTotalCells", 1, 100_000),
+        };
+      },
+      execute: async (context, value) => {
+        const input = value as {
+          rootId: string;
+          files: Array<{ path: string; sourceRef?: VisibleSourceRef }>;
+          maxRowsPerSheet?: number;
+          maxTotalCells?: number;
+        };
+        const executor = await executorForVisibleRoot(context, input.rootId);
+        const extraction = await executor.extractVisibleTables(input.files, {
+          maxRowsPerSheet: input.maxRowsPerSheet,
+          maxTotalCells: input.maxTotalCells,
+        });
+        const artifact = await writeVisibleTableExtractionArtifact(context.grant.workspaceRoot, extraction);
+        const caveats = uniqueStrings(extraction.caveats);
+        const result = {
+          rootId: input.rootId,
+          ...extraction,
+          caveats,
+          artifact,
+        };
+        return {
+          ...result,
+          evidenceReceipt: visibleTableExtractionReceipt(input.rootId, result),
         };
       },
     },
@@ -525,6 +596,7 @@ function visibleDirectoryIndexReceipt(
     samplePaths: readonly string[];
     groups: readonly unknown[];
     fieldProfiles: readonly unknown[];
+    spreadsheetProfile?: unknown;
     indexRef: string;
     sha256: string;
     caveats: readonly string[];
@@ -550,12 +622,145 @@ function visibleDirectoryIndexReceipt(
       extensions: result.extensions,
       groups: result.groups,
       fieldProfiles: result.fieldProfiles,
+      spreadsheetProfile: result.spreadsheetProfile,
       indexRef: result.indexRef,
       sha256: result.sha256,
     }],
     caveats: result.caveats,
     satisfied: result.evidenceKinds.satisfied,
     failed: result.evidenceKinds.failed,
+  });
+}
+
+interface TableExtractionArtifactManifest {
+  readonly schema: "agentloop.tableExtractionArtifactManifest/v1";
+  readonly artifactSchema: "agentloop.visibleTableExtraction/v1";
+  readonly totalFiles: number;
+  readonly totalTables: number;
+  readonly totalRows: number;
+  readonly totalRecords: number;
+  readonly totalCells: number;
+  readonly truncated: boolean;
+  readonly caveats: readonly string[];
+  readonly tables: readonly TableExtractionManifestTable[];
+}
+
+interface TableExtractionManifestTable {
+  readonly tableId: string;
+  readonly filePath: string;
+  readonly fileIndex: number;
+  readonly sheetName: string;
+  readonly sheetIndex: number;
+  readonly sheetPointer: string;
+  readonly rowsPointer: string;
+  readonly recordsPointer: string;
+  readonly columnsPointer: string;
+  readonly sourceRange?: string;
+  readonly headerRange?: string;
+  readonly rowCount: number;
+  readonly recordCount: number;
+  readonly cellCount: number;
+  readonly recordRows?: { readonly first: number; readonly last: number };
+  readonly fields: readonly {
+    readonly name: string;
+    readonly address: string;
+    readonly index: number;
+    readonly sourceAddress?: string;
+    readonly nonEmptyCellCount: number;
+    readonly valueKinds: Record<string, number>;
+  }[];
+  readonly sampleRecords: readonly {
+    readonly row: number;
+    readonly sourceRange: string;
+    readonly values: Record<string, string | number | boolean>;
+  }[];
+  readonly sourceRanges: readonly string[];
+  readonly truncated: boolean;
+}
+
+function visibleTableExtractionReceipt(
+  rootId: string,
+  result: {
+    readonly files: readonly {
+      readonly path: string;
+      readonly sha256: string;
+      readonly bytes: number;
+      readonly sheets: readonly {
+        readonly name: string;
+        readonly sourceRange?: string;
+        readonly rowCount: number;
+        readonly recordCount?: number;
+        readonly cellCount: number;
+        readonly truncated: boolean;
+      }[];
+      readonly truncated: boolean;
+      readonly error?: string;
+    }[];
+    readonly requested: number;
+    readonly returned: number;
+    readonly totalRows: number;
+    readonly totalRecords?: number;
+    readonly totalCells: number;
+    readonly truncated: boolean;
+    readonly sha256: string;
+    readonly caveats: readonly string[];
+    readonly artifact: {
+      readonly path: string;
+      readonly bytes: number;
+      readonly sha256: string;
+      readonly schema: string;
+      readonly manifest: TableExtractionArtifactManifest;
+      readonly caveats: readonly string[];
+    };
+  },
+): VisibleToolEvidenceReceipt {
+  return buildVisibleToolEvidenceReceipt({
+    sourceType: "visible_table_extraction",
+    sourceRefs: result.files.map((file) => ({
+      sourceRefId: visibleSourceRefId(rootId, file.path),
+      rootId,
+      path: file.path,
+      sha256: file.sha256,
+      bytes: file.bytes,
+      sheets: file.sheets.map((sheet) => ({
+        name: sheet.name,
+        sourceRange: sheet.sourceRange,
+        rowCount: sheet.rowCount,
+        recordCount: sheet.recordCount,
+        cellCount: sheet.cellCount,
+        truncated: sheet.truncated,
+      })),
+      truncated: file.truncated,
+      error: file.error,
+    })),
+    facts: [{
+      kind: "structured_table_extraction",
+      rootId,
+      requested: result.requested,
+      returned: result.returned,
+      totalRows: result.totalRows,
+      totalRecords: result.totalRecords,
+      totalCells: result.totalCells,
+      truncated: result.truncated,
+      artifact: {
+        schema: result.artifact.schema,
+        path: result.artifact.path,
+        bytes: result.artifact.bytes,
+        sha256: result.artifact.sha256,
+        manifest: result.artifact.manifest,
+        caveats: result.artifact.caveats,
+      },
+      extractionSha256: result.sha256,
+    }],
+    caveats: result.caveats,
+    satisfied: [
+      "source_summary",
+      "source_read",
+      "source_refs",
+      "schema_summary",
+      "record_counts",
+      "structured_extraction_artifact",
+    ],
   });
 }
 
@@ -699,7 +904,9 @@ function buildVisibleToolEvidenceReceipt(input: {
     facts: input.facts,
     caveats: input.caveats,
     evidenceKinds: {
-      satisfied: input.satisfied,
+      satisfied: input.caveats.length === 0
+        ? uniqueStrings([...input.satisfied, "explicit_caveats"])
+        : input.satisfied,
       caveated: input.caveats.length === 0 ? [] : ["explicit_caveats"],
       failed: input.failed ?? [],
     },
@@ -844,6 +1051,174 @@ function parseReadFileBatch(value: unknown): Array<{
       ranges: parseReadRanges(record.ranges),
     };
   });
+}
+
+function parseTableExtractionFiles(value: unknown): Array<{ path: string; sourceRef?: VisibleSourceRef }> {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    throw badRequest("files must be an array with 1 to 50 entries");
+  }
+  return value.map((item, index) => {
+    const record = requireRecord(item, `files[${index}]`);
+    const sourceRef = parseSourceRef(record.sourceRef, `files[${index}].sourceRef`);
+    const path = record.path === undefined
+      ? sourceRef?.path
+      : requireString(record.path, `files[${index}].path`, { max: 4_000 });
+    if (path === undefined) throw badRequest(`files[${index}].path or files[${index}].sourceRef.path is required`);
+    return {
+      path,
+      ...(sourceRef === undefined ? {} : { sourceRef }),
+    };
+  });
+}
+
+async function writeVisibleTableExtractionArtifact(
+  workspaceRoot: string | undefined,
+  extraction: {
+    readonly schema: "agentloop.visibleTableExtraction/v1";
+    readonly files: readonly {
+      readonly path: string;
+      readonly sheets: readonly {
+        readonly name: string;
+        readonly index: number;
+        readonly sourceRange?: string;
+        readonly header?: { readonly range: string };
+        readonly columns: readonly {
+          readonly index: number;
+          readonly address: string;
+          readonly name: string;
+          readonly sourceAddress?: string;
+          readonly nonEmptyCellCount: number;
+          readonly valueKinds: Record<string, number>;
+        }[];
+        readonly records: readonly {
+          readonly row: number;
+          readonly sourceRange: string;
+          readonly values: Record<string, string | number | boolean>;
+        }[];
+        readonly rowCount: number;
+        readonly recordCount: number;
+        readonly cellCount: number;
+        readonly truncated: boolean;
+      }[];
+    }[];
+    readonly totalRows: number;
+    readonly totalRecords: number;
+    readonly totalCells: number;
+    readonly sha256: string;
+  },
+): Promise<{
+  readonly schema: "agentloop.tableExtractionArtifact/v1";
+  readonly path: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly manifest: TableExtractionArtifactManifest;
+  readonly caveats: readonly string[];
+}> {
+  if (workspaceRoot === undefined) {
+    throw badRequest("visible_extract_tables requires a Runtime workspaceRoot to write a durable extraction artifact");
+  }
+  const canonicalRoot = await fs.realpath(workspaceRoot);
+  const directory = resolve(canonicalRoot, ".agentloop", "table-extractions", extraction.sha256.slice(0, 2));
+  assertInsideRoot(directory, canonicalRoot);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const target = resolve(directory, `${extraction.sha256}.json`);
+  assertInsideRoot(target, canonicalRoot);
+  const content = JSON.stringify(extraction, null, 2);
+  await fs.writeFile(target, content, { encoding: "utf8", flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+  });
+  const written = await fs.readFile(target, "utf8");
+  const sha256 = createHash("sha256").update(written).digest("hex");
+  const manifest = buildTableExtractionArtifactManifest(extraction);
+  return {
+    schema: "agentloop.tableExtractionArtifact/v1",
+    path: relative(canonicalRoot, target).split(sep).join("/"),
+    bytes: Buffer.byteLength(written),
+    sha256,
+    manifest,
+    caveats: manifest.caveats,
+  };
+}
+
+function buildTableExtractionArtifactManifest(
+  extraction: Parameters<typeof writeVisibleTableExtractionArtifact>[1],
+): TableExtractionArtifactManifest {
+  const tables: TableExtractionManifestTable[] = [];
+  const caveats: string[] = [];
+  let totalTableCount = 0;
+  extraction.files.forEach((file, fileIndex) => {
+    file.sheets.forEach((sheet, sheetOffset) => {
+      totalTableCount += 1;
+      if (tables.length >= TABLE_EXTRACTION_MANIFEST_TABLE_LIMIT) return;
+      const sheetPointer = `/files/${fileIndex}/sheets/${sheetOffset}`;
+      const recordRows = sheet.records.length === 0
+        ? undefined
+        : { first: sheet.records[0].row, last: sheet.records[sheet.records.length - 1].row };
+      if (sheet.columns.length > TABLE_EXTRACTION_MANIFEST_FIELD_LIMIT) {
+        caveats.push(`${file.path}:${sheet.name} manifest includes first ${TABLE_EXTRACTION_MANIFEST_FIELD_LIMIT} of ${sheet.columns.length} fields; use columnsPointer for the full list.`);
+      }
+      if (sheet.records.length > TABLE_EXTRACTION_MANIFEST_SAMPLE_RECORD_LIMIT) {
+        caveats.push(`${file.path}:${sheet.name} manifest includes ${TABLE_EXTRACTION_MANIFEST_SAMPLE_RECORD_LIMIT} sample records; use recordsPointer for the full records.`);
+      }
+      tables.push({
+        tableId: `file:${fileIndex}:sheet:${sheet.index}`,
+        filePath: file.path,
+        fileIndex,
+        sheetName: sheet.name,
+        sheetIndex: sheet.index,
+        sheetPointer,
+        rowsPointer: `${sheetPointer}/rows`,
+        recordsPointer: `${sheetPointer}/records`,
+        columnsPointer: `${sheetPointer}/columns`,
+        sourceRange: sheet.sourceRange,
+        headerRange: sheet.header?.range,
+        rowCount: sheet.rowCount,
+        recordCount: sheet.recordCount,
+        cellCount: sheet.cellCount,
+        ...(recordRows === undefined ? {} : { recordRows }),
+        fields: sheet.columns.slice(0, TABLE_EXTRACTION_MANIFEST_FIELD_LIMIT).map((column) => ({
+          name: column.name,
+          address: column.address,
+          index: column.index,
+          sourceAddress: column.sourceAddress,
+          nonEmptyCellCount: column.nonEmptyCellCount,
+          valueKinds: column.valueKinds,
+        })),
+        sampleRecords: sheet.records.slice(0, TABLE_EXTRACTION_MANIFEST_SAMPLE_RECORD_LIMIT).map((record) => ({
+          row: record.row,
+          sourceRange: record.sourceRange,
+          values: record.values,
+        })),
+        sourceRanges: uniqueStrings([
+          sheet.sourceRange,
+          sheet.header?.range,
+          ...sheet.records.slice(0, TABLE_EXTRACTION_MANIFEST_SAMPLE_RECORD_LIMIT).map((record) => record.sourceRange),
+        ].filter((item): item is string => item !== undefined && item.length > 0)),
+        truncated: sheet.truncated,
+      });
+    });
+  });
+  if (totalTableCount > TABLE_EXTRACTION_MANIFEST_TABLE_LIMIT) {
+    caveats.push(`Manifest includes first ${TABLE_EXTRACTION_MANIFEST_TABLE_LIMIT} of ${totalTableCount} tables; use the artifact root profile or JSON paths for omitted sheets.`);
+  }
+  return {
+    schema: "agentloop.tableExtractionArtifactManifest/v1",
+    artifactSchema: extraction.schema,
+    totalFiles: extraction.files.length,
+    totalTables: totalTableCount,
+    totalRows: extraction.totalRows,
+    totalRecords: extraction.totalRecords,
+    totalCells: extraction.totalCells,
+    truncated: caveats.length > 0,
+    caveats: uniqueStrings(caveats),
+    tables,
+  };
+}
+
+function assertInsideRoot(path: string, root: string): void {
+  const rel = relative(root, path);
+  if (rel === "" || (!rel.startsWith("..") && rel !== ".." && !isAbsolute(rel))) return;
+  throw forbidden("Resolved artifact path must stay inside the Runtime workspace root");
 }
 
 function requireBoundedInteger(value: unknown, field: string, min: number, max: number): number {

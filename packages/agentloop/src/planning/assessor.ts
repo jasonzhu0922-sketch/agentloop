@@ -324,6 +324,7 @@ interface RuntimeEvidenceReceipt {
   readonly toolCallId: string;
   readonly schema: string;
   readonly verdict?: string;
+  readonly explicitNoCaveats: boolean;
   readonly satisfied: ReadonlySet<string>;
   readonly caveated: ReadonlySet<string>;
   readonly failed: ReadonlySet<string>;
@@ -332,6 +333,9 @@ interface RuntimeEvidenceReceipt {
 const RUNTIME_EVIDENCE_GATE_KINDS = new Set([
   "source_summary",
   "source_urls",
+  "schema_summary",
+  "record_counts",
+  "structured_extraction_artifact",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -364,11 +368,17 @@ function runtimeEvidenceReceipts(toolCalls: readonly { toolCallId: string; toolN
       && schema !== "agentloop.toolEvidenceReceipt/v1"
     ) continue;
     const evidenceKinds = parseToolResultObject(nestedReceipt?.evidenceKinds ?? parsed?.evidenceKinds);
+    const caveats = Array.isArray(nestedReceipt?.caveats)
+      ? nestedReceipt.caveats
+      : Array.isArray(parsed?.caveats)
+        ? parsed.caveats
+        : undefined;
     const verdict = typeof parsed?.verdict === "string" ? parsed.verdict : undefined;
     receipts.push({
       toolCallId: toolCall.toolCallId,
       schema,
       verdict,
+      explicitNoCaveats: caveats !== undefined && caveats.length === 0,
       satisfied: new Set(stringArrayField(evidenceKinds, "satisfied")),
       caveated: new Set(stringArrayField(evidenceKinds, "caveated")),
       failed: new Set(stringArrayField(evidenceKinds, "failed")),
@@ -403,7 +413,7 @@ function evidenceKindSatisfiedByGate(
   }
   return receipts.some((receipt) => {
     if (receipt.failed.has(kind)) return false;
-    if (kind === "explicit_caveats") return receipt.satisfied.has(kind) || receipt.caveated.has(kind);
+    if (kind === "explicit_caveats") return receipt.satisfied.has(kind) || receipt.caveated.has(kind) || receipt.explicitNoCaveats;
     return receipt.satisfied.has(kind);
   });
 }
@@ -454,7 +464,7 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
         criterionId: requireString(row.criterionId, `criteria[${index}].criterionId`, { max: 128 }),
         satisfied: row.satisfied,
         rationale: requireString(row.rationale, `criteria[${index}].rationale`, { max: 4_000 }),
-        evidenceRefs: requireStringArray(row.evidenceRefs, `criteria[${index}].evidenceRefs`, 100),
+        evidenceRefs: parseEvidenceRefs(row.evidenceRefs, `criteria[${index}].evidenceRefs`, 100),
       };
     });
     const skills = record.skills.map((item, index): SkillAssessment => {
@@ -469,7 +479,7 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
         ...(status === undefined ? {} : { status: status as SkillAssessment["status"] }),
         followed: row.followed,
         rationale: requireString(row.rationale, `skills[${index}].rationale`, { max: 4_000 }),
-        evidenceRefs: requireStringArray(row.evidenceRefs, `skills[${index}].evidenceRefs`, 100),
+        evidenceRefs: parseEvidenceRefs(row.evidenceRefs, `skills[${index}].evidenceRefs`, 100),
       };
     });
     assertExactIds(
@@ -540,7 +550,7 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
     stepId,
     missingEvidenceKinds: uniqueStrings(requireStringArray(record.missingEvidenceKinds, "failedBoundary.missingEvidenceKinds", 50)),
     violatedSkillRequirements: uniqueStrings(requireStringArray(record.violatedSkillRequirements, "failedBoundary.violatedSkillRequirements", 50)),
-    reusableEvidenceRefs: uniqueStrings(requireStringArray(record.reusableEvidenceRefs, "failedBoundary.reusableEvidenceRefs", 100)),
+    reusableEvidenceRefs: parseEvidenceRefs(record.reusableEvidenceRefs, "failedBoundary.reusableEvidenceRefs", 100),
     suggestedRepairShape,
   };
 }
@@ -549,6 +559,25 @@ function parseSuggestedRepairShape(value: unknown): SuggestedRepairShape {
   const shape = requireString(value, "failedBoundary.suggestedRepairShape", { max: 32 });
   if (shape === "repair_leaf" || shape === "revise_plan" || shape === "ask_user" || shape === "fail") return shape;
   throw new TypeError("failedBoundary.suggestedRepairShape must be repair_leaf, revise_plan, ask_user, or fail");
+}
+
+function parseEvidenceRefs(value: unknown, label: string, max = 100): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > max) {
+    throw new TypeError(`${label} must be an array with at most ${max} entries`);
+  }
+  return uniqueStrings(value.map((item, index) => {
+    if (typeof item !== "string") throw new TypeError(`${label}[${index}] must be a string`);
+    return normalizeEvidenceRef(item);
+  }));
+}
+
+function normalizeEvidenceRef(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length === 0) throw new TypeError("evidence reference must contain at least 1 character");
+  if (normalized.length <= 128) return normalized;
+  const suffix = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+  return `${normalized.slice(0, 115)}#${suffix}`;
 }
 
 function deriveFailedBoundary(
@@ -586,7 +615,7 @@ function deriveFailedBoundary(
 }
 
 function sourceContractMismatch(input: StepAssessmentInput, missingEvidenceKinds: readonly string[]): boolean {
-  const sourceKinds = new Set(["source_summary", "source_urls", "explicit_caveats"]);
+  const sourceKinds = new Set(["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"]);
   if (!missingEvidenceKinds.some((kind) => sourceKinds.has(kind))) return false;
   if (!input.step.evidenceContract?.requiredKinds.some((kind) => sourceKinds.has(kind))) return false;
   const receipts = runtimeEvidenceReceipts(input.evidence.toolCalls);
@@ -594,6 +623,9 @@ function sourceContractMismatch(input: StepAssessmentInput, missingEvidenceKinds
     receipt.schema === "agentloop.sourceSummary/v1"
     || receipt.satisfied.has("source_summary")
     || receipt.satisfied.has("source_urls")
+    || receipt.satisfied.has("schema_summary")
+    || receipt.satisfied.has("record_counts")
+    || receipt.satisfied.has("structured_extraction_artifact")
   );
   const hasArtifactReceipt = receipts.some((receipt) =>
     receipt.schema === "agentloop.artifactReceipt/v1"

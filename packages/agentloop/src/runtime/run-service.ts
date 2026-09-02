@@ -1355,6 +1355,12 @@ export class RunService {
         : [...allTools.map((tool) => tool.name)].filter((name) =>
           executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)
         );
+      const taskIntent = classifyTaskIntent({
+        objective: input,
+        recommendedToolNames: allowedToolNames,
+        skillNames: privateSkills.map((skill) => skill.name),
+        responseOnly,
+      });
       const allowedToolSummaries = toolSummaries(allTools, new Set(allowedToolNames));
       const rootGrant = createCapabilityGrant({
         actorUserId,
@@ -1430,6 +1436,7 @@ export class RunService {
         proposal,
         availableSkills: privateSkills,
         availableToolNames: rootGrant.allowedToolNames,
+        taskIntent,
       });
       plan = await this.plans.create(plan);
       planId = plan.id;
@@ -1585,9 +1592,12 @@ export class RunService {
       });
       const stepSkillIds = stepSkills.map((skill) => skill.id);
       const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
-      const stepAllowedToolNames = [...input.rootGrant.allowedToolNames].filter((name) =>
-        name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0
-      );
+      const directDeliveryOnly = stepUsesOnlyDirectDelivery(activeStep) && stepSkillIds.length === 0;
+      const stepAllowedToolNames = directDeliveryOnly
+        ? []
+        : [...input.rootGrant.allowedToolNames].filter((name) =>
+          name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0
+        );
       const stepGrant = createCapabilityGrant({
         actorUserId: input.actorUserId,
         runId: input.runId,
@@ -1876,11 +1886,17 @@ export class RunService {
     }
     const privateSkills = await this.skills.resolveForConversation(input.run.ownerUserId);
     const availableToolNames = this.recoveryAvailableToolNames(privateSkills, input.run.allowDangerousTools);
+    const taskIntent = classifyTaskIntent({
+      objective: input.run.input,
+      recommendedToolNames: [...availableToolNames],
+      skillNames: privateSkills.map((skill) => skill.name),
+    });
     const admitted = admitPlan({
       runId: input.run.id,
       proposal: input.decision.planRevision,
       availableSkills: privateSkills,
       availableToolNames,
+      taskIntent,
     });
     const proposedIds = new Set(admitted.steps.map((step) => step.id));
     const retiredStepIds = input.currentPlan.steps
@@ -2301,8 +2317,19 @@ function shouldLogRunEvent(type: string): boolean {
 
 function redactPublicRunEvent(event: StoredRunEvent): StoredRunEvent {
   if (event.type !== "assistant.committed" || !("reasoningContent" in event.data)) return event;
-  const { reasoningContent: _reasoningContent, ...data } = event.data;
-  return { ...event, data };
+  const { reasoningContent, ...data } = event.data;
+  const characters = typeof reasoningContent === "string" ? reasoningContent.length : 0;
+  return {
+    ...event,
+    data: {
+      ...data,
+      privateReasoning: {
+        schema: "agentloop.privateReasoningProjection/v1",
+        redacted: true,
+        ...(characters > 0 ? { characters } : {}),
+      },
+    },
+  };
 }
 
 function formatRunEventLogLine(runId: string, seq: number, event: RuntimeEvent, createdAt: number): string {
@@ -2886,10 +2913,20 @@ function planContractMismatchRequiresRevision(
   observedShapes: ReadonlySet<ReceiptShape>,
 ): boolean {
   const missing = new Set(failedBoundary.missingEvidenceKinds);
-  if (!missing.has("source_summary") && !missing.has("explicit_caveats")) return false;
+  if (
+    !missing.has("source_summary")
+    && !missing.has("source_urls")
+    && !missing.has("schema_summary")
+    && !missing.has("record_counts")
+    && !missing.has("structured_extraction_artifact")
+    && !missing.has("explicit_caveats")
+  ) return false;
   const sourceContractKinds = new Set<FailedBoundary["missingEvidenceKinds"][number]>([
     "source_summary",
     "source_urls",
+    "schema_summary",
+    "record_counts",
+    "structured_extraction_artifact",
     "explicit_caveats",
   ]);
   const stepRequiresSourceContract = target.evidenceContract?.requiredKinds.some((kind) => sourceContractKinds.has(kind)) === true;
@@ -2922,7 +2959,13 @@ function observedReceiptShapes(
     if (schema === "agentloop.sourceSummary/v1") shapes.add("source");
     const evidenceKinds = asRecord(nestedReceipt?.evidenceKinds ?? result.evidenceKinds);
     const satisfiedKinds = stringArrayField(evidenceKinds?.satisfied);
-    if (satisfiedKinds.some((kind) => kind === "source_summary" || kind === "source_urls")) {
+    if (satisfiedKinds.some((kind) =>
+      kind === "source_summary"
+      || kind === "source_urls"
+      || kind === "schema_summary"
+      || kind === "record_counts"
+      || kind === "structured_extraction_artifact"
+    )) {
       shapes.add("source");
     }
     if (satisfiedKinds.some((kind) => kind.startsWith("artifact_") || kind === "delivery_receipt")) {
@@ -3912,6 +3955,7 @@ function isLookupToolName(name: string): boolean {
   if (
     name === "visible_find_files"
     || name === "visible_index_directory"
+    || name === "visible_extract_tables"
     || name === "visible_search_text"
     || name === "visible_read_file"
     || name === "visible_read_files"
@@ -3924,11 +3968,16 @@ function isSourceContentReadToolName(name: string): boolean {
   return name === "webfetch"
     || name === "visible_read_file"
     || name === "visible_read_files"
+    || name === "visible_extract_tables"
     || /(?:^|_)read_(?:file|files|source|sources)(?:_|$)/i.test(name);
 }
 
 function stepRequiresSourceSummary(step: ExecutionPlan["steps"][number]): boolean {
-  return step.evidenceContract?.requiredKinds.includes("source_summary") ?? false;
+  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+  return requiredKinds.includes("source_summary")
+    || requiredKinds.includes("schema_summary")
+    || requiredKinds.includes("record_counts")
+    || requiredKinds.includes("structured_extraction_artifact");
 }
 
 function stepUsesUploadedSourceEvidence(step: ExecutionPlan["steps"][number]): boolean {
@@ -4305,6 +4354,7 @@ function selectAssessmentProfile(
     return "source_grounded";
   }
   if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
+  if (stepUsesOnlyDirectDelivery(step) && activatedSkills.length === 0) return "deterministic";
   if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
   if (step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
     return "lookup_lite";
@@ -4328,7 +4378,19 @@ function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): bool
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
   return step.recommendedToolNames.includes("verify_artifact_acceptance")
     || requiredKinds.includes("artifact_acceptance")
-    || requiredKinds.includes("source_summary");
+    || requiredKinds.includes("source_summary")
+    || requiredKinds.includes("schema_summary")
+    || requiredKinds.includes("record_counts")
+    || requiredKinds.includes("structured_extraction_artifact");
+}
+
+function stepUsesOnlyDirectDelivery(step: ExecutionPlan["steps"][number]): boolean {
+  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+  return step.role === "deliver"
+    && step.recommendedToolNames.length === 0
+    && step.requiredFacts.length === 0
+    && requiredKinds.length > 0
+    && requiredKinds.every((kind) => kind === "delivery_receipt");
 }
 
 const ARTIFACT_DELIVERY_EVIDENCE_KINDS = new Set([
@@ -4433,7 +4495,10 @@ function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean
   return step.role === "fact_acquisition"
     || step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")
     || requiredKinds.includes("source_summary")
-    || requiredKinds.includes("source_urls");
+    || requiredKinds.includes("source_urls")
+    || requiredKinds.includes("schema_summary")
+    || requiredKinds.includes("record_counts")
+    || requiredKinds.includes("structured_extraction_artifact");
 }
 
 function buildStepSystemPrompt(

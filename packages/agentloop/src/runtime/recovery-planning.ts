@@ -332,6 +332,9 @@ function parseEvidenceKind(value: string, stepIndex: number, kindIndex: number):
   if (
     kind === "source_summary"
     || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "structured_extraction_artifact"
     || kind === "artifact_path"
     || kind === "artifact_non_empty"
     || kind === "artifact_acceptance"

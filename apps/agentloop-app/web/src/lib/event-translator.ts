@@ -109,7 +109,7 @@ export function translateRunEvent(
     return { ...base, title: "裁剪旧工具输出", detail: "旧输出已从模型输入中移除，持久证据仍保留在运行记录中。" };
   }
   if (event.type === "assistant.streaming") {
-    return { ...base, title: "正在生成回复", detail: (d.content ? clip(d.content, 120) + " · " : "") + phaseLabel(d.phase) };
+    return { ...base, title: "收到实时草稿", detail: (d.content ? clip(d.content, 120) + " · " : "") + phaseLabel(d.phase) };
   }
   if (event.type === "assistant.committed") {
     const finish = String(d.finishReason ?? "");

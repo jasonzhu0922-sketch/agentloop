@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +14,9 @@ import { createCoreTools } from "../src/tools/compose.ts";
 import { createVisibleDirectoryTools } from "../src/tools/visible-directory-tools.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
+
+const require = createRequire(import.meta.url);
+const JSZip = require("jszip") as { new(): { file(path: string, content: string): unknown; generateAsync(options: { type: "nodebuffer" }): Promise<Buffer> } };
 
 test("computer paths cannot escape the workspace lexically or through a symbolic link", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-computer-"));
@@ -55,6 +59,71 @@ test("computer_read_file resolves a missing bare filename from a nested evidence
     assert.equal(result.content, "{\"total\":61}");
     assert.equal(result.requestedPath, "content_distribution.json");
     assert.equal(result.resolvedPath, "evidence/content_distribution.json");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_read_json returns structured pointer windows for durable artifacts", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-json-read-"));
+  try {
+    await fs.mkdir(join(root, ".agentloop", "table-extractions", "aa"), { recursive: true });
+    await fs.writeFile(join(root, ".agentloop", "table-extractions", "aa", "artifact.json"), JSON.stringify({
+      schema: "agentloop.visibleTableExtraction/v1",
+      files: [{
+        path: "scores.xlsx",
+        sheets: [{
+          name: "Scores",
+          rows: [
+            { row: 1, cells: [{ address: "A1", value: "Name" }, { address: "B1", value: "Score" }] },
+            { row: 2, cells: [{ address: "A2", value: "Alice" }, { address: "B2", value: 91 }] },
+            { row: 3, cells: [{ address: "A3", value: "Bob" }, { address: "B3", value: 82 }] },
+          ],
+          records: [
+            { row: 2, values: { Name: "Alice", Score: 91 } },
+            { row: 3, values: { Name: "Bob", Score: 82 } },
+          ],
+        }],
+      }],
+    }, null, 2));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_json"]));
+    const prepared = allowed.prepare({
+      id: "read-json",
+      name: "computer_read_json",
+      arguments: {
+        path: ".agentloop/table-extractions/aa/artifact.json",
+        queries: [
+          { pointer: "/schema" },
+          { pointer: "/files/0/sheets/0/records", offset: 1, limit: 1 },
+        ],
+      },
+    });
+    const result = await prepared.tool.execute(
+      grantContext(["computer_read_json"]),
+      prepared.input,
+    ) as {
+      schema: string;
+      root: { type: string; properties: Record<string, { type: string; length?: number }> };
+      queries: Array<{ pointer: string; found: boolean; value: unknown; returned?: number; totalItems?: number; sourceRange?: string }>;
+      caveats: string[];
+    };
+
+    assert.equal(result.schema, "agentloop.jsonRead/v1");
+    assert.equal(result.root.type, "object");
+    assert.equal(result.root.properties.files.length, 1);
+    assert.deepEqual(result.queries[0], {
+      pointer: "/schema",
+      found: true,
+      summary: { type: "string" },
+      value: "agentloop.visibleTableExtraction/v1",
+      sourceRange: "/schema",
+    });
+    assert.equal(result.queries[1]?.returned, 1);
+    assert.equal(result.queries[1]?.totalItems, 2);
+    assert.equal(result.queries[1]?.sourceRange, "/files/0/sheets/0/records[1:2]");
+    assert.deepEqual(result.queries[1]?.value, [{ row: 3, values: { Name: "Bob", Score: 82 } }]);
+    assert.match(result.caveats.join("\n"), /returned 1 of 2 array items/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -282,6 +351,80 @@ test("convert_artifact converts an existing workspace artifact and returns a sta
       sourceFormat: "markdown",
       targetFormat: "pdf",
     });
+    assert.match(await fs.readFile(join(root, "deliverables", "report.pdf"), "utf8"), /^%PDF-1\.4/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("convert_artifact falls back to lightweight ReportLab PDF generation when WeasyPrint fails", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-reportlab-fallback-"));
+  try {
+    await fs.writeFile(join(root, "report.md"), "# 上海虹桥站\n\n| 指标 | 结果 |\n| --- | --- |\n| 总分 | 7.46 |\n");
+    const pandoc = await writeExecutableFixture(root, "fake-pandoc.cjs", [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const args = process.argv.slice(2);",
+      "const output = args[args.indexOf('--output') + 1];",
+      "const input = args[args.indexOf('--output') - 1];",
+      "const source = fs.readFileSync(input, 'utf8');",
+      "fs.writeFileSync(output, '<!doctype html><title>Converted</title><main>' + source + '</main>');",
+      "",
+    ].join("\n"));
+    const weasyprint = await writeExecutableFixture(root, "fake-weasyprint.cjs", [
+      "#!/usr/bin/env node",
+      "process.stderr.write('missing pango');",
+      "process.exit(1);",
+      "",
+    ].join("\n"));
+    const python3 = await writeExecutableFixture(root, "fake-python3.cjs", [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const [, , mode, script, input, output, sourceFormat] = process.argv;",
+      "if (mode !== '-c' || !script.includes('STSong-Light') || sourceFormat !== 'html') process.exit(2);",
+      "const html = fs.readFileSync(input, 'utf8');",
+      "fs.writeFileSync(output, '%PDF-1.4\\n% reportlab fallback ' + Buffer.byteLength(html) + '\\n%%EOF\\n');",
+      "",
+    ].join("\n"));
+    const executor = new ComputerExecutor(root, { executableAliases: { pandoc, weasyprint, python3 } });
+    const registry = new ToolRegistry(createCoreTools({ executor }));
+    const allowed = registry.materialize(grant(["convert_artifact", "verify_artifact_acceptance"]));
+    const prepared = allowed.prepare({
+      id: "convert-report",
+      name: "convert_artifact",
+      arguments: {
+        inputPath: "report.md",
+        outputPath: "deliverables/report.pdf",
+        targetFormat: "pdf",
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["convert_artifact", "verify_artifact_acceptance"]), prepared.input) as {
+      schema: string;
+      output: { path: string; format: string; bytes: number };
+      engine: string;
+      commands: Array<{ engine: string; exitCode: number | null }>;
+      artifactReceipt: {
+        artifact: { path: string; artifactKind: string; bytes: number };
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+        operation: { conversionEngine: string; targetFormat: string };
+      };
+    };
+
+    assert.equal(result.schema, "agentloop.artifactConversion/v1");
+    assert.equal(result.output.path, "deliverables/report.pdf");
+    assert.equal(result.output.format, "pdf");
+    assert.equal(result.engine, "pandoc+weasyprint+reportlab-fallback");
+    assert.deepEqual(result.commands.map((command) => [command.engine, command.exitCode]), [
+      ["pandoc", 0],
+      ["weasyprint", 1],
+      ["reportlab-fallback", 0],
+    ]);
+    assert.equal(result.artifactReceipt.artifact.path, "deliverables/report.pdf");
+    assert.equal(result.artifactReceipt.artifact.artifactKind, "pdf");
+    assert.equal(result.artifactReceipt.operation.conversionEngine, "pandoc+weasyprint+reportlab-fallback");
+    assert.equal(result.artifactReceipt.operation.targetFormat, "pdf");
+    assert.equal(result.artifactReceipt.evidenceKinds.satisfied.includes("artifact_path"), true);
+    assert.equal(result.artifactReceipt.evidenceKinds.satisfied.includes("format_matches_request"), true);
     assert.match(await fs.readFile(join(root, "deliverables", "report.pdf"), "utf8"), /^%PDF-1\.4/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -1192,7 +1335,7 @@ test("computer_write_file reports an existing target as an actionable conflict",
       () => executor.writeFile("measure.py", "replacement\n", false),
       (error: unknown) => hasCode(error, "CONFLICT")
         && error instanceof Error
-        && error.message === "File already exists; set mode=\"overwrite\" or overwrite=true to replace it",
+        && error.message === "File already exists; set mode=\"overwrite\" to replace it",
     );
     assert.equal(await fs.readFile(join(root, "measure.py"), "utf8"), "original\n");
     await executor.writeFile("measure.py", "replacement\n", "overwrite");
@@ -1208,9 +1351,11 @@ test("computer_write_file appends chunks and receipts the final file state", asy
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
     const allowed = registry.materialize(grant(["computer_write_file"]));
     const definition = allowed.definitions.find((tool) => tool.name === "computer_write_file");
-    assert.match(definition?.description ?? "", /mode to create, overwrite, or append/);
+    assert.match(definition?.description ?? "", /Use only mode for write behavior/);
     assert.match(definition?.description ?? "", /Append requires an existing file/);
     assert.match(definition?.description ?? "", /final file sha256/);
+    const writeSchemaProperties = definition?.inputSchema.properties as Record<string, unknown> | undefined;
+    assert.equal(writeSchemaProperties?.overwrite, undefined);
 
     const first = allowed.prepare({
       id: "write-first",
@@ -2741,6 +2886,187 @@ test("visible directory indexing creates source summary evidence for large direc
   }
 });
 
+test("visible directory indexing profiles spreadsheet structure generically", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-spreadsheet-profile-"));
+  try {
+    await writeMinimalXlsx(join(root, "scores.xlsx"), "Scores", [
+      ["Name", "Score", "Weighted"],
+      ["Alice", 91, { formula: "B2*0.5", value: 45.5 }],
+      ["Bob", 82, { formula: "B3*0.5", value: 41 }],
+    ], ["A1:C1"]);
+    await fs.writeFile(join(root, "raw.csv"), "dept,count\n研发,20\n设计,3\n");
+    const registry = new ToolRegistry(createVisibleDirectoryTools());
+    const allowed = registry.materialize(visibleGrant(["visible_index_directory"], root));
+    const prepared = allowed.prepare({
+      id: "index-spreadsheets",
+      name: "visible_index_directory",
+      arguments: { rootId: "visible_dir_1", path: ".", sampleLimit: 10, spreadsheetProfile: true },
+    });
+    const result = await prepared.tool.execute(
+      { grant: visibleGrant(["visible_index_directory"], root) },
+      prepared.input,
+    ) as {
+      spreadsheetProfile: {
+        schema: string;
+        workbookCount: number;
+        profiledWorkbookCount: number;
+        signatures: Array<{ count: number; samplePaths: string[]; sheetNames: string[]; sheetShapes: string[] }>;
+        files: Array<{
+          path: string;
+          workbookType: string;
+          sheetCount: number;
+          sheets: Array<{
+            name: string;
+            rowCount: number;
+            columnCount: number;
+            mergedCellCount: number;
+            formulaCellCount: number;
+            valueKinds: Record<string, number>;
+            candidateHeaders: Array<{ row: number; range: string; values: string[] }>;
+          }>;
+        }>;
+      };
+      evidenceKinds: { satisfied: string[] };
+      evidenceReceipt: { facts: Array<{ spreadsheetProfile?: { workbookCount: number } }>; evidenceKinds: { satisfied: string[] } };
+    };
+
+    assert.equal(result.spreadsheetProfile.schema, "agentloop.spreadsheetProfile/v1");
+    assert.equal(result.spreadsheetProfile.workbookCount, 2);
+    assert.equal(result.spreadsheetProfile.profiledWorkbookCount, 2);
+    assert.ok(result.spreadsheetProfile.signatures.length >= 1);
+    const workbook = result.spreadsheetProfile.files.find((file) => file.path === "scores.xlsx");
+    assert.equal(workbook?.workbookType, "xlsx");
+    assert.equal(workbook?.sheetCount, 1);
+    assert.equal(workbook?.sheets[0]?.name, "Scores");
+    assert.equal(workbook?.sheets[0]?.rowCount, 3);
+    assert.equal(workbook?.sheets[0]?.columnCount, 3);
+    assert.equal(workbook?.sheets[0]?.mergedCellCount, 1);
+    assert.equal(workbook?.sheets[0]?.formulaCellCount, 2);
+    assert.equal(workbook?.sheets[0]?.candidateHeaders[0]?.range, "A1:C1");
+    assert.deepEqual(workbook?.sheets[0]?.candidateHeaders[0]?.values, ["Name", "Score", "Weighted"]);
+    const csv = result.spreadsheetProfile.files.find((file) => file.path === "raw.csv");
+    assert.equal(csv?.workbookType, "csv");
+    assert.deepEqual(csv?.sheets[0]?.candidateHeaders[0]?.values, ["dept", "count"]);
+    assert.ok(result.evidenceKinds.satisfied.includes("schema_summary"));
+    assert.ok(result.evidenceKinds.satisfied.includes("record_counts"));
+    assert.equal(result.evidenceReceipt.facts[0]?.spreadsheetProfile?.workbookCount, 2);
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("schema_summary"));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("visible_extract_tables writes durable generic spreadsheet extraction evidence", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-table-source-"));
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-table-workspace-"));
+  try {
+    await writeMinimalXlsx(join(root, "scores.xlsx"), "Scores", [
+      ["Name", "Score"],
+      ["Alice", 91],
+      ["Bob", 82],
+    ]);
+    const registry = new ToolRegistry(createVisibleDirectoryTools());
+    const runtimeGrant = visibleGrant(["visible_extract_tables"], root, workspace);
+    const allowed = registry.materialize(runtimeGrant);
+    const prepared = allowed.prepare({
+      id: "extract-tables",
+      name: "visible_extract_tables",
+      arguments: {
+        rootId: "visible_dir_1",
+        files: [{ path: "scores.xlsx" }],
+        maxRowsPerSheet: 10,
+        maxTotalCells: 100,
+      },
+    });
+    const result = await prepared.tool.execute(
+      { grant: runtimeGrant },
+      prepared.input,
+    ) as {
+      schema: string;
+      totalRows: number;
+      totalRecords: number;
+      totalCells: number;
+      artifact: {
+        path: string;
+        sha256: string;
+        bytes: number;
+        schema: string;
+        manifest: {
+          schema: string;
+          totalTables: number;
+          totalRecords: number;
+          tables: Array<{
+            filePath: string;
+            sheetName: string;
+            recordsPointer: string;
+            rowsPointer: string;
+            columnsPointer: string;
+            sourceRange?: string;
+            headerRange?: string;
+            recordRows?: { first: number; last: number };
+            fields: Array<{ name: string; address: string; valueKinds: Record<string, number> }>;
+            sampleRecords: Array<{ row: number; sourceRange: string; values: Record<string, string | number> }>;
+            sourceRanges: string[];
+          }>;
+        };
+      };
+      files: Array<{ sheets: Array<{
+        columns: Array<{ name: string }>;
+        rows: Array<{ cells: Array<{ value: string | number }> }>;
+        records: Array<{ row: number; values: Record<string, string | number> }>;
+      }> }>;
+      evidenceReceipt: {
+        evidenceKinds: { satisfied: string[]; caveated: string[] };
+        facts: Array<{
+          artifact: {
+            path: string;
+            manifest: {
+              schema: string;
+              tables: Array<{ recordsPointer: string; sampleRecords: Array<{ values: Record<string, string | number> }> }>;
+            };
+          };
+        }>;
+      };
+    };
+
+    assert.equal(result.schema, "agentloop.visibleTableExtraction/v1");
+    assert.equal(result.totalRows, 3);
+    assert.equal(result.totalRecords, 2);
+    assert.equal(result.totalCells, 6);
+    assert.deepEqual(result.files[0]?.sheets[0]?.columns.map((column) => column.name), ["Name", "Score"]);
+    assert.equal(result.files[0]?.sheets[0]?.rows[1]?.cells[0]?.value, "Alice");
+    assert.deepEqual(result.files[0]?.sheets[0]?.records[0]?.values, { Name: "Alice", Score: 91 });
+    assert.equal(result.artifact.schema, "agentloop.tableExtractionArtifact/v1");
+    assert.equal(result.artifact.manifest.schema, "agentloop.tableExtractionArtifactManifest/v1");
+    assert.equal(result.artifact.manifest.totalTables, 1);
+    assert.equal(result.artifact.manifest.totalRecords, 2);
+    assert.equal(result.artifact.manifest.tables[0]?.filePath, "scores.xlsx");
+    assert.equal(result.artifact.manifest.tables[0]?.sheetName, "Scores");
+    assert.equal(result.artifact.manifest.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+    assert.equal(result.artifact.manifest.tables[0]?.rowsPointer, "/files/0/sheets/0/rows");
+    assert.equal(result.artifact.manifest.tables[0]?.columnsPointer, "/files/0/sheets/0/columns");
+    assert.equal(result.artifact.manifest.tables[0]?.sourceRange, "A1:B3");
+    assert.equal(result.artifact.manifest.tables[0]?.headerRange, "A1:B1");
+    assert.deepEqual(result.artifact.manifest.tables[0]?.recordRows, { first: 2, last: 3 });
+    assert.deepEqual(result.artifact.manifest.tables[0]?.fields.map((field) => field.name), ["Name", "Score"]);
+    assert.deepEqual(result.artifact.manifest.tables[0]?.sampleRecords[0]?.values, { Name: "Alice", Score: 91 });
+    assert.ok(result.artifact.manifest.tables[0]?.sourceRanges.includes("A1:B3"));
+    const artifactContent = await fs.readFile(join(workspace, result.artifact.path), "utf8");
+    assert.equal(createHash("sha256").update(artifactContent).digest("hex"), result.artifact.sha256);
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("schema_summary"));
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("record_counts"));
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("structured_extraction_artifact"));
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("explicit_caveats"));
+    assert.equal(result.evidenceReceipt.evidenceKinds.caveated.includes("explicit_caveats"), false);
+    assert.equal(result.evidenceReceipt.facts[0]?.artifact.path, result.artifact.path);
+    assert.equal(result.evidenceReceipt.facts[0]?.artifact.manifest.schema, "agentloop.tableExtractionArtifactManifest/v1");
+    assert.equal(result.evidenceReceipt.facts[0]?.artifact.manifest.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("visible_find_files reports total matches when returned paths are truncated", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-find-total-"));
   try {
@@ -3040,11 +3366,12 @@ function grant(toolNames: readonly string[]) {
   });
 }
 
-function visibleGrant(toolNames: readonly string[], path: string) {
+function visibleGrant(toolNames: readonly string[], path: string, workspaceRoot?: string) {
   return createCapabilityGrant({
     actorUserId: "user",
     runId: "run",
     depth: 0,
+    ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
     visibleDirectories: [{ id: "visible_dir_1", name: "visible", path }],
     allowedToolNames: toolNames,
     allowedSkillIds: [],
@@ -3066,6 +3393,100 @@ function skillRootGrant(toolNames: readonly string[], path: string) {
     allowedToolNames: toolNames,
     allowedSkillIds: ["demo-skill"],
   });
+}
+
+type MinimalXlsxCell = string | number | boolean | { readonly formula: string; readonly value: string | number | boolean };
+
+async function writeMinimalXlsx(
+  path: string,
+  sheetName: string,
+  rows: readonly (readonly MinimalXlsxCell[])[],
+  mergeRefs: readonly string[] = [],
+): Promise<void> {
+  const zip = new JSZip();
+  const sharedStrings: string[] = [];
+  const sharedIndex = new Map<string, number>();
+  const sharedStringIndex = (value: string): number => {
+    const existing = sharedIndex.get(value);
+    if (existing !== undefined) return existing;
+    const index = sharedStrings.length;
+    sharedStrings.push(value);
+    sharedIndex.set(value, index);
+    return index;
+  };
+  const sheetRows = rows.map((row, rowIndex) => {
+    const cells = row.map((cell, columnIndex) => {
+      const address = `${minimalColumnName(columnIndex + 1)}${rowIndex + 1}`;
+      if (typeof cell === "string") {
+        return `<c r="${address}" t="s"><v>${sharedStringIndex(cell)}</v></c>`;
+      }
+      if (typeof cell === "boolean") {
+        return `<c r="${address}" t="b"><v>${cell ? "1" : "0"}</v></c>`;
+      }
+      if (typeof cell === "number") {
+        return `<c r="${address}"><v>${cell}</v></c>`;
+      }
+      return `<c r="${address}"><f>${escapeXml(cell.formula)}</f><v>${cell.value}</v></c>`;
+    }).join("");
+    return `<row r="${rowIndex + 1}">${cells}</row>`;
+  }).join("");
+  const maxColumns = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  const dimension = `A1:${minimalColumnName(maxColumns)}${rows.length}`;
+  zip.file("[Content_Types].xml", [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+    "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>",
+    "<Default Extension=\"xml\" ContentType=\"application/xml\"/>",
+    "</Types>",
+  ].join(""));
+  zip.file("xl/workbook.xml", [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">",
+    "<sheets>",
+    `<sheet name="${escapeXml(sheetName)}" sheetId="1" r:id="rId1"/>`,
+    "</sheets>",
+    "</workbook>",
+  ].join(""));
+  zip.file("xl/_rels/workbook.xml.rels", [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>",
+    "</Relationships>",
+  ].join(""));
+  zip.file("xl/sharedStrings.xml", [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sharedStrings.length}" uniqueCount="${sharedStrings.length}">`,
+    ...sharedStrings.map((value) => `<si><t>${escapeXml(value)}</t></si>`),
+    "</sst>",
+  ].join(""));
+  zip.file("xl/worksheets/sheet1.xml", [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
+    `<dimension ref="${dimension}"/>`,
+    `<sheetData>${sheetRows}</sheetData>`,
+    mergeRefs.length > 0 ? `<mergeCells count="${mergeRefs.length}">${mergeRefs.map((ref) => `<mergeCell ref="${ref}"/>`).join("")}</mergeCells>` : "",
+    "</worksheet>",
+  ].join(""));
+  await fs.writeFile(path, await zip.generateAsync({ type: "nodebuffer" }));
+}
+
+function minimalColumnName(value: number): string {
+  let output = "";
+  let current = value;
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    output = String.fromCharCode(65 + remainder) + output;
+    current = Math.floor((current - 1) / 26);
+  }
+  return output || "A";
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function grantContext(toolNames: readonly string[]) {

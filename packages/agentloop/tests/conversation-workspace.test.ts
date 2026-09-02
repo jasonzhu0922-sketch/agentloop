@@ -8,6 +8,7 @@ import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtim
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
 test("Computer Tool writes are isolated by conversation and reused by follow-up runs", async () => {
@@ -273,6 +274,91 @@ test("Uploaded source query matches separated search terms instead of one litera
     await fs.rm(workspace, { recursive: true, force: true });
   }
 });
+
+test("Uploaded CID-font PDFs with ToUnicode maps become readable source chunks", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-upload-cid-pdf-"));
+  const database = new AppDatabase(":memory:");
+  try {
+
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      modelFactory: () => { throw new Error("model is not used"); },
+    });
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "评估报告案例.pdf",
+      mimeType: "application/pdf",
+      content: minimalUnicodeCmapPdf("上海虹桥站 碳减排评估报告"),
+    });
+
+    assert.equal(source.status, "ready");
+    assert.equal(source.chunkCount, 1);
+    assert.match(source.summary ?? "", /上海虹桥站 碳减排评估报告/);
+    const chunks = await new SourceRepository(database).chunks(source.id);
+    assert.match(chunks[0]?.content ?? "", /上海虹桥站 碳减排评估报告/);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+function minimalUnicodeCmapPdf(text: string): Buffer {
+  const entries = [...text];
+  const encoded = entries
+    .map((_char, index) => (index + 1).toString(16).padStart(4, "0"))
+    .join("");
+  const cmapEntries = entries
+    .map((char, index) => `<${(index + 1).toString(16).padStart(4, "0")}> <${utf16BeHex(char)}>`)
+    .join("\n");
+  const content = `BT /F1 12 Tf 72 720 Td <${encoded}> Tj ET`;
+  const cmap = `/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+${entries.length} beginbfchar
+${cmapEntries}
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${Buffer.byteLength(content, "latin1")} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type0 /BaseFont /TestCID /Encoding /Identity-H /ToUnicode 6 0 R >>",
+    `<< /Length ${Buffer.byteLength(cmap, "latin1")} >>\nstream\n${cmap}\nendstream`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [0];
+  for (let index = 0; index < objects.length; index += 1) {
+    offsets.push(Buffer.byteLength(pdf, "latin1"));
+    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, "latin1");
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets.slice(1)) pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer << /Root 1 0 R /Size ${objects.length + 1} >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, "latin1");
+}
+
+function utf16BeHex(value: string): string {
+  const utf16 = Buffer.from(value, "utf16le");
+  const swapped = Buffer.alloc(utf16.length);
+  for (let index = 0; index + 1 < utf16.length; index += 2) {
+    swapped[index] = utf16[index + 1]!;
+    swapped[index + 1] = utf16[index]!;
+  }
+  return swapped.toString("hex").toUpperCase();
+}
 
 class ConversationWriteModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;

@@ -185,6 +185,144 @@ test("execution context binds dependency evidence before downstream reacquisitio
   assert.equal(frame.completionBoundary.includes("artifact_acceptance"), true);
 });
 
+test("execution context prefers structured JSON reads for table extraction artifacts", () => {
+  const extractStep: PlanStep = {
+    id: "extract_data",
+    kind: "leaf",
+    position: 0,
+    objective: "Extract visible spreadsheet tables into durable generic evidence.",
+    dependencies: [],
+    role: "fact_acquisition",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    recommendedToolNames: ["visible_index_directory", "visible_extract_tables"],
+    evidenceContract: {
+      requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "completed",
+    output: "Structured extraction artifact: .agentloop/table-extractions/aa/artifact.json",
+    evidence: {
+      candidateOutput: JSON.stringify({
+        schema: "agentloop.sourceSummaryCandidate/v1",
+        facts: [{ claim: "20 spreadsheet files extracted.", sourceRefs: ["extract-tables"] }],
+      }),
+      modelSteps: 2,
+      toolCalls: [{
+        toolCallId: "extract-tables",
+        toolName: "visible_extract_tables",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.visibleTableExtraction/v1",
+          totalRows: 673,
+          totalRecords: 633,
+          totalCells: 4012,
+          artifact: {
+            schema: "agentloop.tableExtractionArtifact/v1",
+            path: ".agentloop/table-extractions/aa/artifact.json",
+            bytes: 1447549,
+            sha256: "a".repeat(64),
+            manifest: {
+              schema: "agentloop.tableExtractionArtifactManifest/v1",
+              artifactSchema: "agentloop.visibleTableExtraction/v1",
+              totalFiles: 20,
+              totalTables: 20,
+              totalRows: 673,
+              totalRecords: 633,
+              totalCells: 4012,
+              tables: [{
+                tableId: "file:0:sheet:0",
+                filePath: "scores.xlsx",
+                fileIndex: 0,
+                sheetName: "Scores",
+                sheetIndex: 0,
+                sheetPointer: "/files/0/sheets/0",
+                rowsPointer: "/files/0/sheets/0/rows",
+                recordsPointer: "/files/0/sheets/0/records",
+                columnsPointer: "/files/0/sheets/0/columns",
+                sourceRange: "A1:B3",
+                headerRange: "A1:B1",
+                rowCount: 3,
+                recordCount: 2,
+                cellCount: 6,
+                recordRows: { first: 2, last: 3 },
+                fields: [{ name: "Name", address: "A", index: 1, nonEmptyCellCount: 3, valueKinds: { text: 3 } }],
+                sampleRecords: [{ row: 2, sourceRange: "A2:B2", values: { Name: "Alice", Score: 91 } }],
+                sourceRanges: ["A1:B3", "A1:B1", "A2:B2"],
+                truncated: false,
+              }],
+            },
+          },
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            evidenceKinds: {
+              satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+              caveated: [],
+              failed: [],
+            },
+          },
+        }),
+      }],
+    },
+  };
+  const produceStep: PlanStep = {
+    id: "deliver_analysis",
+    kind: "leaf",
+    position: 1,
+    objective: "Produce a conversation answer from the extracted table data.",
+    dependencies: ["extract_data"],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    recommendedToolNames: [],
+    evidenceContract: {
+      requiredKinds: ["delivery_receipt", "explicit_caveats"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "running",
+  };
+  const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
+    step: produceStep,
+    plan: {
+      id: "plan-1",
+      runId: "run-1",
+      version: 1,
+      goal: "Analyze spreadsheet performance data",
+      selectedSkillIds: [],
+      status: "running",
+      steps: [extractStep, produceStep],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    skills: [],
+    workspaceRoot: "/workspace",
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", sourceNeed: "source_grounded" }),
+    operationProfile: { id: "data_analysis" },
+    requiresFileOutput: false,
+  }).content);
+
+  assert.match(payload.structuredArtifactConsumptionDiscipline, /manifest table entries/);
+  assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_read_json/);
+  assert.match(payload.structuredArtifactConsumptionDiscipline, /Use computer_search_text only/);
+  const bindings = payload.dependencyEvidenceBindings as {
+    readonly bindings: readonly Array<{
+      readonly toolEvidence: readonly Array<{
+        readonly artifacts?: readonly Array<{
+          readonly path: string;
+          readonly schema?: string;
+          readonly manifest?: { readonly tables: readonly Array<{ readonly recordsPointer: string }> };
+        }>;
+      }>;
+    }>;
+  };
+  assert.equal(bindings.bindings[0]?.toolEvidence[0]?.artifacts?.[0]?.schema, "agentloop.tableExtractionArtifact/v1");
+  assert.equal(bindings.bindings[0]?.toolEvidence[0]?.artifacts?.[0]?.manifest?.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+});
+
 test("step semantic frame classifies visible directory analysis as source acquisition", () => {
   const step: PlanStep = {
     id: "profile_xlsx_data",

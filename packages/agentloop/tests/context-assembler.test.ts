@@ -523,7 +523,7 @@ test("ContextAssembler projects successful artifact write arguments out of model
       toolCalls: [{
         id: "write",
         name: "computer_write_file",
-        arguments: { path: "deliverables/report.md", content: generatedMarkdown },
+        arguments: { path: "deliverables/report.md", content: generatedMarkdown, overwrite: false },
       }],
     },
     { role: "tool" as const, toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },

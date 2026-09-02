@@ -12,12 +12,27 @@ const FILE_PRODUCER_TOOL_NAMES = new Set([
 ]);
 
 const SKILL_QA_ONLY_EVIDENCE_KINDS = new Set(["basic_navigation"]);
+const ARTIFACT_DELIVERY_EVIDENCE_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+]);
+const OUTPUT_EVIDENCE_KINDS = new Set([
+  ...ARTIFACT_DELIVERY_EVIDENCE_KINDS,
+  "delivery_receipt",
+]);
 
 export function admitPlan(input: {
   runId: string;
   proposal: PlanProposal;
   availableSkills: readonly PrivateSkill[];
   availableToolNames: ReadonlySet<string>;
+  taskIntent?: {
+    readonly deliverySurface?: "conversation" | "workspace_artifact";
+    readonly artifactKind?: string;
+  };
   now?: number;
 }): ExecutionPlan {
   const { proposal } = input;
@@ -108,7 +123,12 @@ export function admitPlan(input: {
     ) {
       mergedTools.add("verify_artifact_acceptance");
     }
-    const criteria: SuccessCriterion[] = [...step.successCriteria];
+    const completionEvidenceContract = normalizeCompletionEvidenceContract(step.role, evidenceContract, input.taskIntent);
+    const completionCriteria = normalizeCompletionSuccessCriteria(step.role, step.successCriteria, input.taskIntent);
+    const criteria: SuccessCriterion[] = [
+      ...completionCriteria,
+      ...completionEvidenceSuccessCriteria(completionCriteria, completionEvidenceContract),
+    ];
     for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
       const skill = availableSkills.get(skillId);
@@ -131,7 +151,7 @@ export function admitPlan(input: {
       refinementState,
       requiredFacts,
       recommendedToolNames: [...mergedTools],
-      ...(evidenceContract === undefined ? {} : { evidenceContract }),
+      ...(completionEvidenceContract === undefined ? {} : { evidenceContract: completionEvidenceContract }),
       successCriteria: criteria,
       status: "pending",
     };
@@ -212,6 +232,44 @@ function normalizeEvidenceContract(contract: EvidenceContract | undefined): Evid
     reject("Plan evidenceContract must retain at least one Runtime evidence kind after Skill-owned QA evidence is excluded");
   }
   return { ...contract, requiredKinds };
+}
+
+function normalizeCompletionEvidenceContract(
+  role: PlanProposal["steps"][number]["role"],
+  contract: EvidenceContract | undefined,
+  taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
+): EvidenceContract | undefined {
+  if (contract === undefined || role === undefined || role === "fact_acquisition" || role === "repair") return contract;
+  if (taskIntent?.deliverySurface === "conversation" && taskIntent.artifactKind === "none") {
+    const requiredKinds = contract.requiredKinds.filter((kind) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind));
+    if (!requiredKinds.includes("delivery_receipt")) requiredKinds.push("delivery_receipt");
+    return { ...contract, requiredKinds };
+  }
+  if (contract.requiredKinds.some((kind) => OUTPUT_EVIDENCE_KINDS.has(kind))) return contract;
+  return { ...contract, requiredKinds: [...contract.requiredKinds, "delivery_receipt"] };
+}
+
+function completionEvidenceSuccessCriteria(
+  criteria: readonly SuccessCriterion[],
+  contract: EvidenceContract | undefined,
+): SuccessCriterion[] {
+  if (contract === undefined || !contract.requiredKinds.includes("delivery_receipt")) return [];
+  if (criteria.some((criterion) => criterion.id === "delivery_receipt")) return [];
+  return [{
+    id: "delivery_receipt",
+    description: "The final user-facing result is present as text or an artifact delivery receipt.",
+    source: "planner",
+  }];
+}
+
+function normalizeCompletionSuccessCriteria(
+  role: PlanProposal["steps"][number]["role"],
+  criteria: readonly SuccessCriterion[],
+  taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
+): readonly SuccessCriterion[] {
+  if (role === undefined || role === "fact_acquisition" || role === "repair") return criteria;
+  if (taskIntent?.deliverySurface !== "conversation" || taskIntent.artifactKind !== "none") return criteria;
+  return criteria.filter((criterion) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id));
 }
 
 function assertParentTree(steps: readonly PlanStep[]): void {

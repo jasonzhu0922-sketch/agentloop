@@ -6,14 +6,16 @@ import {
   failureSummary,
   latestProgressEvent,
   latestStreaming,
+  type LiveFeedItem,
+  liveEventFeed,
   livePlan,
   modelWaitText,
   progressText,
   retryText,
+  streamingStatus,
   streamingToolProgress,
 } from "../lib/live";
-import { clip, fmtBytes, previewText, stepClass, stepLabel } from "../lib/format";
-import { translatedTimeline } from "../lib/event-translator";
+import { fmtBytes, previewText, stepClass, stepLabel } from "../lib/format";
 import type { PlanStep, ProcessArtifact, RunEvent, RunRecord, SourceSummary } from "../lib/types";
 import { ArtifactLinks } from "./DetailsPanel";
 
@@ -101,26 +103,65 @@ function PlanStepsPanel({ id, steps }: { readonly id: string; readonly steps: re
   );
 }
 
+function LiveStreamOutput({
+  items,
+  fallback,
+}: {
+  readonly items: readonly LiveFeedItem[];
+  readonly fallback: string;
+}): React.ReactNode {
+  const current = items[items.length - 1] ?? null;
+  const view = liveOutputView(items, fallback);
+  return (
+    <div className="live-output" aria-label="实时 SSE 输出">
+      <div className="live-output-text">{view.body}</div>
+      <div className={"live-output-activity " + (current?.kind ?? "thinking")}>
+        <span className="live-output-dot" aria-hidden="true" />
+        <span>{view.activity}</span>
+      </div>
+    </div>
+  );
+}
+
+function liveOutputView(items: readonly LiveFeedItem[], fallback: string): { readonly body: string; readonly activity: string } {
+  const current = items[items.length - 1] ?? null;
+  if (items.length === 0) return { body: fallback, activity: "等待实时返回" };
+  const latestReply = findLatestItem(items, "reply");
+  const body = latestReply?.detail || current?.detail || current?.title || fallback;
+  return {
+    body,
+    activity: activityText(current),
+  };
+}
+
+function findLatestItem(items: readonly LiveFeedItem[], kind: LiveFeedItem["kind"]): LiveFeedItem | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].kind === kind) return items[index];
+  }
+  return null;
+}
+
+function activityText(item: LiveFeedItem | null): string {
+  if (item?.kind === "reply") return "正在回复";
+  if (item?.kind === "tool") return "正在调用工具";
+  return "正在思考";
+}
+
 function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; readonly steps: readonly PlanStep[] }): React.ReactNode {
   const [planOpen, setPlanOpen] = useState(false);
   const planPanelId = useId();
   const stream = latestStreaming(events);
-  const content = stream?.data?.content ? String(stream.data.content) : "";
+  const streamStatus = streamingStatus(stream);
+  const content = streamStatus?.content ?? "";
   const streamTool = streamingToolProgress(stream);
   const progressEvent = latestProgressEvent(events);
   const phaseEvent = stream?.data?.phase ? stream.data.phase : (progressEvent?.data?.phase ?? "处理中");
   const total = steps.length;
   const done = steps.filter((s) => s.status === "completed").length;
-  const current = steps.find((s) => s.status === "running") ?? null;
   const plan = livePlan(events);
   const retry = retryText(events);
   const idle = streamTool || modelWaitText(events) || progressText(events, plan);
-  const timeline = translatedTimeline(events, 1);
-  const preview = content ? (
-    <div className="live-preview">{previewText(content)}</div>
-  ) : (
-    <div className="live-preview idle">{idle}</div>
-  );
+  const feed = liveEventFeed(events, 4);
   return (
     <article className="msg assistant live">
       <div className="msg-avatar">A</div>
@@ -142,23 +183,8 @@ function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; rea
             ) : null}
           </div>
           {planOpen ? <PlanStepsPanel id={planPanelId} steps={steps} /> : null}
-          {current ? <div className="live-current">{clip(current.objective || current.id, 120)}</div> : null}
           {retry ? <div className="live-retry">{retry}</div> : null}
-          {preview}
-          {timeline.length ? (
-            <ol className="run-timeline">
-              {timeline.map((event) => (
-                <li className={event.tone} key={event.key}>
-                  <span className="timeline-dot" />
-                  <span className="timeline-copy">
-                    <strong>{event.title}</strong>
-                    {event.detail ? <span>{event.detail}</span> : null}
-                    <code>{event.rawType}</code>
-                  </span>
-                </li>
-              ))}
-            </ol>
-          ) : null}
+          <LiveStreamOutput items={feed} fallback={content ? previewText(content) : idle} />
         </div>
       </div>
     </article>

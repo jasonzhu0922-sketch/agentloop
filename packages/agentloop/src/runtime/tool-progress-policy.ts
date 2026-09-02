@@ -3,6 +3,7 @@ import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 export interface RuntimeToolProgressPolicy {
   readonly schema: "agentloop.runtimeToolProgressPolicy/v1";
   readonly requiredEvidenceKinds: readonly string[];
+  readonly autoCompleteFromEvidence?: boolean;
   readonly maxExploratoryPrimarySteps: number;
   readonly maxExploratoryGraceSteps: number;
   readonly maxDiagnosticExploratorySteps: number;
@@ -61,6 +62,16 @@ export interface RuntimeStepEvidenceState {
   readonly instruction: string;
 }
 
+export interface RuntimeEvidenceCompletionCandidate {
+  readonly schema: "agentloop.runtimeEvidenceCompletionCandidate/v1";
+  readonly output: string;
+  readonly requiredEvidenceKinds: readonly string[];
+  readonly satisfiedEvidenceKinds: readonly string[];
+  readonly caveatedEvidenceKinds: readonly string[];
+  readonly sourceToolCallIds: readonly string[];
+  readonly artifacts: readonly RuntimeStepArtifactRef[];
+}
+
 export function initialRuntimeToolProgressState(): RuntimeToolProgressState {
   return {
     exploratoryOnlyPrimarySteps: 0,
@@ -69,6 +80,43 @@ export function initialRuntimeToolProgressState(): RuntimeToolProgressState {
     exploratoryOnlyRejections: 0,
     diagnosticExploratorySteps: 0,
     diagnosticExploratoryRejections: 0,
+  };
+}
+
+export function deriveEvidenceCompletionCandidate(input: {
+  readonly policy?: RuntimeToolProgressPolicy;
+  readonly evidence: readonly AgentLoopToolEvidence[];
+  readonly latestEvidence: readonly AgentLoopToolEvidence[];
+  readonly userInput?: string;
+}): RuntimeEvidenceCompletionCandidate | undefined {
+  const policy = input.policy;
+  if (policy === undefined || policy.requiredEvidenceKinds.length === 0) return undefined;
+  if (policy.autoCompleteFromEvidence !== true) return undefined;
+  if (input.latestEvidence.length === 0 || input.latestEvidence.some((item) => item.isError)) return undefined;
+  const evidenceKinds = collectEvidenceKinds(input.evidence);
+  const successfulToolCallIds = input.evidence
+    .filter((item) => !item.isError)
+    .map((item) => item.toolCallId);
+  const missingRequiredEvidenceKinds = policy.requiredEvidenceKinds.filter((kind) =>
+    !evidenceKindSatisfiedByCompletionGate(kind, evidenceKinds)
+  );
+  if (missingRequiredEvidenceKinds.length > 0) return undefined;
+  const artifacts = collectKnownArtifacts(input.evidence);
+  const satisfiedEvidenceKinds = [...evidenceKinds.satisfied].sort();
+  const caveatedEvidenceKinds = [...evidenceKinds.caveated].sort();
+  const sourceToolCallIds = uniqueStrings(successfulToolCallIds);
+  return {
+    schema: "agentloop.runtimeEvidenceCompletionCandidate/v1",
+    output: formatEvidenceCompletionDelivery({
+      artifacts,
+      caveatedEvidenceKinds,
+      language: preferredDeliveryLanguage(input.userInput),
+    }),
+    requiredEvidenceKinds: policy.requiredEvidenceKinds,
+    satisfiedEvidenceKinds,
+    caveatedEvidenceKinds,
+    sourceToolCallIds,
+    artifacts,
   };
 }
 
@@ -107,6 +155,7 @@ export function artifactStepToolProgressPolicy(requiredEvidenceKinds: readonly s
   return {
     schema: "agentloop.runtimeToolProgressPolicy/v1",
     requiredEvidenceKinds,
+    autoCompleteFromEvidence: requiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
     maxExploratoryPrimarySteps: 3,
     maxExploratoryGraceSteps: 2,
     maxDiagnosticExploratorySteps: 1,
@@ -115,10 +164,12 @@ export function artifactStepToolProgressPolicy(requiredEvidenceKinds: readonly s
       "computer_list_directory",
       "computer_read_file",
       "computer_read_files",
+      "computer_read_json",
       "computer_search_text",
       "read_source",
       "visible_read_file",
       "visible_read_files",
+      "visible_extract_tables",
       "visible_list_directory",
       "webfetch",
       "websearch",
@@ -130,6 +181,7 @@ export function artifactStepToolProgressPolicy(requiredEvidenceKinds: readonly s
       "computer_run_command",
       "convert_artifact",
       "materialize_paginated_html",
+      "visible_extract_tables",
       "verify_artifact_acceptance",
     ],
     repairDirective: [
@@ -152,6 +204,15 @@ export function artifactStepToolProgressPolicy(requiredEvidenceKinds: readonly s
   };
 }
 
+const AUTO_COMPLETABLE_EVIDENCE_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+  "delivery_receipt",
+]);
+
 function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
   readonly satisfied: Set<string>;
   readonly caveated: Set<string>;
@@ -168,6 +229,19 @@ function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
     collectEvidenceKindsFromRecord(asRecord(parsed.evidenceReceipt), { satisfied, caveated, failed });
   }
   return { satisfied, caveated, failed };
+}
+
+function evidenceKindSatisfiedByCompletionGate(
+  kind: string,
+  evidenceKinds: {
+    readonly satisfied: ReadonlySet<string>;
+    readonly caveated: ReadonlySet<string>;
+    readonly failed: ReadonlySet<string>;
+  },
+): boolean {
+  if (evidenceKinds.failed.has(kind)) return false;
+  if (kind === "explicit_caveats") return evidenceKinds.satisfied.has(kind) || evidenceKinds.caveated.has(kind);
+  return evidenceKinds.satisfied.has(kind);
 }
 
 function collectEvidenceKindsFromRecord(
@@ -213,6 +287,48 @@ function collectKnownArtifacts(evidence: readonly AgentLoopToolEvidence[]): Runt
   return [...byPath.values()];
 }
 
+function formatEvidenceCompletionDelivery(input: {
+  readonly caveatedEvidenceKinds: readonly string[];
+  readonly artifacts: readonly RuntimeStepArtifactRef[];
+  readonly language: "zh" | "en";
+}): string {
+  if (input.language === "zh") {
+    const lines = ["已完成并通过当前步骤的验收检查。"];
+    if (input.artifacts.length > 0) {
+      lines.push(`产物：${input.artifacts.map(formatArtifactDeliveryRef).join("；")}。`);
+    }
+    if (input.caveatedEvidenceKinds.length > 0) {
+      lines.push("注意：部分验收项带有保留说明，详情见运行记录。");
+    }
+    return lines.join("\n");
+  }
+
+  const lines = ["Done and verified for the current step."];
+  if (input.artifacts.length > 0) {
+    lines.push(`Artifact: ${input.artifacts.map(formatArtifactDeliveryRef).join("; ")}.`);
+  }
+  if (input.caveatedEvidenceKinds.length > 0) {
+    lines.push("Note: Some acceptance checks include caveats; see the run record for details.");
+  }
+  return lines.join("\n");
+}
+
+function formatArtifactDeliveryRef(artifact: RuntimeStepArtifactRef): string {
+  return [
+    artifact.path,
+    artifact.artifactKind === undefined ? undefined : artifact.artifactKind,
+    artifact.bytes === undefined ? undefined : `${artifact.bytes} bytes`,
+  ].filter((item): item is string => item !== undefined).join(" ");
+}
+
+function preferredDeliveryLanguage(text: string | undefined): "zh" | "en" {
+  return text !== undefined && /[\u3400-\u9fff]/u.test(text) ? "zh" : "en";
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
 function artifactRecordFromResult(record: Record<string, unknown>): Record<string, unknown> | undefined {
   const artifactReceipt = asRecord(record.artifactReceipt);
   return asRecord(record.artifact) ?? asRecord(artifactReceipt?.artifact);
@@ -228,7 +344,13 @@ function nextActionForEvidenceGap(input: {
   if (input.failedEvidenceKinds.length > 0 && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
   }
-  if (missing.has("source_summary") || missing.has("source_urls")) return "acquire_source_evidence";
+  if (
+    missing.has("source_summary")
+    || missing.has("source_urls")
+    || missing.has("schema_summary")
+    || missing.has("record_counts")
+    || missing.has("structured_extraction_artifact")
+  ) return "acquire_source_evidence";
   if ((missing.has("artifact_path") || missing.has("artifact_non_empty")) && hasArtifactProducer(input.policy)) {
     return "produce_artifact";
   }

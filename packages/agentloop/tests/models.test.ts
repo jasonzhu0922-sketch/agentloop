@@ -57,6 +57,97 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
   }
 });
 
+test("OpenAI-compatible adapter normalizes double-encoded object tool arguments", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "call-1",
+            function: { name: "write_file", arguments: JSON.stringify(JSON.stringify({ path: "report.html", content: "ok" })) },
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    const result = await model.complete({
+      runId: "run-double-encoded-tool-arguments",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Write" }],
+      tools: [{
+        name: "write_file",
+        description: "Write a file",
+        inputSchema: { type: "object" },
+      }],
+      toolChoice: { name: "write_file" },
+    });
+
+    assert.deepEqual(result.toolCalls[0].arguments, { path: "report.html", content: "ok" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter rejects non-object tool arguments at the provider boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          content: null,
+          tool_calls: [{
+            id: "call-1",
+            function: { name: "write_file", arguments: JSON.stringify(JSON.stringify("not-json-object")) },
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    await assert.rejects(
+      () => model.complete({
+        runId: "run-invalid-tool-arguments",
+        systemPrompt: "System",
+        phase: "execution",
+        messages: [{ role: "user", content: "Write" }],
+        tools: [{
+          name: "write_file",
+          description: "Write a file",
+          inputSchema: { type: "object" },
+        }],
+        toolChoice: { name: "write_file" },
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.match((error as { message?: string }).message ?? "", /tool arguments at index 0/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible adapter renders prior tool execution as neutral evidence when no tools are available", async () => {
   const originalFetch = globalThis.fetch;
   let capturedBody: Record<string, unknown> | undefined;
@@ -549,6 +640,64 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
   }
 });
 
+test("OpenAI-compatible streaming adapter reports event-consumption failures separately from stream reads", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+  ]);
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "run-stream-sink-failure",
+        systemPrompt: "System",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan" }],
+        tools: [{ name: "submit_outcome_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+        toolChoice: { name: "submit_outcome_plan" },
+      }, async () => {
+        throw new TypeError("database is locked");
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.equal((error as { message?: string }).message, "Model provider returned an unreadable streaming response");
+        const details = (error as { details?: Record<string, unknown> }).details;
+        assert.equal(details?.attempts, 1);
+        assert.equal(details?.causeName, "TypeError");
+        assert.equal(details?.causeMessage, "database is locked");
+        assert.equal(details?.streamFailureStage, "consume_event");
+        assert.equal(details?.streamEventsSeen, 1);
+        assert.deepEqual(details?.lastStreamEvent, {
+          dataKind: "json",
+          byteLength: 64,
+          shape: ["choices"],
+        });
+        assert.deepEqual(details?.request, {
+          protocol: "chat-completions",
+          model: "example-model",
+          phase: "planning",
+          stream: true,
+          canonicalMessageCount: 1,
+          providerMessageCount: 2,
+          toolCount: 1,
+          toolChoice: "function:submit_outcome_plan",
+          runtimeContextPlacement: "system",
+        });
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible streaming adapter preserves a prior non-empty tool name when later deltas send an empty name", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => sseResponse([
@@ -582,6 +731,87 @@ test("OpenAI-compatible streaming adapter preserves a prior non-empty tool name 
     assert.equal(result.toolCalls[0].name, "submit_outcome_plan");
     assert.deepEqual(result.toolCalls[0].arguments, { version: "agentloop.outcomePlan/v2" });
     assert.deepEqual(deltas.map((item) => item.name), ["submit_outcome_plan", "submit_outcome_plan", "submit_outcome_plan"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible streaming adapter preserves a prior non-empty tool name when later deltas send null", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"submit_outcome_plan","arguments":"{\\"version\\":"}}]},"finish_reason":null}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"function":{"name":null,"arguments":"\\"agentloop.outcomePlan/v2\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+    'data: [DONE]\n\n',
+  ]);
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    const result = await model.streamComplete!({
+      runId: "run-stream-null-name",
+      systemPrompt: "System",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan" }],
+      tools: [{ name: "submit_outcome_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_outcome_plan" },
+    }, async () => undefined);
+
+    assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.toolCalls[0], {
+      id: "call-1",
+      name: "submit_outcome_plan",
+      arguments: { version: "agentloop.outcomePlan/v2" },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible streaming adapter normalizes double-encoded object tool arguments", async () => {
+  const originalFetch = globalThis.fetch;
+  const encodedArguments = JSON.stringify(JSON.stringify({ path: "report.html", content: "ok" }));
+  globalThis.fetch = async () => sseResponse([
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call-1",
+            function: { name: "write_file", arguments: encodedArguments },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ]);
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    const readyCalls: Array<{ name: string; arguments: unknown }> = [];
+    const result = await model.streamComplete!({
+      runId: "run-stream-double-encoded-tool-arguments",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Write" }],
+      tools: [{ name: "write_file", description: "Write a file", inputSchema: { type: "object" } }],
+      toolChoice: { name: "write_file" },
+    }, async (event) => {
+      if (event.type === "tool_call_ready") readyCalls.push({ name: event.name, arguments: event.arguments });
+    });
+
+    assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.toolCalls[0].arguments, { path: "report.html", content: "ok" });
+    assert.deepEqual(readyCalls, [{ name: "write_file", arguments: { path: "report.html", content: "ok" } }]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -750,6 +980,64 @@ test("Responses streaming adapter preserves function calls when final response o
     }]);
     assert.deepEqual(readyCalls.map((call) => call.name), ["submit_plan"]);
     assert.deepEqual(result.usage, { inputTokens: 12, outputTokens: 4 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses streaming adapter normalizes double-encoded object tool arguments", async () => {
+  const originalFetch = globalThis.fetch;
+  const encodedArguments = JSON.stringify(JSON.stringify({ q: "status" }));
+  globalThis.fetch = async () => {
+    return sseResponse([
+      `data: ${JSON.stringify({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "function_call", id: "fc_lookup", call_id: "call-1", name: "lookup", arguments: "" },
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "response.function_call_arguments.done",
+        item_id: "fc_lookup",
+        output_index: 0,
+        arguments: encodedArguments,
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          status: "completed",
+          output: [{
+            type: "function_call",
+            id: "fc_lookup",
+            call_id: "call-1",
+            name: "lookup",
+            arguments: encodedArguments,
+          }],
+        },
+      })}\n\n`,
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6",
+      contextWindowTokens: 400_000,
+      maxOutputTokens: 32_768,
+    });
+    const readyCalls: Array<{ name: string; arguments: unknown }> = [];
+    const result = await model.streamComplete!({
+      runId: "run-responses-double-encoded-tool-arguments",
+      systemPrompt: "Return one structured lookup call.",
+      phase: "execution",
+      messages: [{ role: "user", content: "Check" }],
+      tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
+      toolChoice: { name: "lookup" },
+    }, async (event) => {
+      if (event.type === "tool_call_ready") readyCalls.push({ name: event.name, arguments: event.arguments });
+    });
+
+    assert.deepEqual(result.toolCalls[0], { id: "call-1", name: "lookup", arguments: { q: "status" } });
+    assert.deepEqual(readyCalls, [{ name: "lookup", arguments: { q: "status" } }]);
   } finally {
     globalThis.fetch = originalFetch;
   }

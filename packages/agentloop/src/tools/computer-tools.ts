@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import { buildArtifactReceipt } from "../runtime/artifact-receipt.ts";
@@ -14,6 +15,10 @@ const MAX_COMMAND_ARGUMENTS_TOTAL_CHARACTERS = 65_536;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const MIN_COMMAND_TIMEOUT_MS = 100;
 const MAX_COMMAND_TIMEOUT_MS = 300_000;
+const JSON_READ_MAX_BYTES = 8_000_000;
+const JSON_READ_MAX_QUERIES = 20;
+const JSON_READ_MAX_POINTER_LENGTH = 1_000;
+const JSON_READ_MAX_ARRAY_LIMIT = 500;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
   "convert_artifact",
@@ -166,6 +171,7 @@ export function createComputerTools(
         "Search literal text recursively under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "path must be relative to an authorized root; absolute paths are rejected.",
         "Use this low-noise search tool instead of running shell grep/cat loops for file discovery.",
+        "For structured JSON artifacts, use computer_read_json with schema/profile or JSON Pointer first; use text search only when the keyword location is unknown or the manifest is insufficient.",
         "Use optional contextBefore/contextAfter to return small evidence windows around each match.",
       ].join(" "),
       inputSchema: objectSchema(["path", "query"], {
@@ -197,11 +203,73 @@ export function createComputerTools(
       },
     },
     {
+      name: "computer_read_json",
+      description: [
+        "Read structured data from a JSON file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
+        "Use this for durable JSON artifacts such as .agentloop/table-extractions/*.json before falling back to computer_search_text or line-window computer_read_file.",
+        "queries are JSON Pointer selectors; omit queries to get a compact profile. For array targets, offset is 0-indexed and limit returns a bounded window.",
+        "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics.",
+      ].join(" "),
+      inputSchema: objectSchema(["path"], {
+        path: { type: "string" },
+        queries: {
+          type: "array",
+          minItems: 1,
+          maxItems: JSON_READ_MAX_QUERIES,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["pointer"],
+            properties: {
+              pointer: { type: "string", maxLength: JSON_READ_MAX_POINTER_LENGTH },
+              offset: { type: "integer", minimum: 0 },
+              limit: { type: "integer", minimum: 1, maximum: JSON_READ_MAX_ARRAY_LIMIT },
+            },
+          },
+        },
+      }),
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => {
+        const record = requireRecord(value, "computer_read_json arguments");
+        return {
+          path: requireString(record.path, "path", { max: 4_000 }),
+          queries: parseJsonReadQueries(record.queries),
+        };
+      },
+      execute: async (context, value) => {
+        const input = value as { path: string; queries?: JsonReadQuery[] };
+        const file = await executorForContext(executor, context).readFile(input.path, JSON_READ_MAX_BYTES);
+        if (file.truncated) {
+          throw badRequest(`JSON file exceeds the ${JSON_READ_MAX_BYTES} byte structured read limit; use narrower source tooling or a purpose-built parser`);
+        }
+        let document: unknown;
+        try {
+          document = JSON.parse(file.content);
+        } catch {
+          throw badRequest("path must identify a valid JSON file");
+        }
+        const queries = input.queries ?? [];
+        const caveats: string[] = [];
+        const results = queries.map((query) => readJsonPointer(document, query, caveats));
+        return {
+          schema: "agentloop.jsonRead/v1",
+          path: file.resolvedPath ?? input.path,
+          ...(file.requestedPath === undefined ? {} : { requestedPath: file.requestedPath }),
+          bytes: file.bytes,
+          sha256: createHash("sha256").update(file.content).digest("hex"),
+          root: summarizeJsonValue(document),
+          queries: results,
+          caveats,
+        };
+      },
+    },
+    {
       name: "computer_write_file",
       description: [
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
-        "Set mode to create, overwrite, or append; omit mode for create. Append requires an existing file, so create the first chunk with mode=create. The legacy overwrite=true option is accepted only when mode is omitted.",
+        "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file, so create the first chunk with mode=create.",
         "For explicitly paginated HTML, HTML-PPT, or browser slide decks that fit a compact page spec, use materialize_paginated_html instead of streaming the full generated document here.",
         "For ordinary standalone HTML, custom visual pages, dashboards, apps, or interactions, this Tool may write the authored HTML/CSS/JS file directly.",
         "For other very large content, prefer reusable scripts or several smaller append calls over one oversized call so each content argument stays within the output budget.",
@@ -211,7 +279,6 @@ export function createComputerTools(
         path: { type: "string" },
         content: { type: "string" },
         mode: { type: "string", enum: ["create", "overwrite", "append"] },
-        overwrite: { type: "boolean" },
       }),
       executionMode: "exclusive",
       replaySafe: false,
@@ -503,6 +570,146 @@ function parseReadRanges(value: unknown): Array<{ offset: number; limit?: number
   });
 }
 
+interface JsonReadQuery {
+  readonly pointer: string;
+  readonly offset?: number;
+  readonly limit?: number;
+}
+
+function parseJsonReadQueries(value: unknown): JsonReadQuery[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > JSON_READ_MAX_QUERIES) {
+    throw badRequest(`queries must be an array with 1 to ${JSON_READ_MAX_QUERIES} entries`);
+  }
+  return value.map((item, index) => {
+    const record = requireRecord(item, `queries[${index}]`);
+    const pointer = requireString(record.pointer, `queries[${index}].pointer`, { max: JSON_READ_MAX_POINTER_LENGTH });
+    if (pointer !== "" && !pointer.startsWith("/")) {
+      throw badRequest(`queries[${index}].pointer must be an empty string or a JSON Pointer beginning with /`);
+    }
+    return {
+      pointer,
+      offset: optionalBoundedInteger(record.offset, `queries[${index}].offset`, 0, Number.MAX_SAFE_INTEGER),
+      limit: optionalBoundedInteger(record.limit, `queries[${index}].limit`, 1, JSON_READ_MAX_ARRAY_LIMIT),
+    };
+  });
+}
+
+function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: string[]): {
+  readonly pointer: string;
+  readonly found: boolean;
+  readonly summary?: JsonValueSummary;
+  readonly value?: unknown;
+  readonly offset?: number;
+  readonly limit?: number;
+  readonly returned?: number;
+  readonly totalItems?: number;
+  readonly sourceRange?: string;
+} {
+  const selected = selectJsonPointer(document, query.pointer);
+  if (!selected.found) return { pointer: query.pointer, found: false };
+  const value = selected.value;
+  if (Array.isArray(value)) {
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 50;
+    const window = value.slice(offset, offset + limit);
+    if (window.length < value.length) {
+      caveats.push(`Query ${query.pointer || "/"} returned ${window.length} of ${value.length} array items; request another offset for more.`);
+    }
+    return {
+      pointer: query.pointer,
+      found: true,
+      summary: summarizeJsonValue(value),
+      value: window,
+      offset,
+      limit,
+      returned: window.length,
+      totalItems: value.length,
+      sourceRange: `${query.pointer || "/"}[${offset}:${offset + window.length}]`,
+    };
+  }
+  return {
+    pointer: query.pointer,
+    found: true,
+    summary: summarizeJsonValue(value),
+    value: boundJsonValue(value, caveats, query.pointer || "/"),
+    sourceRange: query.pointer || "/",
+  };
+}
+
+function selectJsonPointer(document: unknown, pointer: string): { readonly found: true; readonly value: unknown } | { readonly found: false } {
+  if (pointer === "") return { found: true, value: document };
+  let cursor = document;
+  for (const rawToken of pointer.slice(1).split("/")) {
+    const token = rawToken.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    if (Array.isArray(cursor)) {
+      if (!/^(0|[1-9]\d*)$/u.test(token)) return { found: false };
+      const index = Number(token);
+      if (index >= cursor.length) return { found: false };
+      cursor = cursor[index];
+      continue;
+    }
+    if (typeof cursor !== "object" || cursor === null || !(token in cursor)) return { found: false };
+    cursor = (cursor as Record<string, unknown>)[token];
+  }
+  return { found: true, value: cursor };
+}
+
+interface JsonValueSummary {
+  readonly type: string;
+  readonly keys?: readonly string[];
+  readonly omittedKeys?: number;
+  readonly length?: number;
+  readonly itemSummary?: JsonValueSummary;
+  readonly properties?: Record<string, JsonValueSummary>;
+}
+
+function summarizeJsonValue(value: unknown, depth = 0): JsonValueSummary {
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      ...(value.length === 0 || depth >= 2 ? {} : { itemSummary: summarizeJsonValue(value[0], depth + 1) }),
+    };
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    const keys = entries.map(([key]) => key);
+    const shown = entries.slice(0, 30);
+    return {
+      type: "object",
+      keys: keys.slice(0, 60),
+      ...(keys.length > 60 ? { omittedKeys: keys.length - 60 } : {}),
+      ...(depth >= 2 ? {} : { properties: Object.fromEntries(shown.map(([key, child]) => [key, summarizeJsonValue(child, depth + 1)])) }),
+    };
+  }
+  return { type: value === null ? "null" : typeof value };
+}
+
+function boundJsonValue(value: unknown, caveats: string[], pointer: string, depth = 0): unknown {
+  if (typeof value === "string") {
+    if (value.length <= 4_000) return value;
+    caveats.push(`String at ${pointer} was truncated to 4000 characters.`);
+    return `${value.slice(0, 4_000)}...`;
+  }
+  if (Array.isArray(value)) {
+    const maxItems = 50;
+    if (value.length > maxItems) caveats.push(`Array at ${pointer} was truncated to ${maxItems} of ${value.length} items.`);
+    return value.slice(0, maxItems).map((item, index) => boundJsonValue(item, caveats, `${pointer}/${index}`, depth + 1));
+  }
+  if (typeof value === "object" && value !== null) {
+    if (depth >= 4) {
+      caveats.push(`Object at ${pointer} was summarized after depth 4.`);
+      return summarizeJsonValue(value, depth);
+    }
+    const entries = Object.entries(value as Record<string, unknown>);
+    const maxKeys = 80;
+    if (entries.length > maxKeys) caveats.push(`Object at ${pointer} was truncated to ${maxKeys} of ${entries.length} keys.`);
+    return Object.fromEntries(entries.slice(0, maxKeys).map(([key, child]) => [key, boundJsonValue(child, caveats, `${pointer}/${key}`, depth + 1)]));
+  }
+  return value;
+}
+
 const ARTIFACT_ACCEPTANCE_KINDS = [
   "auto",
   "generic_file",
@@ -600,7 +807,7 @@ function rootPathString(value: unknown, field: string, max: number): string {
 
 function parseWriteFileMode(mode: unknown, overwrite: unknown): WriteFileMode {
   if (mode !== undefined && overwrite !== undefined) {
-    throw badRequest("mode and overwrite cannot both be set");
+    throw badRequest("mode and overwrite cannot both be set; use exactly one, preferably mode, and remove overwrite");
   }
   if (mode === undefined) return overwrite === true ? "overwrite" : "create";
   if (mode === "create" || mode === "overwrite" || mode === "append") return mode;

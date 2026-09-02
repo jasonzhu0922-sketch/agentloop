@@ -481,7 +481,14 @@ def _markdown_for_api(item, index, primary=False):
     return "\n".join(lines)
 
 
-def _delivery_markdown(keyword, details):
+def _api_catalog_caveats():
+    return [
+        "API 目录匹配结果按登记元数据和解析 SQL 排序；当用户给出的中文名称不是精确目录名称时，应以精确 API_ID 再确认。",
+        "计算型 SQL 表达式不一定能映射到物理字段注释，字段说明会优先使用别名或解析结果。",
+    ]
+
+
+def _delivery_markdown(keyword, details, caveats=None):
     lines = [
         f"已按 **api-query** 技能，通过宝武数据中台通用 SQL API 以关键词“{keyword}”检索，命中 **{len(details)} 个 normal 状态接口**。",
     ]
@@ -494,10 +501,16 @@ def _delivery_markdown(keyword, details):
             lines.append("")
             lines.append("---")
             lines.append("")
+    if caveats:
+        lines.append("")
+        lines.append("## 限制说明")
+        lines.append("")
+        for caveat in caveats:
+            lines.append(f"- {caveat}")
     return "\n".join(lines)
 
 
-def _evidence_receipt(keyword, details, assessment_projection):
+def _evidence_receipt(keyword, details, assessment_projection, caveats):
     source_refs = [
         {
             "kind": "api_endpoint",
@@ -537,10 +550,6 @@ def _evidence_receipt(keyword, details, assessment_projection):
             "related_tables": assessment_projection["related_tables"],
         }
     ]
-    caveats = [
-        "API catalog matches are ranked by registered metadata and parsed SQL; confirm with an exact API_ID when the requested Chinese name is not an exact catalog name.",
-        "Computed SQL expressions may not map to physical column remarks and are labeled from aliases or parser output.",
-    ]
     material = json.dumps(
         {"sourceRefs": source_refs, "facts": facts, "caveats": caveats},
         ensure_ascii=False,
@@ -577,7 +586,8 @@ def answer_payload(keyword, limit=10):
         payload["registered_params"] = params_by_api.get(api_id, [])
         payload["registered_inputs"] = _registered_inputs(payload["registered_params"])
         details.append(payload)
-    markdown = _delivery_markdown(keyword, details)
+    caveats = _api_catalog_caveats()
+    markdown = _delivery_markdown(keyword, details, caveats)
     assessment_projection = {
         "query": keyword,
         "match_count": len(details),
@@ -587,7 +597,7 @@ def answer_payload(keyword, limit=10):
         "output_field_counts": {item["api_id"]: len(item.get("output_columns") or []) for item in details},
         "related_tables": {item["api_id"]: item.get("related_tables", []) for item in details},
     }
-    evidence_receipt = _evidence_receipt(keyword, details, assessment_projection)
+    evidence_receipt = _evidence_receipt(keyword, details, assessment_projection, caveats)
     return {
         "schema": "api_catalog_result/v1",
         "query": keyword,

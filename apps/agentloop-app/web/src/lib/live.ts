@@ -15,6 +15,22 @@ export interface ExecutionInsight {
   readonly seq?: number;
 }
 
+export interface StreamingStatus {
+  readonly content: string;
+  readonly toolName?: string;
+  readonly toolArgumentCharacters?: number;
+  readonly toolArguments?: unknown;
+}
+
+export interface LiveFeedItem {
+  readonly key: string;
+  readonly kind: "thinking" | "reply" | "tool";
+  readonly title: string;
+  readonly detail: string;
+  readonly rawType: string;
+  readonly seq?: number;
+}
+
 export interface FailureSummary {
   readonly title: string;
   readonly reason: string;
@@ -67,12 +83,25 @@ export function latestStreaming(events: readonly RunEvent[]): RunEvent | null {
 }
 
 export function streamingToolProgress(stream: RunEvent | null): string {
-  const calls = stream?.data && Array.isArray(stream.data.toolCalls) ? (stream.data.toolCalls as Array<{ name?: string; arguments?: unknown; argumentsRef?: { characters?: number } }>) : [];
-  if (!calls.length) return "";
+  const status = streamingStatus(stream);
+  if (status?.toolName === undefined) return "";
+  return toolProgressView(status.toolName, status.toolArguments).detail;
+}
+
+export function streamingStatus(stream: RunEvent | null): StreamingStatus | null {
+  if (!stream?.data) return null;
+  const content = typeof stream.data.content === "string" ? stream.data.content : "";
+  const calls = Array.isArray(stream.data.toolCalls) ? (stream.data.toolCalls as Array<{ name?: string; arguments?: unknown; argumentsRef?: { characters?: number } }>) : [];
+  if (!calls.length) return { content };
   const call = calls[calls.length - 1] ?? {};
-  const name = call.name ?? "工具";
+  const name = typeof call.name === "string" && call.name.length > 0 ? call.name : undefined;
   const chars = toolArgumentCharacters(call.arguments, call.argumentsRef);
-  return "正在生成工具调用：" + name + (chars ? " · 参数 " + chars + " 字符" : "");
+  return {
+    content,
+    ...(name === undefined ? {} : { toolName: name }),
+    ...(chars > 0 ? { toolArgumentCharacters: chars } : {}),
+    ...("arguments" in call ? { toolArguments: call.arguments } : {}),
+  };
 }
 
 function toolArgumentCharacters(argumentsValue: unknown, ref: { readonly characters?: number } | undefined): number {
@@ -83,6 +112,340 @@ function toolArgumentCharacters(argumentsValue: unknown, ref: { readonly charact
     if (typeof record.originalCharacters === "number") return record.originalCharacters;
   }
   return 0;
+}
+
+const FEED_THINKING_TYPES: Record<string, boolean> = {
+  "run.started": true,
+  "planning.started": true,
+  "planning.skills.selected": true,
+  "planning.turn.started": true,
+  "planning.turn.completed": true,
+  "plan.proposed": true,
+  "plan.admitted": true,
+  "plan.step.started": true,
+  "plan.step.completed": true,
+  "plan.step.failed": true,
+  "context.assembled": true,
+  "context.compaction.started": true,
+  "context.compacted": true,
+  "context.tool_outputs_pruned": true,
+  "context.tool_outputs_projected": true,
+  "candidate.approved": true,
+  "candidate.rejected": true,
+  "assessment.turn.completed": true,
+  "skill.activation.available": true,
+  "skill.activated": true,
+  "skill.compliance.assessed": true,
+  "model.retry": true,
+  "action.failed": true,
+  "run.completed": true,
+  "run.failed": true,
+  "run.cancelled": true,
+};
+
+const FEED_TOOL_TYPES: Record<string, boolean> = {
+  "assistant.tool_call.committed": true,
+  "tool.planned": true,
+  "tool.effect_pending": true,
+  "tool.completed": true,
+  "tool.failed": true,
+  "tool.rejected": true,
+};
+
+export function liveEventFeed(events: readonly RunEvent[], limit = 8): readonly LiveFeedItem[] {
+  const planned = plannedMap(events);
+  const items: LiveFeedItem[] = [];
+  for (const event of events) {
+    items.push(...liveFeedItemsForEvent(event, planned));
+  }
+  return coalesceStreamingFeedItems(items).slice(-limit);
+}
+
+function coalesceStreamingFeedItems(items: readonly LiveFeedItem[]): readonly LiveFeedItem[] {
+  const output: LiveFeedItem[] = [];
+  const streaming = new Map<LiveFeedItem["kind"], LiveFeedItem>();
+  const flushStreaming = (): void => {
+    for (const kind of ["thinking", "reply", "tool"] as const) {
+      const item = streaming.get(kind);
+      if (item !== undefined) output.push(item);
+    }
+    streaming.clear();
+  };
+  for (const item of items) {
+    if (item.rawType === "assistant.streaming") {
+      streaming.set(item.kind, item);
+      continue;
+    }
+    flushStreaming();
+    output.push(item);
+  }
+  flushStreaming();
+  return output;
+}
+
+function liveFeedItemsForEvent(event: RunEvent, planned: ReadonlyMap<string, RunEvent>): readonly LiveFeedItem[] {
+  const seq = event.seq;
+  const base = { rawType: event.type, ...(seq === undefined ? {} : { seq }) };
+  if (event.type === "assistant.streaming") {
+    const status = streamingStatus(event);
+    const items: LiveFeedItem[] = [];
+    const streamPhase = phaseLabel(event.data?.phase);
+    if (status?.content.trim()) {
+      items.push({
+        ...base,
+        key: feedKey(event, "reply"),
+        kind: "reply",
+        title: "回复草稿",
+        detail: clip(status.content, 720),
+      });
+    }
+    if (status?.toolName) {
+      const progress = toolProgressView(status.toolName, status.toolArguments);
+      items.push({
+        ...base,
+        key: feedKey(event, "tool"),
+        kind: "tool",
+        title: progress.title,
+        detail: progress.detail + (streamPhase ? " · " + runningSuffix(streamPhase) : ""),
+      });
+    }
+    if (items.length > 0) return items;
+    return [{
+      ...base,
+      key: feedKey(event, "thinking"),
+      kind: "thinking",
+      title: "等待模型流",
+      detail: streamPhase ? "模型流已连接，正在" + streamPhase + "。" : "模型流已连接，等待增量内容。",
+    }];
+  }
+  if (event.type === "assistant.committed") {
+    const calls = Array.isArray(event.data?.toolCalls) ? event.data.toolCalls : [];
+    const finish = String(event.data?.finishReason ?? "");
+    const translated = translateRunEvent(event, planned);
+    const items = privateReasoningFeedItem(event);
+    if (finish === "tool_calls" || calls.length > 0) {
+      return [...items, {
+        ...base,
+        key: feedKey(event, "tool"),
+        kind: "tool",
+        title: "确认工具调用",
+        detail: calls.length > 0 ? calls.length + " 个工具调用已提交，准备执行。" : streamSentence(translated.detail),
+      }];
+    }
+    return [...items, {
+      ...base,
+      key: feedKey(event, "reply"),
+      kind: "reply",
+      title: "回复已提交",
+      detail: streamSentence(translated.detail),
+    }];
+  }
+  if (FEED_TOOL_TYPES[event.type]) {
+    const translated = translateRunEvent(event, planned);
+    return [{
+      ...base,
+      key: feedKey(event, "tool"),
+      kind: "tool",
+      title: translated.title,
+      detail: streamSentence(translated.detail || translated.title),
+    }];
+  }
+  if (FEED_THINKING_TYPES[event.type]) {
+    const translated = translateRunEvent(event, planned);
+    return [{
+      ...base,
+      key: feedKey(event, "thinking"),
+      kind: "thinking",
+      title: translated.title,
+      detail: streamSentence(translated.detail || translated.title),
+    }];
+  }
+  return [];
+}
+
+function runningSuffix(phase: string): string {
+  return phase.endsWith("中") ? phase : phase + "中";
+}
+
+function toolProgressView(toolName: string, argumentsValue: unknown): { readonly title: string; readonly detail: string } {
+  const args = recordValue(argumentsValue);
+  if (toolName === "visible_index_directory") {
+    return {
+      title: "正在梳理可见目录",
+      detail: "先确认文件范围、类型分布和可引用证据，避免直接猜内容。",
+    };
+  }
+  if (toolName === "visible_find_files") {
+    return {
+      title: "正在定位相关文件",
+      detail: "按文件名或模式筛选候选文件，为后续读取缩小范围。",
+    };
+  }
+  if (toolName === "visible_read_file" || toolName === "visible_read_files" || toolName === "computer_read_file") {
+    return {
+      title: "正在读取已确认的文件",
+      detail: "读取源文件内容，用来支撑后续分析和结论。",
+    };
+  }
+  if (toolName === "visible_search_text" || toolName === "computer_search_text") {
+    return {
+      title: "正在检索相关内容",
+      detail: "在已授权范围内查找匹配内容，减少无依据的推断。",
+    };
+  }
+  if (toolName === "computer_write_file") {
+    return fileWriteProgressView(stringValue(args?.path) ?? projectedPreviewPath(args));
+  }
+  if (toolName === "computer_patch_file") {
+    return {
+      title: "正在更新文件",
+      detail: "把当前步骤需要的修改写入已有文件。",
+    };
+  }
+  if (toolName === "computer_run_command") {
+    return commandProgressView(args);
+  }
+  if (toolName === "materialize_paginated_html") {
+    return {
+      title: "正在生成分页文档",
+      detail: "按结构化页面规格生成可检查的 HTML 文件。",
+    };
+  }
+  if (toolName === "convert_artifact") {
+    return {
+      title: "正在转换文件格式",
+      detail: "把已生成的文件转换为目标格式，并保留转换证据。",
+    };
+  }
+  if (toolName === "websearch") {
+    return {
+      title: "正在搜索资料",
+      detail: "查询外部来源，准备可引用的信息。",
+    };
+  }
+  if (toolName === "webfetch") {
+    return {
+      title: "正在读取网页资料",
+      detail: "获取已选网页内容，用来支撑回答。",
+    };
+  }
+  if (toolName === "load_skill") {
+    return {
+      title: "正在加载处理规则",
+      detail: "读取本步骤需要遵循的专业处理流程。",
+    };
+  }
+  return {
+    title: "正在准备下一步操作",
+    detail: "系统正在把当前步骤转换为可执行操作。",
+  };
+}
+
+function fileWriteProgressView(path: string | undefined): { readonly title: string; readonly detail: string } {
+  const extension = pathExtension(path);
+  if (extension === "py" || extension === "js" || extension === "mjs" || extension === "ts") {
+    return {
+      title: "正在准备处理脚本",
+      detail: "把可复验的处理逻辑写入工作区，下一步会运行它获取结果。",
+    };
+  }
+  if (extension === "json" || extension === "csv" || extension === "tsv") {
+    return {
+      title: "正在保存结构化数据",
+      detail: "把已整理的数据保存为中间证据，便于后续分析和检查。",
+    };
+  }
+  if (extension === "md" || extension === "txt") {
+    return {
+      title: "正在保存分析材料",
+      detail: "把阶段性结论或说明写成文件，供后续步骤引用。",
+    };
+  }
+  if (extension === "html" || extension === "pdf" || extension === "pptx" || extension === "docx" || extension === "xlsx") {
+    return {
+      title: "正在生成交付文件",
+      detail: "把当前内容写成可打开检查的文件。",
+    };
+  }
+  return {
+    title: "正在准备文件",
+    detail: "把当前步骤需要的数据或结果写入工作区。",
+  };
+}
+
+function commandProgressView(args: Record<string, unknown> | undefined): { readonly title: string; readonly detail: string } {
+  const command = (stringValue(args?.command) ?? "").toLowerCase();
+  const argList = Array.isArray(args?.args) ? args.args.map((item) => String(item).toLowerCase()) : [];
+  const joined = [command, ...argList].join(" ");
+  if (/\bpython\d?\b/u.test(command) || /\.py\b/u.test(joined)) {
+    return {
+      title: "正在运行数据处理脚本",
+      detail: "用脚本读取源文件并生成可复验的统计或检查结果。",
+    };
+  }
+  if (/\b(?:npm|pnpm|yarn|vitest|pytest|cargo|go)\b/u.test(joined)) {
+    return {
+      title: "正在运行验证命令",
+      detail: "执行项目检查，确认当前结果是否可用。",
+    };
+  }
+  return {
+    title: "正在运行处理命令",
+    detail: "执行当前步骤需要的本地命令，并记录输出证据。",
+  };
+}
+
+function pathExtension(path: string | undefined): string {
+  if (!path) return "";
+  const base = path.split(/[\\/]/u).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
+function projectedPreviewPath(args: Record<string, unknown> | undefined): string | undefined {
+  const preview = stringValue(args?.preview);
+  if (preview === undefined) return undefined;
+  const match = preview.match(/"path"\s*:\s*"([^"]+)"/u);
+  return match?.[1];
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function streamSentence(value: string): string {
+  const text = value.trim();
+  if (!text) return "";
+  if (/[。！？.!?]$/u.test(text)) return text;
+  return text + "。";
+}
+
+function feedKey(event: RunEvent, suffix: string): string {
+  return String(event.seq ?? event.type) + ":" + suffix;
+}
+
+function privateReasoningFeedItem(event: RunEvent): readonly LiveFeedItem[] {
+  const projection = event.data?.privateReasoning;
+  if (projection === null || typeof projection !== "object" || Array.isArray(projection)) return [];
+  const record = projection as Record<string, unknown>;
+  if (record.schema !== "agentloop.privateReasoningProjection/v1" || record.redacted !== true) return [];
+  const characters = typeof record.characters === "number" && record.characters > 0
+    ? " · 约 " + record.characters + " 字符"
+    : "";
+  return [{
+    key: feedKey(event, "thinking"),
+    kind: "thinking",
+    title: "推理状态已保留",
+    detail: "模型内部推理状态已作为私有上下文保留，公共事件不展示原文" + characters + "。",
+    rawType: event.type,
+    ...(event.seq === undefined ? {} : { seq: event.seq }),
+  }];
 }
 
 export function currentStep(plan: LivePlan | null): PlanStep | null {

@@ -5,7 +5,7 @@ import { commandActivities, commandLine, commandSummary, fullCommandLine } from 
 import { executionCapabilities } from "../execution-capabilities";
 import { eventLabel, fmtBytes, toolAction, truncate } from "../format";
 import { plannedEventMap, translateRunEvent, translatedTimeline } from "../event-translator";
-import { executionInsights, livePlan, currentStepWhy, failureSummary, stepToolPurposes, toolActivityItems } from "../live";
+import { executionInsights, liveEventFeed, livePlan, currentStepWhy, failureSummary, stepToolPurposes, streamingStatus, streamingToolProgress, toolActivityItems } from "../live";
 import { mergeRunIntoConversation, projectConversationRun } from "../../state/run-state";
 import type { ConversationDetail, RunEvent, RunRecord } from "../types";
 import type { ProcessArtifact } from "../types";
@@ -285,6 +285,83 @@ describe("live projection", () => {
     expect(insights.map((item) => item.title)).toContain("整理模型上下文");
     expect(insights.map((item) => item.title)).toContain("工具已准备");
     expect(toolActivityItems(events).map((item) => item.type)).toContain("context.assembled");
+  });
+
+  it("projects public assistant streaming drafts and tool argument progress", () => {
+    const stream: RunEvent = {
+      seq: 10,
+      type: "assistant.streaming",
+      createdAt: 0,
+      data: {
+        phase: "execution",
+        content: "数据已完整获取。现在我来生成 HTML 报告。",
+        reasoningContent: "provider-private-continuation",
+        toolCalls: [{
+          index: 0,
+          id: "call-write",
+          name: "computer_write_file",
+          arguments: {
+            schema: "agentloop.toolArgumentTextProjection/v1",
+            projected: true,
+            originalCharacters: 17715,
+            preview: "{\"path\":\"report.html\",\"content\":\"<!doctype html>",
+          },
+        }],
+      },
+    };
+
+    expect(streamingStatus(stream)).toEqual({
+      content: "数据已完整获取。现在我来生成 HTML 报告。",
+      toolName: "computer_write_file",
+      toolArgumentCharacters: 17715,
+      toolArguments: {
+        schema: "agentloop.toolArgumentTextProjection/v1",
+        projected: true,
+        originalCharacters: 17715,
+        preview: "{\"path\":\"report.html\",\"content\":\"<!doctype html>",
+      },
+    });
+    expect(streamingToolProgress(stream)).toBe("把当前内容写成可打开检查的文件。");
+    expect(eventLabel(stream)).toContain("实时草稿");
+    expect(translateRunEvent(stream).title).toBe("收到实时草稿");
+
+    const feed = liveEventFeed([
+      { seq: 8, type: "context.assembled", createdAt: 0, data: { estimatedInputTokens: 2048 } },
+      {
+        ...stream,
+        seq: 9,
+        data: {
+          ...stream.data,
+          content: "数据已完整获取。",
+        },
+      },
+      stream,
+      {
+        seq: 11,
+        type: "assistant.committed",
+        createdAt: 0,
+        data: {
+          content: "我会生成 HTML 报告。",
+          finishReason: "stop",
+          privateReasoning: {
+            schema: "agentloop.privateReasoningProjection/v1",
+            redacted: true,
+            characters: 31,
+          },
+        },
+      },
+      {
+        seq: 12,
+        type: "tool.planned",
+        createdAt: 0,
+        data: { toolCallId: "call-write", toolName: "computer_write_file", arguments: { path: "report.html" } },
+      },
+    ]);
+    expect(feed.map((item) => item.kind)).toEqual(["thinking", "reply", "tool", "thinking", "reply", "tool"]);
+    expect(feed.map((item) => item.title)).toEqual(["整理上下文", "回复草稿", "正在生成交付文件", "推理状态已保留", "回复已提交", "准备工具"]);
+    expect(feed.map((item) => item.detail).join("\n")).not.toContain("provider-private-continuation");
+    expect(feed.map((item) => item.detail).join("\n")).not.toContain("computer_write_file");
+    expect(feed.map((item) => item.detail).join("\n")).not.toContain("参数 17715 字符");
   });
 
   it("projects run-limit failures into a friendly stopped summary", () => {

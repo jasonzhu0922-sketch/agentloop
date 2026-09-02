@@ -33,6 +33,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   const usesVisibleDirectoryTools = input.step.recommendedToolNames.some((name) => name.startsWith("visible_"));
   const usesSourceTools = input.step.recommendedToolNames.some((name) => name === "read_source");
   const dependencyEvidenceBindings = buildDependencyEvidenceBindings(input.step, input.plan);
+  const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(dependencyEvidenceBindings);
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
   const stepSemanticFrame = deriveStepSemanticFrame({
     step: input.step,
@@ -84,6 +85,12 @@ export function buildStepRuntimeContextSnapshot(input: {
           return { stepId: dependencyId, output: dependency?.output ?? "" };
         }),
         ...(dependencyEvidenceBindings === undefined ? {} : { dependencyEvidenceBindings }),
+        ...(hasStructuredJsonArtifactDependencies
+          ? {
+            structuredArtifactConsumptionDiscipline:
+              "Dependency evidence includes durable structured JSON artifacts. First inspect artifact schema and any manifest in dependencyEvidenceBindings; for agentloop.tableExtractionArtifact/v1, use the manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
+          }
+          : {}),
         workspace: { root: input.workspaceRoot, filePolicy: "workspace-write" },
         visibleDirectories,
         visibleCommandRoots: visibleDirectories.map((root) => ({
@@ -120,9 +127,9 @@ export function buildStepRuntimeContextSnapshot(input: {
           ? {
             visibleSourceDiscipline:
               "Use visible_* tools for user-authorized visibleDirectories. Treat visible_read_file and visible_read_files "
-              + "results as successful source reads even when later context shows only structured evidence projections; "
+              + "and visible_extract_tables results as successful source reads even when later context shows only structured evidence projections; "
               + "the full canonical tool evidence remains persisted for assessment. Prefer visible_read_files batches for "
-              + "multiple sourceRefs. Do not switch to computer_read_file for visible directory sources; computer_read_file "
+              + "multiple text sourceRefs, and visible_extract_tables for spreadsheet sourceRefs when table rows are needed. Do not switch to computer_read_file for visible directory sources; computer_read_file "
               + "reads the workspace root, not the visible directory grant. If computer_run_command is needed to process "
               + "visible source files with a local parser, set cwd to the matching read-only @visible/<rootId> command root "
               + "from visibleCommandRoots and pass the relative paths/sourceRefs returned by visible_* tools. Do not reconstruct "
@@ -285,7 +292,9 @@ interface ProjectedArtifactRef {
   readonly path: string;
   readonly bytes?: number;
   readonly sha256?: string;
+  readonly schema?: string;
   readonly kind?: string;
+  readonly manifest?: unknown;
 }
 
 function summarizeStepEvidence(evidence: StepEvidence | undefined): {
@@ -435,8 +444,25 @@ function addArtifactRef(value: unknown, artifacts: ProjectedArtifactRef[]): void
     path: record.path,
     ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
     ...(typeof record.sha256 === "string" && record.sha256.trim().length > 0 ? { sha256: record.sha256 } : {}),
+    ...(typeof record.schema === "string" && record.schema.trim().length > 0 ? { schema: record.schema } : {}),
     ...(typeof record.kind === "string" && record.kind.trim().length > 0 ? { kind: record.kind } : {}),
+    ...(record.manifest === undefined ? {} : { manifest: record.manifest }),
   });
+}
+
+function hasStructuredJsonArtifacts(
+  bindings: ReturnType<typeof buildDependencyEvidenceBindings>,
+): boolean {
+  return bindings?.bindings.some((binding) =>
+    binding.toolEvidence.some((evidence) =>
+      evidence.resultSchemas.includes("agentloop.visibleTableExtraction/v1")
+      || evidence.resultSchemas.includes("agentloop.tableExtractionArtifact/v1")
+      || evidence.artifacts?.some((artifact) =>
+        artifact.schema === "agentloop.tableExtractionArtifact/v1"
+        || artifact.path.endsWith(".json")
+      ) === true
+    )
+  ) === true;
 }
 
 function addSourceRefs(value: unknown, sourceRefs: unknown[]): void {

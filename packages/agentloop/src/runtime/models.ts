@@ -60,8 +60,8 @@ interface CompatibleStreamChunk {
       reasoning_content?: string | null;
       tool_calls?: Array<{
         index?: number;
-        id?: string;
-        function?: { name?: string; arguments?: string };
+        id?: string | null;
+        function?: { name?: string | null; arguments?: string | null };
       }>;
     };
   }>;
@@ -74,6 +74,31 @@ interface CompatibleStreamChunk {
 interface ProviderRequest {
   readonly body: string;
   readonly logContext: ModelRequestLogContext;
+}
+
+interface StreamFailureDiagnostics {
+  readonly eventsSeen: number;
+  readonly lastEvent?: StreamEventSummary;
+}
+
+interface StreamEventSummary {
+  readonly dataKind: "done" | "json" | "non-json";
+  readonly byteLength: number;
+  readonly shape?: readonly string[];
+}
+
+class StreamConsumptionError extends Error {
+  readonly stage: "read" | "consume_event";
+  readonly diagnostics: StreamFailureDiagnostics;
+  readonly cause: unknown;
+
+  constructor(stage: "read" | "consume_event", error: unknown, diagnostics: StreamFailureDiagnostics) {
+    super(stage === "read" ? "stream read failed" : "stream event consumption failed");
+    this.name = "StreamConsumptionError";
+    this.stage = stage;
+    this.diagnostics = diagnostics;
+    this.cause = error;
+  }
 }
 
 const STREAM_WALL_TIMEOUT_FACTOR = 3;
@@ -295,11 +320,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
           if (error instanceof AppError) throw error;
           // Partial deltas may already have been emitted to the sink, so a
           // mid-stream failure is never replayed through a second provider call.
-          throw new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
-            attempts: attempt,
-            causeCode: transportCauseCode(error),
-            request: request.logContext,
-          });
+          throw unreadableStreamingResponse(error, attempt, request.logContext);
         }
       } finally {
         requestTimeout.dispose();
@@ -360,8 +381,11 @@ export class OpenAICompatibleModel implements ModelAdapter {
     let finishReason: string | undefined;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
+    const diagnostics: { eventsSeen: number; lastEvent?: StreamEventSummary } = { eventsSeen: 0 };
 
     const handleData = async (data: string): Promise<void> => {
+      diagnostics.eventsSeen += 1;
+      diagnostics.lastEvent = summarizeStreamEvent(data);
       if (data.trim() === "[DONE]") return;
       let payload: CompatibleStreamChunk;
       try {
@@ -380,9 +404,11 @@ export class OpenAICompatibleModel implements ModelAdapter {
       for (const call of choice?.delta?.tool_calls ?? []) {
         const index = typeof call.index === "number" ? call.index : toolCallAccumulator.size;
         const accumulated = toolCallAccumulator.get(index) ?? { arguments: "" };
-        if (call.id !== undefined) accumulated.id = call.id;
-        if (call.function?.name !== undefined && call.function.name.length > 0) accumulated.name = call.function.name;
-        const argumentsDelta = call.function?.arguments ?? "";
+        if (typeof call.id === "string" && call.id.length > 0) accumulated.id = call.id;
+        const nameDelta = call.function?.name;
+        if (typeof nameDelta === "string" && nameDelta.length > 0) accumulated.name = nameDelta;
+        const rawArgumentsDelta = call.function?.arguments;
+        const argumentsDelta = typeof rawArgumentsDelta === "string" ? rawArgumentsDelta : "";
         if (argumentsDelta.length > 0) accumulated.arguments += argumentsDelta;
         toolCallAccumulator.set(index, accumulated);
         await sink({
@@ -400,7 +426,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
 
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await reader.read();
+        } catch (error) {
+          throw new StreamConsumptionError("read", error, diagnostics);
+        }
+        const { done, value } = result;
         if (done) break;
         recordActivity();
         buffer += decoder.decode(value, { stream: true });
@@ -412,7 +444,12 @@ export class OpenAICompatibleModel implements ModelAdapter {
             if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
           }
           if (dataLines.length === 0) continue;
-          await handleData(dataLines.join("\n"));
+          try {
+            await handleData(dataLines.join("\n"));
+          } catch (error) {
+            if (error instanceof AppError) throw error;
+            throw new StreamConsumptionError("consume_event", error, diagnostics);
+          }
         }
       }
     } finally {
@@ -424,7 +461,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const readyCalls: Array<{ index: number; call: ModelToolCall }> = [];
     for (const [index, accumulated] of ordered) {
       if (accumulated.id === undefined || accumulated.name === undefined) continue;
-      const call = parseAccumulatedToolCall(accumulated.id, accumulated.name, accumulated.arguments);
+      const call = parseAccumulatedToolCall(accumulated.id, accumulated.name, accumulated.arguments, index);
       toolCalls.push(call);
       readyCalls.push({ index, call });
     }
@@ -587,11 +624,7 @@ export class ResponsesModel implements ModelAdapter {
             throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
           }
           if (error instanceof AppError) throw error;
-          throw new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
-            attempts: attempt,
-            causeCode: transportCauseCode(error),
-            request: request.logContext,
-          });
+          throw unreadableStreamingResponse(error, attempt, request.logContext);
         }
       } finally {
         requestTimeout.dispose();
@@ -663,8 +696,11 @@ export class ResponsesModel implements ModelAdapter {
     let finalResponse: Record<string, unknown> | undefined;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
+    const diagnostics: { eventsSeen: number; lastEvent?: StreamEventSummary } = { eventsSeen: 0 };
 
     const handleData = async (data: string): Promise<void> => {
+      diagnostics.eventsSeen += 1;
+      diagnostics.lastEvent = summarizeStreamEvent(data);
       let chunk: ResponsesStreamChunk;
       try {
         chunk = JSON.parse(data) as ResponsesStreamChunk;
@@ -747,13 +783,19 @@ export class ResponsesModel implements ModelAdapter {
         index: call.index,
         id: call.callId,
         name: call.name,
-        arguments: salvageArguments(call.arguments === "" ? "{}" : call.arguments),
+        arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments, call.index),
       });
     };
 
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await reader.read();
+        } catch (error) {
+          throw new StreamConsumptionError("read", error, diagnostics);
+        }
+        const { done, value } = result;
         if (done) break;
         recordActivity();
         buffer += decoder.decode(value, { stream: true });
@@ -765,7 +807,12 @@ export class ResponsesModel implements ModelAdapter {
             if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
           }
           if (dataLines.length === 0) continue;
-          await handleData(dataLines.join("\n"));
+          try {
+            await handleData(dataLines.join("\n"));
+          } catch (error) {
+            if (error instanceof AppError) throw error;
+            throw new StreamConsumptionError("consume_event", error, diagnostics);
+          }
         }
       }
     } finally {
@@ -823,7 +870,7 @@ function responseStreamToolCalls(
     toolCalls.push({
       id: call.callId,
       name: call.name,
-      arguments: salvageArguments(call.arguments === "" ? "{}" : call.arguments),
+      arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments, call.index),
     });
   }
   return toolCalls;
@@ -850,7 +897,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
   const output = Array.isArray(record.output) ? record.output as Array<Record<string, unknown>> : [];
   const toolCalls: ModelToolCall[] = [];
   const content = responseOutputText(record, output, fallbackContent);
-  for (const item of output) {
+  for (const [index, item] of output.entries()) {
     if (item.type !== "function_call") continue;
     const callId = typeof item.call_id === "string" ? item.call_id : undefined;
     const name = typeof item.name === "string" ? item.name : undefined;
@@ -858,7 +905,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
     toolCalls.push({
       id: callId,
       name,
-      arguments: salvageArguments(typeof item.arguments === "string" ? item.arguments : "{}"),
+      arguments: parseToolArguments(typeof item.arguments === "string" ? item.arguments : "{}", index),
     });
   }
   const status = typeof record.status === "string" ? record.status : "completed";
@@ -1042,6 +1089,27 @@ async function providerHttpError(response: Response, request: ModelRequestLogCon
   });
 }
 
+function unreadableStreamingResponse(error: unknown, attempts: number, request: ModelRequestLogContext): AppError {
+  const streamError = error instanceof StreamConsumptionError ? error : undefined;
+  const cause = streamError?.cause ?? error;
+  return new AppError("MODEL_ERROR", "Model provider returned an unreadable streaming response", 502, {
+    attempts,
+    causeName: errorName(cause),
+    causeMessage: safeErrorMessage(cause),
+    causeCode: transportCauseCode(cause),
+    ...(streamError === undefined
+      ? {}
+      : {
+          streamFailureStage: streamError.stage,
+          streamEventsSeen: streamError.diagnostics.eventsSeen,
+          ...(streamError.diagnostics.lastEvent === undefined
+            ? {}
+            : { lastStreamEvent: streamError.diagnostics.lastEvent }),
+        }),
+    request,
+  });
+}
+
 async function safeResponseBodyPreview(response: Response): Promise<string | undefined> {
   try {
     const text = await response.text();
@@ -1051,6 +1119,36 @@ async function safeResponseBodyPreview(response: Response): Promise<string | und
   } catch {
     return undefined;
   }
+}
+
+function summarizeStreamEvent(data: string): StreamEventSummary {
+  const trimmed = data.trim();
+  if (trimmed === "[DONE]") {
+    return { dataKind: "done", byteLength: Buffer.byteLength(data, "utf8") };
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return {
+      dataKind: "json",
+      byteLength: Buffer.byteLength(data, "utf8"),
+      ...(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? { shape: Object.keys(parsed).sort().slice(0, 12) }
+        : {}),
+    };
+  } catch {
+    return { dataKind: "non-json", byteLength: Buffer.byteLength(data, "utf8") };
+  }
+}
+
+function errorName(error: unknown): string | undefined {
+  return error instanceof Error && error.name.length > 0 ? error.name : undefined;
+}
+
+function safeErrorMessage(error: unknown): string | undefined {
+  if (!(error instanceof Error) || error.message.length === 0) return undefined;
+  const compact = error.message.replace(/\s+/g, " ").trim();
+  if (compact.length === 0) return undefined;
+  return compact.length <= 200 ? compact : `${compact.slice(0, 197)}...`;
 }
 
 function isRetryableStatus(status: number): boolean {
@@ -1201,21 +1299,38 @@ function parseToolCall(
     throw new AppError("MODEL_ERROR", `Model provider returned an invalid tool call at index ${index}`, 502);
   }
   const rawArguments = call.function?.arguments ?? "{}";
-  return { id, name, arguments: salvageArguments(rawArguments) };
+  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments, index) };
 }
 
-function parseAccumulatedToolCall(id: string, name: string, rawArguments: string): ModelToolCall {
-  return { id, name, arguments: salvageArguments(rawArguments === "" ? "{}" : rawArguments) };
+function parseAccumulatedToolCall(id: string, name: string, rawArguments: string, index: number): ModelToolCall {
+  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments, index) };
 }
 
-function salvageArguments(rawArguments: string): unknown {
-  let argumentsValue: unknown;
-  try {
-    argumentsValue = JSON.parse(rawArguments);
-  } catch {
-    argumentsValue = rawArguments;
+function parseToolArguments(rawArguments: string, index: number): Record<string, unknown> {
+  let argumentsValue = parseToolArgumentsJson(rawArguments, index);
+  if (typeof argumentsValue === "string") {
+    argumentsValue = parseToolArgumentsJson(argumentsValue, index);
+  }
+  if (!isJsonObject(argumentsValue)) {
+    throw new AppError("MODEL_ERROR", `Model provider returned non-object tool arguments at index ${index}`, 502, {
+      toolCallIndex: index,
+    });
   }
   return argumentsValue;
+}
+
+function parseToolArgumentsJson(rawArguments: string, index: number): unknown {
+  try {
+    return JSON.parse(rawArguments);
+  } catch {
+    throw new AppError("MODEL_ERROR", `Model provider returned unreadable tool arguments at index ${index}`, 502, {
+      toolCallIndex: index,
+    });
+  }
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeFinishReason(reason: string | undefined, toolCallCount: number): ModelResponse["finishReason"] {

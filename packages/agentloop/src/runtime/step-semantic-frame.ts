@@ -76,6 +76,9 @@ const OPERATION_PROFILE_IDS = new Set<OperationProfileId>([
 const RUNTIME_CORE_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "source_summary",
   "source_urls",
+  "schema_summary",
+  "record_counts",
+  "structured_extraction_artifact",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -183,7 +186,13 @@ function derivePhaseRole(
     return "artifact_production";
   }
   if (step.role === "deliver") return "delivery";
-  if (operation === "data_analysis" || completionBoundary.includes("source_summary")) return "analysis";
+  if (
+    operation === "data_analysis"
+    || completionBoundary.includes("source_summary")
+    || completionBoundary.includes("schema_summary")
+    || completionBoundary.includes("record_counts")
+    || completionBoundary.includes("structured_extraction_artifact")
+  ) return "analysis";
   return "artifact_production";
 }
 
@@ -198,7 +207,14 @@ function deriveEvidenceSources(
   completionBoundary: readonly EvidenceKind[],
 ): StepEvidenceSource[] {
   const result: StepEvidenceSource[] = [];
-  const needsSource = completionBoundary.some((kind) => kind === "source_summary" || kind === "source_urls" || kind === "explicit_caveats");
+  const needsSource = completionBoundary.some((kind) =>
+    kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "structured_extraction_artifact"
+    || kind === "explicit_caveats"
+  );
   if (input.step.dependencies.length > 0) {
     result.push({
       kind: "dependency_step",

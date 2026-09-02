@@ -168,7 +168,7 @@ export function eventLabel(event: RunEvent): string {
   const t = event.type;
   if (t === "assistant.streaming") {
     const c = d.content ?? "";
-    return "正在生成" + (c ? "：" + clip(c, 80) : "") + " · " + phaseLabel(d.phase);
+    return "实时草稿" + (c ? "：" + clip(c, 80) : "") + " · " + phaseLabel(d.phase);
   }
   if (t === "assistant.committed") {
     const txt = d.content ?? "";

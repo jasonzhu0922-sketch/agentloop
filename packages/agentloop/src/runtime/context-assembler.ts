@@ -1183,7 +1183,6 @@ function artifactToolCallArgumentsProjection(
   return omitUndefinedDeep({
     path: stringValue(originalRecord?.path) ?? stringValue(artifact?.path),
     mode: stringValue(originalRecord?.mode),
-    overwrite: booleanValue(originalRecord?.overwrite),
     content: "[Historical successful artifact write content omitted from model context. Use the following tool result artifact receipt as evidence; do not reuse this historical tool call as new input.]",
   }) as Record<string, unknown>;
 }
@@ -1463,6 +1462,7 @@ function compactEvidenceSourceRef(value: unknown): unknown {
     limit: numberValue(record.limit),
     totalLines: numberValue(record.totalLines),
     nextOffset: numberValue(record.nextOffset),
+    sheets: compactSheetRefs(record.sheets, 8),
     matchedBy: matchedBy === undefined ? undefined : omitUndefinedDeep({
       path: stringValue(matchedBy.path),
       pattern: stringValue(matchedBy.pattern),
@@ -1558,6 +1558,9 @@ function compactEvidenceFactForLedger(value: unknown): unknown {
     totalFiles: numberValue(record.totalFiles),
     scannedFiles: numberValue(record.scannedFiles),
     totalBytes: numberValue(record.totalBytes),
+    totalRows: numberValue(record.totalRows),
+    totalRecords: numberValue(record.totalRecords),
+    totalCells: numberValue(record.totalCells),
     bytes: numberValue(record.bytes),
     characters: numberValue(record.characters),
     indexRef: stringValue(record.indexRef),
@@ -1568,6 +1571,9 @@ function compactEvidenceFactForLedger(value: unknown): unknown {
     extensions: recordValue(record.extensions),
     groups: compactCountGroups(record.groups, 20),
     fieldProfiles: compactFieldProfiles(record.fieldProfiles, 8, 8),
+    spreadsheetProfile: compactSpreadsheetProfile(record.spreadsheetProfile),
+    artifact: compactArtifactPointer(record.artifact),
+    extractionSha256: stringValue(record.extractionSha256),
     textGroups: compactTextGroups(record.textGroups, 12, 240, 2),
     pathGroups: compactPathGroups(record.pathGroups, 12),
     samplePaths,
@@ -1577,6 +1583,99 @@ function compactEvidenceFactForLedger(value: unknown): unknown {
     sections,
     excerptCharacters: typeof record.excerpt === "string" ? record.excerpt.length : undefined,
     excerptSha256: typeof record.excerpt === "string" ? digest(record.excerpt) : undefined,
+  });
+}
+
+function compactSpreadsheetProfile(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  return omitUndefinedDeep({
+    schema: stringValue(record.schema),
+    workbookCount: numberValue(record.workbookCount),
+    profiledWorkbookCount: numberValue(record.profiledWorkbookCount),
+    truncated: booleanValue(record.truncated),
+    signatures: Array.isArray(record.signatures) ? record.signatures.slice(0, 8).map((item) => {
+      const signature = recordValue(item);
+      if (signature === undefined) return item;
+      return omitUndefinedDeep({
+        signature: stringValue(signature.signature),
+        count: numberValue(signature.count),
+        samplePaths: Array.isArray(signature.samplePaths) ? signature.samplePaths.slice(0, 4) : undefined,
+        sheetNames: Array.isArray(signature.sheetNames) ? signature.sheetNames.slice(0, 8) : undefined,
+        sheetShapes: Array.isArray(signature.sheetShapes) ? signature.sheetShapes.slice(0, 8) : undefined,
+      });
+    }) : undefined,
+    files: Array.isArray(record.files) ? record.files.slice(0, 8).map(compactSpreadsheetFileProfile) : undefined,
+    caveats: compactArray(record.caveats, 8),
+  });
+}
+
+function compactSpreadsheetFileProfile(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return value;
+  return omitUndefinedDeep({
+    path: stringValue(record.path),
+    extension: stringValue(record.extension),
+    bytes: numberValue(record.bytes),
+    workbookType: stringValue(record.workbookType),
+    sheetCount: numberValue(record.sheetCount),
+    signature: stringValue(record.signature),
+    truncated: booleanValue(record.truncated),
+    error: stringValue(record.error),
+    sheets: Array.isArray(record.sheets) ? record.sheets.slice(0, 8).map(compactSpreadsheetSheetProfile) : undefined,
+  });
+}
+
+function compactSpreadsheetSheetProfile(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return value;
+  return omitUndefinedDeep({
+    name: stringValue(record.name),
+    index: numberValue(record.index),
+    declaredRange: stringValue(record.declaredRange),
+    observedRange: stringValue(record.observedRange),
+    rowCount: numberValue(record.rowCount),
+    columnCount: numberValue(record.columnCount),
+    nonEmptyCellCount: numberValue(record.nonEmptyCellCount),
+    mergedCellCount: numberValue(record.mergedCellCount),
+    formulaCellCount: numberValue(record.formulaCellCount),
+    valueKinds: recordValue(record.valueKinds),
+    candidateHeaders: Array.isArray(record.candidateHeaders) ? record.candidateHeaders.slice(0, 3).map((item) => {
+      const header = recordValue(item);
+      if (header === undefined) return item;
+      return omitUndefinedDeep({
+        row: numberValue(header.row),
+        range: stringValue(header.range),
+        nonEmptyCellCount: numberValue(header.nonEmptyCellCount),
+        values: Array.isArray(header.values) ? header.values.slice(0, 12) : undefined,
+      });
+    }) : undefined,
+  });
+}
+
+function compactSheetRefs(value: unknown, maximum: number): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maximum).map((item) => {
+    const record = recordValue(item);
+    if (record === undefined) return item;
+    return omitUndefinedDeep({
+      name: stringValue(record.name),
+      sourceRange: stringValue(record.sourceRange),
+      rowCount: numberValue(record.rowCount),
+      cellCount: numberValue(record.cellCount),
+      truncated: booleanValue(record.truncated),
+    });
+  });
+}
+
+function compactArtifactPointer(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined) return undefined;
+  return omitUndefinedDeep({
+    schema: stringValue(record.schema),
+    path: stringValue(record.path),
+    bytes: numberValue(record.bytes),
+    sha256: stringValue(record.sha256),
   });
 }
 

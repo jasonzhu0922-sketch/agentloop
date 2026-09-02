@@ -24,6 +24,9 @@ import { admitPlan, hasFileProducer } from "./admission.ts";
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
   "source_urls",
+  "schema_summary",
+  "record_counts",
+  "structured_extraction_artifact",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -31,6 +34,14 @@ const EVIDENCE_KIND_VALUES = [
   "format_matches_request",
   "delivery_receipt",
   "explicit_caveats",
+] as const satisfies readonly EvidenceKind[];
+
+const ARTIFACT_DELIVERY_EVIDENCE_KIND_VALUES = [
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
 ] as const satisfies readonly EvidenceKind[];
 
 const SKILL_QA_ONLY_EVIDENCE_KIND_VALUES = [
@@ -149,6 +160,7 @@ export class ModelPlanner implements Planner {
   }
 
   async plan(task: TaskSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanProposal> {
+    const taskProfile = planningTaskProfile(task);
     await emit?.({
       type: "planning.started",
       data: {
@@ -156,7 +168,7 @@ export class ModelPlanner implements Planner {
         availableToolCount: task.availableToolNames.length,
       },
     });
-    if (task.responseOnly) {
+    if (task.responseOnly && taskProfile.planShape === "single_leaf") {
       await emit?.({
         type: "planning.turn.started",
         data: {
@@ -188,7 +200,6 @@ export class ModelPlanner implements Planner {
       ...(task.conversationHistory ?? []),
       { role: "user", content: task.input },
     ];
-    const taskProfile = planningTaskProfile(task);
     const selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
     await emit?.({
       type: "planning.profile.created",
@@ -296,6 +307,10 @@ export class ModelPlanner implements Planner {
           proposal,
           availableSkills: task.availableSkills,
           availableToolNames: new Set(task.availableToolNames),
+          taskIntent: {
+            deliverySurface: taskProfile.deliverySurface,
+            artifactKind: taskProfile.artifactKind,
+          },
         });
         await emit?.({
           type: "planning.outcome_plan.admitted",
@@ -472,14 +487,19 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     responseOnly: task.responseOnly,
   });
   const operationProfiles = relevantOperationProfiles(task);
+  const operationProfileIds = new Set(operationProfiles.map((profile) => profile.id));
   const artifactKind = taskIntent.artifactKind;
   const sourceNeed = taskIntent.sourceNeed === "none" && (task.sources?.length ?? 0) > 0 && task.responseOnly !== true
     ? "source_grounded"
     : taskIntent.sourceNeed;
   const recovery = task.conversationWorkingSet?.failedBoundaries.length
     || task.conversationWorkingSet?.activeGoal?.unfinished === true;
+  const dataAnalysisSourceTask = operationProfileIds.has("data_analysis")
+    && (taskHasVisibleDataSource(task) || taskHasUploadedDataSource(task));
   const planShape = recovery
     ? "recovery_patch"
+    : dataAnalysisSourceTask
+      ? "fact_then_produce"
     : artifactKind !== "none" && (sourceNeed === "source_grounded" || sourceNeed === "strict_user_source")
       ? "fact_then_produce"
       : "single_leaf";
@@ -509,6 +529,26 @@ function inferArtifactKind(input: string): NonNullable<TaskProfile["artifactKind
 
 function inferSourceNeed(input: string): NonNullable<TaskProfile["sourceNeed"]> {
   return classifyTaskIntent({ objective: input }).sourceNeed;
+}
+
+function taskHasVisibleDataSource(task: TaskSpec): boolean {
+  return (task.visibleDirectories?.length ?? 0) > 0
+    && task.availableToolNames.some((name) =>
+      name === "visible_index_directory"
+      || name === "visible_extract_tables"
+      || name === "visible_read_files"
+      || name === "visible_find_files"
+    );
+}
+
+function taskHasUploadedDataSource(task: TaskSpec): boolean {
+  return (task.sources ?? []).some((source) =>
+    /(?:csv|tsv|xls|xlsx|xlsm|spreadsheet|sheet|table|json|ndjson|parquet)/iu.test([
+      source.originalName,
+      source.mimeType,
+      source.extension,
+    ].join(" "))
+  );
 }
 
 function inferRiskProfile(toolNames: readonly string[]): NonNullable<TaskProfile["riskProfile"]> {
@@ -605,6 +645,7 @@ function planningRuntimeContext(
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
+          evidenceContractPolicy: evidenceContractPolicyForTask(taskProfile),
           firstRoundRules: [
             "submit exactly one OutcomePlan",
             "do not submit plan patches",
@@ -623,6 +664,50 @@ function planningRuntimeContext(
         "</runtime_directive>",
       ]),
     ].filter(Boolean).join("\n"),
+  };
+}
+
+function evidenceContractPolicyForTask(taskProfile: TaskProfile): Record<string, unknown> {
+  const sourceKinds = ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"];
+  if (taskProfile.deliverySurface === "conversation" && taskProfile.artifactKind === "none") {
+    return {
+      schema: "agentloop.evidenceContractPolicy/v1",
+      principle: "Evidence contracts follow the semantic delivery surface. Source evidence, final conversation delivery, and workspace artifact delivery are separate evidence families.",
+      finalDeliverySurface: "conversation",
+      sourceFactAcquisition: {
+        useWhen: "the task has visible directories, uploaded files, bulk data, or source-grounded analysis requirements",
+        recommendedRequiredKinds: sourceKinds,
+        note: "Use structured extraction artifacts for reusable data evidence, but do not treat that source artifact as the final user deliverable.",
+      },
+      finalProduceOrDeliverLeaf: {
+        requiredKinds: ["delivery_receipt", "explicit_caveats"],
+        forbiddenKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+        note: "For conversation-only answers, the final leaf delivers text in the conversation; it must not require a workspace artifact path unless the user asked for a file.",
+      },
+    };
+  }
+  if (taskProfile.deliverySurface === "workspace_artifact" && taskProfile.artifactKind !== undefined && taskProfile.artifactKind !== "none") {
+    return {
+      schema: "agentloop.evidenceContractPolicy/v1",
+      principle: "Evidence contracts follow the semantic delivery surface. Source evidence, final conversation delivery, and workspace artifact delivery are separate evidence families.",
+      finalDeliverySurface: "workspace_artifact",
+      sourceFactAcquisition: {
+        useWhen: "the requested artifact depends on visible directories, uploaded files, bulk data, or source-grounded analysis requirements",
+        recommendedRequiredKinds: sourceKinds,
+      },
+      finalProduceOrDeliverLeaf: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
+        recommendedWhenAvailable: ["artifact_acceptance", "artifact_openable"],
+        note: "For requested file/media artifacts, final delivery must be backed by observable artifact evidence; final prose alone is not enough.",
+      },
+    };
+  }
+  return {
+    schema: "agentloop.evidenceContractPolicy/v1",
+    principle: "Use the smallest evidence contract that matches the task semantics; do not add artifact evidence unless the user requested a workspace artifact.",
+    finalProduceOrDeliverLeaf: {
+      requiredKinds: ["delivery_receipt"],
+    },
   };
 }
 
@@ -888,24 +973,62 @@ function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {
 }
 
 function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): PlanProposal {
+  const taskProfile = planningTaskProfile(task);
+  const terminalStepIds = terminalLeafStepIds(proposal.steps);
   return {
     ...proposal,
     steps: proposal.steps.map((step) => {
-      if (step.evidenceContract !== undefined) return step;
-      const coreCriteria = step.successCriteria.filter((criterion) =>
+      const deliveryNormalized = normalizeConversationOnlyTerminalStep(step, terminalStepIds, taskProfile);
+      if (deliveryNormalized.evidenceContract !== undefined) return deliveryNormalized;
+      const coreCriteria = deliveryNormalized.successCriteria.filter((criterion) =>
         !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
       );
-      if (coreCriteria.length > 0) return { ...step, successCriteria: coreCriteria };
+      if (coreCriteria.length > 0) return { ...deliveryNormalized, successCriteria: coreCriteria };
       return {
-        ...step,
+        ...deliveryNormalized,
         successCriteria: [{
           id: `${step.id}-core-delivery`,
-          description: coreSuccessCriterionDescription(step),
+          description: coreSuccessCriterionDescription(deliveryNormalized),
           source: "planner",
         }],
       };
     }),
   };
+}
+
+function terminalLeafStepIds(steps: readonly PlanStepProposal[]): ReadonlySet<string> {
+  const dependedOn = new Set(steps.flatMap((step) => step.dependencies));
+  return new Set(steps
+    .filter((step) => (step.kind ?? "leaf") === "leaf" && !dependedOn.has(step.id))
+    .map((step) => step.id));
+}
+
+function normalizeConversationOnlyTerminalStep(
+  step: PlanStepProposal,
+  terminalStepIds: ReadonlySet<string>,
+  taskProfile: TaskProfile,
+): PlanStepProposal {
+  if (taskProfile.deliverySurface !== "conversation" || taskProfile.artifactKind !== "none") return step;
+  if (!terminalStepIds.has(step.id) || step.role === "fact_acquisition" || step.role === "repair") return step;
+  if (step.evidenceContract === undefined) return {
+    ...step,
+    successCriteria: step.successCriteria.filter((criterion) => !isArtifactDeliveryEvidenceKind(criterion.id)),
+  };
+  const requiredKinds = step.evidenceContract.requiredKinds.filter((kind) => !isArtifactDeliveryEvidenceKind(kind));
+  if (!requiredKinds.includes("delivery_receipt")) requiredKinds.push("delivery_receipt");
+  return {
+    ...step,
+    evidenceContract: { ...step.evidenceContract, requiredKinds },
+    successCriteria: requiredKinds.map((kind) => ({
+      id: kind,
+      description: evidenceCriterionDescription(kind, step.evidenceContract?.caveatPolicy ?? "none"),
+      source: "planner",
+    })),
+  };
+}
+
+function isArtifactDeliveryEvidenceKind(kind: string): kind is typeof ARTIFACT_DELIVERY_EVIDENCE_KIND_VALUES[number] {
+  return (ARTIFACT_DELIVERY_EVIDENCE_KIND_VALUES as readonly string[]).includes(kind);
 }
 
 function coreSuccessCriterionDescription(step: PlanStepProposal): string {
@@ -1152,6 +1275,12 @@ function evidenceCriterionDescription(kind: EvidenceKind, caveatPolicy: CaveatPo
       return `A bounded source summary is available.${suffix}`;
     case "source_urls":
       return `Source URLs or equivalent source references are available.${suffix}`;
+    case "schema_summary":
+      return `A bounded schema or field summary is available.${suffix}`;
+    case "record_counts":
+      return `Record, row, range, or cell counts are available.${suffix}`;
+    case "structured_extraction_artifact":
+      return `A durable structured extraction artifact or content-addressed reference is available.${suffix}`;
     case "artifact_path":
       return "The delivered artifact path is recorded.";
     case "artifact_non_empty":

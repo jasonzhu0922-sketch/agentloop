@@ -417,7 +417,8 @@ test("ModelPlanner treats bound uploaded sources as source-grounded artifact inp
       const runtimeContext = request.runtimeContext?.content ?? "";
       assert.match(runtimeContext, /"sourceNeed":"source_grounded"/);
       assert.match(runtimeContext, /"planShape":"fact_then_produce"/);
-      assert.match(runtimeContext, /For data-to-report requests over files or bulk data/);
+      assert.match(runtimeContext, /Choose the smallest dependency shape/);
+      assert.match(runtimeContext, /"finalDeliverySurface":"workspace_artifact"/);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -484,6 +485,75 @@ test("ModelPlanner treats bound uploaded sources as source-grounded artifact inp
   assert.equal(calls, 1);
   assert.deepEqual(plan.steps.map((step) => step.id), ["profile_uploaded_spreadsheet", "produce_html_report"]);
   assert.deepEqual(plan.steps[1].dependencies, ["profile_uploaded_spreadsheet"]);
+});
+
+test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analysis replies", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const runtimeContext = request.runtimeContext?.content ?? "";
+      assert.match(runtimeContext, /"planShape":"fact_then_produce"/);
+      assert.match(runtimeContext, /"id":"data_analysis"/);
+      assert.match(runtimeContext, /visible_extract_tables/);
+      assert.match(runtimeContext, /structured extraction artifact/);
+      assert.match(runtimeContext, /"evidenceContractPolicy"/);
+      assert.match(runtimeContext, /"finalDeliverySurface":"conversation"/);
+      assert.match(runtimeContext, /"forbiddenKinds":\["artifact_path","artifact_non_empty","artifact_acceptance","artifact_openable","format_matches_request"\]/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("visible-spreadsheet-analysis", {
+          goal: "Analyze the visible spreadsheet data with structured evidence before replying.",
+          shape: "fact_then_produce",
+          steps: [{
+            id: "profile_visible_spreadsheets",
+            objective: "Profile visible spreadsheet files and extract bounded structured table evidence with schema, counts, ranges, and caveats.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            recommendedToolNames: ["visible_index_directory", "visible_extract_tables"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }, {
+            id: "deliver_analysis_reply",
+            objective: "Answer the user's analysis request using the structured extraction evidence and caveats.",
+            dependencies: ["profile_visible_spreadsheets"],
+            role: "deliver",
+            skillIds: [],
+            recommendedToolNames: [],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-planner-visible-spreadsheet-analysis-fact-then-produce",
+    input: "帮我分析一下这里面的绩效评价情况，直接在对话里回答就行",
+    availableSkills: [],
+    availableToolNames: ["visible_index_directory", "visible_extract_tables", "visible_find_files", "visible_read_files"],
+    responseOnly: true,
+    visibleDirectories: [{
+      id: "visible_dir_1",
+      name: "绩效表",
+      path: "/tmp/perf",
+    }],
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["profile_visible_spreadsheets", "deliver_analysis_reply"]);
+  assert.deepEqual(plan.steps[0].recommendedToolNames, ["visible_index_directory", "visible_extract_tables"]);
+  assert.deepEqual(plan.steps[1].dependencies, ["profile_visible_spreadsheets"]);
+  assert.deepEqual(plan.steps[1].evidenceContract?.requiredKinds, ["delivery_receipt", "explicit_caveats"]);
+  assert.deepEqual(plan.steps[1].successCriteria.map((criterion) => criterion.id), ["delivery_receipt", "explicit_caveats"]);
 });
 
 test("ModelPlanner canonicalizes duplicate names in the set-valued Tool capability field", async () => {
@@ -741,6 +811,187 @@ test("Plan admission normalizes Skill-owned QA evidence out of Runtime evidence 
     "artifact_path",
     "artifact_non_empty",
     "artifact_acceptance",
+  ]);
+});
+
+test("Plan admission adds delivery evidence to non-acquisition source-only leaves", () => {
+  const proposal: PlanProposal = {
+    goal: "summarize uploaded source",
+    selectedSkillIds: [],
+    steps: [{
+      id: "summarize-source",
+      objective: "Read the uploaded source and produce a user-facing summary.",
+      dependencies: [],
+      role: "produce",
+      skillIds: [],
+      recommendedToolNames: ["read_source"],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source evidence is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are recorded.", source: "planner" },
+      ],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-source-only-produce-admission",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["read_source"]),
+  });
+
+  assert.deepEqual(admitted.steps[0].evidenceContract?.requiredKinds, [
+    "source_summary",
+    "explicit_caveats",
+    "delivery_receipt",
+  ]);
+  assert.equal(admitted.steps[0].successCriteria.some((criterion) => criterion.id === "delivery_receipt"), true);
+});
+
+test("Plan admission leaves acquisition source evidence contracts source-only", () => {
+  const proposal: PlanProposal = {
+    goal: "collect uploaded source facts",
+    selectedSkillIds: [],
+    steps: [{
+      id: "read-source",
+      objective: "Read the uploaded source as evidence for a later step.",
+      dependencies: [],
+      role: "fact_acquisition",
+      skillIds: [],
+      recommendedToolNames: ["read_source"],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source evidence is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are recorded.", source: "planner" },
+      ],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-source-acquisition-admission",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["read_source"]),
+  });
+
+  assert.deepEqual(admitted.steps[0].evidenceContract?.requiredKinds, [
+    "source_summary",
+    "explicit_caveats",
+  ]);
+  assert.equal(admitted.steps[0].successCriteria.some((criterion) => criterion.id === "delivery_receipt"), false);
+});
+
+test("Plan admission normalizes conversation-only data analysis final leaves away from artifact gates", () => {
+  const proposal: PlanProposal = {
+    goal: "analyze structured table data and reply",
+    selectedSkillIds: [],
+    steps: [{
+      id: "profile-visible-tables",
+      objective: "Extract structured table evidence from visible spreadsheet files.",
+      dependencies: [],
+      role: "fact_acquisition",
+      skillIds: [],
+      recommendedToolNames: ["visible_index_directory", "visible_extract_tables"],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source evidence is available.", source: "planner" },
+        { id: "schema_summary", description: "Schema evidence is available.", source: "planner" },
+        { id: "record_counts", description: "Record counts are available.", source: "planner" },
+        { id: "structured_extraction_artifact", description: "A structured extraction artifact is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are explicit.", source: "planner" },
+      ],
+    }, {
+      id: "deliver-analysis-reply",
+      objective: "Use the structured evidence to answer the user's analysis request in the conversation.",
+      dependencies: ["profile-visible-tables"],
+      role: "produce",
+      skillIds: [],
+      recommendedToolNames: ["computer_read_file"],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "A delivered artifact path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The delivered artifact is non-empty.", source: "planner" },
+        { id: "format_matches_request", description: "The artifact format matches the request.", source: "planner" },
+        { id: "delivery_receipt", description: "The final answer is delivered.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are explicit.", source: "planner" },
+      ],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-conversation-data-analysis-admission",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["visible_index_directory", "visible_extract_tables", "computer_read_file"]),
+    taskIntent: { deliverySurface: "conversation", artifactKind: "none" },
+  });
+
+  assert.deepEqual(admitted.steps[0].evidenceContract?.requiredKinds, [
+    "source_summary",
+    "schema_summary",
+    "record_counts",
+    "structured_extraction_artifact",
+    "explicit_caveats",
+  ]);
+  assert.deepEqual(admitted.steps[1].evidenceContract?.requiredKinds, [
+    "delivery_receipt",
+    "explicit_caveats",
+  ]);
+  assert.deepEqual(admitted.steps[1].successCriteria.map((criterion) => criterion.id), [
+    "delivery_receipt",
+    "explicit_caveats",
+  ]);
+});
+
+test("Plan admission preserves artifact gates for workspace artifact delivery", () => {
+  const proposal: PlanProposal = {
+    goal: "write a source-grounded report file",
+    selectedSkillIds: [],
+    steps: [{
+      id: "write-report",
+      objective: "Create a Markdown report file from the extracted data.",
+      dependencies: [],
+      role: "produce",
+      skillIds: [],
+      recommendedToolNames: ["computer_write_file"],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "A delivered artifact path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The delivered artifact is non-empty.", source: "planner" },
+        { id: "format_matches_request", description: "The artifact format matches the request.", source: "planner" },
+        { id: "delivery_receipt", description: "The final artifact is delivered.", source: "planner" },
+      ],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-workspace-artifact-admission",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["computer_write_file"]),
+    taskIntent: { deliverySurface: "workspace_artifact", artifactKind: "document" },
+  });
+
+  assert.deepEqual(admitted.steps[0].evidenceContract?.requiredKinds, [
+    "artifact_path",
+    "artifact_non_empty",
+    "format_matches_request",
+    "delivery_receipt",
   ]);
 });
 
@@ -3575,6 +3826,66 @@ test("ModelStepAssessor carries evidence contracts into assessment and accepts r
   });
 });
 
+test("ModelStepAssessor normalizes long evidence refs without masking failed boundaries", async () => {
+  const longRef = `computer_run_command stdoutRef ${"nested/path/".repeat(20)}result.stdout.txt`;
+  const assessor = new ModelStepAssessor(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [{
+      id: "assessment",
+      name: "submit_assessment",
+      arguments: {
+        criteria: [
+          { criterionId: "artifact_path", satisfied: false, rationale: "No final artifact path was recorded.", evidenceRefs: [longRef] },
+          { criterionId: "delivery_receipt", satisfied: true, rationale: "Inline answer is present.", evidenceRefs: ["candidateOutput"] },
+        ],
+        skills: [],
+        feedback: "Artifact path is missing.",
+        failedBoundary: {
+          stepId: "produce-analysis",
+          missingEvidenceKinds: ["artifact_path"],
+          violatedSkillRequirements: [],
+          reusableEvidenceRefs: [longRef],
+          suggestedRepairShape: "repair_leaf",
+        },
+      },
+    }],
+  }));
+
+  const assessment = await assessor.assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("produce-analysis"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "delivery_receipt"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "Artifact path evidence is present", source: "planner" },
+        { id: "delivery_receipt", description: "Delivery receipt evidence is present", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Inline answer",
+      toolCalls: [],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["artifact_path"]);
+  assert.equal(assessment.failedBoundary?.reusableEvidenceRefs.length, 1);
+  assert.ok((assessment.failedBoundary?.reusableEvidenceRefs[0]?.length ?? 0) <= 128);
+});
+
 test("RuleBasedStepAssessor derives failed boundaries from rejected evidence contracts", async () => {
   const assessment = await new RuleBasedStepAssessor().assess({
     runId: "run",
@@ -3701,6 +4012,60 @@ test("RuleBasedStepAssessor accepts source summary receipts for directory analys
   assert.equal(assessment.approved, true);
   assert.equal(assessment.feedback, "");
   assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
+});
+
+test("ProfiledRuleStepAssessor treats explicit empty caveats as satisfied source caveat evidence", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("profile-tables"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source summary evidence is present.", source: "planner" },
+        { id: "schema_summary", description: "Schema evidence is present.", source: "planner" },
+        { id: "record_counts", description: "Record count evidence is present.", source: "planner" },
+        { id: "structured_extraction_artifact", description: "Structured extraction artifact evidence is present.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveat evidence is explicit.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Profiled and extracted visible table data with no tool caveats.",
+      toolCalls: [{
+        toolCallId: "extract-tables",
+        toolName: "visible_extract_tables",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.visibleTableExtraction/v1",
+          caveats: [],
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            sourceType: "visible_table_extraction",
+            caveats: [],
+            evidenceKinds: {
+              satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
+              caveated: [],
+              failed: [],
+            },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "explicit_caveats")?.satisfied, true);
 });
 
 test("ProfiledRuleStepAssessor accepts artifact receipts from written file evidence gates", async () => {
@@ -3882,6 +4247,67 @@ test("ModelStepAssessor receives candidate projection instead of full long outpu
   assert.match(observedContext, /agentloop\.candidateProjection\/v1/);
   assert.match(observedContext, /sha256/);
   assert.doesNotMatch(observedContext, /UNIQUE_FULL_OUTPUT_TAIL_SHOULD_NOT_REACH_ASSESSOR/);
+});
+
+test("RunService keeps Planner-declared direct-answer leaves toolless and rule-assessed", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const model = new PlannedDirectAnswerModel();
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "answer from prior conversation",
+        selectedSkillIds: [],
+        steps: [{
+          id: "direct-answer",
+          objective: "直接回答上一轮问题并引用已有来源",
+          dependencies: [],
+          role: "deliver",
+          skillIds: [],
+          recommendedToolNames: [],
+          evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
+          successCriteria: [{
+            id: "delivery_receipt",
+            description: "A delivery receipt identifies the final user-facing result.",
+            source: "planner",
+          }],
+        }],
+      }),
+    };
+    const websearch: RuntimeTool<unknown> = {
+      name: "websearch",
+      description: "Search the web",
+      inputSchema: { type: "object" },
+      async execute() {
+        throw new Error("direct-answer step must not receive websearch");
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      tools: [websearch],
+    });
+
+    const run = await runs.execute(owner.user.id, "你倒是回答啊", { allowDangerousTools: true });
+
+    assert.equal(run.status, "completed");
+    assert.equal(model.executionToolCounts.length, 1);
+    assert.deepEqual(model.executionToolCounts, [0]);
+    assert.equal(model.assessmentCalls, 0);
+    const detail = await runs.plan(owner.user.id, run.id);
+    assert.equal(detail.plan.steps[0].status, "completed");
+    assert.equal(detail.assessments[0]?.assessmentProfile, "deterministic");
+    assert.equal(detail.assessments[0]?.assessmentMethod, "rule");
+    const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(run.id) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason_code, "plan_assessed_and_completed");
+  } finally {
+    database.close();
+  }
 });
 
 test("RunService emits assessment failed boundaries for rejected candidates", async () => {
@@ -6101,6 +6527,130 @@ test("source summary receipts use principle assessment without model-backed QA",
   }
 });
 
+test("large structured source Tool results preserve receipts for evidence-gate assessment", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let called = false;
+    const largeSourceTool: RuntimeTool = {
+      name: "large_structured_source",
+      description: "Return a large structured source extraction with a canonical receipt.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      executionMode: "parallel",
+      replaySafe: true,
+      maxResultCharacters: 4_000,
+      parse: () => ({}),
+      execute: async () => ({
+        schema: "agentloop.visibleTableExtraction/v1",
+        files: Array.from({ length: 80 }, (_, index) => ({
+          path: `sheet-${index}.xlsx`,
+          records: Array.from({ length: 20 }, (__, row) => ({ row, values: { name: `person-${index}-${row}`, score: row } })),
+        })),
+        requested: 80,
+        returned: 80,
+        totalRows: 1_600,
+        totalRecords: 1_600,
+        totalCells: 3_200,
+        artifact: {
+          schema: "agentloop.tableExtractionArtifact/v1",
+          path: ".agentloop/table-extractions/aa/source.json",
+          bytes: 95_000,
+          sha256: "a".repeat(64),
+        },
+        caveats: ["Large extraction rows are stored in the durable artifact."],
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          sourceType: "visible_table_extraction",
+          receiptId: "large-source-receipt",
+          sourceRefs: [{ path: "sheet-0.xlsx", sha256: "b".repeat(64) }],
+          facts: [{
+            kind: "structured_table_extraction",
+            requested: 80,
+            returned: 80,
+            totalRows: 1_600,
+            totalRecords: 1_600,
+            totalCells: 3_200,
+            artifact: { path: ".agentloop/table-extractions/aa/source.json", sha256: "a".repeat(64) },
+          }],
+          caveats: ["Large extraction rows are stored in the durable artifact."],
+          evidenceKinds: {
+            satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
+            caveated: ["explicit_caveats"],
+            failed: [],
+          },
+        },
+      }),
+    };
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if (request.phase === "assessment") throw new Error("large source gate should use rule assessment");
+        if (request.phase !== "execution") return { content: "", finishReason: "stop", toolCalls: [] };
+        if (!called) {
+          called = true;
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{ id: "large-source", name: "large_structured_source", arguments: {} }],
+          };
+        }
+        return {
+          content: "Structured extraction evidence is available in the durable artifact with counts and caveats.",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      },
+    };
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "collect large structured source evidence",
+        selectedSkillIds: [],
+        steps: [{
+          id: "collect-large-source",
+          objective: "Collect large structured source evidence with a durable artifact receipt.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          recommendedToolNames: ["large_structured_source"],
+          evidenceContract: {
+            requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+          successCriteria: [
+            { id: "source_summary", description: "A structured source summary receipt is present.", source: "planner" },
+            { id: "schema_summary", description: "A schema summary is present.", source: "planner" },
+            { id: "record_counts", description: "Record counts are present.", source: "planner" },
+            { id: "structured_extraction_artifact", description: "A durable extraction artifact is present.", source: "planner" },
+            { id: "explicit_caveats", description: "Extraction caveats are explicit.", source: "planner" },
+          ],
+        }],
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      tools: [largeSourceTool],
+    });
+
+    const run = await runs.execute(owner.user.id, "收集大量结构化来源证据");
+
+    assert.equal(run.status, "completed");
+    const events = await runs.events(owner.user.id, run.id);
+    const completed = events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "large-source");
+    assert.match(String(completed?.data.result), /large_tool_result_receipt_preserved/);
+    assert.match(String(completed?.data.result), /agentloop\.toolEvidenceReceipt\/v1/);
+    const latestAssessment = (await runs.plan(owner.user.id, run.id)).assessments.at(-1);
+    assert.equal(latestAssessment?.approved, true);
+    assert.equal(latestAssessment?.assessmentProfile, "evidence_gate");
+    assert.equal(latestAssessment?.assessmentMethod, "rule");
+  } finally {
+    database.close();
+  }
+});
+
 test("visible command steps expose read-only visible command roots in execution context", async () => {
   const database = new AppDatabase(":memory:");
   const visible = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-command-context-"));
@@ -7777,6 +8327,29 @@ class VisibleReadContinuationModel implements ModelAdapter {
     assert.equal(request.tools.length, 0);
     return {
       content: "已读取 long-plan.md 的两个连续窗口并形成带证据边界的详细总结。",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class PlannedDirectAnswerModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  readonly executionToolCounts: number[] = [];
+  assessmentCalls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase === "assessment") {
+      this.assessmentCalls += 1;
+      throw new Error("direct-answer delivery should use deterministic rule assessment");
+    }
+    if (request.phase !== "execution") {
+      return { content: "", finishReason: "stop", toolCalls: [] };
+    }
+    this.executionToolCounts.push(request.tools.length);
+    assert.equal(request.tools.some((tool) => tool.name === "websearch"), false);
+    return {
+      content: "根据上一轮已取得的信息，宝信软件董事长是夏雪松。",
       finishReason: "stop",
       toolCalls: [],
     };

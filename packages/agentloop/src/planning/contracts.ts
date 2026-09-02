@@ -21,6 +21,9 @@ export type OutcomeLeafRole = "fact_acquisition" | "produce" | "deliver" | "repa
 export type EvidenceKind =
   | "source_summary"
   | "source_urls"
+  | "schema_summary"
+  | "record_counts"
+  | "structured_extraction_artifact"
   | "artifact_path"
   | "artifact_non_empty"
   | "artifact_acceptance"
