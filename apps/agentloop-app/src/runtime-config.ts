@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 export interface ApplicationRuntimePaths {
   readonly databasePath: string;
   readonly providerConfigPath?: string;
+  readonly planningExtensionsConfigPath?: string;
   readonly workspaceRoot: string;
   readonly customSkillDirectories: readonly string[];
 }
@@ -11,6 +12,7 @@ export function resolveApplicationRuntimePaths(input: {
   readonly appRoot: string;
   readonly databasePath?: string;
   readonly providerConfigPath?: string;
+  readonly planningExtensionsConfigPath?: string;
   readonly workspaceRoot?: string;
   readonly customSkillDirectories?: readonly string[];
 }): ApplicationRuntimePaths {
@@ -21,6 +23,9 @@ export function resolveApplicationRuntimePaths(input: {
     ...(input.providerConfigPath === undefined || input.providerConfigPath.trim().length === 0
       ? {}
       : { providerConfigPath: resolveFromAppRoot(input.appRoot, input.providerConfigPath) }),
+    ...(input.planningExtensionsConfigPath === undefined || input.planningExtensionsConfigPath.trim().length === 0
+      ? {}
+      : { planningExtensionsConfigPath: resolveFromAppRoot(input.appRoot, input.planningExtensionsConfigPath) }),
     workspaceRoot: resolveFromAppRoot(input.appRoot, input.workspaceRoot ?? "./workspace"),
     customSkillDirectories: (input.customSkillDirectories ?? []).map((directory) => resolveFromAppRoot(input.appRoot, directory)),
   };

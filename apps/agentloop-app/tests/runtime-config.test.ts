@@ -18,12 +18,14 @@ test("runtime path overrides support absolute paths and app-relative paths", () 
     appRoot,
     databasePath: ":memory:",
     providerConfigPath: "./config/providers.json",
+    planningExtensionsConfigPath: "./config/planning-extensions.json",
     workspaceRoot: "/var/lib/agentloop/workspace",
     customSkillDirectories: ["./custom-skills", "/opt/agentloop-skills"],
   });
 
   assert.equal(paths.databasePath, ":memory:");
   assert.equal(paths.providerConfigPath, resolve(appRoot, "config/providers.json"));
+  assert.equal(paths.planningExtensionsConfigPath, resolve(appRoot, "config/planning-extensions.json"));
   assert.equal(paths.workspaceRoot, "/var/lib/agentloop/workspace");
   assert.deepEqual(paths.customSkillDirectories, [
     resolve(appRoot, "custom-skills"),

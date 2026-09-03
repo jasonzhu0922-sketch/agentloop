@@ -1,0 +1,22 @@
+{
+  "storage": {
+    "type": "sqlite",
+    "databasePath": "../data/agentloop-plan-template.db",
+    "migrateOnStart": true
+  },
+  "config": {
+    "enabled": true,
+    "observeEnabled": true,
+    "mode": "direct_use",
+    "allowDirectUse": true,
+    "minDirectUseScore": 0.9,
+    "minPlannerContextScore": 0.7,
+    "allowedRiskCeiling": "low"
+  },
+  "mining": {
+    "minCompletedRunsForCandidate": 3,
+    "maxObservedMatchesPerRun": 500,
+    "allowedRiskCeiling": "low",
+    "excludedSideEffectKinds": ["send_email", "external_api", "browser_operation"]
+  }
+}

@@ -13,6 +13,7 @@ import {
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { AuthService } from "./auth/auth-service.ts";
 import { createAgentLoopServer } from "./http/server.ts";
+import { loadPlanningExtensions } from "./planning-extension-loader.ts";
 import { resolveApplicationRuntimePaths } from "./runtime-config.ts";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -24,6 +25,7 @@ const runtimePaths = resolveApplicationRuntimePaths({
   appRoot,
   databasePath: process.env.DATABASE_PATH,
   providerConfigPath: process.env.LLM_PROVIDER_CONFIG_PATH,
+  planningExtensionsConfigPath: process.env.PLANNING_EXTENSIONS_CONFIG_PATH,
   workspaceRoot: process.env.WORKSPACE_ROOT,
   customSkillDirectories: parseStringArray(process.env.CUSTOM_SKILL_DIRECTORIES_JSON, "CUSTOM_SKILL_DIRECTORIES_JSON"),
 });
@@ -55,6 +57,11 @@ const skills = new SkillService(database, {
   skillDirectories,
 });
 const skillDirectorySync = await skills.syncSkillDirectories();
+const planningExtensionPlugins = await loadPlanningExtensions({
+  appRoot,
+  workspaceRoot,
+  ...(runtimePaths.planningExtensionsConfigPath === undefined ? {} : { configPath: runtimePaths.planningExtensionsConfigPath }),
+});
 const runs = new RunService({
   database,
   skills,
@@ -75,6 +82,7 @@ const runs = new RunService({
   ...(process.env.AGENTLOOP_RUN_EVENT_LOGS === "0"
     ? {}
     : { runEventLogSink: (line) => process.stdout.write(`${line}\n`) }),
+  planningExtensions: planningExtensionPlugins.extensions,
 });
 const reconciledRunCount = await runs.reconcileInterruptedRuns();
 const recoveryMonitor = setInterval(() => {
@@ -97,7 +105,11 @@ function shutdown(): void {
   closing = true;
   clearInterval(recoveryMonitor);
   server.close(() => {
-    void database.close();
+    void planningExtensionPlugins.close()
+      .catch((error) => {
+        process.stderr.write(`planning extension shutdown failed: ${String(error)}\n`);
+      })
+      .finally(() => database.close());
     process.exitCode = 0;
   });
 }

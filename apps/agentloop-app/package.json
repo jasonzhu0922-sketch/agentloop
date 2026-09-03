@@ -12,6 +12,9 @@
     "@zhujun/agentloop-skills": "*",
     "pptxgenjs": "^4.0.1"
   },
+  "optionalDependencies": {
+    "@zhujun/agentloop-plan-template": "*"
+  },
   "devDependencies": {
     "@types/node": "^26.3.0"
   },

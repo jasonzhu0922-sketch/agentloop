@@ -14,12 +14,14 @@
   "scripts": {
     "build:kernel": "npm run build --workspace @zhujun/agentloop",
     "build:skills": "npm run build --workspace @zhujun/agentloop-skills",
+    "build:plan-template": "npm run build --workspace @zhujun/agentloop-plan-template",
     "pack:kernel": "npm run build:kernel && npm pack ./packages/agentloop",
     "pack:skills": "npm run build:skills && npm pack ./packages/agentloop-skills",
+    "pack:plan-template": "npm run build:kernel && npm run build:plan-template && npm pack ./packages/agentloop-plan-template",
     "build:web": "npm run build --prefix apps/agentloop-app/web",
-    "build": "npm run build:kernel && npm run build:skills && npm run build:web",
-    "dev": "npm run build:kernel && npm run build:skills && node apps/agentloop-app/scripts/dev.mjs",
-    "start": "npm run build:kernel && npm run build:skills && npm run start --workspace agentloop-app",
+    "build": "npm run build:kernel && npm run build:skills && npm run build:plan-template && npm run build:web",
+    "dev": "npm run build:kernel && npm run build:skills && npm run build:plan-template && node apps/agentloop-app/scripts/dev.mjs",
+    "start": "npm run build:kernel && npm run build:skills && npm run build:plan-template && npm run start --workspace agentloop-app",
     "test": "npm run test --workspaces --if-present",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"

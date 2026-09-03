@@ -4,6 +4,8 @@
 日期：2026-09-02
 状态：设计稿
 
+配置操作说明见：[Plan Template 插件配置说明](./PLAN-TEMPLATE-PLUGIN-CONFIGURATION.md)。
+
 ## 1. 设计结论
 
 Plan Template Fast Path 的目标不是取消规划，而是在不破坏 AgentLoop canonical Runtime 权威链路的前提下，把历史成功 Run 中稳定、重复、可验证的 Plan 结构沉淀为模版，用于降低新任务的首轮 Planner 大模型调用成本。
@@ -37,6 +39,23 @@ Plan Template Fast Path 的目标不是取消规划，而是在不破坏 AgentLo
 
 > Template 是 Planner 前置的候选生成器，不是新的 Runtime 权威，也不能直接声明任务完成。
 
+包形态结论：
+
+```text
+@zhujun/agentloop
+  只提供 planning extension SPI、PlanProposal admission 入口和 canonical Runtime 权威链路。
+
+@zhujun/agentloop-plan-template
+  作为内核可选插件包发布，自闭环实现 TaskProfiler、TemplateMatcher、
+  TemplatePlanInstantiator、TemplateMiner、TemplateEvaluator 和 PlanTemplateStore。
+
+apps/agentloop-app 或其他宿主应用
+  只负责从应用配置读取是否绑定插件、插件发现位置和 opaque options 覆盖项，
+  不理解 PlanTemplate 的匹配、生命周期、提炼和持久化逻辑。
+```
+
+因此 Plan Template 不是参考应用模块，也不是 Skill / Tool 插件，而是 **kernel planning extension package**。
+
 ## 2. 不做的设计
 
 本方案不做以下形态：
@@ -48,6 +67,9 @@ Plan Template Fast Path 的目标不是取消规划，而是在不破坏 AgentLo
 - 不把模版文本塞进全局 prompt；只在当前任务的 Planner 路由中动态使用。
 - 不把模版匹配失败视为 `blocked`；普通失败应降级到正常 Planner 或 recover / replan。
 - 不引入兼容旧状态机的双轨完成判断。
+- 不把 PlanTemplate 的表结构、匹配算法或生命周期管理写进 `apps/agentloop-app`。
+- 不要求宿主应用理解 PlanTemplate 业务逻辑；宿主只做依赖装配、配置和运维展示。
+- 不复用宿主应用的数据库连接、ORM 或 DAL；PlanTemplate 存储连接由插件包自己创建和管理。
 
 ## 3. 真实运行契约
 
@@ -69,6 +91,57 @@ Canonical Context
   -> TerminalCommitter
   -> Outcome
 ```
+
+### 3.1 包与所有权边界
+
+Plan Template 的正确所有权是独立内核插件包，而不是参考应用。
+
+```text
+packages/agentloop
+  定义 PlanningExtension SPI。
+  负责调用 extension、接纳 PlanProposal、执行 canonical Runtime。
+  不保存 PlanTemplate 数据。
+  不实现 template matching / mining / lifecycle 业务。
+
+packages/agentloop-plan-template
+  实现 Plan Template 完整闭环。
+  自带 schema、migration、store、matcher、miner、evaluator。
+  自己创建和管理 Sqlite / PostgreSQL 等数据库连接。
+  输出符合内核 SPI 的 PlanProposal 或 plannerContext。
+
+apps/agentloop-app
+  参考宿主，只在启动时按应用配置动态装配插件。
+  提供插件绑定开关、发现位置、opaque options 覆盖和可选管理 API/UI。
+  不写 PlanTemplate 的核心逻辑。
+```
+
+物理数据落在 PlanTemplate 插件自己的数据库或独立 schema 中，不接入宿主应用主库连接。表、migration、repository、查询语义和连接生命周期都归 `@zhujun/agentloop-plan-template` 包所有。这样可以同时满足：
+
+- 应用部署时通过配置指定数据库位置、备份、安全和多租户边界。
+- PlanTemplate 逻辑不泄漏到应用层。
+- 其他宿主应用可以复用同一个插件包，而不是复制 app 内部实现。
+
+### 3.2 不是 Skill / Tool 插件
+
+Plan Template 不应建模为 Tool：
+
+- Tool 在 Plan admitted 之后才被调用。
+- Plan Template 的目标是在 Planner 之前提供候选 Plan。
+- 如果做成 Tool，系统仍需先让 Planner 规划“调用模板工具”，无法节省首轮 Planner 调用。
+
+Plan Template 也不应建模为 Skill：
+
+- Skill 拥有领域工作流、素材约束和执行策略。
+- Plan Template 拥有跨领域的规划结构复用、匹配、提炼和生命周期。
+- 放进 Skill 容易演变成任务类型特例，而不是中性的规划优化层。
+
+正确形态是：
+
+```text
+kernel planning extension package
+```
+
+它处在 Planner 之前，输出仍受 PlanAdmission 管束。
 
 ## 4. 核心对象
 
@@ -312,6 +385,25 @@ interface PlanTemplateFastPathConfig {
 }
 ```
 
+插件还应单独接收自己的存储配置。宿主传入的是配置值，不是数据库连接对象。
+
+```ts
+type PlanTemplateStorageConfig =
+  | {
+      type: "sqlite";
+      databasePath: string;
+      busyTimeoutMs?: number;
+      migrateOnStart?: boolean;
+    }
+  | {
+      type: "postgres";
+      connectionString: string;
+      schemaName?: string;
+      poolSize?: number;
+      migrateOnStart?: boolean;
+    };
+```
+
 推荐默认值：
 
 ```json
@@ -335,16 +427,40 @@ interface PlanTemplateFastPathConfig {
 - `mode="direct_use"`：允许高置信 active 模版实例化 PlanProposal；仍必须通过 PlanAdmission。
 - `allowDirectUse=false` 时，即使 `mode="direct_use"`，也只能降级为 `planner_context` 或 normal Planner。
 
-配置来源应接入现有 Runtime / app config，而不是散落在业务代码中。建议支持环境变量或应用配置项：
+配置来源分两层：
 
-```text
-PLAN_TEMPLATE_FAST_PATH_ENABLED=false
-PLAN_TEMPLATE_FAST_PATH_MODE=off
-PLAN_TEMPLATE_FAST_PATH_ALLOW_DIRECT_USE=false
-PLAN_TEMPLATE_FAST_PATH_MIN_DIRECT_USE_SCORE=0.90
-PLAN_TEMPLATE_FAST_PATH_MIN_PLANNER_CONTEXT_SCORE=0.70
-PLAN_TEMPLATE_FAST_PATH_ALLOWED_RISK_CEILING=low
+1. 插件包拥有代码默认值，也可以拥有自己的插件配置文件。
+2. 应用配置决定是否绑定该插件、从哪里发现插件，并可以用 opaque `options` 覆盖插件配置。
+
+参考应用只做通用装配，不解析 PlanTemplate 字段语义：
+
+```json
+{
+  "enabled": true,
+  "planningExtensions": [
+    {
+      "enabled": true,
+      "module": "@zhujun/agentloop-plan-template",
+      "factory": "createPlanTemplatePlugin",
+      "optionsPath": "./plan-template.defaults.json",
+      "options": {
+        "storage": {
+          "type": "sqlite",
+          "databasePath": "../data/agentloop-plan-template.db",
+          "migrateOnStart": true
+        },
+        "config": {
+          "enabled": true,
+          "mode": "planner_context",
+          "allowDirectUse": false
+        }
+      }
+    }
+  ]
+}
 ```
+
+其中 `optionsPath` 是插件配置基线，`options` 是应用配置覆盖项。参考应用只做 schema-agnostic JSON merge，最终 options 原样交给插件 factory。PlanTemplate 字段校验、默认值归一化、SQLite / PostgreSQL 存储解释和 migration 仍由 `@zhujun/agentloop-plan-template` 完成。
 
 该配置只控制“是否尝试模版匹配与复用”，不控制 Assessment、Delivery 或 Outcome 的完成规则。
 
@@ -607,7 +723,89 @@ retired:
 
 ## 9. 持久化设计
 
-第一阶段表结构：
+PlanTemplate 数据不写入 `@zhujun/agentloop` 内核的 Run / Plan 主 schema，也不由 `apps/agentloop-app` 自行管理。`@zhujun/agentloop-plan-template` 插件包自带 database connection、storage layer、schema migration 和 repository。
+
+宿主只提供插件装配配置和 opaque options，不提供数据库连接。
+
+直接嵌入推荐形态：
+
+```ts
+import { createPlanTemplatePlugin } from "@zhujun/agentloop-plan-template";
+import { AppDatabase, RunService } from "@zhujun/agentloop";
+
+const database = new AppDatabase("./data/app.db");
+
+const planTemplates = createPlanTemplatePlugin({
+  storage: {
+    type: "sqlite",
+    databasePath: "./data/agentloop-plan-template.db",
+    migrateOnStart: true,
+  },
+  config: {
+    enabled: true,
+    mode: "planner_context",
+    allowDirectUse: false,
+  },
+});
+
+await planTemplates.migrate();
+
+const runs = new RunService({
+  database,
+  planningExtensions: [planTemplates.extension()],
+});
+```
+
+参考应用推荐形态：
+
+```json
+{
+  "enabled": true,
+  "planningExtensions": [
+    {
+      "enabled": true,
+      "module": "@zhujun/agentloop-plan-template",
+      "factory": "createPlanTemplatePlugin",
+      "optionsPath": "./plan-template.defaults.json",
+      "options": {
+        "config": {
+          "mode": "planner_context"
+        }
+      }
+    }
+  ]
+}
+```
+
+在这个形态下，app 不 import `@zhujun/agentloop-plan-template`。app 启动时读取 `PLANNING_EXTENSIONS_CONFIG_PATH` 指向的 JSON，动态 import 插件 module，调用 factory，并把返回的 `PlanningExtension` 注入 `RunService`。
+
+PostgreSQL 推荐形态：
+
+```ts
+import { createPlanTemplatePlugin } from "@zhujun/agentloop-plan-template";
+
+const planTemplates = createPlanTemplatePlugin({
+  storage: {
+    type: "postgres",
+    connectionString: await secrets.get("agentloop-plan-template-postgres-url"),
+    schemaName: "agentloop_plan_template",
+    migrateOnStart: true,
+  },
+  config,
+});
+
+await planTemplates.migrate();
+```
+
+规则：
+
+- 插件拥有 `plan_template_*` 表结构、migration、repository、索引策略、连接创建和连接生命周期。
+- 宿主只拥有插件绑定配置、插件发现位置、部署位置、备份策略和权限配置。
+- 内核只通过 `PlanningExtension` 接口调用插件，不直接读写插件表。
+- 参考应用可以暴露管理 API/UI，但只能调用插件公开 API，不复制内部查询逻辑。
+- 插件表与 Run / Plan 主表不建立数据库外键；`run_id`、`agent_run_id` 等只是不透明引用。
+
+第一阶段表结构由插件包管理：
 
 ```sql
 CREATE TABLE plan_templates (
@@ -655,6 +853,39 @@ CREATE TABLE plan_template_matches (
 );
 ```
 
+SQLite / PostgreSQL 差异由插件 storage adapter 封装：
+
+```text
+PlanTemplateStorageConfig
+  -> PlanTemplateConnectionFactory
+  -> PlanTemplateSqlDialect
+  -> SqlitePlanTemplateStore
+  -> PostgresPlanTemplateStore
+```
+
+两种 store 暴露相同接口：
+
+```ts
+interface PlanTemplateStore {
+  migrate(): Promise<void>;
+  listCandidates(fingerprint: TaskFingerprint): Promise<PlanTemplate[]>;
+  getTemplate(id: string): Promise<PlanTemplate | null>;
+  upsertTemplate(template: PlanTemplate): Promise<void>;
+  recordExample(example: PlanTemplateExample): Promise<void>;
+  recordMatch(match: PlanTemplateMatch): Promise<void>;
+  recordOutcome(outcome: PlanTemplateOutcome): Promise<void>;
+  updateReliability(templateId: string, reliability: TemplateReliability): Promise<void>;
+}
+```
+
+实现约束：
+
+- 插件包可以复用内核导出的低层 SQL adapter 类型，也可以维护自己的 adapter，但调用方不得传入 `AppDatabase.connection` 或宿主 ORM 对象。
+- 插件连接不得参与 Run / Plan 主库事务；跨库关联只记录 `run_id`、`conversation_id`、`agent_run_id` 等不透明 ID。
+- SQLite 默认使用独立文件，例如 `./data/agentloop-plan-template.db`。
+- PostgreSQL 默认使用独立 database 或独立 schema，例如 `agentloop_plan_template`。
+- migration 由插件包显式执行；参考应用启动时只能调用 `planTemplates.migrate()` 或启用 `migrateOnStart`。
+
 后续增强：
 
 - `plan_template_embeddings`：存储 task / template embedding refs。
@@ -664,7 +895,71 @@ CREATE TABLE plan_template_matches (
 
 ## 10. 模块边界
 
-建议新增或扩展模块：
+建议新增一个独立 workspace package：
+
+```text
+packages/agentloop-plan-template/
+  package.json
+  tsconfig.json
+  src/
+    index.ts
+    config.ts
+    types.ts
+    plugin.ts
+    profiler/
+      task-profiler.ts
+    matching/
+      template-retriever.ts
+      constraint-verifier.ts
+      match-scorer.ts
+    planning/
+      template-plan-instantiator.ts
+      planner-template-router.ts
+    storage/
+      connection-factory.ts
+      storage-config.ts
+      plan-template-store.ts
+      sqlite-plan-template-store.ts
+      postgres-plan-template-store.ts
+      migrations.ts
+    mining/
+      template-miner.ts
+      template-normalizer.ts
+    evaluation/
+      template-evaluator.ts
+```
+
+`packages/agentloop` 只新增最小 SPI：
+
+```ts
+interface PlanningExtension {
+  name: string;
+  beforePlanning(input: PlanningExtensionInput): Promise<PlanningExtensionDecision>;
+  afterPlanAdmission?(input: PlanAdmissionObservation): Promise<void>;
+  afterOutcome?(input: RuntimeOutcomeObservation): Promise<void>;
+}
+
+type PlanningExtensionDecision =
+  | {
+      kind: "none";
+    }
+  | {
+      kind: "planner_context";
+      context: unknown;
+    }
+  | {
+      kind: "plan_proposal";
+      proposal: PlanProposal;
+      source: {
+        kind: "planning_extension";
+        extensionName: string;
+        templateId?: string;
+        score?: number;
+      };
+    };
+```
+
+`@zhujun/agentloop-plan-template` 实现：
 
 ```text
 TaskProfiler
@@ -702,6 +997,8 @@ TemplateEvaluator
 - TemplateMiner 不修改历史 Run。
 - TemplateEvaluator 不改变 Runtime outcome。
 - PlannerTemplateRouter 不绕过 PlanAdmission。
+- `@zhujun/agentloop` 不 import `@zhujun/agentloop-plan-template`，避免内核依赖可选插件。
+- `apps/agentloop-app` 不静态 import `@zhujun/agentloop-plan-template`，不实现 template matching / mining / lifecycle，只按配置动态装配插件和暴露可选管理面。
 
 ## 11. 与 Planner / Runtime 的集成点
 
@@ -710,10 +1007,11 @@ TemplateEvaluator
 ```text
 runtime chat intake
   -> create AgentRun / RuntimeContext
-  -> load PlanTemplateFastPathConfig
-  -> if disabled/off: normal LLM Planner
-  -> if observe/planner_context/direct_use: TaskProfiler
-  -> PlannerTemplateRouter, gated by config
+  -> invoke registered PlanningExtension.beforePlanning()
+  -> PlanTemplate plugin checks its own config
+  -> if disabled/off: extension returns none
+  -> if observe: extension records observation, returns none
+  -> if planner_context/direct_use: extension runs TaskProfiler + TemplateMatcher
   -> PlanProposal source:
        direct template
        or LLM Planner with template context
@@ -743,6 +1041,31 @@ runtime chat intake
 ```
 
 不要注入完整历史 Run、长 prompt 或大量案例文本。
+
+核心调用关系：
+
+```text
+RunService
+  -> PlanningExtension.beforePlanning()
+       @zhujun/agentloop-plan-template
+         -> TaskProfiler
+         -> PlanTemplateStore
+         -> TemplateMatcher
+         -> TemplatePlanInstantiator
+  -> PlanAdmission
+  -> PlanningExtension.afterPlanAdmission()
+  -> RuntimeLoop
+  -> TerminalCommitter
+  -> PlanningExtension.afterOutcome()
+```
+
+`beforePlanning()` 只能返回三类结果：
+
+- `none`：内核继续正常 Planner。
+- `planner_context`：内核调用 LLM Planner，并附加短 template hint。
+- `plan_proposal`：内核跳过 LLM Planner，但该 proposal 必须进入 PlanAdmission。
+
+`afterPlanAdmission()` 和 `afterOutcome()` 只用于记录 match / admission / outcome 反馈，不能改变已经发生的 canonical 状态。
 
 ## 12. 可观测性
 
@@ -835,9 +1158,11 @@ Delivery / Outcome
 
 目标：
 
+- 新增 workspace package `@zhujun/agentloop-plan-template`。
+- 在 `@zhujun/agentloop` 新增最小 `PlanningExtension` SPI。
 - 新增全局配置 `PlanTemplateFastPathConfig`，默认 `enabled=false`、`mode=off`。
 - 新增 TaskFingerprint 生成。
-- 新增 `plan_template_matches` 记录，但默认不影响现有 Planner。
+- 在插件包内新增 `plan_template_matches` store / migration，默认不影响现有 Planner。
 - 在现有 Planner 前后记录是否存在潜在可复用 shape。
 
 验收：
@@ -845,12 +1170,14 @@ Delivery / Outcome
 - 默认配置下不改变现有任务执行行为。
 - `mode=observe` 下只产生观测记录，不改变 Planner 输入。
 - 可以从 DB 看到 fingerprint、候选、rejection reason、Planner latency。
+- `@zhujun/agentloop` 不依赖 `@zhujun/agentloop-plan-template`。
+- SQLite 和 PostgreSQL store 至少有迁移与基础 CRUD 覆盖。
 
 ### Batch 2：人工种子模版与 planner_context
 
 目标：
 
-- 新增 `plan_templates` / `plan_template_examples`。
+- 在插件包内新增 `plan_templates` / `plan_template_examples`。
 - 人工配置 2 到 3 个低风险模版。
 - 在全局配置 `mode=planner_context` 时启用 compact template hint，不跳过 LLM Planner。
 

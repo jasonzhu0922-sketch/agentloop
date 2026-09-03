@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "planningExtensions": [
+    {
+      "enabled": false,
+      "module": "@zhujun/agentloop-plan-template",
+      "factory": "createPlanTemplatePlugin",
+      "optionsPath": "./plan-template.defaults.example.json",
+      "options": {
+        "config": {
+          "observeEnabled": true,
+          "mode": "off"
+        }
+      }
+    }
+  ]
+}
