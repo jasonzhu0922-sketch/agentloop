@@ -24,11 +24,12 @@ export interface OpenAICompatibleModelOptions {
   readonly maxAttempts?: number;
   readonly retryDelayMs?: number;
   /**
-   * Some reasoning-mode OpenAI-compatible Providers reject constrained
-   * `tool_choice` values but accept `auto`. Runtime still validates the
-   * resulting call sequence; this setting only adapts the wire protocol.
+   * Some reasoning-mode OpenAI-compatible Providers reject named function
+   * `tool_choice` values. `constrained-as-auto` keeps the legacy lowest common
+   * denominator. `named-as-required` preserves single-tool structured phases by
+   * requiring a tool call while leaving Runtime to validate the tool name.
    */
-  readonly toolChoiceMode?: "native" | "constrained-as-auto";
+  readonly toolChoiceMode?: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement?: RuntimeContextPlacement;
   /** Optional server-authored reporter invoked before each retry attempt. */
   readonly onRetry?: ModelRetryReporter;
@@ -114,7 +115,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
-  private readonly toolChoiceMode: "native" | "constrained-as-auto";
+  private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly onRetry?: ModelRetryReporter;
 
@@ -153,8 +154,12 @@ export class OpenAICompatibleModel implements ModelAdapter {
     if (!Number.isSafeInteger(this.retryDelayMs) || this.retryDelayMs < 0 || this.retryDelayMs > 30_000) {
       throw new TypeError("LLM retry delay must be an integer between 0 and 30000 milliseconds");
     }
-    if (this.toolChoiceMode !== "native" && this.toolChoiceMode !== "constrained-as-auto") {
-      throw new TypeError("LLM tool choice mode must be native or constrained-as-auto");
+    if (
+      this.toolChoiceMode !== "native"
+      && this.toolChoiceMode !== "constrained-as-auto"
+      && this.toolChoiceMode !== "named-as-required"
+    ) {
+      throw new TypeError("LLM tool choice mode must be native, constrained-as-auto, or named-as-required");
     }
     if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
       throw new TypeError("runtime context placement must be system or user-envelope");
@@ -341,7 +346,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     }));
     const toolChoice = invocation.tools.length === 0
       ? undefined
-      : toProviderToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode);
+      : toProviderToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
     const body = JSON.stringify({
       model: this.model,
       messages: prompt.messages,
@@ -461,7 +466,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const readyCalls: Array<{ index: number; call: ModelToolCall }> = [];
     for (const [index, accumulated] of ordered) {
       if (accumulated.id === undefined || accumulated.name === undefined) continue;
-      const call = parseAccumulatedToolCall(accumulated.id, accumulated.name, accumulated.arguments, index);
+      const call = parseAccumulatedToolCall(accumulated.id, accumulated.name, accumulated.arguments);
       toolCalls.push(call);
       readyCalls.push({ index, call });
     }
@@ -507,7 +512,7 @@ export class ResponsesModel implements ModelAdapter {
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
-  private readonly toolChoiceMode: "native" | "constrained-as-auto";
+  private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly onRetry?: ModelRetryReporter;
 
@@ -546,8 +551,12 @@ export class ResponsesModel implements ModelAdapter {
     if (!Number.isSafeInteger(this.retryDelayMs) || this.retryDelayMs < 0 || this.retryDelayMs > 30_000) {
       throw new TypeError("LLM retry delay must be an integer between 0 and 30000 milliseconds");
     }
-    if (this.toolChoiceMode !== "native" && this.toolChoiceMode !== "constrained-as-auto") {
-      throw new TypeError("LLM tool choice mode must be native or constrained-as-auto");
+    if (
+      this.toolChoiceMode !== "native"
+      && this.toolChoiceMode !== "constrained-as-auto"
+      && this.toolChoiceMode !== "named-as-required"
+    ) {
+      throw new TypeError("LLM tool choice mode must be native, constrained-as-auto, or named-as-required");
     }
     if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
       throw new TypeError("runtime context placement must be system or user-envelope");
@@ -649,7 +658,7 @@ export class ResponsesModel implements ModelAdapter {
     }));
     const toolChoice = invocation.tools.length === 0
       ? undefined
-      : toResponsesToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode);
+      : toResponsesToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
     const body = JSON.stringify({
       model: this.model,
       ...(instructions.length === 0 ? {} : { instructions }),
@@ -783,7 +792,7 @@ export class ResponsesModel implements ModelAdapter {
         index: call.index,
         id: call.callId,
         name: call.name,
-        arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments, call.index),
+        arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments),
       });
     };
 
@@ -870,7 +879,7 @@ function responseStreamToolCalls(
     toolCalls.push({
       id: call.callId,
       name: call.name,
-      arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments, call.index),
+      arguments: parseToolArguments(call.arguments === "" ? "{}" : call.arguments),
     });
   }
   return toolCalls;
@@ -905,7 +914,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
     toolCalls.push({
       id: callId,
       name,
-      arguments: parseToolArguments(typeof item.arguments === "string" ? item.arguments : "{}", index),
+      arguments: parseToolArguments(typeof item.arguments === "string" ? item.arguments : "{}"),
     });
   }
   const status = typeof record.status === "string" ? record.status : "completed";
@@ -1008,9 +1017,13 @@ function responsesEmptyInputSentinel(): Record<string, unknown> {
 
 function toResponsesToolChoice(
   choice: NonNullable<ModelInvocation["toolChoice"]>,
-  mode: "native" | "constrained-as-auto",
+  mode: "native" | "constrained-as-auto" | "named-as-required",
+  toolCount: number,
 ): "auto" | "required" | Readonly<{ type: "function"; name: string }> {
   if (mode === "constrained-as-auto" && choice !== "auto") return "auto";
+  if (mode === "named-as-required" && typeof choice !== "string") {
+    return toolCount === 1 ? "required" : "auto";
+  }
   if (typeof choice === "string") return choice;
   return { type: "function", name: choice.name };
 }
@@ -1027,9 +1040,13 @@ function estimateWireTokens(value: string): number {
 
 function toProviderToolChoice(
   choice: NonNullable<ModelInvocation["toolChoice"]>,
-  mode: "native" | "constrained-as-auto",
+  mode: "native" | "constrained-as-auto" | "named-as-required",
+  toolCount: number,
 ): "auto" | "required" | Readonly<{ type: "function"; function: { name: string } }> {
   if (mode === "constrained-as-auto" && choice !== "auto") return "auto";
+  if (mode === "named-as-required" && typeof choice !== "string") {
+    return toolCount === 1 ? "required" : "auto";
+  }
   if (typeof choice === "string") return choice;
   return { type: "function", function: { name: choice.name } };
 }
@@ -1299,38 +1316,29 @@ function parseToolCall(
     throw new AppError("MODEL_ERROR", `Model provider returned an invalid tool call at index ${index}`, 502);
   }
   const rawArguments = call.function?.arguments ?? "{}";
-  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments, index) };
+  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments) };
 }
 
-function parseAccumulatedToolCall(id: string, name: string, rawArguments: string, index: number): ModelToolCall {
-  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments, index) };
+function parseAccumulatedToolCall(id: string, name: string, rawArguments: string): ModelToolCall {
+  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments) };
 }
 
-function parseToolArguments(rawArguments: string, index: number): Record<string, unknown> {
-  let argumentsValue = parseToolArgumentsJson(rawArguments, index);
+function parseToolArguments(rawArguments: string): unknown {
+  let argumentsValue = parseToolArgumentsJson(rawArguments);
+  if (argumentsValue === undefined) return rawArguments;
   if (typeof argumentsValue === "string") {
-    argumentsValue = parseToolArgumentsJson(argumentsValue, index);
-  }
-  if (!isJsonObject(argumentsValue)) {
-    throw new AppError("MODEL_ERROR", `Model provider returned non-object tool arguments at index ${index}`, 502, {
-      toolCallIndex: index,
-    });
+    const decodedValue = parseToolArgumentsJson(argumentsValue);
+    if (decodedValue !== undefined) argumentsValue = decodedValue;
   }
   return argumentsValue;
 }
 
-function parseToolArgumentsJson(rawArguments: string, index: number): unknown {
+function parseToolArgumentsJson(rawArguments: string): unknown | undefined {
   try {
     return JSON.parse(rawArguments);
   } catch {
-    throw new AppError("MODEL_ERROR", `Model provider returned unreadable tool arguments at index ${index}`, 502, {
-      toolCallIndex: index,
-    });
+    return undefined;
   }
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeFinishReason(reason: string | undefined, toolCallCount: number): ModelResponse["finishReason"] {

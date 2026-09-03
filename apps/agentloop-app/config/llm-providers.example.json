@@ -12,7 +12,7 @@
       "timeoutMs": 120000,
       "maxAttempts": 3,
       "retryDelayMs": 250,
-      "toolChoiceMode": "constrained-as-auto",
+      "toolChoiceMode": "named-as-required",
       "runtimeContextPlacement": "system",
       "protocol": "chat-completions"
     },

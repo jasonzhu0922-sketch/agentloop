@@ -281,6 +281,64 @@ test("the provider registry can be loaded from the ignored JSON configuration fi
   }
 });
 
+test("the provider registry passes named-as-required tool choice mode into Responses models", async () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "openai",
+      defaultModelKey: "planning-model",
+      providers: {
+        openai: {
+          kind: "openai-compatible",
+          baseUrl: "https://api.openai.test/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+          defaultModel: "planning-model",
+          contextWindowTokens: 128_000,
+          maxOutputTokens: 8_192,
+          protocol: "responses",
+          toolChoiceMode: "named-as-required",
+        },
+      },
+      models: {
+        "planning-model": {
+          providerKey: "openai",
+          providerModel: "planning-model",
+          displayName: "Planning Model",
+        },
+      },
+    }),
+    OPENAI_API_KEY: "openai-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      status: "completed",
+      output: [{
+        type: "function_call",
+        id: "fc_plan",
+        call_id: "call-plan",
+        name: "submit_outcome_plan",
+        arguments: "{}",
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = registry.create();
+    await model.complete({
+      runId: "registry-named-as-required",
+      systemPrompt: "System",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan" }],
+      tools: [{ name: "submit_outcome_plan", description: "Submit plan", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_outcome_plan" },
+    });
+    assert.equal(capturedBody?.tool_choice, "required");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("the provider registry passes Runtime Context placement into the selected Adapter", async () => {
   const registry = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({

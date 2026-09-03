@@ -100,7 +100,7 @@ test("OpenAI-compatible adapter normalizes double-encoded object tool arguments"
   }
 });
 
-test("OpenAI-compatible adapter rejects non-object tool arguments at the provider boundary", async () => {
+test("OpenAI-compatible adapter exposes non-object tool arguments for runtime contract repair", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
     return new Response(JSON.stringify({
@@ -124,25 +124,21 @@ test("OpenAI-compatible adapter rejects non-object tool arguments at the provide
       contextWindowTokens: 128_000,
       maxOutputTokens: 8_192,
     });
-    await assert.rejects(
-      () => model.complete({
-        runId: "run-invalid-tool-arguments",
-        systemPrompt: "System",
-        phase: "execution",
-        messages: [{ role: "user", content: "Write" }],
-        tools: [{
-          name: "write_file",
-          description: "Write a file",
-          inputSchema: { type: "object" },
-        }],
-        toolChoice: { name: "write_file" },
-      }),
-      (error: unknown) => {
-        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
-        assert.match((error as { message?: string }).message ?? "", /tool arguments at index 0/);
-        return true;
-      },
-    );
+    const result = await model.complete({
+      runId: "run-invalid-tool-arguments",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Write" }],
+      tools: [{
+        name: "write_file",
+        description: "Write a file",
+        inputSchema: { type: "object" },
+      }],
+      toolChoice: { name: "write_file" },
+    });
+
+    assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.toolCalls[0].arguments, "not-json-object");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -817,6 +813,58 @@ test("OpenAI-compatible streaming adapter normalizes double-encoded object tool 
   }
 });
 
+test("OpenAI-compatible streaming adapter exposes malformed tool arguments for runtime contract repair", async () => {
+  const originalFetch = globalThis.fetch;
+  const malformedArguments = [
+    "{\"schema\":\"agentloop.outcomePlan/v2\",",
+    "\"goal\":\"查询宝武集团数据中台中\\\"合同备案\\\"API 的参数信息\",",
+    "\"shape\":\"single_leaf\",",
+    "\"leaves\":[{\"id\":\"leaf-1\",",
+    "\"objective\":\"查询合同备案 API 参数。\\\", \\\"dependsOn\\\": [], \\\"role\\\": \\\"deliver\\\", \\\"skillIds\\\": []",
+  ].join("");
+  globalThis.fetch = async () => sseResponse([
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call-1",
+            function: { name: "submit_outcome_plan", arguments: malformedArguments },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ]);
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    const readyCalls: Array<{ name: string; arguments: unknown }> = [];
+    const result = await model.streamComplete!({
+      runId: "run-stream-malformed-tool-arguments",
+      systemPrompt: "System",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan" }],
+      tools: [{ name: "submit_outcome_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_outcome_plan" },
+    }, async (event) => {
+      if (event.type === "tool_call_ready") readyCalls.push({ name: event.name, arguments: event.arguments });
+    });
+
+    assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.toolCalls[0].arguments, malformedArguments);
+    assert.deepEqual(readyCalls, [{ name: "submit_outcome_plan", arguments: malformedArguments }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible streaming adapter retries request timeout before first chunk", async () => {
   const originalFetch = globalThis.fetch;
   let attempts = 0;
@@ -1344,6 +1392,43 @@ test("Responses adapter keeps provider input non-empty for system-only runtime p
     assert.deepEqual(capturedBody?.tool_choice, "auto");
     assert.equal(result.finishReason, "tool_calls");
     assert.equal(result.toolCalls[0].name, "submit_assessment");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter can lower named tool choice to required for single-tool structured phases", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse([
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_outcome_plan","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{}"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_outcome_plan","arguments":"{}"}]}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      toolChoiceMode: "named-as-required",
+    });
+    const result = await model.streamComplete!({
+      runId: "run-responses-named-as-required",
+      systemPrompt: "Return exactly one submit_outcome_plan tool call.",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan this task." }],
+      tools: [{ name: "submit_outcome_plan", description: "Submit plan", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_outcome_plan" },
+    }, async () => undefined);
+
+    assert.equal(capturedBody?.tool_choice, "required");
+    assert.equal(result.finishReason, "tool_calls");
+    assert.equal(result.toolCalls[0].name, "submit_outcome_plan");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -34,7 +34,7 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly timeoutMs: number;
   readonly maxAttempts: number;
   readonly retryDelayMs: number;
-  readonly toolChoiceMode: "native" | "constrained-as-auto";
+  readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly protocol: "chat-completions" | "responses";
 }
@@ -47,7 +47,7 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly timeoutMs: number;
   readonly maxAttempts: number;
   readonly retryDelayMs: number;
-  readonly toolChoiceMode: "native" | "constrained-as-auto";
+  readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly protocol: "chat-completions" | "responses";
 }
@@ -489,11 +489,11 @@ function optionalDisplayName(value: unknown, fallback: string, label: string): s
 function optionalToolChoiceMode(
   value: unknown,
   label: string,
-  fallback: "native" | "constrained-as-auto" = "native",
-): "native" | "constrained-as-auto" {
+  fallback: "native" | "constrained-as-auto" | "named-as-required" = "native",
+): "native" | "constrained-as-auto" | "named-as-required" {
   if (value === undefined) return fallback;
-  if (value === "native" || value === "constrained-as-auto") return value;
-  throw new Error(`${label} must be native or constrained-as-auto`);
+  if (value === "native" || value === "constrained-as-auto" || value === "named-as-required") return value;
+  throw new Error(`${label} must be native, constrained-as-auto, or named-as-required`);
 }
 
 function optionalRuntimeContextPlacement(
