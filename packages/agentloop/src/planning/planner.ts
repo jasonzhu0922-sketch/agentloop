@@ -613,6 +613,9 @@ function planningRuntimeContext(
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
+        ...((task.planningExtensionContexts?.length ?? 0) === 0 ? {} : {
+          planningExtensionContexts: task.planningExtensionContexts,
+        }),
         ...artifactFollowupContextField(task),
         stepGranularity: STEP_GRANULARITY_GUIDANCE,
         operationProfiles: taskProfile.operations,
@@ -1279,6 +1282,8 @@ function evidenceCriterionDescription(kind: EvidenceKind, caveatPolicy: CaveatPo
       return `A bounded schema or field summary is available.${suffix}`;
     case "record_counts":
       return `Record, row, range, or cell counts are available.${suffix}`;
+    case "table_coverage":
+      return `All extracted tables are covered by the summary.${suffix}`;
     case "structured_extraction_artifact":
       return `A durable structured extraction artifact or content-addressed reference is available.${suffix}`;
     case "artifact_path":

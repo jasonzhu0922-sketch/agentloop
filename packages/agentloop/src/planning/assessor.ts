@@ -21,7 +21,7 @@ import type {
 
 const SUBMIT_ASSESSMENT_TOOL = {
   name: "submit_assessment",
-  description: "Submit a criterion-by-criterion and applied-Skill-by-applied-Skill completion assessment.",
+  description: "Submit a criterion-by-criterion completion assessment and non-blocking applied-Skill QA observations.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -49,7 +49,7 @@ const SUBMIT_ASSESSMENT_TOOL = {
           required: ["skillId", "followed", "rationale", "evidenceRefs"],
           properties: {
             skillId: { type: "string" },
-            status: { type: "string", enum: ["followed", "skipped_unavailable", "process_caveat", "not_followed"] },
+            status: { type: "string", enum: ["followed", "skipped_unavailable", "process_caveat", "not_followed", "not_assessed"] },
             followed: { type: "boolean" },
             rationale: { type: "string" },
             evidenceRefs: { type: "array", items: { type: "string" } },
@@ -109,9 +109,9 @@ export class ModelStepAssessor implements StepAssessor {
           ],
           contractLines: [
             "A tool result, artifact, trace, or model claim is not completion by itself.",
-            "Every criterion and every applied Skill supplied in the assessment context must receive exactly one assessment.",
-            "For applied Skills, the loaded Skill body is the workflow authority; use any assessmentPolicy in context for caveats.",
-            "Use source caveat policy only to mark evidence boundaries; never approve missing source facts as completed.",
+            "Assess every criterion exactly once.",
+            "Skill entries are QA observations, not completion gates; use not_assessed when QA is not rerun.",
+            "Never approve missing source facts as completed.",
           ],
           taskProfile,
         }),
@@ -200,8 +200,9 @@ export class RuleBasedStepAssessor implements StepAssessor {
     });
     const skills: SkillAssessment[] = input.skills.map((skill) => ({
       skillId: skill.id,
+      status: "not_assessed",
       followed: false,
-      rationale: "Skill adherence requires a model-backed or policy-backed assessor; activation alone is not compliance",
+      rationale: "This rule assessor does not perform Skill QA; completion is governed by the admitted criteria and canonical evidence.",
       evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`],
     }));
     return buildAssessment(input, criteria, skills, "", input.assessmentProfile ?? "deterministic", "rule");
@@ -244,12 +245,12 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     });
     const skills: SkillAssessment[] = input.skills.map((skill) => ({
       skillId: skill.id,
-      status: "not_followed",
+      status: "not_assessed",
       followed: false,
-      rationale: "Profiled rule assessment does not judge Skill adherence; use the model-backed assessor for Skill-bound steps.",
+      rationale: "Profiled rule assessment does not reperform Skill QA; completion is governed by the admitted criteria and lookup evidence.",
       evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`],
     }));
-    const feedback = criteria.every((criterion) => criterion.satisfied) && skills.length === 0
+    const feedback = criteria.every((criterion) => criterion.satisfied)
       ? ""
       : "Completion rejected by lightweight assessment; provide the missing answer evidence or use full model assessment.";
     return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
@@ -306,14 +307,12 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     });
     const skills: SkillAssessment[] = input.skills.map((skill) => ({
       skillId: skill.id,
-      status: requiredKindsSatisfied && nonEmpty ? "followed" : "not_followed",
-      followed: requiredKindsSatisfied && nonEmpty,
-      rationale: requiredKindsSatisfied && nonEmpty
-        ? "Runtime principle assessment accepted the Skill-bound step because the required QA/delivery receipt is present; it did not reperform Skill QA."
-        : "The required QA/delivery receipt is missing or failed, so the Skill-bound step cannot pass the principle gate.",
+      status: "not_assessed",
+      followed: false,
+      rationale: "Runtime principle assessment does not reperform Skill QA; completion is governed by required QA/delivery receipts and admitted criteria.",
       evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`, ...receipts.map((receipt) => receipt.toolCallId)],
     }));
-    const feedback = criteria.every((criterion) => criterion.satisfied) && skills.every((skill) => skill.followed)
+    const feedback = criteria.every((criterion) => criterion.satisfied)
       ? ""
       : "Completion rejected by principle assessment; provide the missing Runtime evidence receipt or repair the failed receipt.";
     return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
@@ -335,6 +334,7 @@ const RUNTIME_EVIDENCE_GATE_KINDS = new Set([
   "source_urls",
   "schema_summary",
   "record_counts",
+  "table_coverage",
   "structured_extraction_artifact",
   "artifact_path",
   "artifact_non_empty",
@@ -471,8 +471,8 @@ function parseAssessment(input: StepAssessmentInput, value: unknown): SkillCompl
       const row = requireRecord(item, `skills[${index}]`);
       if (typeof row.followed !== "boolean") throw new TypeError(`skills[${index}].followed must be boolean`);
       const status = row.status;
-      if (status !== undefined && !["followed", "skipped_unavailable", "process_caveat", "not_followed"].includes(status as string)) {
-        throw new TypeError(`skills[${index}].status must be followed, skipped_unavailable, process_caveat, or not_followed`);
+      if (status !== undefined && !["followed", "skipped_unavailable", "process_caveat", "not_followed", "not_assessed"].includes(status as string)) {
+        throw new TypeError(`skills[${index}].status must be followed, skipped_unavailable, process_caveat, not_followed, or not_assessed`);
       }
       return {
         skillId: requireString(row.skillId, `skills[${index}].skillId`, { max: 128 }),
@@ -514,10 +514,7 @@ function buildAssessment(
     item.status === "skipped_unavailable" || item.status === "process_caveat"
   );
   const approved = input.evidence.candidateOutput.trim().length > 0
-    && criteria.every((item) => item.satisfied)
-    && skills.every((item) =>
-      item.followed || item.status === "skipped_unavailable" || item.status === "process_caveat"
-    );
+    && criteria.every((item) => item.satisfied);
   const derivedFailedBoundary = approved
     ? undefined
     : failedBoundary ?? deriveFailedBoundary(input, criteria, skills);
@@ -545,11 +542,12 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
   if (stepId !== input.step.id) {
     throw new TypeError("failedBoundary.stepId must match the assessed step");
   }
+  requireStringArray(record.violatedSkillRequirements, "failedBoundary.violatedSkillRequirements", 50);
   const suggestedRepairShape = parseSuggestedRepairShape(record.suggestedRepairShape);
   return {
     stepId,
     missingEvidenceKinds: uniqueStrings(requireStringArray(record.missingEvidenceKinds, "failedBoundary.missingEvidenceKinds", 50)),
-    violatedSkillRequirements: uniqueStrings(requireStringArray(record.violatedSkillRequirements, "failedBoundary.violatedSkillRequirements", 50)),
+    violatedSkillRequirements: [],
     reusableEvidenceRefs: parseEvidenceRefs(record.reusableEvidenceRefs, "failedBoundary.reusableEvidenceRefs", 100),
     suggestedRepairShape,
   };
@@ -583,7 +581,7 @@ function normalizeEvidenceRef(value: string): string {
 function deriveFailedBoundary(
   input: StepAssessmentInput,
   criteria: readonly CriterionAssessment[],
-  skills: readonly SkillAssessment[],
+  _skills: readonly SkillAssessment[],
 ): FailedBoundary {
   const failedCriteria = criteria.filter((item) => !item.satisfied);
   const evidenceKinds = new Set<string>(input.step.evidenceContract?.requiredKinds ?? []);
@@ -591,24 +589,19 @@ function deriveFailedBoundary(
     if (evidenceKinds.has(criterion.criterionId)) return [criterion.criterionId];
     return input.step.evidenceContract === undefined ? [criterion.criterionId] : [];
   });
-  const violatedSkillRequirements = skills
-    .filter((skill) => !skill.followed && skill.status !== "skipped_unavailable" && skill.status !== "process_caveat")
-    .map((skill) => `${skill.skillId}:${skill.status ?? "not_followed"}`);
   const reusableEvidenceRefs = [
     ...failedCriteria.flatMap((criterion) => criterion.evidenceRefs),
-    ...skills.filter((skill) => !skill.followed).flatMap((skill) => skill.evidenceRefs),
   ];
   const suggestedRepairShape = sourceContractMismatch(input, missingEvidenceKinds)
     ? "revise_plan"
     : missingEvidenceKinds.length === 0
-      && violatedSkillRequirements.length === 0
       && input.evidence.candidateOutput.trim().length === 0
     ? "ask_user"
     : "repair_leaf";
   return {
     stepId: input.step.id,
     missingEvidenceKinds: uniqueStrings(missingEvidenceKinds),
-    violatedSkillRequirements: uniqueStrings(violatedSkillRequirements),
+    violatedSkillRequirements: [],
     reusableEvidenceRefs: uniqueStrings(reusableEvidenceRefs),
     suggestedRepairShape,
   };
@@ -686,9 +679,9 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
   if (input.skills.length > 0) {
     policy.skillCaveats = {
       unavailableValidation:
-        "If Skill-mandated validation depends on unavailable local components, renderers, browsers, fonts, or interactive inspection capability: reject when the user or step criteria explicitly require that validation; otherwise, if all criteria are satisfied and probe evidence shows the dependency is unavailable, use skipped_unavailable, cite the probe, and state the caveat without claiming the check completed.",
+        "Skill QA is not a completion gate. Reject unavailable validation only when user or criteria require it; otherwise record skipped_unavailable or not_assessed.",
       processDiscipline:
-        "If the only remaining Skill gap is process discipline such as planning-before-coding, review-before-build, ordering, or evidence-capture timing, and all criteria are satisfied, use process_caveat instead of not_followed unless the user or step criteria make that discipline a blocking requirement.",
+        "Do not reject process-only Skill gaps when criteria pass; record process_caveat or not_assessed.",
     };
   }
   if (input.step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
@@ -813,10 +806,8 @@ function assertExactIds(actual: readonly string[], expected: readonly string[], 
 
 function defaultFeedback(
   criteria: readonly CriterionAssessment[],
-  skills: readonly SkillAssessment[],
+  _skills: readonly SkillAssessment[],
 ): string {
   const failedCriteria = criteria.filter((item) => !item.satisfied).map((item) => item.criterionId);
-  const failedSkills = skills.filter((item) => !item.followed).map((item) => item.skillId);
-  return `Completion rejected. Unsatisfied criteria: ${failedCriteria.join(", ") || "none"}; `
-    + `non-compliant Skills: ${failedSkills.join(", ") || "none"}. Repair the same step and resubmit.`;
+  return `Completion rejected. Unsatisfied criteria: ${failedCriteria.join(", ") || "none"}. Repair the same step and resubmit.`;
 }

@@ -24,12 +24,21 @@ import type {
   PlanStepProposal,
   Planner,
   PlanRevisionAssessor,
+  PlanningExtensionContext,
   SelectedSkillRole,
   SkillComplianceAssessment,
   StepAssessor,
   StepEvidence,
+  TaskSpec,
   ToolEvidence,
 } from "../planning/contracts.ts";
+import type {
+  PlanAdmissionObservation,
+  PlanningExtension,
+  PlanningExtensionInput,
+  PlanningExtensionProposalSource,
+  RuntimeOutcomeObservation,
+} from "../planning/extensions.ts";
 import { ModelPlanner } from "../planning/planner.ts";
 import { PlanRepository } from "../planning/plan-repository.ts";
 import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
@@ -267,6 +276,7 @@ export class RunService {
   private readonly eventHub = new RunEventHub();
   private readonly runEventLogSink?: RunEventLogSink;
   private readonly activeRunControllers = new Map<string, AbortController>();
+  private readonly planningExtensions: readonly PlanningExtension[];
 
   constructor(options: {
     database: SqlConnection;
@@ -287,6 +297,7 @@ export class RunService {
     defaultModelKey?: string;
     modelKeys?: readonly string[];
     runEventLogSink?: RunEventLogSink;
+    planningExtensions?: readonly PlanningExtension[];
   }) {
     this.database = options.database;
     this.skills = options.skills;
@@ -327,6 +338,7 @@ export class RunService {
     this.actions = new RuntimeActionRepository(options.database);
     this.recovery = new RecoveryRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
+    this.planningExtensions = options.planningExtensions ?? [];
   }
 
   async execute(
@@ -1275,6 +1287,7 @@ export class RunService {
 
     let planId: string | undefined;
     let runningStepId: string | undefined;
+    let admittedPlanSource: PlanningExtensionProposalSource | undefined;
     try {
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
@@ -1411,36 +1424,109 @@ export class RunService {
           },
         });
       }
-      const proposal = await this.plannerFactory(model).plan({
+      const planningWorkspace = await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId, availableSources);
+      const planningTask: TaskSpec = {
         runId,
         input,
         availableSkills: planningSkills,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
-        workspaceFacts: await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId, availableSources),
+        workspaceFacts: planningWorkspace,
         visibleDirectories,
         sources: availableSources,
         ...(responseOnly ? { responseOnly: true } : {}),
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
+      };
+      const planningExtensionResolution = await this.resolvePlanningExtensions({
+        task: planningTask,
+        actorUserId,
+        ...(modelKey === undefined ? {} : { modelKey }),
+        ...(conversationId === undefined ? {} : { conversationId }),
+        responseOnly,
+        emit,
+      });
+      const planner = this.plannerFactory(model);
+      const proposalFromPlanner = async (): Promise<PlanProposal> => planner.plan({
+        ...planningTask,
+        ...(
+          planningExtensionResolution.contexts.length === 0
+            ? {}
+            : { planningExtensionContexts: planningExtensionResolution.contexts }
+        ),
       }, runController.signal, emit);
+      let proposal = planningExtensionResolution.proposal ?? await proposalFromPlanner();
+      let proposalSource = planningExtensionResolution.proposalSource;
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       await emit({
         type: "plan.proposed",
-        data: { goal: proposal.goal, selectedSkillIds: proposal.selectedSkillIds, stepCount: proposal.steps.length },
+        data: {
+          goal: proposal.goal,
+          selectedSkillIds: proposal.selectedSkillIds,
+          stepCount: proposal.steps.length,
+          ...(proposalSource === undefined ? {} : {
+            source: proposalSource,
+          }),
+        },
       });
       await throwIfRunCancelled(this.runs, runId, runController.signal);
-      let plan = admitPlan({
-        runId,
-        proposal,
-        availableSkills: privateSkills,
-        availableToolNames: rootGrant.allowedToolNames,
-        taskIntent,
-      });
+      let plan: ExecutionPlan;
+      try {
+        plan = admitPlan({
+          runId,
+          proposal,
+          availableSkills: privateSkills,
+          availableToolNames: rootGrant.allowedToolNames,
+          taskIntent,
+        });
+      } catch (error) {
+        await this.notifyPlanningExtensionsAfterAdmission({
+          runId,
+          proposal,
+          admitted: false,
+          ...(proposalSource === undefined ? {} : {
+            source: proposalSource,
+          }),
+          errorCode: error instanceof AppError ? error.code : "PLAN_NOT_ADMITTED",
+          errorMessage: error instanceof Error ? error.message : "Plan was not admitted",
+        }, emit);
+        if (planningExtensionResolution.proposal === undefined) throw error;
+        await emit({
+          type: "planning.extension.plan_admission_failed",
+          data: {
+            source: planningExtensionResolution.proposalSource,
+            message: error instanceof Error ? error.message : "Plan was not admitted",
+          },
+        });
+        proposal = await proposalFromPlanner();
+        proposalSource = undefined;
+        await throwIfRunCancelled(this.runs, runId, runController.signal);
+        await emit({
+          type: "plan.proposed",
+          data: { goal: proposal.goal, selectedSkillIds: proposal.selectedSkillIds, stepCount: proposal.steps.length },
+        });
+        plan = admitPlan({
+          runId,
+          proposal,
+          availableSkills: privateSkills,
+          availableToolNames: rootGrant.allowedToolNames,
+          taskIntent,
+        });
+      }
       plan = await this.plans.create(plan);
       planId = plan.id;
       actionScope.planId = plan.id;
+      admittedPlanSource = proposalSource;
+      await this.notifyPlanningExtensionsAfterAdmission({
+        runId,
+        proposal,
+        admitted: true,
+        planId: plan.id,
+        ...(proposalSource === undefined ? {} : {
+          source: proposalSource,
+        }),
+      }, emit);
       await emit({
         type: "plan.admitted",
         data: { planId: plan.id, version: plan.version, goal: plan.goal, steps: plan.steps },
@@ -1474,6 +1560,14 @@ export class RunService {
       const output = finalPlanOutput(plan);
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(plan.id), plan, runId, output);
+      await this.notifyPlanningExtensionsAfterOutcome({
+        runId,
+        status: "completed",
+        planId: plan.id,
+        output,
+        reasonCode,
+        ...(admittedPlanSource === undefined ? {} : { source: admittedPlanSource }),
+      }, emit);
       await emit({
         type: "terminal.delivery_committed",
         data: { runId, planId: plan.id, output, reasonCode },
@@ -1522,6 +1616,13 @@ export class RunService {
         }
         const status = appError.code === "CANCELLED" ? "cancelled" : "failed";
         await this.terminal.commitStopped({ runId, planId, status, reasonCode: appError.code });
+        await this.notifyPlanningExtensionsAfterOutcome({
+          runId,
+          status,
+          ...(planId === undefined ? {} : { planId }),
+          reasonCode: appError.code,
+          ...(admittedPlanSource === undefined ? {} : { source: admittedPlanSource }),
+        }, emit);
         await emit({
           type: status === "cancelled" ? "run.cancelled" : "run.failed",
           data: {
@@ -1540,6 +1641,118 @@ export class RunService {
     } finally {
       if (this.activeRunControllers.get(runId) === runController) {
         this.activeRunControllers.delete(runId);
+      }
+    }
+  }
+
+  private async resolvePlanningExtensions(input: {
+    task: TaskSpec;
+    actorUserId: string;
+    responseOnly: boolean;
+    modelKey?: string;
+    conversationId?: string;
+    emit: (event: RuntimeEvent) => Promise<void>;
+  }): Promise<{
+    proposal?: PlanProposal;
+    proposalSource?: PlanningExtensionProposalSource;
+    contexts: PlanningExtensionContext[];
+  }> {
+    if (this.planningExtensions.length === 0) return { contexts: [] };
+    const contexts: PlanningExtensionContext[] = [];
+    for (const extension of this.planningExtensions) {
+      try {
+        const extensionInput: PlanningExtensionInput = {
+          runId: input.task.runId,
+          actorUserId: input.actorUserId,
+          input: input.task.input,
+          responseOnly: input.responseOnly,
+          ...(input.modelKey === undefined ? {} : { modelKey: input.modelKey }),
+          ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
+          availableSkills: input.task.availableSkills,
+          selectedSkillRoles: input.task.selectedSkillRoles ?? [],
+          availableToolNames: input.task.availableToolNames,
+          availableTools: input.task.availableTools ?? input.task.availableToolNames.map((name) => ({ name, description: "" })),
+          ...(input.task.workspaceFacts === undefined ? {} : { workspaceFacts: input.task.workspaceFacts }),
+          visibleDirectories: input.task.visibleDirectories ?? [],
+          sources: input.task.sources ?? [],
+          ...(input.task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: input.task.conversationWorkingSet }),
+        };
+        const decision = await extension.beforePlanning(extensionInput);
+        await input.emit({
+          type: "planning.extension.decision",
+          data: {
+            extensionName: extension.name,
+            kind: decision.kind,
+            ...(decision.kind === "planner_context" ? planningExtensionContextTelemetry(decision.context) : {}),
+            ...(decision.kind === "plan_proposal" ? {
+              templateId: decision.source.templateId,
+              score: decision.source.score,
+              stepCount: decision.proposal.steps.length,
+            } : {}),
+          },
+        });
+        if (decision.kind === "planner_context") {
+          contexts.push(decision.context);
+          continue;
+        }
+        if (decision.kind === "plan_proposal") {
+          return {
+            proposal: decision.proposal,
+            proposalSource: decision.source,
+            contexts,
+          };
+        }
+      } catch (error) {
+        await input.emit({
+          type: "planning.extension.failed",
+          data: {
+            extensionName: extension.name,
+            message: error instanceof Error ? error.message : "Planning extension failed",
+          },
+        });
+      }
+    }
+    return { contexts };
+  }
+
+  private async notifyPlanningExtensionsAfterAdmission(
+    observation: PlanAdmissionObservation,
+    emit: (event: RuntimeEvent) => Promise<void>,
+  ): Promise<void> {
+    for (const extension of this.planningExtensions) {
+      if (extension.afterPlanAdmission === undefined) continue;
+      try {
+        await extension.afterPlanAdmission(observation);
+      } catch (error) {
+        await emit({
+          type: "planning.extension.feedback_failed",
+          data: {
+            extensionName: extension.name,
+            phase: "afterPlanAdmission",
+            message: error instanceof Error ? error.message : "Planning extension feedback failed",
+          },
+        });
+      }
+    }
+  }
+
+  private async notifyPlanningExtensionsAfterOutcome(
+    observation: RuntimeOutcomeObservation,
+    emit: (event: RuntimeEvent) => Promise<void>,
+  ): Promise<void> {
+    for (const extension of this.planningExtensions) {
+      if (extension.afterOutcome === undefined) continue;
+      try {
+        await extension.afterOutcome(observation);
+      } catch (error) {
+        await emit({
+          type: "planning.extension.feedback_failed",
+          data: {
+            extensionName: extension.name,
+            phase: "afterOutcome",
+            message: error instanceof Error ? error.message : "Planning extension feedback failed",
+          },
+        });
       }
     }
   }
@@ -1713,17 +1926,17 @@ export class RunService {
         evaluateCandidate: async (candidate) => {
           assessmentAttempt += 1;
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
-          const assessmentProfile = selectAssessmentProfile(activeStep, activatedStepSkills);
-          const useProfiledRuleAssessor = input.defaultAssessmentPolicyEnabled
-            && isProfiledRuleAssessmentProfile(assessmentProfile);
-          const assessor = useProfiledRuleAssessor
-            ? new ProfiledRuleStepAssessor(assessmentProfile)
-            : input.assessor;
           const evidence: StepEvidence = {
             candidateOutput: candidate.output,
             toolCalls: candidate.toolEvidence,
             modelSteps: candidate.modelSteps,
           };
+          const assessmentProfile = selectAssessmentProfile(activeStep, evidence);
+          const useProfiledRuleAssessor = input.defaultAssessmentPolicyEnabled
+            && isProfiledRuleAssessmentProfile(assessmentProfile);
+          const assessor = useProfiledRuleAssessor
+            ? new ProfiledRuleStepAssessor(assessmentProfile)
+            : input.assessor;
           const modelEvidence: StepEvidence = {
             candidateOutput: candidate.output,
             toolCalls: candidate.projectedToolEvidence,
@@ -2268,6 +2481,7 @@ const TERMINAL_EVENT_TYPES = new Set([
   "run.failed",
   "run.cancelled",
   "planning.started",
+  "planning.extension.decision",
   "planning.skills.selected",
   "planning.turn.started",
   "planning.turn.completed",
@@ -2364,6 +2578,14 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   if (type === "planning.started") {
     addNumber(details, "availableSkills", data.availableSkillCount);
     addNumber(details, "availableTools", data.availableToolCount);
+  }
+  if (type === "planning.extension.decision") {
+    addString(details, "extension", data.extensionName);
+    addString(details, "kind", data.kind);
+    addString(details, "contextKind", data.contextKind);
+    addString(details, "templateId", data.templateId);
+    addNumber(details, "score", data.score);
+    addNumber(details, "steps", data.stepCount);
   }
   if (type === "planning.skills.selected") {
     addNumber(details, "skills", data.selectedCount);
@@ -2496,6 +2718,17 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     addString(details, "toolSignature", data.toolSignature);
   }
   return details;
+}
+
+function planningExtensionContextTelemetry(
+  context: PlanningExtensionContext,
+): Record<string, unknown> {
+  const content = asRecord(context.content);
+  return {
+    contextKind: context.kind,
+    ...(content?.templateId === undefined ? {} : { templateId: content.templateId }),
+    ...(content?.score === undefined ? {} : { score: content.score }),
+  };
 }
 
 function addString(details: string[], label: string, value: unknown): void {
@@ -4341,31 +4574,134 @@ function assessmentEvidenceSignature(evidence: StepEvidence): Record<string, unk
 
 function selectAssessmentProfile(
   step: ExecutionPlan["steps"][number],
-  activatedSkills: readonly PrivateSkill[],
+  evidence?: StepEvidence,
 ): AssessmentProfileId {
   const text = [
     step.objective,
     ...step.successCriteria.map((criterion) => criterion.description),
   ].join("\n");
   const artifactDeliveryEvidenceGate = stepUsesArtifactDeliveryEvidenceGate(step);
-  const strictSkillQa = activatedSkillsDeclareStrictQa(activatedSkills);
-  if (artifactDeliveryEvidenceGate && !strictSkillQa) return "evidence_gate";
-  if (artifactDeliveryEvidenceGate && strictSkillQa && !matchesRiskSensitiveAssessment(text)) {
-    return "source_grounded";
-  }
+  if (artifactDeliveryEvidenceGate) return "evidence_gate";
   if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
-  if (stepUsesOnlyDirectDelivery(step) && activatedSkills.length === 0) return "deterministic";
+  if (stepUsesOnlyDirectDelivery(step)) return "deterministic";
   if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
+  if (stepEvidenceSupportsRuntimeEvidenceGate(step, evidence)) return "evidence_gate";
   if (step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
     return "lookup_lite";
   }
   if (matchesSourceGroundedAssessment(text)) return "source_grounded";
-  if (activatedSkills.length > 0) return "source_grounded";
   if (step.recommendedToolNames.length === 0) return "deterministic";
   if (step.recommendedToolNames.every((name) => /(?:read|list|search|fetch|inspect|get|query)/i.test(name))) {
     return "lookup_lite";
   }
   return "source_grounded";
+}
+
+const RUNTIME_RECEIPT_ASSESSMENT_KINDS = new Set([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+  "delivery_receipt",
+  "explicit_caveats",
+]);
+
+function stepEvidenceSupportsRuntimeEvidenceGate(
+  step: ExecutionPlan["steps"][number],
+  evidence?: StepEvidence,
+): boolean {
+  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+  return evidence !== undefined
+    && evidence.candidateOutput.trim().length > 0
+    && requiredKinds.length > 0
+    && requiredKinds.every((kind) => RUNTIME_RECEIPT_ASSESSMENT_KINDS.has(kind))
+    && evidence.toolCalls.some((toolCall) => toolCallHasRuntimeEvidenceReceipt(toolCall))
+    && (!requiresTableArtifactCoverage(step, evidence) || hasTableArtifactCoverageEvidence(evidence.toolCalls));
+}
+
+function requiresTableArtifactCoverage(step: ExecutionPlan["steps"][number], evidence: StepEvidence): boolean {
+  const text = [
+    step.objective,
+    ...step.successCriteria.map((criterion) => criterion.description),
+    evidence.candidateOutput,
+  ].join("\n");
+  return /(?:table extraction artifact|table artifact summary|computer_summarize_table_artifact|all tables|全部表|全量表|所有表|manifest table entries)/iu.test(text);
+}
+
+function hasTableArtifactCoverageEvidence(toolCalls: readonly ToolEvidence[]): boolean {
+  return toolCalls.some((toolCall) => {
+    if (toolCall.isError) return false;
+    const parsed = parseToolResult(toolCall.result);
+    const record = isPlainRecord(parsed) ? parsed : undefined;
+    if (record === undefined) return false;
+    const topSchema = typeof record.schema === "string" ? record.schema : undefined;
+    if (topSchema !== "agentloop.tableArtifactSummary/v1") return false;
+    const receipt = isPlainRecord(record.evidenceReceipt) ? record.evidenceReceipt : undefined;
+    const kinds = receipt === undefined ? undefined : receiptKinds(receipt);
+    const facts = Array.isArray(receipt?.facts) ? receipt.facts : [];
+    const fullCoverage = facts.some((fact) => {
+      const factRecord = isPlainRecord(fact) ? fact : undefined;
+      return factRecord !== undefined && factRecord.fullTableCoverage === true;
+    });
+    return fullCoverage && kinds?.has("table_coverage") === true;
+  });
+}
+
+function receiptKinds(receipt: Record<string, unknown>): ReadonlySet<string> {
+  const evidenceKinds = isPlainRecord(receipt.evidenceKinds) ? receipt.evidenceKinds : undefined;
+  return new Set([
+    ...stringArrayField(evidenceKinds?.satisfied),
+    ...stringArrayField(evidenceKinds?.caveated),
+  ]);
+}
+
+function toolCallHasRuntimeEvidenceReceipt(toolCall: ToolEvidence): boolean {
+  if (toolCall.isError) return false;
+  return toolResultRecords(toolCall.result).some((record) => {
+    const nestedReceipt = isPlainRecord(record.evidenceReceipt)
+      ? record.evidenceReceipt
+      : isPlainRecord(record.artifactReceipt)
+        ? record.artifactReceipt
+        : undefined;
+    const topLevelSchema = typeof record.schema === "string" ? record.schema : undefined;
+    const nestedSchema = typeof nestedReceipt?.schema === "string" ? nestedReceipt.schema : undefined;
+    const schema = topLevelSchema === "agentloop.artifactAcceptance/v1"
+      || topLevelSchema === "agentloop.sourceSummary/v1"
+      || topLevelSchema === "agentloop.artifactReceipt/v1"
+      || topLevelSchema === "agentloop.toolEvidenceReceipt/v1"
+      ? topLevelSchema
+      : nestedSchema;
+    return schema === "agentloop.artifactAcceptance/v1"
+      || schema === "agentloop.sourceSummary/v1"
+      || schema === "agentloop.artifactReceipt/v1"
+      || schema === "agentloop.toolEvidenceReceipt/v1";
+  });
+}
+
+function toolResultRecords(result: string): ReadonlyArray<Record<string, unknown>> {
+  const parsed = parseToolResult(result);
+  const records = Array.isArray(parsed)
+    ? parsed.filter(isPlainRecord)
+    : isPlainRecord(parsed)
+      ? [parsed]
+      : [];
+  const stdoutRecords = records.flatMap((record) => {
+    if (typeof record.stdout !== "string") return [];
+    const stdout = parseToolResult(record.stdout);
+    return Array.isArray(stdout)
+      ? stdout.filter(isPlainRecord)
+      : isPlainRecord(stdout)
+        ? [stdout]
+        : [];
+  });
+  return [...stdoutRecords, ...records];
 }
 
 function isProfiledRuleAssessmentProfile(
@@ -4425,13 +4761,6 @@ function stepUsesArtifactDeliveryEvidenceGate(step: ExecutionPlan["steps"][numbe
     || SKILL_QA_ONLY_EVIDENCE_KINDS.has(criterion.id)
     || /(?:\b(?:artifact|file|path|non-empty|format|acceptance|receipt|openable|render status)\b|产物|文件|路径|非空|格式|验收|收据|可打开|渲染状态)/iu
       .test(criterion.description)
-  );
-}
-
-function activatedSkillsDeclareStrictQa(skills: readonly PrivateSkill[]): boolean {
-  return skills.some((skill) =>
-    skill.agentLoop?.roles.includes("qa") === true
-    || (skill.agentLoop?.qaKinds.length ?? 0) > 0
   );
 }
 

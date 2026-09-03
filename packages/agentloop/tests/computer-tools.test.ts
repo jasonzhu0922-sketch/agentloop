@@ -4,11 +4,13 @@ import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { ArtifactAcceptanceService } from "../src/acceptance/artifact-acceptance.ts";
 import type { ArtifactAcceptanceProvider } from "../src/acceptance/artifact-acceptance-provider.ts";
 import { createPlaywrightArtifactAcceptanceProvider } from "../src/acceptance/playwright-artifact-acceptance-provider.ts";
 import { buildCommandEnvironment, ComputerExecutor, parseGrepLine, parseRgJsonLine } from "../src/computer/computer-executor.ts";
+import { profileSpreadsheets } from "../src/computer/spreadsheet-inspector.ts";
 import { createComputerTools } from "../src/tools/computer-tools.ts";
 import { createCoreTools } from "../src/tools/compose.ts";
 import { createVisibleDirectoryTools } from "../src/tools/visible-directory-tools.ts";
@@ -2956,6 +2958,26 @@ test("visible directory indexing profiles spreadsheet structure generically", as
   }
 });
 
+test("profileSpreadsheets reads multiple workbooks with bounded concurrency", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-spreadsheet-profile-concurrency-"));
+  try {
+    for (const name of ["a.xlsx", "b.xlsx", "c.xlsx", "d.xlsx"]) {
+      await writeMinimalXlsx(join(root, name), "Sheet1", [
+        ["Name", "Score"],
+        ["Alice", 91],
+      ]);
+    }
+    const files = await Promise.all(["a.xlsx", "b.xlsx", "c.xlsx", "d.xlsx"].map(async (path) => ({
+      path,
+      bytes: (await fs.stat(join(root, path))).size,
+    })));
+    const result = await profileSpreadsheets(root, files, { maxFiles: 4 });
+    assert.equal(result.profiledWorkbookCount, 4);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("visible_extract_tables writes durable generic spreadsheet extraction evidence", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-table-source-"));
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-table-workspace-"));
@@ -3064,6 +3086,120 @@ test("visible_extract_tables writes durable generic spreadsheet extraction evide
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("computer_summarize_table_artifact covers all extracted tables with compact generic statistics", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-table-artifact-summary-"));
+  try {
+    const artifactPath = join(root, ".agentloop", "table-extractions", "aa");
+    await fs.mkdir(artifactPath, { recursive: true });
+    await fs.writeFile(join(artifactPath, "artifact.json"), JSON.stringify({
+      schema: "agentloop.visibleTableExtraction/v1",
+      requested: 2,
+      returned: 2,
+      totalRows: 6,
+      totalRecords: 4,
+      totalCells: 12,
+      truncated: false,
+      caveats: [],
+      files: [
+        {
+          path: "a.xlsx",
+          sheets: [{
+            name: "Scores",
+            index: 0,
+            sourceRange: "A1:B3",
+            columns: [
+              { index: 1, address: "A", name: "Name", nonEmptyCellCount: 2, valueKinds: { text: 2 } },
+              { index: 2, address: "B", name: "Score", nonEmptyCellCount: 2, valueKinds: { number: 2 } },
+            ],
+            records: [
+              { row: 2, sourceRange: "A2:B2", values: { Name: "Alice", Score: 91 }, cellCount: 2 },
+              { row: 3, sourceRange: "A3:B3", values: { Name: "Bob", Score: 82 }, cellCount: 2 },
+            ],
+            rowCount: 3,
+            recordCount: 2,
+            cellCount: 6,
+            truncated: false,
+          }],
+        },
+        {
+          path: "b.xlsx",
+          sheets: [{
+            name: "Scores",
+            index: 0,
+            sourceRange: "A1:B3",
+            columns: [
+              { index: 1, address: "A", name: "Name", nonEmptyCellCount: 2, valueKinds: { text: 2 } },
+              { index: 2, address: "B", name: "Score", nonEmptyCellCount: 2, valueKinds: { number: 2 } },
+            ],
+            records: [
+              { row: 2, sourceRange: "A2:B2", values: { Name: "Carol", Score: 88 }, cellCount: 2 },
+              { row: 3, sourceRange: "A3:B3", values: { Name: "Dave", Score: 95 }, cellCount: 2 },
+            ],
+            rowCount: 3,
+            recordCount: 2,
+            cellCount: 6,
+            truncated: false,
+          }],
+        },
+      ],
+    }));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_summarize_table_artifact"]));
+    const prepared = allowed.prepare({
+      id: "summarize-table-artifact",
+      name: "computer_summarize_table_artifact",
+      arguments: {
+        path: ".agentloop/table-extractions/aa/artifact.json",
+        sampleRecords: 1,
+      },
+    });
+    const result = await prepared.tool.execute(
+      grantContext(["computer_summarize_table_artifact"]),
+      prepared.input,
+    ) as {
+      schema: string;
+      requested: number;
+      returned: number;
+      tableCount: number;
+      returnedTables: number;
+      tables: Array<{
+        filePath: string;
+        recordsPointer: string;
+        recordCount: number;
+        fields: Array<{ name: string }>;
+        numericFields: Array<{ name: string; count: number; min: number; max: number; mean: number }>;
+        textSamples: Record<string, string[]>;
+        sampleRecords: Array<{ values: Record<string, string | number> }>;
+      }>;
+      evidenceReceipt: {
+        sourceRefs: Array<{ filePath: string; recordsPointer: string; recordCount: number }>;
+        facts: Array<{ fullTableCoverage: boolean; tableCount: number; returnedTables: number }>;
+        evidenceKinds: { satisfied: string[]; caveated: string[] };
+      };
+    };
+
+    assert.equal(result.schema, "agentloop.tableArtifactSummary/v1");
+    assert.equal(result.requested, 2);
+    assert.equal(result.returned, 2);
+    assert.equal(result.tableCount, 2);
+    assert.equal(result.returnedTables, 2);
+    assert.deepEqual(result.tables.map((table) => table.filePath), ["a.xlsx", "b.xlsx"]);
+    assert.equal(result.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+    assert.deepEqual(result.tables[0]?.fields.map((field) => field.name), ["Name", "Score"]);
+    assert.deepEqual(result.tables[0]?.numericFields[0], { name: "Score", count: 2, min: 82, max: 91, sum: 173, mean: 86.5 });
+    assert.deepEqual(result.tables[1]?.textSamples.Name, ["Carol", "Dave"]);
+    assert.deepEqual(result.tables[1]?.sampleRecords[0]?.values, { Name: "Carol", Score: 88 });
+    assert.equal(result.evidenceReceipt.facts[0]?.fullTableCoverage, true);
+    assert.equal(result.evidenceReceipt.facts[0]?.tableCount, 2);
+    assert.equal(result.evidenceReceipt.sourceRefs[1]?.recordsPointer, "/files/1/sheets/0/records");
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("record_counts"));
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("structured_extraction_artifact"));
+    assert.equal(result.evidenceReceipt.evidenceKinds.caveated.length, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
   }
 });
 
@@ -3237,6 +3373,49 @@ test("visible_read_files reads bounded windows from multiple discovered files", 
     assert.equal(result.evidenceReceipt.facts[0].title, "A");
     assert.equal(result.evidenceReceipt.sourceRefs[1].path, "b.md");
     assert.deepEqual(result.evidenceReceipt.facts[0].outline, [{ line: 1, text: "# A" }]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ComputerExecutor.readFiles uses bounded file-level concurrency while preserving result order", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-read-files-concurrency-"));
+  try {
+    const executor = new ComputerExecutor(root);
+    let active = 0;
+    let peak = 0;
+    const started: string[] = [];
+    executor.readFile = async (path: string) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      started.push(path);
+      await delay(path === "a.md" ? 30 : 5);
+      active -= 1;
+      return {
+        content: `content:${path}`,
+        bytes: 100,
+        truncated: false,
+      };
+    };
+
+    const result = await executor.readFiles([
+      { path: "a.md" },
+      { path: "b.md" },
+      { path: "c.md" },
+      { path: "d.md" },
+    ], { maxTotalCharacters: 1_000 });
+
+    assert.equal(peak >= 2, true);
+    assert.deepEqual(started, ["a.md", "b.md", "c.md", "d.md"]);
+    assert.deepEqual(result.files.map((file) => file.path), ["a.md", "b.md", "c.md", "d.md"]);
+    assert.deepEqual(result.files.map((file) => file.content), [
+      "content:a.md",
+      "content:b.md",
+      "content:c.md",
+      "content:d.md",
+    ]);
+    assert.equal(result.returned, 4);
+    assert.equal(result.truncated, false);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -153,6 +153,7 @@ export { ModelStepAssessor, ProfiledRuleStepAssessor, RuleBasedStepAssessor } fr
 export { DependencyScheduler } from "./planning/scheduler.ts";
 export { PlanRepository } from "./planning/plan-repository.ts";
 export type * from "./planning/contracts.ts";
+export type * from "./planning/extensions.ts";
 export {
   AppError,
   asAppError,

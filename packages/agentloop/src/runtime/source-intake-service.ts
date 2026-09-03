@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { inflateRawSync, inflateSync } from "node:zlib";
+import { promisify } from "node:util";
 import { badRequest } from "../shared/errors.ts";
 import { SourceRepository, sourceSummary, type SourceRow } from "../storage/repositories/source-repository.ts";
 import type { UploadedSourceSummary, UploadedSourceStatus } from "./contracts.ts";
@@ -10,6 +13,7 @@ const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const MAX_EXTRACTED_CHARACTERS = 120_000;
 const CHUNK_CHARACTERS = 8_000;
 const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".xlsx", ".pptx"]);
+const execFileAsync = promisify(execFile);
 
 export class SourceIntakeService {
   private readonly repository: SourceRepository;
@@ -46,7 +50,7 @@ export class SourceIntakeService {
     const storagePath = join(directory, "original");
     await fs.writeFile(storagePath, input.content, { flag: "wx" });
 
-    const extraction = extractText({
+    const extraction = await extractText({
       originalName,
       extension,
       content: input.content,
@@ -95,12 +99,12 @@ interface ExtractionResult {
   readonly errorMessage?: string;
 }
 
-function extractText(input: {
+async function extractText(input: {
   originalName: string;
   extension: string;
   content: Buffer;
   byteSize: number;
-}): ExtractionResult {
+}): Promise<ExtractionResult> {
   if (input.byteSize > MAX_SOURCE_BYTES) {
     return {
       status: "oversized",
@@ -119,7 +123,7 @@ function extractText(input: {
       errorMessage: `Unsupported file extension: ${input.extension || "(none)"}`,
     };
   }
-  const decoded = decodeSourceText(input);
+  const decoded = await decodeSourceText(input);
   if (decoded.ok === false) return decoded.error;
   const text = decoded.text;
   const truncated = text.length > MAX_EXTRACTED_CHARACTERS;
@@ -136,12 +140,16 @@ type DecodeSourceResult =
   | { readonly ok: true; readonly text: string }
   | { readonly ok: false; readonly error: ExtractionResult };
 
-function decodeSourceText(input: {
+async function decodeSourceText(input: {
   originalName: string;
   extension: string;
   content: Buffer;
-}): DecodeSourceResult {
+}): Promise<DecodeSourceResult> {
   try {
+    if (input.extension === ".pdf") {
+      const pdftotext = await extractPdfTextWithPdftotext(input.content);
+      if (pdftotext !== undefined) return { ok: true, text: pdftotext };
+    }
     if (input.extension === ".docx") return { ok: true, text: extractDocxText(input.content) };
     if (input.extension === ".xlsx") return { ok: true, text: extractXlsxText(input.content) };
     if (input.extension === ".pptx") return { ok: true, text: extractPptxText(input.content) };
@@ -157,6 +165,26 @@ function decodeSourceText(input: {
       extractionErrorCode(input.extension),
       error instanceof Error ? error.message : `Could not extract ${input.originalName}`,
     );
+  }
+}
+
+async function extractPdfTextWithPdftotext(content: Buffer): Promise<string | undefined> {
+  const tempDir = await fs.mkdtemp(join(tmpdir(), "agentloop-pdf-"));
+  const inputPath = join(tempDir, "input.pdf");
+  const outputPath = join(tempDir, "output.txt");
+  try {
+    await fs.writeFile(inputPath, content);
+    try {
+      await execFileAsync("pdftotext", ["-layout", inputPath, outputPath], { timeout: 30_000 });
+      const text = await fs.readFile(outputPath, "utf8");
+      const normalized = text.replace(/\u0000/g, "").trim();
+      if (normalized.length > 0) return normalized;
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 }
 

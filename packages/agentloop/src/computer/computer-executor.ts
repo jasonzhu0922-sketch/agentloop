@@ -11,6 +11,7 @@ import {
   type SpreadsheetDirectoryProfile,
   type SpreadsheetExtractionPayload,
 } from "./spreadsheet-inspector.ts";
+import { mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 
 const DEFAULT_OUTPUT_LIMIT = 100_000;
 const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
@@ -37,6 +38,7 @@ const DIRECTORY_PROFILE_FIELD_HIERARCHY_LIMIT = 80;
 const DIRECTORY_PROFILE_FIELD_SAMPLE_LIMIT = 2;
 const READ_FILES_MAX_FILES = 50;
 const READ_FILES_MAX_CHARACTERS = 200_000;
+const READ_FILES_CONCURRENCY = 4;
 const READ_RANGE_DEFAULT_LIMIT = 200;
 const READ_RANGE_MAX_LIMIT = 2_000;
 const READ_RANGE_MAX_RANGES = 20;
@@ -530,8 +532,10 @@ export class ComputerExecutor {
     }
     const indexMaterial = sorted.map((file) => `${file.path}\0${file.bytes}`).join("\n");
     const sha256 = createHash("sha256").update(indexMaterial).digest("hex");
-    const fieldProfiles = options.fieldProfile === false ? [] : await this.profileDirectoryFields(sorted);
-    const spreadsheetProfile = options.spreadsheetProfile === false ? undefined : await profileSpreadsheets(this.workspaceRoot, sorted);
+    const [fieldProfiles, spreadsheetProfile] = await Promise.all([
+      options.fieldProfile === false ? Promise.resolve([] as DirectoryFieldProfile[]) : this.profileDirectoryFields(sorted),
+      options.spreadsheetProfile === false ? Promise.resolve(undefined) : profileSpreadsheets(this.workspaceRoot, sorted),
+    ]);
     const caveats = [
       "Directory profile records file metadata and representative paths; it does not read every file body.",
       ...(options.fieldProfile === false
@@ -714,34 +718,37 @@ export class ComputerExecutor {
       Math.max(1, options.maxTotalCharacters ?? READ_FILES_MAX_CHARACTERS),
       READ_FILES_MAX_CHARACTERS,
     );
-    const results: Array<{
-      path: string;
-      content: string;
-      sha256: string;
-      bytes: number;
-      characters: number;
-      truncated: boolean;
-      resolvedPath?: string;
-      requestedPath?: string;
-      offset?: number;
-      limit?: number;
-      totalLines?: number;
-      nextOffset?: number;
-      ranges?: ReadFileRangeResult[];
-    }> = [];
+    const rawResults = await mapWithConcurrencyLimit(files, READ_FILES_CONCURRENCY, async (entry) => {
+      const result = await this.readFile(entry.path, READ_FILES_MAX_CHARACTERS, {
+        offset: entry.offset,
+        limit: entry.limit,
+        ranges: entry.ranges,
+      });
+      return {
+        path: result.resolvedPath ?? entry.path,
+        content: result.content,
+        sha256: createHash("sha256").update(result.content).digest("hex"),
+        bytes: result.bytes,
+        characters: result.content.length,
+        truncated: result.truncated,
+        ...(result.resolvedPath === undefined ? {} : { resolvedPath: result.resolvedPath }),
+        ...(result.requestedPath === undefined ? {} : { requestedPath: result.requestedPath }),
+        ...(result.offset === undefined ? {} : { offset: result.offset }),
+        ...(result.limit === undefined ? {} : { limit: result.limit }),
+        ...(result.totalLines === undefined ? {} : { totalLines: result.totalLines }),
+        ...(result.nextOffset === undefined ? {} : { nextOffset: result.nextOffset }),
+        ...(result.ranges === undefined ? {} : { ranges: result.ranges }),
+      };
+    });
+    const results: typeof rawResults = [];
     let usedCharacters = 0;
     let truncated = false;
-    for (const entry of files) {
+    for (const result of rawResults) {
       if (usedCharacters >= maxTotalCharacters) {
         truncated = true;
         break;
       }
       const remaining = maxTotalCharacters - usedCharacters;
-      const result = await this.readFile(entry.path, Math.min(remaining, 200_000), {
-        offset: entry.offset,
-        limit: entry.limit,
-        ranges: entry.ranges,
-      });
       let content = result.content;
       let entryTruncated = result.truncated;
       if (content.length > remaining) {
@@ -752,19 +759,11 @@ export class ComputerExecutor {
       usedCharacters += content.length;
       truncated = truncated || entryTruncated;
       results.push({
-        path: result.resolvedPath ?? entry.path,
+        ...result,
         content,
         sha256: createHash("sha256").update(content).digest("hex"),
-        bytes: result.bytes,
         characters: content.length,
         truncated: entryTruncated,
-        ...(result.resolvedPath === undefined ? {} : { resolvedPath: result.resolvedPath }),
-        ...(result.requestedPath === undefined ? {} : { requestedPath: result.requestedPath }),
-        ...(result.offset === undefined ? {} : { offset: result.offset }),
-        ...(result.limit === undefined ? {} : { limit: result.limit }),
-        ...(result.totalLines === undefined ? {} : { totalLines: result.totalLines }),
-        ...(result.nextOffset === undefined ? {} : { nextOffset: result.nextOffset }),
-        ...(result.ranges === undefined ? {} : { ranges: result.ranges }),
       });
     }
     const sourceRefs = results.map((result) => ({

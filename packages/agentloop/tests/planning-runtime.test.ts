@@ -23,6 +23,7 @@ import { AppError } from "../src/shared/errors.ts";
 import { inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
 import { SkillService, type PrivateSkill } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import { RunOutcomeRepository } from "../src/storage/repositories/outcome-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
@@ -3707,6 +3708,66 @@ test("ModelStepAssessor treats process-only Skill gaps as non-blocking caveats",
   assert.match(assessment.feedback, /Process caveat/);
 });
 
+test("ModelStepAssessor does not reject satisfied criteria solely for Skill non-adherence", async () => {
+  const skill = skillFixture({
+    id: "source-skill",
+    name: "source-skill",
+    instructions: "Use a preferred lookup workflow before answering.",
+  });
+  const assessor = new ModelStepAssessor(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [{
+      id: "assessment",
+      name: "submit_assessment",
+      arguments: {
+        criteria: [
+          { criterionId: "answer-ready", satisfied: true, rationale: "The answer is supported by canonical evidence.", evidenceRefs: ["lookup"] },
+        ],
+        skills: [{
+          skillId: skill.id,
+          status: "not_followed",
+          followed: false,
+          rationale: "The preferred Skill workflow was not independently verified.",
+          evidenceRefs: ["candidateOutput"],
+        }],
+        feedback: "Skill QA was not independently verified.",
+        failedBoundary: {
+          stepId: "answer",
+          missingEvidenceKinds: [],
+          violatedSkillRequirements: [`${skill.id}:not_followed`],
+          reusableEvidenceRefs: ["candidateOutput"],
+          suggestedRepairShape: "repair_leaf",
+        },
+      },
+    }],
+  }));
+  const assessment = await assessor.assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("answer"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      successCriteria: [{ id: "answer-ready", description: "The answer is supported by canonical evidence.", source: "planner" }],
+    },
+    skills: [skill],
+    evidence: {
+      candidateOutput: "Answer is ready.",
+      toolCalls: [{ toolCallId: "lookup", toolName: "computer_run_command", isError: false, result: "lookup ok" }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.feedback, "");
+  assert.equal(assessment.failedBoundary, undefined);
+});
+
 test("ModelStepAssessor still rejects unavailable validation when a required criterion is unsatisfied", async () => {
   const skill = skillFixture({ id: "qa-skill", name: "qa-skill" });
   const assessor = new ModelStepAssessor(new StaticModel({
@@ -3919,6 +3980,43 @@ test("RuleBasedStepAssessor derives failed boundaries from rejected evidence con
     reusableEvidenceRefs: [],
     suggestedRepairShape: "repair_leaf",
   });
+});
+
+test("ProfiledRuleStepAssessor does not block Skill-bound lookup completion on unassessed Skill QA", async () => {
+  const skill = skillFixture({ id: "discovered:api-query", name: "api-query" });
+  const assessment = await new ProfiledRuleStepAssessor("lookup_lite").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("query-api"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      skillIds: [skill.id],
+      recommendedToolNames: ["load_skill", "computer_run_command", "websearch"],
+      successCriteria: [
+        { id: "delivery_receipt", description: "A delivery receipt identifies the final user-facing result.", source: "planner" },
+        { id: "explicit_caveats", description: "Unavailable or unverified facts are explicitly caveated.", source: "planner" },
+      ],
+    },
+    skills: [skill],
+    evidence: {
+      candidateOutput: "Found one API catalog candidate with input and output parameters plus explicit caveats.",
+      toolCalls: [
+        { toolCallId: "load-api-query", toolName: "load_skill", isError: false, result: "loaded api-query" },
+        { toolCallId: "query-api-catalog", toolName: "computer_run_command", isError: false, result: "api_catalog_result/v1" },
+      ],
+      modelSteps: 2,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.feedback, "");
+  assert.equal(assessment.skills[0].status, "not_assessed");
+  assert.equal(assessment.failedBoundary, undefined);
 });
 
 test("evidence-gate assessment marks source-versus-artifact receipt mismatches for Plan revision", async () => {
@@ -4195,6 +4293,85 @@ test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking fo
   assert.equal(assessment.approved, true);
   assert.equal(assessment.feedback, "");
   assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
+});
+
+test("ProfiledRuleStepAssessor requires full table artifact coverage before approving all-tables analysis", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("analyze-table-artifacts"),
+      objective: "Summarize all tables in the extracted table artifact and report coverage.",
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "schema_summary", "record_counts", "table_coverage", "structured_extraction_artifact", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Structured source evidence is present.", source: "planner" },
+        { id: "schema_summary", description: "Schema and field summary are present.", source: "planner" },
+        { id: "record_counts", description: "Record counts are present.", source: "planner" },
+        { id: "table_coverage", description: "All extracted tables are covered by the summary.", source: "planner" },
+        { id: "structured_extraction_artifact", description: "A durable structured extraction artifact is present.", source: "planner" },
+        { id: "explicit_caveats", description: "Any unverified facts are explicitly caveated.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Summarized 3 of 20 tables from the artifact.",
+      toolCalls: [{
+        toolCallId: "table-summary",
+        toolName: "computer_summarize_table_artifact",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.tableArtifactSummary/v1",
+          path: ".agentloop/table-extractions/aa/artifact.json",
+          requested: 20,
+          returned: 20,
+          totalRows: 673,
+          totalRecords: 633,
+          totalCells: 4012,
+          truncated: false,
+          tableCount: 20,
+          returnedTables: 3,
+          tables: [
+            { filePath: "a.xlsx", recordsPointer: "/files/0/sheets/0/records", recordCount: 2 },
+            { filePath: "b.xlsx", recordsPointer: "/files/1/sheets/0/records", recordCount: 2 },
+            { filePath: "c.xlsx", recordsPointer: "/files/2/sheets/0/records", recordCount: 2 },
+          ],
+          caveats: ["Table artifact summary returned 3 of 20 tables; increase maxTables or use computer_read_json for later table pointers."],
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            sourceType: "table_artifact_summary",
+            receiptId: "table-summary-receipt",
+            sourceRefs: [
+              { fileIndex: 0, sheetIndex: 0, filePath: "a.xlsx", sheetName: "Scores", recordsPointer: "/files/0/sheets/0/records" },
+              { fileIndex: 1, sheetIndex: 0, filePath: "b.xlsx", sheetName: "Scores", recordsPointer: "/files/1/sheets/0/records" },
+              { fileIndex: 2, sheetIndex: 0, filePath: "c.xlsx", sheetName: "Scores", recordsPointer: "/files/2/sheets/0/records" },
+            ],
+            facts: [{ kind: "table_artifact_summary", fullTableCoverage: false, tableCount: 20, returnedTables: 3 }],
+            caveats: ["Table artifact summary returned 3 of 20 tables; increase maxTables or use computer_read_json for later table pointers."],
+            evidenceKinds: {
+              satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
+              caveated: ["explicit_caveats"],
+              failed: [],
+            },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+
+  assert.equal(assessment.approved, false);
+  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "table_coverage")?.satisfied, false);
+  assert.ok(assessment.feedback.length > 0);
 });
 
 test("ModelStepAssessor receives candidate projection instead of full long output", async () => {
@@ -4807,8 +4984,8 @@ test("ModelStepAssessor exposes Skill caveat policy only for Skill-bound assessm
 
   assert.doesNotMatch(observedSystemPrompt, /Skill-mandated validation|planning-before-coding|review-before-build/);
   assert.match(observedContext, /assessmentPolicy/);
-  assert.match(observedContext, /Skill-mandated validation/);
-  assert.match(observedContext, /planning-before-coding/);
+  assert.match(observedContext, /Skill QA is not a completion gate/);
+  assert.match(observedContext, /process-only Skill gaps/);
 });
 
 test("ModelStepAssessor repairs invalid structured arguments without approving by default", async () => {
@@ -5892,7 +6069,7 @@ test("web lookup evidence queues convergence before the step budget is exhausted
   }
 });
 
-test("rule-based assessment cannot claim Skill compliance but repair limit can complete with caveat", async () => {
+test("rule-based assessment completes satisfied criteria without Skill QA repair loops", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -5911,16 +6088,18 @@ test("rule-based assessment cannot claim Skill compliance but repair limit can c
     const run = await runs.execute(owner.user.id, "semantic task");
     const runId = run.id;
     const detail = await runs.plan(owner.user.id, runId);
-    assert.equal(detail.assessments.at(-1)?.approved, false);
+    assert.equal(detail.assessments.at(-1)?.approved, true);
+    assert.equal(detail.assessments.at(-1)?.skills[0]?.status, "not_assessed");
     assert.equal((await runs.get(owner.user.id, runId)).status, "completed");
-    assert.equal((await runs.events(owner.user.id, runId)).filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
-    assert.equal((await runs.events(owner.user.id, runId)).filter((event) => event.type === "candidate.completion_caveated").length, 1);
-    assert.equal((await runs.events(owner.user.id, runId)).some((event) => event.type === "skill.compliance.assessment_reused"), true);
-    assert.equal((await runs.events(owner.user.id, runId)).some((event) => event.type === "candidate.assessment_reused"), true);
+    const events = await runs.events(owner.user.id, runId);
+    assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 0);
+    assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 0);
+    assert.equal(events.some((event) => event.type === "skill.compliance.assessment_reused"), false);
+    assert.equal(events.some((event) => event.type === "candidate.assessment_reused"), false);
     const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
       .get(run.id) as { status: string; reason_code: string };
     assert.equal(outcome.status, "completed");
-    assert.equal(outcome.reason_code, "completed_with_repair_limit_caveat");
+    assert.equal(outcome.reason_code, "plan_assessed_and_completed");
   } finally {
     database.close();
   }
@@ -6318,8 +6497,9 @@ test("artifact delivery evidence gates bypass risk-sensitive words when Skill QA
     assert.equal(latestAssessment?.approved, true);
     assert.equal(latestAssessment?.assessmentProfile, "evidence_gate");
     assert.equal(latestAssessment?.assessmentMethod, "rule");
-    assert.equal(latestAssessment?.skills[0]?.followed, true);
-    assert.match(latestAssessment?.skills[0]?.rationale ?? "", /did not reperform Skill QA/);
+    assert.equal(latestAssessment?.skills[0]?.status, "not_assessed");
+    assert.equal(latestAssessment?.skills[0]?.followed, false);
+    assert.match(latestAssessment?.skills[0]?.rationale ?? "", /does not reperform Skill QA/);
     assert.ok((await runs.events(owner.user.id, run.id)).some((event) =>
       event.type === "skill.compliance.assessed"
       && (event.data as { assessmentProfile?: string; assessmentMethod?: string }).assessmentProfile === "evidence_gate"
@@ -6330,7 +6510,7 @@ test("artifact delivery evidence gates bypass risk-sensitive words when Skill QA
   }
 });
 
-test("declared Skill QA keeps artifact delivery on model-backed assessment", async () => {
+test("declared Skill QA does not force artifact delivery onto model-backed assessment", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -6377,7 +6557,7 @@ test("declared Skill QA keeps artifact delivery on model-backed assessment", asy
                 skills: [{
                   skillId: skill.id,
                   followed: true,
-                  rationale: "Declared browser QA remains under model-backed Skill assessment.",
+                  rationale: "Declared browser QA remains observable when model-backed assessment is explicitly selected.",
                   evidenceRefs: ["verify-html"],
                 }],
                 feedback: "",
@@ -6466,10 +6646,11 @@ test("declared Skill QA keeps artifact delivery on model-backed assessment", asy
     const run = await runs.execute(owner.user.id, "生成需要浏览器 QA 的 HTML-PPT", { allowDangerousTools: true });
 
     assert.equal(run.status, "completed");
-    assert.equal(assessmentCalls, 1);
+    assert.equal(assessmentCalls, 0);
     const latestAssessment = (await runs.plan(owner.user.id, run.id)).assessments.at(-1);
-    assert.equal(latestAssessment?.assessmentProfile, "source_grounded");
-    assert.equal(latestAssessment?.assessmentMethod, "model");
+    assert.equal(latestAssessment?.assessmentProfile, "evidence_gate");
+    assert.equal(latestAssessment?.assessmentMethod, "rule");
+    assert.equal(latestAssessment?.skills[0]?.status, "not_assessed");
   } finally {
     database.close();
   }
@@ -6717,24 +6898,39 @@ test("source provider command receipts satisfy principle assessment evidence gat
 
     const skills = new SkillService(database);
     const owner = testOwner();
+    const skill = await skills.create(owner.user.id, {
+      name: "api-query",
+      description: "Query API catalog metadata.",
+      instructions: [
+        "---",
+        "agentloop:",
+        "  roles:",
+        "    - source_provider",
+        "  artifactKinds:",
+        "    - none",
+        "  sourceKinds:",
+        "    - api",
+        "  qaKinds: []",
+        "---",
+        "Query API catalog metadata and return structured source receipts.",
+      ].join("\n"),
+    });
     const model = new CommandSourceReceiptGateModel();
     const planner: Planner = {
       plan: async () => ({
         goal: "summarize API catalog command output",
-        selectedSkillIds: [],
+        selectedSkillIds: [skill.id],
         steps: [{
           id: "query-api-catalog",
           objective: "Run a source-provider command and deliver its structured source summary.",
           dependencies: [],
-          skillIds: [],
-          recommendedToolNames: ["computer_run_command"],
+          skillIds: [skill.id],
+          recommendedToolNames: ["load_skill", "computer_run_command", "computer_read_file"],
           evidenceContract: {
-            requiredKinds: ["source_summary", "source_urls", "delivery_receipt", "explicit_caveats"],
+            requiredKinds: ["delivery_receipt", "explicit_caveats"],
             caveatPolicy: "mark_unverified_facts",
           },
           successCriteria: [
-            { id: "source_summary", description: "A structured source summary receipt is present.", source: "planner" },
-            { id: "source_urls", description: "The source endpoint or equivalent source reference is present.", source: "planner" },
             { id: "delivery_receipt", description: "The final answer identifies the delivered summary.", source: "planner" },
             { id: "explicit_caveats", description: "Caveats from source collection are present.", source: "planner" },
           ],
@@ -6940,6 +7136,39 @@ test("large uploaded source reads use bounded convergence instead of forcing ful
       event.type === "loop.convergence_queued"
       && (event.data as { reason?: string }).reason === "lookup_evidence_ready"
     ), true);
+  } finally {
+    database.close();
+  }
+});
+
+test("pdf uploads prefer pdftotext extraction over the custom fallback", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const sourceRepository = new SourceRepository(database);
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => { throw new Error("model is not used"); },
+    });
+    const pdfPath = "/Users/zhujun/coding/agentloop/apps/agentloop-app/workspace/uploads/35618237-f930-401c-8edb-5e37c2808c22/sources/src_cebc40aa600740739268cc8e1f279298/original";
+    const content = await fs.readFile(pdfPath);
+
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "2603.16975v1.pdf",
+      content,
+    });
+    const summary = await runs.source(owner.user.id, source.id);
+    const chunkText = (await sourceRepository.chunks(source.id)).map((chunk) => chunk.content).join("\n");
+    const normalizedChunkText = chunkText.replace(/\s+/g, " ");
+
+    assert.equal(source.status, "ready");
+    assert.equal(source.chunkCount > 1, true);
+    assert.match(summary.summary ?? "", /The State of Generative AI in Software Development/);
+    assert.doesNotMatch(summary.summary ?? "", /eawe darry/i);
+    assert.match(normalizedChunkText, /The State of Generative AI in Software Development/);
+    assert.doesNotMatch(chunkText, /eawe darry/i);
   } finally {
     database.close();
   }
@@ -7842,7 +8071,7 @@ test("source contract mismatch routes recovery into a Plan revision instead of r
               failedBoundary: {
                 stepId: input.step.id,
                 missingEvidenceKinds: ["source_summary", "explicit_caveats"],
-                violatedSkillRequirements: ["discovered:api-query:not_followed"],
+                violatedSkillRequirements: [],
                 reusableEvidenceRefs: ["artifact-receipt"],
                 suggestedRepairShape: "repair_leaf" as const,
               },
@@ -8159,6 +8388,7 @@ class SourceSummaryGateModel implements ModelAdapter {
 class CommandSourceReceiptGateModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   assessmentCalls = 0;
+  private loaded = false;
   private queried = false;
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
@@ -8170,6 +8400,14 @@ class CommandSourceReceiptGateModel implements ModelAdapter {
       return { content: "", finishReason: "stop", toolCalls: [] };
     }
     const toolNames = request.tools.map((tool) => tool.name);
+    if (!this.loaded && toolNames.includes("load_skill")) {
+      this.loaded = true;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "load-api-query", name: "load_skill", arguments: { name: "api-query" } }],
+      };
+    }
     if (!this.queried && toolNames.includes("computer_run_command")) {
       this.queried = true;
       const payload = {

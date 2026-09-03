@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { extname, resolve } from "node:path";
 import { createRequire } from "node:module";
+import { mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 
 const require = createRequire(import.meta.url);
 const JSZip = require("jszip") as {
@@ -19,6 +20,7 @@ const CSV_PROFILE_MAX_ROWS = 5_000;
 const EXTRACT_FILE_LIMIT = 50;
 const EXTRACT_ROWS_PER_SHEET_LIMIT = 2_000;
 const EXTRACT_TOTAL_CELL_LIMIT = 100_000;
+const EXTRACT_FILE_CONCURRENCY = 4;
 
 interface ZipArchive {
   readonly file: (path: string) => ZipFile | null;
@@ -40,6 +42,7 @@ export interface SpreadsheetProfileOptions {
 export interface SpreadsheetExtractionOptions {
   readonly maxRowsPerSheet?: number;
   readonly maxTotalCells?: number;
+  readonly concurrency?: number;
 }
 
 export interface SpreadsheetCell {
@@ -187,7 +190,11 @@ export async function profileSpreadsheets(
   const candidates = files.filter(isSpreadsheetLikePath);
   const maxFiles = Math.min(Math.max(1, options.maxFiles ?? PROFILE_FILE_LIMIT), PROFILE_FILE_LIMIT);
   const selected = candidates.slice(0, maxFiles);
-  const profiles = await Promise.all(selected.map((file) => profileSpreadsheetFile(rootPath, file)));
+  const profiles = await mapWithConcurrencyLimit(
+    selected,
+    EXTRACT_FILE_CONCURRENCY,
+    (file) => profileSpreadsheetFile(rootPath, file),
+  );
   const truncated = candidates.length > selected.length || profiles.some((profile) => profile.truncated);
   const caveats = [
     ...(candidates.length > selected.length ? [`Spreadsheet profiling stopped at ${selected.length} of ${candidates.length} candidate workbooks.`] : []),
@@ -211,24 +218,29 @@ export async function extractSpreadsheetTables(
 ): Promise<SpreadsheetExtractionPayload> {
   const maxRowsPerSheet = Math.min(Math.max(1, options.maxRowsPerSheet ?? 500), EXTRACT_ROWS_PER_SHEET_LIMIT);
   const maxTotalCells = Math.min(Math.max(1, options.maxTotalCells ?? 20_000), EXTRACT_TOTAL_CELL_LIMIT);
+  const concurrency = Math.min(Math.max(1, options.concurrency ?? EXTRACT_FILE_CONCURRENCY), EXTRACT_FILE_LIMIT);
   const candidates = files.filter(isSpreadsheetLikePath);
   const selected = candidates.slice(0, EXTRACT_FILE_LIMIT);
+  let truncated = candidates.length > selected.length;
+  const extractedFiles = await mapWithConcurrencyLimit(selected, concurrency, (file) =>
+    extractSpreadsheetFile(rootPath, file, {
+      maxRowsPerSheet,
+      maxTotalCells,
+    })
+  );
   const output: SpreadsheetExtractionFile[] = [];
   let usedCells = 0;
-  let truncated = candidates.length > selected.length;
-  for (const file of selected) {
+  for (const extracted of extractedFiles) {
     if (usedCells >= maxTotalCells) {
       truncated = true;
       break;
     }
     const remainingCells = maxTotalCells - usedCells;
-    const extracted = await extractSpreadsheetFile(rootPath, file, {
-      maxRowsPerSheet,
-      maxTotalCells: remainingCells,
-    });
-    usedCells += extracted.sheets.reduce((sum, sheet) => sum + sheet.cellCount, 0);
-    truncated = truncated || extracted.truncated;
-    output.push(extracted);
+    const selectedExtraction = limitExtractedSpreadsheetFile(extracted, remainingCells);
+    const cells = selectedExtraction.sheets.reduce((sum, sheet) => sum + sheet.cellCount, 0);
+    usedCells += cells;
+    truncated = truncated || selectedExtraction.truncated || extracted.truncated || cells < extracted.sheets.reduce((sum, sheet) => sum + sheet.cellCount, 0);
+    output.push(selectedExtraction);
   }
   const caveats = [
     ...(files.length > candidates.length ? [`Table extraction ignored ${files.length - candidates.length} non-spreadsheet requested files.`] : []),
@@ -247,6 +259,70 @@ export async function extractSpreadsheetTables(
     truncated,
     caveats,
     sha256: createHash("sha256").update(material).digest("hex"),
+  };
+}
+
+function limitExtractedSpreadsheetFile(
+  file: SpreadsheetExtractionFile,
+  maxTotalCells: number,
+): SpreadsheetExtractionFile {
+  if (file.sheets.length === 0 || maxTotalCells <= 0) {
+    return file.sheets.length === 0 ? file : { ...file, sheets: [], truncated: true };
+  }
+  let usedCells = 0;
+  let truncated = false;
+  const sheets: SpreadsheetExtractionSheet[] = [];
+  for (const sheet of file.sheets) {
+    if (usedCells >= maxTotalCells) {
+      truncated = true;
+      break;
+    }
+    if (usedCells + sheet.cellCount <= maxTotalCells) {
+      usedCells += sheet.cellCount;
+      sheets.push(sheet);
+      truncated = truncated || sheet.truncated;
+      continue;
+    }
+    const remaining = maxTotalCells - usedCells;
+    const limited = limitExtractedSheet(sheet, remaining);
+    usedCells += limited.cellCount;
+    sheets.push(limited);
+    truncated = true;
+    break;
+  }
+  if (!truncated && sheets.length === file.sheets.length) return file;
+  return {
+    ...file,
+    sheets,
+    sha256: createHash("sha256").update(JSON.stringify({ path: file.path, sheets })).digest("hex"),
+    truncated: true,
+    caveats: uniqueStrings([...file.caveats, `${file.path} extraction was truncated by the batch cell budget.`]),
+  };
+}
+
+function limitExtractedSheet(
+  sheet: SpreadsheetExtractionSheet,
+  maxCells: number,
+): SpreadsheetExtractionSheet {
+  const rows: SpreadsheetRow[] = [];
+  let usedCells = 0;
+  for (const row of sheet.rows) {
+    if (usedCells + row.cells.length > maxCells) break;
+    rows.push(row);
+    usedCells += row.cells.length;
+  }
+  const header = sheet.header;
+  const columns = extractionColumns(rows, header);
+  const records = extractionRecords(rows, header, columns);
+  return {
+    ...sheet,
+    columns,
+    rows,
+    records,
+    rowCount: rows.length,
+    recordCount: records.length,
+    cellCount: usedCells,
+    truncated: true,
   };
 }
 
@@ -372,13 +448,10 @@ async function parseXlsxWorkbook(rootPath: string, path: string, options: { read
   const rels = parseWorkbookRelationships(relsXml);
   const sharedStrings = await parseSharedStrings(zip);
   const sheets = parseWorkbookSheets(workbookXml, rels);
-  const parsed: ParsedWorksheet[] = [];
-  for (let index = 0; index < sheets.length; index += 1) {
-    const sheet = sheets[index];
+  return await mapWithConcurrencyLimit(sheets, EXTRACT_FILE_CONCURRENCY, async (sheet, index) => {
     const xml = await zipText(zip, sheet.path);
-    parsed.push(parseWorksheetXml(sheet.name, index, xml, sharedStrings, options.maxRows));
-  }
-  return parsed;
+    return parseWorksheetXml(sheet.name, index, xml, sharedStrings, options.maxRows);
+  });
 }
 
 async function parseCsvWorkbook(rootPath: string, path: string, options: { readonly maxRows: number }): Promise<ParsedWorksheet[]> {

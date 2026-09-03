@@ -23,6 +23,7 @@ export type EvidenceKind =
   | "source_urls"
   | "schema_summary"
   | "record_counts"
+  | "table_coverage"
   | "structured_extraction_artifact"
   | "artifact_path"
   | "artifact_non_empty"
@@ -74,6 +75,18 @@ export interface TaskSpec {
    * is built from canonical Run facts, not model prose or UI transcript text.
    */
   readonly conversationWorkingSet?: ConversationWorkingSet;
+  /**
+   * Compact, bounded hints supplied by optional planning extensions. These are
+   * Planner inputs only; they cannot admit a Plan or claim completion.
+   */
+  readonly planningExtensionContexts?: readonly PlanningExtensionContext[];
+}
+
+export interface PlanningExtensionContext {
+  readonly schema: "agentloop.planningExtensionContext/v1";
+  readonly extensionName: string;
+  readonly kind: string;
+  readonly content: unknown;
 }
 
 export interface PlanningWorkspaceFacts {
@@ -294,7 +307,7 @@ export interface CriterionAssessment {
 
 export interface SkillAssessment {
   readonly skillId: string;
-  readonly status?: "followed" | "skipped_unavailable" | "process_caveat" | "not_followed";
+  readonly status?: "followed" | "skipped_unavailable" | "process_caveat" | "not_followed" | "not_assessed";
   readonly followed: boolean;
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];

@@ -46,6 +46,7 @@ export interface RuntimeStepArtifactRef {
   readonly bytes?: number;
   readonly sha256?: string;
   readonly artifactKind?: string;
+  readonly acceptanceProfile?: string;
 }
 
 export interface RuntimeStepEvidenceState {
@@ -93,7 +94,7 @@ export function deriveEvidenceCompletionCandidate(input: {
   if (policy === undefined || policy.requiredEvidenceKinds.length === 0) return undefined;
   if (policy.autoCompleteFromEvidence !== true) return undefined;
   if (input.latestEvidence.length === 0 || input.latestEvidence.some((item) => item.isError)) return undefined;
-  const evidenceKinds = collectEvidenceKinds(input.evidence);
+  const evidenceKinds = collectPolicyEvidenceKinds(input.evidence, policy);
   const successfulToolCallIds = input.evidence
     .filter((item) => !item.isError)
     .map((item) => item.toolCallId);
@@ -101,7 +102,7 @@ export function deriveEvidenceCompletionCandidate(input: {
     !evidenceKindSatisfiedByCompletionGate(kind, evidenceKinds)
   );
   if (missingRequiredEvidenceKinds.length > 0) return undefined;
-  const artifacts = collectKnownArtifacts(input.evidence);
+  const artifacts = collectPolicyDeliverableArtifacts(input.evidence, policy);
   const satisfiedEvidenceKinds = [...evidenceKinds.satisfied].sort();
   const caveatedEvidenceKinds = [...evidenceKinds.caveated].sort();
   const sourceToolCallIds = uniqueStrings(successfulToolCallIds);
@@ -126,10 +127,10 @@ export function deriveRuntimeStepEvidenceState(input: {
 }): RuntimeStepEvidenceState | undefined {
   const policy = input.policy;
   if (policy === undefined) return undefined;
-  const evidenceKinds = collectEvidenceKinds(input.evidence);
+  const evidenceKinds = collectPolicyEvidenceKinds(input.evidence, policy);
   const missingRequiredEvidenceKinds = policy.requiredEvidenceKinds
     .filter((kind) => !evidenceKinds.satisfied.has(kind));
-  const knownArtifacts = collectKnownArtifacts(input.evidence);
+  const knownArtifacts = collectPolicyDeliverableArtifacts(input.evidence, policy);
   const nextAction = nextActionForEvidenceGap({
     missingRequiredEvidenceKinds,
     failedEvidenceKinds: [...evidenceKinds.failed],
@@ -213,6 +214,15 @@ const AUTO_COMPLETABLE_EVIDENCE_KINDS = new Set([
   "delivery_receipt",
 ]);
 
+const NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_integrity",
+  "artifact_inspection",
+  "artifact_openable",
+  "format_matches_request",
+]);
+
 function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
   readonly satisfied: Set<string>;
   readonly caveated: Set<string>;
@@ -229,6 +239,23 @@ function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
     collectEvidenceKindsFromRecord(asRecord(parsed.evidenceReceipt), { satisfied, caveated, failed });
   }
   return { satisfied, caveated, failed };
+}
+
+function collectPolicyEvidenceKinds(
+  evidence: readonly AgentLoopToolEvidence[],
+  policy: RuntimeToolProgressPolicy,
+): {
+  readonly satisfied: Set<string>;
+  readonly caveated: Set<string>;
+  readonly failed: Set<string>;
+} {
+  const evidenceKinds = collectEvidenceKinds(evidence);
+  if (!hasGeneratedSourceWithoutAcceptanceDeliverable(evidence, policy)) return evidenceKinds;
+  for (const kind of NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS) {
+    evidenceKinds.satisfied.delete(kind);
+    evidenceKinds.caveated.delete(kind);
+  }
+  return evidenceKinds;
 }
 
 function evidenceKindSatisfiedByCompletionGate(
@@ -282,9 +309,27 @@ function collectKnownArtifacts(evidence: readonly AgentLoopToolEvidence[]): Runt
         ?? stringField(parsed, "kind")
         ?? stringField(artifact, "artifactKind")
         ?? stringField(artifact, "kind"),
+      acceptanceProfile: stringField(parsed, "acceptanceProfile")
+        ?? stringField(artifact, "acceptanceProfile"),
     });
   }
   return [...byPath.values()];
+}
+
+function collectPolicyDeliverableArtifacts(
+  evidence: readonly AgentLoopToolEvidence[],
+  policy: RuntimeToolProgressPolicy,
+): RuntimeStepArtifactRef[] {
+  const artifacts = collectKnownArtifacts(evidence);
+  if (!policy.requiredEvidenceKinds.includes("artifact_acceptance")) return artifacts;
+  return artifacts.filter(isAcceptanceDeliverableArtifact);
+}
+
+function isAcceptanceDeliverableArtifact(artifact: RuntimeStepArtifactRef): boolean {
+  if (artifact.acceptanceProfile !== undefined) return true;
+  if (artifact.sourceTool === "convert_artifact" || artifact.sourceTool === "materialize_paginated_html") return true;
+  if (artifact.artifactKind !== undefined && artifact.artifactKind !== "code" && artifact.artifactKind !== "source") return true;
+  return !isGeneratedSourcePath(artifact.path);
 }
 
 function formatEvidenceCompletionDelivery(input: {
@@ -443,6 +488,20 @@ export function evaluateRuntimeToolProgress(input: {
     };
   }
 
+  if (hasGeneratedSourceWithoutAcceptanceDeliverable(input.priorEvidence ?? [], policy)) {
+    const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
+    return {
+      allow: false,
+      stalled: exploratoryOnlyRejections > 1,
+      reason: "Generated artifact source exists but final artifact evidence is still missing",
+      directive: artifactSourceProductionRepairDirective(policy),
+      state: {
+        ...input.state,
+        exploratoryOnlyRejections,
+      },
+    };
+  }
+
   if (hasArtifactPathWithoutAcceptance(input.priorEvidence ?? [], policy)) {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
@@ -526,6 +585,17 @@ export function evaluateRuntimeToolProgress(input: {
   };
 }
 
+function artifactSourceProductionRepairDirective(policy: RuntimeToolProgressPolicy): string {
+  return [
+    "<runtime_artifact_source_production_repair>",
+    "The current artifact-producing step has generated source or build-helper files, but no final deliverable artifact evidence yet.",
+    "Use an evidence-producing tool next: run the build/render script or command, write the requested final artifact, convert the source into the requested artifact format, or materialize the final artifact.",
+    "Do not verify a target path until a tool result or receipt proves that final artifact exists.",
+    `Required evidence kinds: ${policy.requiredEvidenceKinds.length === 0 ? "unspecified" : policy.requiredEvidenceKinds.join(", ")}.`,
+    "</runtime_artifact_source_production_repair>",
+  ].join("\n");
+}
+
 function artifactAcceptanceRepairDirective(policy: RuntimeToolProgressPolicy): string {
   return [
     "<runtime_artifact_acceptance_repair>",
@@ -555,10 +625,60 @@ function hasArtifactPathWithoutAcceptance(
       || item.toolName === "materialize_paginated_html"
       || item.toolName === "convert_artifact"
     ) {
-      sawArtifactPath = hasSatisfiedEvidenceKind(item, "artifact_path") || hasArtifactPathResult(item);
+      sawArtifactPath = hasAcceptanceDeliverableArtifact(item) && (
+        hasSatisfiedEvidenceKind(item, "artifact_path") || hasArtifactPathResult(item)
+      );
     }
   }
   return sawArtifactPath;
+}
+
+function hasGeneratedSourceWithoutAcceptanceDeliverable(
+  evidence: readonly AgentLoopToolEvidence[],
+  policy: RuntimeToolProgressPolicy,
+): boolean {
+  if (!policy.requiredEvidenceKinds.includes("artifact_acceptance")) return false;
+  let sawGeneratedSource = false;
+  let sawDeliverable = false;
+  for (const item of evidence) {
+    if (item.isError) continue;
+    const artifact = artifactRefFromEvidence(item);
+    if (artifact === undefined) continue;
+    if (isAcceptanceDeliverableArtifact(artifact)) {
+      sawDeliverable = true;
+      continue;
+    }
+    if (isGeneratedSourcePath(artifact.path)) sawGeneratedSource = true;
+  }
+  return sawGeneratedSource && !sawDeliverable;
+}
+
+function hasAcceptanceDeliverableArtifact(evidence: AgentLoopToolEvidence): boolean {
+  const artifact = artifactRefFromEvidence(evidence);
+  return artifact !== undefined && isAcceptanceDeliverableArtifact(artifact);
+}
+
+function artifactRefFromEvidence(evidence: AgentLoopToolEvidence): RuntimeStepArtifactRef | undefined {
+  const parsed = parseToolEvidenceRecord(evidence);
+  if (parsed === undefined) return undefined;
+  const artifact = artifactRecordFromResult(parsed);
+  const path = stringField(parsed, "path")
+    ?? stringField(artifact, "path")
+    ?? stringField(asRecord(parsed.output), "path");
+  if (path === undefined) return undefined;
+  return {
+    path,
+    sourceTool: evidence.toolName,
+    toolCallId: evidence.toolCallId,
+    bytes: numberField(parsed, "bytes") ?? numberField(artifact, "bytes"),
+    sha256: stringField(parsed, "sha256") ?? stringField(artifact, "sha256"),
+    artifactKind: stringField(parsed, "artifactKind")
+      ?? stringField(parsed, "kind")
+      ?? stringField(artifact, "artifactKind")
+      ?? stringField(artifact, "kind"),
+    acceptanceProfile: stringField(parsed, "acceptanceProfile")
+      ?? stringField(artifact, "acceptanceProfile"),
+  };
 }
 
 function hasSatisfiedEvidenceKind(evidence: AgentLoopToolEvidence, kind: string): boolean {
@@ -584,6 +704,31 @@ function hasArtifactPathResult(evidence: AgentLoopToolEvidence): boolean {
   if (typeof artifact?.path === "string" && artifact.path.trim().length > 0) return true;
   const output = asRecord(parsed.output);
   return typeof output?.path === "string" && output.path.trim().length > 0;
+}
+
+const GENERATED_SOURCE_EXTENSIONS = new Set([
+  ".bash",
+  ".cjs",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ps1",
+  ".py",
+  ".sh",
+  ".ts",
+  ".tsx",
+  ".zsh",
+]);
+
+function isGeneratedSourcePath(path: string): boolean {
+  const normalized = path.trim().toLowerCase();
+  const slash = normalized.lastIndexOf("/");
+  const basename = slash === -1 ? normalized : normalized.slice(slash + 1);
+  if (basename === "makefile" || basename === "dockerfile") return true;
+  const dot = basename.lastIndexOf(".");
+  return dot > 0 && GENERATED_SOURCE_EXTENSIONS.has(basename.slice(dot));
 }
 
 function parseToolEvidenceRecord(evidence: AgentLoopToolEvidence): Record<string, unknown> | undefined {

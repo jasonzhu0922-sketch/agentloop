@@ -19,6 +19,9 @@ const JSON_READ_MAX_BYTES = 8_000_000;
 const JSON_READ_MAX_QUERIES = 20;
 const JSON_READ_MAX_POINTER_LENGTH = 1_000;
 const JSON_READ_MAX_ARRAY_LIMIT = 500;
+const TABLE_ARTIFACT_SUMMARY_MAX_TABLES = 200;
+const TABLE_ARTIFACT_SUMMARY_MAX_SAMPLE_RECORDS = 5;
+const TABLE_ARTIFACT_SUMMARY_MAX_TEXT_SAMPLES = 6;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
   "convert_artifact",
@@ -262,6 +265,52 @@ export function createComputerTools(
           queries: results,
           caveats,
         };
+      },
+    },
+    {
+      name: "computer_summarize_table_artifact",
+      description: [
+        "Summarize a durable agentloop.visibleTableExtraction/v1 JSON artifact under the workspace root.",
+        "Use this before manual computer_read_json windows when a downstream analysis must cover many extracted tables/files.",
+        "Returns every manifest table up to a bounded limit, field names, record counts, source ranges, compact numeric statistics, representative text samples, and caveats without interpreting business semantics.",
+      ].join(" "),
+      inputSchema: objectSchema(["path"], {
+        path: { type: "string" },
+        maxTables: { type: "integer", minimum: 1, maximum: TABLE_ARTIFACT_SUMMARY_MAX_TABLES },
+        sampleRecords: { type: "integer", minimum: 0, maximum: TABLE_ARTIFACT_SUMMARY_MAX_SAMPLE_RECORDS },
+      }),
+      executionMode: "parallel",
+      replaySafe: true,
+      maxResultCharacters: 120_000,
+      parse: (value) => {
+        const record = requireRecord(value, "computer_summarize_table_artifact arguments");
+        return {
+          path: requireString(record.path, "path", { max: 4_000 }),
+          maxTables: optionalBoundedInteger(record.maxTables, "maxTables", 1, TABLE_ARTIFACT_SUMMARY_MAX_TABLES),
+          sampleRecords: optionalBoundedInteger(record.sampleRecords, "sampleRecords", 0, TABLE_ARTIFACT_SUMMARY_MAX_SAMPLE_RECORDS),
+        };
+      },
+      execute: async (context, value) => {
+        const input = value as { path: string; maxTables?: number; sampleRecords?: number };
+        const file = await executorForContext(executor, context).readFile(input.path, JSON_READ_MAX_BYTES);
+        if (file.truncated) {
+          throw badRequest(`JSON file exceeds the ${JSON_READ_MAX_BYTES} byte structured read limit; use narrower source tooling or a purpose-built parser`);
+        }
+        let document: unknown;
+        try {
+          document = JSON.parse(file.content);
+        } catch {
+          throw badRequest("path must identify a valid JSON file");
+        }
+        return summarizeTableExtractionArtifact({
+          path: file.resolvedPath ?? input.path,
+          requestedPath: file.requestedPath,
+          bytes: file.bytes,
+          sha256: createHash("sha256").update(file.content).digest("hex"),
+          document,
+          maxTables: input.maxTables ?? TABLE_ARTIFACT_SUMMARY_MAX_TABLES,
+          sampleRecords: input.sampleRecords ?? 2,
+        });
       },
     },
     {
@@ -653,6 +702,327 @@ function selectJsonPointer(document: unknown, pointer: string): { readonly found
     cursor = (cursor as Record<string, unknown>)[token];
   }
   return { found: true, value: cursor };
+}
+
+function summarizeTableExtractionArtifact(input: {
+  readonly path: string;
+  readonly requestedPath?: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly document: unknown;
+  readonly maxTables: number;
+  readonly sampleRecords: number;
+}): {
+  readonly schema: "agentloop.tableArtifactSummary/v1";
+  readonly path: string;
+  readonly requestedPath?: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly sourceSchema: string;
+  readonly requested: number;
+  readonly returned: number;
+  readonly totalRows: number;
+  readonly totalRecords: number;
+  readonly totalCells: number;
+  readonly truncated: boolean;
+  readonly tableCount: number;
+  readonly returnedTables: number;
+  readonly tables: readonly TableArtifactSummaryTable[];
+  readonly caveats: readonly string[];
+  readonly evidenceReceipt: {
+    readonly schema: "agentloop.toolEvidenceReceipt/v1";
+    readonly sourceType: "table_artifact_summary";
+    readonly receiptId: string;
+    readonly sourceRefs: readonly unknown[];
+    readonly facts: readonly unknown[];
+    readonly caveats: readonly string[];
+    readonly evidenceKinds: {
+      readonly satisfied: readonly string[];
+      readonly caveated: readonly string[];
+      readonly failed: readonly string[];
+    };
+  };
+} {
+  const artifact = requireTableExtractionArtifact(input.document);
+  const tables = tableExtractionTables(artifact);
+  const returnedTables = tables.slice(0, input.maxTables);
+  const caveats = [
+    ...artifact.caveats,
+    ...(tables.length > returnedTables.length ? [`Table artifact summary returned ${returnedTables.length} of ${tables.length} tables; increase maxTables or use computer_read_json for later table pointers.`] : []),
+  ];
+  const summaries = returnedTables.map((table) => summarizeTableArtifactTable(table, input.sampleRecords));
+  const sourceRefs = summaries.map((table) => ({
+    fileIndex: table.fileIndex,
+    sheetIndex: table.sheetIndex,
+    filePath: table.filePath,
+    sheetName: table.sheetName,
+    recordsPointer: table.recordsPointer,
+    rowsPointer: table.rowsPointer,
+    columnsPointer: table.columnsPointer,
+    recordCount: table.recordCount,
+    sourceRange: table.sourceRange,
+  }));
+  const facts = [{
+    kind: "table_artifact_summary",
+    artifactPath: input.path,
+    artifactSha256: input.sha256,
+    sourceSchema: artifact.schema,
+    requested: artifact.requested,
+    returned: artifact.returned,
+    totalRows: artifact.totalRows,
+    totalRecords: artifact.totalRecords,
+    totalCells: artifact.totalCells,
+    tableCount: tables.length,
+    returnedTables: summaries.length,
+    fullTableCoverage: summaries.length === tables.length,
+  }];
+  const receiptMaterial = JSON.stringify({ input, sourceRefs, facts, caveats });
+  return {
+    schema: "agentloop.tableArtifactSummary/v1",
+    path: input.path,
+    ...(input.requestedPath === undefined ? {} : { requestedPath: input.requestedPath }),
+    bytes: input.bytes,
+    sha256: input.sha256,
+    sourceSchema: artifact.schema,
+    requested: artifact.requested,
+    returned: artifact.returned,
+    totalRows: artifact.totalRows,
+    totalRecords: artifact.totalRecords,
+    totalCells: artifact.totalCells,
+    truncated: artifact.truncated || tables.length > returnedTables.length,
+    tableCount: tables.length,
+    returnedTables: summaries.length,
+    tables: summaries,
+    caveats,
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1",
+      sourceType: "table_artifact_summary",
+      receiptId: createHash("sha256").update(receiptMaterial).digest("hex"),
+      sourceRefs,
+      facts,
+      caveats,
+      evidenceKinds: {
+        satisfied: ["source_summary", "schema_summary", "record_counts", "table_coverage", "structured_extraction_artifact", ...(caveats.length === 0 ? ["explicit_caveats"] : [])],
+        caveated: caveats.length === 0 ? [] : ["explicit_caveats"],
+        failed: [],
+      },
+    },
+  };
+}
+
+interface TableExtractionArtifact {
+  readonly schema: "agentloop.visibleTableExtraction/v1";
+  readonly files: readonly TableExtractionArtifactFile[];
+  readonly requested: number;
+  readonly returned: number;
+  readonly totalRows: number;
+  readonly totalRecords: number;
+  readonly totalCells: number;
+  readonly truncated: boolean;
+  readonly caveats: readonly string[];
+}
+
+interface TableExtractionArtifactFile {
+  readonly path: string;
+  readonly sheets: readonly TableExtractionArtifactSheet[];
+}
+
+interface TableExtractionArtifactSheet {
+  readonly name: string;
+  readonly index: number;
+  readonly sourceRange?: string;
+  readonly columns: readonly TableExtractionArtifactColumn[];
+  readonly records: readonly TableExtractionArtifactRecord[];
+  readonly rowCount: number;
+  readonly recordCount: number;
+  readonly cellCount: number;
+  readonly truncated: boolean;
+}
+
+interface TableExtractionArtifactColumn {
+  readonly index: number;
+  readonly address: string;
+  readonly name: string;
+  readonly sourceAddress?: string;
+  readonly nonEmptyCellCount: number;
+  readonly valueKinds: Record<string, number>;
+}
+
+interface TableExtractionArtifactRecord {
+  readonly row: number;
+  readonly sourceRange: string;
+  readonly values: Record<string, unknown>;
+  readonly cellCount: number;
+}
+
+interface TableArtifactSummaryTable {
+  readonly fileIndex: number;
+  readonly sheetIndex: number;
+  readonly filePath: string;
+  readonly sheetName: string;
+  readonly sourceRange?: string;
+  readonly recordsPointer: string;
+  readonly rowsPointer: string;
+  readonly columnsPointer: string;
+  readonly rowCount: number;
+  readonly recordCount: number;
+  readonly cellCount: number;
+  readonly truncated: boolean;
+  readonly fields: readonly {
+    readonly name: string;
+    readonly address: string;
+    readonly nonEmptyCellCount: number;
+    readonly valueKinds: Record<string, number>;
+  }[];
+  readonly numericFields: readonly {
+    readonly name: string;
+    readonly count: number;
+    readonly min: number;
+    readonly max: number;
+    readonly sum: number;
+    readonly mean: number;
+  }[];
+  readonly textSamples: Record<string, readonly string[]>;
+  readonly sampleRecords: readonly TableExtractionArtifactRecord[];
+}
+
+function requireTableExtractionArtifact(value: unknown): TableExtractionArtifact {
+  const record = requireRecord(value, "table artifact");
+  if (record.schema !== "agentloop.visibleTableExtraction/v1") {
+    throw badRequest("path must identify an agentloop.visibleTableExtraction/v1 artifact");
+  }
+  if (!Array.isArray(record.files)) throw badRequest("table artifact files must be an array");
+  return {
+    schema: "agentloop.visibleTableExtraction/v1",
+    files: record.files.map((file, fileIndex) => {
+      const fileRecord = requireRecord(file, `files[${fileIndex}]`);
+      if (!Array.isArray(fileRecord.sheets)) throw badRequest(`files[${fileIndex}].sheets must be an array`);
+      return {
+        path: requireString(fileRecord.path, `files[${fileIndex}].path`, { max: 4_000 }),
+        sheets: fileRecord.sheets.map((sheet, sheetIndex) => {
+          const sheetRecord = requireRecord(sheet, `files[${fileIndex}].sheets[${sheetIndex}]`);
+          if (!Array.isArray(sheetRecord.columns)) throw badRequest(`files[${fileIndex}].sheets[${sheetIndex}].columns must be an array`);
+          if (!Array.isArray(sheetRecord.records)) throw badRequest(`files[${fileIndex}].sheets[${sheetIndex}].records must be an array`);
+          return {
+            name: requireString(sheetRecord.name, `files[${fileIndex}].sheets[${sheetIndex}].name`, { max: 512 }),
+            index: Number.isSafeInteger(sheetRecord.index) ? sheetRecord.index as number : sheetIndex,
+            ...(typeof sheetRecord.sourceRange === "string" ? { sourceRange: sheetRecord.sourceRange } : {}),
+            columns: sheetRecord.columns.map((column, columnIndex) => {
+              const columnRecord = requireRecord(column, `files[${fileIndex}].sheets[${sheetIndex}].columns[${columnIndex}]`);
+              return {
+                index: Number.isSafeInteger(columnRecord.index) ? columnRecord.index as number : columnIndex + 1,
+                address: typeof columnRecord.address === "string" ? columnRecord.address : "",
+                name: requireString(columnRecord.name, `files[${fileIndex}].sheets[${sheetIndex}].columns[${columnIndex}].name`, { max: 512 }),
+                ...(typeof columnRecord.sourceAddress === "string" ? { sourceAddress: columnRecord.sourceAddress } : {}),
+                nonEmptyCellCount: Number.isSafeInteger(columnRecord.nonEmptyCellCount) ? columnRecord.nonEmptyCellCount as number : 0,
+                valueKinds: isRecord(columnRecord.valueKinds) ? numericRecord(columnRecord.valueKinds) : {},
+              };
+            }),
+            records: sheetRecord.records.map((row, rowIndex) => {
+              const rowRecord = requireRecord(row, `files[${fileIndex}].sheets[${sheetIndex}].records[${rowIndex}]`);
+              return {
+                row: Number.isSafeInteger(rowRecord.row) ? rowRecord.row as number : rowIndex + 1,
+                sourceRange: typeof rowRecord.sourceRange === "string" ? rowRecord.sourceRange : "",
+                values: isRecord(rowRecord.values) ? rowRecord.values : {},
+                cellCount: Number.isSafeInteger(rowRecord.cellCount) ? rowRecord.cellCount as number : Object.keys(isRecord(rowRecord.values) ? rowRecord.values : {}).length,
+              };
+            }),
+            rowCount: Number.isSafeInteger(sheetRecord.rowCount) ? sheetRecord.rowCount as number : 0,
+            recordCount: Number.isSafeInteger(sheetRecord.recordCount) ? sheetRecord.recordCount as number : sheetRecord.records.length,
+            cellCount: Number.isSafeInteger(sheetRecord.cellCount) ? sheetRecord.cellCount as number : 0,
+            truncated: sheetRecord.truncated === true,
+          };
+        }),
+      };
+    }),
+    requested: Number.isSafeInteger(record.requested) ? record.requested as number : 0,
+    returned: Number.isSafeInteger(record.returned) ? record.returned as number : record.files.length,
+    totalRows: Number.isSafeInteger(record.totalRows) ? record.totalRows as number : 0,
+    totalRecords: Number.isSafeInteger(record.totalRecords) ? record.totalRecords as number : 0,
+    totalCells: Number.isSafeInteger(record.totalCells) ? record.totalCells as number : 0,
+    truncated: record.truncated === true,
+    caveats: Array.isArray(record.caveats) ? record.caveats.filter((item): item is string => typeof item === "string") : [],
+  };
+}
+
+function tableExtractionTables(artifact: TableExtractionArtifact): Array<{
+  readonly file: TableExtractionArtifactFile;
+  readonly fileIndex: number;
+  readonly sheet: TableExtractionArtifactSheet;
+  readonly sheetIndex: number;
+}> {
+  return artifact.files.flatMap((file, fileIndex) =>
+    file.sheets.map((sheet, sheetIndex) => ({ file, fileIndex, sheet, sheetIndex }))
+  );
+}
+
+function summarizeTableArtifactTable(
+  table: ReturnType<typeof tableExtractionTables>[number],
+  sampleRecords: number,
+): TableArtifactSummaryTable {
+  const { file, fileIndex, sheet, sheetIndex } = table;
+  const numeric = new Map<string, { count: number; min: number; max: number; sum: number }>();
+  const textSamples = new Map<string, string[]>();
+  for (const record of sheet.records) {
+    for (const [field, value] of Object.entries(record.values)) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        const current = numeric.get(field) ?? { count: 0, min: value, max: value, sum: 0 };
+        current.count += 1;
+        current.min = Math.min(current.min, value);
+        current.max = Math.max(current.max, value);
+        current.sum += value;
+        numeric.set(field, current);
+      } else if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (trimmed.length === 0) continue;
+        const samples = textSamples.get(field) ?? [];
+        if (samples.length < TABLE_ARTIFACT_SUMMARY_MAX_TEXT_SAMPLES && !samples.includes(trimmed)) {
+          samples.push(trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed);
+        }
+        textSamples.set(field, samples);
+      }
+    }
+  }
+  return {
+    fileIndex,
+    sheetIndex,
+    filePath: file.path,
+    sheetName: sheet.name,
+    ...(sheet.sourceRange === undefined ? {} : { sourceRange: sheet.sourceRange }),
+    recordsPointer: `/files/${fileIndex}/sheets/${sheetIndex}/records`,
+    rowsPointer: `/files/${fileIndex}/sheets/${sheetIndex}/rows`,
+    columnsPointer: `/files/${fileIndex}/sheets/${sheetIndex}/columns`,
+    rowCount: sheet.rowCount,
+    recordCount: sheet.recordCount,
+    cellCount: sheet.cellCount,
+    truncated: sheet.truncated,
+    fields: sheet.columns.map((column) => ({
+      name: column.name,
+      address: column.address,
+      nonEmptyCellCount: column.nonEmptyCellCount,
+      valueKinds: column.valueKinds,
+    })),
+    numericFields: [...numeric.entries()]
+      .sort((left, right) => right[1].count - left[1].count || left[0].localeCompare(right[0]))
+      .map(([name, stats]) => ({
+        name,
+        count: stats.count,
+        min: stats.min,
+        max: stats.max,
+        sum: Number(stats.sum.toFixed(6)),
+        mean: Number((stats.sum / stats.count).toFixed(6)),
+      })),
+    textSamples: Object.fromEntries([...textSamples.entries()].sort(([left], [right]) => left.localeCompare(right))),
+    sampleRecords: sheet.records.slice(0, sampleRecords),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function numericRecord(value: Record<string, unknown>): Record<string, number> {
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1])));
 }
 
 interface JsonValueSummary {

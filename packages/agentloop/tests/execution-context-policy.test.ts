@@ -306,6 +306,7 @@ test("execution context prefers structured JSON reads for table extraction artif
   }).content);
 
   assert.match(payload.structuredArtifactConsumptionDiscipline, /manifest table entries/);
+  assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_summarize_table_artifact/);
   assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_read_json/);
   assert.match(payload.structuredArtifactConsumptionDiscipline, /Use computer_search_text only/);
   const bindings = payload.dependencyEvidenceBindings as {

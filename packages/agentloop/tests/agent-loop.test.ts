@@ -1616,6 +1616,175 @@ test("artifact progress policy redirects read-only exploration to acceptance aft
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
+test("artifact progress policy treats generated build scripts as source until a deliverable exists", async () => {
+  const executions: string[] = [];
+  let calls = 0;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write generated files",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`write:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        path: "build_html_from_markdown.py",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "build_html_from_markdown.py", bytes: 120, sha256: "script-hash" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const readTool: RuntimeTool<unknown> = {
+    name: "computer_read_file",
+    description: "Read generated source",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`read:${JSON.stringify(input)}`);
+      return "source";
+    },
+  };
+  const runTool: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Run build command",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`run:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        exitCode: 0,
+        stdout: "report.html\n",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "report.html", kind: "html", bytes: 240, sha256: "html-hash" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the final artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`verify:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        artifactPath: "report.html",
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      });
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "write-script",
+            name: "computer_write_file",
+            arguments: { path: "build_html_from_markdown.py", content: "print('report.html')" },
+          }],
+        };
+      }
+      if (calls === 2) {
+        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+        assert.equal(semanticState.nextAction, "produce_artifact");
+        assert.deepEqual(semanticState.knownArtifacts, []);
+        assert.ok(semanticState.evidenceProducingToolNames.includes("computer_run_command"));
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "reread-script",
+            name: "computer_read_file",
+            arguments: { path: "build_html_from_markdown.py" },
+          }],
+        };
+      }
+      if (calls === 3) {
+        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_repair/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "run-build",
+            name: "computer_run_command",
+            arguments: { command: "python3 build_html_from_markdown.py" },
+          }],
+        };
+      }
+      if (calls === 4) {
+        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+        assert.equal(semanticState.nextAction, "verify_existing_artifact");
+        assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["report.html"]);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "verify-report",
+            name: "verify_artifact_acceptance",
+            arguments: { artifactPath: "report.html", artifactKind: "html" },
+          }],
+        };
+      }
+      return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "computer_read_file", "computer_run_command", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify an HTML artifact.",
+    input: "convert markdown to html",
+    model,
+    tools: new ToolRegistry([writeTool, readTool, runTool, verifyTool]),
+    grant,
+    maxSteps: 6,
+    convergenceGraceSteps: 0,
+    progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"]),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      reason: "artifact_acceptance_observed",
+    }),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "report.html accepted");
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "run", "verify"]);
+  const rejected = events.find((event) =>
+    event.type === "tool.rejected" && event.data.toolCallId === "reread-script"
+  );
+  assert.equal(rejected?.data.reason, "Generated artifact source exists but final artifact evidence is still missing");
+  assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
+});
+
 test("artifact diagnostics reject continued read-only exploration and redirect to source repair", async () => {
   const executions: string[] = [];
   let calls = 0;
