@@ -408,13 +408,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
     for (let candidateAttempt = 1; candidateAttempt <= EMPTY_CANDIDATE_REPAIR_ATTEMPTS; candidateAttempt += 1) {
-      const toolChoice = convergenceOnly || materialized.definitions.length === 0
-        ? undefined
-        : toolChoiceForExecutionEvidenceGap({
-          progressPolicy: options.progressPolicy,
-          toolEvidence,
-          availableToolNames: materialized.definitions.map((tool) => tool.name),
-        });
       const invocation: ModelInvocation = {
         runId: options.runId,
         systemPrompt: options.systemPrompt,
@@ -422,7 +415,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         runtimeContext: assembly.runtimeContext,
         messages: assembly.messages,
         tools: convergenceOnly ? [] : materialized.definitions,
-        ...(toolChoice === undefined ? {} : { toolChoice }),
+        ...(convergenceOnly || materialized.definitions.length === 0
+          ? {}
+          : { toolChoice: "auto" as const }),
         maxOutputTokens: convergenceOnly
           ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
           : options.model.limits.maxOutputTokens,
@@ -1282,24 +1277,6 @@ function executionFeedbackDirective(input: {
   }
   lines.push("</runtime_execution_feedback>");
   return lines.join("\n");
-}
-
-function toolChoiceForExecutionEvidenceGap(input: {
-  readonly progressPolicy?: RuntimeToolProgressPolicy;
-  readonly toolEvidence: readonly AgentLoopToolEvidence[];
-  readonly availableToolNames: readonly string[];
-}): "auto" | "required" {
-  const stepEvidenceState = deriveRuntimeStepEvidenceState({
-    policy: input.progressPolicy,
-    evidence: input.toolEvidence,
-  });
-  if (stepEvidenceState === undefined) return "auto";
-  if (stepEvidenceState.missingRequiredEvidenceKinds.length === 0) return "auto";
-  if (stepEvidenceState.nextAction === "submit_completion_candidate") return "auto";
-  const availableToolNames = new Set(input.availableToolNames);
-  return stepEvidenceState.evidenceProducingToolNames.some((name) => availableToolNames.has(name))
-    ? "required"
-    : "auto";
 }
 
 function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string {

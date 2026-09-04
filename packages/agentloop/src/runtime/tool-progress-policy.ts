@@ -39,6 +39,12 @@ export type RuntimeStepNextAction =
   | "submit_completion_candidate"
   | "produce_required_evidence";
 
+export type RuntimeStepWorkProductStatus =
+  | "none"
+  | "process_artifact_available"
+  | "deliverable_available"
+  | "accepted";
+
 export interface RuntimeStepArtifactRef {
   readonly path: string;
   readonly sourceTool: string;
@@ -49,6 +55,15 @@ export interface RuntimeStepArtifactRef {
   readonly acceptanceProfile?: string;
 }
 
+export interface RuntimeStepWorkProductState {
+  readonly schema: "agentloop.runtimeStepWorkProductState/v1";
+  readonly status: RuntimeStepWorkProductStatus;
+  readonly acceptanceRequired: boolean;
+  readonly expectedArtifactKind?: string;
+  readonly deliverableArtifacts: readonly RuntimeStepArtifactRef[];
+  readonly processArtifacts: readonly RuntimeStepArtifactRef[];
+}
+
 export interface RuntimeStepEvidenceState {
   readonly schema: "agentloop.runtimeStepEvidenceState/v1";
   readonly requiredEvidenceKinds: readonly string[];
@@ -56,6 +71,7 @@ export interface RuntimeStepEvidenceState {
   readonly caveatedEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
   readonly missingRequiredEvidenceKinds: readonly string[];
+  readonly workProduct: RuntimeStepWorkProductState;
   readonly knownArtifacts: readonly RuntimeStepArtifactRef[];
   readonly processArtifacts: readonly RuntimeStepArtifactRef[];
   readonly recentActionableDiagnostic: boolean;
@@ -98,6 +114,7 @@ export function deriveEvidenceCompletionCandidate(input: {
   if (policy.autoCompleteFromEvidence !== true) return undefined;
   if (input.latestEvidence.length === 0 || input.latestEvidence.some((item) => item.isError)) return undefined;
   const evidenceKinds = collectPolicyEvidenceKinds(input.evidence, policy);
+  const workProduct = classifyWorkProduct(input.evidence, policy, evidenceKinds);
   const successfulToolCallIds = input.evidence
     .filter((item) => !item.isError)
     .map((item) => item.toolCallId);
@@ -105,7 +122,7 @@ export function deriveEvidenceCompletionCandidate(input: {
     !evidenceKindSatisfiedByCompletionGate(kind, evidenceKinds)
   );
   if (missingRequiredEvidenceKinds.length > 0) return undefined;
-  const artifacts = collectPolicyDeliverableArtifacts(input.evidence, policy);
+  const artifacts = workProduct.deliverableArtifacts;
   const satisfiedEvidenceKinds = [...evidenceKinds.satisfied].sort();
   const caveatedEvidenceKinds = [...evidenceKinds.caveated].sort();
   const sourceToolCallIds = uniqueStrings(successfulToolCallIds);
@@ -133,16 +150,16 @@ export function deriveRuntimeStepEvidenceState(input: {
   const evidenceKinds = collectPolicyEvidenceKinds(input.evidence, policy);
   const missingRequiredEvidenceKinds = policy.requiredEvidenceKinds
     .filter((kind) => !evidenceKinds.satisfied.has(kind));
-  const knownArtifacts = collectPolicyDeliverableArtifacts(input.evidence, policy);
-  const processArtifacts = collectPolicyProcessArtifacts(input.evidence, policy);
+  const workProduct = classifyWorkProduct(input.evidence, policy, evidenceKinds);
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(input.evidence);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(input.evidence);
   const nextAction = nextActionForEvidenceGap({
     missingRequiredEvidenceKinds,
     failedEvidenceKinds: [...evidenceKinds.failed],
-    knownArtifacts,
+    workProduct,
     policy,
   });
+  const evidenceProducingToolNames = evidenceProducingToolsForAction(nextAction, policy);
   return {
     schema: "agentloop.runtimeStepEvidenceState/v1",
     requiredEvidenceKinds: policy.requiredEvidenceKinds,
@@ -150,24 +167,23 @@ export function deriveRuntimeStepEvidenceState(input: {
     caveatedEvidenceKinds: [...evidenceKinds.caveated].sort(),
     failedEvidenceKinds: [...evidenceKinds.failed].sort(),
     missingRequiredEvidenceKinds,
-    knownArtifacts,
-    processArtifacts,
+    workProduct,
+    knownArtifacts: workProduct.deliverableArtifacts,
+    processArtifacts: workProduct.processArtifacts,
     recentActionableDiagnostic,
     recentPatchPreconditionFailure,
     nextAction,
-    evidenceProducingToolNames: evidenceProducingToolsForAction(nextAction, policy),
+    evidenceProducingToolNames,
     exploratoryToolNames: recentPatchPreconditionFailure
       ? policy.exploratoryToolNames.filter((name) => PATCH_REBASE_READ_TOOL_NAMES.has(name))
       : recentActionableDiagnostic || nextAction === "verify_existing_artifact" ? [] : policy.exploratoryToolNames,
-    instruction: recentPatchPreconditionFailure
-      ? "Use this current-step semantic state before choosing a tool. The last patch failed because its patch precondition did not match the current file. Read that exact patch target once to rebase the edit, then patch, write, run, or verify; do not broaden into directory listing or reference search."
-      : recentActionableDiagnostic
-      ? "Use this current-step semantic state before choosing a tool. A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic. Read-only exploration is no longer useful; patch, run, or verify next."
-      : nextAction === "verify_existing_artifact"
-      ? "Use this current-step semantic state before choosing a tool. A known artifact already exists, but required artifact acceptance is still missing. Verify the artifact next; do not reread the same artifact merely to decide whether to verify it."
-      : processArtifacts.length > 0 && nextAction === "produce_artifact"
-      ? "Use this current-step semantic state before choosing a tool. Process artifacts already exist for this Skill-bound step, but they are not the final deliverable. Run/build/render/convert them into the requested artifact kind, or write the final requested artifact directly; do not keep rewriting the same process artifacts without a concrete diagnostic."
-      : "Use this current-step semantic state before choosing a tool. Prefer a listed evidence-producing tool when required evidence is missing; use exploratory tools only for a specifically missing fact that is not already represented by receipts or known artifacts.",
+    instruction: instructionForStepState({
+      workProduct,
+      nextAction,
+      recentActionableDiagnostic,
+      recentPatchPreconditionFailure,
+      evidenceProducingToolNames,
+    }),
   };
 }
 
@@ -272,10 +288,19 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
-  if (!hasIntermediateArtifactWithoutAcceptanceDeliverable(evidence, policy)) return evidenceKinds;
-  for (const kind of NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS) {
-    evidenceKinds.satisfied.delete(kind);
-    evidenceKinds.caveated.delete(kind);
+  const workProduct = classifyWorkProduct(evidence, policy, evidenceKinds);
+  if (workProduct.status === "process_artifact_available") {
+    for (const kind of NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS) {
+      evidenceKinds.satisfied.delete(kind);
+      evidenceKinds.caveated.delete(kind);
+    }
+    return evidenceKinds;
+  }
+  if (workProduct.deliverableArtifacts.length > 0) {
+    evidenceKinds.satisfied.add("artifact_path");
+    if (workProduct.deliverableArtifacts.some((artifact) => (artifact.bytes ?? 0) > 0)) {
+      evidenceKinds.satisfied.add("artifact_non_empty");
+    }
   }
   return evidenceKinds;
 }
@@ -338,22 +363,41 @@ function collectKnownArtifacts(evidence: readonly AgentLoopToolEvidence[]): Runt
   return [...byPath.values()];
 }
 
-function collectPolicyDeliverableArtifacts(
+function classifyWorkProduct(
   evidence: readonly AgentLoopToolEvidence[],
   policy: RuntimeToolProgressPolicy,
-): RuntimeStepArtifactRef[] {
-  const artifacts = collectKnownArtifacts(evidence);
-  if (!policy.requiredEvidenceKinds.includes("artifact_acceptance")) return artifacts;
-  return artifacts.filter((artifact) => isAcceptanceDeliverableArtifact(artifact, policy));
-}
-
-function collectPolicyProcessArtifacts(
-  evidence: readonly AgentLoopToolEvidence[],
-  policy: RuntimeToolProgressPolicy,
-): RuntimeStepArtifactRef[] {
-  if (!policy.requiredEvidenceKinds.includes("artifact_acceptance")) return [];
-  return collectKnownArtifacts(evidence)
-    .filter((artifact) => !isAcceptanceDeliverableArtifact(artifact, policy));
+  evidenceKinds: {
+    readonly satisfied: ReadonlySet<string>;
+    readonly failed: ReadonlySet<string>;
+  },
+): RuntimeStepWorkProductState {
+  const artifacts = collectKnownArtifacts(evidence)
+    .filter((artifact) => WORK_PRODUCT_TOOL_NAMES.has(artifact.sourceTool));
+  const acceptanceRequired = policy.requiredEvidenceKinds.includes("artifact_acceptance");
+  const deliverableArtifacts = acceptanceRequired
+    ? artifacts.filter((artifact) => isAcceptanceDeliverableArtifact(artifact, policy))
+    : artifacts;
+  const processArtifacts = acceptanceRequired
+    ? artifacts.filter((artifact) => !isAcceptanceDeliverableArtifact(artifact, policy))
+    : [];
+  const acceptanceSatisfied = acceptanceRequired
+    && evidenceKinds.satisfied.has("artifact_acceptance")
+    && !evidenceKinds.failed.has("artifact_acceptance");
+  const status: RuntimeStepWorkProductStatus = deliverableArtifacts.length > 0 && acceptanceSatisfied
+    ? "accepted"
+    : deliverableArtifacts.length > 0
+    ? "deliverable_available"
+    : processArtifacts.length > 0
+    ? "process_artifact_available"
+    : "none";
+  return {
+    schema: "agentloop.runtimeStepWorkProductState/v1",
+    status,
+    acceptanceRequired,
+    ...(policy.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: policy.expectedArtifactKind }),
+    deliverableArtifacts,
+    processArtifacts,
+  };
 }
 
 function isAcceptanceDeliverableArtifact(
@@ -420,7 +464,7 @@ function artifactRecordFromResult(record: Record<string, unknown>): Record<strin
 function nextActionForEvidenceGap(input: {
   readonly missingRequiredEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
-  readonly knownArtifacts: readonly RuntimeStepArtifactRef[];
+  readonly workProduct: RuntimeStepWorkProductState;
   readonly policy: RuntimeToolProgressPolicy;
 }): RuntimeStepNextAction {
   const missing = new Set(input.missingRequiredEvidenceKinds);
@@ -434,15 +478,26 @@ function nextActionForEvidenceGap(input: {
     || missing.has("record_counts")
     || missing.has("structured_extraction_artifact")
   ) return "acquire_source_evidence";
-  if ((missing.has("artifact_path") || missing.has("artifact_non_empty")) && hasArtifactProducer(input.policy)) {
-    return "produce_artifact";
-  }
   if (
-    input.knownArtifacts.length > 0
+    input.workProduct.status === "deliverable_available"
     && (missing.has("artifact_acceptance") || missing.has("artifact_openable") || missing.has("format_matches_request"))
     && hasAnyTool(input.policy, ["verify_artifact_acceptance"])
   ) {
     return "verify_existing_artifact";
+  }
+  if (
+    input.workProduct.status === "deliverable_available"
+    && [...missing].every((kind) =>
+      kind === "artifact_acceptance"
+      || kind === "artifact_openable"
+      || kind === "format_matches_request"
+      || kind === "delivery_receipt"
+    )
+  ) {
+    return "submit_completion_candidate";
+  }
+  if ((missing.has("artifact_path") || missing.has("artifact_non_empty")) && hasArtifactProducer(input.policy)) {
+    return "produce_artifact";
   }
   if (input.missingRequiredEvidenceKinds.length === 0 || (
     input.missingRequiredEvidenceKinds.length === 1 && missing.has("delivery_receipt")
@@ -498,6 +553,62 @@ function hasAnyTool(policy: RuntimeToolProgressPolicy, names: readonly string[])
   return names.some((name) => policy.evidenceProducingToolNames.includes(name));
 }
 
+function instructionForStepState(input: {
+  readonly workProduct: RuntimeStepWorkProductState;
+  readonly nextAction: RuntimeStepNextAction;
+  readonly recentActionableDiagnostic: boolean;
+  readonly recentPatchPreconditionFailure: boolean;
+  readonly evidenceProducingToolNames: readonly string[];
+}): string {
+  const lines = [
+    "Use this current-step semantic state before choosing a tool.",
+    `Work product status is ${input.workProduct.status}.`,
+  ];
+  if (input.workProduct.expectedArtifactKind !== undefined) {
+    lines.push(`The requested final artifact kind is ${input.workProduct.expectedArtifactKind}.`);
+  }
+  if (input.recentPatchPreconditionFailure) {
+    lines.push("The last patch failed because its patch precondition did not match the current file.");
+    lines.push("Read that exact patch target once to rebase the edit, then patch, write, run, or verify; do not broaden into directory listing or reference search.");
+    return lines.join(" ");
+  }
+  if (input.recentActionableDiagnostic) {
+    lines.push("A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic.");
+    lines.push("Read-only exploration is no longer useful; patch, run, or verify next.");
+    return lines.join(" ");
+  }
+  switch (input.nextAction) {
+    case "verify_existing_artifact":
+      lines.push("A deliverable artifact exists, but required artifact acceptance is still missing.");
+      lines.push("Verify the artifact next; do not reread the same artifact merely to decide whether to verify it.");
+      break;
+    case "produce_artifact":
+      if (input.workProduct.status === "process_artifact_available") {
+        lines.push("Process artifacts already exist, but they are not the final deliverable.");
+        lines.push("Run/build/render/convert them into the requested artifact kind, or write the final requested artifact directly.");
+      } else {
+        lines.push("Produce the requested artifact with an evidence-producing tool.");
+      }
+      break;
+    case "acquire_source_evidence":
+      lines.push("Acquire only the missing source evidence required by the current evidence contract.");
+      break;
+    case "submit_completion_candidate":
+      lines.push("Required evidence is satisfied; submit a truthful completion candidate for Assessment.");
+      break;
+    case "repair_artifact_source":
+      lines.push("Repair the artifact source or rerun the named command based on the failed evidence.");
+      break;
+    case "produce_required_evidence":
+      lines.push("Produce the missing required evidence with one of the listed evidence-producing tools.");
+      break;
+  }
+  if (input.evidenceProducingToolNames.length > 0) {
+    lines.push(`Allowed next evidence-producing tools: ${input.evidenceProducingToolNames.join(", ")}.`);
+  }
+  return lines.join(" ");
+}
+
 export function evaluateRuntimeToolProgress(input: {
   readonly policy?: RuntimeToolProgressPolicy;
   readonly state: RuntimeToolProgressState;
@@ -509,6 +620,12 @@ export function evaluateRuntimeToolProgress(input: {
   if (policy === undefined || input.calls.length === 0) {
     return { allow: true, state: input.state };
   }
+  const priorEvidence = input.priorEvidence ?? [];
+  const priorEvidenceKinds = collectEvidenceKinds(priorEvidence);
+  const workProduct = classifyWorkProduct(priorEvidence, policy, priorEvidenceKinds);
+  const recentActionableDiagnostic = hasRecentActionableDiagnostic(priorEvidence);
+  const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(priorEvidence);
+  const recentPatchRebaseReadAfterPreconditionFailure = hasRecentPatchRebaseReadAfterPreconditionFailure(priorEvidence);
   const allExploratory = input.calls.every((call) => policy.exploratoryToolNames.includes(call.name));
   const hasEvidenceProducer = input.calls.some((call) => policy.evidenceProducingToolNames.includes(call.name));
   const hasSetupOnly = input.calls.every((call) => policy.setupToolNames.includes(call.name));
@@ -516,8 +633,11 @@ export function evaluateRuntimeToolProgress(input: {
     !hasSetupOnly
     && shouldRejectRepeatedNonDeliverableSourceMutation({
       calls: input.calls,
-      evidence: input.priorEvidence ?? [],
       policy,
+      workProduct,
+      recentActionableDiagnostic,
+      recentPatchPreconditionFailure,
+      recentPatchRebaseReadAfterPreconditionFailure,
     })
   ) {
     const nonDeliverableSourceMutationRejections = input.state.nonDeliverableSourceMutationRejections + 1;
@@ -547,13 +667,13 @@ export function evaluateRuntimeToolProgress(input: {
   }
 
   if (
-    hasRecentPatchPreconditionFailure(input.priorEvidence ?? [])
-    && callsAreTargetedPatchRebaseReads(input.calls, input.priorEvidence ?? [])
+    recentPatchPreconditionFailure
+    && callsAreTargetedPatchRebaseReads(input.calls, priorEvidence)
   ) {
     return { allow: true, state: input.state };
   }
 
-  if (hasIntermediateArtifactWithoutAcceptanceDeliverable(input.priorEvidence ?? [], policy)) {
+  if (workProduct.status === "process_artifact_available") {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
       allow: false,
@@ -567,7 +687,7 @@ export function evaluateRuntimeToolProgress(input: {
     };
   }
 
-  if (hasArtifactPathWithoutAcceptance(input.priorEvidence ?? [], policy)) {
+  if (workProduct.status === "deliverable_available") {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
       allow: false,
@@ -581,7 +701,7 @@ export function evaluateRuntimeToolProgress(input: {
     };
   }
 
-  if (hasRecentActionableDiagnostic(input.priorEvidence ?? [])) {
+  if (recentActionableDiagnostic) {
     const diagnosticExploratoryRejections = input.state.diagnosticExploratoryRejections + 1;
     return {
       allow: false,
@@ -666,13 +786,16 @@ function artifactAcceptanceRepairDirective(policy: RuntimeToolProgressPolicy): s
 
 function shouldRejectRepeatedNonDeliverableSourceMutation(input: {
   readonly calls: readonly ModelToolCall[];
-  readonly evidence: readonly AgentLoopToolEvidence[];
   readonly policy: RuntimeToolProgressPolicy;
+  readonly workProduct: RuntimeStepWorkProductState;
+  readonly recentActionableDiagnostic: boolean;
+  readonly recentPatchPreconditionFailure: boolean;
+  readonly recentPatchRebaseReadAfterPreconditionFailure: boolean;
 }): boolean {
-  if (!hasIntermediateArtifactWithoutAcceptanceDeliverable(input.evidence, input.policy)) return false;
-  if (hasRecentActionableDiagnostic(input.evidence)) return false;
-  if (hasRecentPatchPreconditionFailure(input.evidence)) return false;
-  if (hasRecentPatchRebaseReadAfterPreconditionFailure(input.evidence)) return false;
+  if (input.workProduct.status !== "process_artifact_available") return false;
+  if (input.recentActionableDiagnostic) return false;
+  if (input.recentPatchPreconditionFailure) return false;
+  if (input.recentPatchRebaseReadAfterPreconditionFailure) return false;
   if (input.calls.some((call) => callMaterializesOrVerifiesArtifact(call.name))) return false;
 
   const mutationCalls = input.calls.filter((call) => REPLACE_SOURCE_TOOL_NAMES.has(call.name));
@@ -686,21 +809,24 @@ function shouldRejectRepeatedNonDeliverableSourceMutation(input: {
   if (targetPaths.some((path) => pathCanBeAcceptanceDeliverable(path, input.policy))) return false;
 
   const knownNonDeliverablePaths = new Set(
-    collectKnownArtifacts(input.evidence)
-      .filter((artifact) => !isAcceptanceDeliverableArtifact(artifact, input.policy))
-      .map((artifact) => normalizeArtifactPath(artifact.path)),
+    input.workProduct.processArtifacts.map((artifact) => normalizeArtifactPath(artifact.path)),
   );
   if (knownNonDeliverablePaths.size === 0) return false;
   return targetPaths.every((path) => knownNonDeliverablePaths.has(normalizeArtifactPath(path)));
 }
 
 const REPLACE_SOURCE_TOOL_NAMES = new Set(["computer_write_file"]);
+const WORK_PRODUCT_TOOL_NAMES = new Set([
+  "computer_write_file",
+  "computer_patch_file",
+  "computer_run_command",
+  "convert_artifact",
+  "materialize_paginated_html",
+  "verify_artifact_acceptance",
+]);
 
 function callMaterializesOrVerifiesArtifact(toolName: string): boolean {
-  return toolName === "computer_run_command"
-    || toolName === "convert_artifact"
-    || toolName === "materialize_paginated_html"
-    || toolName === "verify_artifact_acceptance";
+  return WORK_PRODUCT_TOOL_NAMES.has(toolName) && toolName !== "computer_write_file" && toolName !== "computer_patch_file";
 }
 
 function sourceMutationTargetPaths(call: ModelToolCall): string[] {
@@ -726,57 +852,6 @@ function normalizeArtifactPath(path: string): string {
   return path.trim();
 }
 
-function hasArtifactPathWithoutAcceptance(
-  evidence: readonly AgentLoopToolEvidence[],
-  policy: RuntimeToolProgressPolicy,
-): boolean {
-  if (!policy.requiredEvidenceKinds.includes("artifact_acceptance")) return false;
-  let sawArtifactPath = false;
-  for (const item of evidence) {
-    if (item.isError) continue;
-    if (item.toolName === "verify_artifact_acceptance" && hasSatisfiedEvidenceKind(item, "artifact_acceptance")) {
-      sawArtifactPath = false;
-      continue;
-    }
-    if (
-      item.toolName === "computer_write_file"
-      || item.toolName === "computer_patch_file"
-      || item.toolName === "materialize_paginated_html"
-      || item.toolName === "convert_artifact"
-    ) {
-      sawArtifactPath = hasAcceptanceDeliverableArtifact(item, policy) && (
-        hasSatisfiedEvidenceKind(item, "artifact_path") || hasArtifactPathResult(item)
-      );
-    }
-  }
-  return sawArtifactPath;
-}
-
-function hasIntermediateArtifactWithoutAcceptanceDeliverable(
-  evidence: readonly AgentLoopToolEvidence[],
-  policy: RuntimeToolProgressPolicy,
-): boolean {
-  if (!policy.requiredEvidenceKinds.includes("artifact_acceptance")) return false;
-  let sawGeneratedSource = false;
-  let sawDeliverable = false;
-  for (const item of evidence) {
-    if (item.isError) continue;
-    const artifact = artifactRefFromEvidence(item);
-    if (artifact === undefined) continue;
-    if (isAcceptanceDeliverableArtifact(artifact, policy)) {
-      sawDeliverable = true;
-      continue;
-    }
-    if (isGeneratedSourcePath(artifact.path) || policy.expectedArtifactKind !== undefined) sawGeneratedSource = true;
-  }
-  return sawGeneratedSource && !sawDeliverable;
-}
-
-function hasAcceptanceDeliverableArtifact(evidence: AgentLoopToolEvidence, policy: RuntimeToolProgressPolicy): boolean {
-  const artifact = artifactRefFromEvidence(evidence);
-  return artifact !== undefined && isAcceptanceDeliverableArtifact(artifact, policy);
-}
-
 function artifactRefFromEvidence(evidence: AgentLoopToolEvidence): RuntimeStepArtifactRef | undefined {
   const parsed = parseToolEvidenceRecord(evidence);
   if (parsed === undefined) return undefined;
@@ -798,31 +873,6 @@ function artifactRefFromEvidence(evidence: AgentLoopToolEvidence): RuntimeStepAr
     acceptanceProfile: stringField(parsed, "acceptanceProfile")
       ?? stringField(artifact, "acceptanceProfile"),
   };
-}
-
-function hasSatisfiedEvidenceKind(evidence: AgentLoopToolEvidence, kind: string): boolean {
-  const parsed = parseToolEvidenceRecord(evidence);
-  if (parsed === undefined) return false;
-  return recordSatisfiesEvidenceKind(parsed, kind)
-    || recordSatisfiesEvidenceKind(asRecord(parsed.artifactReceipt), kind)
-    || recordSatisfiesEvidenceKind(asRecord(parsed.evidenceReceipt), kind);
-}
-
-function recordSatisfiesEvidenceKind(record: Record<string, unknown> | undefined, kind: string): boolean {
-  const evidenceKinds = asRecord(record?.evidenceKinds);
-  return Array.isArray(evidenceKinds?.satisfied)
-    && evidenceKinds.satisfied.includes(kind);
-}
-
-function hasArtifactPathResult(evidence: AgentLoopToolEvidence): boolean {
-  const parsed = parseToolEvidenceRecord(evidence);
-  if (parsed === undefined) return false;
-  if (typeof parsed.path === "string" && parsed.path.trim().length > 0) return true;
-  const artifactReceipt = asRecord(parsed.artifactReceipt);
-  const artifact = asRecord(artifactReceipt?.artifact);
-  if (typeof artifact?.path === "string" && artifact.path.trim().length > 0) return true;
-  const output = asRecord(parsed.output);
-  return typeof output?.path === "string" && output.path.trim().length > 0;
 }
 
 const GENERATED_SOURCE_EXTENSIONS = new Set([

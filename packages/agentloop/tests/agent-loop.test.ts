@@ -1431,6 +1431,26 @@ test("artifact progress policy rejects excessive read-only exploration before gr
       return JSON.stringify({ path: "outline.json", fileChanges: [{ path: "outline.json", changeType: "created" }] });
     },
   };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify artifact acceptance",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`verify:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        artifactPath: "outline.json",
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance"],
+          caveated: [],
+          failed: [],
+        },
+      });
+    },
+  };
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
@@ -1446,33 +1466,54 @@ test("artifact progress policy rejects excessive read-only exploration before gr
           }],
         };
       }
-      if (calls > 5) return { content: "artifact source authored", finishReason: "stop", toolCalls: [] };
-      assert.match(request.runtimeContext?.content ?? "", /runtime_tool_progress_repair/);
-      assert.match(request.runtimeContext?.content ?? "", /bounded exploration budget/);
-      return {
-        content: "",
-        finishReason: "tool_calls",
-        toolCalls: [{ id: "write-artifact", name: "computer_write_file", arguments: { path: "outline.json", content: "{}" } }],
-      };
+      if (calls === 5) {
+        assert.match(request.runtimeContext?.content ?? "", /runtime_tool_progress_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /bounded exploration budget/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "write-artifact", name: "computer_write_file", arguments: { path: "outline.json", content: "{}" } }],
+        };
+      }
+      if (calls === 6) {
+        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+        assert.equal(semanticState.workProduct.status, "deliverable_available");
+        assert.equal(semanticState.nextAction, "verify_existing_artifact");
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "verify-artifact", name: "verify_artifact_acceptance", arguments: { artifactPath: "outline.json" } }],
+        };
+      }
+      return { content: "artifact source authored", finishReason: "stop", toolCalls: [] };
     },
   };
   const events: RuntimeEvent[] = [];
-  const grant = makeGrant(["computer_read_file", "computer_write_file"]);
+  const grant = makeGrant(["computer_read_file", "computer_write_file", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
     runId: grant.runId,
     systemPrompt: "Produce an artifact.",
     input: "make deck",
     model,
-    tools: new ToolRegistry([readTool, writeTool]),
+    tools: new ToolRegistry([readTool, writeTool, verifyTool]),
     grant,
     maxSteps: 10,
     convergenceGraceSteps: 0,
     progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_acceptance"]),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      reason: "artifact_acceptance_observed",
+    }),
     emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => ({
+      approved: candidate.output.includes("Done and verified")
+        && candidate.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      feedback: "",
+    }),
   });
 
-  assert.equal(result.output, "artifact source authored");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["read", "read", "read", "write"]);
+  assert.equal(result.output, "Done and verified for the current step.\nArtifact: outline.json.");
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["read", "read", "read", "write", "verify"]);
   const rejected = events.find((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "read-4"
   );
@@ -1618,7 +1659,7 @@ test("artifact progress policy redirects read-only exploration to acceptance aft
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
-test("artifact execution requires a tool while required evidence is missing", async () => {
+test("artifact execution keeps multi-tool provider choice auto while Runtime evidence is missing", async () => {
   const executions: string[] = [];
   let calls = 0;
   const writeTool: RuntimeTool<unknown> = {
@@ -1664,7 +1705,7 @@ test("artifact execution requires a tool while required evidence is missing", as
     complete: async (request) => {
       calls += 1;
       if (calls === 1) {
-        assert.equal(request.toolChoice, "required");
+        assert.equal(request.toolChoice, "auto");
         return {
           content: "",
           finishReason: "tool_calls",
@@ -1672,7 +1713,7 @@ test("artifact execution requires a tool while required evidence is missing", as
         };
       }
       if (calls === 2) {
-        assert.equal(request.toolChoice, "required");
+        assert.equal(request.toolChoice, "auto");
         return {
           content: "",
           finishReason: "tool_calls",
@@ -3588,6 +3629,7 @@ function numberTool(
 function runtimeStepSemanticState(content: string): {
   readonly schema: string;
   readonly missingRequiredEvidenceKinds: readonly string[];
+  readonly workProduct: { readonly status: string };
   readonly knownArtifacts: readonly Array<{ readonly path: string }>;
   readonly processArtifacts: readonly Array<{ readonly path: string }>;
   readonly nextAction: string;
@@ -3599,6 +3641,7 @@ function runtimeStepSemanticState(content: string): {
   return JSON.parse(match[1]) as {
     readonly schema: string;
     readonly missingRequiredEvidenceKinds: readonly string[];
+    readonly workProduct: { readonly status: string };
     readonly knownArtifacts: readonly Array<{ readonly path: string }>;
     readonly processArtifacts: readonly Array<{ readonly path: string }>;
     readonly nextAction: string;
