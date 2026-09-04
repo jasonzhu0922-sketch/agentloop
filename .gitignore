@@ -3,6 +3,7 @@
 apps/agentloop-app/.env
 apps/*/.env.before-*
 apps/agentloop-app/config/llm-providers.json
+apps/agentloop-app/custom-skills/
 apps/agentloop-app/data/
 apps/agentloop-app/conversations/
 apps/agentloop-app/uploads/
