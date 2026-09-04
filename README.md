@@ -1,207 +1,193 @@
 # AgentLoop
 
-AgentLoop 是一个从 PI Agent、OpenCode 和 DeepSeek Harness 固定提交进行源码级移植，并加入 Plan-first、私有 Skill、多用户登录、会话式单 Agent 执行、Computer Tool 与批次调度的智能体框架。
+AgentLoop 是一个 Plan-first 的单 Agent Runtime。它把用户任务先转成结构化 Plan，再按 Step 调度 Skill、Tool、Evidence、Assessment 和 Terminal Committer；模型文本、Tool 成功、文件存在或 UI 事件本身都不能单独判定任务完成。
 
-当前主链不是“模型一直 ReAct，直到它说完成”，而是：
-
-```text
-登录用户任务
-→ Skill 选择
-→ 结构化 Plan
-→ Admission / Skill-Step Binding
-→ 依赖调度
-→ 当前 Step Agent Loop
-→ Computer / Plugin Tools
-→ Canonical Evidence
-→ Success Criteria + Skill Compliance Assessment
-→ 同一步修复或继续下一步
-→ Terminal Commit
-```
-
-Tool 成功、模型文本、Artifact 或事件 Trace 都不能单独建立完成；只有所有 Plan Step 均有通过的持久评估时，Terminal Committer 才能提交 `Run.completed`。
-
-## 已实现功能
-
-- 用户注册、登录、注销；密码和会话 Token 只保存摘要。
-- 用户级私有 Skill，支持内联定义或完整 Package；Package 原样复制到用户隔离的只读存储，并锁定来源提交与全包 hash。
-- `ModelPlanner` 强制模型调用结构化 `submit_plan`；Markdown/纯文本计划失败关闭。
-- DAG Admission：校验未知依赖、环、Skill 选择与 Step 绑定、Plan 声明的 Tool 可用性，并只为 Skill-bound Step 加入通用 `load_skill` 激活能力。
-- 依赖感知调度；每个 Step 单独物化 Capability Grant、Skill 目录和 Tool Schema，Skill 正文只能经 `load_skill` ToolResult 进入当前对话。
-- 候选完成评估、Skill Compliance 持久化、评估不通过后的同一步修复循环。
-- Terminal Committer 唯一提交完成或失败 Outcome。
-- 单 Agent 会话执行：服务端使用固定 persona 驱动每个 Run，没有 Agent 定义、Skill 绑定或委派；后续轮次通过 `conversationId` 继承同一会话上下文，工具集只由 `allowDangerousTools` 门控。
-- Computer Tool：目录、读文件、文本搜索、写文件、无 Shell 命令执行；每个会话固定使用 `WORKSPACE_ROOT/conversations/<conversationId>`，同会话多轮复用该目录，不同会话物理隔离；GUI/浏览器通过 `ComputerDriver` 插件接入。
-- Workspace containment、会话目录隔离、符号链接逃逸防护、命令参数数组、超时/强杀、输出上限。
-- 写文件、命令执行、点击/输入/导航等危险 Tool 默认不授权，Run/Batch 必须显式 `allowDangerousTools`。
-- Batch 一等实体：`Batch → BatchItem → Run → Plan`，支持 1–32 并发、幂等键、`continue`/`fail-fast` 和逐项结果。
-- 登录后用户级 Web 前端（独立 React + Vite 应用，位于 `apps/agentloop-app/web/`）：对话式智能助手（聊天、实时进度、计划与最终结果），支持在同一个对话流里连续下达多轮指令（后续 Run 会把此前轮次作为上下文喂给 Planner 与执行模型）。后端作为纯 HTTP API 对外服务。
-- OpenAI-compatible Model；所有 Provider Adapter 进入同一条结构化 Plan-first 主链。
-- SQLite 权威 Plan/Step/Evidence/Assessment/Outcome/Batch/Event 存储。
-
-## 上游移植
-
-- PI Agent `58302d34e703e0453ea13bdd10c7e423589ce177`：Loop 结构、Skill 目录/正文渐进披露、并行执行后按模型调用顺序回填、截断 Tool Call 拒绝和有界并发映射。
-- OpenCode `4d68d30b48a99379b2baaf597dbad576707ea36d`：权限过滤的 Skill 目录、`skill` Tool 正文加载、每个模型步骤重新物化 Tool 快照和 Tool 注册身份边界。
-- DeepSeek Harness `47f943859bef60e4160492346772ded9b24f765a`：独占 Tool 屏障、有界并发结算、子 Agent 深度和由子 Run 自身终态决定结果。
-
-完整源码映射见 [上游核验](docs/UPSTREAM-RESEARCH.md)，MIT 归属见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
-
-## 仓库结构
-
-本仓库是 npm workspaces monorepo，分为两部分：
+当前仓库是 npm workspaces monorepo：
 
 ```text
 agentloop/
-├── packages/agentloop/        内核 @zhujun/agentloop：可直接 npm publish 的
-│                              headless 智能体运行时（planning/runtime/tools/
-│                              skills/storage），身份只是不透明 userId 字符串，
-│                              不含 HTTP 与鉴权。
-├── apps/agentloop-app/        参考应用 agentloop-app：通过依赖
-│                              "@zhujun/agentloop" 引入内核包，组装 HTTP API、
-│                              邮箱+密码鉴权与 React 前端（apps/agentloop-app/web）。
-└── docs/                      设计文档
+├── packages/agentloop/           Runtime 内核：planning/runtime/tools/storage
+├── packages/agentloop-skills/    可发布的内置 Skills 包
+├── packages/agentloop-plan-template/
+│                                 可选的 Plan Template / fast-path 插件
+├── apps/agentloop-app/           参考应用：HTTP API、登录鉴权、React Web
+└── docs/                         架构、集成、运维和设计文档
 ```
 
-外部应用复用内核时只需 `npm install @zhujun/agentloop` 并按 [集成指南](docs/INTEGRATION.md) 装配；`apps/agentloop-app` 即官方的接入示范。
+## 核心机制
+
+AgentLoop 的执行链路是：
+
+```text
+登录用户任务
+→ Skill 目录选择
+→ 结构化 Plan
+→ Plan Admission / Skill-Step Binding
+→ 依赖调度
+→ Step Agent Loop
+→ Computer / Plugin Tools
+→ Canonical Evidence
+→ Success Criteria + Skill Compliance Assessment
+→ 修复或进入下一 Step
+→ Terminal Committer
+```
+
+主要能力：
+
+- 多用户注册、登录、注销；密码和会话 Token 只保存摘要。
+- 用户私有 Skill，支持内联定义或完整 Package 导入。
+- 内置 Skills 独立在 `@zhujun/agentloop-skills` 包中发布和发现。
+- 结构化 Planner、DAG Admission、Step 级 Capability Grant。
+- Computer Tool 支持目录、读文件、文本搜索、写文件、命令执行和可插拔 GUI/浏览器驱动。
+- 危险 Tool 默认关闭，Run/Batch 必须显式授权。
+- SQLite 持久化 Run、Plan、Step、Evidence、Assessment、Outcome、Batch 和 Event。
+- React + Vite Web 前端展示聊天、实时进度、Plan 和最终结果。
+- 可选 Plan Template 插件用于观察历史 Run、挖掘候选模板和启用低风险 fast-path。
 
 ## 快速启动
 
-要求 Node.js 26 或更高版本。仓库根目录执行：
+要求 Node.js 26 或更高版本。
+
+1. 安装根依赖：
 
 ```bash
 npm install
-npm test      # 依次运行内核与应用两个测试套件
-npm start     # 构建内核后从 apps/agentloop-app 启动 API
 ```
 
-后端只暴露纯 HTTP API（`/healthz` 与 `/v1/*`），不托管前端页面。面向用户的对话式智能助手是独立的 React + Vite 前端，位于 `apps/agentloop-app/web`。开发模式一条命令拉起双进程：
+2. 安装 Web 前端依赖：
 
 ```bash
-npm run dev   # API + Vite dev server（首次需先: cd apps/agentloop-app/web && npm install）
+cd apps/agentloop-app/web
+npm install
+cd ../../..
 ```
 
-然后打开 `http://localhost:5173/` 即可使用。登录后输入任务即可开始对话，界面展示实时进度、Plan 与最终结果。参考应用的运行配置和本地运行数据都归 `apps/agentloop-app` 所有：配置是 `apps/agentloop-app/.env`，数据库默认是 `apps/agentloop-app/data/agentloop.db`，工作区默认是 `apps/agentloop-app/workspace`。服务会为每个会话创建独立的 Computer Tool 根目录 `WORKSPACE_ROOT/conversations/<conversationId>`：
-
-```bash
-cd apps/agentloop-app
-WORKSPACE_ROOT=./workspace DATABASE_PATH=./data/agentloop.db npm start
-```
-
-生产部署时，先 `cd apps/agentloop-app/web && npm run build` 产出 `web/dist`，再用任意静态服务器托管该目录，并把 `WEB_ORIGINS_JSON`（后端 `apps/agentloop-app/.env`）配置为前端的 Origin 以允许跨域 API 调用；或通过反向代理把 `dist/` 与 `/v1/*` 放在同一 Origin 下。
-
-LLM Provider 由服务端 JSON 注册表配置，服务端按注册表决定 Run 使用的默认 Provider，模型 ID 可覆盖该 Provider 的默认模型；Run API 不能传任意 Base URL、密钥或超时参数。当前注册表支持 `openai-compatible` Adapter（例如 DeepSeek、OpenAI-compatible 网关和本地兼容服务），后续 Provider 以新的 Adapter 接入，不改变 Runtime 主链。
-
-先复制 [apps/agentloop-app/.env.example](apps/agentloop-app/.env.example) 为被 `.gitignore` 排除的 `apps/agentloop-app/.env`，再复制 [llm-providers.example.json](apps/agentloop-app/config/llm-providers.example.json) 为被 `.gitignore` 排除的 `apps/agentloop-app/config/llm-providers.json`，填写 Provider 类型、地址和默认模型；再把 `apiKeyEnv` 指向的 Key 写入本机 `apps/agentloop-app/.env` 或部署环境。`npm start` 会在 app 目录的 `.env` 存在时自动加载它，部署环境已注入的同名变量保持优先。模板不包含任何密钥：
+3. 创建本地配置文件：
 
 ```bash
 cp apps/agentloop-app/.env.example apps/agentloop-app/.env
 cp apps/agentloop-app/config/llm-providers.example.json apps/agentloop-app/config/llm-providers.json
-# 编辑 apps/agentloop-app/config/llm-providers.json，并在 apps/agentloop-app/.env 或部署环境中设置：
-export MY_LLM_API_KEY=server-secret
-npm start
 ```
 
-首次使用如果还没有数据库文件，先初始化一次空库：
+4. 编辑本地配置：
+
+- 在 `apps/agentloop-app/config/llm-providers.json` 中配置 Provider、Base URL、默认模型和公开的 `modelKey`。
+- 在 `apps/agentloop-app/.env` 中填写对应的环境变量值，例如 `MY_LLM_API_KEY` 或 `OPENAI_API_KEY`。
+- `LLM_PROVIDER_CONFIG_PATH` 默认指向 `./config/llm-providers.json`。
+
+5. 初始化空 SQLite 数据库：
 
 ```bash
 npm run init-db
 ```
 
-每个 Provider 的 `apiKeyEnv` 只保存环境变量名，密钥本身不进入 JSON 配置、SQLite 或 Run 记录。可选字段 `maxAttempts`（1–5）和 `retryDelayMs`（0–30000）控制单个模型请求的重试；其余省略项采用 `128000 / 8192 / 120000 / 3 / 250` 的默认值。HTTP `400` 与 `408/429/5xx` 一样按同一预算重试（默认最多 3 次尝试），每次重试都会持久化为 `model.retry` 事件并在 Web 前端实时显示「正在重试（N/M）」。默认 `toolChoiceMode` 为 `native`；对于 DeepSeek Thinking 一类会拒绝 `required` 或命名函数选择、但支持 `auto` 的 Provider，设为 `constrained-as-auto`；对于拒绝命名函数选择但支持 `required` 的单工具结构化阶段，设为 `named-as-required`。这些策略只转换上游 wire-protocol；Runtime 仍然拒绝遗漏的必需 Skill 加载、Plan 或 Assessment。
-
-模型 profile 可以覆盖 Provider 的默认协议、工具选择模式与上限。需要使用 GPT5.6 时，在 `models` 中注册 `gpt-5.6`，把 `providerModel` 设为 `gpt-5.6`，并声明 `protocol: "responses"`；如果兼容网关拒绝命名函数选择但接受 `required`，同时声明 `toolChoiceMode: "named-as-required"`。Adapter 会使用该模型 profile 调用 Provider 的 `/responses` 端点，Run 只需要选择公开的 `modelKey`。
-
-`runtimeContextPlacement` 默认是 `system`：Adapter 会保留真实的 `user / assistant / tool` transcript，并把服务端产生的 Plan、当前 Step、Skill 目录、压缩摘要与修复指令包进带 `source="server"`、snapshot ID 和 phase 的 `<runtime_context>`，追加到 Provider 的 `system` message。这是 DeepSeek/OpenAI-compatible Provider 的推荐设置。只有某个 Provider 明确不接受动态 System 内容时才设为 `user-envelope`；它只是最后一公里兼容编码，内部仍然保持 Runtime Context 与用户消息分离，且 Runtime 不会根据模型文本授予权限或判定完成。控制台通过 `/v1/providers` 读取无密钥 Provider 目录。
-
-需要让 Agent 调用不在系统 `PATH` 中的受信任运行时时，由服务端配置可执行别名。模型只能提交别名和参数数组，不能提交绝对可执行路径；Runtime 在无 Shell 的进程边界把别名解析到固定二进制：
+6. 启动开发模式：
 
 ```bash
-TRUSTED_EXECUTABLE_ALIASES_JSON='{"artifact-node":"/absolute/path/to/trusted/node"}' npm start
+npm run dev
 ```
 
-受信任工具需要运行时路径等非敏感环境变量时，可由服务端通过 `TRUSTED_COMMAND_ENV_JSON` 注入。该通道拒绝名称中含 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`AUTH` 等敏感词的变量；模型密钥不得进入 Computer 子进程：
+打开 `http://localhost:5173/` 使用 Web 前端。后端 API 默认在 `http://127.0.0.1:8787`，开发脚本会自动选择可用端口并配置前端 CORS。
+
+只启动 API：
 
 ```bash
-TRUSTED_COMMAND_ENV_JSON='{"RUNTIME_NODE":"/absolute/path/to/trusted/node"}' npm start
-```
-
-## Skill 定义
-
-```json
-{
-  "name": "internal-research",
-  "description": "内部研究流程",
-  "instructions": "先核验资料，再形成结论。只使用已核验资料，并逐条记录证据；完成前复核所有关键结论均能指向已读取的证据。"
-}
-```
-
-Skill 原文是唯一领域工作流权威，不再有框架侧的规划提示、Tool 清单、完成标准或绑定模式副本。Planner 初始只看到当前用户的私有 Skill 与正式 `skills/` 目录自动发现并物化的 Skill 目录；目录只含名称、描述、版本和位置。Planner 依据这些元数据直接提交结构化 Plan，不在规划阶段加载 Skill 正文。每个 Skill-bound Step 开始时才开放 `load_skill`，原文进入该 Step 的 ToolResult 后再开放 Plan 授权的执行 Tool。Assessment 直接对照同一版本 Skill 原文和运行证据，Skill 仍不能扩张 Capability Grant。
-
-内核自带 Skill 目录是包资产，由应用启动代码固定解析；额外的应用扩展目录统一通过 `CUSTOM_SKILL_DIRECTORIES_JSON` 指定。每个直接子目录只要以自己的 Skill 名命名并包含标准 `SKILL.md`，即可进入 Agent Loop；不要求同级 `.source.json`。若提供合法的 `<skill-name>.source.json`，其中的 HTTPS 来源、提交和 Package 指纹会作为可选溯源元数据记录，且始终放在 Package 外部，不改变第三方包的字节和 hash：
-
-```bash
-CUSTOM_SKILL_DIRECTORIES_JSON='["/srv/app/custom-skills"]' \
 npm start
 ```
 
-### 原样安装现成 Skill Package
+## 本地数据与 Git 边界
 
-Package 模式用于验证现成 Skill 本身；安装过程只提取标准 `SKILL.md` 的名称、描述和完整原文，不叠加框架自定义语义。服务端先配置导入白名单与只读托管目录。托管目录由服务端统一管理，不能作为 Computer Tool 的可写会话目录；`load_skill` 只向当前 Step 注入已授权的包内容和服务端包路径：
+仓库只提交源码、示例配置和文档，不提交本机运行数据。
+
+这些文件和目录是本地状态，已被 `.gitignore` 排除：
+
+```text
+apps/agentloop-app/.env
+apps/agentloop-app/config/llm-providers.json
+apps/agentloop-app/data/
+apps/agentloop-app/conversations/
+apps/agentloop-app/uploads/
+apps/agentloop-app/outputs/
+apps/agentloop-app/workspace/
+data/
+conversations/
+uploads/
+outputs/
+node_modules/
+dist/
+```
+
+默认数据库路径是 `apps/agentloop-app/data/agentloop.db`。数据库文件不进入 Git；新用户通过 `npm run init-db` 创建空库，启动服务时也会复用 Runtime 的迁移逻辑补齐表结构。
+
+Provider JSON 只保存 Provider 类型、地址、模型和 `apiKeyEnv` 变量名；密钥值放在本地 `.env` 或部署环境变量中，不写入 JSON、SQLite 或 Run 记录。
+
+推送前可以检查是否误跟踪了本地状态：
 
 ```bash
-WORKSPACE_ROOT=/srv/agentloop-workspace \
-SKILL_IMPORT_ROOTS_JSON='["/srv/approved-skill-imports"]' \
-npm start
+git status --short --untracked-files=all
+git ls-files | rg '(^|/)\.env$|\.db$|llm-providers\.json|conversations|uploads|outputs|workspace'
 ```
 
-`POST /v1/skills/import-directory` 接受服务端可见目录、HTTPS 来源、40 位提交 SHA 和调用者预先核验的 Package SHA-256：
+第二条命令如有输出，应先确认是否需要从索引移除。
 
-```json
-{
-  "sourceDirectory": "/srv/approved-skill-imports/presentation-skill",
-  "sourceUrl": "https://github.com/siril9/presentation-skill",
-  "sourceRevision": "3a22eed290fa2205b6a1e2de5549b4429c5fffd0",
-  "expectedPackageHash": "0ad72f96b57398a95e04ba4b2fd3a1db2d4e11548d34ca16c44cfd189cfb1842"
-}
-```
+## 运行配置
 
-安装器拒绝符号链接、路径逃逸和超额文件，逐文件复制后复算全包 hash 并把副本设为只读。Run 在开始、Step 执行、Assessment 和 Terminal Commit 前重新核验；任何变化都会以 `SKILL_PACKAGE_MUTATED` 终止，而不是修改 Skill 或切换替代实现。
+参考应用读取 `apps/agentloop-app/.env`。常用变量：
 
-### 原始 presentation-skill 真实 E2E
+| 变量 | 说明 |
+|---|---|
+| `PORT` / `HOST` | API 监听端口和地址 |
+| `WEB_ORIGINS_JSON` | 允许跨域访问 API 的前端 Origin 列表 |
+| `DATABASE_PATH` | SQLite 数据库路径，默认 `./data/agentloop.db` |
+| `WORKSPACE_ROOT` | Run 工作区根目录，默认 `./workspace` |
+| `SESSION_TTL_HOURS` | 登录会话有效期 |
+| `LLM_PROVIDER_CONFIG_PATH` | Provider 注册表路径 |
+| `CUSTOM_SKILL_DIRECTORIES_JSON` | 额外 Skill 根目录列表 |
+| `SKILL_IMPORT_ROOTS_JSON` | 允许导入 Skill Package 的服务端目录 |
+| `TRUSTED_EXECUTABLE_ALIASES_JSON` | 可暴露给 Computer Tool 的受信任命令别名 |
+| `TRUSTED_COMMAND_ENV_JSON` | 注入受信任命令的非敏感环境变量 |
 
-仓库顶层 `skills/` 是正式的 Skill 发现目录。Runtime 启动时扫描每个直接子目录的标准 `SKILL.md`，并在用户首次列出 Skill 或发起 Run 时原样物化到该用户隔离的只读 Package Store；Planner 只看元数据并据此出 Plan，真正的 `load_skill` 发生在对应 Step 的执行阶段。`skills/presentation-skill` 的 Package 内容、文件数和 Package hash 都在复制及每个运行关键点重新核验；若同级来源锁存在且匹配，才额外显示来源与提交。`scripts/run-presentation-e2e.ts` 通过这条正式发现链路调用 Package 自带的 builder 与 QA，不包含框架定制 renderer。
+`CUSTOM_SKILL_DIRECTORIES_JSON=["./custom-skills"]` 会把 `apps/agentloop-app/custom-skills/` 作为额外 Skill 根目录。当前参考应用保留了：
 
-同一目录还收录了来自 Anthropic Skills 的多个 Apache-2.0 Package。来源锁并非准入条件：任何结构有效的直接子目录均会被发现；部署方须只放入有权运行和复制的 Package。如需从目录中隔离某个 Package，可在同级提供有效的 `<skill-name>.disabled.json`；该显式隔离优先于 Package 发现。
+- `review-contract`
+- `statistical-analysis`
 
-用新的 DeepSeek Key 手工运行，Key 通过标准输入传入，不写入源码、命令行参数、环境文件或证据：
+## Skills
+
+内置 Skills 位于 `packages/agentloop-skills/skills/`，由 `@zhujun/agentloop-skills` 通过 `bundledSkillDirectories()` 暴露给参考应用。当前内置目录包含 18 个 Skill Package，例如 `presentation-skill`、`xlsx`、`pdf`、`docx`、`frontend-design`、`web-artifacts-builder`、`explore-data` 等。
+
+Skill 加载边界：
+
+- Planner 初始只看到 Skill 名称、描述、版本和位置。
+- Skill 正文只在对应 Step 通过 `load_skill` 进入上下文。
+- Assessment 对照同一版本 Skill 原文和运行证据判断是否满足。
+- Package 导入会复制到用户隔离的只读 store，并在关键执行点复核 hash。
+
+更多 Skill 设计见 [APP-DEVELOPMENT-GUIDE.md](docs/APP-DEVELOPMENT-GUIDE.md) 和 [INTEGRATION.md](docs/INTEGRATION.md)。
+
+## Plan Template 插件
+
+`packages/agentloop-plan-template/` 是独立的可选规划扩展。参考应用通过 `PLANNING_EXTENSIONS_CONFIG_PATH=./config/planning-extensions.json` 显式启用，不默认改写 Planner 行为。
+
+示例配置：
 
 ```bash
-(read -s "DEEPSEEK_API_KEY?DeepSeek API Key: "; printf '\n'; printf '%s\n' "$DEEPSEEK_API_KEY" | node scripts/run-presentation-e2e.ts; e2e_status=$?; unset DEEPSEEK_API_KEY; exit $e2e_status)
+cp apps/agentloop-app/config/planning-extensions.example.json apps/agentloop-app/config/planning-extensions.json
+cp apps/agentloop-app/config/plan-template.defaults.example.json apps/agentloop-app/config/plan-template.defaults.json
 ```
 
-成功与失败都会在新建的 `outputs/presentation-skill-e2e/<timestamp>/evidence.json` 中留下 Package 前后 hash、持久 Run/Plan/Assessment/Outcome、Tool 调用以及 PPTX/QA 证据。脚本还会独立记录实际转换引擎及版本、PDF 光栅器、操作系统、QA 声明字体和 Fontconfig 的实际字体匹配，明确区分“原始 Skill 自动 QA 通过”与“该渲染环境对目标查看器具有可信视觉等价性”。当前 8 页案例只有在原始 builder、原始 QA、8 页实际渲染、零 overflow/overlap/design error、渲染环境证据已记录、Package 未变和 Terminal Outcome 全部成立时才返回成功；字体替代会把自动视觉证据标记为 `environment-limited`，但不会伪装成人工检查失败或擅自修改第三方 Skill。人工逐页视觉检查仍是独立验收，不由 Agent 自报替代。
+常用命令：
 
-## Computer Tool
+```bash
+npm run mine --workspace @zhujun/agentloop-plan-template -- --config apps/agentloop-app/config/plan-template.defaults.json
+npm run templates --workspace @zhujun/agentloop-plan-template -- list --config apps/agentloop-app/config/plan-template.defaults.json
+```
 
-内置 Tool：
-
-| Tool | 风险 | 作用 |
-|---|---:|---|
-| `computer_list_directory` | 只读 | 列出当前会话 Workspace 目录 |
-| `computer_read_file` | 只读 | 有上限地读取当前会话目录中的 UTF-8 文件 |
-| `computer_search_text` | 只读 | 在当前会话目录中递归字面量搜索 |
-| `verify_artifact_acceptance` | 只读 | 对交付物生成统一 `artifact_acceptance` 证据；支持 HTML/HTML-PPT、DOCX、XLSX、PPTX、PDF、Markdown、图片、JSON 和通用文件的本地结构验收，并显式记录未接入渲染器的 `skipped_unavailable` caveat |
-| `materialize_paginated_html` | 危险 | 从结构化 page spec 物化分页 HTML 文件；HTML-PPT 通过 `renderMode: "slides"` 和 `acceptanceProfile: "html_ppt"` 限定，避免模型把完整 HTML 作为 `computer_write_file.content` 长时间流式输出 |
-| `computer_write_file` | 危险 | 在当前会话目录创建/覆盖文件 |
-| `computer_run_command` | 危险 | 在当前会话目录中 `spawn(command, args)`，不使用 Shell 字符串 |
-| `computer_snapshot` | 只读 | 由 ComputerDriver 截屏 |
-| `computer_click/type_text/press_key/navigate` | 危险 | 由 ComputerDriver 控制 GUI/浏览器 |
-
-一个 Tool 只有同时满足“已注册、当前 Plan Step 已声明、Run 已授权危险工具”才会出现在模型 Tool Schema 中。
-
-`verify_artifact_acceptance` 的渲染验收通过 Runtime 内部 provider 注入扩展，不直接增加模型可见 Tool。设置 `ARTIFACT_ACCEPTANCE_PLAYWRIGHT=1` 会把 Playwright provider 注入 RunService；如需复用系统浏览器，可设置 `ARTIFACT_ACCEPTANCE_PLAYWRIGHT_EXECUTABLE_PATH`。若运行时未安装或无法启动 Playwright/Chromium，对应浏览器 checks 会保持 `skipped_unavailable` caveat。
+更多操作见 [PLAN-TEMPLATE-OPERATIONS.md](docs/PLAN-TEMPLATE-OPERATIONS.md)。
 
 ## API
+
+参考应用提供纯 HTTP API，主要路径：
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
@@ -209,28 +195,49 @@ npm start
 | `POST` | `/v1/auth/login` | 登录 |
 | `POST` | `/v1/auth/logout` | 注销 |
 | `GET` | `/v1/me` | 当前用户 |
-| `GET/POST` | `/v1/skills` | 私有 Skill 目录/创建 |
-| `GET` | `/v1/skills/discovered` | 已核验的服务端 Skill 发现目录 |
-| `POST` | `/v1/skills/import-directory` | 从服务端批准目录原样安装并锁定 Skill Package |
-| `GET` | `/v1/skills/:id` | 读取自己的 Skill 正文 |
-| `GET` | `/v1/tools` | 当前部署的 Computer/Plugin Tool 目录 |
-| `POST` | `/v1/runs` | 执行一个 Plan-first Run（可选 `conversationId` 追加到既有对话） |
-| `GET` | `/v1/runs` | 当前用户顶级 Run 历史（新→旧，供会话列表） |
-| `GET` | `/v1/conversations` | 当前用户对话列表（新→旧，含轮数/终态） |
-| `GET` | `/v1/conversations/:id` | 单个对话及其按时间排序的 Run 轮次 |
-| `GET` | `/v1/runs/:id` | Run 权威状态 |
-| `GET` | `/v1/runs/:id/plan` | Plan、Step、Evidence、Compliance |
-| `GET` | `/v1/runs/:id/events` | Run 事件日志 |
-| `GET` | `/v1/host/protocol` | 外部宿主 sidecar 协议描述 |
-| `POST` | `/v1/host/runs` | 执行 Run 并返回 `agentloop.hostRun/v1` 稳定投射 |
-| `POST` | `/v1/host/runs/async` | 异步启动 Run 并返回 host 投射 |
-| `GET` | `/v1/host/runs/:id` | 读取 Run/Outcome/Plan/Artifact 的 host 投射 |
-| `GET` | `/v1/host/runs/:id/events` | 读取 `agentloop.hostRunEvent/v1` 事件列表 |
-| `GET` | `/v1/host/runs/:id/events/stream` | SSE 订阅 host 事件 |
+| `GET/POST` | `/v1/skills` | 私有 Skill 列表和创建 |
+| `GET` | `/v1/skills/discovered` | 服务端已发现 Skill 目录 |
+| `POST` | `/v1/skills/import-directory` | 从批准目录导入 Skill Package |
+| `GET` | `/v1/tools` | 当前部署的 Tool 目录 |
+| `POST` | `/v1/runs` | 执行一个 Plan-first Run |
+| `GET` | `/v1/runs/:id` | 读取 Run 权威状态 |
+| `GET` | `/v1/runs/:id/plan` | 读取 Plan、Step、Evidence、Compliance |
+| `GET` | `/v1/runs/:id/events` | 读取 Run 事件 |
+| `GET` | `/v1/conversations` | 当前用户会话列表 |
+| `GET` | `/v1/conversations/:id` | 单个会话和轮次 |
 | `POST` | `/v1/batches` | 创建并执行批次 |
 | `GET` | `/v1/batches/:id` | 批次汇总 |
 | `GET` | `/v1/batches/:id/items` | 批次逐项结果 |
 
+外部宿主集成可使用 `/v1/host/protocol`、`/v1/host/runs`、`/v1/host/runs/async` 和 host event stream。详见 [INTEGRATION.md](docs/INTEGRATION.md)。
+
+## 常用脚本
+
+```bash
+npm run build
+npm run build:kernel
+npm run build:skills
+npm run build:plan-template
+npm run build:web
+npm run test
+npm run typecheck
+npm run init-db
+npm run dev
+npm start
+```
+
+## 上游来源
+
+AgentLoop 的 Runtime 设计参考并源码级核验了：
+
+- PI Agent `58302d34e703e0453ea13bdd10c7e423589ce177`
+- OpenCode `4d68d30b48a99379b2baaf597dbad576707ea36d`
+- DeepSeek Harness `47f943859bef60e4160492346772ded9b24f765a`
+
+完整映射见 [UPSTREAM-RESEARCH.md](docs/UPSTREAM-RESEARCH.md)，第三方许可见 [THIRD_PARTY_NOTICES.md](packages/agentloop/THIRD_PARTY_NOTICES.md)。
+
 ## 部署边界
 
-当前实现是可运行的单节点参考内核：SQLite、同步 HTTP Run、单进程 Worker。生产多副本部署仍应替换为 PostgreSQL + 队列 + fenced lease + SSE，并将不可信代码/命令放进容器或 WASM Sandbox；浏览器登录也应升级为 HttpOnly Cookie、CSRF、OIDC/MFA。详细边界和演进路径见 [架构设计](docs/ARCHITECTURE.md)。
+当前参考应用适合单节点本地或内网部署：SQLite、单进程 API、同步 Run、Vite 前端独立托管。生产多副本部署建议替换为 PostgreSQL、队列、fenced lease、独立 Worker、HttpOnly Cookie、CSRF/OIDC/MFA，并把不可信命令放入容器或 WASM Sandbox。
+
+详细架构见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
