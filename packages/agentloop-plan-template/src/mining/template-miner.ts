@@ -225,7 +225,6 @@ function skeletonFromProposal(proposal: PlanProposal): readonly PlanStepSkeleton
       producedEvidenceKinds: requiredEvidenceKinds,
       requiredCapabilities: [],
       skillRoleHints: selectedSkillRoleHints(step),
-      objective: normalizeObjective(step.objective),
     };
   });
 }
@@ -290,10 +289,6 @@ function inferShape(proposal: PlanProposal): PlanProposal["shape"] {
   if (proposal.steps.length === 1) return "single_leaf";
   if (proposal.steps.some((step) => step.role === "fact_acquisition")) return "fact_then_produce";
   return "pipeline";
-}
-
-function normalizeObjective(value: string): string {
-  return value.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
 function maxRisk(values: readonly PlanTemplateRiskLevel[]): PlanTemplateRiskLevel {

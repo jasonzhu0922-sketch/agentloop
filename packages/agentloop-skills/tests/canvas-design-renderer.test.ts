@@ -96,6 +96,28 @@ test("canvas-design renderer chooses a non-singleton layout when layoutFamily is
   }
 });
 
+test("canvas-design renderer accepts the documented low texture range", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "agentloop-canvas-design-low-texture-"));
+  try {
+    const result = render(workspace, {
+      output: "low-texture.png",
+      title: "National Day",
+      subtitle: "Public ceremony and shared memory",
+      movement: "Monumental Festival",
+      layoutFamily: "monument-axis",
+      labels: ["1949", "2026", "77", "Celebration"],
+      texture: 0.18,
+      density: 0.58,
+      seed: 77,
+      canvas: { width: 900, height: 1200 },
+    });
+
+    assert.equal(result.layoutFamily, "monument-axis");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 function render(workspace: string, spec: Record<string, unknown>): { layoutFamily: string } {
   const specPath = join(workspace, `${spec.layoutFamily}.json`);
   writeFileSync(specPath, JSON.stringify(spec), "utf8");

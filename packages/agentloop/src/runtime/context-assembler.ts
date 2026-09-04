@@ -1154,7 +1154,7 @@ function artifactToolCallArgumentProjection(toolName: string, content: string): 
     artifact: compactArtifactReceiptArtifact(artifact),
     inspection: inspection === undefined ? undefined : compactArtifactReceiptInspection(inspection),
     evidenceKinds: recordValue(receipt.evidenceKinds),
-    instruction: "Original artifact content arguments are omitted from this model-context projection after a successful write. Use artifact receipt fields; read the artifact path only when exact content is required.",
+    instruction: "Original artifact content arguments are omitted from this model-context projection after a successful write. Use artifact receipt fields; if artifact acceptance is still missing, verify the artifact instead of rereading the same path.",
   });
   return recordValue(projection);
 }
@@ -1243,7 +1243,7 @@ function artifactReceiptProjection(receipt: Record<string, unknown>, sourceSchem
       evidenceKinds: recordValue(receipt.evidenceKinds),
       canonicalEvidence: recordValue(receipt.canonicalEvidence),
     },
-    instruction: "Use this artifact receipt for generated file facts. Read the artifact path explicitly only when exact file content is needed.",
+    instruction: "Use this artifact receipt for generated file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead.",
   };
   return JSON.stringify(omitUndefinedDeep(projection));
 }
@@ -1301,7 +1301,7 @@ function paginatedHtmlMaterializationProjection(value: Record<string, unknown>):
       outlineTruncated: booleanValue(inspection.outlineTruncated),
       sampleRangeCount: Array.isArray(inspection.sampleRanges) ? inspection.sampleRanges.length : undefined,
     },
-    instruction: "Use this artifact receipt for generated file facts. Read the artifact path explicitly only when exact file content is needed.",
+    instruction: "Use this artifact receipt for generated file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead.",
   };
   return JSON.stringify(omitUndefinedDeep(projection));
 }
@@ -1329,7 +1329,7 @@ function writtenArtifactProjection(value: Record<string, unknown>, toolName: str
       outlineTruncated: booleanValue(inspection.outlineTruncated),
       sampleRangeCount: Array.isArray(inspection.sampleRanges) ? inspection.sampleRanges.length : undefined,
     },
-    instruction: "Use this artifact receipt for written file facts. Read the artifact path explicitly only when exact file content is needed.",
+    instruction: "Use this artifact receipt for written file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead.",
   };
   return JSON.stringify(omitUndefinedDeep(projection));
 }

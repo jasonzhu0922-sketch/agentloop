@@ -375,6 +375,10 @@ function forbiddenMovesForFrame(input: {
   if (input.evidenceMode === "reuse_dependency_evidence" || input.evidenceMode === "reuse_conversation_evidence") {
     moves.add("do not reacquire source data solely to recreate already satisfied prior evidence");
   }
+  if (input.evidenceMode === "verify_existing_artifact") {
+    moves.add("do not reread the same artifact merely to decide whether to verify it");
+    moves.add("do not use read-only exploration when the next action is artifact verification");
+  }
   if (input.evidenceSources.some((source) => source.kind === "visible_directory")) {
     moves.add("do not bypass visible_* source refs with workspace-root reads for visible directory material");
   }

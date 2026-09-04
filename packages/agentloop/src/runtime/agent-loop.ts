@@ -408,6 +408,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
     for (let candidateAttempt = 1; candidateAttempt <= EMPTY_CANDIDATE_REPAIR_ATTEMPTS; candidateAttempt += 1) {
+      const toolChoice = convergenceOnly || materialized.definitions.length === 0
+        ? undefined
+        : toolChoiceForExecutionEvidenceGap({
+          progressPolicy: options.progressPolicy,
+          toolEvidence,
+          availableToolNames: materialized.definitions.map((tool) => tool.name),
+        });
       const invocation: ModelInvocation = {
         runId: options.runId,
         systemPrompt: options.systemPrompt,
@@ -415,9 +422,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         runtimeContext: assembly.runtimeContext,
         messages: assembly.messages,
         tools: convergenceOnly ? [] : materialized.definitions,
-        ...(convergenceOnly || materialized.definitions.length === 0
-          ? {}
-          : { toolChoice: "auto" as const }),
+        ...(toolChoice === undefined ? {} : { toolChoice }),
         maxOutputTokens: convergenceOnly
           ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
           : options.model.limits.maxOutputTokens,
@@ -434,6 +439,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         maxToolResultCharacters,
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
+        allowEarlyDispatch: options.progressPolicy === undefined,
       }, earlyOutcomes);
       if (
         response.toolCalls.length === 0
@@ -1247,6 +1253,16 @@ function executionFeedbackDirective(input: {
     "Recent tool results:",
   ];
   if (stepEvidenceState !== undefined) {
+    if (stepEvidenceState.recentActionableDiagnostic) {
+      lines.push(
+        "A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic. Read-only exploration is no longer useful; patch, run, or verify next.",
+      );
+    }
+    if (stepEvidenceState.nextAction === "verify_existing_artifact") {
+      lines.push(
+        "A known artifact already exists, but required artifact acceptance is still missing. Verify the artifact next; do not reread the same artifact merely to decide whether to verify it.",
+      );
+    }
     lines.push(
       "<runtime_step_semantic_state>",
       JSON.stringify(stepEvidenceState),
@@ -1266,6 +1282,24 @@ function executionFeedbackDirective(input: {
   }
   lines.push("</runtime_execution_feedback>");
   return lines.join("\n");
+}
+
+function toolChoiceForExecutionEvidenceGap(input: {
+  readonly progressPolicy?: RuntimeToolProgressPolicy;
+  readonly toolEvidence: readonly AgentLoopToolEvidence[];
+  readonly availableToolNames: readonly string[];
+}): "auto" | "required" {
+  const stepEvidenceState = deriveRuntimeStepEvidenceState({
+    policy: input.progressPolicy,
+    evidence: input.toolEvidence,
+  });
+  if (stepEvidenceState === undefined) return "auto";
+  if (stepEvidenceState.missingRequiredEvidenceKinds.length === 0) return "auto";
+  if (stepEvidenceState.nextAction === "submit_completion_candidate") return "auto";
+  const availableToolNames = new Set(input.availableToolNames);
+  return stepEvidenceState.evidenceProducingToolNames.some((name) => availableToolNames.has(name))
+    ? "required"
+    : "auto";
 }
 
 function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string {
@@ -1349,13 +1383,15 @@ interface StreamingDispatchContext {
   readonly maxToolResultCharacters: number;
   readonly maxParallelToolCalls: number;
   readonly actionTracker: AgentLoopOptions["actionTracker"];
+  readonly allowEarlyDispatch: boolean;
 }
 
 /**
  * Prefer the model adapter's streaming path. As each tool call's arguments
  * complete (`tool_call_ready`), the call is durably committed through
- * `assistant.tool_call.committed` and dispatched through a bounded pool while
- * the remainder of the stream is still being consumed (OpenCode-style overlap).
+ * `assistant.tool_call.committed` and, when no progress policy must admit the
+ * whole tool batch first, dispatched through a bounded pool while the remainder
+ * of the stream is still being consumed (OpenCode-style overlap).
  * Resolves to the same aggregated ModelResponse; the caller still emits the
  * full `assistant.committed` checkpoint after this resolves.
  */
@@ -1430,6 +1466,7 @@ async function completeWithStreamingAndDispatch(
           arguments: call.arguments,
         },
       });
+      if (!context.allowEarlyDispatch) return;
       dispatchEarly(call);
     },
   });

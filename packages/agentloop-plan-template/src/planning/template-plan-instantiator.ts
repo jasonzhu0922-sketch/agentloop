@@ -60,8 +60,25 @@ function skillIdsForStep(
 }
 
 function instantiateObjective(step: PlanStepSkeleton, userInput: string): string {
-  if (step.objective !== undefined && step.objective.trim().length > 0) return step.objective;
-  return `${step.operationRef}: ${userInput}`.slice(0, 500);
+  const objective = step.objective?.trim();
+  if (objective !== undefined && objective.length > 0 && hasCurrentInputPlaceholder(objective)) {
+    return objective
+      .replaceAll("{{input}}", userInput)
+      .replaceAll("{input}", userInput)
+      .replaceAll("$input", userInput)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 500);
+  }
+  return `${preferredObjectivePrefix(userInput)}${userInput}`.slice(0, 500);
+}
+
+function hasCurrentInputPlaceholder(value: string): boolean {
+  return value.includes("{{input}}") || value.includes("{input}") || value.includes("$input");
+}
+
+function preferredObjectivePrefix(userInput: string): string {
+  return /[\u3400-\u9fff]/u.test(userInput) ? "完成当前任务：" : "Complete current task: ";
 }
 
 function successCriterionDescription(step: PlanStepSkeleton): string {

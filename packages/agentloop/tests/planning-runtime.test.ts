@@ -115,6 +115,51 @@ test("ModelPlanner fails closed when the model returns prose instead of submit_o
   );
 });
 
+test("ModelPlanner retries once when the planning model returns an empty response", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
+      if (calls === 1) {
+        return { content: "", finishReason: "stop", toolCalls: [] };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /previous planning response was empty/i);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("empty-response-plan", {
+          goal: "Generate a festive National Day poster.",
+          shape: "single_leaf",
+          steps: [{
+            id: "build_poster",
+            objective: "Create the requested poster.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            recommendedToolNames: ["computer_write_file"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "delivery_receipt"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-empty-planning-response",
+    input: "帮我生成一张国庆庆祝海报",
+    availableSkills: [],
+    availableToolNames: ["computer_write_file"],
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["build_poster"]);
+});
+
 test("Task intent treats Chinese summary files as workspace document artifacts", () => {
   const intent = classifyTaskIntent({
     objective: "你倒是生成一个总结文件啊",
@@ -5754,6 +5799,115 @@ test("RunService routes follow-up file creation through completed delivery text 
   } finally {
     database.close();
     await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("RunService skips conversation intent classifier for deterministic artifact execution", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let capturedTask: TaskSpec | undefined;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        assert.equal(request.runId.startsWith("conversation-intent:"), false);
+        return { content: "poster execution reached", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          return {
+            goal: task.input,
+            selectedSkillIds: [],
+            steps: [{
+              id: "create-poster",
+              objective: "Create the requested poster image.",
+              dependencies: [],
+              skillIds: [],
+              recommendedToolNames: [],
+              successCriteria: [{ id: "poster-created", description: "The poster image request reached execution planning.", source: "planner" }],
+            }],
+          };
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.execute(owner.user.id, "2026 年是中华人民共和国成立 77 年，请你帮我生成一张国庆庆祝海报", {
+      allowDangerousTools: true,
+      conversationIntent: "auto",
+    });
+
+    assert.equal(run.status, "completed");
+    assert.equal(capturedTask?.responseOnly, undefined);
+    assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService retries malformed conversation intent output and defaults uncertainty to execution", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let classifierCalls = 0;
+    let capturedTask: TaskSpec | undefined;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if (request.runId.startsWith("conversation-intent:")) {
+          classifierCalls += 1;
+          if (classifierCalls === 1) {
+            return { content: "", finishReason: "stop", toolCalls: [] };
+          }
+          assert.match(request.systemPrompt, /previous classifier response was invalid/i);
+          return { content: "execute", finishReason: "stop", toolCalls: [] };
+        }
+        return { content: "execution fallback reached", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          return {
+            goal: task.input,
+            selectedSkillIds: [],
+            steps: [{
+              id: "handle-turn",
+              objective: "Handle the latest turn through execution after classifier uncertainty.",
+              dependencies: [],
+              skillIds: [],
+              recommendedToolNames: [],
+              successCriteria: [{ id: "handled", description: "The uncertain turn reached execution planning.", source: "planner" }],
+            }],
+          };
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.execute(owner.user.id, "这件事怎么处理？", {
+      allowDangerousTools: true,
+      conversationIntent: "auto",
+    });
+
+    assert.equal(run.status, "completed");
+    assert.equal(classifierCalls, 2);
+    assert.equal(capturedTask?.responseOnly, undefined);
+    assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+  } finally {
+    database.close();
   }
 });
 

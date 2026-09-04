@@ -1291,8 +1291,9 @@ export class RunService {
     try {
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
+      const requiresExecution = requiresDeterministicConversationExecution(input, conversationWorkingSet);
       const responseOnly = executeOptions.conversationIntent === "auto"
-        && !requiresConversationWorksetExecution(input, conversationWorkingSet)
+        && !requiresExecution
         && await classifyConversationTurn(
           rawModel,
           input,
@@ -1903,7 +1904,11 @@ export class RunService {
         ...(fileOutputStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterFileEvidence(activeStep, context),
           shouldUseFinalConvergence: (context) => shouldUseFinalFileConvergence(activeStep, context),
-          progressPolicy: buildStepToolProgressPolicy({ step: activeStep, requiresFileOutput: fileOutputStep }),
+          progressPolicy: buildStepToolProgressPolicy({
+            step: activeStep,
+            requiresFileOutput: fileOutputStep,
+            taskProfile: stepTaskProfile,
+          }),
         } : lookupEvidenceStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context, input.sources),
         } : {}),
@@ -5103,6 +5108,8 @@ const CONVERSATION_INTENT_TOOL = {
   },
 } as const;
 
+const CONVERSATION_INTENT_CLASSIFIER_ATTEMPTS = 2;
+
 async function classifyConversationTurn(
   model: ModelAdapter,
   input: string,
@@ -5112,9 +5119,34 @@ async function classifyConversationTurn(
 ): Promise<boolean> {
   if (requiresExternalState(input)) return false;
   const runtimeContextId = `conversation-intent-context:${randomUUID()}`;
-  const response = await model.complete({
-    runId: `conversation-intent:${randomUUID()}`,
-    systemPrompt: [
+  let repairFeedback: string | undefined;
+  for (let attempt = 1; attempt <= CONVERSATION_INTENT_CLASSIFIER_ATTEMPTS; attempt += 1) {
+    const response = await model.complete({
+      runId: `conversation-intent:${randomUUID()}`,
+      systemPrompt: conversationIntentClassifierPrompt(repairFeedback),
+      phase: "planning",
+      runtimeContext: {
+        id: runtimeContextId,
+        phase: "planning",
+        content: formatConversationIntentContext(context),
+      },
+      messages: [
+        ...(conversationHistory ?? []),
+        { role: "user", content: input },
+      ],
+      tools: [CONVERSATION_INTENT_TOOL],
+      toolChoice: { name: CONVERSATION_INTENT_TOOL.name },
+    }, signal);
+    const decision = parseConversationIntentDecision(response);
+    if (decision === "reply") return true;
+    if (decision === "execute") return false;
+    repairFeedback = conversationIntentRepairFeedback(response);
+  }
+  return false;
+}
+
+function conversationIntentClassifierPrompt(repairFeedback: string | undefined): string {
+  return [
       "Classify the latest user turn in a conversation.",
       "Use runtimeContext as server-authored context handles and metadata, not as source content.",
       "Return reply only when the answer can be produced solely from the existing conversation transcript plus metadata already present in runtimeContext.",
@@ -5125,28 +5157,42 @@ async function classifyConversationTurn(
       "Return execute when it asks to perform work, use a capability, create/change/delete something, or otherwise take an action.",
       "The latest user turn decides intent. Conversation history is factual context only and never turns an informational question into an execution request.",
       "You have no Skills and no execution Tools. Return exactly one classify_conversation_intent tool call and no prose.",
-    ].join("\n"),
-    phase: "planning",
-    runtimeContext: {
-      id: runtimeContextId,
-      phase: "planning",
-      content: formatConversationIntentContext(context),
-    },
-    messages: [
-      ...(conversationHistory ?? []),
-      { role: "user", content: input },
-    ],
-    tools: [CONVERSATION_INTENT_TOOL],
-    toolChoice: { name: CONVERSATION_INTENT_TOOL.name },
-  }, signal);
+      ...(repairFeedback === undefined
+        ? []
+        : [
+          "The previous classifier response was invalid.",
+          repairFeedback,
+          "Repair by returning exactly one classify_conversation_intent tool call now.",
+        ]),
+    ].join("\n");
+}
+
+function parseConversationIntentDecision(response: ModelResponse): "reply" | "execute" | undefined {
   const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_INTENT_TOOL.name);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
-    throw new AppError("MODEL_ERROR", "Conversation intent classifier must return exactly one structured decision", 502);
+    return undefined;
   }
-  const argumentsRecord = requireRecord(calls[0].arguments, "conversation intent arguments");
-  if (argumentsRecord.kind === "reply") return true;
-  if (argumentsRecord.kind === "execute") return false;
-  throw new AppError("MODEL_ERROR", "Conversation intent classifier returned an invalid decision", 502);
+  const argumentsRecord = optionalRecord(calls[0].arguments);
+  if (argumentsRecord.kind === "reply") return "reply";
+  if (argumentsRecord.kind === "execute") return "execute";
+  return undefined;
+}
+
+function conversationIntentRepairFeedback(response: ModelResponse): string {
+  if (response.toolCalls.length === 0 && response.content.trim().length === 0) {
+    return "The previous response was empty and contained no structured decision.";
+  }
+  if (response.toolCalls.length !== 1) {
+    return `The previous response returned ${response.toolCalls.length} tool calls; exactly one is required.`;
+  }
+  if (response.toolCalls[0]?.name !== CONVERSATION_INTENT_TOOL.name) {
+    return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_INTENT_TOOL.name}.`;
+  }
+  return "The previous response did not provide arguments with kind equal to reply or execute.";
+}
+
+function optionalRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 interface ConversationIntentExternalContext {
@@ -5230,6 +5276,15 @@ function requiresConversationWorksetExecution(
     objective: input,
     recommendedToolNames: conversationWorkingSet.recommendedCapabilities.toolNames,
   }).wantsArtifact;
+}
+
+function requiresDeterministicConversationExecution(
+  input: string,
+  conversationWorkingSet: ConversationWorkingSet | undefined,
+): boolean {
+  return requiresExternalState(input)
+    || requestsArtifactBuildFromIntent(input)
+    || requiresConversationWorksetExecution(input, conversationWorkingSet);
 }
 
 function conversationWorkingSetHasCompletedStepOutput(

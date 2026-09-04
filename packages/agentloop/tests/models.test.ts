@@ -400,6 +400,138 @@ test("OpenAI-compatible adapter can lower constrained tool choice for reasoning-
   }
 });
 
+test("OpenAI-compatible adapter retries when required tool choice returns no tool calls", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: "" } }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          content: "",
+          tool_calls: [{ id: "call-1", function: { name: "submit", arguments: "{}" } }],
+        },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      onRetry: (info) => {
+        retries.push({ attempt: info.attempt, maxAttempts: info.maxAttempts, status: info.status ?? 0 });
+      },
+    });
+    const result = await model.complete({
+      runId: "required-tool-missing-retry",
+      systemPrompt: "System",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan" }],
+      tools: [{ name: "submit", description: "Submit", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit" },
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(retries, [{ attempt: 1, maxAttempts: 2, status: 0 }]);
+    assert.equal(result.finishReason, "tool_calls");
+    assert.equal(result.toolCalls[0].name, "submit");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter rejects a Responses payload instead of treating it as no message", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status: "completed",
+    output: [{
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "done" }],
+    }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "responses-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.complete({
+        runId: "chat-completions-protocol-mismatch",
+        systemPrompt: "Return one structured call.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+        toolChoice: { name: "submit_plan" },
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.equal(
+          (error as { message?: string }).message,
+          "Configured Chat Completions Provider returned a Responses payload; set protocol to responses",
+        );
+        assert.deepEqual((error as { details?: unknown }).details, {
+          expectedProtocol: "chat-completions",
+          observedProtocol: "responses",
+          responseShape: ["output"],
+        });
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible streaming adapter rejects Responses chunks at the protocol boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+  ]);
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "responses-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "chat-completions-stream-protocol-mismatch",
+        systemPrompt: "Return one structured call.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+        toolChoice: { name: "submit_plan" },
+      }, async () => undefined),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.match((error as { message?: string }).message ?? "", /returned a Responses payload/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible adapter exposes status, request id, and a provider body preview", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response("sensitive upstream body", {
@@ -1427,6 +1559,55 @@ test("Responses adapter can lower named tool choice to required for single-tool 
     }, async () => undefined);
 
     assert.equal(capturedBody?.tool_choice, "required");
+    assert.equal(result.finishReason, "tool_calls");
+    assert.equal(result.toolCalls[0].name, "submit_outcome_plan");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter retries when required tool choice returns no tool calls", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return sseResponse([
+        'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+      ]);
+    }
+    return sseResponse([
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_outcome_plan","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{}"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_outcome_plan","arguments":"{}"}]}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      toolChoiceMode: "named-as-required",
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      onRetry: (info) => {
+        retries.push({ attempt: info.attempt, maxAttempts: info.maxAttempts, status: info.status ?? 0 });
+      },
+    });
+    const result = await model.streamComplete!({
+      runId: "run-responses-required-tool-missing-retry",
+      systemPrompt: "Return exactly one submit_outcome_plan tool call.",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan this task." }],
+      tools: [{ name: "submit_outcome_plan", description: "Submit plan", inputSchema: { type: "object" } }],
+      toolChoice: { name: "submit_outcome_plan" },
+    }, async () => undefined);
+
+    assert.equal(attempts, 2);
+    assert.deepEqual(retries, [{ attempt: 1, maxAttempts: 2, status: 0 }]);
     assert.equal(result.finishReason, "tool_calls");
     assert.equal(result.toolCalls[0].name, "submit_outcome_plan");
   } finally {

@@ -158,9 +158,12 @@ export function buildStepRuntimeContextSnapshot(input: {
 export function buildStepToolProgressPolicy(input: {
   readonly step: ExecutionPlan["steps"][number];
   readonly requiresFileOutput: boolean;
+  readonly taskProfile?: TaskProfile;
 }): RuntimeToolProgressPolicy | undefined {
   if (!input.requiresFileOutput && !stepRequiresArtifactEvidence(input.step)) return undefined;
-  return artifactStepToolProgressPolicy(input.step.evidenceContract?.requiredKinds ?? []);
+  return artifactStepToolProgressPolicy(input.step.evidenceContract?.requiredKinds ?? [], {
+    expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
+  });
 }
 
 function skillArtifactWorkflowDiscipline(

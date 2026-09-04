@@ -558,7 +558,8 @@ def add_grain(img: Image.Image, rng: random.Random, amount: float) -> None:
     for y in range(0, img.height, stride):
         for x in range(0, img.width, stride):
             value = rng.randint(0, 255)
-            alpha = rng.randint(4, int(18 * min(amount, 1.0)))
+            alpha_max = max(4, int(18 * min(amount, 1.0)))
+            alpha = rng.randint(4, alpha_max)
             px[x, y] = (value, value, value, alpha)
     img.alpha_composite(overlay) if img.mode == "RGBA" else img.paste(Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB"))
 

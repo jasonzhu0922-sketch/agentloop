@@ -8,6 +8,8 @@ agentloop:
   artifactKinds:
     - image
     - document
+  executionProfiles:
+    - local_script
   sourceKinds: []
   qaKinds: []
 ---

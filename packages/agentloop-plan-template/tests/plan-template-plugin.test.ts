@@ -213,6 +213,94 @@ test("observeEnabled can run alongside direct use routing", async () => {
   }
 });
 
+test("direct-use templates rebind leaf objectives to the current task input", async () => {
+  const directory = await fs.mkdtemp(join(tmpdir(), "agentloop-plan-template-objective-rebind-"));
+  const databasePath = join(directory, "plan-template.db");
+  const plugin = createPlanTemplatePlugin({
+    storage: {
+      type: "sqlite",
+      databasePath,
+      migrateOnStart: true,
+    },
+    config: {
+      enabled: true,
+      observeEnabled: true,
+      mode: "direct_use",
+      allowDirectUse: true,
+      minDirectUseScore: 0.1,
+      minPlannerContextScore: 0.1,
+    },
+    now: () => new Date("2026-09-04T00:00:00.000Z"),
+  });
+  try {
+    const store = await plugin.store();
+    await store.migrate();
+    await store.upsertTemplate({
+      schema: "agentloop.planTemplate/v1",
+      id: "template_api_query_rebind",
+      version: 1,
+      status: "active",
+      intentFamily: "research",
+      sourceNeed: "web_research",
+      acceptedSourceTypes: [],
+      artifactKind: "none",
+      sideEffectKind: "none",
+      requiredCapabilities: ["web_research"],
+      requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+      riskCeiling: "low",
+      planSkeleton: [{
+        id: "step_1",
+        role: "produce",
+        operationRef: "produce:discovered:api-query",
+        dependsOn: [],
+        inputBindings: {},
+        requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        producedEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        requiredCapabilities: [],
+        skillRoleHints: ["source_provider"],
+        objective: "查询并返回合同备案 API 的完整参数信息（入参、出参、数据表等）",
+      }],
+      positiveExampleRefs: ["run-contract-api"],
+      negativeExampleRefs: [],
+      reliability: {
+        completedRuns: 9,
+        admittedRuns: 9,
+        failedRuns: 0,
+        planAdmissionFailureRate: 0,
+        assessmentFailureRate: 0,
+        repairRate: 0,
+        avgPlannerSavedMs: 0,
+        updatedAt: "2026-09-04T00:00:00.000Z",
+      },
+      createdAt: "2026-09-04T00:00:00.000Z",
+      updatedAt: "2026-09-04T00:00:00.000Z",
+    });
+
+    const decision = await plugin.extension().beforePlanning({
+      runId: "run-api-query-rebind",
+      actorUserId: "owner",
+      input: "查询宝武集团数据中台客商画像API 的参数信息",
+      responseOnly: false,
+      availableSkills: [{ id: "discovered:api-query", ownerUserId: "owner", name: "api-query", description: "API query", sourceKind: "package" }],
+      selectedSkillRoles: [{ skillId: "discovered:api-query", role: "source_provider", reason: "metadata" }],
+      availableToolNames: ["load_skill", "computer_run_command", "websearch"],
+      availableTools: [],
+      visibleDirectories: [],
+      sources: [],
+    });
+
+    assert.equal(decision.kind, "plan_proposal");
+    if (decision.kind !== "plan_proposal") return;
+    assert.equal(decision.proposal.goal, "查询宝武集团数据中台客商画像API 的参数信息");
+    assert.equal(decision.proposal.steps[0].objective, "完成当前任务：查询宝武集团数据中台客商画像API 的参数信息");
+    assert.match(decision.proposal.steps[0].objective, /客商画像API/);
+    assert.doesNotMatch(decision.proposal.steps[0].objective, /合同备案/);
+  } finally {
+    await plugin.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("observed and routed matches are both marked completed on outcome", async () => {
   const directory = await fs.mkdtemp(join(tmpdir(), "agentloop-plan-template-outcome-"));
   const databasePath = join(directory, "plan-template.db");
@@ -467,6 +555,7 @@ test("miner promotes repeated completed observations to candidate templates only
     assert.equal(templates.length, 1);
     assert.equal(templates[0].status, "candidate");
     assert.equal(templates[0].intentFamily, "research");
+    assert.equal(templates[0].planSkeleton[0].objective, undefined);
     assert.equal(templates[0].positiveExampleRefs.length, 2);
   } finally {
     await plugin.close();

@@ -398,6 +398,9 @@ function plannerContractRetryDirective(
   outcomePlanCalls: readonly ModelToolCall[],
   availableToolNames: readonly string[],
 ): string | undefined {
+  if (shouldRetryPlannerEmptyResponse(response)) {
+    return plannerEmptyResponseDirective();
+  }
   if (shouldRetryPlannerToolContract(response, outcomePlanCalls.length, availableToolNames)) {
     return plannerToolContractDirective(response);
   }
@@ -408,6 +411,14 @@ function plannerContractRetryDirective(
     return plannerOutcomePlanAdmissionDirective(planningError);
   }
   return undefined;
+}
+
+function shouldRetryPlannerEmptyResponse(
+  response: Awaited<ReturnType<ModelAdapter["complete"]>>,
+): boolean {
+  return response.finishReason !== "length"
+    && response.toolCalls.length === 0
+    && response.content.trim().length === 0;
 }
 
 function shouldRetryOutcomePlanArgumentsContract(
@@ -427,6 +438,14 @@ function shouldRetryOutcomePlanAdmissionContract(
 ): boolean {
   if (response.finishReason === "length") return false;
   return response.toolCalls.length === 1 && outcomePlanCalls.length === 1 && isJsonObject(outcomePlanCalls[0].arguments);
+}
+
+function plannerEmptyResponseDirective(): string {
+  return [
+    "Your previous planning response was empty.",
+    "Submit exactly one submit_outcome_plan call for the same user goal.",
+    "Do not execute work, call other tools, or declare completion during planning.",
+  ].join("\n");
 }
 
 function plannerToolContractDirective(response: Awaited<ReturnType<ModelAdapter["complete"]>>): string {
