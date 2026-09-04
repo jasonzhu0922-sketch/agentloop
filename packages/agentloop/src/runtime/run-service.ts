@@ -1846,7 +1846,8 @@ export class RunService {
         .filter((assessment) => assessment.stepId === activeStep.id).length;
       const assessedCandidates = new Map<string, SkillComplianceAssessment>();
       const recovery = input.initialRecovery?.stepId === activeStep.id ? input.initialRecovery : undefined;
-      const fileOutputStep = stepSkills.some((skill) => skillRequiresFileOutput(skill))
+      const fileOutputStep = (stepAllowsSkillFileOutput(activeStep)
+        && stepSkills.some((skill) => skillRequiresFileOutput(skill)))
         || stepRequiresFileOutput(activeStep);
       const lookupEvidenceStep = !fileOutputStep && stepCanConvergeFromLookupEvidence(activeStep);
       const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills);
@@ -3966,10 +3967,23 @@ function skillRequiresFileOutput(skill: Pick<PrivateSkill, "name" | "description
 }
 
 function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
+  if (step.role === "fact_acquisition") return false;
   return artifactExtensionsRequiredByStep(step).size > 0
     || step.recommendedToolNames.some((name) =>
       name === "computer_write_file" || name === "computer_patch_file" || name === "computer_run_command" || name === "materialize_paginated_html"
     );
+}
+
+function stepAllowsSkillFileOutput(step: ExecutionPlan["steps"][number]): boolean {
+  if (step.role === "fact_acquisition") return false;
+  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+  return requiredKinds.some((kind) =>
+    kind === "artifact_path"
+    || kind === "artifact_non_empty"
+    || kind === "artifact_openable"
+    || kind === "format_matches_request"
+    || kind === "artifact_acceptance"
+  );
 }
 
 function stepCanConvergeFromLookupEvidence(step: ExecutionPlan["steps"][number]): boolean {

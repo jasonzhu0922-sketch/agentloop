@@ -7141,6 +7141,80 @@ test("large uploaded source reads use bounded convergence instead of forcing ful
   }
 });
 
+test("fact acquisition source reads are not capped by file-output skill heuristics", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const skill = await skills.create(owner.user.id, {
+      name: "city-carbon-ai-assessment",
+      description: "Generate a polished report artifact from uploaded source evidence.",
+      instructions: instructionsWithAgentLoopMetadata(
+        "Read uploaded source evidence and summarize it accurately.",
+        ["source_provider"],
+        ["none"],
+        ["document"],
+      ),
+    });
+    const model = new FactAcquisitionReadSkillModel();
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "summarize uploaded PDF",
+        selectedSkillIds: [skill.id],
+        steps: [{
+          id: "leaf1",
+          objective: "读取上传PDF并输出中文要点整理：概括文章核心结论、主要论据/发现、方法或数据来源、局限与适用范围，必要时标注无法从原文确认的信息。",
+          dependencies: [],
+          skillIds: [skill.id],
+          role: "fact_acquisition",
+          recommendedToolNames: ["read_source", "load_skill"],
+          evidenceContract: {
+            requiredKinds: ["source_summary", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+          successCriteria: [
+            { id: "source_summary", description: "Source evidence is available.", source: "planner" },
+            { id: "explicit_caveats", description: "Caveats are explicit when needed.", source: "planner" },
+          ],
+        }],
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+    });
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "2603.16975v1.md",
+      content: Buffer.from(Array.from({ length: 420 }, (_, index) =>
+        `# Section ${index + 1}\n` + `Evidence ${index + 1} `.repeat(10)
+      ).join("\n"), "utf8"),
+    });
+    model.sourceId = source.id;
+
+    const run = await runs.execute(owner.user.id, "整理这篇文章要点", {
+      allowDangerousTools: true,
+      sourceIds: [source.id],
+    });
+
+    assert.equal(run.status, "completed");
+    assert.equal(model.executionCalls, 5);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) =>
+      event.type === "tool.rejected"
+      && event.data.toolName === "read_source"
+      && event.data.reason === "Read-only exploratory tool calls exceeded the artifact step primary budget"
+    ), false);
+    assert.equal(events.filter((event) =>
+      event.type === "tool.completed"
+      && event.data.toolName === "read_source"
+    ).length, 4);
+  } finally {
+    database.close();
+  }
+});
+
 test("pdf uploads prefer pdftotext extraction over the custom fallback", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -8695,6 +8769,39 @@ class LargeUploadedSourceBoundedModel implements ModelAdapter {
     assert.doesNotMatch(request.runtimeContext?.content ?? "", /uploadedSourceCoverage/);
     return {
       content: "已基于上传材料的已读 chunk 生成中文总结，并保留未覆盖内容的 caveat。",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class FactAcquisitionReadSkillModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  sourceId = "";
+  executionCalls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase !== "execution") {
+      return { content: "", finishReason: "stop", toolCalls: [] };
+    }
+    this.executionCalls += 1;
+    if (this.executionCalls <= 4) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: `read-source-${this.executionCalls}`,
+          name: "read_source",
+          arguments: {
+            sourceId: this.sourceId,
+            chunkIndex: this.executionCalls - 1,
+            maxChunks: 1,
+          },
+        }],
+      };
+    }
+    return {
+      content: "已基于上传 PDF 的多个 chunk 完成中文要点整理。",
       finishReason: "stop",
       toolCalls: [],
     };
