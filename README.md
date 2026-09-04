@@ -101,6 +101,12 @@ export MY_LLM_API_KEY=server-secret
 npm start
 ```
 
+首次使用如果还没有数据库文件，先初始化一次空库：
+
+```bash
+npm run init-db
+```
+
 每个 Provider 的 `apiKeyEnv` 只保存环境变量名，密钥本身不进入 JSON 配置、SQLite 或 Run 记录。可选字段 `maxAttempts`（1–5）和 `retryDelayMs`（0–30000）控制单个模型请求的重试；其余省略项采用 `128000 / 8192 / 120000 / 3 / 250` 的默认值。HTTP `400` 与 `408/429/5xx` 一样按同一预算重试（默认最多 3 次尝试），每次重试都会持久化为 `model.retry` 事件并在 Web 前端实时显示「正在重试（N/M）」。默认 `toolChoiceMode` 为 `native`；对于 DeepSeek Thinking 一类会拒绝 `required` 或命名函数选择、但支持 `auto` 的 Provider，设为 `constrained-as-auto`；对于拒绝命名函数选择但支持 `required` 的单工具结构化阶段，设为 `named-as-required`。这些策略只转换上游 wire-protocol；Runtime 仍然拒绝遗漏的必需 Skill 加载、Plan 或 Assessment。
 
 模型 profile 可以覆盖 Provider 的默认协议、工具选择模式与上限。需要使用 GPT5.6 时，在 `models` 中注册 `gpt-5.6`，把 `providerModel` 设为 `gpt-5.6`，并声明 `protocol: "responses"`；如果兼容网关拒绝命名函数选择但接受 `required`，同时声明 `toolChoiceMode: "named-as-required"`。Adapter 会使用该模型 profile 调用 Provider 的 `/responses` 端点，Run 只需要选择公开的 `modelKey`。

@@ -19,6 +19,7 @@
     "@types/node": "^26.3.0"
   },
   "scripts": {
+    "init-db": "node scripts/init-db.ts",
     "start": "node --env-file-if-exists=.env src/main.ts",
     "test": "node --test --test-isolation=process tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json"

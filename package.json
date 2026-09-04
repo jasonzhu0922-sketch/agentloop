@@ -15,6 +15,7 @@
     "build:kernel": "npm run build --workspace @zhujun/agentloop",
     "build:skills": "npm run build --workspace @zhujun/agentloop-skills",
     "build:plan-template": "npm run build --workspace @zhujun/agentloop-plan-template",
+    "init-db": "npm run init-db --workspace agentloop-app",
     "pack:kernel": "npm run build:kernel && npm pack ./packages/agentloop",
     "pack:skills": "npm run build:skills && npm pack ./packages/agentloop-skills",
     "pack:plan-template": "npm run build:kernel && npm run build:plan-template && npm pack ./packages/agentloop-plan-template",
