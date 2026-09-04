@@ -91,3 +91,29 @@ test("recovery preserves committed provider reasoning continuation", () => {
     reasoningContent: "opaque-thinking-state",
   });
 });
+
+test("recovery preserves tool failure phase for prepare and execute failures", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "do the thing",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["assistant.committed", {
+        step: 1,
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          { id: "call-prepare", name: "write_file", arguments: { path: "a.txt" } },
+          { id: "call-execute", name: "run_step", arguments: { action: "build" } },
+        ],
+      }],
+      ["tool.rejected", { step: 1, toolCallId: "call-prepare", toolName: "write_file", reason: "invalid args", failurePhase: "prepare" }],
+      ["tool.failed", { step: 1, toolCallId: "call-execute", toolName: "run_step", error: "spawn . EACCES" }],
+    ),
+  });
+
+  assert.deepEqual(transcript.toolEvidence, [
+    { toolCallId: "call-prepare", toolName: "write_file", result: "invalid args", isError: true, failurePhase: "prepare" },
+    { toolCallId: "call-execute", toolName: "run_step", result: "spawn . EACCES", isError: true, failurePhase: "execute" },
+  ]);
+});

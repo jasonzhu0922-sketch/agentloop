@@ -27,6 +27,7 @@ interface AssistantCheckpoint {
 interface ToolOutcome {
   readonly content: string;
   readonly isError: boolean;
+  readonly failurePhase?: "prepare" | "execute" | "runtime";
 }
 
 /** Rebuild only provider-valid exchanges from persisted Runtime events. */
@@ -76,9 +77,19 @@ export function reconstructRecoveryTranscript(input: {
     if (event.type === "tool.completed" && typeof event.data.result === "string") {
       outcomes.set(toolCallId, { content: event.data.result, isError: false });
     } else if (event.type === "tool.failed" && typeof event.data.error === "string") {
-      outcomes.set(toolCallId, { content: event.data.error, isError: true });
+      outcomes.set(toolCallId, {
+        content: event.data.error,
+        isError: true,
+        failurePhase: "execute",
+      });
     } else if (event.type === "tool.rejected" && typeof event.data.reason === "string") {
-      outcomes.set(toolCallId, { content: event.data.reason, isError: true });
+      outcomes.set(toolCallId, {
+        content: event.data.reason,
+        isError: true,
+        failurePhase: typeof event.data.failurePhase === "string"
+          ? event.data.failurePhase as "prepare" | "execute" | "runtime"
+          : "prepare",
+      });
     }
   }
 
@@ -101,8 +112,8 @@ export function reconstructRecoveryTranscript(input: {
       toolCalls: assistant.toolCalls,
       ...(assistant.reasoningContent === undefined ? {} : { reasoningContent: assistant.reasoningContent }),
     });
-    for (const call of assistant.toolCalls) {
-      const outcome = outcomes.get(call.id)!;
+      for (const call of assistant.toolCalls) {
+        const outcome = outcomes.get(call.id)!;
       messages.push({
         role: "tool",
         toolCallId: call.id,
@@ -110,8 +121,14 @@ export function reconstructRecoveryTranscript(input: {
         content: outcome.content,
         isError: outcome.isError,
       });
-      toolEvidence.push({ toolCallId: call.id, toolName: call.name, result: outcome.content, isError: outcome.isError });
-    }
+      toolEvidence.push({
+        toolCallId: call.id,
+        toolName: call.name,
+        result: outcome.content,
+        isError: outcome.isError,
+        ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
+      });
+      }
     checkpointEventSeq = assistant.event.seq;
   }
 
@@ -145,6 +162,7 @@ export function reconstructRecoveryTranscript(input: {
           toolName: call.name,
           result: outcome.content,
           isError: outcome.isError,
+          ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
         });
       }
       checkpointEventSeq = Math.max(checkpointEventSeq ?? 0, ...orphanCalls.map((call) => call.seq));

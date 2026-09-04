@@ -242,6 +242,7 @@ export interface AgentLoopToolEvidence {
   readonly toolName: string;
   readonly result: string;
   readonly isError: boolean;
+  readonly failurePhase?: "prepare" | "execute" | "runtime";
 }
 
 export interface CandidateCompletionContext {

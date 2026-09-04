@@ -2609,6 +2609,75 @@ test("next model turn receives explicit execution feedback for failures and file
   assert.equal(calls, 3);
 });
 
+test("repeated execution failures surface failure phases and a strategy switch directive", async () => {
+  let calls = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "run_step",
+    description: "Run one scripted step",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => {
+      if (value === null || typeof value !== "object" || !("action" in value)) {
+        throw new Error("action is required");
+      }
+      return value;
+    },
+    execute: async (_context, value) => {
+      const action = (value as { action?: string }).action;
+      if (action === "execute") {
+        throw new AppError("TOOL_EXECUTION_ERROR", "spawn . EACCES", 409);
+      }
+      return {
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        fileChanges: [],
+      };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "run-prepare", name: "run_step", arguments: {} }],
+        };
+      }
+      if (calls === 2) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "run-execute", name: "run_step", arguments: { action: "execute" } }],
+        };
+      }
+      const runtimeContext = request.runtimeContext?.content ?? "";
+      assert.match(runtimeContext, /runtime_execution_feedback/);
+      assert.match(runtimeContext, /Recent failures by phase:/);
+      assert.match(runtimeContext, /phase=prepare tool=run_step/);
+      assert.match(runtimeContext, /phase=execute tool=run_step/);
+      assert.match(runtimeContext, /switch subgoal or tool family/);
+      return { content: "changed strategy", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["run_step"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Run until the artifact is ready.",
+    input: "export",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 4,
+  });
+
+  assert.equal(result.output, "changed strategy");
+  assert.equal(calls, 3);
+});
+
 test("next model turn receives actionable feedback for Skill package mutation", async () => {
   let calls = 0;
   const tool: RuntimeTool<unknown> = {

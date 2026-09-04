@@ -104,7 +104,7 @@ interface ToolOutcome {
   readonly call: ModelToolCall;
   readonly content: string;
   readonly isError: boolean;
-  readonly failurePhase?: "prepare" | "execute";
+  readonly failurePhase?: "prepare" | "execute" | "runtime";
 }
 
 interface StructuredToolCandidate {
@@ -706,6 +706,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               toolCallId: call.id,
               toolName: call.name,
               reason: "Tool call was not executed because the model repeated identical tool calls without forward progress",
+              failurePhase: "runtime",
             },
           });
         }
@@ -742,6 +743,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             toolName: call.name,
             result: reason,
             isError: true,
+            failurePhase: "runtime" as const,
           };
           toolEvidence.push(evidence);
           messages.push({
@@ -778,6 +780,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         call,
         content: "Tool call was not executed because the Runtime reserved this final step for convergence",
         isError: true,
+        failurePhase: "runtime",
       }));
       for (const outcome of outcomes) {
         await emit({
@@ -797,13 +800,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           call,
           content: "Tool call was not executed because the model response hit its output limit",
           isError: true,
+          failurePhase: "runtime",
         };
       });
       for (const outcome of outcomes) {
         if (earlyOutcomes.has(outcome.call.id)) continue;
         await emit({
           type: "tool.rejected",
-          data: { step, toolCallId: outcome.call.id, toolName: outcome.call.name, reason: outcome.content },
+          data: {
+            step,
+            toolCallId: outcome.call.id,
+            toolName: outcome.call.name,
+            reason: outcome.content,
+            failurePhase: "runtime",
+          },
         });
       }
     } else {
@@ -829,7 +839,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           const message = publicErrorMessage(error);
           await emit({
             type: "tool.rejected",
-            data: { step, toolCallId: call.id, toolName: call.name, reason: message },
+            data: { step, toolCallId: call.id, toolName: call.name, reason: message, failurePhase: "prepare" },
           });
           prepared.push({ kind: "rejected", call, message });
         }
@@ -865,6 +875,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         toolName: outcome.call.name,
         result: outcome.content,
         isError: outcome.isError,
+        ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
       };
       toolEvidence.push(evidence);
       latestToolEvidence.push(evidence);
@@ -1238,10 +1249,12 @@ function executionFeedbackDirective(input: {
     policy: input.progressPolicy,
     evidence: input.toolEvidence,
   });
+  const recentFailures = input.toolEvidence.filter((item) => item.isError);
   const lines = [
     "<runtime_execution_feedback>",
     "The previous tool step produced canonical execution results. Consume these results before choosing the next action.",
     "If any tool failed, address the concrete failure cause or change strategy before continuing.",
+    "If failures span multiple phases or repeat with new error text, stop replaying the same command shape and switch subgoal or tool family.",
     "If any command created or modified files, treat fileChanges paths as artifact facts. Do not reread just-written artifact content unless a validator, build, render, or acceptance diagnostic names a concrete missing field, line range, or contract.",
     "If a just-written artifact is known incomplete, continue with the next bounded file-producing patch. If it is complete but lacks required acceptance evidence, call the available acceptance or verification Tool.",
     "If required evidence is still missing, call the appropriate current-step tool to produce that evidence; do not submit completion from assumptions.",
@@ -1267,6 +1280,16 @@ function executionFeedbackDirective(input: {
   for (const item of input.latestToolEvidence.slice(-6)) {
     lines.push(`- ${summarizeToolEvidenceForDirective(item)}`);
   }
+  if (recentFailures.length > 0) {
+    lines.push("Recent failures by phase:");
+    for (const item of recentFailures.slice(-4)) {
+      lines.push(`- ${summarizeToolFailureForDirective(item)}`);
+    }
+    const distinctFailurePhases = [...new Set(recentFailures.map((item) => item.failurePhase ?? "unknown"))];
+    if (distinctFailurePhases.length > 1) {
+      lines.push("These failures span multiple phases. Do not keep replaying the same command shape; switch subgoal or tool family.");
+    }
+  }
   const skillPackageMutation = input.latestToolEvidence.find((item) =>
     item.isError && /SKILL_PACKAGE_MUTATED/.test(item.result)
   );
@@ -1283,6 +1306,7 @@ function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string 
   const parsed = parseJsonRecord(item.result);
   const details: string[] = [];
   let commandFailed = false;
+  if (item.failurePhase !== undefined) details.push(`phase=${item.failurePhase}`);
   if (parsed !== undefined) {
     const exitCode = parsed.exitCode;
     if (typeof exitCode === "number" || exitCode === null) {
@@ -1307,6 +1331,12 @@ function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string 
     `tool=${item.toolName}`,
     details.join(" "),
   ].join(" ");
+}
+
+function summarizeToolFailureForDirective(item: AgentLoopToolEvidence): string {
+  const phase = item.failurePhase === undefined ? "unknown" : item.failurePhase;
+  const reason = truncateForDirective(item.result.replace(/\s+/g, " "), 160);
+  return `phase=${phase} tool=${item.toolName} toolCallId=${item.toolCallId} reason="${reason}"`;
 }
 
 function summarizeFileChanges(value: unknown): string[] {
