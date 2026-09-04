@@ -91,7 +91,7 @@ function evidenceContractForFixture(step: LegacyPlanStepFixture): {
   return { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" };
 }
 
-test("ModelPlanner fails closed when the model returns prose instead of submit_outcome_plan", async () => {
+test("ModelPlanner fails closed after one bounded prose contract retry", async () => {
   const planner = new ModelPlanner(new StaticModel({ content: "Here is a markdown plan", toolCalls: [], finishReason: "stop" }));
   await assert.rejects(
     () => planner.plan({
@@ -103,7 +103,7 @@ test("ModelPlanner fails closed when the model returns prose instead of submit_o
     (error: unknown) => {
       assert.equal(hasCode(error, "PLANNING_ERROR"), true);
       assert.deepEqual((error as { details?: unknown }).details, {
-        planningTurn: 1,
+        planningTurn: 2,
         finishReason: "stop",
         toolCallCount: 0,
         toolCallNames: [],
@@ -113,6 +113,55 @@ test("ModelPlanner fails closed when the model returns prose instead of submit_o
       return true;
     },
   );
+});
+
+test("ModelPlanner retries once when the planning model returns ordinary text", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
+      if (calls === 1) {
+        return {
+          content: "已经按你的要求改成绘图人物风格了。",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /ordinary assistant text/i);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("plain-response-plan", {
+          goal: "Create the requested image artifact.",
+          shape: "single_leaf",
+          steps: [{
+            id: "create_image",
+            objective: "Create and deliver the requested image artifact.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            recommendedToolNames: ["computer_write_file"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "delivery_receipt"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-plain-planning-response",
+    input: "这些形象要用绘图的方式，不要单纯用文字",
+    availableSkills: [],
+    availableToolNames: ["computer_write_file"],
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["create_image"]);
 });
 
 test("ModelPlanner retries once when the planning model returns an empty response", async () => {

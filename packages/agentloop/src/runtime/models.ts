@@ -244,7 +244,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       const message = choice?.message;
       if (message === undefined) throw new AppError("MODEL_ERROR", "Model provider returned no message", 502);
       const toolCalls = (message.tool_calls ?? []).map((call, index) => parseToolCall(call, index));
-      const result = {
+      return {
         content: message.content ?? "",
         toolCalls,
         finishReason: normalizeFinishReason(choice?.finish_reason, toolCalls.length),
@@ -260,14 +260,6 @@ export class OpenAICompatibleModel implements ModelAdapter {
               },
             }),
       };
-      if (requiredToolChoiceMissing(request.logContext, result)) {
-        if (attempt < this.maxAttempts) {
-          await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
-          continue;
-        }
-        throw requiredToolChoiceMissingError(attempt, request.logContext, result);
-      }
-      return result;
     }
     throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
   }
@@ -323,15 +315,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         }
 
         try {
-          const result = await this.consumeStream(response, sink, requestTimeout.recordActivity);
-          if (requiredToolChoiceMissing(request.logContext, result)) {
-            if (attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-              continue;
-            }
-            throw requiredToolChoiceMissingError(attempt, request.logContext, result);
-          }
-          return result;
+          return await this.consumeStream(response, sink, requestTimeout.recordActivity);
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
@@ -640,25 +624,9 @@ export class ResponsesModel implements ModelAdapter {
           if (isJsonResponse(response)) {
             const payload = await response.json();
             assertResponsesPayload(payload);
-            const result = parseResponsesResponse(payload);
-            if (requiredToolChoiceMissing(request.logContext, result)) {
-              if (attempt < this.maxAttempts) {
-                await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-                continue;
-              }
-              throw requiredToolChoiceMissingError(attempt, request.logContext, result);
-            }
-            return result;
+            return parseResponsesResponse(payload);
           }
-          const result = await this.consumeStream(response, sink, requestTimeout.recordActivity);
-          if (requiredToolChoiceMissing(request.logContext, result)) {
-            if (attempt < this.maxAttempts) {
-              await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
-              continue;
-            }
-            throw requiredToolChoiceMissingError(attempt, request.logContext, result);
-          }
-          return result;
+          return await this.consumeStream(response, sink, requestTimeout.recordActivity);
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
@@ -1151,31 +1119,6 @@ function describeToolChoice(value: unknown): string {
     }
   }
   return "unknown";
-}
-
-function requiredToolChoiceMissing(request: ModelRequestLogContext, response: ModelResponse): boolean {
-  if (request.toolCount === 0) return false;
-  if (request.toolChoice === "none" || request.toolChoice === "auto") return false;
-  return response.toolCalls.length === 0;
-}
-
-function requiredToolChoiceMissingError(
-  attempts: number,
-  request: ModelRequestLogContext,
-  response: ModelResponse,
-): AppError {
-  return new AppError(
-    "MODEL_ERROR",
-    "Model provider returned no tool calls for a required tool-choice request",
-    502,
-    {
-      attempts,
-      request,
-      finishReason: response.finishReason,
-      responseContentLength: response.content.length,
-      responseContentPreview: response.content.slice(0, 500),
-    },
-  );
 }
 
 function isJsonResponse(response: Response): boolean {

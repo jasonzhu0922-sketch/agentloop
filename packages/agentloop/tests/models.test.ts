@@ -1566,21 +1566,15 @@ test("Responses adapter can lower named tool choice to required for single-tool 
   }
 });
 
-test("Responses adapter retries when required tool choice returns no tool calls", async () => {
+test("Responses adapter returns a valid non-tool response for Planner contract validation", async () => {
   const originalFetch = globalThis.fetch;
   let attempts = 0;
   const retries: Array<{ attempt: number; maxAttempts: number; status: number }> = [];
   globalThis.fetch = async () => {
     attempts += 1;
-    if (attempts === 1) {
-      return sseResponse([
-        'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
-      ]);
-    }
     return sseResponse([
-      'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_outcome_plan","arguments":""}}\n\n',
-      'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{}"}\n\n',
-      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call-1","name":"submit_outcome_plan","arguments":"{}"}]}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"已完成"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"已完成"}]}]}}\n\n',
     ]);
   };
   try {
@@ -1606,10 +1600,11 @@ test("Responses adapter retries when required tool choice returns no tool calls"
       toolChoice: { name: "submit_outcome_plan" },
     }, async () => undefined);
 
-    assert.equal(attempts, 2);
-    assert.deepEqual(retries, [{ attempt: 1, maxAttempts: 2, status: 0 }]);
-    assert.equal(result.finishReason, "tool_calls");
-    assert.equal(result.toolCalls[0].name, "submit_outcome_plan");
+    assert.equal(attempts, 1);
+    assert.deepEqual(retries, []);
+    assert.equal(result.finishReason, "stop");
+    assert.deepEqual(result.toolCalls, []);
+    assert.equal(result.content, "已完成");
   } finally {
     globalThis.fetch = originalFetch;
   }

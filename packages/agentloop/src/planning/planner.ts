@@ -401,6 +401,9 @@ function plannerContractRetryDirective(
   if (shouldRetryPlannerEmptyResponse(response)) {
     return plannerEmptyResponseDirective();
   }
+  if (shouldRetryPlannerPlainResponse(response)) {
+    return plannerPlainResponseDirective();
+  }
   if (shouldRetryPlannerToolContract(response, outcomePlanCalls.length, availableToolNames)) {
     return plannerToolContractDirective(response);
   }
@@ -419,6 +422,23 @@ function shouldRetryPlannerEmptyResponse(
   return response.finishReason !== "length"
     && response.toolCalls.length === 0
     && response.content.trim().length === 0;
+}
+
+function shouldRetryPlannerPlainResponse(
+  response: Awaited<ReturnType<ModelAdapter["complete"]>>,
+): boolean {
+  return response.finishReason !== "length"
+    && response.toolCalls.length === 0
+    && response.content.trim().length > 0;
+}
+
+function plannerPlainResponseDirective(): string {
+  return [
+    "Your previous planning response returned ordinary assistant text instead of the required structured plan.",
+    "Treat the latest user message as the active planning goal, not as a request to report completed work.",
+    "Submit exactly one submit_outcome_plan call for that goal.",
+    "Do not execute work, call other tools, or declare completion during planning.",
+  ].join("\n");
 }
 
 function shouldRetryOutcomePlanArgumentsContract(
