@@ -54,5 +54,6 @@ export function tokenizeInstructionText(value: string): readonly string[] {
 }
 
 function normalizeToken(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, "");
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, "");
+  return /[\p{L}\p{N}]/u.test(normalized) ? normalized : "";
 }

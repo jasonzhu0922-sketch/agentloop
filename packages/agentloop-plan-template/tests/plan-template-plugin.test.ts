@@ -139,7 +139,88 @@ test("mcp route queries are not profiled as web research templates", async () =>
   assert.equal(decision.kind, "rejected");
 });
 
+test("direct-use rejects templates with disjoint specific instruction fingerprints", async () => {
+  const input = "查询天安门到乌鲁木齐的自驾游行车路线，要有关键节点信息。";
+  const task = {
+    runId: "run-disjoint-instruction",
+    actorUserId: "owner",
+    input,
+    responseOnly: false,
+    availableSkills: [],
+    selectedSkillRoles: [],
+    availableToolNames: ["websearch", "webfetch"],
+    availableTools: [],
+    visibleDirectories: [],
+    sources: [],
+  };
+  const fingerprint = profileTask(task);
 
+  assert.equal(fingerprint.sourceNeed, "web_research");
+  assert.equal(fingerprint.operationHints.includes("api_query"), true);
+  assert.equal(fingerprint.requiredCapabilities.includes("web_research"), true);
+
+  const decision = routePlanTemplate({
+    task,
+    fingerprint,
+    templates: [{
+      schema: "agentloop.planTemplate/v1",
+      id: "template_unbound_web_research",
+      version: 1,
+      status: "active",
+      intentFamily: "research",
+      sourceNeed: "web_research",
+      acceptedSourceTypes: [],
+      artifactKind: "none",
+      sideEffectKind: "none",
+      requiredCapabilities: ["web_research"],
+      requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+      riskCeiling: "low",
+      planSkeleton: [{
+        id: "step_1",
+        role: "produce",
+        operationRef: "produce:discovered:api-query",
+        dependsOn: [],
+        inputBindings: {},
+        requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        producedEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        requiredCapabilities: ["web_research"],
+        skillRoleHints: ["source_provider"],
+        objective: "查询并返回合同备案 API 的完整参数信息（入参、出参、数据表等）",
+      }],
+      positiveExampleRefs: [],
+      negativeExampleRefs: [],
+      reliability: {
+        completedRuns: 9,
+        admittedRuns: 9,
+        failedRuns: 0,
+        planAdmissionFailureRate: 0,
+        assessmentFailureRate: 0,
+        repairRate: 0,
+        avgPlannerSavedMs: 0,
+        updatedAt: "2026-09-05T00:00:00.000Z",
+      },
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:00:00.000Z",
+    }],
+    config: {
+      schema: "agentloop.planTemplateFastPathConfig/v1",
+      enabled: true,
+      observeEnabled: false,
+      mode: "direct_use",
+      allowDirectUse: true,
+      minDirectUseScore: 0.9,
+      minPlannerContextScore: 0.7,
+      allowedRiskCeiling: "low",
+      requireActiveTemplateForDirectUse: true,
+    },
+  });
+
+  assert.equal(decision.kind, "rejected");
+  if (decision.kind === "rejected") {
+    assert.equal(decision.rejectionReasons.includes("score_below_threshold"), true);
+    assert.equal(decision.score, 0.69);
+  }
+});
 
 test("instruction tokens raise similarity for matching template instruction text", async () => {
   const fingerprint = profileTask({
@@ -224,7 +305,7 @@ test("instruction tokens raise similarity for matching template instruction text
 
   assert.equal(decision.kind, "direct_use");
 });
-test("research tasks can still match research templates", async () => {
+test("research tasks without instruction affinity stay below direct-use threshold", async () => {
   const fingerprint = profileTask({
     runId: "run-research",
     actorUserId: "owner",
@@ -308,7 +389,10 @@ test("research tasks can still match research templates", async () => {
     },
   });
 
-  assert.equal(decision.kind, "direct_use");
+  assert.equal(decision.kind, "rejected");
+  if (decision.kind === "rejected") {
+    assert.equal(decision.rejectionReasons.includes("score_below_threshold"), true);
+  }
 });
 
 test("observe mode can run alongside direct use routing", async () => {
@@ -506,7 +590,7 @@ test("direct-use templates rebind leaf objectives to the current task input", as
         inputBindings: {},
         requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
         producedEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
-        requiredCapabilities: [],
+        requiredCapabilities: ["web_research"],
         skillRoleHints: ["source_provider"],
         objective: "查询并返回合同备案 API 的完整参数信息（入参、出参、数据表等）",
       }],
@@ -806,6 +890,7 @@ test("miner promotes repeated completed observations to candidate templates only
     assert.equal(templates[0].status, "candidate");
     assert.equal(templates[0].intentFamily, "research");
     assert.equal(templates[0].planSkeleton[0].objective, undefined);
+    assert.deepEqual(templates[0].planSkeleton[0].requiredCapabilities, ["load_skill", "computer_run_command"]);
     assert.equal(templates[0].positiveExampleRefs.length, 2);
   } finally {
     await plugin.close();

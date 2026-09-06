@@ -10,6 +10,7 @@ test("application-owned runtime paths do not depend on the process working direc
 
   assert.equal(paths.workspaceRoot, resolve(appRoot, "workspace"));
   assert.equal(paths.databasePath, resolve(appRoot, "data/agentloop.db"));
+  assert.equal(paths.stepExecutionStrategyConfigPath, resolve(appRoot, "config/step-execution-strategy.json"));
   assert.equal(paths.mcpServersConfigPath, resolve(appRoot, "config/mcp-servers.json"));
   assert.deepEqual(paths.customSkillDirectories, []);
 });
@@ -20,6 +21,7 @@ test("runtime path overrides support absolute paths and app-relative paths", () 
     databasePath: ":memory:",
     providerConfigPath: "./config/providers.json",
     planningExtensionsConfigPath: "./config/planning-extensions.json",
+    stepExecutionStrategyConfigPath: "./config/full-tools.json",
     workspaceRoot: "/var/lib/agentloop/workspace",
     customSkillDirectories: ["./custom-skills", "/opt/agentloop-skills"],
   });
@@ -27,6 +29,7 @@ test("runtime path overrides support absolute paths and app-relative paths", () 
   assert.equal(paths.databasePath, ":memory:");
   assert.equal(paths.providerConfigPath, resolve(appRoot, "config/providers.json"));
   assert.equal(paths.planningExtensionsConfigPath, resolve(appRoot, "config/planning-extensions.json"));
+  assert.equal(paths.stepExecutionStrategyConfigPath, resolve(appRoot, "config/full-tools.json"));
   assert.equal(paths.mcpServersConfigPath, resolve(appRoot, "config/mcp-servers.json"));
   assert.equal(paths.workspaceRoot, "/var/lib/agentloop/workspace");
   assert.deepEqual(paths.customSkillDirectories, [

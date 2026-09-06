@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
 import { artifactStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
 import type {
   CapabilityGrant,
@@ -69,6 +70,216 @@ test("execution turns use the model-declared output budget", async () => {
 
   assert.equal(result.output, "done");
   assert.equal(observedMaxOutputTokens, 32_768);
+});
+
+test("single leaf execution carries loop step handoff across model steps", async () => {
+  const contexts: string[] = [];
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      contexts.push(request.runtimeContext?.content ?? "");
+      if (calls === 1) {
+        assert.match(request.runtimeContext?.content ?? "", /agentloop\.loopStepFrame\/v1/);
+        assert.match(request.runtimeContext?.content ?? "", /"mode":"current_to_next"/);
+        assert.match(request.runtimeContext?.content ?? "", /"toolCallCount":0/);
+        assert.match(request.runtimeContext?.content ?? "", /first bounded evidence\/tool batch/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "lookup-route",
+            name: "lookup_route",
+            arguments: { from: "A", to: "B" },
+          }],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /agentloop\.loopStepFrame\/v1/);
+      assert.match(request.runtimeContext?.content ?? "", /"mode":"current_to_next"/);
+      assert.match(request.runtimeContext?.content ?? "", /"toolCallCount":1/);
+      assert.match(request.runtimeContext?.content ?? "", /"recentToolNames":\["lookup_route"\]/);
+      assert.match(request.runtimeContext?.content ?? "", /do not repeat a successful prior tool call/);
+      return { content: "route summary delivered", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "lookup_route",
+    description: "Lookup route facts",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({
+      schema: "agentloop.testRouteResult/v1",
+      evidenceReceipt: {
+        schema: "agentloop.toolEvidenceReceipt/v1",
+        sourceType: "test",
+        receiptId: "route-receipt",
+        sourceRefs: [{ toolName: "lookup_route" }],
+        facts: [{ kind: "source_summary", textPreview: "route facts" }],
+        caveats: [],
+        evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+      },
+    }),
+  };
+
+  const result = await runAgentLoop({
+    runId: "run-loop-step-frame",
+    systemPrompt: "Complete the current Plan step.",
+    input: "look up route and answer",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant: makeGrant(["lookup_route"]),
+    maxSteps: 3,
+  });
+
+  assert.equal(result.output, "route summary delivered");
+  assert.equal(calls, 2);
+  assert.equal(contexts.length, 2);
+});
+
+test("custom step execution strategy can replace loop frame, tool exposure, and prompt projection", async () => {
+  const events: RuntimeEvent[] = [];
+  const observedTools: string[][] = [];
+  const observedContexts: string[] = [];
+  const strategy: StepExecutionStrategy = {
+    id: "test.customStepExecutionStrategy/v1",
+    prepareModelStep: (input) => ({
+      schema: "agentloop.stepExecutionDecision/v1",
+      strategyId: "test.customStepExecutionStrategy/v1",
+      loopStepFrame: {
+        schema: "agentloop.loopStepFrame/v1",
+        mode: "current_to_next",
+        modelStep: input.modelStep,
+        limits: {
+          primaryMaxSteps: input.maxSteps,
+          hardLimit: input.hardLimit,
+          remainingIncludingCurrent: input.hardLimit - input.modelStep + 1,
+        },
+        priorEvidence: {
+          toolCallCount: input.priorToolEvidence.length,
+          successfulToolCallCount: input.priorToolEvidence.filter((item) => !item.isError).length,
+          failedToolCallCount: input.priorToolEvidence.filter((item) => item.isError).length,
+          recentToolNames: [],
+        },
+        currentStage: {
+          objective: "Use the focused custom strategy.",
+          toolUsePolicy: "Call only the active test tool.",
+          availableToolCount: 1,
+        },
+        handoffContract: {
+          reusableOutputPolicy: "Preserve the custom strategy receipt.",
+          forbiddenMoves: ["do not call hidden_tool"],
+        },
+        toolCatalog: {
+          policyId: "test.customToolExposurePolicy/v1",
+          mode: "narrowed",
+          activeToolCount: 1,
+          hiddenToolGroups: [{
+            group: "hidden-test-tools",
+            toolNames: ["hidden_tool"],
+            hiddenReason: "custom strategy keeps this tool out of the current model step",
+            unlockWhen: "a later strategy decision exposes it",
+          }],
+        },
+        projectionIntent: {
+          schema: "agentloop.promptProjectionPolicy/v1",
+          policyId: "test.customPromptProjectionPolicy/v1",
+          mode: "custom",
+          instruction: "Project only custom test receipts.",
+          largeToolResultProjectionCharacters: 64,
+          largeToolResultPreviewCharacters: 16,
+        },
+      },
+      toolCatalog: {
+        schema: "agentloop.toolCatalogDecision/v1",
+        policyId: "test.customToolExposurePolicy/v1",
+        mode: "narrowed",
+        activeToolNames: ["allowed_tool"],
+        hiddenToolGroups: [{
+          group: "hidden-test-tools",
+          toolNames: ["hidden_tool"],
+          hiddenReason: "custom strategy keeps this tool out of the current model step",
+          unlockWhen: "a later strategy decision exposes it",
+        }],
+      },
+      promptProjection: {
+        schema: "agentloop.promptProjectionPolicy/v1",
+        policyId: "test.customPromptProjectionPolicy/v1",
+        mode: "custom",
+        instruction: "Project only custom test receipts.",
+        largeToolResultProjectionCharacters: 64,
+        largeToolResultPreviewCharacters: 16,
+      },
+      trace: {
+        schema: "agentloop.stepExecutionPolicyTrace/v1",
+        strategyId: "test.customStepExecutionStrategy/v1",
+        loopStepPolicyId: "test.customLoopStepPolicy/v1",
+        toolExposurePolicyId: "test.customToolExposurePolicy/v1",
+        promptProjectionPolicyId: "test.customPromptProjectionPolicy/v1",
+      },
+    }),
+  };
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      observedTools.push(request.tools.map((tool) => tool.name));
+      observedContexts.push(request.runtimeContext?.content ?? "");
+      if (calls === 1) {
+        assert.deepEqual(request.tools.map((tool) => tool.name), ["allowed_tool"]);
+        assert.match(request.runtimeContext?.content ?? "", /test\.customStepExecutionStrategy\/v1|custom strategy receipt/);
+        assert.match(request.runtimeContext?.content ?? "", /custom strategy keeps this tool out of the current model step/);
+        assert.match(request.runtimeContext?.content ?? "", /prompt_projection_policy/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "allowed-call", name: "allowed_tool", arguments: {} }],
+        };
+      }
+      return { content: "custom strategy completed", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const allowedTool: RuntimeTool<unknown> = {
+    name: "allowed_tool",
+    description: "Allowed by the custom strategy",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => "allowed result",
+  };
+  const hiddenTool: RuntimeTool<unknown> = {
+    name: "hidden_tool",
+    description: "Hidden by the custom strategy",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => "hidden result",
+  };
+
+  const result = await runAgentLoop({
+    runId: "run-custom-step-execution-strategy",
+    systemPrompt: "Complete the current Plan step.",
+    input: "use custom strategy",
+    model,
+    tools: new ToolRegistry([allowedTool, hiddenTool]),
+    grant: makeGrant(["allowed_tool", "hidden_tool"]),
+    maxSteps: 3,
+    stepExecutionStrategy: strategy,
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "custom strategy completed");
+  assert.deepEqual(observedTools[0], ["allowed_tool"]);
+  assert.match(observedContexts[0], /Project only custom test receipts/);
+  const policyEvent = events.find((event) => event.type === "step_execution.policy_applied");
+  assert.equal(policyEvent?.data.strategyId, "test.customStepExecutionStrategy/v1");
+  assert.equal(policyEvent?.data.activeToolCount, 1);
+  assert.equal(policyEvent?.data.hiddenToolGroupCount, 1);
 });
 
 test("batch source reads are observed as one tool action with many source receipts", async () => {
@@ -1439,6 +1650,7 @@ test("artifact grace rejects excessive read-only exploration and redirects to ev
     maxSteps: 1,
     convergenceGraceSteps: 6,
     progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_acceptance"]),
+    stepExecutionStrategy: createStepExecutionStrategyProfile("full-catalog"),
     emit: (event) => { events.push(event); },
   });
 
@@ -1547,6 +1759,7 @@ test("artifact progress policy rejects excessive read-only exploration before gr
     maxSteps: 10,
     convergenceGraceSteps: 0,
     progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_acceptance"]),
+    stepExecutionStrategy: createStepExecutionStrategyProfile("full-catalog"),
     shouldConvergeAfterToolStep: (context) => ({
       converge: context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
       reason: "artifact_acceptance_observed",
@@ -2108,7 +2321,8 @@ test("artifact progress policy treats mismatched typed intermediates as source u
         };
       }
       if (calls === 4) {
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_repair/);
+        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+        assert.equal(semanticState.nextAction, "produce_artifact");
         return {
           content: "",
           finishReason: "tool_calls",
@@ -2151,20 +2365,349 @@ test("artifact progress policy treats mismatched typed intermediates as source u
   });
 
   assert.equal(result.output, "poster.png accepted");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "write", "run", "verify"]);
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), [
+    "write",
+    "write",
+    "write",
+    "write",
+    "run",
+    "verify",
+  ]);
   const rejected = events.find((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "reread-spec"
   );
   assert.equal(rejected?.data.reason, "Intermediate artifact/source evidence exists but final artifact evidence is still missing");
-  const rejectedRewrite = events.find((event) =>
-    event.type === "tool.rejected" && event.data.toolCallId === "rewrite-spec"
-  );
-  assert.equal(rejectedRewrite?.data.reason, "Intermediate artifact/source evidence exists but final artifact evidence is still missing");
   assert.equal(events.some((event) =>
     (event.type === "tool.effect_pending" || event.type === "tool.dispatched" || event.type === "tool.completed")
     && event.data.toolCallId === "rewrite-spec"
-  ), false);
+  ), true);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
+});
+
+test("artifact progress policy allows diagnostic-driven intermediate source repair before rerender", async () => {
+  const executions: string[] = [];
+  let renderAttempts = 0;
+  let calls = 0;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write generated files",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`write:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        path: "poster-spec.json",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "poster-spec.json", bytes: 120, sha256: "spec-hash" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const runTool: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Render requested image",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      renderAttempts += 1;
+      executions.push(`run:${JSON.stringify(input)}`);
+      if (renderAttempts === 1) {
+        return JSON.stringify({
+          exitCode: 1,
+          stdout: "",
+          stderr: "Traceback (most recent call last):\n  File \"render_static_canvas.py\", line 103, in main\n    raise ValueError(\"output must be a relative workspace path\")\nValueError: output must be a relative workspace path\n",
+          fileChanges: [],
+        });
+      }
+      return JSON.stringify({
+        exitCode: 0,
+        stdout: "poster.png\n",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "poster.png", bytes: 240, sha256: "poster-hash", artifactKind: "image" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the requested image",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`verify:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        artifactPath: "poster.png",
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      });
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "write-absolute-spec",
+            name: "computer_write_file",
+            arguments: { path: "poster-spec.json", content: "{\"output\":\"/tmp/poster.png\"}" },
+          }],
+        };
+      }
+      if (calls === 2) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "render-absolute-spec", name: "computer_run_command", arguments: { command: "render poster-spec.json" } }],
+        };
+      }
+      if (calls === 3) {
+        assert.match(request.runtimeContext?.content ?? "", /"recentActionableDiagnostic":true/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "rewrite-relative-spec",
+            name: "computer_write_file",
+            arguments: { path: "poster-spec.json", content: "{\"output\":\"poster.png\"}", mode: "overwrite" },
+          }],
+        };
+      }
+      if (calls === 4) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "rerender-relative-spec", name: "computer_run_command", arguments: { command: "render poster-spec.json" } }],
+        };
+      }
+      if (calls === 5) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "verify-poster", name: "verify_artifact_acceptance", arguments: { artifactPath: "poster.png", artifactKind: "image" } }],
+        };
+      }
+      return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "computer_run_command", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify an image artifact.",
+    input: "create a poster image",
+    model,
+    tools: new ToolRegistry([writeTool, runTool, verifyTool]),
+    grant,
+    maxSteps: 7,
+    convergenceGraceSteps: 0,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      { expectedArtifactKind: "image" },
+    ),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      reason: "artifact_acceptance_observed",
+    }),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "poster.png accepted");
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "run", "write", "run", "verify"]);
+  assert.equal(events.some((event) =>
+    event.type === "tool.rejected" && event.data.toolCallId === "rewrite-relative-spec"
+  ), false);
+  assert.equal(renderAttempts, 2);
+});
+
+test("artifact progress policy allows required source evidence after process artifacts exist", async () => {
+  const executions: string[] = [];
+  let calls = 0;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write generated files",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`write:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        path: "build-report.py",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "build-report.py", bytes: 120, sha256: "script-hash" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const readSourceTool: RuntimeTool<unknown> = {
+    name: "read_source",
+    description: "Read required source evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`read-source:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          receiptId: "source-summary",
+          sourceType: "test",
+          facts: [{ kind: "source_summary", textPreview: "required source facts" }],
+          caveats: [],
+          evidenceKinds: {
+            satisfied: ["source_summary"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const runTool: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Build requested artifact",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`run:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        exitCode: 0,
+        stdout: "report.html\n",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "report.html", bytes: 240, sha256: "html-hash", artifactKind: "html" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      });
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the requested artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      executions.push(`verify:${JSON.stringify(input)}`);
+      return JSON.stringify({
+        artifactPath: "report.html",
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      });
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "write-builder", name: "computer_write_file", arguments: { path: "build-report.py", content: "print('report.html')" } }],
+        };
+      }
+      if (calls === 2) {
+        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+        assert.equal(semanticState.nextAction, "acquire_source_evidence");
+        assert.deepEqual(semanticState.processArtifacts.map((artifact) => artifact.path), ["build-report.py"]);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "read-required-source", name: "read_source", arguments: { sourceId: "brief", maxChunks: 1 } }],
+        };
+      }
+      if (calls === 3) {
+        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+        assert.equal(semanticState.nextAction, "produce_artifact");
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "build-report", name: "computer_run_command", arguments: { command: "python3 build-report.py" } }],
+        };
+      }
+      if (calls === 4) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "verify-report", name: "verify_artifact_acceptance", arguments: { artifactPath: "report.html", artifactKind: "html" } }],
+        };
+      }
+      return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "read_source", "computer_run_command", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Use source evidence, then produce and verify an HTML artifact.",
+    input: "read the source and create a report",
+    model,
+    tools: new ToolRegistry([writeTool, readSourceTool, runTool, verifyTool]),
+    grant,
+    maxSteps: 6,
+    convergenceGraceSteps: 0,
+    stepExecutionStrategy: createStepExecutionStrategyProfile("full-catalog"),
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["source_summary", "artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      { expectedArtifactKind: "html" },
+    ),
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && !item.isError),
+      reason: "artifact_acceptance_observed",
+    }),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "report.html accepted");
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "read-source", "run", "verify"]);
+  assert.equal(events.some((event) =>
+    event.type === "tool.rejected" && event.data.toolCallId === "read-required-source"
+  ), false);
 });
 
 test("artifact progress policy allows a targeted rebase read after patch precondition failure", async () => {
@@ -3807,8 +4350,48 @@ function runtimeStepSemanticState(content: string): {
   readonly exploratoryToolNames: readonly string[];
 } {
   const match = content.match(/<runtime_step_semantic_state>\n(.*?)\n<\/runtime_step_semantic_state>/s);
-  assert.ok(match?.[1]);
-  return JSON.parse(match[1]) as {
+  if (match?.[1] !== undefined) {
+    return JSON.parse(match[1]) as {
+      readonly schema: string;
+      readonly missingRequiredEvidenceKinds: readonly string[];
+      readonly workProduct: { readonly status: string };
+      readonly knownArtifacts: readonly Array<{ readonly path: string }>;
+      readonly processArtifacts: readonly Array<{ readonly path: string }>;
+      readonly nextAction: string;
+      readonly evidenceProducingToolNames: readonly string[];
+      readonly exploratoryToolNames: readonly string[];
+    };
+  }
+  const frameMatch = content.match(/<loop_step_frame source="server">\n(.*?)\n<\/loop_step_frame>/s);
+  assert.ok(frameMatch?.[1]);
+  const frame = JSON.parse(frameMatch[1]) as {
+    readonly currentEvidenceState?: {
+      readonly missingRequiredEvidenceKinds: readonly string[];
+      readonly workProduct: {
+        readonly status: string;
+        readonly deliverableArtifactPaths: readonly string[];
+        readonly processArtifactPaths: readonly string[];
+        readonly deliverableArtifacts?: readonly Array<{ readonly path: string }>;
+        readonly processArtifacts?: readonly Array<{ readonly path: string }>;
+      };
+      readonly nextAction: string;
+      readonly evidenceProducingToolNames: readonly string[];
+      readonly exploratoryToolNames: readonly string[];
+    };
+  };
+  assert.ok(frame.currentEvidenceState);
+  return {
+    schema: "agentloop.runtimeStepEvidenceState/v1",
+    missingRequiredEvidenceKinds: frame.currentEvidenceState.missingRequiredEvidenceKinds,
+    workProduct: { status: frame.currentEvidenceState.workProduct.status },
+    knownArtifacts: frame.currentEvidenceState.workProduct.deliverableArtifacts
+      ?? frame.currentEvidenceState.workProduct.deliverableArtifactPaths.map((path) => ({ path })),
+    processArtifacts: frame.currentEvidenceState.workProduct.processArtifacts
+      ?? frame.currentEvidenceState.workProduct.processArtifactPaths.map((path) => ({ path })),
+    nextAction: frame.currentEvidenceState.nextAction,
+    evidenceProducingToolNames: frame.currentEvidenceState.evidenceProducingToolNames,
+    exploratoryToolNames: frame.currentEvidenceState.exploratoryToolNames,
+  } as {
     readonly schema: string;
     readonly missingRequiredEvidenceKinds: readonly string[];
     readonly workProduct: { readonly status: string };

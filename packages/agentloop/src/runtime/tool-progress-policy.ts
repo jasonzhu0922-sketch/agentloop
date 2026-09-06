@@ -1,4 +1,9 @@
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
+import {
+  parseJsonRecord,
+  runtimeEvidenceKindArrays,
+  runtimeEvidenceRecordsFromToolResult,
+} from "./tool-result-evidence.ts";
 
 export interface RuntimeToolProgressPolicy {
   readonly schema: "agentloop.runtimeToolProgressPolicy/v1";
@@ -155,6 +160,7 @@ export function deriveRuntimeStepEvidenceState(input: {
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(input.evidence);
   const nextAction = nextActionForEvidenceGap({
     missingRequiredEvidenceKinds,
+    satisfiedEvidenceKinds: [...evidenceKinds.satisfied],
     failedEvidenceKinds: [...evidenceKinds.failed],
     workProduct,
     policy,
@@ -191,14 +197,30 @@ export function artifactStepToolProgressPolicy(
   requiredEvidenceKinds: readonly string[],
   options: { readonly expectedArtifactKind?: string } = {},
 ): RuntimeToolProgressPolicy {
+  return runtimeStepToolProgressPolicy(requiredEvidenceKinds, {
+    ...options,
+    scope: "artifact",
+  });
+}
+
+export function runtimeStepToolProgressPolicy(
+  requiredEvidenceKinds: readonly string[],
+  options: {
+    readonly expectedArtifactKind?: string;
+    readonly scope?: "artifact" | "source" | "generic";
+    readonly additionalExploratoryToolNames?: readonly string[];
+    readonly additionalEvidenceProducingToolNames?: readonly string[];
+  } = {},
+): RuntimeToolProgressPolicy {
+  const scope = options.scope ?? "generic";
   return {
     schema: "agentloop.runtimeToolProgressPolicy/v1",
     requiredEvidenceKinds,
     ...(options.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: options.expectedArtifactKind }),
     autoCompleteFromEvidence: requiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
-    maxExploratoryPrimarySteps: 3,
-    maxExploratoryGraceSteps: 2,
-    exploratoryToolNames: [
+    maxExploratoryPrimarySteps: scope === "source" ? 8 : 3,
+    maxExploratoryGraceSteps: scope === "source" ? 3 : 2,
+    exploratoryToolNames: uniqueStrings([
       "computer_find_files",
       "computer_list_directory",
       "computer_read_file",
@@ -206,37 +228,52 @@ export function artifactStepToolProgressPolicy(
       "computer_read_json",
       "computer_search_text",
       "read_source",
+      "visible_find_files",
+      "visible_index_directory",
       "visible_read_file",
       "visible_read_files",
       "visible_extract_tables",
       "visible_list_directory",
       "webfetch",
       "websearch",
-    ],
+      ...(options.additionalExploratoryToolNames ?? []),
+    ]),
     setupToolNames: ["load_skill"],
-    evidenceProducingToolNames: [
+    evidenceProducingToolNames: uniqueStrings([
       "computer_patch_file",
       "computer_write_file",
       "computer_run_command",
+      "computer_summarize_table_artifact",
       "convert_artifact",
       "materialize_paginated_html",
       "visible_extract_tables",
       "verify_artifact_acceptance",
-    ],
+      ...(options.additionalEvidenceProducingToolNames ?? []),
+    ]),
     repairDirective: [
       "<runtime_tool_progress_repair>",
-      "Read-only exploration has exceeded the bounded exploration budget for this artifact-producing step.",
+      scope === "source"
+        ? "Read-only exploration has exceeded the bounded exploration budget for this source-evidence step."
+        : "Read-only exploration has exceeded the bounded exploration budget for this artifact-producing step.",
       `Required evidence kinds: ${requiredEvidenceKinds.length === 0 ? "unspecified" : requiredEvidenceKinds.join(", ")}.`,
-      "Use an evidence-producing tool next: write or update the artifact source, run the Skill validator/build/render command, or verify artifact acceptance.",
+      scope === "source"
+        ? "Use one focused evidence-producing action next: emit a durable structured extraction artifact, run a source parser, summarize an extracted table artifact, or return a completion candidate with explicit caveats when the remaining evidence cannot be produced locally."
+        : "Use an evidence-producing tool next: write or update the artifact source, run the Skill validator/build/render command, or verify artifact acceptance.",
       "Do not keep listing, searching, or reading references unless a validator, build, render, or acceptance diagnostic names a concrete missing field or contract.",
-      "If the artifact cannot be produced with the current evidence, return a truthful incomplete completion candidate instead of spending more read-only tool turns.",
+      scope === "source"
+        ? "If the source evidence cannot be completed with the current grants, return a truthful incomplete completion candidate instead of spending more read-only tool turns."
+        : "If the artifact cannot be produced with the current evidence, return a truthful incomplete completion candidate instead of spending more read-only tool turns.",
       "</runtime_tool_progress_repair>",
     ].join("\n"),
     diagnosticRepairDirective: [
       "<runtime_validation_diagnostic_repair>",
-      "A recent validator, build, render, parser, or acceptance tool result already named a concrete artifact diagnostic.",
+      scope === "source"
+        ? "A recent parser, extraction, validator, or source tool result already named a concrete source-evidence diagnostic."
+        : "A recent validator, build, render, parser, or acceptance tool result already named a concrete artifact diagnostic.",
       `Required evidence kinds: ${requiredEvidenceKinds.length === 0 ? "unspecified" : requiredEvidenceKinds.join(", ")}.`,
-      "Use an evidence-producing tool next: patch the named source file, rerun the validator/build/render command, or call verify_artifact_acceptance for the produced artifact.",
+      scope === "source"
+        ? "Use an evidence-producing tool next: repair the named extraction/source artifact, rerun the parser, or produce a bounded source evidence receipt."
+        : "Use an evidence-producing tool next: patch the named source file, rerun the validator/build/render command, or call verify_artifact_acceptance for the produced artifact.",
       "Do not spend additional turns listing, searching, or rereading references when the diagnostic already includes a concrete path, line/column, rule, missing field, suggested fix, or artifact path.",
       "</runtime_validation_diagnostic_repair>",
     ].join("\n"),
@@ -270,11 +307,11 @@ function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
   const caveated = new Set<string>();
   const failed = new Set<string>();
   for (const item of evidence) {
-    const parsed = parseToolEvidenceRecord(item);
-    if (parsed === undefined) continue;
-    collectEvidenceKindsFromRecord(parsed, { satisfied, caveated, failed });
-    collectEvidenceKindsFromRecord(asRecord(parsed.artifactReceipt), { satisfied, caveated, failed });
-    collectEvidenceKindsFromRecord(asRecord(parsed.evidenceReceipt), { satisfied, caveated, failed });
+    for (const parsed of runtimeEvidenceRecordsFromToolResult(item.result)) {
+      collectEvidenceKindsFromRecord(parsed, { satisfied, caveated, failed });
+      collectEvidenceKindsFromRecord(asRecord(parsed.artifactReceipt), { satisfied, caveated, failed });
+      collectEvidenceKindsFromRecord(asRecord(parsed.evidenceReceipt), { satisfied, caveated, failed });
+    }
   }
   return { satisfied, caveated, failed };
 }
@@ -322,10 +359,10 @@ function collectEvidenceKindsFromRecord(
   record: Record<string, unknown> | undefined,
   output: { readonly satisfied: Set<string>; readonly caveated: Set<string>; readonly failed: Set<string> },
 ): void {
-  const evidenceKinds = asRecord(record?.evidenceKinds);
-  collectStringArray(evidenceKinds?.satisfied, output.satisfied);
-  collectStringArray(evidenceKinds?.caveated, output.caveated);
-  collectStringArray(evidenceKinds?.failed, output.failed);
+  const evidenceKinds = runtimeEvidenceKindArrays(record);
+  collectStringArray(evidenceKinds.satisfied, output.satisfied);
+  collectStringArray(evidenceKinds.caveated, output.caveated);
+  collectStringArray(evidenceKinds.failed, output.failed);
 }
 
 function collectStringArray(value: unknown, output: Set<string>): void {
@@ -339,26 +376,27 @@ function collectKnownArtifacts(evidence: readonly AgentLoopToolEvidence[]): Runt
   const byPath = new Map<string, RuntimeStepArtifactRef>();
   for (const item of evidence) {
     if (item.isError) continue;
-    const parsed = parseToolEvidenceRecord(item);
-    if (parsed === undefined) continue;
-    const artifact = artifactRecordFromResult(parsed);
-    const path = stringField(parsed, "path")
-      ?? stringField(artifact, "path")
-      ?? stringField(asRecord(parsed.output), "path");
-    if (path === undefined) continue;
-    byPath.set(path, {
-      path,
-      sourceTool: item.toolName,
-      toolCallId: item.toolCallId,
-      bytes: numberField(parsed, "bytes") ?? numberField(artifact, "bytes"),
-      sha256: stringField(parsed, "sha256") ?? stringField(artifact, "sha256"),
-      artifactKind: stringField(parsed, "artifactKind")
-        ?? stringField(parsed, "kind")
-        ?? stringField(artifact, "artifactKind")
-        ?? stringField(artifact, "kind"),
-      acceptanceProfile: stringField(parsed, "acceptanceProfile")
-        ?? stringField(artifact, "acceptanceProfile"),
-    });
+    for (const parsed of runtimeEvidenceRecordsFromToolResult(item.result)) {
+      for (const artifact of artifactRecordsFromResult(parsed)) {
+        const path = stringField(parsed, "path")
+          ?? stringField(artifact, "path")
+          ?? stringField(asRecord(parsed.output), "path");
+        if (path === undefined) continue;
+        byPath.set(path, {
+          path,
+          sourceTool: item.toolName,
+          toolCallId: item.toolCallId,
+          bytes: numberField(parsed, "bytes") ?? numberField(artifact, "bytes"),
+          sha256: stringField(parsed, "sha256") ?? stringField(artifact, "sha256"),
+          artifactKind: stringField(parsed, "artifactKind")
+            ?? stringField(parsed, "kind")
+            ?? stringField(artifact, "artifactKind")
+            ?? stringField(artifact, "kind"),
+          acceptanceProfile: stringField(parsed, "acceptanceProfile")
+            ?? stringField(artifact, "acceptanceProfile"),
+        });
+      }
+    }
   }
   return [...byPath.values()];
 }
@@ -456,18 +494,33 @@ function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
 
-function artifactRecordFromResult(record: Record<string, unknown>): Record<string, unknown> | undefined {
+function artifactRecordsFromResult(record: Record<string, unknown>): readonly Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
   const artifactReceipt = asRecord(record.artifactReceipt);
-  return asRecord(record.artifact) ?? asRecord(artifactReceipt?.artifact);
+  const artifact = asRecord(record.artifact) ?? asRecord(artifactReceipt?.artifact);
+  if (artifact !== undefined) records.push(artifact);
+  const artifactPath = stringField(record, "artifact");
+  if (artifactPath !== undefined) records.push({ path: artifactPath });
+  const path = stringField(record, "path") ?? stringField(asRecord(record.output), "path");
+  if (path !== undefined) records.push(record);
+  if (Array.isArray(record.fileChanges)) {
+    for (const item of record.fileChanges) {
+      const fileChange = asRecord(item);
+      if (fileChange !== undefined && stringField(fileChange, "path") !== undefined) records.push(fileChange);
+    }
+  }
+  return records;
 }
 
 function nextActionForEvidenceGap(input: {
   readonly missingRequiredEvidenceKinds: readonly string[];
+  readonly satisfiedEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
   readonly workProduct: RuntimeStepWorkProductState;
   readonly policy: RuntimeToolProgressPolicy;
 }): RuntimeStepNextAction {
   const missing = new Set(input.missingRequiredEvidenceKinds);
+  const satisfied = new Set(input.satisfiedEvidenceKinds);
   if (input.failedEvidenceKinds.length > 0 && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
   }
@@ -477,7 +530,18 @@ function nextActionForEvidenceGap(input: {
     || missing.has("schema_summary")
     || missing.has("record_counts")
     || missing.has("structured_extraction_artifact")
-  ) return "acquire_source_evidence";
+  ) {
+    if (
+      (missing.has("record_counts") || missing.has("structured_extraction_artifact"))
+      && satisfied.has("source_summary")
+      && !missing.has("source_urls")
+      && !missing.has("schema_summary")
+      && hasAnyTool(input.policy, SOURCE_EVIDENCE_PRODUCER_TOOL_NAMES)
+    ) {
+      return "produce_required_evidence";
+    }
+    return "acquire_source_evidence";
+  }
   if (
     input.workProduct.status === "deliverable_available"
     && (missing.has("artifact_acceptance") || missing.has("artifact_openable") || missing.has("format_matches_request"))
@@ -548,6 +612,13 @@ function hasArtifactProducer(policy: RuntimeToolProgressPolicy): boolean {
     "materialize_paginated_html",
   ]);
 }
+
+const SOURCE_EVIDENCE_PRODUCER_TOOL_NAMES = [
+  "computer_write_file",
+  "computer_run_command",
+  "computer_summarize_table_artifact",
+  "visible_extract_tables",
+] as const;
 
 function hasAnyTool(policy: RuntimeToolProgressPolicy, names: readonly string[]): boolean {
   return names.some((name) => policy.evidenceProducingToolNames.includes(name));
@@ -623,35 +694,22 @@ export function evaluateRuntimeToolProgress(input: {
   const priorEvidence = input.priorEvidence ?? [];
   const priorEvidenceKinds = collectEvidenceKinds(priorEvidence);
   const workProduct = classifyWorkProduct(priorEvidence, policy, priorEvidenceKinds);
+  const policyEvidenceKinds = collectPolicyEvidenceKinds(priorEvidence, policy);
+  const missingRequiredEvidenceKinds = policy.requiredEvidenceKinds
+    .filter((kind) => !policyEvidenceKinds.satisfied.has(kind));
+  const nextAction = nextActionForEvidenceGap({
+    missingRequiredEvidenceKinds,
+    satisfiedEvidenceKinds: [...policyEvidenceKinds.satisfied],
+    failedEvidenceKinds: [...policyEvidenceKinds.failed],
+    workProduct,
+    policy,
+  });
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(priorEvidence);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(priorEvidence);
   const recentPatchRebaseReadAfterPreconditionFailure = hasRecentPatchRebaseReadAfterPreconditionFailure(priorEvidence);
   const allExploratory = input.calls.every((call) => policy.exploratoryToolNames.includes(call.name));
   const hasEvidenceProducer = input.calls.some((call) => policy.evidenceProducingToolNames.includes(call.name));
   const hasSetupOnly = input.calls.every((call) => policy.setupToolNames.includes(call.name));
-  if (
-    !hasSetupOnly
-    && shouldRejectRepeatedNonDeliverableSourceMutation({
-      calls: input.calls,
-      policy,
-      workProduct,
-      recentActionableDiagnostic,
-      recentPatchPreconditionFailure,
-      recentPatchRebaseReadAfterPreconditionFailure,
-    })
-  ) {
-    const nonDeliverableSourceMutationRejections = input.state.nonDeliverableSourceMutationRejections + 1;
-    return {
-      allow: false,
-      stalled: nonDeliverableSourceMutationRejections > 1,
-      reason: "Intermediate artifact/source evidence exists but final artifact evidence is still missing",
-      directive: intermediateArtifactProductionRepairDirective(policy),
-      state: {
-        ...input.state,
-        nonDeliverableSourceMutationRejections,
-      },
-    };
-  }
   if (!allExploratory || hasEvidenceProducer || hasSetupOnly) {
     return {
       allow: true,
@@ -673,7 +731,21 @@ export function evaluateRuntimeToolProgress(input: {
     return { allow: true, state: input.state };
   }
 
-  if (workProduct.status === "process_artifact_available") {
+  if (recentActionableDiagnostic) {
+    const diagnosticExploratoryRejections = input.state.diagnosticExploratoryRejections + 1;
+    return {
+      allow: false,
+      stalled: diagnosticExploratoryRejections > 1,
+      reason: "Read-only exploratory tool calls are not allowed after an actionable artifact diagnostic",
+      directive: policy.diagnosticRepairDirective,
+      state: {
+        ...input.state,
+        diagnosticExploratoryRejections,
+      },
+    };
+  }
+
+  if (workProduct.status === "process_artifact_available" && nextAction !== "acquire_source_evidence") {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
       allow: false,
@@ -687,7 +759,7 @@ export function evaluateRuntimeToolProgress(input: {
     };
   }
 
-  if (workProduct.status === "deliverable_available") {
+  if (workProduct.status === "deliverable_available" && nextAction !== "acquire_source_evidence") {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
       allow: false,
@@ -697,20 +769,6 @@ export function evaluateRuntimeToolProgress(input: {
       state: {
         ...input.state,
         exploratoryOnlyRejections,
-      },
-    };
-  }
-
-  if (recentActionableDiagnostic) {
-    const diagnosticExploratoryRejections = input.state.diagnosticExploratoryRejections + 1;
-    return {
-      allow: false,
-      stalled: diagnosticExploratoryRejections > 1,
-      reason: "Read-only exploratory tool calls are not allowed after an actionable artifact diagnostic",
-      directive: policy.diagnosticRepairDirective,
-      state: {
-        ...input.state,
-        diagnosticExploratoryRejections,
       },
     };
   }
@@ -784,38 +842,6 @@ function artifactAcceptanceRepairDirective(policy: RuntimeToolProgressPolicy): s
   ].join("\n");
 }
 
-function shouldRejectRepeatedNonDeliverableSourceMutation(input: {
-  readonly calls: readonly ModelToolCall[];
-  readonly policy: RuntimeToolProgressPolicy;
-  readonly workProduct: RuntimeStepWorkProductState;
-  readonly recentActionableDiagnostic: boolean;
-  readonly recentPatchPreconditionFailure: boolean;
-  readonly recentPatchRebaseReadAfterPreconditionFailure: boolean;
-}): boolean {
-  if (input.workProduct.status !== "process_artifact_available") return false;
-  if (input.recentActionableDiagnostic) return false;
-  if (input.recentPatchPreconditionFailure) return false;
-  if (input.recentPatchRebaseReadAfterPreconditionFailure) return false;
-  if (input.calls.some((call) => callMaterializesOrVerifiesArtifact(call.name))) return false;
-
-  const mutationCalls = input.calls.filter((call) => REPLACE_SOURCE_TOOL_NAMES.has(call.name));
-  if (mutationCalls.length === 0) return false;
-  if (input.calls.some((call) => !REPLACE_SOURCE_TOOL_NAMES.has(call.name) && !input.policy.exploratoryToolNames.includes(call.name))) {
-    return false;
-  }
-
-  const targetPaths = mutationCalls.flatMap((call) => sourceMutationTargetPaths(call));
-  if (targetPaths.length === 0) return false;
-  if (targetPaths.some((path) => pathCanBeAcceptanceDeliverable(path, input.policy))) return false;
-
-  const knownNonDeliverablePaths = new Set(
-    input.workProduct.processArtifacts.map((artifact) => normalizeArtifactPath(artifact.path)),
-  );
-  if (knownNonDeliverablePaths.size === 0) return false;
-  return targetPaths.every((path) => knownNonDeliverablePaths.has(normalizeArtifactPath(path)));
-}
-
-const REPLACE_SOURCE_TOOL_NAMES = new Set(["computer_write_file"]);
 const WORK_PRODUCT_TOOL_NAMES = new Set([
   "computer_write_file",
   "computer_patch_file",
@@ -825,37 +851,10 @@ const WORK_PRODUCT_TOOL_NAMES = new Set([
   "verify_artifact_acceptance",
 ]);
 
-function callMaterializesOrVerifiesArtifact(toolName: string): boolean {
-  return WORK_PRODUCT_TOOL_NAMES.has(toolName) && toolName !== "computer_write_file" && toolName !== "computer_patch_file";
-}
-
-function sourceMutationTargetPaths(call: ModelToolCall): string[] {
-  const args = asRecord(call.arguments);
-  if (args === undefined) return [];
-  const paths = [
-    stringField(args, "path"),
-    stringField(args, "filePath"),
-    stringField(args, "targetPath"),
-    stringField(args, "artifactPath"),
-  ].filter((path): path is string => path !== undefined);
-  return uniqueStrings(paths);
-}
-
-function pathCanBeAcceptanceDeliverable(path: string, policy: RuntimeToolProgressPolicy): boolean {
-  if (policy.expectedArtifactKind !== undefined) {
-    return artifactPathMatchesExpectedKind(path, policy.expectedArtifactKind);
-  }
-  return !isGeneratedSourcePath(path);
-}
-
-function normalizeArtifactPath(path: string): string {
-  return path.trim();
-}
-
 function artifactRefFromEvidence(evidence: AgentLoopToolEvidence): RuntimeStepArtifactRef | undefined {
   const parsed = parseToolEvidenceRecord(evidence);
   if (parsed === undefined) return undefined;
-  const artifact = artifactRecordFromResult(parsed);
+  const artifact = artifactRecordsFromResult(parsed)[0];
   const path = stringField(parsed, "path")
     ?? stringField(artifact, "path")
     ?? stringField(asRecord(parsed.output), "path");
@@ -951,11 +950,7 @@ function pathExtension(path: string): string | undefined {
 }
 
 function parseToolEvidenceRecord(evidence: AgentLoopToolEvidence): Record<string, unknown> | undefined {
-  try {
-    return asRecord(JSON.parse(evidence.result));
-  } catch {
-    return undefined;
-  }
+  return parseJsonRecord(evidence.result);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1050,7 +1045,7 @@ function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {
   if (text.length === 0) return false;
   const hasDiagnostic =
     evidence.isError
-    || /(?:validation failed|validator|preflight|parse|parser|syntax|error_count["']?\s*:\s*[1-9]|\berror\(s\)|failed evidence|artifact_acceptance)/iu.test(text);
+    || /(?:"exitCode"\s*:\s*[1-9]\d*|Traceback|(?:[A-Z][A-Za-z0-9_]*Error|Exception):|validation failed|validator|preflight|parse|parser|syntax|error_count["']?\s*:\s*[1-9]|\berror\(s\)|failed evidence|artifact_acceptance)/u.test(text);
   if (!hasDiagnostic) return false;
   return /(?:line\s+\d+|column\s+\d+|position\s+\d+|slide[_\s-]*(?:index)?\s*\d+|rule["']?\s*:|suggested[_\s-]*fix|requires|missing|artifact[_\s-]*path|wrote\s+\S+\.[A-Za-z0-9]+|\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx|pptx|xlsx)\b)/iu
     .test(text);

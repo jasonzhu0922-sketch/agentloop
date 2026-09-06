@@ -26,6 +26,11 @@ import { ToolRegistry } from "../tools/tool-registry.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
 import {
+  DefaultStepExecutionStrategy,
+  type StepExecutionDecision,
+  type StepExecutionStrategy,
+} from "./step-execution-strategy.ts";
+import {
   deriveRuntimeStepEvidenceState,
   deriveEvidenceCompletionCandidate,
   evaluateRuntimeToolProgress,
@@ -71,6 +76,7 @@ export interface AgentLoopOptions {
     context: ToolStepConvergenceContext,
   ) => boolean | Promise<boolean>;
   readonly progressPolicy?: RuntimeToolProgressPolicy;
+  readonly stepExecutionStrategy?: StepExecutionStrategy;
   readonly signal?: AbortSignal;
   readonly emit?: RuntimeEventSink;
   readonly actionTracker?: {
@@ -180,6 +186,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const candidateRepairGraceSteps = Math.max(0, options.candidateRepairGraceSteps ?? 0);
   const convergenceMaxOutputTokens = Math.max(1, options.convergenceMaxOutputTokens ?? CONVERGENCE_MAX_OUTPUT_TOKENS);
   const convergencePrompt = options.convergencePrompt ?? CONVERGENCE_PROMPT;
+  const stepExecutionStrategy = options.stepExecutionStrategy ?? new DefaultStepExecutionStrategy();
   const candidateRepairAssessmentLimit = Math.max(
     0,
     options.candidateRepairAssessmentLimit ?? DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT,
@@ -441,7 +448,40 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     // Ported from OpenCode's materialization boundary: each model step gets a
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
-    const materialized = options.tools.materialize(options.grant);
+    const grantedMaterialized = options.tools.materialize(options.grant);
+    const stepEvidenceState = deriveRuntimeStepEvidenceState({
+      policy: options.progressPolicy,
+      evidence: toolEvidence,
+    });
+    const stepExecutionDecision = stepExecutionStrategy.prepareModelStep({
+      modelStep: step,
+      maxSteps: options.maxSteps,
+      hardLimit,
+      convergenceOnly,
+      availableTools: convergenceOnly ? [] : grantedMaterialized.definitions,
+      priorToolEvidence: toolEvidence,
+      stepEvidenceState,
+      stepSemanticFrame: options.stepSemanticFrame,
+    });
+    const materialized = options.tools.materialize(scopedGrantForStepExecution(
+      options.grant,
+      grantedMaterialized.definitions,
+      stepExecutionDecision,
+    ));
+    contextAssembler.setRuntimeStepFrame(JSON.stringify(stepExecutionDecision.loopStepFrame));
+    contextAssembler.setPromptProjectionPolicy(stepExecutionDecision.promptProjection);
+    await emit({
+      type: "step_execution.policy_applied",
+      data: {
+        step,
+        strategyId: stepExecutionDecision.strategyId,
+        toolCatalogMode: stepExecutionDecision.toolCatalog.mode,
+        activeToolCount: materialized.definitions.length,
+        hiddenToolGroupCount: stepExecutionDecision.toolCatalog.hiddenToolGroups.length,
+        promptProjectionMode: stepExecutionDecision.promptProjection.mode,
+        trace: stepExecutionDecision.trace,
+      },
+    });
     let assembly = await contextAssembler.assemble(messages, convergenceOnly ? [] : materialized.definitions, options.signal);
 
     let earlyOutcomes = new Map<string, ToolOutcome>();
@@ -1147,6 +1187,30 @@ function currentHardLimit(
   finalConvergenceGraceSteps = 0,
 ): number {
   return maxSteps + convergenceGraceSteps + candidateRepairGraceSteps + finalConvergenceGraceSteps;
+}
+
+function scopedGrantForStepExecution(
+  grant: CapabilityGrant,
+  availableTools: readonly { readonly name: string }[],
+  decision: StepExecutionDecision,
+): CapabilityGrant {
+  const availableToolNames = new Set(availableTools.map((tool) => tool.name));
+  const invalidToolNames = decision.toolCatalog.activeToolNames.filter((name) => !availableToolNames.has(name));
+  if (invalidToolNames.length > 0) {
+    throw new AppError(
+      "INTERNAL_ERROR",
+      "Step execution strategy selected tools outside the current capability grant",
+      500,
+      {
+        strategyId: decision.strategyId,
+        invalidToolNames,
+      },
+    );
+  }
+  return {
+    ...grant,
+    allowedToolNames: new Set(decision.toolCatalog.activeToolNames),
+  };
 }
 
 async function shouldUseFinalConvergence(

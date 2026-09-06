@@ -224,7 +224,7 @@ function skeletonFromProposal(proposal: PlanProposal): readonly PlanStepSkeleton
       inputBindings: {},
       requiredEvidenceKinds,
       producedEvidenceKinds: requiredEvidenceKinds,
-      requiredCapabilities: [],
+      requiredCapabilities: unique(step.recommendedToolNames),
       skillRoleHints: selectedSkillRoleHints(step),
     };
   });

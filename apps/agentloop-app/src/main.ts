@@ -16,6 +16,7 @@ import { createAgentLoopServer } from "./http/server.ts";
 import { loadOptionalMcpToolsFromConfigFile } from "./mcp/mcp-loader.ts";
 import { loadPlanningExtensions } from "./planning-extension-loader.ts";
 import { resolveApplicationRuntimePaths } from "./runtime-config.ts";
+import { loadStepExecutionStrategyFromConfigFile } from "./step-execution-strategy-loader.ts";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const port = parseInteger(process.env.PORT, 8787, 1, 65_535);
@@ -27,6 +28,7 @@ const runtimePaths = resolveApplicationRuntimePaths({
   databasePath: process.env.DATABASE_PATH,
   providerConfigPath: process.env.LLM_PROVIDER_CONFIG_PATH,
   planningExtensionsConfigPath: process.env.PLANNING_EXTENSIONS_CONFIG_PATH,
+  stepExecutionStrategyConfigPath: process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH,
   workspaceRoot: process.env.WORKSPACE_ROOT,
   customSkillDirectories: parseStringArray(process.env.CUSTOM_SKILL_DIRECTORIES_JSON, "CUSTOM_SKILL_DIRECTORIES_JSON"),
 });
@@ -63,6 +65,12 @@ const planningExtensionPlugins = await loadPlanningExtensions({
   workspaceRoot,
   ...(runtimePaths.planningExtensionsConfigPath === undefined ? {} : { configPath: runtimePaths.planningExtensionsConfigPath }),
 });
+const stepExecutionStrategy = await loadStepExecutionStrategyFromConfigFile({
+  appRoot,
+  workspaceRoot,
+  configPath: runtimePaths.stepExecutionStrategyConfigPath,
+  required: process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH !== undefined,
+});
 const mcpIntegration = await loadOptionalMcpToolsFromConfigFile(runtimePaths.mcpServersConfigPath);
 const runs = new RunService({
   database,
@@ -72,6 +80,7 @@ const runs = new RunService({
   modelKeys: providers.modelKeys(),
   workspaceRoot,
   acceptanceProviders,
+  stepExecutionStrategy,
   computerExecutableAliases: parseExecutableAliases(process.env.TRUSTED_EXECUTABLE_ALIASES_JSON),
   computerCommandEnvironment: parseCommandEnvironment(process.env.TRUSTED_COMMAND_ENV_JSON),
   tools: [

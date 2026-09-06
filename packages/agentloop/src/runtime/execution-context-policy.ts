@@ -5,7 +5,7 @@ import { skillExecutionRootEnvName } from "../tools/skill-loader.ts";
 import type { DynamicPromptProfile, TaskProfile } from "./dynamic-prompt.ts";
 import { formatDynamicPromptContext } from "./dynamic-prompt.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
-import { artifactStepToolProgressPolicy, type RuntimeToolProgressPolicy } from "./tool-progress-policy.ts";
+import { runtimeStepToolProgressPolicy, type RuntimeToolProgressPolicy } from "./tool-progress-policy.ts";
 import type {
   RuntimeContextSnapshot,
   SkillExecutionRootGrant,
@@ -46,6 +46,7 @@ export function buildStepRuntimeContextSnapshot(input: {
     requiresFileOutput: input.requiresFileOutput,
     conversationWorkingSet: input.conversationWorkingSet,
   });
+  const planStepHandoffFrame = buildPlanStepHandoffFrame(input.step, input.plan, stepSemanticFrame);
   const evidenceAcquisitionDiscipline = buildEvidenceAcquisitionDiscipline({
     stepSemanticFrame,
     usesWebTools,
@@ -72,6 +73,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           successCriteria: input.step.successCriteria,
         },
         stepSemanticFrame,
+        planStepHandoffFrame,
         downstreamPlanSteps: input.plan.steps
           .filter((item) =>
             item.id !== input.step.id
@@ -162,6 +164,215 @@ export function buildStepRuntimeContextSnapshot(input: {
   };
 }
 
+function buildPlanStepHandoffFrame(
+  step: ExecutionPlan["steps"][number],
+  plan: ExecutionPlan,
+  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "completionBoundary" | "phaseRole" | "evidenceMode" | "firstAction">,
+):
+  | {
+      readonly schema: "agentloop.stepHandoffFrame/v1";
+      readonly mode: "current_to_next";
+      readonly currentStepId: string;
+      readonly instruction: string;
+      readonly currentStep: StepHandoffStep;
+      readonly nextStage: {
+        readonly kind: "direct_dependents" | "next_pending";
+        readonly steps: readonly StepHandoffNextStep[];
+      };
+      readonly handoffContract: {
+        readonly reusableEvidenceKinds: readonly EvidenceKind[];
+        readonly reusableOutputPolicy: string;
+        readonly currentStepBoundary: string;
+        readonly nextStepBoundary: string;
+        readonly forbiddenMoves: readonly string[];
+      };
+    }
+  | {
+      readonly schema: "agentloop.stepHandoffFrame/v1";
+      readonly mode: "terminal_current_only";
+      readonly currentStepId: string;
+      readonly instruction: string;
+      readonly currentStep: StepHandoffStep;
+      readonly handoffContract: {
+        readonly reusableEvidenceKinds: readonly EvidenceKind[];
+        readonly reusableOutputPolicy: string;
+        readonly currentStepBoundary: string;
+        readonly forbiddenMoves: readonly string[];
+      };
+    } {
+  const currentStep = compactHandoffStep(step, frame.completionBoundary);
+  const reusableEvidenceKinds = reusableEvidenceKindsForStep(step);
+  const nextStage = findNextStage(step, plan);
+  if (nextStage.steps.length === 0) {
+    return {
+      schema: "agentloop.stepHandoffFrame/v1",
+      mode: "terminal_current_only",
+      currentStepId: step.id,
+      instruction:
+        "This is the final active Plan step. Complete the current step's boundary directly; no next-step handoff is required.",
+      currentStep,
+      handoffContract: {
+        reusableEvidenceKinds,
+        reusableOutputPolicy:
+          "Summarize only evidence needed to prove the current step complete; do not invent a downstream handoff.",
+        currentStepBoundary: summarizeCurrentStepBoundary(frame),
+        forbiddenMoves: [
+          "do not invent a downstream step or handoff target when no next active Plan stage exists",
+          ...handoffForbiddenMovesForFrame(frame),
+        ],
+      },
+    };
+  }
+  return {
+    schema: "agentloop.stepHandoffFrame/v1",
+    mode: "current_to_next",
+    currentStepId: step.id,
+    instruction:
+      "Complete only the current step, and make its output/evidence reusable by the next Plan stage. Do not execute the next stage.",
+    currentStep,
+    nextStage,
+    handoffContract: {
+      reusableEvidenceKinds,
+      reusableOutputPolicy:
+        "The completion candidate should name reusable evidence, artifact paths, summaries, caveats, and missing facts that the next stage can consume without repeating this step.",
+      currentStepBoundary: summarizeCurrentStepBoundary(frame),
+      nextStepBoundary:
+        "The next stage is context for semantic continuity only; its objective and evidence contract must not be completed during the current step unless explicitly required by the current step.",
+      forbiddenMoves: [
+        "do not execute work whose only purpose is to satisfy the next step's completion boundary",
+        "do not reacquire evidence already satisfied by the current step when handing off to the next step",
+        ...handoffForbiddenMovesForFrame(frame),
+      ],
+    },
+  };
+}
+
+interface StepHandoffStep {
+  readonly id: string;
+  readonly objective: string;
+  readonly role?: ExecutionPlan["steps"][number]["role"];
+  readonly status: ExecutionPlan["steps"][number]["status"];
+  readonly evidenceContract?: ExecutionPlan["steps"][number]["evidenceContract"];
+}
+
+interface StepHandoffNextStep extends StepHandoffStep {
+  readonly dependsOnCurrent: boolean;
+  readonly requiredInputsFromCurrent: readonly string[];
+}
+
+function compactHandoffStep(
+  step: ExecutionPlan["steps"][number],
+  completionBoundary?: readonly EvidenceKind[],
+): StepHandoffStep {
+  return {
+    id: step.id,
+    objective: truncateContextText(step.objective, STEP_HANDOFF_OBJECTIVE_LIMIT),
+    ...(step.role === undefined ? {} : { role: step.role }),
+    status: step.status,
+    ...(completionBoundary === undefined || completionBoundary.length === 0
+      ? step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }
+      : {
+        evidenceContract: {
+          requiredKinds: completionBoundary,
+          caveatPolicy: step.evidenceContract?.caveatPolicy ?? "none",
+        },
+      }),
+  };
+}
+
+function findNextStage(
+  step: ExecutionPlan["steps"][number],
+  plan: ExecutionPlan,
+): {
+  readonly kind: "direct_dependents" | "next_pending";
+  readonly steps: readonly StepHandoffNextStep[];
+} {
+  const activeSteps = plan.steps
+    .filter((item) =>
+      item.id !== step.id
+      && item.retiredAt === undefined
+      && item.status !== "completed"
+    )
+    .sort((left, right) => left.position - right.position);
+  const directDependents = activeSteps.filter((item) => item.dependencies.includes(step.id));
+  const selected = directDependents.length > 0 ? directDependents : activeSteps.filter((item) => item.position > step.position).slice(0, 1);
+  return {
+    kind: directDependents.length > 0 ? "direct_dependents" : "next_pending",
+    steps: selected.slice(0, STEP_HANDOFF_NEXT_STEP_LIMIT).map((item) => ({
+      ...compactHandoffStep(item),
+      dependsOnCurrent: item.dependencies.includes(step.id),
+      requiredInputsFromCurrent: requiredInputsFromCurrentStep(step, item),
+    })),
+  };
+}
+
+function reusableEvidenceKindsForStep(step: ExecutionPlan["steps"][number]): EvidenceKind[] {
+  const kinds = step.evidenceContract?.requiredKinds ?? [];
+  return kinds.filter(isReusableEvidenceKind);
+}
+
+function requiredInputsFromCurrentStep(
+  current: ExecutionPlan["steps"][number],
+  next: ExecutionPlan["steps"][number],
+): string[] {
+  const result = new Set<string>();
+  if (next.dependencies.includes(current.id)) result.add("current step completion output");
+  const currentKinds = new Set(current.evidenceContract?.requiredKinds ?? []);
+  const nextKinds = new Set(next.evidenceContract?.requiredKinds ?? []);
+  for (const kind of currentKinds) {
+    if (nextKinds.has(kind) || isReusableEvidenceKind(kind)) result.add(kind);
+  }
+  if (next.recommendedToolNames.some((name) => /(?:write|create|export|verify|artifact)/iu.test(name))) {
+    for (const kind of ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"] as const) {
+      if (currentKinds.has(kind)) result.add(kind);
+    }
+  }
+  if (next.recommendedToolNames.some((name) => /(?:read|source|visible|web|search|fetch)/iu.test(name))) {
+    for (const kind of ["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const) {
+      if (currentKinds.has(kind)) result.add(kind);
+    }
+  }
+  return [...result].slice(0, STEP_HANDOFF_INPUT_LIMIT);
+}
+
+function isReusableEvidenceKind(kind: EvidenceKind): boolean {
+  return kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "structured_extraction_artifact"
+    || kind === "artifact_path"
+    || kind === "artifact_non_empty"
+    || kind === "artifact_acceptance"
+    || kind === "artifact_openable"
+    || kind === "format_matches_request"
+    || kind === "explicit_caveats";
+}
+
+function summarizeCurrentStepBoundary(
+  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "completionBoundary" | "phaseRole" | "evidenceMode" | "firstAction">,
+): string {
+  return [
+    `phaseRole=${frame.phaseRole}`,
+    `evidenceMode=${frame.evidenceMode}`,
+    `firstAction=${frame.firstAction}`,
+    `completionBoundary=${frame.completionBoundary.join(",") || "none"}`,
+  ].join("; ");
+}
+
+function handoffForbiddenMovesForFrame(
+  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "phaseRole" | "evidenceMode">,
+): string[] {
+  const result: string[] = [];
+  if (frame.phaseRole === "evidence_acquisition") {
+    result.push("do not write the downstream artifact before the acquisition boundary is accepted");
+  }
+  if (frame.evidenceMode === "reuse_dependency_evidence") {
+    result.push("do not redo dependency acquisition when the handoff evidence is already bound");
+  }
+  return result;
+}
+
 function buildEvidenceAcquisitionDiscipline(input: {
   readonly stepSemanticFrame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "phaseRole" | "evidenceMode" | "firstAction">;
   readonly usesWebTools: boolean;
@@ -190,9 +401,15 @@ export function buildStepToolProgressPolicy(input: {
   readonly requiresFileOutput: boolean;
   readonly taskProfile?: TaskProfile;
 }): RuntimeToolProgressPolicy | undefined {
-  if (!input.requiresFileOutput && !stepRequiresArtifactEvidence(input.step)) return undefined;
-  return artifactStepToolProgressPolicy(input.step.evidenceContract?.requiredKinds ?? [], {
+  const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
+  if (!input.requiresFileOutput && !stepRequiresRuntimeEvidenceProgress(requiredKinds)) return undefined;
+  return runtimeStepToolProgressPolicy(requiredKinds, {
     expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
+    scope: stepRequiresArtifactEvidence(input.step)
+      ? "artifact"
+      : stepRequiresSourceEvidence(requiredKinds) ? "source" : "generic",
+    additionalExploratoryToolNames: input.step.recommendedToolNames,
+    additionalEvidenceProducingToolNames: input.step.recommendedToolNames,
   });
 }
 
@@ -543,18 +760,44 @@ function truncateContextText(value: string, maximum: number): string {
   return compact.length <= maximum ? compact : `${compact.slice(0, maximum - 1)}...`;
 }
 
-function stepRequiresArtifactEvidence(step: ExecutionPlan["steps"][number]): boolean {
-  return step.evidenceContract?.requiredKinds.some((kind) =>
-    kind === "artifact_path"
-    || kind === "artifact_non_empty"
-    || kind === "artifact_openable"
-    || kind === "format_matches_request"
-    || kind === "artifact_acceptance"
+function stepRequiresRuntimeEvidenceProgress(requiredKinds: readonly EvidenceKind[]): boolean {
+  return requiredKinds.some((kind) =>
+    SOURCE_RUNTIME_EVIDENCE_KINDS.has(kind)
+    || ARTIFACT_RUNTIME_EVIDENCE_KINDS.has(kind)
     || kind === "delivery_receipt"
-  ) ?? false;
+    || kind === "explicit_caveats"
+  );
 }
+
+function stepRequiresSourceEvidence(requiredKinds: readonly EvidenceKind[]): boolean {
+  return requiredKinds.some((kind) => SOURCE_RUNTIME_EVIDENCE_KINDS.has(kind));
+}
+
+function stepRequiresArtifactEvidence(step: ExecutionPlan["steps"][number]): boolean {
+  return step.evidenceContract?.requiredKinds.some((kind) => ARTIFACT_RUNTIME_EVIDENCE_KINDS.has(kind)) ?? false;
+}
+
+const SOURCE_RUNTIME_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+]);
+
+const ARTIFACT_RUNTIME_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_openable",
+  "format_matches_request",
+  "artifact_acceptance",
+]);
 
 const DEPENDENCY_OUTPUT_LIMIT = 1_200;
 const DEPENDENCY_TOOL_EVIDENCE_LIMIT = 12;
 const DEPENDENCY_TOOL_PREVIEW_LIMIT = 900;
 const DEPENDENCY_SOURCE_REF_LIMIT = 12;
+const STEP_HANDOFF_OBJECTIVE_LIMIT = 600;
+const STEP_HANDOFF_NEXT_STEP_LIMIT = 3;
+const STEP_HANDOFF_INPUT_LIMIT = 12;

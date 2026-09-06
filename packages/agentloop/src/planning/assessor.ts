@@ -7,6 +7,12 @@ import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { classifyTaskIntent } from "../runtime/task-intent.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
 import { deliveryCandidateCaveats } from "../runtime/delivery-candidate.ts";
+import {
+  canonicalArtifactAcceptanceVerdict,
+  parseJsonRecord,
+  runtimeEvidenceKindArrays,
+  runtimeEvidenceRecordsFromToolResult,
+} from "../runtime/tool-result-evidence.ts";
 import type {
   AssessmentMethod,
   AssessmentProfileId,
@@ -355,36 +361,36 @@ function runtimeEvidenceReceipts(toolCalls: readonly { toolCallId: string; toolN
   const receipts: RuntimeEvidenceReceipt[] = [];
   for (const toolCall of toolCalls) {
     if (toolCall.isError) continue;
-    const parsed = parseToolResultObject(toolCall.result);
-    const topLevelSchema = typeof parsed?.schema === "string" ? parsed.schema : undefined;
-    const nestedReceipt = parseToolResultObject(parsed?.evidenceReceipt ?? parsed?.artifactReceipt);
-    const schema = topLevelSchema === "agentloop.artifactAcceptance/v1" || topLevelSchema === "agentloop.sourceSummary/v1"
-      ? topLevelSchema
-      : typeof nestedReceipt?.schema === "string"
-        ? nestedReceipt.schema
-        : undefined;
-    if (
-      schema !== "agentloop.artifactAcceptance/v1"
-      && schema !== "agentloop.sourceSummary/v1"
-      && schema !== "agentloop.artifactReceipt/v1"
-      && schema !== "agentloop.toolEvidenceReceipt/v1"
-    ) continue;
-    const evidenceKinds = parseToolResultObject(nestedReceipt?.evidenceKinds ?? parsed?.evidenceKinds);
-    const caveats = Array.isArray(nestedReceipt?.caveats)
-      ? nestedReceipt.caveats
-      : Array.isArray(parsed?.caveats)
-        ? parsed.caveats
-        : undefined;
-    const verdict = typeof parsed?.verdict === "string" ? parsed.verdict : undefined;
-    receipts.push({
-      toolCallId: toolCall.toolCallId,
-      schema,
-      verdict,
-      explicitNoCaveats: caveats !== undefined && caveats.length === 0,
-      satisfied: new Set(stringArrayField(evidenceKinds, "satisfied")),
-      caveated: new Set(stringArrayField(evidenceKinds, "caveated")),
-      failed: new Set(stringArrayField(evidenceKinds, "failed")),
-    });
+    for (const parsed of runtimeEvidenceRecordsFromToolResult(toolCall.result)) {
+      const topLevelSchema = typeof parsed.schema === "string" ? parsed.schema : undefined;
+      const nestedReceipt = parseToolResultObject(parsed.evidenceReceipt ?? parsed.artifactReceipt);
+      const schema = topLevelSchema === "agentloop.artifactAcceptance/v1" || topLevelSchema === "agentloop.sourceSummary/v1"
+        ? topLevelSchema
+        : typeof nestedReceipt?.schema === "string"
+          ? nestedReceipt.schema
+          : undefined;
+      if (
+        schema !== "agentloop.artifactAcceptance/v1"
+        && schema !== "agentloop.sourceSummary/v1"
+        && schema !== "agentloop.artifactReceipt/v1"
+        && schema !== "agentloop.toolEvidenceReceipt/v1"
+      ) continue;
+      const evidenceKinds = runtimeEvidenceKindArrays(nestedReceipt ?? parsed);
+      const caveats = Array.isArray(nestedReceipt?.caveats)
+        ? nestedReceipt.caveats
+        : Array.isArray(parsed.caveats)
+          ? parsed.caveats
+          : undefined;
+      receipts.push({
+        toolCallId: toolCall.toolCallId,
+        schema,
+        verdict: canonicalArtifactAcceptanceVerdict(parsed),
+        explicitNoCaveats: caveats !== undefined && caveats.length === 0,
+        satisfied: new Set(evidenceKinds.satisfied),
+        caveated: new Set(evidenceKinds.caveated),
+        failed: new Set(evidenceKinds.failed),
+      });
+    }
   }
   return receipts;
 }
@@ -412,7 +418,11 @@ function evidenceKindSatisfiedByGate(
   if (kind === "artifact_acceptance") {
     const acceptance = receipts.find((receipt) => receipt.schema === "agentloop.artifactAcceptance/v1");
     return acceptance !== undefined
-      && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
+      && (
+        acceptance.verdict === "accepted"
+        || acceptance.verdict === "caveated"
+        || acceptance.satisfied.has("artifact_acceptance")
+      )
       && acceptance.failed.size === 0;
   }
   if (kind === "explicit_caveats" && candidate !== undefined) {
@@ -442,22 +452,7 @@ function rejectedEvidenceGateRationale(
 }
 
 function parseToolResultObject(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return parseToolResultObject(parsed);
-    } catch {
-      return undefined;
-    }
-  }
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function stringArrayField(record: Record<string, unknown> | undefined, field: string): string[] {
-  const value = record?.[field];
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  return parseJsonRecord(value);
 }
 
 function parseAssessment(input: StepAssessmentInput, value: unknown): SkillComplianceAssessment {

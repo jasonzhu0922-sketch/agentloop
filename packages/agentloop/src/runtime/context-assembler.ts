@@ -11,6 +11,7 @@ import type {
   RuntimeEvent,
   RuntimeEventSink,
 } from "./contracts.ts";
+import type { PromptProjectionDecision } from "./step-execution-strategy.ts";
 
 export interface ContextPolicy {
   readonly outputReserveTokens?: number;
@@ -122,6 +123,8 @@ export class ContextAssembler {
   private contextEpoch = 0;
   private contextRevision = 0;
   private runtimeDirective?: string;
+  private runtimeStepFrame?: string;
+  private promptProjectionPolicy?: PromptProjectionDecision;
   private snapshot?: RuntimeContextSnapshot;
   private previousSnapshotId?: string;
   private summary?: string;
@@ -155,6 +158,26 @@ export class ContextAssembler {
     const normalized = value?.trim() || undefined;
     if (this.runtimeDirective === normalized) return;
     this.runtimeDirective = normalized;
+    this.contextRevision += 1;
+    this.invalidateSnapshot();
+  }
+
+  /**
+   * Per-model-step server guidance is separate from repair directives: it
+   * describes the current loop turn and expected handoff without pretending to
+   * be user transcript or durable Plan state.
+   */
+  setRuntimeStepFrame(value: string | undefined): void {
+    const normalized = value?.trim() || undefined;
+    if (this.runtimeStepFrame === normalized) return;
+    this.runtimeStepFrame = normalized;
+    this.contextRevision += 1;
+    this.invalidateSnapshot();
+  }
+
+  setPromptProjectionPolicy(value: PromptProjectionDecision | undefined): void {
+    if (samePromptProjectionPolicy(this.promptProjectionPolicy, value)) return;
+    this.promptProjectionPolicy = value;
     this.contextRevision += 1;
     this.invalidateSnapshot();
   }
@@ -451,7 +474,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
-        || message.content.length <= this.policy.largeToolResultProjectionCharacters
+        || message.content.length <= this.largeToolResultProjectionCharacters()
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const structuredEvidence = structuredToolResultProjection(message.name, message.content);
@@ -468,7 +491,7 @@ export class ContextAssembler {
         newlyProjected.push(record);
         continue;
       }
-      const preview = message.content.slice(0, this.policy.largeToolResultPreviewCharacters);
+      const preview = message.content.slice(0, this.largeToolResultPreviewCharacters());
       const record: PrunedToolResult = {
         toolCallId: message.toolCallId,
         toolName: message.name,
@@ -801,6 +824,16 @@ export class ContextAssembler {
         "The summary never substitutes for exact Skill instructions. Reload any Skill you intend to continue applying when its load_skill result is absent from the recent transcript tail.",
         "</skill_disclosure_rule>",
       ]),
+      ...(this.runtimeStepFrame === undefined ? [] : [
+        "<loop_step_frame source=\"server\">",
+        this.runtimeStepFrame,
+        "</loop_step_frame>",
+      ]),
+      ...(this.promptProjectionPolicy === undefined ? [] : [
+        "<prompt_projection_policy source=\"server\">",
+        JSON.stringify(this.promptProjectionPolicy),
+        "</prompt_projection_policy>",
+      ]),
       ...(this.runtimeDirective === undefined ? [] : [
         "<runtime_directive>",
         this.runtimeDirective,
@@ -819,6 +852,18 @@ export class ContextAssembler {
 
   private invalidateSnapshot(): void {
     this.snapshot = undefined;
+  }
+
+  private largeToolResultProjectionCharacters(): number {
+    return this.promptProjectionPolicy?.largeToolResultProjectionCharacters
+      ?? this.policy.largeToolResultProjectionCharacters;
+  }
+
+  private largeToolResultPreviewCharacters(): number {
+    const projection = this.largeToolResultProjectionCharacters();
+    const preview = this.promptProjectionPolicy?.largeToolResultPreviewCharacters
+      ?? this.policy.largeToolResultPreviewCharacters;
+    return Math.min(preview, projection);
   }
 }
 
@@ -1086,6 +1131,10 @@ function uploadedSourceProjection(value: Record<string, unknown>): unknown {
 function structuredToolResultProjection(toolName: string, content: string): string | undefined {
   const value = parseJsonRecord(content);
   if (value === undefined) return undefined;
+  const stdoutRecord = parseJsonRecord(value.stdout);
+  if (stdoutRecord !== undefined && stringValue(stdoutRecord.schema) === "agentloop.artifactAcceptance/v1") {
+    return artifactAcceptanceProjection(stdoutRecord);
+  }
   const artifactReceipt = recordValue(value.artifactReceipt);
   if (artifactReceipt !== undefined) {
     return artifactReceiptProjection(artifactReceipt, stringValue(value.schema));
@@ -1335,7 +1384,7 @@ function writtenArtifactProjection(value: Record<string, unknown>, toolName: str
 }
 
 function artifactAcceptanceProjection(value: Record<string, unknown>): string | undefined {
-  const artifact = recordValue(value.artifact);
+  const artifact = recordValue(value.artifact) ?? artifactRecordFromString(value.artifact);
   if (artifact === undefined) return undefined;
   const checks = Array.isArray(value.checks) ? value.checks : [];
   const projection = {
@@ -1352,13 +1401,30 @@ function artifactAcceptanceProjection(value: Record<string, unknown>): string | 
       inspectionTruncated: booleanValue(artifact.inspectionTruncated),
     },
     verdict: stringValue(value.verdict),
-    evidenceKinds: recordValue(value.evidenceKinds),
+    evidenceKinds: artifactAcceptanceEvidenceKindsProjection(value),
     checks: checks.slice(0, 24).map(compactArtifactAcceptanceCheck),
     caveats: compactArray(value.caveats, 12),
     requestedChecks: compactArray(value.requestedChecks, 12),
     instruction: "Use this acceptance receipt for artifact status and caveats. When required artifact evidence is satisfied, do not reread files only to restate receipt facts. Do not infer skipped checks as passed; request the missing capability only when strict validation is required.",
   };
   return JSON.stringify(omitUndefinedDeep(projection));
+}
+
+function artifactAcceptanceEvidenceKindsProjection(value: Record<string, unknown>): unknown {
+  const evidenceKinds = recordValue(value.evidenceKinds);
+  if (evidenceKinds !== undefined) return evidenceKinds;
+  const projected = omitUndefinedDeep({
+    satisfied: compactArray(value.satisfiedEvidenceKinds, 24),
+    caveated: compactArray(value.caveatedEvidenceKinds, 24),
+    failed: compactArray(value.failedEvidenceKinds, 24),
+  });
+  const record = recordValue(projected);
+  if (record === undefined) return undefined;
+  return Object.keys(record).length === 0 ? undefined : record;
+}
+
+function artifactRecordFromString(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? { path: value } : undefined;
 }
 
 function compactArtifactAcceptanceCheck(value: unknown): unknown {
@@ -1788,7 +1854,8 @@ function truncateSingleLine(value: string, maximum: number): string {
   return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum)}...`;
 }
 
-function parseJsonRecord(content: string): Record<string, unknown> | undefined {
+function parseJsonRecord(content: unknown): Record<string, unknown> | undefined {
+  if (typeof content !== "string") return recordValue(content);
   try {
     return recordValue(JSON.parse(content));
   } catch {
@@ -1832,6 +1899,15 @@ function skillNameFromArguments(value: unknown): string | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const name = (value as Record<string, unknown>).name;
   return typeof name === "string" ? name : undefined;
+}
+
+function samePromptProjectionPolicy(
+  left: PromptProjectionDecision | undefined,
+  right: PromptProjectionDecision | undefined,
+): boolean {
+  if (left === right) return true;
+  if (left === undefined || right === undefined) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function assertClosedToolProtocol(messages: readonly ModelMessage[]): void {

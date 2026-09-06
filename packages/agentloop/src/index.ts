@@ -59,6 +59,27 @@ export type {
 export { runAgentLoop } from "./runtime/agent-loop.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";
 export type * from "./runtime/contracts.ts";
+export {
+  createStepExecutionStrategyProfile,
+  DefaultLoopStepPolicy,
+  DefaultPromptProjectionPolicy,
+  DefaultStepExecutionStrategy,
+  DefaultToolExposurePolicy,
+  FullCatalogToolExposurePolicy,
+} from "./runtime/step-execution-strategy.ts";
+export type {
+  HiddenToolGroup,
+  LoopStepFrame,
+  LoopStepPolicy,
+  PromptProjectionDecision,
+  PromptProjectionPolicy,
+  StepExecutionDecision,
+  StepExecutionInput,
+  StepExecutionPolicyTrace,
+  StepExecutionStrategy,
+  ToolCatalogDecision,
+  ToolExposurePolicy,
+} from "./runtime/step-execution-strategy.ts";
 export { OpenAICompatibleModel } from "./runtime/models.ts";
 export { LlmProviderRegistry } from "./runtime/provider-registry.ts";
 export type { LlmModelSummary, LlmProviderSummary } from "./runtime/provider-registry.ts";

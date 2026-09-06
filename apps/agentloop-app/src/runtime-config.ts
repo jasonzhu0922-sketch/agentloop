@@ -4,6 +4,7 @@ export interface ApplicationRuntimePaths {
   readonly databasePath: string;
   readonly providerConfigPath?: string;
   readonly planningExtensionsConfigPath?: string;
+  readonly stepExecutionStrategyConfigPath: string;
   readonly mcpServersConfigPath: string;
   readonly workspaceRoot: string;
   readonly customSkillDirectories: readonly string[];
@@ -14,6 +15,7 @@ export function resolveApplicationRuntimePaths(input: {
   readonly databasePath?: string;
   readonly providerConfigPath?: string;
   readonly planningExtensionsConfigPath?: string;
+  readonly stepExecutionStrategyConfigPath?: string;
   readonly workspaceRoot?: string;
   readonly customSkillDirectories?: readonly string[];
 }): ApplicationRuntimePaths {
@@ -27,6 +29,10 @@ export function resolveApplicationRuntimePaths(input: {
     ...(input.planningExtensionsConfigPath === undefined || input.planningExtensionsConfigPath.trim().length === 0
       ? {}
       : { planningExtensionsConfigPath: resolveFromAppRoot(input.appRoot, input.planningExtensionsConfigPath) }),
+    stepExecutionStrategyConfigPath: resolveFromAppRoot(
+      input.appRoot,
+      input.stepExecutionStrategyConfigPath ?? "./config/step-execution-strategy.json",
+    ),
     mcpServersConfigPath: resolveFromAppRoot(input.appRoot, "./config/mcp-servers.json"),
     workspaceRoot: resolveFromAppRoot(input.appRoot, input.workspaceRoot ?? "./workspace"),
     customSkillDirectories: (input.customSkillDirectories ?? []).map((directory) => resolveFromAppRoot(input.appRoot, directory)),

@@ -222,3 +222,114 @@ test("read_source treats chunkIndex and maxChunks as a consecutive read window",
     await database.close();
   }
 });
+
+test("read_source treats blank query as omitted and defaults unfiltered reads to full small sources", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+
+    const owner = testOwner();
+    const repository = new SourceRepository(database);
+    const now = Date.now();
+    const source = await repository.insertSource({
+      id: "src_33333333333333333333333333333333",
+      ownerUserId: owner.user.id,
+      originalName: "brief.md",
+      mimeType: "text/markdown",
+      extension: ".md",
+      byteSize: 90,
+      sha256: "source-sha-small-full",
+      storagePath: "/server-owned/upload/small-full-original",
+      status: "ready",
+      summary: "brief.md has three chunks.",
+      tokenEstimate: 30,
+      characterCount: 90,
+      truncated: false,
+      createdAt: now,
+    });
+    await repository.replaceChunks(source.id, [
+      {
+        chunk_index: 0,
+        kind: "text",
+        locator: "chars=1-30",
+        content: "alpha overview",
+        token_estimate: 5,
+        sha256: "chunk-sha-alpha",
+      },
+      {
+        chunk_index: 1,
+        kind: "text",
+        locator: "chars=31-60",
+        content: "beta details",
+        token_estimate: 5,
+        sha256: "chunk-sha-beta",
+      },
+      {
+        chunk_index: 2,
+        kind: "text",
+        locator: "chars=61-90",
+        content: "gamma caveats",
+        token_estimate: 5,
+        sha256: "chunk-sha-gamma",
+      },
+    ], now);
+    const tool = createSourceTools(repository)[0];
+    const grant = createCapabilityGrant({
+      actorUserId: owner.user.id,
+      runId: "run-read-source-blank-query",
+      depth: 0,
+      uploadedSources: [{
+        id: source.id,
+        originalName: source.original_name,
+        mimeType: source.mime_type,
+        extension: source.extension,
+        byteSize: source.byte_size,
+        sha256: source.sha256,
+        status: source.status,
+        summary: source.summary ?? undefined,
+        chunkCount: 3,
+        truncated: false,
+      }],
+      allowedToolNames: ["read_source"],
+      allowedSkillIds: [],
+    });
+
+    const blankQuery = await tool.execute({ grant }, tool.parse({
+      sourceId: source.id,
+      query: "   ",
+    })) as {
+      returnedChunks: number;
+      selectedChunks: number;
+      chunks: Array<{ chunkIndex: number; content: string }>;
+      evidenceReceipt: {
+        facts: Array<{ selectedBy: string; returnedChunkIndexes: number[] }>;
+        caveats: string[];
+      };
+    };
+
+    assert.equal(blankQuery.selectedChunks, 3);
+    assert.equal(blankQuery.returnedChunks, 3);
+    assert.deepEqual(blankQuery.chunks.map((chunk) => chunk.chunkIndex), [0, 1, 2]);
+    assert.deepEqual(blankQuery.evidenceReceipt.facts[0]?.returnedChunkIndexes, [0, 1, 2]);
+    assert.equal(blankQuery.evidenceReceipt.facts[0]?.selectedBy, "chunkIndex");
+    assert.deepEqual(blankQuery.evidenceReceipt.caveats, []);
+
+    const windowFromSecondChunk = await tool.execute({ grant }, tool.parse({
+      sourceId: source.id,
+      chunkIndex: 1,
+      query: "",
+    })) as {
+      returnedChunks: number;
+      selectedChunks: number;
+      chunks: Array<{ chunkIndex: number; content: string }>;
+      evidenceReceipt: { facts: Array<{ selectedBy: string; returnedChunkIndexes: number[] }> };
+    };
+
+    assert.equal(windowFromSecondChunk.selectedChunks, 2);
+    assert.equal(windowFromSecondChunk.returnedChunks, 2);
+    assert.deepEqual(windowFromSecondChunk.chunks.map((chunk) => chunk.content), ["beta details", "gamma caveats"]);
+    assert.deepEqual(windowFromSecondChunk.evidenceReceipt.facts[0]?.returnedChunkIndexes, [1, 2]);
+    assert.equal(windowFromSecondChunk.evidenceReceipt.facts[0]?.selectedBy, "chunkIndex");
+  } finally {
+    await database.close();
+  }
+});

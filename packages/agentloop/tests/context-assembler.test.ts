@@ -808,6 +808,49 @@ test("ContextAssembler projects artifact acceptance receipts without losing cave
   assert.match(projected, /structured projection/);
 });
 
+test("ContextAssembler projects artifact acceptance JSON emitted on command stdout", async () => {
+  const toolResult = JSON.stringify({
+    exitCode: 0,
+    stdout: JSON.stringify({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifact: "report.pdf",
+      verdict: "pass",
+      satisfiedEvidenceKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+      failedEvidenceKinds: [],
+      caveats: [],
+    }),
+    stderr: "",
+  });
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-command-stdout-acceptance-projection",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "verify", name: "computer_run_command", arguments: { command: "python3 verify.py" } }] },
+    { role: "tool", toolCallId: "verify", name: "computer_run_command", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const projection = JSON.parse(projected.split("\n\n")[0]) as {
+    schema: string;
+    artifact: { path: string };
+    verdict: string;
+    evidenceKinds?: { satisfied?: string[] };
+  };
+
+  assert.equal(projection.schema, "agentloop.contextArtifactAcceptanceProjection/v1");
+  assert.equal(projection.artifact.path, "report.pdf");
+  assert.equal(projection.verdict, "pass");
+  assert.deepEqual(projection.evidenceKinds?.satisfied, ["artifact_path", "artifact_non_empty", "artifact_acceptance"]);
+  assert.match(projected, /structured projection/);
+});
+
 test("ContextAssembler summarizes structured evidence as a receipt ledger", async () => {
   const requests: ModelInvocation[] = [];
   const rawContent = "raw source paragraph ".repeat(5_000);
@@ -1047,6 +1090,48 @@ test("ContextAssembler projects large ToolResults before they pollute the next m
   assert.match(projectedTool?.content ?? "", /canonical event retained/);
   assert.ok(canonical[1].content.length === largeProfile.length, "canonical ToolResult remains unchanged");
   assert.ok(events.some((event) => event.type === "context.tool_outputs_projected"));
+});
+
+test("ContextAssembler applies step prompt projection thresholds to large ToolResult previews", async () => {
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-step-projection-policy",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+  assembler.setPromptProjectionPolicy({
+    schema: "agentloop.promptProjectionPolicy/v1",
+    policyId: "test.smallPreviewProjection/v1",
+    mode: "custom",
+    instruction: "Keep a tiny preview for this model step.",
+    largeToolResultProjectionCharacters: 64,
+    largeToolResultPreviewCharacters: 12,
+  });
+  const largeResult = `abcdef0123456789${"x".repeat(128)}`;
+  const assembly = await assembler.assemble([
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "large-call", name: "large_tool", arguments: {} }],
+    },
+    {
+      role: "tool",
+      toolCallId: "large-call",
+      name: "large_tool",
+      content: largeResult,
+      isError: false,
+    },
+  ], []);
+  const projectedTool = assembly.messages.find((message) => message.role === "tool");
+
+  assert.match(assembly.runtimeContext.content, /test\.smallPreviewProjection\/v1/);
+  assert.match(projectedTool?.content ?? "", /previewCharacters=12/);
+  assert.match(projectedTool?.content ?? "", /abcdef012345/);
+  assert.doesNotMatch(projectedTool?.content ?? "", /abcdef0123456789/);
 });
 
 test("the Loop prunes old Tool output, compacts complete exchanges, and reloads a Skill whose body left the tail", async () => {

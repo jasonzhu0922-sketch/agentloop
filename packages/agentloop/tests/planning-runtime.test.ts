@@ -15,6 +15,7 @@ import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
 import { RunService, selectPlanningSkills } from "../src/runtime/run-service.ts";
+import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
@@ -2717,7 +2718,9 @@ test("RunService exposes downstream Plan steps as execution boundary context", a
 
     assert.equal(run.status, "completed");
     assert.match(model.firstSystemPrompt, /Do not perform work reserved for a pending downstream Plan step/);
+    assert.match(model.firstSystemPrompt, /Use loopStepFrame for model-step continuity/);
     assert.match(model.firstRuntimeContext, /"currentPlanStep":\{"id":"extract-data"/);
+    assert.match(model.firstRuntimeContext, /"planStepHandoffFrame":\{"schema":"agentloop\.stepHandoffFrame\/v1","mode":"current_to_next"/);
     assert.match(model.firstRuntimeContext, /"downstreamPlanSteps":\[\{"id":"write-report"/);
     assert.match(model.firstRuntimeContext, /The final Markdown report is produced/);
   } finally {
@@ -4376,6 +4379,67 @@ test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking fo
             caveated: [],
             failed: [],
           },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.feedback, "");
+  assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
+});
+
+test("ProfiledRuleStepAssessor accepts artifact acceptance JSON emitted on command stdout", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("generate-pdf"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "The PDF path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The PDF is non-empty.", source: "planner" },
+        { id: "artifact_acceptance", description: "The artifact acceptance receipt is recorded.", source: "planner" },
+        { id: "artifact_openable", description: "The PDF can be opened.", source: "planner" },
+        { id: "format_matches_request", description: "The delivered format is PDF.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Delivered report.pdf with command-emitted acceptance evidence.",
+      toolCalls: [{
+        toolCallId: "verify-by-command",
+        toolName: "computer_run_command",
+        isError: false,
+        result: JSON.stringify({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: "agentloop.artifactAcceptance/v1",
+            artifact: "report.pdf",
+            verdict: "pass",
+            satisfiedEvidenceKinds: [
+              "artifact_path",
+              "artifact_non_empty",
+              "artifact_acceptance",
+              "artifact_openable",
+              "format_matches_request",
+            ],
+            failedEvidenceKinds: [],
+            caveats: [],
+          }),
+          stderr: "",
+          fileChanges: [],
         }),
       }],
       modelSteps: 1,
@@ -7418,6 +7482,68 @@ test("fact acquisition source reads are not capped by file-output skill heuristi
   }
 });
 
+test("source fact acquisition applies action-aware tool narrowing globally", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const model = new SourceFactAcquisitionActionAwareModel();
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "extract uploaded source facts",
+        selectedSkillIds: [],
+        steps: [{
+          id: "extract-source-facts",
+          objective: "Read the uploaded article and produce reusable source facts for a downstream report.",
+          dependencies: [],
+          skillIds: [],
+          role: "fact_acquisition",
+          recommendedToolNames: ["read_source"],
+          evidenceContract: {
+            requiredKinds: ["source_summary", "explicit_caveats", "delivery_receipt"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+          successCriteria: [
+            { id: "source_summary", description: "Uploaded source evidence is available.", source: "planner" },
+            { id: "explicit_caveats", description: "Source caveats are explicit.", source: "planner" },
+            { id: "delivery_receipt", description: "A completion candidate is delivered.", source: "planner" },
+          ],
+        }],
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      maxSteps: 4,
+    });
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "article.md",
+      content: Buffer.from("# Article\n" + "Source fact. ".repeat(100), "utf8"),
+    });
+    model.sourceId = source.id;
+
+    const run = await runs.execute(owner.user.id, "整理这篇文章要点", {
+      allowDangerousTools: true,
+      sourceIds: [source.id],
+    });
+
+    assert.equal(run.status, "completed");
+    assert.ok(model.firstToolNames.includes("read_source"));
+    assert.equal(model.firstToolNames.includes("computer_write_file"), false);
+    assert.equal(model.firstToolNames.includes("convert_artifact"), false);
+    assert.equal(model.firstToolNames.includes("verify_artifact_acceptance"), false);
+    assert.equal(model.sawActionAwareProjection, true);
+    const events = await runs.events(owner.user.id, run.id);
+    const firstPolicy = events.find((event) => event.type === "step_execution.policy_applied");
+    assert.equal(firstPolicy?.data.toolCatalogMode, "narrowed");
+    assert.equal(firstPolicy?.data.promptProjectionMode, "action_aware");
+  } finally {
+    database.close();
+  }
+});
+
 test("pdf uploads prefer pdftotext extraction over the custom fallback", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -8041,6 +8167,7 @@ test("file artifact convergence ignores command stdout that only mentions output
       modelFactory: () => model,
       plannerFactory: () => planner,
       assessorFactory: () => approvingSkillAssessor(),
+      stepExecutionStrategy: createStepExecutionStrategyProfile("full-catalog"),
     });
 
     const run = await runs.execute(owner.user.id, "make a poster", { allowDangerousTools: true });
@@ -8138,6 +8265,7 @@ test("file artifact convergence does not shortcut verification-only artifact ste
       modelFactory: () => model,
       plannerFactory: () => planner,
       assessorFactory: () => approvingSkillAssessor(),
+      stepExecutionStrategy: createStepExecutionStrategyProfile("full-catalog"),
     });
 
     const run = await runs.execute(owner.user.id, "verify deck", { allowDangerousTools: true });
@@ -8656,6 +8784,42 @@ class SourceSummaryGateModel implements ModelAdapter {
     }
     return {
       content: "Delivered a caveated source summary from the visible directory index; file bodies were not all read.",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class SourceFactAcquisitionActionAwareModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  sourceId = "";
+  firstToolNames: string[] = [];
+  sawActionAwareProjection = false;
+  private executionCalls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase !== "execution") {
+      return { content: "", finishReason: "stop", toolCalls: [] };
+    }
+    this.executionCalls += 1;
+    const toolNames = request.tools.map((tool) => tool.name);
+    if (this.executionCalls === 1) {
+      this.firstToolNames = toolNames;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "read-uploaded-source",
+          name: "read_source",
+          arguments: { sourceId: this.sourceId, chunkIndex: 0, maxChunks: 1 },
+        }],
+      };
+    }
+    this.sawActionAwareProjection = /<prompt_projection_policy source="server">[\s\S]*"mode":"action_aware"/.test(
+      request.runtimeContext?.content ?? "",
+    );
+    return {
+      content: "Uploaded source facts are available with explicit caveats recorded in the source receipt.",
       finishReason: "stop",
       toolCalls: [],
     };

@@ -4,31 +4,47 @@ import { optionalPositiveInteger, requireRecord, requireString } from "../shared
 import { SourceRepository } from "../storage/repositories/source-repository.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 
+const DEFAULT_FILTERED_SOURCE_READ_CHUNKS = 5;
+const DEFAULT_UNFILTERED_SOURCE_READ_CHUNKS = 10;
+const MAX_SOURCE_READ_CHUNKS = 10;
+
 export function createSourceTools(repository: SourceRepository): RuntimeTool<unknown>[] {
   return [{
     name: "read_source",
     description: [
       "Read chunks from uploaded sources authorized for the current Run or conversation.",
       "Use sourceId from sources in runtime context.",
+      "Omit query to read source content directly; never pass an empty query.",
       "When chunkIndex is supplied with maxChunks, read a consecutive window starting at chunkIndex.",
+      "Without query, the default window reads up to 10 chunks, which is the full source when the upload has 10 or fewer chunks.",
+      "Use query only as a non-empty search filter for selecting matching chunks.",
       "This reads extracted source chunks, not arbitrary filesystem paths.",
     ].join(" "),
     inputSchema: objectSchema(["sourceId"], {
       sourceId: { type: "string" },
       chunkIndex: { type: "integer", minimum: 0 },
-      query: { type: "string" },
-      maxChunks: { type: "integer", minimum: 1, maximum: 10 },
+      query: {
+        type: "string",
+        description: "Optional non-empty search filter. Omit this field for full/windowed source reading; do not pass an empty string.",
+      },
+      maxChunks: { type: "integer", minimum: 1, maximum: MAX_SOURCE_READ_CHUNKS },
     }),
     executionMode: "parallel",
     replaySafe: true,
     maxResultCharacters: 40_000,
     parse: (value) => {
       const record = requireRecord(value, "read_source arguments");
+      const query = optionalSourceQuery(record.query, "query", 200);
       return {
         sourceId: requireString(record.sourceId, "sourceId", { max: 80, pattern: /^src_[a-f0-9]{32}$/ }),
         chunkIndex: optionalNonNegativeInteger(record.chunkIndex, "chunkIndex", 100_000),
-        query: optionalString(record.query, "query", 200),
-        maxChunks: optionalPositiveInteger(record.maxChunks, "maxChunks", 5, 10),
+        query,
+        maxChunks: optionalPositiveInteger(
+          record.maxChunks,
+          "maxChunks",
+          query === undefined ? DEFAULT_UNFILTERED_SOURCE_READ_CHUNKS : DEFAULT_FILTERED_SOURCE_READ_CHUNKS,
+          MAX_SOURCE_READ_CHUNKS,
+        ),
       };
     },
     execute: async (context, value) => {
@@ -196,8 +212,9 @@ function objectSchema(required: readonly string[], properties: Record<string, un
   return { type: "object", additionalProperties: false, required, properties };
 }
 
-function optionalString(value: unknown, label: string, max: number): string | undefined {
+function optionalSourceQuery(value: unknown, label: string, max: number): string | undefined {
   if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && value.trim().length === 0) return undefined;
   return requireString(value, label, { max });
 }
 

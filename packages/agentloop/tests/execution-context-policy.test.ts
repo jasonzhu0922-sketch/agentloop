@@ -2,7 +2,46 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ConversationWorkingSet, ExecutionPlan, PlanStep } from "../src/planning/contracts.ts";
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
-import { buildStepRuntimeContextSnapshot } from "../src/runtime/execution-context-policy.ts";
+import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
+
+test("source evidence steps receive a global Runtime progress policy", () => {
+  const step: PlanStep = {
+    id: "extract-source",
+    kind: "leaf",
+    position: 0,
+    objective: "Extract reusable source facts before producing the report.",
+    dependencies: [],
+    role: "fact_acquisition",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    recommendedToolNames: ["load_skill", "read_source"],
+    evidenceContract: {
+      requiredKinds: ["source_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats", "delivery_receipt"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "pending",
+  };
+
+  const policy = buildStepToolProgressPolicy({
+    step,
+    requiresFileOutput: false,
+  });
+
+  assert.notEqual(policy, undefined);
+  assert.deepEqual(policy?.requiredEvidenceKinds, [
+    "source_summary",
+    "record_counts",
+    "structured_extraction_artifact",
+    "explicit_caveats",
+    "delivery_receipt",
+  ]);
+  assert.equal(policy?.maxExploratoryPrimarySteps, 8);
+  assert.equal(policy?.exploratoryToolNames.includes("read_source"), true);
+  assert.equal(policy?.evidenceProducingToolNames.includes("computer_write_file"), true);
+  assert.match(policy?.repairDirective ?? "", /source-evidence step/);
+});
 
 test("execution context binds dependency evidence before downstream reacquisition", () => {
   const inspectStep: PlanStep = {
@@ -183,6 +222,128 @@ test("execution context binds dependency evidence before downstream reacquisitio
     source.kind === "dependency_step" && source.reusePolicy === "must_reuse_first"
   ), true);
   assert.equal(frame.completionBoundary.includes("artifact_acceptance"), true);
+  const handoff = payload.planStepHandoffFrame as {
+    readonly schema: string;
+    readonly mode: string;
+    readonly currentStepId: string;
+    readonly nextStage?: {
+      readonly kind: string;
+      readonly steps: readonly Array<{
+        readonly id: string;
+        readonly dependsOnCurrent: boolean;
+        readonly requiredInputsFromCurrent: readonly string[];
+      }>;
+    };
+    readonly handoffContract: {
+      readonly reusableEvidenceKinds: readonly string[];
+      readonly reusableOutputPolicy: string;
+      readonly nextStepBoundary?: string;
+      readonly forbiddenMoves: readonly string[];
+    };
+  };
+  assert.equal(handoff.schema, "agentloop.stepHandoffFrame/v1");
+  assert.equal(handoff.mode, "terminal_current_only");
+  assert.equal(handoff.currentStepId, "build_analysis_xlsx");
+  assert.equal(handoff.nextStage, undefined);
+  assert.equal(handoff.handoffContract.nextStepBoundary, undefined);
+  assert.equal(handoff.handoffContract.reusableEvidenceKinds.includes("artifact_acceptance"), true);
+});
+
+test("execution context carries current-to-next handoff for non-terminal steps", () => {
+  const extractStep: PlanStep = {
+    id: "extract_data",
+    kind: "leaf",
+    position: 0,
+    objective: "Extract spreadsheet rows into a durable source summary.",
+    dependencies: [],
+    role: "fact_acquisition",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    recommendedToolNames: ["visible_index_directory", "visible_extract_tables"],
+    evidenceContract: {
+      requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "running",
+  };
+  const writeStep: PlanStep = {
+    id: "write_report",
+    kind: "leaf",
+    position: 1,
+    objective: "Write the final report from the extracted summary.",
+    dependencies: ["extract_data"],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    recommendedToolNames: ["computer_write_file", "verify_artifact_acceptance"],
+    evidenceContract: {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request", "delivery_receipt", "explicit_caveats"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "pending",
+  };
+  const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
+    step: extractStep,
+    plan: {
+      id: "plan-1",
+      runId: "run-1",
+      version: 1,
+      goal: "Extract then report",
+      selectedSkillIds: [],
+      status: "running",
+      steps: [extractStep, writeStep],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    skills: [],
+    workspaceRoot: "/workspace",
+    visibleDirectories: [{ id: "vis-1", name: "input", path: "/data" }],
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", sourceNeed: "source_grounded" }),
+    operationProfile: { id: "data_analysis" },
+    requiresFileOutput: false,
+  }).content);
+  const handoff = payload.planStepHandoffFrame as {
+    readonly schema: string;
+    readonly mode: string;
+    readonly currentStepId: string;
+    readonly instruction: string;
+    readonly nextStage: {
+      readonly kind: string;
+      readonly steps: readonly Array<{
+        readonly id: string;
+        readonly objective: string;
+        readonly dependsOnCurrent: boolean;
+        readonly requiredInputsFromCurrent: readonly string[];
+      }>;
+    };
+    readonly handoffContract: {
+      readonly reusableEvidenceKinds: readonly string[];
+      readonly reusableOutputPolicy: string;
+      readonly currentStepBoundary: string;
+      readonly nextStepBoundary: string;
+      readonly forbiddenMoves: readonly string[];
+    };
+  };
+
+  assert.equal(handoff.schema, "agentloop.stepHandoffFrame/v1");
+  assert.equal(handoff.mode, "current_to_next");
+  assert.equal(handoff.currentStepId, "extract_data");
+  assert.match(handoff.instruction, /Do not execute the next stage/);
+  assert.equal(handoff.nextStage.kind, "direct_dependents");
+  assert.equal(handoff.nextStage.steps[0]?.id, "write_report");
+  assert.equal(handoff.nextStage.steps[0]?.dependsOnCurrent, true);
+  assert.equal(handoff.nextStage.steps[0]?.requiredInputsFromCurrent.includes("source_summary"), true);
+  assert.equal(handoff.nextStage.steps[0]?.requiredInputsFromCurrent.includes("structured_extraction_artifact"), true);
+  assert.equal(handoff.handoffContract.reusableEvidenceKinds.includes("record_counts"), true);
+  assert.match(handoff.handoffContract.currentStepBoundary, /phaseRole=evidence_acquisition/);
+  assert.match(handoff.handoffContract.nextStepBoundary, /context for semantic continuity only/);
+  assert.equal(handoff.handoffContract.forbiddenMoves.some((item) =>
+    item.includes("downstream artifact")
+  ), true);
 });
 
 test("execution context prefers structured JSON reads for table extraction artifacts", () => {

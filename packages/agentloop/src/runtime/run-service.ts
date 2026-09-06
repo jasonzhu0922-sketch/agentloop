@@ -55,6 +55,7 @@ import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
+import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
 import { classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange } from "./task-intent.ts";
 import type {
   CapabilityGrant,
@@ -279,6 +280,7 @@ export class RunService {
   private readonly runEventLogSink?: RunEventLogSink;
   private readonly activeRunControllers = new Map<string, AbortController>();
   private readonly planningExtensions: readonly PlanningExtension[];
+  private readonly stepExecutionStrategy?: StepExecutionStrategy;
 
   constructor(options: {
     database: SqlConnection;
@@ -300,6 +302,7 @@ export class RunService {
     modelKeys?: readonly string[];
     runEventLogSink?: RunEventLogSink;
     planningExtensions?: readonly PlanningExtension[];
+    stepExecutionStrategy?: StepExecutionStrategy;
   }) {
     this.database = options.database;
     this.skills = options.skills;
@@ -341,6 +344,7 @@ export class RunService {
     this.recovery = new RecoveryRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
     this.planningExtensions = options.planningExtensions ?? [];
+    this.stepExecutionStrategy = options.stepExecutionStrategy;
   }
 
   async execute(
@@ -1865,6 +1869,11 @@ export class RunService {
         requiresFileOutput: fileOutputStep,
         conversationWorkingSet: input.conversationWorkingSet,
       });
+      const stepProgressPolicy = buildStepToolProgressPolicy({
+        step: activeStep,
+        requiresFileOutput: fileOutputStep,
+        taskProfile: stepTaskProfile,
+      });
       const result = await runAgentLoop({
         runId: input.runId,
         systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
@@ -1902,7 +1911,9 @@ export class RunService {
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
         maxSteps: this.maxSteps,
+        ...(this.stepExecutionStrategy === undefined ? {} : { stepExecutionStrategy: this.stepExecutionStrategy }),
         candidateRepairGraceSteps: CANDIDATE_REPAIR_GRACE_STEPS,
+        ...(stepProgressPolicy === undefined ? {} : { progressPolicy: stepProgressPolicy }),
         ...(fileOutputStep
           ? { convergenceGraceSteps: FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
           : {}),
@@ -1918,11 +1929,6 @@ export class RunService {
         ...(fileOutputStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterFileEvidence(activeStep, context),
           shouldUseFinalConvergence: (context) => shouldUseFinalFileConvergence(activeStep, context),
-          progressPolicy: buildStepToolProgressPolicy({
-            step: activeStep,
-            requiresFileOutput: fileOutputStep,
-            taskProfile: stepTaskProfile,
-          }),
         } : lookupEvidenceStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context, input.sources),
         } : {}),
@@ -4910,6 +4916,7 @@ function buildStepSystemPrompt(
     contractLines: [
       "Work only on the current admitted Plan step.",
       "The runtime owns authorization, persistence, assessment, Plan progression, and terminal completion.",
+      "Use loopStepFrame for model-step continuity and planStepHandoffFrame for Plan-step continuity when present; preserve reusable evidence without executing a future stage unless it is explicitly part of the current boundary.",
       "Do not perform work reserved for a pending downstream Plan step unless the current step objective or success criteria explicitly require that same artifact.",
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
       "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
