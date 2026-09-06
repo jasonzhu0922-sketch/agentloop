@@ -1186,9 +1186,13 @@ export class ComputerExecutor {
     truncated: boolean;
     timedOut: boolean;
     evidenceReceipt?: Record<string, unknown>;
-  }> {
+    }> {
     if (!EXECUTABLE_NAME_PATTERN.test(input.command)) {
       throw badRequest("command must be an executable name without shell syntax or path separators");
+    }
+    const commandMismatch = interpreterEntryPointMismatch(input.command, input.args);
+    if (commandMismatch !== undefined) {
+      throw badRequest(commandMismatch);
     }
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
     await this.assertCommandArgumentsDoNotEscape(input.args, cwdResolution);
@@ -2025,6 +2029,69 @@ function isBareFilename(path: string): boolean {
     && !path.includes("\\")
     && basename(path) === path;
 }
+
+function interpreterEntryPointMismatch(command: string, args: readonly string[]): string | undefined {
+  if (!isSourceFileInterpreter(command)) return undefined;
+  if (args.some((arg) => arg === "-" || arg === "-c" || arg === "-m")) return undefined;
+
+  const entryPoint = args.find((arg) => isPotentialEntrypointPath(arg));
+  if (entryPoint === undefined) return undefined;
+
+  const extension = extname(entryPoint).toLowerCase();
+  if (!DATA_ARTIFACT_EXTENSIONS.has(extension)) return undefined;
+
+  return [
+    `${command} cannot use ${entryPoint} as its entry point`,
+    "use a source file or inline code instead of a structured data artifact",
+  ].join("; ");
+}
+
+function isSourceFileInterpreter(command: string): boolean {
+  return (
+    /^python(?:\d+(?:\.\d+)*)?$/u.test(command)
+    || /^pypy(?:\d+(?:\.\d+)*)?$/u.test(command)
+    || command === "node"
+    || command === "nodejs"
+    || command === "deno"
+    || command === "ruby"
+    || command === "perl"
+    || command === "php"
+    || command === "sh"
+    || command === "bash"
+    || command === "zsh"
+    || command === "ksh"
+    || command === "fish"
+  );
+}
+
+function isPotentialEntrypointPath(value: string): boolean {
+  return value.startsWith(".")
+    || value.startsWith("@")
+    || value.includes("/")
+    || value.includes("\\")
+    || extname(value) !== "";
+}
+
+const DATA_ARTIFACT_EXTENSIONS = new Set([
+  ".csv",
+  ".docx",
+  ".htm",
+  ".html",
+  ".jpeg",
+  ".jpg",
+  ".json",
+  ".md",
+  ".pdf",
+  ".png",
+  ".pptx",
+  ".tsv",
+  ".txt",
+  ".webp",
+  ".xlsx",
+  ".xls",
+  ".yaml",
+  ".yml",
+]);
 
 function directoryPriority(workspacePath: string): number {
   const directories = workspacePath.split("/").slice(0, -1).map((segment) => segment.toLowerCase());

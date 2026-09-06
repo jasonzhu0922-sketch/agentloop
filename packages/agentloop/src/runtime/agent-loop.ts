@@ -3,6 +3,7 @@ import { AppError } from "../shared/errors.ts";
 import { createConcurrencyLimiter, mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
+import { appendDeliveryCandidateCaveats, buildRuntimeDeliveryCandidate, normalizeDeliveryCandidate } from "./delivery-candidate.ts";
 import type {
   AgentLoopResult,
   AgentLoopToolEvidence,
@@ -17,7 +18,9 @@ import type {
   RuntimeContextSnapshot,
   RuntimeEvent,
   RuntimeEventSink,
+  RuntimeDeliveryCandidate,
 } from "./contracts.ts";
+import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import type { PreparedToolCall } from "../tools/tool-registry.ts";
 import { ToolRegistry } from "../tools/tool-registry.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
@@ -58,6 +61,7 @@ export interface AgentLoopOptions {
   readonly maxToolResultCharacters?: number;
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
+  readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
   readonly convergencePrompt?: string;
   readonly convergenceMaxOutputTokens?: number;
   readonly shouldConvergeAfterToolStep?: (
@@ -108,7 +112,7 @@ interface ToolOutcome {
 }
 
 interface StructuredToolCandidate {
-  readonly output: string;
+  readonly deliveryCandidate: RuntimeDeliveryCandidate;
   readonly projection: string;
   readonly sourceToolCallId: string;
   readonly schema?: string;
@@ -256,10 +260,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     readonly step: number;
     readonly output: string;
     readonly projectedToolEvidence: readonly AgentLoopToolEvidence[];
+    readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
     readonly rejectionDirective: string;
   }): Promise<AgentLoopResult | undefined> => {
     const evaluation = await evaluateCandidate(input.step, {
       output: input.output,
+      stepSemanticFrame: input.stepSemanticFrame,
+      deliveryCandidate: buildRuntimeDeliveryCandidate({
+        output: input.output,
+        stepSemanticFrame: input.stepSemanticFrame,
+        toolEvidence,
+        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
+      }),
       messages,
       modelSteps: input.step,
       toolEvidence,
@@ -277,6 +289,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "loop.completed", data: { step: input.step, output: input.output } });
       return {
         output: input.output,
+        deliveryCandidate: buildRuntimeDeliveryCandidate({
+          output: input.output,
+          stepSemanticFrame: input.stepSemanticFrame,
+          toolEvidence,
+          sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
+        }),
         messages,
         steps: input.step,
         toolEvidence,
@@ -286,6 +304,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (evaluation.deferredValidation === true) {
       const output = deferredValidationOutput(input.output, evaluation.feedback);
       const completionCaveat = { reason: "deferred_validation" as const, feedback: evaluation.feedback };
+      const deliveryCandidate = buildRuntimeDeliveryCandidate({
+        output,
+        stepSemanticFrame: input.stepSemanticFrame,
+        toolEvidence,
+        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
+      });
       await emit({
         type: "candidate.validation_deferred",
         data: { step: input.step, output, feedback: evaluation.feedback },
@@ -293,6 +317,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "loop.completed", data: { step: input.step, output, deferredValidation: true, completionCaveat } });
       return {
         output,
+        deliveryCandidate,
         messages,
         steps: input.step,
         toolEvidence,
@@ -304,6 +329,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (evaluation.evidenceBoundary === true) {
       const output = evidenceBoundaryOutput(input.output, evaluation.feedback);
       const completionCaveat = { reason: "evidence_boundary" as const, feedback: evaluation.feedback };
+      const deliveryCandidate = buildRuntimeDeliveryCandidate({
+        output,
+        stepSemanticFrame: input.stepSemanticFrame,
+        toolEvidence,
+        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
+      });
       await emit({
         type: "candidate.evidence_boundary_accepted",
         data: { step: input.step, output, feedback: evaluation.feedback },
@@ -311,6 +342,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "loop.completed", data: { step: input.step, output, completionCaveat } });
       return {
         output,
+        deliveryCandidate,
         messages,
         steps: input.step,
         toolEvidence,
@@ -343,6 +375,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       const output = repairLimitCompletionOutput(input.output, candidateRepairAssessmentLimit);
       const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
+      const deliveryCandidate = buildRuntimeDeliveryCandidate({
+        output,
+        stepSemanticFrame: input.stepSemanticFrame,
+        toolEvidence,
+        sourceToolCallIds: input.projectedToolEvidence.map((item) => item.toolCallId),
+      });
       await emit({
         type: "candidate.completion_caveated",
         data: {
@@ -357,6 +395,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "loop.completed", data: { step: input.step, output, completionCaveat } });
       return {
         output,
+        deliveryCandidate,
         messages,
         steps: input.step,
         toolEvidence,
@@ -566,6 +605,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       const evaluation = await evaluateCandidate(step, {
         output: response.content,
+        stepSemanticFrame: options.stepSemanticFrame,
+        deliveryCandidate: buildRuntimeDeliveryCandidate({
+          output: response.content,
+          stepSemanticFrame: options.stepSemanticFrame,
+          toolEvidence,
+        }),
         messages,
         modelSteps: step,
         toolEvidence,
@@ -581,7 +626,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       if (evaluation.approved) {
         await emit({ type: "loop.completed", data: { step, output: response.content } });
-        return { output: response.content, messages, steps: step, toolEvidence, activatedSkillNames: [...activatedSkillNames] };
+        return {
+          output: response.content,
+          deliveryCandidate: buildRuntimeDeliveryCandidate({
+            output: response.content,
+            stepSemanticFrame: options.stepSemanticFrame,
+            toolEvidence,
+          }),
+          messages,
+          steps: step,
+          toolEvidence,
+          activatedSkillNames: [...activatedSkillNames],
+        };
       }
       if (evaluation.deferredValidation === true) {
         const output = deferredValidationOutput(response.content, evaluation.feedback);
@@ -593,6 +649,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output, deferredValidation: true, completionCaveat } });
         return {
           output,
+          deliveryCandidate: buildRuntimeDeliveryCandidate({
+            output,
+            stepSemanticFrame: options.stepSemanticFrame,
+            toolEvidence,
+          }),
           messages,
           steps: step,
           toolEvidence,
@@ -611,6 +672,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
         return {
           output,
+          deliveryCandidate: buildRuntimeDeliveryCandidate({
+            output,
+            stepSemanticFrame: options.stepSemanticFrame,
+            toolEvidence,
+          }),
           messages,
           steps: step,
           toolEvidence,
@@ -657,6 +723,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
         return {
           output,
+          deliveryCandidate: buildRuntimeDeliveryCandidate({
+            output,
+            stepSemanticFrame: options.stepSemanticFrame,
+            toolEvidence,
+          }),
           messages,
           steps: step,
           toolEvidence,
@@ -955,8 +1026,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       const completion = await evaluateToolBackedCandidate({
         step,
-        output: structuredCandidate.output,
+        output: structuredCandidate.deliveryCandidate.output,
         projectedToolEvidence: projectStructuredCandidateEvidence(toolEvidence, structuredCandidate),
+        stepSemanticFrame: options.stepSemanticFrame,
         rejectionDirective: "Structured tool candidate was rejected. Repair this step using the available evidence.",
       });
       if (completion !== undefined) return completion;
@@ -987,6 +1059,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         step,
         output: evidenceCompletionCandidate.output,
         projectedToolEvidence: toolEvidence,
+        stepSemanticFrame: options.stepSemanticFrame,
         rejectionDirective: "Runtime evidence completion candidate was rejected. Repair this step using the available evidence.",
       });
       if (completion !== undefined) return completion;
@@ -1174,56 +1247,49 @@ function structuredCandidateFromRecord(
     ? deliveryCandidate.output
     : (typeof record.delivery_markdown === "string" ? record.delivery_markdown : undefined);
   if (output === undefined || output.trim().length === 0) return undefined;
-  const userVisibleOutput = structuredCandidateOutputWithCaveats(output, record);
+  const userVisibleOutput = appendDeliveryCandidateCaveats(normalizeDeliveryCandidate({
+    output,
+    evidenceKinds: {
+      satisfied: evidenceReceiptKinds(record, "satisfied"),
+      caveated: evidenceReceiptKinds(record, "caveated"),
+      failed: evidenceReceiptKinds(record, "failed"),
+    },
+    caveats: evidenceReceiptCaveats(record),
+    sourceToolCallIds: [sourceToolCallId],
+  }));
   const projectionSource = record.assessmentProjection
     ?? record.assessment_summary
     ?? {
       schema,
       sourceToolCallId,
-      deliveryCharacters: userVisibleOutput.length,
+      deliveryCharacters: userVisibleOutput.output.length,
     };
   return {
-    output: userVisibleOutput,
+    deliveryCandidate: userVisibleOutput,
     projection: JSON.stringify({
       structuredToolCandidate: projectionSource,
       sourceToolCallId,
       ...(schema === undefined ? {} : { schema }),
       ...(sourceSchema === undefined ? {} : { sourceSchema }),
       ...(wrapperSchema === undefined || wrapperSchema === schema ? {} : { wrapperSchema }),
+      deliveryCandidate: userVisibleOutput,
     }),
     sourceToolCallId,
     ...(schema === undefined ? {} : { schema }),
   };
 }
 
-function structuredCandidateOutputWithCaveats(output: string, record: Record<string, unknown>): string {
-  const caveats = evidenceReceiptCaveats(record);
-  if (caveats.length === 0) return output;
-  const missing = caveats.filter((caveat) => !candidateAlreadyMentionsCaveat(output, caveat));
-  if (missing.length === 0) return output;
-  const heading = /[\u3400-\u9fff]/u.test(output) ? "## 限制说明" : "## Limitations";
-  return [
-    output.trimEnd(),
-    "",
-    heading,
-    "",
-    ...missing.map((caveat) => `- ${caveat}`),
-  ].join("\n");
+function evidenceReceiptKinds(record: Record<string, unknown>, kind: "satisfied" | "caveated" | "failed"): string[] {
+  const receipt = isPlainRecord(record.evidenceReceipt) ? record.evidenceReceipt : undefined;
+  const kinds = isPlainRecord(receipt?.evidenceKinds) ? receipt.evidenceKinds : undefined;
+  return Array.isArray(kinds?.[kind]) ? kinds[kind].filter((item): item is string => typeof item === "string") : [];
 }
 
 function evidenceReceiptCaveats(record: Record<string, unknown>): string[] {
   const receipt = isPlainRecord(record.evidenceReceipt) ? record.evidenceReceipt : undefined;
-  const caveats = Array.isArray(receipt?.caveats) ? receipt.caveats : [];
-  return [...new Set(caveats
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0))];
-}
-
-function candidateAlreadyMentionsCaveat(output: string, caveat: string): boolean {
-  const normalizedOutput = output.replace(/\s+/g, " ").trim();
-  const normalizedCaveat = caveat.replace(/\s+/g, " ").trim();
-  return normalizedOutput.includes(normalizedCaveat);
+  return Array.isArray(receipt?.caveats)
+    ? receipt.caveats.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter((item) => item.length > 0)
+    : [];
 }
 
 function projectStructuredCandidateEvidence(
@@ -1406,9 +1472,6 @@ async function completeWithStreamingAndDispatch(
   context: StreamingDispatchContext,
   earlyOutcomes: Map<string, ToolOutcome>,
 ): Promise<ModelResponse> {
-  if (context.model.streamComplete === undefined) {
-    return context.model.complete(context.invocation, context.signal);
-  }
   const limiter = createConcurrencyLimiter(Math.max(1, context.maxParallelToolCalls));
   const dispatches: Array<Promise<void>> = [];
 
@@ -1471,6 +1534,15 @@ async function completeWithStreamingAndDispatch(
           toolCallId: call.id,
           name: call.name,
           arguments: call.arguments,
+        },
+      });
+      await context.emit({
+        type: "model.stream.awaiting_completion",
+        data: {
+          phase: "execution",
+          step: context.step,
+          toolCallId: call.id,
+          toolName: call.name,
         },
       });
       if (!context.allowEarlyDispatch) return;

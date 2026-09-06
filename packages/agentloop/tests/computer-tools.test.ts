@@ -2171,6 +2171,37 @@ test("computer command names remain bare executable names", async () => {
   }
 });
 
+test("computer_run_command rejects structured data files as interpreter entry points", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-entrypoint-"));
+  try {
+    await fs.writeFile(join(root, "payload.json"), "{\"ok\":true}\n");
+    await fs.writeFile(join(root, "script.js"), "process.stdout.write('ok\\n');\n");
+    const executor = new ComputerExecutor(root, {
+      executableAliases: { "node": process.execPath },
+    });
+    await assert.rejects(
+      () => executor.runCommand({
+        command: "node",
+        args: ["payload.json"],
+        cwd: ".",
+        timeoutMs: 2_000,
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && error instanceof Error
+        && /cannot use payload\.json as its entry point/i.test(error.message),
+    );
+    const result = await executor.runCommand({
+      command: "node",
+      args: ["script.js"],
+      cwd: ".",
+      timeoutMs: 2_000,
+    });
+    assert.equal(result.exitCode, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_run_command can use only Runtime-authorized Skill execution roots as cwd", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-root-"));
   const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-package-"));

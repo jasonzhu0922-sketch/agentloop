@@ -46,6 +46,12 @@ export function buildStepRuntimeContextSnapshot(input: {
     requiresFileOutput: input.requiresFileOutput,
     conversationWorkingSet: input.conversationWorkingSet,
   });
+  const evidenceAcquisitionDiscipline = buildEvidenceAcquisitionDiscipline({
+    stepSemanticFrame,
+    usesWebTools,
+    usesVisibleDirectoryTools,
+    usesSourceTools,
+  });
   return {
     phase: "execution",
     content: [
@@ -55,7 +61,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           recommendedToolNamesAreAdvisory: true,
           instruction: "Use the recommended tools as a starting point, but choose any currently exposed tool when it better satisfies the current step evidence contract.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
-          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, contradictory, or explicitly refreshed requirements.",
+          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, contradictory, or explicitly refreshed requirements. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },
         currentPlanStep: {
           id: input.step.id,
@@ -91,6 +97,7 @@ export function buildStepRuntimeContextSnapshot(input: {
               "Dependency evidence includes durable structured JSON artifacts. First inspect artifact schema and any manifest in dependencyEvidenceBindings; for agentloop.tableExtractionArtifact/v1, use the manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
           }
           : {}),
+        ...(evidenceAcquisitionDiscipline === undefined ? {} : { evidenceAcquisitionDiscipline }),
         workspace: { root: input.workspaceRoot, filePolicy: "workspace-write" },
         visibleDirectories,
         visibleCommandRoots: visibleDirectories.map((root) => ({
@@ -153,6 +160,29 @@ export function buildStepRuntimeContextSnapshot(input: {
       formatAvailableSkills(input.skills),
     ].filter(Boolean).join("\n"),
   };
+}
+
+function buildEvidenceAcquisitionDiscipline(input: {
+  readonly stepSemanticFrame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "phaseRole" | "evidenceMode" | "firstAction">;
+  readonly usesWebTools: boolean;
+  readonly usesVisibleDirectoryTools: boolean;
+  readonly usesSourceTools: boolean;
+}): string | undefined {
+  const shouldGuideAcquisition = input.stepSemanticFrame.phaseRole === "evidence_acquisition"
+    || input.stepSemanticFrame.evidenceMode === "acquire_new_evidence"
+    || input.stepSemanticFrame.firstAction === "inspect_available_sources"
+    || input.usesWebTools
+    || input.usesVisibleDirectoryTools
+    || input.usesSourceTools;
+  if (!shouldGuideAcquisition) return undefined;
+  const lines = [
+    "Treat the current step as one acquisition pass, not a fact-by-fact conversation.",
+    "Before calling tools, identify the full set of independent facts needed to satisfy the current evidence contract.",
+    "When several facts can be discovered from the same source family, fetch them in the same turn and prefer batch-capable or windowed reads over serial one-fact-at-a-time loops.",
+    "Use visible_read_files batches for multiple visible file reads, read_source chunk windows for consecutive uploaded source chunks, and multiple web queries only when they are genuinely independent.",
+    "Do not wait for Assessment to ask for the next obvious fact if the same source family can provide it now.",
+  ];
+  return lines.join(" ");
 }
 
 export function buildStepToolProgressPolicy(input: {

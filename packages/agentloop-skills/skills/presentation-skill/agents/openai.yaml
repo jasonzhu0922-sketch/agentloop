@@ -1,4 +1,0 @@
-interface:
-  display_name: "Presentation Skill"
-  short_description: "Editable PowerPoint decks with visual QA"
-  default_prompt: "Use $presentation-skill to create a polished editable PowerPoint deck from this request and verify the rendered slides."

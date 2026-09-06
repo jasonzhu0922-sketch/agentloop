@@ -1,5 +1,5 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { ModelMessage, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
+import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -288,6 +288,7 @@ export interface ToolEvidence {
 
 export interface StepEvidence {
   readonly candidateOutput: string;
+  readonly deliveryCandidate?: RuntimeDeliveryCandidate;
   readonly toolCalls: readonly ToolEvidence[];
   readonly modelSteps: number;
   readonly completionCaveat?: CompletionCaveat;

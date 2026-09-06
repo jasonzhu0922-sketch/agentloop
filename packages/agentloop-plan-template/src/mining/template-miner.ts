@@ -194,6 +194,7 @@ function shapeKey(fingerprint: TaskFingerprint, proposal: PlanProposal): string 
       sideEffectKind: fingerprint.sideEffectKind,
       requiredCapabilities: fingerprint.requiredCapabilities,
       skillHints: fingerprint.skillHints,
+      instructionTokens: fingerprint.instructionTokens,
       outputConstraints: fingerprint.outputConstraints,
       riskLevel: fingerprint.riskLevel,
     },

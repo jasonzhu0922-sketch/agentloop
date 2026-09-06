@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
-import type { ModelAdapter, ModelInvocation, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
+import type { ModelAdapter, ModelInvocation, RuntimeContextSnapshot, RuntimeDeliveryCandidate, RuntimeEventSink } from "../runtime/contracts.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { classifyTaskIntent } from "../runtime/task-intent.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
+import { deliveryCandidateCaveats } from "../runtime/delivery-candidate.ts";
 import type {
   AssessmentMethod,
   AssessmentProfileId,
@@ -284,24 +285,25 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
   private assessEvidenceGate(input: StepAssessmentInput): SkillComplianceAssessment {
     const candidateOutput = input.evidence.candidateOutput.trim();
     const nonEmpty = candidateOutput.length > 0;
+    const deliveryCandidate = input.evidence.deliveryCandidate;
     const successfulToolRefs = input.evidence.toolCalls
       .filter((toolCall) => !toolCall.isError)
       .map((toolCall) => toolCall.toolCallId);
     const receipts = runtimeEvidenceReceipts(input.evidence.toolCalls);
     const requiredKinds = runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []);
     const requiredKindsSatisfied = requiredKinds.every((kind) =>
-      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs)
+      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate)
     );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
-      const satisfied = nonEmpty && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs);
+      const satisfied = nonEmpty && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate);
       return {
         criterionId: criterion.id,
         satisfied,
         rationale: satisfied
-          ? "The required Runtime evidence receipts satisfy the principle assessment gate; detailed QA remains owned by the producing Skill or Tool."
+          ? "The required Runtime delivery candidate and evidence receipts satisfy the principle assessment gate; detailed QA remains owned by the producing Skill or Tool."
           : rejectedEvidenceGateRationale(nonEmpty, receipts, requiredKinds, successfulToolRefs),
         evidenceRefs: satisfied
-          ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId)]
+          ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId), ...(deliveryCandidate?.sourceToolCallIds ?? [])]
           : successfulToolRefs,
       };
     });
@@ -393,8 +395,9 @@ function criterionSatisfiedByEvidenceGate(
   requiredKindsSatisfied: boolean,
   receipts: readonly RuntimeEvidenceReceipt[],
   successfulToolRefs: readonly string[],
+  candidate?: RuntimeDeliveryCandidate,
 ): boolean {
-  if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs);
+  if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
 }
@@ -403,6 +406,7 @@ function evidenceKindSatisfiedByGate(
   kind: string,
   receipts: readonly RuntimeEvidenceReceipt[],
   successfulToolRefs: readonly string[],
+  candidate?: RuntimeDeliveryCandidate,
 ): boolean {
   if (kind === "delivery_receipt") return successfulToolRefs.length > 0;
   if (kind === "artifact_acceptance") {
@@ -410,6 +414,11 @@ function evidenceKindSatisfiedByGate(
     return acceptance !== undefined
       && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
       && acceptance.failed.size === 0;
+  }
+  if (kind === "explicit_caveats" && candidate !== undefined) {
+    return candidate.caveats.length > 0
+      || candidate.evidenceKinds.caveated.includes(kind)
+      || candidate.evidenceKinds.satisfied.includes(kind);
   }
   return receipts.some((receipt) => {
     if (receipt.failed.has(kind)) return false;
@@ -551,6 +560,12 @@ function parseFailedBoundary(input: StepAssessmentInput, value: unknown): Failed
     reusableEvidenceRefs: parseEvidenceRefs(record.reusableEvidenceRefs, "failedBoundary.reusableEvidenceRefs", 100),
     suggestedRepairShape,
   };
+}
+
+function candidateExplicitCaveats(evidence: StepEvidence): readonly string[] {
+  const candidate = evidence.deliveryCandidate;
+  if (candidate === undefined) return [];
+  return deliveryCandidateCaveats(candidate);
 }
 
 function parseSuggestedRepairShape(value: unknown): SuggestedRepairShape {

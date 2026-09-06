@@ -125,6 +125,71 @@ test("ContextAssembler preserves a bounded web-page preview in structured eviden
   assert.ok((fact?.textPreview?.length ?? 0) <= 1_500);
 });
 
+test("ContextAssembler preserves structured MCP route facts in projected evidence", async () => {
+  const routeFacts = [
+    { name: "origin", value: "116.397463,39.909187" },
+    { name: "destination", value: "121.144625,28.859042" },
+    { name: "pathsCount", value: "1" },
+    { name: "paths[0].distance", value: "1455377" },
+    { name: "paths[0].duration", value: "54633" },
+  ];
+  const toolResult = JSON.stringify({
+    schema: "agentloop.mcpToolResult/v1",
+    serverKey: "amap-maps",
+    toolName: "maps_direction_driving",
+    text: JSON.stringify({
+      origin: "116.397463,39.909187",
+      destination: "121.144625,28.859042",
+      paths: [{ distance: "1455377", duration: "54633", steps: [{ instruction: "向北行驶396米右转" }] }],
+    }),
+    content: [{ type: "text", text: JSON.stringify({ origin: "116.397463,39.909187" }) }],
+    isError: false,
+    raw: { content: [{ type: "text", text: "unused" }], isError: false },
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1",
+      sourceType: "mcp",
+      receiptId: "mcp-route-receipt-1",
+      sourceRefs: [{ serverKey: "amap-maps", toolName: "maps_direction_driving", transport: "http", url: "https://mcp.amap.com/mcp" }],
+      facts: [{
+        kind: "source_summary",
+        toolName: "maps_direction_driving",
+        textPreview: "origin=116.397463,39.909187; destination=121.144625,28.859042; paths[0].distance=1455377; paths[0].duration=54633",
+        fields: routeFacts,
+      }],
+      caveats: [],
+      evidenceKinds: { satisfied: ["mcp_tool_call", "source_summary"], caveated: [], failed: [] },
+    },
+  });
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-mcp-route-facts",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "route-call", name: "mcp_amap_maps_maps_direction_driving", arguments: { origin: "116.397463,39.909187", destination: "121.144625,28.859042" } }] },
+    { role: "tool", toolCallId: "route-call", name: "mcp_amap_maps_maps_direction_driving", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const projection = JSON.parse(projected.split("\n\n")[0]) as {
+    evidenceReceipt: {
+      facts: Array<{
+        fields?: Array<{ name?: string; value?: string }>;
+        textPreview?: string;
+      }>;
+    };
+  };
+
+  assert.ok(projection.evidenceReceipt.facts[0]?.fields?.some((field) => field.name === "paths[0].distance" && field.value === "1455377"));
+  assert.ok(projection.evidenceReceipt.facts[0]?.fields?.some((field) => field.name === "paths[0].duration" && field.value === "54633"));
+  assert.match(projection.evidenceReceipt.facts[0]?.textPreview ?? "", /paths\[0\]\.distance=1455377/);
+});
+
 test("ContextAssembler preserves uploaded source chunk content and read_source semantics", async () => {
   const uploadedContent = [
     "Sheet: 工作表1",

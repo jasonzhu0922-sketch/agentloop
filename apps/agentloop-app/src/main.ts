@@ -13,6 +13,7 @@ import {
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { AuthService } from "./auth/auth-service.ts";
 import { createAgentLoopServer } from "./http/server.ts";
+import { loadOptionalMcpToolsFromConfigFile } from "./mcp/mcp-loader.ts";
 import { loadPlanningExtensions } from "./planning-extension-loader.ts";
 import { resolveApplicationRuntimePaths } from "./runtime-config.ts";
 
@@ -62,6 +63,7 @@ const planningExtensionPlugins = await loadPlanningExtensions({
   workspaceRoot,
   ...(runtimePaths.planningExtensionsConfigPath === undefined ? {} : { configPath: runtimePaths.planningExtensionsConfigPath }),
 });
+const mcpIntegration = await loadOptionalMcpToolsFromConfigFile(runtimePaths.mcpServersConfigPath);
 const runs = new RunService({
   database,
   skills,
@@ -72,13 +74,16 @@ const runs = new RunService({
   acceptanceProviders,
   computerExecutableAliases: parseExecutableAliases(process.env.TRUSTED_EXECUTABLE_ALIASES_JSON),
   computerCommandEnvironment: parseCommandEnvironment(process.env.TRUSTED_COMMAND_ENV_JSON),
-  tools: process.env.WEB_SEARCH_DISABLED === "1"
-    ? []
-    : createWebTools({
-        ...(process.env.WEB_SEARCH_PROVIDER === undefined ? {} : { searchProvider: parseSearchProvider(process.env.WEB_SEARCH_PROVIDER) }),
-        ...(process.env.WEB_SEARCH_ENDPOINT === undefined ? {} : { searchEndpoint: process.env.WEB_SEARCH_ENDPOINT }),
-        ...(process.env.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: process.env.WEB_SEARCH_API_KEY }),
-      }),
+  tools: [
+    ...(process.env.WEB_SEARCH_DISABLED === "1"
+      ? []
+      : createWebTools({
+          ...(process.env.WEB_SEARCH_PROVIDER === undefined ? {} : { searchProvider: parseSearchProvider(process.env.WEB_SEARCH_PROVIDER) }),
+          ...(process.env.WEB_SEARCH_ENDPOINT === undefined ? {} : { searchEndpoint: process.env.WEB_SEARCH_ENDPOINT }),
+          ...(process.env.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: process.env.WEB_SEARCH_API_KEY }),
+        })),
+    ...mcpIntegration.tools,
+  ],
   ...(process.env.AGENTLOOP_RUN_EVENT_LOGS === "0"
     ? {}
     : { runEventLogSink: (line) => process.stdout.write(`${line}\n`) }),
@@ -97,6 +102,14 @@ server.listen(port, host, () => {
   process.stdout.write(
     `AgentLoop API listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}; pruned ${skillDirectorySync.prunedLegacySkillCount} stale package Skill(s); refreshed ${skillDirectorySync.refreshedInstalledSkillCount} installed Skill package(s); queued ${reconciledRunCount} recovery review(s)\n`,
   );
+  if (mcpIntegration.loadedServers.length > 0 || mcpIntegration.failedServers.length > 0) {
+    process.stdout.write(
+      `MCP sources loaded ${mcpIntegration.loadedServers.length} server(s) and skipped ${mcpIntegration.failedServers.length} failed server(s)\n`,
+    );
+    for (const failedServer of mcpIntegration.failedServers) {
+      process.stderr.write(`MCP server ${failedServer.key} failed: ${failedServer.message}\n`);
+    }
+  }
 });
 
 let closing = false;

@@ -1,5 +1,6 @@
 import type { PlanTemplate } from "../types.ts";
 import type { TaskFingerprint } from "../types.ts";
+import { taskInstructionTokens, templateInstructionTokens, templateOperationHints } from "./template-signals.ts";
 
 export function scoreTemplateMatch(input: {
   readonly fingerprint: TaskFingerprint;
@@ -7,13 +8,17 @@ export function scoreTemplateMatch(input: {
 }): number {
   const { fingerprint, template } = input;
   const intentScore = overlapScore(fingerprint.intentHints, [template.intentFamily, ...template.positiveExampleRefs]);
+  const operationScore = overlapScore(fingerprint.operationHints, templateOperationHints(template));
+  const instructionScore = overlapScore(fingerprint.instructionTokens, templateInstructionTokens(template));
   const inputScore = template.sourceNeed === fingerprint.sourceNeed ? 1 : 0;
   const artifactScore = template.artifactKind === fingerprint.artifactKind ? 1 : 0;
   const capabilityScore = coverageScore(fingerprint.requiredCapabilities, template.requiredCapabilities);
   const skillAffinityScore = template.planSkeleton.some((step) => step.skillRoleHints.some((hint) => fingerprint.skillHints.includes(hint))) ? 1 : 0.5;
   const reliabilityScore = reliability(template);
   const raw =
-    0.3 * intentScore
+    0.2 * intentScore
+    + 0.15 * operationScore
+    + 0.2 * instructionScore
     + 0.2 * inputScore
     + 0.15 * artifactScore
     + 0.15 * capabilityScore

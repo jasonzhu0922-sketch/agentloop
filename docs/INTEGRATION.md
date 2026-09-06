@@ -179,6 +179,19 @@ new RunService({ ..., tools: [assessContractTool] });
 
 参考实现：`src/tools/web-tools.ts`（含证据回执 evidenceReceipt 范式）。危险工具（写文件/命令/GUI）默认不授权，Run/Batch 必须显式 `allowDangerousTools`。
 
+### MCP 注册文件接入
+
+如果工具来自外部 MCP server，建议在 App 侧增加独立注册文件 `apps/agentloop-app/config/mcp-servers.json`。App 启动时自动读取该文件，再把每个 MCP server 物化成 `RuntimeTool[]` 注入 `RunService`。
+
+详细设计见 [MCP-SOURCE-DESIGN](MCP-SOURCE-DESIGN.md)。
+
+### 启动后验证 MCP 可用
+
+1. 启动 App 后确认启动日志里出现 `MCP sources loaded X server(s) and skipped Y failed server(s)`。
+2. 调 `GET /v1/tools`，确认出现形如 `mcp_<serverKey>_<toolName>` 的工具名。
+3. 发起一次普通 `POST /v1/runs`，在输入里明确要求调用该 MCP 工具，检查 run 结果里是否返回对应的 `evidenceReceipt.schema = agentloop.toolEvidenceReceipt/v1`。
+4. 如果某个 server 没有出现在 `/v1/tools`，先看启动日志里的失败数，再检查注册文件路径、鉴权配置和远端 MCP server 的 `tools/list` 是否可用。
+
 ## 6. 配置模型与密钥
 
 四条路：

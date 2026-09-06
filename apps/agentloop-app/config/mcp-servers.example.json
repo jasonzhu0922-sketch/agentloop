@@ -1,0 +1,17 @@
+{
+  "defaultTrust": "untrusted",
+  "servers": [
+    {
+      "key": "amap-maps",
+      "transport": "http",
+      "url": "https://mcp.amap.com/mcp",
+      "auth": {
+        "kind": "query",
+        "name": "key",
+        "secretEnv": "AMAP_MCP_KEY"
+      },
+      "trust": "trusted",
+      "timeoutMs": 15000
+    }
+  ]
+}

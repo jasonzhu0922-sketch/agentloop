@@ -130,7 +130,13 @@ function taskProfileSystemSection(taskProfile: TaskProfile | undefined): string 
   const payload = {
     phase: taskProfile.phase,
     intent: taskProfile.intent,
-    ops: taskProfile.operations.map((profile) => profile.id),
+    ops: taskProfile.operations.map((profile) => ({
+      id: profile.id,
+      ...(profile.name === undefined ? {} : { name: profile.name }),
+      ...(profile.description === undefined ? {} : { description: profile.description }),
+      ...(profile.executionRules === undefined ? {} : { executionRules: profile.executionRules }),
+      ...(profile.successEvidence === undefined ? {} : { successEvidence: profile.successEvidence }),
+    })),
     ...(taskProfile.evidenceProfile === undefined ? {} : { evidence: taskProfile.evidenceProfile }),
     ...(taskProfile.riskProfile === undefined ? {} : { risk: taskProfile.riskProfile }),
     ...(taskProfile.planShape === undefined ? {} : { shape: taskProfile.planShape }),

@@ -1,7 +1,9 @@
 import type {
   ModelAdapter,
   ModelInvocation,
+  ModelRequestLogContext,
   ModelResponse,
+  ModelStreamEvent,
   ModelToolCall,
   RuntimeEventSink,
 } from "./contracts.ts";
@@ -40,8 +42,47 @@ export interface ModelStreamingOptions {
  */
 export async function completeWithStreaming(options: ModelStreamingOptions): Promise<ModelResponse> {
   const { model, invocation, emit, signal, base, onToolCallReady } = options;
+  const stream = model.streamComplete !== undefined;
+  const request = model.requestLogContext?.(invocation, stream) ?? fallbackRequestLogContext(invocation, stream);
+  const startedAt = Date.now();
+  let firstEventAt: number | undefined;
+  await emit({ type: "model.request.started", data: { ...base, request } });
+  const completed = async (response: ModelResponse): Promise<ModelResponse> => {
+    await emit({
+      type: "model.request.completed",
+      data: {
+        ...base,
+        request,
+        durationMs: Date.now() - startedAt,
+        ...(firstEventAt === undefined ? {} : { timeToFirstEventMs: firstEventAt - startedAt }),
+        finishReason: response.finishReason,
+        contentLength: response.content.length,
+        toolCallCount: response.toolCalls.length,
+        ...(response.usage === undefined ? {} : { usage: response.usage }),
+      },
+    });
+    return response;
+  };
+  const failed = async (error: unknown): Promise<never> => {
+    await emit({
+      type: "model.request.failed",
+      data: {
+        ...base,
+        request,
+        durationMs: Date.now() - startedAt,
+        ...(firstEventAt === undefined ? {} : { timeToFirstEventMs: firstEventAt - startedAt }),
+        ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}),
+        message: safeErrorMessage(error),
+      },
+    });
+    throw error;
+  };
   if (model.streamComplete === undefined) {
-    return model.complete(invocation, signal);
+    try {
+      return await completed(await model.complete(invocation, signal));
+    } catch (error) {
+      return await failed(error);
+    }
   }
   let partialContent = "";
   const partialToolCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
@@ -68,21 +109,76 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
     });
   };
 
-  const response = await model.streamComplete(invocation, async (event) => {
-    if (event.type === "text_delta") {
-      partialContent += event.text;
-    } else if (event.type === "tool_call_delta") {
-      const accumulated = partialToolCalls.get(event.index) ?? { arguments: "" };
-      if (event.id !== undefined) accumulated.id = event.id;
-      if (event.name !== undefined) accumulated.name = event.name;
-      accumulated.arguments += event.argumentsDelta;
-      partialToolCalls.set(event.index, accumulated);
-    } else {
-      await onToolCallReady?.({ id: event.id, name: event.name, arguments: event.arguments });
-    }
-    await flush(false);
-  }, signal);
+  try {
+    const response = await model.streamComplete(invocation, async (event) => {
+      if (firstEventAt === undefined) {
+        firstEventAt = Date.now();
+        await emit({
+          type: "model.stream.first_event",
+          data: {
+            ...base,
+            request,
+            elapsedMs: firstEventAt - startedAt,
+            eventType: event.type,
+            ...streamEventIdentity(event),
+          },
+        });
+      }
+      if (event.type === "text_delta") {
+        partialContent += event.text;
+      } else if (event.type === "tool_call_delta") {
+        const accumulated = partialToolCalls.get(event.index) ?? { arguments: "" };
+        if (event.id !== undefined) accumulated.id = event.id;
+        if (event.name !== undefined) accumulated.name = event.name;
+        accumulated.arguments += event.argumentsDelta;
+        partialToolCalls.set(event.index, accumulated);
+      } else {
+        await onToolCallReady?.({ id: event.id, name: event.name, arguments: event.arguments });
+      }
+      await flush(false);
+    }, signal);
 
-  await flush(true);
-  return response;
+    await flush(true);
+    return await completed(response);
+  } catch (error) {
+    return await failed(error);
+  }
+}
+
+function fallbackRequestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext {
+  return {
+    protocol: "chat-completions",
+    model: "unknown",
+    phase: invocation.phase ?? "unknown",
+    stream,
+    canonicalMessageCount: invocation.messages.length,
+    toolCount: invocation.tools.length,
+    toolChoice: describeInvocationToolChoice(invocation.toolChoice),
+    runtimeContextPlacement: invocation.runtimeContext === undefined ? "none" : "unknown",
+  };
+}
+
+function describeInvocationToolChoice(value: ModelInvocation["toolChoice"]): string {
+  if (value === undefined) return "none";
+  if (typeof value === "string") return value;
+  return `function:${value.name}`;
+}
+
+function streamEventIdentity(event: ModelStreamEvent): Record<string, unknown> {
+  if (event.type === "text_delta") return {};
+  if (event.type === "tool_call_delta") {
+    return {
+      index: event.index,
+      ...(event.id === undefined ? {} : { toolCallId: event.id }),
+      ...(event.name === undefined ? {} : { toolName: event.name }),
+    };
+  }
+  return { index: event.index, toolCallId: event.id, toolName: event.name };
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const compact = message.replace(/\s+/g, " ").trim();
+  if (compact.length === 0) return "Model request failed";
+  return compact.length <= 200 ? compact : `${compact.slice(0, 197)}...`;
 }

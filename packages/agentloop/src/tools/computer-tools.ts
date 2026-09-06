@@ -507,6 +507,7 @@ export function createComputerTools(
         "Generated scripts that need read-only Skill assets should read the AGENTLOOP_SKILL_ROOT_* environment variable shown in execution context and join package-relative asset paths from there.",
         "When cwd is @skills/<skill-name>, relative task paths in arguments resolve under the read-only Skill package; pass task inputs, outputs, workspaces, and QA directories as absolute paths under the Runtime workspace root.",
         "Command arguments must not reference filesystem paths outside the workspace root, the current command root, or another authorized command root.",
+        "Do not use a structured data artifact such as .json, .csv, .tsv, .xlsx, .docx, .pptx, or .pdf as a Python, Node, shell, or other interpreter entry point.",
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",

@@ -54,6 +54,7 @@ import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
+import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import { classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange } from "./task-intent.ts";
 import type {
   CapabilityGrant,
@@ -61,6 +62,7 @@ import type {
   ModelAdapter,
   ModelInvocation,
   ModelMessage,
+  ModelRequestLogContext,
   ModelResponse,
   ModelRetryReporter,
   ModelStreamSink,
@@ -1852,9 +1854,21 @@ export class RunService {
         || stepRequiresFileOutput(activeStep);
       const lookupEvidenceStep = !fileOutputStep && stepCanConvergeFromLookupEvidence(activeStep);
       const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills);
+      const stepSemanticFrame = deriveStepSemanticFrame({
+        step: activeStep,
+        plan,
+        skills: stepSkills,
+        visibleDirectories: input.visibleDirectories,
+        sources: input.sources,
+        taskProfile: stepTaskProfile,
+        operationProfileId: stepTaskProfile.operations[0]?.id,
+        requiresFileOutput: fileOutputStep,
+        conversationWorkingSet: input.conversationWorkingSet,
+      });
       const result = await runAgentLoop({
         runId: input.runId,
         systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
+        stepSemanticFrame,
         runtimeContext: recovery === undefined
           ? buildStepRuntimeContext(
             activeStep,
@@ -2078,6 +2092,7 @@ export class RunService {
       });
       const evidence: StepEvidence = {
         candidateOutput: result.output,
+        deliveryCandidate: result.deliveryCandidate,
         toolCalls: result.toolEvidence,
         modelSteps: result.steps,
         ...(result.completionCaveat === undefined ? {} : { completionCaveat: result.completionCaveat }),
@@ -2508,6 +2523,11 @@ const TERMINAL_EVENT_TYPES = new Set([
   "loop.no_progress",
   "step.started",
   "step.completed",
+  "model.request.started",
+  "model.stream.first_event",
+  "model.stream.awaiting_completion",
+  "model.request.completed",
+  "model.request.failed",
   "assistant.committed",
   "assistant.tool_call.committed",
   "tool.planned",
@@ -2670,6 +2690,28 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
       addNumber(details, "outputTokens", usage.outputTokens);
     }
   }
+  if (
+    type === "model.request.started"
+    || type === "model.stream.first_event"
+    || type === "model.stream.awaiting_completion"
+    || type === "model.request.completed"
+    || type === "model.request.failed"
+  ) {
+    appendModelRequestDetails(details, data);
+    addString(details, "eventType", data.eventType);
+    addNumber(details, "elapsedMs", data.elapsedMs);
+    addNumber(details, "durationMs", data.durationMs);
+    addNumber(details, "timeToFirstEventMs", data.timeToFirstEventMs);
+    addNumber(details, "contentChars", data.contentLength);
+    addNumber(details, "toolCalls", data.toolCallCount);
+    const usage = asRecord(data.usage);
+    if (usage !== undefined) {
+      addNumber(details, "inputTokens", usage.inputTokens);
+      addNumber(details, "outputTokens", usage.outputTokens);
+    }
+    const message = asString(data.message);
+    if (message !== undefined && message.trim().length > 0) details.push(`message="${truncateForTerminal(message, 160)}"`);
+  }
   if (type === "skill.activation.available" && Array.isArray(data.skills)) {
     details.push(`skills=${data.skills.length}`);
   }
@@ -2703,18 +2745,7 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     }
   }
   if (type === "model.retry") {
-    const request = asRecord(data.request);
-    if (request !== undefined) {
-      addString(details, "requestPhase", request.phase);
-      addString(details, "requestProtocol", request.protocol);
-      addNumber(details, "requestTools", request.toolCount);
-      addString(details, "requestToolChoice", request.toolChoice);
-      addString(details, "requestPlacement", request.runtimeContextPlacement);
-      addNumber(details, "requestCanonicalMessages", request.canonicalMessageCount);
-      addNumber(details, "requestProviderMessages", request.providerMessageCount);
-      addNumber(details, "requestProviderItems", request.providerInputItemCount);
-      addBoolean(details, "requestSentinel", request.insertedEmptyInputSentinel);
-    }
+    appendModelRequestDetails(details, data);
   }
   if (type === "loop.convergence_requested" || type === "loop.limit_exceeded" || type === "loop.no_progress") {
     addNumber(details, "maxSteps", data.maxSteps);
@@ -2724,6 +2755,22 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     addString(details, "toolSignature", data.toolSignature);
   }
   return details;
+}
+
+function appendModelRequestDetails(details: string[], data: Readonly<Record<string, unknown>>): void {
+  const request = asRecord(data.request);
+  if (request === undefined) return;
+  addString(details, "requestPhase", request.phase);
+  addString(details, "requestProtocol", request.protocol);
+  addString(details, "requestModel", request.model);
+  addBoolean(details, "requestStream", request.stream);
+  addNumber(details, "requestTools", request.toolCount);
+  addString(details, "requestToolChoice", request.toolChoice);
+  addString(details, "requestPlacement", request.runtimeContextPlacement);
+  addNumber(details, "requestCanonicalMessages", request.canonicalMessageCount);
+  addNumber(details, "requestProviderMessages", request.providerMessageCount);
+  addNumber(details, "requestProviderItems", request.providerInputItemCount);
+  addBoolean(details, "requestSentinel", request.insertedEmptyInputSentinel);
 }
 
 function planningExtensionContextTelemetry(
@@ -3696,6 +3743,10 @@ class ActionTrackedModel implements ModelAdapter {
 
   estimateInputTokens(invocation: ModelInvocation): number | undefined {
     return this.model.estimateInputTokens?.(invocation);
+  }
+
+  requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext | undefined {
+    return this.model.requestLogContext?.(invocation, stream);
   }
 
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {

@@ -826,6 +826,50 @@ test("OpenAI-compatible streaming adapter reports event-consumption failures sep
   }
 });
 
+test("OpenAI-compatible streaming adapter retries an unreadable stream before any emitted delta", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new TypeError("socket closed before first chunk"));
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    return sseResponse([
+      'data: {"choices":[{"delta":{"content":"Recovered"},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ]);
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+    });
+    const result = await model.streamComplete!({
+      runId: "run-stream-retry-before-emission",
+      systemPrompt: "System",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan" }],
+      tools: [],
+    }, async () => undefined);
+
+    assert.equal(attempts, 2);
+    assert.equal(result.content, "Recovered");
+    assert.equal(result.finishReason, "stop");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible streaming adapter preserves a prior non-empty tool name when later deltas send an empty name", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => sseResponse([

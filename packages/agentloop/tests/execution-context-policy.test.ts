@@ -390,6 +390,56 @@ test("step semantic frame classifies visible directory analysis as source acquis
   assert.equal(frame.forbiddenMoves.some((move) => /do not answer from assumptions/.test(move)), true);
 });
 
+test("execution context asks acquisition steps to batch independent reads in one turn", () => {
+  const step: PlanStep = {
+    id: "lookup_route",
+    kind: "leaf",
+    position: 0,
+    objective: "Query the route and distance between two places using the map MCP.",
+    dependencies: [],
+    role: "fact_acquisition",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    recommendedToolNames: ["mcp_amap_maps_maps_geo", "mcp_amap_maps_maps_direction_driving", "mcp_amap_maps_maps_distance"],
+    evidenceContract: {
+      requiredKinds: ["source_summary", "explicit_caveats"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "running",
+  };
+
+  const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
+    step,
+    plan: {
+      id: "plan-1",
+      runId: "run-1",
+      version: 1,
+      goal: "Query a map route",
+      selectedSkillIds: [],
+      status: "running",
+      steps: [step],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    skills: [],
+    workspaceRoot: "/workspace",
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", sourceNeed: "source_grounded" }),
+    operationProfile: { id: "web_research" },
+    requiresFileOutput: false,
+  }).content);
+
+  assert.match(
+    payload.evidenceAcquisitionDiscipline as string,
+    /fetch them in the same turn/i,
+  );
+  assert.match(
+    payload.evidenceAcquisitionDiscipline as string,
+    /Do not wait for Assessment to ask for the next obvious fact/i,
+  );
+});
+
 test("dependency evidence binding keeps missing source summary explicit", () => {
   const inspectStep: PlanStep = {
     id: "inspect_data",

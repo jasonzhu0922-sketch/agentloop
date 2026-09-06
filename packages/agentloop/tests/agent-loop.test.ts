@@ -505,6 +505,53 @@ test("source-only evidence receipts do not replace a produce step delivery candi
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
+test("conversation produce candidates carry explicit caveats as structured delivery evidence", async () => {
+  let modelCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(): Promise<ModelResponse> {
+      modelCalls += 1;
+      return {
+        content: "已完成汇总分析，团队整体表现较好。",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Summarize the analysis.",
+    input: "给我一个汇总分析",
+    model,
+    tools: new ToolRegistry([]),
+    grant,
+    maxSteps: 2,
+    stepSemanticFrame: {
+      completionBoundary: ["explicit_caveats"],
+      evidenceMode: "produce_without_external_evidence",
+      phaseRole: "delivery",
+    },
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.ok(candidate.deliveryCandidate);
+      assert.equal(candidate.deliveryCandidate.schema, "agentloop.runtimeDeliveryCandidate/v1");
+      assert.equal(candidate.deliveryCandidate.caveats.length > 0, true);
+      assert.equal(candidate.stepSemanticFrame?.completionBoundary.includes("explicit_caveats"), true);
+      assert.match(candidate.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(modelCalls, 1);
+  assert.ok(result.deliveryCandidate);
+  assert.equal(result.deliveryCandidate.schema, "agentloop.runtimeDeliveryCandidate/v1");
+  assert.equal(result.deliveryCandidate.caveats.length > 0, true);
+  assert.match(result.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
 test("structured tool candidates go directly to assessment without a final model rewrite", async () => {
   let executions = 0;
   let assessmentCalls = 0;
@@ -716,7 +763,7 @@ test("oversized structured stdout candidates from command projections go directl
       const projected = candidate.projectedToolEvidence.find((item) => item.toolCallId === "lookup-1");
       assert.match(projected?.result ?? "", /api_catalog_result\/v1/);
       assert.match(projected?.result ?? "", /primary_api_id/);
-      assert.doesNotMatch(projected?.result ?? "", /出参字段 出参字段 出参字段/);
+      assert.match(projected?.result ?? "", /"deliveryCandidate"/);
       return { approved: true, feedback: "" };
     },
   });
@@ -2942,10 +2989,20 @@ test("streaming turns emit live deltas before the durable assistant checkpoint",
   });
 
   assert.equal(result.output, "done");
+  const modelStarted = events.filter((event) => event.type === "model.request.started");
+  const modelCompleted = events.filter((event) => event.type === "model.request.completed");
+  const firstEvents = events.filter((event) => event.type === "model.stream.first_event");
+  assert.equal(modelStarted.length, 2);
+  assert.equal(modelCompleted.length, 2);
+  assert.equal(firstEvents.length, 1);
+  assert.equal(firstEvents[0].data.eventType, "text_delta");
+  assert.equal((firstEvents[0].data.request as { canonicalMessageCount?: number }).canonicalMessageCount, 1);
   const streamingEvents = events.filter((event) => event.type === "assistant.streaming");
   assert.equal(streamingEvents.length >= 1, true);
   const committedIndex = events.findIndex((event) => event.type === "assistant.committed");
   assert.equal(committedIndex >= 0, true);
+  assert.equal(events.findIndex((event) => event.type === "model.request.started") < events.findIndex((event) => event.type === "model.stream.first_event"), true);
+  assert.equal(events.findIndex((event) => event.type === "model.stream.first_event") < events.findIndex((event) => event.type === "model.request.completed"), true);
   // Every transient delta must precede the durable checkpoint for that turn.
   const streamingIndices = events.map((event, index) => ({ event, index }))
     .filter(({ event }) => event.type === "assistant.streaming")
@@ -3014,16 +3071,60 @@ test("tool_call_ready dispatches the tool before the full assistant checkpoint",
   assert.equal(executions, 1);
   const committedIdx = events.findIndex((event) => event.type === "assistant.committed");
   const toolCallCommittedIdx = events.findIndex((event) => event.type === "assistant.tool_call.committed");
+  const awaitingCompletionIdx = events.findIndex((event) => event.type === "model.stream.awaiting_completion");
+  const modelCompletedIdx = events.findIndex((event) => event.type === "model.request.completed");
   const toolCompletedIdx = events.findIndex((event) => event.type === "tool.completed");
   assert.equal(toolCallCommittedIdx >= 0, true);
+  assert.equal(awaitingCompletionIdx >= 0, true);
+  assert.equal(modelCompletedIdx >= 0, true);
   assert.equal(toolCompletedIdx >= 0, true);
   // Per-call checkpoint precedes its effect, which precedes the full checkpoint.
+  assert.equal(toolCallCommittedIdx < awaitingCompletionIdx, true);
+  assert.equal(awaitingCompletionIdx < committedIdx, true);
+  assert.equal(modelCompletedIdx < committedIdx, true);
   assert.equal(toolCallCommittedIdx < toolCompletedIdx, true);
   assert.equal(toolCompletedIdx < committedIdx, true);
   const perCallCommit = events[toolCallCommittedIdx];
   assert.equal(perCallCommit.data.toolCallId, "call-echo");
   assert.equal(perCallCommit.data.name, "echo");
   assert.deepEqual(perCallCommit.data.arguments, { value: 7 });
+  const awaitingCompletion = events[awaitingCompletionIdx];
+  assert.equal(awaitingCompletion.data.toolCallId, "call-echo");
+  assert.equal(awaitingCompletion.data.toolName, "echo");
+});
+
+test("model request failures are emitted before the run fails", async () => {
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      throw new AppError("MODEL_ERROR", "provider timeout", 502);
+    },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: "run-model-failed-event",
+      systemPrompt: "Fail",
+      input: "fail",
+      model,
+      tools: new ToolRegistry([]),
+      grant: makeGrant([]),
+      maxSteps: 1,
+      emit: (event) => { events.push(event); },
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+      return true;
+    },
+  );
+
+  const startedIdx = events.findIndex((event) => event.type === "model.request.started");
+  const failedIdx = events.findIndex((event) => event.type === "model.request.failed");
+  assert.equal(startedIdx >= 0, true);
+  assert.equal(failedIdx > startedIdx, true);
+  assert.equal(events[failedIdx].data.code, "MODEL_ERROR");
+  assert.match(String(events[failedIdx].data.message), /provider timeout/);
 });
 
 test("progress policy admits streaming tool calls before dispatching side effects", async () => {

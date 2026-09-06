@@ -12,6 +12,20 @@ export interface RuntimeContextSnapshot {
   readonly supersedesId?: string;
 }
 
+export interface RuntimeDeliveryCandidateEvidenceKinds {
+  readonly satisfied: readonly string[];
+  readonly caveated: readonly string[];
+  readonly failed: readonly string[];
+}
+
+export interface RuntimeDeliveryCandidate {
+  readonly schema: "agentloop.runtimeDeliveryCandidate/v1";
+  readonly output: string;
+  readonly caveats: readonly string[];
+  readonly evidenceKinds: RuntimeDeliveryCandidateEvidenceKinds;
+  readonly sourceToolCallIds: readonly string[];
+}
+
 export interface ModelToolCall {
   readonly id: string;
   readonly name: string;
@@ -152,6 +166,8 @@ export interface ModelAdapter {
    * provider-neutral estimate.
    */
   estimateInputTokens?(invocation: ModelInvocation): number | undefined;
+  /** Sanitized provider-bound request shape for Runtime observability. */
+  requestLogContext?(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext | undefined;
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse>;
   /**
    * Streaming variant of complete(). Emits incremental text and tool-call
@@ -224,6 +240,7 @@ export type RuntimeEventSink = (event: RuntimeEvent) => Promise<void> | void;
 
 export interface AgentLoopResult {
   readonly output: string;
+  readonly deliveryCandidate?: RuntimeDeliveryCandidate;
   readonly messages: readonly ModelMessage[];
   readonly steps: number;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
@@ -247,6 +264,12 @@ export interface AgentLoopToolEvidence {
 
 export interface CandidateCompletionContext {
   readonly output: string;
+  readonly deliveryCandidate?: RuntimeDeliveryCandidate;
+  readonly stepSemanticFrame?: Readonly<{
+    readonly completionBoundary: readonly string[];
+    readonly evidenceMode: string;
+    readonly phaseRole: string;
+  }>;
   readonly messages: readonly ModelMessage[];
   readonly modelSteps: number;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];

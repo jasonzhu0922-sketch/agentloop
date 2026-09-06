@@ -78,8 +78,9 @@ interface ProviderRequest {
 }
 
 interface StreamFailureDiagnostics {
-  readonly eventsSeen: number;
-  readonly lastEvent?: StreamEventSummary;
+  eventsSeen: number;
+  hadSinkEmission: boolean;
+  lastEvent?: StreamEventSummary;
 }
 
 interface StreamEventSummary {
@@ -183,6 +184,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
       + providerTools.length * 4;
   }
 
+  requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext {
+    return this.buildRequest(invocation, stream).logContext;
+  }
+
   async complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
     const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
@@ -244,6 +249,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
       const message = choice?.message;
       if (message === undefined) throw new AppError("MODEL_ERROR", "Model provider returned no message", 502);
       const toolCalls = (message.tool_calls ?? []).map((call, index) => parseToolCall(call, index));
+      if (requestRequiresToolCall(request.logContext.toolChoice) && toolCalls.length === 0 && attempt < this.maxAttempts) {
+        await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
+        continue;
+      }
       return {
         content: message.content ?? "",
         toolCalls,
@@ -324,6 +333,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
             }
             throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
           }
+          if (error instanceof StreamConsumptionError && !error.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+            continue;
+          }
           if (error instanceof AppError) throw error;
           // Partial deltas may already have been emitted to the sink, so a
           // mid-stream failure is never replayed through a second provider call.
@@ -388,7 +401,14 @@ export class OpenAICompatibleModel implements ModelAdapter {
     let finishReason: string | undefined;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
-    const diagnostics: { eventsSeen: number; lastEvent?: StreamEventSummary } = { eventsSeen: 0 };
+    const diagnostics: StreamFailureDiagnostics = {
+      eventsSeen: 0,
+      hadSinkEmission: false,
+    };
+    const emit = async (event: Parameters<ModelStreamSink>[0]): Promise<void> => {
+      diagnostics.hadSinkEmission = true;
+      await sink(event);
+    };
 
     const handleData = async (data: string): Promise<void> => {
       diagnostics.eventsSeen += 1;
@@ -405,7 +425,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       const deltaContent = choice?.delta?.content;
       if (typeof deltaContent === "string" && deltaContent.length > 0) {
         content += deltaContent;
-        await sink({ type: "text_delta", text: deltaContent });
+        await emit({ type: "text_delta", text: deltaContent });
       }
       const reasoningDelta = choice?.delta?.reasoning_content;
       if (typeof reasoningDelta === "string") reasoningContent += reasoningDelta;
@@ -419,7 +439,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         const argumentsDelta = typeof rawArgumentsDelta === "string" ? rawArgumentsDelta : "";
         if (argumentsDelta.length > 0) accumulated.arguments += argumentsDelta;
         toolCallAccumulator.set(index, accumulated);
-        await sink({
+        await emit({
           type: "tool_call_delta",
           index,
           ...(accumulated.id === undefined ? {} : { id: accumulated.id }),
@@ -570,6 +590,10 @@ export class ResponsesModel implements ModelAdapter {
     return await this.streamComplete(invocation, async () => undefined, signal);
   }
 
+  requestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext {
+    return this.buildRequest(invocation, stream).logContext;
+  }
+
   async streamComplete(
     invocation: ModelInvocation,
     sink: ModelStreamSink,
@@ -634,6 +658,10 @@ export class ResponsesModel implements ModelAdapter {
               continue;
             }
             throw modelRequestAborted(requestTimeout.abortReason, requestTimeout.details());
+          }
+          if (error instanceof StreamConsumptionError && !error.diagnostics.hadSinkEmission && attempt < this.maxAttempts) {
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, undefined, request.logContext);
+            continue;
           }
           if (error instanceof AppError) throw error;
           throw unreadableStreamingResponse(error, attempt, request.logContext);
@@ -708,7 +736,10 @@ export class ResponsesModel implements ModelAdapter {
     let finalResponse: Record<string, unknown> | undefined;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
-    const diagnostics: { eventsSeen: number; lastEvent?: StreamEventSummary } = { eventsSeen: 0 };
+    const diagnostics: StreamFailureDiagnostics = {
+      eventsSeen: 0,
+      hadSinkEmission: false,
+    };
 
     const handleData = async (data: string): Promise<void> => {
       diagnostics.eventsSeen += 1;
@@ -1119,6 +1150,10 @@ function describeToolChoice(value: unknown): string {
     }
   }
   return "unknown";
+}
+
+function requestRequiresToolCall(toolChoice: string): boolean {
+  return toolChoice === "required" || toolChoice.startsWith("function:");
 }
 
 function isJsonResponse(response: Response): boolean {

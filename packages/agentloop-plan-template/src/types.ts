@@ -40,6 +40,8 @@ export interface TaskFingerprint {
   readonly sideEffectKind: TaskSideEffectKind;
   readonly requiredCapabilities: readonly string[];
   readonly skillHints: readonly string[];
+  readonly operationHints: readonly string[];
+  readonly instructionTokens: readonly string[];
   readonly outputConstraints: readonly string[];
   readonly riskLevel: PlanTemplateRiskLevel;
   readonly textEmbeddingRef?: string;

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { PlanProposal } from "@zhujun/agentloop";
 import { createPlanTemplatePlugin } from "../src/index.ts";
+import { profileTask, routePlanTemplate } from "../src/index.ts";
 
 test("observeEnabled records a match in the plugin-owned sqlite database", async () => {
   const directory = await fs.mkdtemp(join(tmpdir(), "agentloop-plan-template-"));
@@ -59,6 +60,255 @@ test("observeEnabled records a match in the plugin-owned sqlite database", async
     await plugin.close();
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+test("mcp route queries are not profiled as web research templates", async () => {
+  const fingerprint = profileTask({
+    runId: "run-amap-mcp",
+    actorUserId: "owner",
+    input: "请调用高德 MCP，查询天安门到外滩的驾车路线和距离。",
+    responseOnly: false,
+    availableSkills: [],
+    selectedSkillRoles: [],
+    availableToolNames: ["mcp_amap_maps_maps_direction_driving", "websearch"],
+    availableTools: [],
+    visibleDirectories: [],
+    sources: [],
+  });
+
+  assert.equal(fingerprint.sideEffectKind, "external_api");
+  assert.equal(fingerprint.sourceNeed, "none");
+  assert.equal(fingerprint.operationHints.includes("external_api"), true);
+
+  const decision = routePlanTemplate({
+    task: {
+      runId: "run-amap-mcp",
+      actorUserId: "owner",
+      input: "请调用高德 MCP，查询天安门到外滩的驾车路线和距离。",
+      responseOnly: false,
+      availableSkills: [],
+      selectedSkillRoles: [],
+      availableToolNames: ["mcp_amap_maps_maps_direction_driving", "websearch"],
+      availableTools: [],
+      visibleDirectories: [],
+      sources: [],
+    },
+    fingerprint,
+    templates: [{
+      schema: "agentloop.planTemplate/v1",
+      id: "template_research",
+      version: 1,
+      status: "active",
+      intentFamily: "research",
+      sourceNeed: "web_research",
+      acceptedSourceTypes: [],
+      artifactKind: "none",
+      sideEffectKind: "none",
+      requiredCapabilities: ["web_research"],
+      requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+      riskCeiling: "low",
+      planSkeleton: [],
+      positiveExampleRefs: [],
+      negativeExampleRefs: [],
+      reliability: {
+        completedRuns: 9,
+        admittedRuns: 9,
+        failedRuns: 0,
+        planAdmissionFailureRate: 0,
+        assessmentFailureRate: 0,
+        repairRate: 0,
+        avgPlannerSavedMs: 0,
+        updatedAt: "2026-09-05T00:00:00.000Z",
+      },
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:00:00.000Z",
+    }],
+    config: {
+      schema: "agentloop.planTemplateFastPathConfig/v1",
+      enabled: true,
+      observeEnabled: false,
+      mode: "direct_use",
+      allowDirectUse: true,
+      minDirectUseScore: 0.9,
+      minPlannerContextScore: 0.7,
+      allowedRiskCeiling: "low",
+      requireActiveTemplateForDirectUse: true,
+    },
+  });
+
+  assert.equal(decision.kind, "rejected");
+});
+
+
+
+test("instruction tokens raise similarity for matching template instruction text", async () => {
+  const fingerprint = profileTask({
+    runId: "run-instruction-sim",
+    actorUserId: "owner",
+    input: "查询并返回最新研究结果",
+    responseOnly: false,
+    availableSkills: [],
+    selectedSkillRoles: [],
+    availableToolNames: ["websearch", "webfetch"],
+    availableTools: [],
+    visibleDirectories: [],
+    sources: [],
+  });
+
+  const decision = routePlanTemplate({
+    task: {
+      runId: "run-instruction-sim",
+      actorUserId: "owner",
+      input: "查询并返回最新研究结果",
+      responseOnly: false,
+      availableSkills: [],
+      selectedSkillRoles: [],
+      availableToolNames: ["websearch", "webfetch"],
+      availableTools: [],
+      visibleDirectories: [],
+      sources: [],
+    },
+    fingerprint,
+    templates: [{
+      schema: "agentloop.planTemplate/v1",
+      id: "template_instruction_research",
+      version: 1,
+      status: "active",
+      intentFamily: "research",
+      sourceNeed: "web_research",
+      acceptedSourceTypes: [],
+      artifactKind: "none",
+      sideEffectKind: "none",
+      requiredCapabilities: ["web_research"],
+      requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+      riskCeiling: "low",
+      planSkeleton: [{
+        id: "step_1",
+        role: "produce",
+        operationRef: "research:websearch",
+        dependsOn: [],
+        inputBindings: {},
+        requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        producedEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        requiredCapabilities: ["web_research"],
+        skillRoleHints: ["source_provider"],
+        objective: "查询并返回最新研究结果",
+      }],
+      positiveExampleRefs: [],
+      negativeExampleRefs: [],
+      reliability: {
+        completedRuns: 9,
+        admittedRuns: 9,
+        failedRuns: 0,
+        planAdmissionFailureRate: 0,
+        assessmentFailureRate: 0,
+        repairRate: 0,
+        avgPlannerSavedMs: 0,
+        updatedAt: "2026-09-05T00:00:00.000Z",
+      },
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:00:00.000Z",
+    }],
+    config: {
+      schema: "agentloop.planTemplateFastPathConfig/v1",
+      enabled: true,
+      observeEnabled: false,
+      mode: "direct_use",
+      allowDirectUse: true,
+      minDirectUseScore: 0.9,
+      minPlannerContextScore: 0.7,
+      allowedRiskCeiling: "low",
+      requireActiveTemplateForDirectUse: true,
+    },
+  });
+
+  assert.equal(decision.kind, "direct_use");
+});
+test("research tasks can still match research templates", async () => {
+  const fingerprint = profileTask({
+    runId: "run-research",
+    actorUserId: "owner",
+    input: "请联网查询最近的 AI 热点新闻，并给出简洁中文简报。",
+    responseOnly: false,
+    availableSkills: [],
+    selectedSkillRoles: [],
+    availableToolNames: ["websearch", "webfetch"],
+    availableTools: [],
+    visibleDirectories: [],
+    sources: [],
+  });
+
+  assert.equal(fingerprint.sourceNeed, "web_research");
+  assert.equal(fingerprint.operationHints.includes("research"), true);
+
+  const decision = routePlanTemplate({
+    task: {
+      runId: "run-research",
+      actorUserId: "owner",
+      input: "请联网查询最近的 AI 热点新闻，并给出简洁中文简报。",
+      responseOnly: false,
+      availableSkills: [],
+      selectedSkillRoles: [],
+      availableToolNames: ["websearch", "webfetch"],
+      availableTools: [],
+      visibleDirectories: [],
+      sources: [],
+    },
+    fingerprint,
+    templates: [{
+      schema: "agentloop.planTemplate/v1",
+      id: "template_research",
+      version: 1,
+      status: "active",
+      intentFamily: "research",
+      sourceNeed: "web_research",
+      acceptedSourceTypes: [],
+      artifactKind: "none",
+      sideEffectKind: "none",
+      requiredCapabilities: ["web_research"],
+      requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+      riskCeiling: "low",
+      planSkeleton: [{
+        id: "step_1",
+        role: "produce",
+        operationRef: "research:websearch",
+        dependsOn: [],
+        inputBindings: {},
+        requiredEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        producedEvidenceKinds: ["delivery_receipt", "explicit_caveats"],
+        requiredCapabilities: ["web_research"],
+        skillRoleHints: ["source_provider"],
+        objective: "查询并返回最新研究结果",
+      }],
+      positiveExampleRefs: [],
+      negativeExampleRefs: [],
+      reliability: {
+        completedRuns: 9,
+        admittedRuns: 9,
+        failedRuns: 0,
+        planAdmissionFailureRate: 0,
+        assessmentFailureRate: 0,
+        repairRate: 0,
+        avgPlannerSavedMs: 0,
+        updatedAt: "2026-09-05T00:00:00.000Z",
+      },
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:00:00.000Z",
+    }],
+    config: {
+      schema: "agentloop.planTemplateFastPathConfig/v1",
+      enabled: true,
+      observeEnabled: false,
+      mode: "direct_use",
+      allowDirectUse: true,
+      minDirectUseScore: 0.9,
+      minPlannerContextScore: 0.7,
+      allowedRiskCeiling: "low",
+      requireActiveTemplateForDirectUse: true,
+    },
+  });
+
+  assert.equal(decision.kind, "direct_use");
 });
 
 test("observe mode can run alongside direct use routing", async () => {
