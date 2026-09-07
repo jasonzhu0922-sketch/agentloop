@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createStepExecutionStrategyProfile,
+  DefaultToolExposurePolicy,
   DefaultStepExecutionStrategy,
 } from "../src/runtime/step-execution-strategy.ts";
 import type { RuntimeStepEvidenceState } from "../src/runtime/tool-progress-policy.ts";
 
-test("default step execution strategy narrows tools to artifact acceptance", () => {
-  const strategy = new DefaultStepExecutionStrategy();
+test("action-aware step execution strategy narrows tools to artifact acceptance", () => {
+  const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 2,
     maxSteps: 4,
@@ -37,8 +38,8 @@ test("default step execution strategy narrows tools to artifact acceptance", () 
   assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 2048);
 });
 
-test("default step execution strategy hides read-only tools during diagnostic repair", () => {
-  const strategy = new DefaultStepExecutionStrategy();
+test("action-aware step execution strategy hides read-only tools during diagnostic repair", () => {
+  const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 3,
     maxSteps: 6,
@@ -78,7 +79,7 @@ test("full-catalog step execution profile keeps all granted tools visible", () =
     maxSteps: 4,
     hardLimit: 4,
     convergenceOnly: false,
-    availableTools: tools(["computer_read_file", "computer_write_file", "verify_artifact_acceptance"]),
+    availableTools: tools(["computer_read_file", "computer_write_file", "computer_run_command", "verify_artifact_acceptance"]),
     priorToolEvidence: [],
     stepEvidenceState: state({
       nextAction: "verify_existing_artifact",
@@ -95,12 +96,41 @@ test("full-catalog step execution profile keeps all granted tools visible", () =
   assert.deepEqual(decision.toolCatalog.activeToolNames, [
     "computer_read_file",
     "computer_write_file",
+    "computer_run_command",
     "verify_artifact_acceptance",
   ]);
 });
 
-test("default delivery-only submit stage keeps tools visible before non-setup evidence exists", () => {
+test("default step execution strategy keeps every Plan-granted tool visible", () => {
   const strategy = new DefaultStepExecutionStrategy();
+  const decision = strategy.prepareModelStep({
+    modelStep: 4,
+    maxSteps: 6,
+    hardLimit: 6,
+    convergenceOnly: false,
+    availableTools: tools(["load_skill", "computer_write_file", "computer_run_command", "verify_artifact_acceptance"]),
+    priorToolEvidence: [{ toolCallId: "source", toolName: "read_source", result: "{}", isError: false }],
+    stepEvidenceState: state({
+      nextAction: "submit_completion_candidate",
+      evidenceProducingToolNames: ["computer_write_file", "computer_run_command"],
+      exploratoryToolNames: ["read_source"],
+      workProductStatus: "process_artifact_available",
+      processArtifactPaths: ["report.py"],
+      missingRequiredEvidenceKinds: ["artifact_path"],
+    }),
+  });
+
+  assert.equal(decision.toolCatalog.mode, "full");
+  assert.deepEqual(decision.toolCatalog.activeToolNames, [
+    "load_skill",
+    "computer_write_file",
+    "computer_run_command",
+    "verify_artifact_acceptance",
+  ]);
+});
+
+test("action-aware delivery-only submit stage keeps tools visible before non-setup evidence exists", () => {
+  const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 1,
     maxSteps: 4,
@@ -121,8 +151,8 @@ test("default delivery-only submit stage keeps tools visible before non-setup ev
   assert.deepEqual(decision.toolCatalog.activeToolNames, ["load_skill", "computer_write_file", "webfetch"]);
 });
 
-test("default submit stage hides production tools after non-setup evidence exists", () => {
-  const strategy = new DefaultStepExecutionStrategy();
+test("action-aware submit stage hides production tools after non-setup evidence exists", () => {
+  const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 3,
     maxSteps: 4,
@@ -170,6 +200,8 @@ function state(input: {
     caveatedEvidenceKinds: [],
     failedEvidenceKinds: [],
     missingRequiredEvidenceKinds: input.missingRequiredEvidenceKinds,
+    pendingCandidateEvidenceKinds: [],
+    missingToolEvidenceKinds: input.missingRequiredEvidenceKinds,
     workProduct: {
       schema: "agentloop.runtimeStepWorkProductState/v1",
       status: input.workProductStatus,

@@ -88,6 +88,8 @@ export interface LoopStepFrame {
 export interface CompactLoopEvidenceState {
   readonly nextAction: RuntimeStepEvidenceState["nextAction"];
   readonly missingRequiredEvidenceKinds: readonly string[];
+  readonly pendingCandidateEvidenceKinds: readonly string[];
+  readonly missingToolEvidenceKinds: readonly string[];
   readonly workProduct: {
     readonly status: RuntimeStepEvidenceState["workProduct"]["status"];
     readonly expectedArtifactKind?: string;
@@ -165,7 +167,10 @@ export class DefaultStepExecutionStrategy implements StepExecutionStrategy {
   } = {}) {
     this.id = options.id ?? "agentloop.defaultStepExecutionStrategy/v1";
     this.loopStepPolicy = options.loopStepPolicy ?? new DefaultLoopStepPolicy();
-    this.toolExposurePolicy = options.toolExposurePolicy ?? new DefaultToolExposurePolicy();
+    // The Run CapabilityGrant is the authorization boundary. Do not turn a
+    // next-action hint into a second, transient authorization boundary that
+    // can reject a Tool the user already authorized for the Run.
+    this.toolExposurePolicy = options.toolExposurePolicy ?? new FullCatalogToolExposurePolicy();
     this.promptProjectionPolicy = options.promptProjectionPolicy ?? new DefaultPromptProjectionPolicy();
   }
 
@@ -384,6 +389,7 @@ export function createStepExecutionStrategyProfile(
   }
   return new DefaultStepExecutionStrategy({
     id: "agentloop.actionAwareStepExecutionStrategy/v1",
+    toolExposurePolicy: new DefaultToolExposurePolicy(),
     promptProjectionPolicy,
   });
 }
@@ -563,6 +569,8 @@ function compactLoopEvidenceState(state: RuntimeStepEvidenceState): CompactLoopE
   return {
     nextAction: state.nextAction,
     missingRequiredEvidenceKinds: state.missingRequiredEvidenceKinds,
+    pendingCandidateEvidenceKinds: state.pendingCandidateEvidenceKinds,
+    missingToolEvidenceKinds: state.missingToolEvidenceKinds,
     workProduct: {
       status: state.workProduct.status,
       ...(state.workProduct.expectedArtifactKind === undefined

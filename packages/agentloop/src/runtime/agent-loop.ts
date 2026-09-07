@@ -236,7 +236,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   }
 
   let convergenceRequested = false;
-  let previousToolSignature: string | undefined;
   let previousPrepareRejectionSignature: string | undefined;
   let consecutivePrepareRejectionSteps = 0;
   let toolProgressState = initialRuntimeToolProgressState();
@@ -797,37 +796,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     contextAssembler.setRuntimeDirective(undefined);
 
-    // Progress-aware grace: once past the primary budget, re-issuing the exact
-    // same tool calls (name + arguments) as the previous step is a stall, not
-    // progress. Stop granting further grace and report the budget exhaustion
-    // instead of paying for a looping model.
+    // Progress evaluation informs the next model turn, but does not turn a
+    // predicted next action into a second authorization boundary. An already
+    // authorized call can still be the model's needed state-acquisition step.
+    let progressHint: string | undefined;
     if (
       !convergenceOnly
       && response.finishReason !== "length"
       && response.toolCalls.length > 0
     ) {
-      const signature = toolCallSignature(response.toolCalls);
-      if (inGrace && previousToolSignature !== undefined && signature === previousToolSignature) {
-        stalled = true;
-        for (const call of response.toolCalls) {
-          await emit({
-            type: "tool.rejected",
-            data: {
-              step,
-              toolCallId: call.id,
-              toolName: call.name,
-              reason: "Tool call was not executed because the model repeated identical tool calls without forward progress",
-              failurePhase: "runtime",
-            },
-          });
-        }
-        await emit({
-          type: "loop.no_progress",
-          data: { step, phase: "execution", toolSignature: signature },
-        });
-        break;
-      }
-      previousToolSignature = signature;
       const progressDecision = evaluateRuntimeToolProgress({
         policy: options.progressPolicy,
         state: toolProgressState,
@@ -836,53 +813,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         priorEvidence: toolEvidence,
       });
       toolProgressState = progressDecision.state;
-      if (!progressDecision.allow) {
-        stalled = progressDecision.stalled === true || step === hardLimit;
-        const reason = progressDecision.reason ?? "Tool call was not executed because it did not make forward progress";
-        for (const call of response.toolCalls) {
-          await emit({
-            type: "tool.rejected",
-            data: {
-              step,
-              toolCallId: call.id,
-              toolName: call.name,
-              reason,
-            },
-          });
-          const evidence = {
-            toolCallId: call.id,
-            toolName: call.name,
-            result: reason,
-            isError: true,
-            failurePhase: "runtime" as const,
-          };
-          toolEvidence.push(evidence);
-          messages.push({
-            role: "tool",
-            toolCallId: call.id,
-            name: call.name,
-            content: reason,
-            isError: true,
-          });
-        }
-        await emit({
-          type: "step.completed",
-          data: { step, toolResults: response.toolCalls.map((call) => ({ toolCallId: call.id, isError: true })) },
-        });
-        await emit({
-          type: "loop.no_progress",
-          data: {
-            step,
-            phase: "execution",
-            toolSignature: signature,
-            reason,
-            stalled,
-          },
-        });
-        if (stalled) break;
-        contextAssembler.setRuntimeDirective(progressDecision.directive ?? reason);
-        continue;
-      }
+      progressHint = progressDecision.progressHint;
     }
 
     let outcomes: ToolOutcome[];
@@ -1143,6 +1074,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         latestToolEvidence,
         toolEvidence,
         progressPolicy: options.progressPolicy,
+        progressHint,
       }));
     }
   }
@@ -1373,6 +1305,7 @@ function executionFeedbackDirective(input: {
   readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly progressPolicy?: RuntimeToolProgressPolicy;
+  readonly progressHint?: string;
 }): string | undefined {
   if (input.latestToolEvidence.length === 0) return undefined;
   const stepEvidenceState = deriveRuntimeStepEvidenceState({
@@ -1385,20 +1318,20 @@ function executionFeedbackDirective(input: {
     "The previous tool step produced canonical execution results. Consume these results before choosing the next action.",
     "If any tool failed, address the concrete failure cause or change strategy before continuing.",
     "If failures span multiple phases or repeat with new error text, stop replaying the same command shape and switch subgoal or tool family.",
-    "If any command created or modified files, treat fileChanges paths as artifact facts. Do not reread just-written artifact content unless a validator, build, render, or acceptance diagnostic names a concrete missing field, line range, or contract.",
-    "If a just-written artifact is known incomplete, continue with the next bounded file-producing patch. If it is complete but lacks required acceptance evidence, call the available acceptance or verification Tool.",
+    "If any command created or modified files, treat fileChanges paths as artifact facts. Normally avoid rereading just-written artifact content unless a validator, build, render, or acceptance diagnostic names a concrete missing field, line range, or contract.",
+    "If a just-written artifact is known incomplete, prefer the next bounded file-producing patch. If it is complete but lacks required acceptance evidence, prefer the available acceptance or verification Tool.",
     "If required evidence is still missing, call the appropriate current-step tool to produce that evidence; do not submit completion from assumptions.",
     "Recent tool results:",
   ];
   if (stepEvidenceState !== undefined) {
     if (stepEvidenceState.recentActionableDiagnostic) {
       lines.push(
-        "A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic. Read-only exploration is no longer useful; patch, run, or verify next.",
+        "A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic. Prefer patching, running, or verifying next; read only when it is needed to resolve that diagnostic.",
       );
     }
     if (stepEvidenceState.nextAction === "verify_existing_artifact") {
       lines.push(
-        "A known artifact already exists, but required artifact acceptance is still missing. Verify the artifact next; do not reread the same artifact merely to decide whether to verify it.",
+        "A known artifact already exists, but required artifact acceptance is still missing. Prefer verification next; avoid rereading the same artifact solely to decide whether to verify it.",
       );
     }
     lines.push(
@@ -1406,6 +1339,9 @@ function executionFeedbackDirective(input: {
       JSON.stringify(stepEvidenceState),
       "</runtime_step_semantic_state>",
     );
+  }
+  if (input.progressHint !== undefined) {
+    lines.push("<runtime_progress_hint>", input.progressHint, "</runtime_progress_hint>");
   }
   for (const item of input.latestToolEvidence.slice(-6)) {
     lines.push(`- ${summarizeToolEvidenceForDirective(item)}`);
@@ -1737,22 +1673,6 @@ function collectActivatedSkillNames(
     if (skill !== undefined) activated.add(skill.name);
   }
   return [...activated];
-}
-
-/**
- * Fingerprint one step's requested tool calls (name + argument digest) so the
- * Runtime can tell a productive step from a repeat of the previous step.
- */
-function toolCallSignature(calls: readonly ModelToolCall[]): string {
-  return calls
-    .map((call) => {
-      const serialized = typeof call.arguments === "string"
-        ? call.arguments
-        : JSON.stringify(call.arguments) ?? "";
-      return `${call.name}#${createHash("sha256").update(serialized).digest("hex")}`;
-    })
-    .sort()
-    .join("|");
 }
 
 function allPrepareRejectionSignature(outcomes: readonly ToolOutcome[]): string | undefined {

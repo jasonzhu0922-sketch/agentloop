@@ -3,7 +3,7 @@ import test from "node:test";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
-import { artifactStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
+import { artifactStepToolProgressPolicy, runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
 import type {
   CapabilityGrant,
   ModelAdapter,
@@ -760,6 +760,94 @@ test("conversation produce candidates carry explicit caveats as structured deliv
   assert.equal(result.deliveryCandidate.schema, "agentloop.runtimeDeliveryCandidate/v1");
   assert.equal(result.deliveryCandidate.caveats.length > 0, true);
   assert.match(result.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
+test("conversation delivery does not turn a helper script into an artifact-acceptance loop", async () => {
+  let helperWrites = 0;
+  let modelCalls = 0;
+  const helperTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write a temporary analysis helper",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      helperWrites += 1;
+      return {
+        path: "scripts/summarize_performance.py",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "scripts/summarize_performance.py", kind: "code" },
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(request): Promise<ModelResponse> {
+      modelCalls += 1;
+      const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+      assert.equal(semanticState.nextAction, "submit_completion_candidate");
+      assert.deepEqual(semanticState.missingRequiredEvidenceKinds, ["delivery_receipt", "explicit_caveats"]);
+      assert.deepEqual(semanticState.pendingCandidateEvidenceKinds, ["delivery_receipt", "explicit_caveats"]);
+      assert.deepEqual(semanticState.missingToolEvidenceKinds, []);
+      assert.equal(semanticState.workProduct.status, "none");
+      assert.deepEqual(semanticState.knownArtifacts, []);
+      assert.deepEqual(semanticState.evidenceProducingToolNames, []);
+      if (modelCalls === 1) {
+        return {
+          content: "我先计算汇总指标。",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "write-analysis-helper",
+            name: "computer_write_file",
+            arguments: { path: "scripts/summarize_performance.py", content: "print('summary')" },
+          }],
+        };
+      }
+      return {
+        content: "研发组共 18 人，已完成绩效汇总。",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Summarize the already extracted performance evidence.",
+    input: "汇总研发组绩效，并说明数据限制。",
+    model,
+    tools: new ToolRegistry([helperTool]),
+    grant,
+    maxSteps: 3,
+    progressPolicy: runtimeStepToolProgressPolicy(["delivery_receipt", "explicit_caveats"]),
+    stepSemanticFrame: {
+      completionBoundary: ["delivery_receipt", "explicit_caveats"],
+      evidenceMode: "reuse_dependency_evidence",
+      phaseRole: "delivery",
+    },
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.ok(candidate.deliveryCandidate);
+      assert.match(candidate.deliveryCandidate.output, /## (?:限制说明|Limitations)/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "研发组共 18 人，已完成绩效汇总。");
+  assert.equal(helperWrites, 1);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.some((event) => event.type === "tool.rejected"), false);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
@@ -1553,7 +1641,7 @@ test("distinct tool calls keep extending grace while the model makes progress", 
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
-test("artifact grace rejects excessive read-only exploration and redirects to evidence-producing tools", async () => {
+test("artifact grace records excessive read-only exploration as advice without vetoing tools", async () => {
   const executions: string[] = [];
   let calls = 0;
   const readTool: RuntimeTool<unknown> = {
@@ -1604,7 +1692,7 @@ test("artifact grace rejects excessive read-only exploration and redirects to ev
         };
       }
       if (calls === 2) {
-        assert.match(request.runtimeContext?.content ?? "", /Do not reread just-written artifact content/);
+        assert.match(request.runtimeContext?.content ?? "", /Normally avoid rereading just-written artifact content/);
         assert.match(request.runtimeContext?.content ?? "", /complete but lacks required acceptance evidence/);
         return {
           content: "",
@@ -1656,14 +1744,12 @@ test("artifact grace rejects excessive read-only exploration and redirects to ev
 
   assert.equal(result.output, "artifact source authored");
   assert.equal(calls, 6);
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["read", "read", "search", "write"]);
-  const noProgress = events.filter((event) => event.type === "loop.no_progress");
-  assert.equal(noProgress.length, 1);
-  assert.equal(noProgress[0]?.data.stalled, false);
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["read", "read", "search", "search", "write"]);
+  assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 0);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
-test("artifact progress policy rejects excessive read-only exploration before grace", async () => {
+test("artifact progress policy advises after excessive read-only exploration before grace", async () => {
   const executions: string[] = [];
   let calls = 0;
   const readTool: RuntimeTool<unknown> = {
@@ -1773,15 +1859,14 @@ test("artifact progress policy rejects excessive read-only exploration before gr
   });
 
   assert.equal(result.output, "Done and verified for the current step.\nArtifact: outline.json.");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["read", "read", "read", "write", "verify"]);
-  const rejected = events.find((event) =>
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["read", "read", "read", "read", "write", "verify"]);
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "read-4"
-  );
-  assert.equal(rejected?.data.reason, "Read-only exploratory tool calls exceeded the artifact step primary budget");
+  ), false);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
-test("artifact progress policy redirects read-only exploration to acceptance after artifact evidence", async () => {
+test("artifact progress policy advises verification after artifact evidence without vetoing a read", async () => {
   const executions: string[] = [];
   let calls = 0;
   const writeTool: RuntimeTool<unknown> = {
@@ -1864,7 +1949,7 @@ test("artifact progress policy redirects read-only exploration to acceptance aft
         assert.equal(semanticState.missingRequiredEvidenceKinds.includes("artifact_acceptance"), true);
         assert.deepEqual(semanticState.evidenceProducingToolNames, ["verify_artifact_acceptance"]);
         assert.deepEqual(semanticState.exploratoryToolNames, []);
-        assert.match(runtimeContext, /Verify the artifact next; do not reread the same artifact merely to decide whether to verify it\./);
+        assert.match(runtimeContext, /Prefer verifying the artifact next; avoid rereading it solely to decide whether verification is needed\./);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -1876,7 +1961,7 @@ test("artifact progress policy redirects read-only exploration to acceptance aft
         };
       }
       if (calls === 3) {
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_acceptance_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_acceptance_hint/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -1911,11 +1996,10 @@ test("artifact progress policy redirects read-only exploration to acceptance aft
   });
 
   assert.equal(result.output, "report.html accepted");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "verify"]);
-  const rejected = events.find((event) =>
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "read", "verify"]);
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "read-report"
-  );
-  assert.equal(rejected?.data.reason, "Artifact path evidence exists but artifact acceptance is still missing");
+  ), false);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
@@ -2124,7 +2208,7 @@ test("artifact progress policy treats generated build scripts as source until a 
         };
       }
       if (calls === 3) {
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_hint/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -2172,11 +2256,10 @@ test("artifact progress policy treats generated build scripts as source until a 
   });
 
   assert.equal(result.output, "report.html accepted");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "run", "verify"]);
-  const rejected = events.find((event) =>
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "read", "run", "verify"]);
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "reread-script"
-  );
-  assert.equal(rejected?.data.reason, "Intermediate artifact/source evidence exists but final artifact evidence is still missing");
+  ), false);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
@@ -2302,7 +2385,7 @@ test("artifact progress policy treats mismatched typed intermediates as source u
         };
       }
       if (calls === 3) {
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_hint/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -2368,15 +2451,15 @@ test("artifact progress policy treats mismatched typed intermediates as source u
   assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), [
     "write",
     "write",
+    "read-json",
     "write",
     "write",
     "run",
     "verify",
   ]);
-  const rejected = events.find((event) =>
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "reread-spec"
-  );
-  assert.equal(rejected?.data.reason, "Intermediate artifact/source evidence exists but final artifact evidence is still missing");
+  ), false);
   assert.equal(events.some((event) =>
     (event.type === "tool.effect_pending" || event.type === "tool.dispatched" || event.type === "tool.completed")
     && event.data.toolCallId === "rewrite-spec"
@@ -2886,7 +2969,7 @@ test("artifact progress policy allows a targeted rebase read after patch precond
   ), false);
 });
 
-test("artifact diagnostics reject a reread and redirect to source repair", async () => {
+test("artifact diagnostics advise source repair without vetoing a targeted reread", async () => {
   const executions: string[] = [];
   let calls = 0;
   const runTool: RuntimeTool<unknown> = {
@@ -2943,7 +3026,7 @@ test("artifact diagnostics reject a reread and redirect to source repair", async
       }
       if (calls === 2) {
         assert.match(request.runtimeContext?.content ?? "", /runtime_execution_feedback/);
-        assert.match(request.runtimeContext?.content ?? "", /Read-only exploration is no longer useful; patch, run, or verify next\./);
+        assert.match(request.runtimeContext?.content ?? "", /Prefer patching, running, or verifying next; read only when it is needed to resolve that diagnostic\./);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -2977,15 +3060,14 @@ test("artifact diagnostics reject a reread and redirect to source repair", async
   });
 
   assert.equal(result.output, "source repaired");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["run", "write"]);
-  const rejected = events.find((event) =>
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["run", "read", "write"]);
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolName === "computer_read_file"
-  );
-  assert.equal(rejected?.data.reason, "Read-only exploratory tool calls are not allowed after an actionable artifact diagnostic");
+  ), false);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
-test("artifact diagnostics do not allow a read-only grace turn after a concrete diagnostic", async () => {
+test("artifact diagnostics retain a read-only grace turn as advice after a concrete diagnostic", async () => {
   const executions: string[] = [];
   let calls = 0;
   const runTool: RuntimeTool<unknown> = {
@@ -3043,7 +3125,7 @@ test("artifact diagnostics do not allow a read-only grace turn after a concrete 
       if (calls === 2) {
         const runtimeContext = request.runtimeContext?.content ?? "";
         assert.match(runtimeContext, /runtime_execution_feedback/);
-        assert.match(runtimeContext, /Read-only exploration is no longer useful; patch, run, or verify next\./);
+        assert.match(runtimeContext, /Prefer patching, running, or verifying next; read only when it is needed to resolve that diagnostic\./);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -3077,11 +3159,10 @@ test("artifact diagnostics do not allow a read-only grace turn after a concrete 
   });
 
   assert.equal(result.output, "source repaired");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["run", "write"]);
-  const rejected = events.find((event) =>
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["run", "read-json", "write"]);
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "read-json"
-  );
-  assert.equal(rejected?.data.reason, "Read-only exploratory tool calls are not allowed after an actionable artifact diagnostic");
+  ), false);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
@@ -3319,7 +3400,7 @@ test("next model turn receives actionable feedback for Skill package mutation", 
   assert.equal(calls, 2);
 });
 
-test("a looping model stops extending grace once it repeats identical tool calls", async () => {
+test("a looping model reaches the real hard limit when it repeats authorized tool calls", async () => {
   let executions = 0;
   const tool: RuntimeTool<unknown> = {
     name: "render",
@@ -3352,13 +3433,15 @@ test("a looping model stops extending grace once it repeats identical tool calls
       && typeof error === "object"
       && "code" in error
       && (error as { code: unknown }).code === "RUN_LIMIT_EXCEEDED"
-      && (error as unknown as { message: string }).message.includes("without forward progress"),
+      && (error as unknown as { message: string }).message.includes("Run exceeded its 6-step limit"),
   );
-  assert.equal(executions, 2);
-  assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 1);
+  // The sixth and final turn is reserved for no-tool convergence; all five
+  // preceding authorized repeated calls still execute.
+  assert.equal(executions, 5);
+  assert.equal(events.filter((event) => event.type === "loop.no_progress").length, 0);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 1);
   const limitEvent = events.find((event) => event.type === "loop.limit_exceeded");
-  assert.equal(limitEvent?.data.stalled, true);
+  assert.equal(limitEvent?.data.stalled, false);
 });
 
 test("a converged turn that emits an unexecuted tool invocation gets one no-tool repair before assessment", async () => {
@@ -3674,7 +3757,7 @@ test("model request failures are emitted before the run fails", async () => {
   assert.match(String(events[failedIdx].data.message), /provider timeout/);
 });
 
-test("progress policy admits streaming tool calls before dispatching side effects", async () => {
+test("progress policy advises after an intermediate artifact read without vetoing the authorized call", async () => {
   const events: RuntimeEvent[] = [];
   const executions: string[] = [];
   let calls = 0;
@@ -3770,7 +3853,8 @@ test("progress policy admits streaming tool calls before dispatching side effect
         return { content: "", finishReason: "tool_calls", toolCalls: [call] };
       }
       if (calls === 3) {
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_repair/);
+        assert.match(request.runtimeContext?.content ?? "", /runtime_progress_hint/);
+        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_source_production_hint/);
         const call = {
           id: "render-poster",
           name: "computer_run_command",
@@ -3813,18 +3897,17 @@ test("progress policy admits streaming tool calls before dispatching side effect
   });
 
   assert.equal(result.output, "poster.png accepted");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "run", "verify"]);
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "read-json", "run", "verify"]);
   assert.equal(events.some((event) =>
     event.type === "assistant.tool_call.committed" && event.data.toolCallId === "read-spec"
   ), true);
   assert.equal(events.some((event) =>
     (event.type === "tool.effect_pending" || event.type === "tool.dispatched" || event.type === "tool.completed")
     && event.data.toolCallId === "read-spec"
-  ), false);
-  const rejected = events.find((event) =>
+  ), true);
+  assert.equal(events.some((event) =>
     event.type === "tool.rejected" && event.data.toolCallId === "read-spec"
-  );
-  assert.equal(rejected?.data.reason, "Intermediate artifact/source evidence exists but final artifact evidence is still missing");
+  ), false);
 });
 
 test("capability grants are immutable at runtime, not only in TypeScript", () => {
@@ -4356,6 +4439,8 @@ function numberTool(
 function runtimeStepSemanticState(content: string): {
   readonly schema: string;
   readonly missingRequiredEvidenceKinds: readonly string[];
+  readonly pendingCandidateEvidenceKinds: readonly string[];
+  readonly missingToolEvidenceKinds: readonly string[];
   readonly workProduct: { readonly status: string };
   readonly knownArtifacts: readonly Array<{ readonly path: string }>;
   readonly processArtifacts: readonly Array<{ readonly path: string }>;
@@ -4397,6 +4482,8 @@ function runtimeStepSemanticState(content: string): {
   return {
     schema: "agentloop.runtimeStepEvidenceState/v1",
     missingRequiredEvidenceKinds: frame.currentEvidenceState.missingRequiredEvidenceKinds,
+    pendingCandidateEvidenceKinds: frame.currentEvidenceState.pendingCandidateEvidenceKinds,
+    missingToolEvidenceKinds: frame.currentEvidenceState.missingToolEvidenceKinds,
     workProduct: { status: frame.currentEvidenceState.workProduct.status },
     knownArtifacts: frame.currentEvidenceState.workProduct.deliverableArtifacts
       ?? frame.currentEvidenceState.workProduct.deliverableArtifactPaths.map((path) => ({ path })),

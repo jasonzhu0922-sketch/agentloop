@@ -4921,7 +4921,7 @@ test("ModelStepAssessor receives candidate projection instead of full long outpu
   assert.doesNotMatch(observedContext, /UNIQUE_FULL_OUTPUT_TAIL_SHOULD_NOT_REACH_ASSESSOR/);
 });
 
-test("RunService keeps Planner-declared direct-answer leaves toolless and rule-assessed", async () => {
+test("RunService keeps Planner-declared direct-answer leaves rule-assessed without revoking Run tools", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const skills = new SkillService(database);
@@ -4967,7 +4967,7 @@ test("RunService keeps Planner-declared direct-answer leaves toolless and rule-a
 
     assert.equal(run.status, "completed");
     assert.equal(model.executionToolCounts.length, 1);
-    assert.deepEqual(model.executionToolCounts, [0]);
+    assert.equal(model.executionToolCounts[0]! > 0, true);
     assert.equal(model.assessmentCalls, 0);
     const detail = await runs.plan(owner.user.id, run.id);
     assert.equal(detail.plan.steps[0].status, "completed");
@@ -5771,7 +5771,7 @@ test("unused Plan-bound Skills do not block completion when output criteria are 
   }
 });
 
-test("Plan step capability binding scopes tools within the Run-authorized execution grant", async () => {
+test("Plan step capability binding guides execution without revoking Run-authorized tools", async () => {
   const database = new AppDatabase(":memory:");
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-tool-recommendation-"));
   try {
@@ -5779,7 +5779,7 @@ test("Plan step capability binding scopes tools within the Run-authorized execut
 
     const skills = new SkillService(database);
     const owner = testOwner();
-    const model = new ExtraToolBeyondRecommendationModel();
+    const model = new RunAuthorizedCommandModel();
     const planner: Planner = {
       plan: async () => ({
         goal: "read evidence",
@@ -5797,15 +5797,14 @@ test("Plan step capability binding scopes tools within the Run-authorized execut
       assessorFactory: () => new RuleBasedStepAssessor(),
       workspaceRoot: workspace,
     });
-    const run = await runs.execute(owner.user.id, "read evidence");
+    const run = await runs.execute(owner.user.id, "read evidence", { allowDangerousTools: true });
     assert.equal(run.status, "completed");
-    assert.equal(model.readToolWasVisible, true);
-    assert.equal(model.requestedReadToolBeyondRecommendation, true);
+    assert.equal(model.commandToolWasVisible, true);
+    assert.equal(model.requestedCommandOutsidePlanBinding, true);
     assert.equal(model.requiredCapabilityWasPresentInContext, true);
     const started = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "plan.step.started");
     const startedData = started?.data as { toolNames?: string[]; requiredCapabilities?: string[] } | undefined;
-    assert.equal(Boolean(startedData?.toolNames?.includes("computer_read_file")), true);
-    assert.equal(Boolean(startedData?.toolNames?.includes("computer_list_directory")), true);
+    assert.equal(Boolean(startedData?.toolNames?.includes("computer_run_command")), true);
     assert.deepEqual(startedData?.requiredCapabilities, ["workspace_file_read"]);
   } finally {
     database.close();
@@ -5813,7 +5812,7 @@ test("Plan step capability binding scopes tools within the Run-authorized execut
   }
 });
 
-test("candidate rejection repair turn stays bound to the current leaf grant", async () => {
+test("candidate rejection repair keeps the current leaf objective without revoking Run-authorized tools", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -5861,7 +5860,7 @@ test("candidate rejection repair turn stays bound to the current leaf grant", as
 
     assert.equal(run.status, "completed");
     assert.equal(model.sawRepairDirective, true);
-    assert.equal(model.downstreamToolHiddenDuringRepair, true);
+    assert.equal(model.runToolVisibleDuringRepair, true);
     const events = await runs.events(owner.user.id, run.id);
     assert.equal(events.some((event) => event.type === "candidate.rejected"), true);
   } finally {
@@ -7865,7 +7864,7 @@ test("fact acquisition source reads are not capped by file-output skill heuristi
   }
 });
 
-test("source fact acquisition applies action-aware tool narrowing globally", async () => {
+test("source fact acquisition keeps the Run-authorized catalog while projecting action-aware guidance", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const skills = new SkillService(database);
@@ -7914,9 +7913,9 @@ test("source fact acquisition applies action-aware tool narrowing globally", asy
 
     assert.equal(run.status, "completed");
     assert.ok(model.firstToolNames.includes("read_source"));
-    assert.equal(model.firstToolNames.includes("computer_write_file"), false);
-    assert.equal(model.firstToolNames.includes("convert_artifact"), false);
-    assert.equal(model.firstToolNames.includes("verify_artifact_acceptance"), false);
+    assert.equal(model.firstToolNames.includes("computer_write_file"), true);
+    assert.equal(model.firstToolNames.includes("convert_artifact"), true);
+    assert.equal(model.firstToolNames.includes("verify_artifact_acceptance"), true);
     assert.equal(model.sawActionAwareProjection, true);
     const events = await runs.events(owner.user.id, run.id);
     const firstPolicy = events.find((event) => event.type === "step_execution.policy_applied");
@@ -9407,7 +9406,7 @@ class PlannedDirectAnswerModel implements ModelAdapter {
       return { content: "", finishReason: "stop", toolCalls: [] };
     }
     this.executionToolCounts.push(request.tools.length);
-    assert.equal(request.tools.some((tool) => tool.name === "websearch"), false);
+    assert.equal(request.tools.some((tool) => tool.name === "websearch"), true);
     return {
       content: "根据上一轮已取得的信息，宝信软件董事长是夏雪松。",
       finishReason: "stop",
@@ -9733,20 +9732,20 @@ class RejectedRepairLeafGrantModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   private calls = 0;
   sawRepairDirective = false;
-  downstreamToolHiddenDuringRepair = false;
+  runToolVisibleDuringRepair = false;
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     this.calls += 1;
     const toolNames = request.tools.map((tool) => tool.name);
     if (this.calls === 1) {
-      assert.equal(toolNames.includes("load_skill"), false);
+      assert.equal(toolNames.includes("computer_read_file"), true);
       return { content: "premature downstream answer", finishReason: "stop", toolCalls: [] };
     }
     if (this.calls === 2) {
       this.sawRepairDirective = /runtime_candidate_repair/.test(request.runtimeContext?.content ?? "");
-      this.downstreamToolHiddenDuringRepair = !toolNames.includes("load_skill");
+      this.runToolVisibleDuringRepair = toolNames.includes("computer_read_file");
       assert.equal(this.sawRepairDirective, true);
-      assert.equal(this.downstreamToolHiddenDuringRepair, true);
+      assert.equal(this.runToolVisibleDuringRepair, true);
       return { content: "bounded research repaired for the current leaf", finishReason: "stop", toolCalls: [] };
     }
     assert.equal(toolNames.includes("load_skill"), true);
@@ -9754,30 +9753,33 @@ class RejectedRepairLeafGrantModel implements ModelAdapter {
   }
 }
 
-class ExtraToolBeyondRecommendationModel implements ModelAdapter {
+class RunAuthorizedCommandModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   private calls = 0;
-  readToolWasVisible = false;
-  requestedReadToolBeyondRecommendation = false;
+  commandToolWasVisible = false;
+  requestedCommandOutsidePlanBinding = false;
   requiredCapabilityWasPresentInContext = false;
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     this.calls += 1;
     const toolNames = request.tools.map((tool) => tool.name);
-    this.readToolWasVisible = this.readToolWasVisible || toolNames.includes("computer_read_file");
+    this.commandToolWasVisible = this.commandToolWasVisible || toolNames.includes("computer_run_command");
     this.requiredCapabilityWasPresentInContext = this.requiredCapabilityWasPresentInContext
       || (request.runtimeContext?.content ?? "").includes("\"requiredCapabilities\":[\"workspace_file_read\"]");
     if (this.calls === 1) {
-      assert.equal(toolNames.includes("computer_list_directory"), true);
-      assert.equal(toolNames.includes("computer_read_file"), true);
-      this.requestedReadToolBeyondRecommendation = true;
+      assert.equal(toolNames.includes("computer_run_command"), true);
+      this.requestedCommandOutsidePlanBinding = true;
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [{ id: "read-evidence", name: "computer_read_file", arguments: { path: "evidence.txt" } }],
+        toolCalls: [{
+          id: "run-authorized-command",
+          name: "computer_run_command",
+          arguments: { command: "node", args: ["-e", "console.log('command completed')"] },
+        }],
       };
     }
-    return { content: "Read evidence with an authorized tool beyond the recommended list.", toolCalls: [], finishReason: "stop" };
+    return { content: "Ran a Run-authorized command while completing the current Plan objective.", toolCalls: [], finishReason: "stop" };
   }
 }
 

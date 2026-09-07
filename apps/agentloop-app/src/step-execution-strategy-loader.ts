@@ -28,7 +28,7 @@ export async function loadStepExecutionStrategyFromConfigFile(
     if (options.required === true) {
       throw new Error(`Step execution strategy config does not exist: ${options.configPath}`);
     }
-    return createStepExecutionStrategyProfile("action-aware");
+    return createStepExecutionStrategyProfile("full-catalog");
   }
   const raw = JSON.parse(await fs.readFile(options.configPath, "utf8"));
   const config = parseStepExecutionStrategyConfig(raw);
@@ -96,7 +96,7 @@ export function parseStepExecutionStrategyConfig(input: unknown): StepExecutionS
       ...(record.options === undefined ? {} : { options: record.options }),
     };
   }
-  const profile = optionalString(record.profile, "Step execution strategy profile") ?? "action-aware";
+  const profile = optionalString(record.profile, "Step execution strategy profile") ?? "full-catalog";
   if (profile !== "action-aware" && profile !== "full-catalog") {
     throw new Error(`Unsupported Step execution strategy profile: ${profile}`);
   }

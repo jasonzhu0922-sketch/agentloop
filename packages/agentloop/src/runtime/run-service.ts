@@ -1844,13 +1844,13 @@ export class RunService {
       });
       const stepSkillIds = stepSkills.map((skill) => skill.id);
       const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
-      const directDeliveryOnly = stepUsesOnlyDirectDelivery(activeStep) && stepSkillIds.length === 0;
-      const stepAllowedToolNames = directDeliveryOnly
-        ? []
-        : stepResolvedToolNames(activeStep).filter((name) =>
-          input.rootGrant.allowedToolNames.has(name)
-          && (name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0)
-        );
+      // The Run grant is the execution authorization boundary. A Plan leaf
+      // describes the current objective and its evidence contract, but must
+      // not revoke a Tool that the user already authorized for the Run.
+      // Resource and Skill grants below remain leaf-scoped.
+      const stepAllowedToolNames = [...input.rootGrant.allowedToolNames].filter((name) =>
+        name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0
+      );
       const stepVisibleDirectories = visibleDirectoriesForStep(
         input.visibleDirectories,
         activeStep.executionBinding.requiredVisibleDirectoryIds,

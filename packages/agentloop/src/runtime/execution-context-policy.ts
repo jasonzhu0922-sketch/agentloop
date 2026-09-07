@@ -61,8 +61,8 @@ export function buildStepRuntimeContextSnapshot(input: {
       "<execution_context source=\"server\">",
       JSON.stringify({
         toolSelectionPolicy: {
-          executionBindingIsAuthoritative: true,
-          instruction: "Use the step execution binding as the server-resolved capability-to-tool boundary; choose among currently exposed tools to satisfy the current step evidence contract.",
+          executionBindingGuidesCurrentObjective: true,
+          instruction: "Use the step execution binding to understand the current objective, evidence contract, and preferred tool families. Choose among currently exposed Run-authorized tools to satisfy that contract.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
           beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, contradictory, or explicitly refreshed requirements. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },

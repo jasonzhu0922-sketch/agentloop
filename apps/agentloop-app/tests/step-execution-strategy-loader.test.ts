@@ -16,11 +16,11 @@ declare global {
   } | undefined;
 }
 
-test("step execution strategy config defaults to action-aware profile", () => {
+test("step execution strategy config defaults to full-catalog profile", () => {
   const config = parseStepExecutionStrategyConfig({});
 
   assert.equal(config.kind, "profile");
-  assert.equal(config.profile, "action-aware");
+  assert.equal(config.profile, "full-catalog");
   assert.deepEqual(config.projection, {});
 });
 
@@ -57,13 +57,13 @@ test("step execution strategy config rejects unknown profiles and fields", () =>
   );
 });
 
-test("step execution strategy loader uses action-aware when default config is absent", async () => {
+test("step execution strategy loader uses full-catalog when default config is absent", async () => {
   const directory = await mkdtemp(join(tmpdir(), "agentloop-step-strategy-"));
   const strategy = await loadStepExecutionStrategyFromConfigFile({
     configPath: join(directory, "missing.json"),
   });
 
-  assert.equal(strategy.id, "agentloop.actionAwareStepExecutionStrategy/v1");
+  assert.equal(strategy.id, "agentloop.fullCatalogStepExecutionStrategy/v1");
 });
 
 test("step execution strategy loader reads configured profile", async () => {

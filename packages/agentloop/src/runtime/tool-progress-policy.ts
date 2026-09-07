@@ -29,11 +29,9 @@ export interface RuntimeToolProgressState {
 }
 
 export interface RuntimeToolProgressDecision {
-  readonly allow: boolean;
   readonly state: RuntimeToolProgressState;
-  readonly reason?: string;
-  readonly stalled?: boolean;
-  readonly directive?: string;
+  /** Advice to include with the next execution feedback, not a tool veto. */
+  readonly progressHint?: string;
 }
 
 export type RuntimeStepNextAction =
@@ -76,6 +74,10 @@ export interface RuntimeStepEvidenceState {
   readonly caveatedEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
   readonly missingRequiredEvidenceKinds: readonly string[];
+  /** Required evidence that only a user-visible completion candidate can provide. */
+  readonly pendingCandidateEvidenceKinds: readonly string[];
+  /** Remaining evidence that requires a Tool result before a candidate can be assessed. */
+  readonly missingToolEvidenceKinds: readonly string[];
   readonly workProduct: RuntimeStepWorkProductState;
   readonly knownArtifacts: readonly RuntimeStepArtifactRef[];
   readonly processArtifacts: readonly RuntimeStepArtifactRef[];
@@ -155,6 +157,10 @@ export function deriveRuntimeStepEvidenceState(input: {
   const evidenceKinds = collectPolicyEvidenceKinds(input.evidence, policy);
   const missingRequiredEvidenceKinds = policy.requiredEvidenceKinds
     .filter((kind) => !evidenceKinds.satisfied.has(kind));
+  const pendingCandidateEvidenceKinds = missingRequiredEvidenceKinds
+    .filter((kind) => CANDIDATE_CONTAINED_EVIDENCE_KINDS.has(kind));
+  const missingToolEvidenceKinds = missingRequiredEvidenceKinds
+    .filter((kind) => !CANDIDATE_CONTAINED_EVIDENCE_KINDS.has(kind));
   const workProduct = classifyWorkProduct(input.evidence, policy, evidenceKinds);
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(input.evidence);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(input.evidence);
@@ -173,6 +179,8 @@ export function deriveRuntimeStepEvidenceState(input: {
     caveatedEvidenceKinds: [...evidenceKinds.caveated].sort(),
     failedEvidenceKinds: [...evidenceKinds.failed].sort(),
     missingRequiredEvidenceKinds,
+    pendingCandidateEvidenceKinds,
+    missingToolEvidenceKinds,
     workProduct,
     knownArtifacts: workProduct.deliverableArtifacts,
     processArtifacts: workProduct.processArtifacts,
@@ -287,6 +295,24 @@ const AUTO_COMPLETABLE_EVIDENCE_KINDS = new Set([
   "artifact_openable",
   "format_matches_request",
   "delivery_receipt",
+]);
+
+// These obligations are established by a user-visible completion candidate and
+// verified by Assessment. They are not tool receipts that must be fabricated
+// before the model is allowed to answer.
+const CANDIDATE_CONTAINED_EVIDENCE_KINDS = new Set([
+  "delivery_receipt",
+  "explicit_caveats",
+]);
+
+// Only these contract kinds (or an expected artifact kind) make a written
+// workspace path part of the current leaf's delivery state.
+const ARTIFACT_WORK_PRODUCT_EVIDENCE_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
 ]);
 
 const NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS = new Set([
@@ -409,8 +435,16 @@ function classifyWorkProduct(
     readonly failed: ReadonlySet<string>;
   },
 ): RuntimeStepWorkProductState {
-  const artifacts = collectKnownArtifacts(evidence)
-    .filter((artifact) => WORK_PRODUCT_TOOL_NAMES.has(artifact.sourceTool));
+  // A file produced while completing a conversation or source-evidence step is
+  // auxiliary evidence unless the current contract actually asks for an
+  // artifact. Do not let a helper script become a fictional final deliverable
+  // merely because it was written by a work-product-capable tool.
+  const tracksArtifactDelivery = policy.expectedArtifactKind !== undefined
+    || policy.requiredEvidenceKinds.some((kind) => ARTIFACT_WORK_PRODUCT_EVIDENCE_KINDS.has(kind));
+  const artifacts = tracksArtifactDelivery
+    ? collectKnownArtifacts(evidence)
+      .filter((artifact) => WORK_PRODUCT_TOOL_NAMES.has(artifact.sourceTool))
+    : [];
   const acceptanceRequired = policy.requiredEvidenceKinds.includes("artifact_acceptance");
   const deliverableArtifacts = acceptanceRequired
     ? artifacts.filter((artifact) => isAcceptanceDeliverableArtifact(artifact, policy))
@@ -563,9 +597,7 @@ function nextActionForEvidenceGap(input: {
   if ((missing.has("artifact_path") || missing.has("artifact_non_empty")) && hasArtifactProducer(input.policy)) {
     return "produce_artifact";
   }
-  if (input.missingRequiredEvidenceKinds.length === 0 || (
-    input.missingRequiredEvidenceKinds.length === 1 && missing.has("delivery_receipt")
-  )) {
+  if ([...missing].every((kind) => CANDIDATE_CONTAINED_EVIDENCE_KINDS.has(kind))) {
     return "submit_completion_candidate";
   }
   return "produce_required_evidence";
@@ -632,7 +664,7 @@ function instructionForStepState(input: {
   readonly evidenceProducingToolNames: readonly string[];
 }): string {
   const lines = [
-    "Use this current-step semantic state before choosing a tool.",
+    "This current-step semantic state is advisory context for choosing a tool; it does not restrict otherwise authorized tools.",
     `Work product status is ${input.workProduct.status}.`,
   ];
   if (input.workProduct.expectedArtifactKind !== undefined) {
@@ -645,13 +677,13 @@ function instructionForStepState(input: {
   }
   if (input.recentActionableDiagnostic) {
     lines.push("A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic.");
-    lines.push("Read-only exploration is no longer useful; patch, run, or verify next.");
+    lines.push("Prefer patching, running, or verifying next; read only when it is needed to resolve the diagnostic.");
     return lines.join(" ");
   }
   switch (input.nextAction) {
     case "verify_existing_artifact":
       lines.push("A deliverable artifact exists, but required artifact acceptance is still missing.");
-      lines.push("Verify the artifact next; do not reread the same artifact merely to decide whether to verify it.");
+      lines.push("Prefer verifying the artifact next; avoid rereading it solely to decide whether verification is needed.");
       break;
     case "produce_artifact":
       if (input.workProduct.status === "process_artifact_available") {
@@ -665,7 +697,8 @@ function instructionForStepState(input: {
       lines.push("Acquire only the missing source evidence required by the current evidence contract.");
       break;
     case "submit_completion_candidate":
-      lines.push("Required evidence is satisfied; submit a truthful completion candidate for Assessment.");
+      lines.push("All tool-producible prerequisites are satisfied.");
+      lines.push("Submit a truthful user-visible completion candidate now; include the delivery receipt and any required caveats for Assessment.");
       break;
     case "repair_artifact_source":
       lines.push("Repair the artifact source or rerun the named command based on the failed evidence.");
@@ -689,7 +722,7 @@ export function evaluateRuntimeToolProgress(input: {
 }): RuntimeToolProgressDecision {
   const policy = input.policy;
   if (policy === undefined || input.calls.length === 0) {
-    return { allow: true, state: input.state };
+    return { state: input.state };
   }
   const priorEvidence = input.priorEvidence ?? [];
   const priorEvidenceKinds = collectEvidenceKinds(priorEvidence);
@@ -712,7 +745,6 @@ export function evaluateRuntimeToolProgress(input: {
   const hasSetupOnly = input.calls.every((call) => policy.setupToolNames.includes(call.name));
   if (!allExploratory || hasEvidenceProducer || hasSetupOnly) {
     return {
-      allow: true,
       state: {
         exploratoryOnlyGraceSteps: 0,
         exploratoryOnlyRejections: input.state.exploratoryOnlyRejections,
@@ -728,16 +760,13 @@ export function evaluateRuntimeToolProgress(input: {
     recentPatchPreconditionFailure
     && callsAreTargetedPatchRebaseReads(input.calls, priorEvidence)
   ) {
-    return { allow: true, state: input.state };
+    return { state: input.state };
   }
 
   if (recentActionableDiagnostic) {
     const diagnosticExploratoryRejections = input.state.diagnosticExploratoryRejections + 1;
     return {
-      allow: false,
-      stalled: diagnosticExploratoryRejections > 1,
-      reason: "Read-only exploratory tool calls are not allowed after an actionable artifact diagnostic",
-      directive: policy.diagnosticRepairDirective,
+      progressHint: policy.diagnosticRepairDirective,
       state: {
         ...input.state,
         diagnosticExploratoryRejections,
@@ -748,10 +777,7 @@ export function evaluateRuntimeToolProgress(input: {
   if (workProduct.status === "process_artifact_available" && nextAction !== "acquire_source_evidence") {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
-      allow: false,
-      stalled: exploratoryOnlyRejections > 1,
-      reason: "Intermediate artifact/source evidence exists but final artifact evidence is still missing",
-      directive: intermediateArtifactProductionRepairDirective(policy),
+      progressHint: intermediateArtifactProductionRepairDirective(policy),
       state: {
         ...input.state,
         exploratoryOnlyRejections,
@@ -762,10 +788,7 @@ export function evaluateRuntimeToolProgress(input: {
   if (workProduct.status === "deliverable_available" && nextAction !== "acquire_source_evidence") {
     const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
     return {
-      allow: false,
-      stalled: exploratoryOnlyRejections > 1,
-      reason: "Artifact path evidence exists but artifact acceptance is still missing",
-      directive: artifactAcceptanceRepairDirective(policy),
+      progressHint: artifactAcceptanceRepairDirective(policy),
       state: {
         ...input.state,
         exploratoryOnlyRejections,
@@ -777,16 +800,12 @@ export function evaluateRuntimeToolProgress(input: {
     const exploratoryOnlyPrimarySteps = input.state.exploratoryOnlyPrimarySteps + 1;
     if (exploratoryOnlyPrimarySteps <= policy.maxExploratoryPrimarySteps) {
       return {
-        allow: true,
         state: { ...input.state, exploratoryOnlyPrimarySteps },
       };
     }
     const exploratoryOnlyPrimaryRejections = input.state.exploratoryOnlyPrimaryRejections + 1;
     return {
-      allow: false,
-      stalled: exploratoryOnlyPrimaryRejections > 1,
-      reason: "Read-only exploratory tool calls exceeded the artifact step primary budget",
-      directive: policy.repairDirective,
+      progressHint: policy.repairDirective,
       state: {
         ...input.state,
         exploratoryOnlyPrimarySteps,
@@ -798,20 +817,13 @@ export function evaluateRuntimeToolProgress(input: {
   const exploratoryOnlyGraceSteps = input.state.exploratoryOnlyGraceSteps + 1;
   if (exploratoryOnlyGraceSteps <= policy.maxExploratoryGraceSteps) {
     return {
-      allow: true,
       state: { ...input.state, exploratoryOnlyGraceSteps },
     };
   }
 
   const exploratoryOnlyRejections = input.state.exploratoryOnlyRejections + 1;
-  const stalled = exploratoryOnlyRejections > 1;
   return {
-    allow: false,
-    stalled,
-    reason: stalled
-      ? "Read-only exploratory tool calls repeated after the Runtime requested an evidence-producing action"
-      : "Read-only exploratory tool calls exceeded the artifact step grace budget",
-    directive: policy.repairDirective,
+    progressHint: policy.repairDirective,
     state: {
       ...input.state,
       exploratoryOnlyGraceSteps,
@@ -822,23 +834,23 @@ export function evaluateRuntimeToolProgress(input: {
 
 function intermediateArtifactProductionRepairDirective(policy: RuntimeToolProgressPolicy): string {
   return [
-    "<runtime_artifact_source_production_repair>",
+    "<runtime_artifact_source_production_hint>",
     "The current artifact-producing step has intermediate artifact/source files, but no final deliverable artifact evidence yet.",
-    "Use an evidence-producing tool next: run the build/render script or command, write the requested final artifact, convert the source into the requested artifact format, or materialize the final artifact.",
-    "Do not verify a target path until a tool result or receipt proves that final artifact exists.",
+    "Recommended next move: consume any needed intermediate evidence, then run the build/render script or command, write the requested final artifact, convert the source into the requested artifact format, or materialize the final artifact.",
+    "This is progress advice, not a restriction on otherwise authorized tools.",
     `Required evidence kinds: ${policy.requiredEvidenceKinds.length === 0 ? "unspecified" : policy.requiredEvidenceKinds.join(", ")}.`,
-    "</runtime_artifact_source_production_repair>",
+    "</runtime_artifact_source_production_hint>",
   ].join("\n");
 }
 
 function artifactAcceptanceRepairDirective(policy: RuntimeToolProgressPolicy): string {
   return [
-    "<runtime_artifact_acceptance_repair>",
+    "<runtime_artifact_acceptance_hint>",
     "The current artifact-producing step already has artifact_path evidence, but artifact_acceptance is still missing.",
-    "Call verify_artifact_acceptance for the produced artifact, or use an evidence-producing tool to patch a known incomplete artifact source before verifying.",
-    "Do not spend another turn listing, searching, or rereading the artifact merely to decide whether to verify it.",
+    "Recommended next move: call verify_artifact_acceptance for the produced artifact, or use an evidence-producing tool to patch a known incomplete artifact source before verifying.",
+    "This is progress advice, not a restriction on otherwise authorized tools.",
     `Required evidence kinds: ${policy.requiredEvidenceKinds.length === 0 ? "unspecified" : policy.requiredEvidenceKinds.join(", ")}.`,
-    "</runtime_artifact_acceptance_repair>",
+    "</runtime_artifact_acceptance_hint>",
   ].join("\n");
 }
 

@@ -1,6 +1,6 @@
 {
   "schema": "agentloop.stepExecutionStrategyConfig/v1",
-  "profile": "action-aware",
+  "profile": "full-catalog",
   "projection": {
     "diagnosticProjectionCharacters": 4096,
     "diagnosticPreviewCharacters": 1200,
