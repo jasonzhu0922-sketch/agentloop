@@ -11,6 +11,7 @@ agentloop/
 ├── packages/agentloop-plan-template/
 │                                 可选的 Plan Template / fast-path 插件
 ├── apps/agentloop-app/           参考应用：HTTP API、登录鉴权、React Web
+├── apps/agentloop-multi-runtime/ 多 Runtime Web、Router、Host 的参考设计与构建模块
 └── docs/                         架构、集成、运维和设计文档
 ```
 
@@ -57,7 +58,27 @@ AgentLoop 的执行链路是：
 7. **Assessment** 对完成候选核对 Success Criteria、证据契约、产物收据和已激活 Skill 的合规性；通过后才完成 Step。
 8. **Repair / Recovery** 评估不通过时，把失败边界和反馈注入当前 Step 做有界修复；仍无法满足时进入 Recovery 或 Plan Revision，而不是以模型文本或文件存在冒充成功。
 
+### Step Agent Loop 的两阶段推进
+
+这里的“两阶段”发生在**同一个已准入的 Plan Step 内**，不是把任务强制拆成两个 Plan Step，也不是让当前 Step 提前执行下游 Step。Runtime 在每个模型回合生成一个紧凑的 `loopStepFrame`，把该回合组织为：
+
+```text
+阶段一：Current Stage
+  根据当前证据状态选择唯一优先动作
+  （采集来源证据 / 产出或修复产物 / 验证既有产物 / 补齐证据 / 提交完成候选）
+→ 阶段二：Next Stage
+  仅声明进入下一动作的触发条件与目标，并交接可复用证据
+→ 下一模型回合重新根据最新 Canonical Evidence 决策
+```
+
+- `RuntimeStepEvidenceState` 从已持久化的 Tool Evidence 派生 `nextAction`、缺失证据、产物状态、诊断和可用工具类别；它只投影继续当前 Step 所需的紧凑状态，而非重放完整历史。
+- 当前阶段优先推进证据缺口：已有明确诊断时允许读取必要上下文、修复、重跑或验证；不会因为已存在中间文件就一概禁止写入或修复。无关的重复浏览、搜索或读取仍会被进度策略拒绝。
+- 下一阶段只在其触发条件满足后才成为新的当前阶段；`handoffContract` 保留可复用输出并禁止重复动作。它不能越过当前 Step 的成功边界，也不能替代 Dependency Scheduler 对下游 Plan Step 的调度。
+- 收敛或没有可用 Tool 时，Loop 切换为 `terminal_candidate`，由 Assessment 决定完成或返回定向修复，而不是由模型自行宣布成功。
+
 全部 leaf Step 完成后，才由 **Terminal Committer** 提交整个 Run 的 Delivery 与 Outcome。
+
+多 Runtime 部署下，Router 将不同用户的不同会话任务分派给不同的、各自加载 AgentLoop 内核的 Worker；单个任务仍由一个 Worker 完整执行，不拆分其 Plan 或 Step。设计见 [MULTI-RUNTIME-LOAD-BALANCING-DESIGN.md](docs/MULTI-RUNTIME-LOAD-BALANCING-DESIGN.md)。
 
 主要能力：
 
