@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useAgentLoop } from "../state/context";
 import { projectConversationRun } from "../state/run-state";
 import { Markdown } from "./Markdown";
@@ -113,15 +113,32 @@ function LiveStreamOutput({
   readonly fallback: string;
   readonly reasoningContent: string;
 }): React.ReactNode {
+  const reasoningRef = useRef<HTMLDivElement>(null);
+  const followsReasoningRef = useRef(true);
   const current = items[items.length - 1] ?? null;
   const view = liveOutputView(items, fallback);
+
+  useLayoutEffect(() => {
+    const reasoning = reasoningRef.current;
+    if (reasoning !== null && followsReasoningRef.current) {
+      scrollReasoningToBottom(reasoning);
+    }
+  }, [reasoningContent]);
+
   return (
     <div className="live-output" aria-label="实时 SSE 输出">
       <div className="live-output-text">{view.body}</div>
       {reasoningContent ? (
         <details className="live-reasoning" open>
           <summary>模型思考</summary>
-          <div>{reasoningContent}</div>
+          <div
+            ref={reasoningRef}
+            onScroll={(event) => {
+              followsReasoningRef.current = isNearBottom(event.currentTarget);
+            }}
+          >
+            {reasoningContent}
+          </div>
         </details>
       ) : null}
       <div className={"live-output-activity " + (current?.kind ?? "thinking")}>
@@ -130,6 +147,20 @@ function LiveStreamOutput({
       </div>
     </div>
   );
+}
+
+const REASONING_FOLLOW_THRESHOLD_PX = 24;
+
+/** Whether a reader is close enough to the newest reasoning to keep following streamed updates. */
+export function isNearBottom(
+  container: Pick<HTMLElement, "clientHeight" | "scrollHeight" | "scrollTop">,
+  threshold = REASONING_FOLLOW_THRESHOLD_PX,
+): boolean {
+  return container.scrollHeight - container.clientHeight - container.scrollTop <= threshold;
+}
+
+export function scrollReasoningToBottom(container: Pick<HTMLElement, "scrollHeight" | "scrollTop">): void {
+  container.scrollTop = container.scrollHeight;
 }
 
 function liveOutputView(items: readonly LiveFeedItem[], fallback: string): { readonly body: string; readonly activity: string } {

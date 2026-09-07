@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { AgentLoopProvider as ProviderImpl } from "./state/AgentLoopProvider";
 import { useAgentLoop } from "./state/context";
 import { AuthScreen } from "./components/AuthScreen";
@@ -9,6 +9,8 @@ import { ArtifactsPanel } from "./components/DetailsPanel";
 
 function Shell(): React.ReactNode {
   const { state, actions } = useAgentLoop();
+  const conversationScrollRef = useRef<HTMLDivElement>(null);
+  const activeEventVersion = activeRunEventVersion(state.activeRunIds, state.runDetailsById);
 
   useEffect(() => {
     if (state.token !== "" && state.user === null) {
@@ -17,6 +19,10 @@ function Shell(): React.ReactNode {
       });
     }
   }, [state.token, state.user, actions]);
+
+  useLayoutEffect(() => {
+    scrollToBottom(conversationScrollRef.current);
+  }, [state.conversation?.runs.length, state.running, activeEventVersion]);
 
   if (state.token === "" || state.user === null) {
     return <AuthScreen />;
@@ -38,7 +44,7 @@ function Shell(): React.ReactNode {
         </header>
         <div className="main-grid">
           <section className="conversation">
-            <div className="conversation-scroll">
+            <div className="conversation-scroll" ref={conversationScrollRef}>
               <ConversationView />
             </div>
             <Composer />
@@ -48,6 +54,22 @@ function Shell(): React.ReactNode {
       </main>
     </div>
   );
+}
+
+/** A stream event changes the live card's height and must advance the actual scroll container. */
+export function activeRunEventVersion(
+  activeRunIds: readonly string[],
+  runDetailsById: Readonly<Record<string, { readonly events: readonly { readonly seq: number }[] }>>,
+): string {
+  return activeRunIds.map((runId) => {
+    const events = runDetailsById[runId]?.events ?? [];
+    const last = events[events.length - 1];
+    return `${runId}:${events.length}:${last?.seq ?? 0}`;
+  }).join("|");
+}
+
+export function scrollToBottom(container: Pick<HTMLElement, "scrollHeight" | "scrollTop"> | null): void {
+  if (container !== null) container.scrollTop = container.scrollHeight;
 }
 
 export function providerLabel(providers: readonly { key: string; defaultModel?: string }[], defaultKey: string): string {
