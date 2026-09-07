@@ -21,8 +21,8 @@ AgentLoop 的执行链路是：
 ```text
 登录用户任务
 → Skill 目录选择
-→ 结构化 Plan
-→ Plan Admission / Skill-Step Binding
+→ Capability-first Outcome Plan
+→ Plan Admission / StepExecutionBinding
 → 依赖调度
 → Step Agent Loop
 → Computer / Plugin Tools
@@ -37,11 +37,13 @@ AgentLoop 的执行链路是：
 - 多用户注册、登录、注销；密码和会话 Token 只保存摘要。
 - 用户私有 Skill，支持内联定义或完整 Package 导入。
 - 内置 Skills 独立在 `@zhujun/agentloop-skills` 包中发布和发现。
-- 结构化 Planner、DAG Admission、Step 级 Capability Grant。
+- Capability-first Planner：Planner 只声明 `requiredCapabilities`，Admission 解析为 StepExecutionBinding；Runtime 再在 Run 授权范围内物化执行工具。
+- 可选 MCP ToolSource：宿主可用别名和 capability 注册外部来源，仍由 Admission、Step binding 与危险工具授权统一约束。
 - Computer Tool 支持目录、读文件、文本搜索、写文件、命令执行和可插拔 GUI/浏览器驱动。
 - 危险 Tool 默认关闭，Run/Batch 必须显式授权。
 - SQLite 持久化 Run、Plan、Step、Evidence、Assessment、Outcome、Batch 和 Event。
 - React + Vite Web 前端展示聊天、实时进度、Plan 和最终结果。
+- Responses Provider 的 reasoning summary 会在 Run 进行中实时展示；最终回复出现后不再渲染该实时面板。
 - 可选 Plan Template 插件用于观察历史 Run、挖掘候选模板和启用低风险 fast-path。
 
 ## 快速启动
@@ -74,6 +76,7 @@ cp apps/agentloop-app/config/llm-providers.example.json apps/agentloop-app/confi
 - 在 `apps/agentloop-app/config/llm-providers.json` 中配置 Provider、Base URL、默认模型和公开的 `modelKey`。
 - 在 `apps/agentloop-app/.env` 中填写对应的环境变量值，例如 `MY_LLM_API_KEY` 或 `OPENAI_API_KEY`。
 - `LLM_PROVIDER_CONFIG_PATH` 默认指向 `./config/llm-providers.json`。
+- 可选 MCP 来源在 `apps/agentloop-app/config/mcp-servers.json` 中注册；认证信息通过 `secretEnv` 引用 `.env` 或部署环境变量，不能写入注册文件。
 
 5. 初始化空 SQLite 数据库：
 
@@ -142,10 +145,17 @@ git ls-files | rg '(^|/)\.env$|\.db$|llm-providers\.json|conversations|uploads|o
 | `WORKSPACE_ROOT` | Run 工作区根目录，默认 `./workspace` |
 | `SESSION_TTL_HOURS` | 登录会话有效期 |
 | `LLM_PROVIDER_CONFIG_PATH` | Provider 注册表路径 |
+| `STEP_EXECUTION_STRATEGY_CONFIG_PATH` | 可选 Step 执行策略配置路径；未设置时读取 `./config/step-execution-strategy.json`，缺失时使用 `full-catalog` |
 | `CUSTOM_SKILL_DIRECTORIES_JSON` | 额外 Skill 根目录列表 |
 | `SKILL_IMPORT_ROOTS_JSON` | 允许导入 Skill Package 的服务端目录 |
 | `TRUSTED_EXECUTABLE_ALIASES_JSON` | 可暴露给 Computer Tool 的受信任命令别名 |
 | `TRUSTED_COMMAND_ENV_JSON` | 注入受信任命令的非敏感环境变量 |
+
+`mcp-servers.json` 是可选的宿主侧 ToolSource 注册表。每个服务可声明 `aliases` 与 `capabilities`，让 Planner 按来源能力规划；Admission 再将其绑定到当前 Step 的实际工具。服务认证使用 `secretEnv` 指向环境变量，密钥不应进入该文件、SQLite 或 Run 记录。
+
+Responses 协议的 Provider 或模型可设 `reasoningSummary: "auto"`。服务会在 Run event stream 中向所有者保留 Provider 返回的 reasoning 内容，Web 前端只在 Run 活跃时显示它，并在最终回答取代实时卡片后隐藏。
+
+Step 执行策略可控制工具目录投影与提示上下文；它提供进度建议，不会构成第二套授权边界。工具是否可用仍由 Run Capability Grant、StepExecutionBinding 和 ToolRegistry 共同决定。
 
 `CUSTOM_SKILL_DIRECTORIES_JSON=["./custom-skills"]` 会把 `apps/agentloop-app/custom-skills/` 作为额外 Skill 根目录。当前参考应用保留了：
 
