@@ -32,6 +32,33 @@ AgentLoop 的执行链路是：
 → Terminal Committer
 ```
 
+### 单个 Step 的执行闭环
+
+依赖调度选中一个依赖已满足的叶子 Step 后，Runtime 在该 Step 内运行一个有明确完成边界的闭环：
+
+```text
+领取依赖就绪的 Step
+→ 建立执行上下文与 Run 授权快照
+→ 模型提出 Tool 调用或完成候选
+→ Tool 返回 Canonical Evidence
+→ 证据进入下一模型回合
+→ Success Criteria + Skill Compliance Assessment
+→ 完成当前 Step / 注入反馈定向修复 / 进入 Recovery
+```
+
+其中各层职责明确分离：
+
+1. **Dependency Scheduler** 只选择尚未完成、依赖均已满足的 leaf Step；没有就绪 Step 的未完成 Plan 会被拒绝，避免死锁。
+2. **Runtime Context** 为当前 Step 注入目标、依赖产物、成功标准、证据契约、可见目录、上传资源和关联 Skill。
+3. **Capability Grant** 以 Run 级用户授权为工具执行边界（包括危险工具开关）；`StepExecutionBinding` 指引当前目标、优先能力和证据要求，但不会撤回已获 Run 授权的工具。上传资源、可见目录和 Skill 指令仍按 Step 隔离。
+4. **Step Agent Loop** 在有界模型回合中执行“模型 → Tool → Evidence → 下一回合”。模型或 Tool 都不能自行把 Step 标记为完成。
+5. **Tool / Action** 先经参数与授权校验，再持久化执行 Action；Tool 只返回结果、收据、诊断和副作用事实。
+6. **Canonical Evidence** 将每个 Tool 结果持久化并投影给下一回合；成功 `load_skill` 会记录该 Skill 的激活证据。
+7. **Assessment** 对完成候选核对 Success Criteria、证据契约、产物收据和已激活 Skill 的合规性；通过后才完成 Step。
+8. **Repair / Recovery** 评估不通过时，把失败边界和反馈注入当前 Step 做有界修复；仍无法满足时进入 Recovery 或 Plan Revision，而不是以模型文本或文件存在冒充成功。
+
+全部 leaf Step 完成后，才由 **Terminal Committer** 提交整个 Run 的 Delivery 与 Outcome。
+
 主要能力：
 
 - 多用户注册、登录、注销；密码和会话 Token 只保存摘要。
@@ -155,7 +182,7 @@ git ls-files | rg '(^|/)\.env$|\.db$|llm-providers\.json|conversations|uploads|o
 
 Responses 协议的 Provider 或模型可设 `reasoningSummary: "auto"`。服务会在 Run event stream 中向所有者保留 Provider 返回的 reasoning 内容，Web 前端只在 Run 活跃时显示它，并在最终回答取代实时卡片后隐藏。
 
-Step 执行策略可控制工具目录投影与提示上下文；它提供进度建议，不会构成第二套授权边界。工具是否可用仍由 Run Capability Grant、StepExecutionBinding 和 ToolRegistry 共同决定。
+Step 执行策略可控制工具目录投影与提示上下文；它提供进度建议，不会构成第二套授权边界。工具是否可用由 Run Capability Grant 和 ToolRegistry 决定；StepExecutionBinding 则约束当前目标、证据契约及 Step 资源范围。
 
 `CUSTOM_SKILL_DIRECTORIES_JSON=["./custom-skills"]` 会把 `apps/agentloop-app/custom-skills/` 作为额外 Skill 根目录。当前参考应用保留了：
 
