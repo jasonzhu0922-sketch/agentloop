@@ -220,6 +220,8 @@ class CompressionComplianceModel implements ModelAdapter {
     assert.equal(this.plannerCalls, 1);
     assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
     assert.match(request.runtimeContext?.content ?? "", new RegExp(`<name>${this.scenario.skillName}</name>`));
+    assert.match(request.runtimeContext?.content ?? "", /"availableCapabilities"/);
+    assert.doesNotMatch(request.runtimeContext?.content ?? "", new RegExp(DELIVERY_TOOL));
     this.assertSkillIsNotVisible(request);
     return toolResponse("planner-submit", "submit_outcome_plan", {
       schema: "agentloop.outcomePlan/v2",
@@ -236,7 +238,7 @@ class CompressionComplianceModel implements ModelAdapter {
         dependsOn: [],
         role: "produce",
         skillIds: [this.skillId],
-        recommendedToolNames: [DELIVERY_TOOL],
+        requiredCapabilities: ["custom_tool_call"],
         evidenceContract: {
           requiredKinds: ["delivery_receipt"],
           caveatPolicy: "none",

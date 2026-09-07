@@ -539,7 +539,7 @@ function directoryPlanner(): Planner {
           objective: "Load and follow the discovered workflow",
           dependencies: [],
           skillIds: [skill.id],
-          recommendedToolNames: [],
+          requiredCapabilities: [],
           successCriteria: [{
             id: "loaded",
             description: "The exact discovered Skill body is loaded before completion",
@@ -566,7 +566,7 @@ function directoryReferencePlanner(): Planner {
           objective: "Load and follow the discovered workflow",
           dependencies: [],
           skillIds: [skill.name],
-          recommendedToolNames: [],
+          requiredCapabilities: [],
           successCriteria: [{
             id: "loaded",
             description: "The exact discovered Skill body is loaded before completion",
@@ -607,7 +607,7 @@ function refreshedDirectoryPlanner(): Planner {
           dependencies: [],
           role: "produce",
           skillIds: [skill.id],
-          recommendedToolNames: [],
+          requiredCapabilities: [],
           successCriteria: [{
             id: "loaded",
             description: "The refreshed discovered Skill body is loaded before completion",

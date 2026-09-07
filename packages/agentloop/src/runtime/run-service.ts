@@ -43,6 +43,13 @@ import { ModelPlanner } from "../planning/planner.ts";
 import { PlanRepository } from "../planning/plan-repository.ts";
 import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
 import { DependencyScheduler } from "../planning/scheduler.ts";
+import {
+  planningCapabilitiesFromToolNames,
+  stepHasSourceKind,
+  stepHasTool,
+  stepResolvedToolNames,
+  stepUsesTool,
+} from "../planning/step-execution-binding.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
@@ -180,7 +187,8 @@ export interface HostRunProjection {
       readonly objective: string;
       readonly dependencies: readonly string[];
       readonly skillIds: readonly string[];
-      readonly recommendedToolNames: readonly string[];
+      readonly requiredCapabilities: readonly string[];
+      readonly executionBinding: ExecutionPlan["steps"][number]["executionBinding"];
       readonly output?: string;
       readonly error?: string;
     }[];
@@ -582,7 +590,7 @@ export class RunService {
     const reusableArtifacts: ConversationReusableArtifact[] = [];
     const failedBoundaries: ConversationFailedBoundary[] = [];
     const requiredSkillIds = new Set<string>();
-    const recommendedToolNames = new Set<string>();
+    const recommendedCapabilityIds = new Set<string>();
     const sourceSummaries: ConversationSourceSummary[] = [];
     let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
 
@@ -619,7 +627,8 @@ export class RunService {
               objective: step.objective,
               dependencies: step.dependencies,
               skillIds: step.skillIds,
-              recommendedToolNames: step.recommendedToolNames,
+              requiredCapabilities: step.requiredCapabilities,
+              executionBinding: step.executionBinding,
               ...(step.output === undefined ? {} : { output: truncateWorkingSetText(step.output, 1_200) }),
               ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
             })),
@@ -637,7 +646,7 @@ export class RunService {
           };
           for (const step of unfinishedSteps) {
             for (const skillId of step.skillIds) requiredSkillIds.add(skillId);
-            for (const toolName of step.recommendedToolNames) recommendedToolNames.add(toolName);
+            for (const capability of step.requiredCapabilities) recommendedCapabilityIds.add(capability);
           }
         }
       } else if (run.status !== "completed") {
@@ -665,7 +674,7 @@ export class RunService {
           && step.retiredAt === undefined
         );
         const sourceSkillIds = sourcePlanStep?.skillIds ?? [];
-        const sourceToolNames = sourcePlanStep?.recommendedToolNames ?? [];
+        const sourceCapabilities = sourcePlanStep?.requiredCapabilities ?? [];
         reusableArtifacts.push({
           runId: run.id,
           path: artifact.path,
@@ -676,7 +685,7 @@ export class RunService {
           ...(source?.toolCallId === undefined ? {} : { sourceToolCallId: source.toolCallId }),
           ...(source?.stepId === undefined ? {} : { sourcePlanStepId: source.stepId }),
           ...(sourceSkillIds.length === 0 ? {} : { sourceSkillIds }),
-          ...(sourceToolNames.length === 0 ? {} : { sourceToolNames }),
+          ...(sourceCapabilities.length === 0 ? {} : { sourceCapabilities }),
           reusable: true,
         });
       }
@@ -686,7 +695,7 @@ export class RunService {
     const boundedSourceSummaries = sourceSummaries.slice(-CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT);
     for (const artifact of boundedArtifacts) {
       for (const skillId of artifact.sourceSkillIds ?? []) requiredSkillIds.add(skillId);
-      for (const toolName of artifact.sourceToolNames ?? []) recommendedToolNames.add(toolName);
+      for (const capability of artifact.sourceCapabilities ?? []) recommendedCapabilityIds.add(capability);
     }
     const resumeSuggestion = buildResumeSuggestion(activeGoal, planCursors, boundedArtifacts, failedBoundaries);
     const evidenceLedger: ConversationEvidenceLedger | undefined = boundedSourceSummaries.length === 0
@@ -705,7 +714,7 @@ export class RunService {
       failedBoundaries,
       recommendedCapabilities: {
         skillIds: [...requiredSkillIds],
-        toolNames: [...recommendedToolNames],
+        capabilityIds: [...recommendedCapabilityIds],
       },
       ...(evidenceLedger === undefined ? {} : { evidenceLedger }),
       ...(resumeSuggestion === undefined ? {} : { resumeSuggestion }),
@@ -809,7 +818,8 @@ export class RunService {
           objective: step.objective,
           dependencies: step.dependencies,
           skillIds: step.skillIds,
-          recommendedToolNames: step.recommendedToolNames,
+          requiredCapabilities: step.requiredCapabilities,
+          executionBinding: step.executionBinding,
           ...(step.output === undefined ? {} : { output: truncateWorkingSetText(step.output, 1_200) }),
           ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
         })),
@@ -1377,7 +1387,7 @@ export class RunService {
         );
       const taskIntent = classifyTaskIntent({
         objective: input,
-        recommendedToolNames: allowedToolNames,
+        toolNames: allowedToolNames,
         skillNames: privateSkills.map((skill) => skill.name),
         responseOnly,
       });
@@ -1439,6 +1449,7 @@ export class RunService {
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
+        availableCapabilities: planningCapabilitiesFromToolNames(allowedToolNames),
         workspaceFacts: planningWorkspace,
         visibleDirectories,
         sources: availableSources,
@@ -1815,8 +1826,9 @@ export class RunService {
       const directDeliveryOnly = stepUsesOnlyDirectDelivery(activeStep) && stepSkillIds.length === 0;
       const stepAllowedToolNames = directDeliveryOnly
         ? []
-        : [...input.rootGrant.allowedToolNames].filter((name) =>
-          name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0
+        : stepResolvedToolNames(activeStep).filter((name) =>
+          input.rootGrant.allowedToolNames.has(name)
+          && (name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0)
         );
       const stepGrant = createCapabilityGrant({
         actorUserId: input.actorUserId,
@@ -1837,7 +1849,8 @@ export class RunService {
           stepId: activeStep.id,
           skillIds: stepSkillIds,
           toolNames: [...stepGrant.allowedToolNames],
-          recommendedToolNames: activeStep.recommendedToolNames,
+          requiredCapabilities: activeStep.requiredCapabilities,
+          executionBinding: activeStep.executionBinding,
           ...(skillExecutionRoots.length === 0 ? {} : {
             skillExecutionRoots: skillExecutionRoots.map((root) => ({
               id: root.id,
@@ -2128,7 +2141,7 @@ export class RunService {
     const availableToolNames = this.recoveryAvailableToolNames(privateSkills, input.run.allowDangerousTools);
     const taskIntent = classifyTaskIntent({
       objective: input.run.input,
-      recommendedToolNames: [...availableToolNames],
+      toolNames: [...availableToolNames],
       skillNames: privateSkills.map((skill) => skill.name),
     });
     const admitted = admitPlan({
@@ -3184,7 +3197,7 @@ function failedBoundaryRecoveryDecision(
           refinementState: step.refinementState,
           requiredFacts: step.requiredFacts,
           skillIds: step.skillIds,
-          recommendedToolNames: step.recommendedToolNames,
+          requiredCapabilities: step.requiredCapabilities,
           ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
           successCriteria: step.successCriteria,
         })),
@@ -3291,7 +3304,7 @@ function repairLeafForFailedBoundary(
     refinementState: "not_refinable",
     requiredFacts: target.requiredFacts,
     skillIds: target.skillIds,
-    recommendedToolNames: target.recommendedToolNames,
+    requiredCapabilities: target.requiredCapabilities,
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
     successCriteria: target.successCriteria,
   };
@@ -3947,7 +3960,7 @@ function shouldCompleteWithEvidenceBoundary(input: {
 }
 
 function stepUsesExternalSourceTools(step: ExecutionPlan["steps"][number]): boolean {
-  return step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch");
+  return stepHasSourceKind(step, "web");
 }
 
 function hasSuccessfulExternalSourceEvidence(toolCalls: readonly ToolEvidence[]): boolean {
@@ -4031,7 +4044,7 @@ function skillRequiresFileOutput(skill: Pick<PrivateSkill, "name" | "description
 function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
   if (step.role === "fact_acquisition") return false;
   return artifactExtensionsRequiredByStep(step).size > 0
-    || step.recommendedToolNames.some((name) =>
+    || stepUsesTool(step, (name) =>
       name === "computer_write_file" || name === "computer_patch_file" || name === "computer_run_command" || name === "materialize_paginated_html"
     );
 }
@@ -4049,8 +4062,9 @@ function stepAllowsSkillFileOutput(step: ExecutionPlan["steps"][number]): boolea
 }
 
 function stepCanConvergeFromLookupEvidence(step: ExecutionPlan["steps"][number]): boolean {
-  return step.recommendedToolNames.length > 0
-    && step.recommendedToolNames.every((name) => isLookupToolName(name));
+  const resolvedToolNames = stepResolvedToolNames(step);
+  return resolvedToolNames.length > 0
+    && resolvedToolNames.every((name) => isLookupToolName(name));
 }
 
 function shouldConvergeAfterLookupEvidence(
@@ -4067,8 +4081,8 @@ function shouldConvergeAfterLookupEvidence(
     .filter((item) => !item.isError && isLookupToolName(item.toolName));
   const webSearchCount = successfulLookupEvidence.filter((item) => item.toolName === "websearch").length;
   const webFetchCount = successfulLookupEvidence.filter((item) => item.toolName === "webfetch").length;
-  const webStep = step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch");
-  const requiresContentRead = step.recommendedToolNames.some((name) => isSourceContentReadToolName(name));
+  const webStep = stepHasSourceKind(step, "web");
+  const requiresContentRead = stepUsesTool(step, (name) => isSourceContentReadToolName(name));
   const sourceReadKeys = lookupSourceReadKeys(successfulLookupEvidence);
   const sourceReadCount = sourceReadKeys.size;
   const minimumSourceReads = minimumSourceReadsForLookupStep(step, successfulLookupEvidence);
@@ -4160,7 +4174,7 @@ function shouldUseFinalFileConvergence(
 }
 
 function stepRequiresArtifactAcceptance(step: ExecutionPlan["steps"][number]): boolean {
-  return step.recommendedToolNames.includes("verify_artifact_acceptance")
+  return stepHasTool(step, "verify_artifact_acceptance")
     || (step.evidenceContract?.requiredKinds.includes("artifact_acceptance") ?? false);
 }
 
@@ -4182,18 +4196,19 @@ function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number])
     step.objective,
     ...step.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
   ].join("\n").toLowerCase();
-  const productionTool = step.recommendedToolNames.some((name) =>
-    name === "computer_write_file" || name === "computer_patch_file" || name === "materialize_paginated_html" || name === "convert_artifact"
-  );
-  if (productionTool) return true;
   const productionIntent =
     /\b(?:create|generate|write|build|rebuild|export|save|produce|output|materialize|render)\b/i.test(text)
     || /(?:生成|创建|制作|写入|构建|重建|导出|保存|输出|产出|渲染)/u.test(text);
-  if (!productionIntent) return false;
   const verificationIntent =
     /\b(?:verify|validate|check|inspect|review|qa|quality|compare|readback)\b/i.test(text)
     || /(?:验证|校验|检查|审查|终检|验收|质量|对比|问题清单)/u.test(text);
-  const onlyCommandOrLookup = step.recommendedToolNames.every((name) =>
+  if (!productionIntent && verificationIntent) return false;
+  const productionTool = stepUsesTool(step, (name) =>
+    name === "computer_write_file" || name === "computer_patch_file" || name === "materialize_paginated_html" || name === "convert_artifact"
+  );
+  if (productionTool) return true;
+  if (!productionIntent) return false;
+  const onlyCommandOrLookup = stepResolvedToolNames(step).every((name) =>
     name === "computer_run_command" || isLookupToolName(name) || name === "load_skill"
   );
   if (verificationIntent && onlyCommandOrLookup && !/\b(?:build|rebuild|export|save|write|generate|create|produce|output)\b/i.test(text)
@@ -4290,7 +4305,7 @@ function stepRequiresSourceSummary(step: ExecutionPlan["steps"][number]): boolea
 }
 
 function stepUsesUploadedSourceEvidence(step: ExecutionPlan["steps"][number]): boolean {
-  return step.recommendedToolNames.includes("read_source") && stepRequiresSourceSummary(step);
+  return stepHasSourceKind(step, "uploaded_source") && stepRequiresSourceSummary(step);
 }
 
 function stepAllowsSourceSummaryCandidateConvergence(step: ExecutionPlan["steps"][number]): boolean {
@@ -4301,7 +4316,7 @@ function minimumSourceReadsForLookupStep(
   step: ExecutionPlan["steps"][number],
   evidence: readonly AgentLoopToolEvidence[],
 ): number {
-  if (!step.recommendedToolNames.some((name) => isSourceContentReadToolName(name))) return 0;
+  if (!stepUsesTool(step, (name) => isSourceContentReadToolName(name))) return 0;
   const defaultMinimum = stepAllowsSourceSummaryCandidateConvergence(step) ? 5 : 1;
   const discovered = discoveredSourceCount(evidence);
   if (discovered === undefined) return defaultMinimum;
@@ -4662,12 +4677,13 @@ function selectAssessmentProfile(
   if (stepUsesOnlyDirectDelivery(step)) return "deterministic";
   if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
   if (stepEvidenceSupportsRuntimeEvidenceGate(step, evidence)) return "evidence_gate";
-  if (step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+  if (stepHasSourceKind(step, "web")) {
     return "lookup_lite";
   }
   if (matchesSourceGroundedAssessment(text)) return "source_grounded";
-  if (step.recommendedToolNames.length === 0) return "deterministic";
-  if (step.recommendedToolNames.every((name) => /(?:read|list|search|fetch|inspect|get|query)/i.test(name))) {
+  const resolvedToolNames = stepResolvedToolNames(step);
+  if (resolvedToolNames.length === 0) return "deterministic";
+  if (resolvedToolNames.every((name) => /(?:read|list|search|fetch|inspect|get|query)/i.test(name))) {
     return "lookup_lite";
   }
   return "source_grounded";
@@ -4788,7 +4804,7 @@ function isProfiledRuleAssessmentProfile(
 
 function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): boolean {
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
-  return step.recommendedToolNames.includes("verify_artifact_acceptance")
+  return stepHasTool(step, "verify_artifact_acceptance")
     || requiredKinds.includes("artifact_acceptance")
     || requiredKinds.includes("source_summary")
     || requiredKinds.includes("schema_summary")
@@ -4799,7 +4815,7 @@ function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): bool
 function stepUsesOnlyDirectDelivery(step: ExecutionPlan["steps"][number]): boolean {
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
   return step.role === "deliver"
-    && step.recommendedToolNames.length === 0
+    && stepResolvedToolNames(step).length === 0
     && step.requiredFacts.length === 0
     && requiredKinds.length > 0
     && requiredKinds.every((kind) => kind === "delivery_receipt");
@@ -4823,7 +4839,7 @@ function runtimeArtifactDeliveryRequiredKinds(requiredKinds: readonly string[]):
 function stepUsesArtifactDeliveryEvidenceGate(step: ExecutionPlan["steps"][number]): boolean {
   const requiredKinds = runtimeArtifactDeliveryRequiredKinds(step.evidenceContract?.requiredKinds ?? []);
   if (
-    !step.recommendedToolNames.includes("verify_artifact_acceptance")
+    !stepHasTool(step, "verify_artifact_acceptance")
     && !requiredKinds.includes("artifact_acceptance")
   ) {
     return false;
@@ -4856,7 +4872,7 @@ function executionTaskProfile(
   input?: {
     readonly objective: string;
     readonly successCriteria: readonly { readonly id: string; readonly description: string }[];
-    readonly recommendedToolNames: readonly string[];
+    readonly toolNames: readonly string[];
     readonly skillNames?: readonly string[];
     readonly allowResearchPolicy?: boolean;
   },
@@ -4866,7 +4882,7 @@ function executionTaskProfile(
     : classifyTaskIntent({
       objective: input.objective,
       successCriteria: input.successCriteria,
-      recommendedToolNames: input.recommendedToolNames,
+      toolNames: input.toolNames,
       skillNames: input.skillNames,
     });
   return buildTaskProfile({
@@ -4888,7 +4904,7 @@ function executionTaskProfileForStep(
   const input = {
     objective: step.objective,
     successCriteria: step.successCriteria,
-    recommendedToolNames: step.recommendedToolNames,
+    toolNames: stepResolvedToolNames(step),
     skillNames: skills.map((skill) => skill.name),
     allowResearchPolicy: stepAllowsResearchPolicy(step),
   };
@@ -4898,7 +4914,7 @@ function executionTaskProfileForStep(
 function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean {
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
   return step.role === "fact_acquisition"
-    || step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")
+    || stepHasSourceKind(step, "web")
     || requiredKinds.includes("source_summary")
     || requiredKinds.includes("source_urls")
     || requiredKinds.includes("schema_summary")
@@ -4940,7 +4956,7 @@ function buildStepRuntimeContext(
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
     successCriteria: step.successCriteria,
-    recommendedToolNames: step.recommendedToolNames,
+    toolNames: stepResolvedToolNames(step),
     skillNames: skills.map((skill) => skill.name),
   });
   return buildStepRuntimeContextSnapshot({
@@ -5332,7 +5348,6 @@ function requiresConversationWorksetExecution(
   if (!hasReusablePriorWork) return false;
   return classifyTaskIntent({
     objective: input,
-    recommendedToolNames: conversationWorkingSet.recommendedCapabilities.toolNames,
   }).wantsArtifact;
 }
 

@@ -21,7 +21,7 @@ export interface OperationProfile {
 export interface OperationProfileInput {
   readonly objective: string;
   readonly successCriteria: readonly Pick<SuccessCriterion, "id" | "description">[];
-  readonly recommendedToolNames: readonly string[];
+  readonly toolNames: readonly string[];
   readonly skillNames?: readonly string[];
 }
 
@@ -179,7 +179,7 @@ export function inferOperationProfile(input: OperationProfileInput): OperationPr
     ...input.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
     ...(input.skillNames ?? []),
   ].join("\n"));
-  const tools = new Set(input.recommendedToolNames);
+  const tools = new Set(input.toolNames);
   if (tools.has("websearch") || tools.has("webfetch") || intent.sourceNeed !== "none") {
     return profile("web_research");
   }

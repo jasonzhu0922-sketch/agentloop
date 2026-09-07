@@ -20,7 +20,7 @@ export interface TaskIntentClassification {
 export interface TaskIntentInput {
   readonly objective: string;
   readonly successCriteria?: readonly { readonly id: string; readonly description: string }[];
-  readonly recommendedToolNames?: readonly string[];
+  readonly toolNames?: readonly string[];
   readonly skillNames?: readonly string[];
   readonly responseOnly?: boolean;
 }
@@ -39,8 +39,8 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
   };
   const artifactKind = detectArtifactKindSignal(text);
   const sourceNeed = inferSourceNeedFromIntent(text);
-  const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.recommendedToolNames ?? []);
-  const hasFileProducer = (input.recommendedToolNames ?? []).some(isFileProducerToolName);
+  const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
+  const hasFileProducer = (input.toolNames ?? []).some(isFileProducerToolName);
   const wantsArtifact = artifactKind !== "none"
     && (signals.action.length > 0 || hasFileProducer)
     && input.responseOnly !== true;
@@ -62,7 +62,7 @@ export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy 
     ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
     ...(input.skillNames ?? []),
   ].join("\n"));
-  return researchPolicyForIntentText(text, inferSourceNeedFromIntent(text), input.recommendedToolNames ?? []);
+  return researchPolicyForIntentText(text, inferSourceNeedFromIntent(text), input.toolNames ?? []);
 }
 
 export function requestedArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
@@ -106,7 +106,7 @@ function inferSourceNeedFromIntent(text: string): SourceNeed {
 function researchPolicyForIntentText(
   text: string,
   sourceNeed: SourceNeed,
-  _recommendedToolNames: readonly string[],
+  _toolNames: readonly string[],
 ): ResearchPolicy | undefined {
   if (sourceNeed === "none") return undefined;
   const freshnessNeed = /(?:latest|current|today|recent|最新|当前|今天|近期|市场价格|价格|报价|行情|多少钱)/iu.test(text)

@@ -14,9 +14,7 @@ export function instantiatePlanTemplate(input: {
     dependencies: step.dependsOn,
     role: step.role,
     skillIds: skillIdsForStep(step, selectedSkillRoles),
-    recommendedToolNames: step.requiredCapabilities
-      .map((capability) => toolForCapability(capability, input.task.availableToolNames))
-      .filter((toolName): toolName is string => toolName !== undefined),
+    requiredCapabilities: step.requiredCapabilities,
     evidenceContract: {
       requiredKinds: step.requiredEvidenceKinds,
       caveatPolicy: "none" as const,
@@ -89,17 +87,6 @@ function successCriterionDescription(step: PlanStepSkeleton): string {
     return `Step satisfies evidence: ${step.requiredEvidenceKinds.join(", ")}.`;
   }
   return "Step completes its planned operation with non-empty output.";
-}
-
-function toolForCapability(capability: string, availableToolNames: readonly string[]): string | undefined {
-  const available = new Set(availableToolNames);
-  if (capability === "artifact_acceptance" && available.has("verify_artifact_acceptance")) return "verify_artifact_acceptance";
-  if (capability === "artifact_write" && available.has("computer_write_file")) return "computer_write_file";
-  if (capability === "web_research" && available.has("websearch")) return "websearch";
-  if (capability === "source_read" && available.has("read_source")) return "read_source";
-  if (capability === "visible_directory_read" && available.has("computer_list_directory")) return "computer_list_directory";
-  if (available.has(capability)) return capability;
-  return undefined;
 }
 
 function inferShape(template: PlanTemplate): PlanProposal["shape"] {

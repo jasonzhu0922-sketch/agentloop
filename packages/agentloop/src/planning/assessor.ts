@@ -25,6 +25,7 @@ import type {
   StepEvidence,
   SuggestedRepairShape,
 } from "./contracts.ts";
+import { stepHasSourceKind, stepResolvedToolNames } from "./step-execution-binding.ts";
 
 const SUBMIT_ASSESSMENT_TOOL = {
   name: "submit_assessment",
@@ -643,7 +644,9 @@ function uniqueStrings(values: readonly string[]): string[] {
 }
 
 function stepRequiresLookupEvidence(input: StepAssessmentInput): boolean {
-  if (input.step.recommendedToolNames.length > 0) return true;
+  if (input.step.executionBinding.sourceKinds.some((kind) =>
+    kind === "web" || kind === "uploaded_source" || kind === "visible_directory" || kind === "workspace_file"
+  )) return true;
   return input.step.successCriteria.some((criterion) =>
     /(?:\b(?:source|url|cite|citation|current|latest|lookup|search|fetch)\b|来源|网址|引用|最新|当前|查询|检索|搜索)/iu
       .test(criterion.description),
@@ -694,7 +697,7 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
         "Do not reject process-only Skill gaps when criteria pass; record process_caveat or not_assessed.",
     };
   }
-  if (input.step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+  if (stepHasSourceKind(input.step, "web")) {
     policy.sourceCaveats = {
       evidenceBoundary:
         "If authoritative external sources were attempted and remain unavailable, forbidden, paywalled, or missing full text: do not approve criteria that require those missing facts. In feedback, explicitly separate verified facts from unavailable or unverified facts so Runtime can decide whether a limited-evidence delivery is acceptable. Treat source evidence as blocking only when exact/current/official source facts are the user's required deliverable; otherwise it is auxiliary grounding for the core artifact.",
@@ -768,7 +771,7 @@ function assessmentTaskProfile(input: StepAssessmentInput): TaskProfile {
   const intent = classifyTaskIntent({
     objective: input.step.objective,
     successCriteria: input.step.successCriteria,
-    recommendedToolNames: input.step.recommendedToolNames,
+    toolNames: stepResolvedToolNames(input.step),
     skillNames: input.skills.map((skill) => skill.name),
   });
   return buildTaskProfile({
@@ -784,7 +787,7 @@ function assessmentTaskProfile(input: StepAssessmentInput): TaskProfile {
 function stepAllowsResearchPolicy(step: StepAssessmentInput["step"]): boolean {
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
   return step.role === "fact_acquisition"
-    || step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")
+    || stepHasSourceKind(step, "web")
     || requiredKinds.includes("source_summary")
     || requiredKinds.includes("source_urls");
 }

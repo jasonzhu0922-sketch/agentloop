@@ -1158,7 +1158,7 @@ test("Responses streaming adapter preserves function calls when final response o
       'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_plan","call_id":"call-plan","name":"submit_plan","arguments":""}}\n\n',
       'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"{\\"goal\\":\\"analyze\\",\\"selectedSkillIds\\":[],"}\n\n',
       'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"steps\\":[{\\"id\\":\\"extract\\",\\"objective\\":\\"extract evidence\\",\\"dependencies\\":[],"}\n\n',
-      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"skillIds\\":[],\\"recommendedToolNames\\":[],\\"successCriteria\\":[{\\"id\\":\\"done\\",\\"description\\":\\"evidence exists\\"}]}]}"}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_plan","output_index":1,"delta":"\\"skillIds\\":[],\\"requiredCapabilities\\":[],\\"successCriteria\\":[{\\"id\\":\\"done\\",\\"description\\":\\"evidence exists\\"}]}]}"}\n\n',
       'data: {"type":"response.function_call_arguments.done","item_id":"fc_plan","output_index":1}\n\n',
       'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":12,"output_tokens":4}}}\n\n',
     ]);
@@ -1197,7 +1197,7 @@ test("Responses streaming adapter preserves function calls when final response o
           objective: "extract evidence",
           dependencies: [],
           skillIds: [],
-          recommendedToolNames: [],
+          requiredCapabilities: [],
           successCriteria: [{ id: "done", description: "evidence exists" }],
         }],
       },

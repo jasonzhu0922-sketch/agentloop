@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ConversationWorkingSet, ExecutionPlan, PlanStep } from "../src/planning/contracts.ts";
+import { createStepExecutionBinding } from "../src/planning/step-execution-binding.ts";
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
 
 test("source evidence steps receive a global Runtime progress policy", () => {
-  const step: PlanStep = {
+  const step = planStep({
     id: "extract-source",
     kind: "leaf",
     position: 0,
@@ -15,14 +16,14 @@ test("source evidence steps receive a global Runtime progress policy", () => {
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["load_skill", "read_source"],
+    requiredCapabilities: ["skill_instruction_load", "uploaded_source_read"],
     evidenceContract: {
       requiredKinds: ["source_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats", "delivery_receipt"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "pending",
-  };
+  });
 
   const policy = buildStepToolProgressPolicy({
     step,
@@ -44,7 +45,7 @@ test("source evidence steps receive a global Runtime progress policy", () => {
 });
 
 test("execution context binds dependency evidence before downstream reacquisition", () => {
-  const inspectStep: PlanStep = {
+  const inspectStep = planStep({
     id: "inspect_data",
     kind: "leaf",
     position: 0,
@@ -54,7 +55,7 @@ test("execution context binds dependency evidence before downstream reacquisitio
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["visible_index_directory", "computer_run_command", "computer_write_file"],
+    requiredCapabilities: ["visible_directory_read", "workspace_artifact_write"],
     evidenceContract: {
       requiredKinds: ["source_summary", "artifact_path", "artifact_non_empty", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
@@ -131,8 +132,8 @@ test("execution context binds dependency evidence before downstream reacquisitio
         }),
       }],
     },
-  };
-  const buildStep: PlanStep = {
+  });
+  const buildStep = planStep({
     id: "build_analysis_xlsx",
     kind: "leaf",
     position: 1,
@@ -142,14 +143,14 @@ test("execution context binds dependency evidence before downstream reacquisitio
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["load_skill", "computer_write_file", "verify_artifact_acceptance"],
+    requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
     evidenceContract: {
       requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request", "delivery_receipt", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "running",
-  };
+  });
   const plan: ExecutionPlan = {
     id: "plan-1",
     runId: "run-1",
@@ -250,7 +251,7 @@ test("execution context binds dependency evidence before downstream reacquisitio
 });
 
 test("execution context carries current-to-next handoff for non-terminal steps", () => {
-  const extractStep: PlanStep = {
+  const extractStep = planStep({
     id: "extract_data",
     kind: "leaf",
     position: 0,
@@ -260,15 +261,15 @@ test("execution context carries current-to-next handoff for non-terminal steps",
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["visible_index_directory", "visible_extract_tables"],
+    requiredCapabilities: ["visible_directory_read"],
     evidenceContract: {
       requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "running",
-  };
-  const writeStep: PlanStep = {
+  });
+  const writeStep = planStep({
     id: "write_report",
     kind: "leaf",
     position: 1,
@@ -278,14 +279,14 @@ test("execution context carries current-to-next handoff for non-terminal steps",
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["computer_write_file", "verify_artifact_acceptance"],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
     evidenceContract: {
       requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request", "delivery_receipt", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "pending",
-  };
+  });
   const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
     step: extractStep,
     plan: {
@@ -347,7 +348,7 @@ test("execution context carries current-to-next handoff for non-terminal steps",
 });
 
 test("execution context prefers structured JSON reads for table extraction artifacts", () => {
-  const extractStep: PlanStep = {
+  const extractStep = planStep({
     id: "extract_data",
     kind: "leaf",
     position: 0,
@@ -357,7 +358,7 @@ test("execution context prefers structured JSON reads for table extraction artif
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["visible_index_directory", "visible_extract_tables"],
+    requiredCapabilities: ["visible_directory_read"],
     evidenceContract: {
       requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
@@ -427,8 +428,8 @@ test("execution context prefers structured JSON reads for table extraction artif
         }),
       }],
     },
-  };
-  const produceStep: PlanStep = {
+  });
+  const produceStep = planStep({
     id: "deliver_analysis",
     kind: "leaf",
     position: 1,
@@ -438,14 +439,14 @@ test("execution context prefers structured JSON reads for table extraction artif
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: [],
+    requiredCapabilities: [],
     evidenceContract: {
       requiredKinds: ["delivery_receipt", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "running",
-  };
+  });
   const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
     step: produceStep,
     plan: {
@@ -486,7 +487,7 @@ test("execution context prefers structured JSON reads for table extraction artif
 });
 
 test("step semantic frame classifies visible directory analysis as source acquisition", () => {
-  const step: PlanStep = {
+  const step = planStep({
     id: "profile_xlsx_data",
     kind: "leaf",
     position: 0,
@@ -496,14 +497,14 @@ test("step semantic frame classifies visible directory analysis as source acquis
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["visible_find_files", "visible_read_files", "computer_run_command"],
+    requiredCapabilities: ["visible_directory_read", "workspace_artifact_write"],
     evidenceContract: {
       requiredKinds: ["source_summary", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "running",
-  };
+  });
   const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
     step,
     plan: {
@@ -552,7 +553,7 @@ test("step semantic frame classifies visible directory analysis as source acquis
 });
 
 test("execution context asks acquisition steps to batch independent reads in one turn", () => {
-  const step: PlanStep = {
+  const step = planStep({
     id: "lookup_route",
     kind: "leaf",
     position: 0,
@@ -562,14 +563,14 @@ test("execution context asks acquisition steps to batch independent reads in one
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["mcp_amap_maps_maps_geo", "mcp_amap_maps_maps_direction_driving", "mcp_amap_maps_maps_distance"],
+    requiredCapabilities: ["external_api_call"],
     evidenceContract: {
       requiredKinds: ["source_summary", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
     status: "running",
-  };
+  });
 
   const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
     step,
@@ -602,7 +603,7 @@ test("execution context asks acquisition steps to batch independent reads in one
 });
 
 test("dependency evidence binding keeps missing source summary explicit", () => {
-  const inspectStep: PlanStep = {
+  const inspectStep = planStep({
     id: "inspect_data",
     kind: "leaf",
     position: 0,
@@ -612,7 +613,7 @@ test("dependency evidence binding keeps missing source summary explicit", () => 
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["computer_write_file"],
+    requiredCapabilities: ["workspace_artifact_write"],
     evidenceContract: {
       requiredKinds: ["source_summary", "artifact_path", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
@@ -641,8 +642,8 @@ test("dependency evidence binding keeps missing source summary explicit", () => 
         feedback: "Missing source summary receipt.",
       },
     },
-  };
-  const nextStep: PlanStep = {
+  });
+  const nextStep = planStep({
     id: "build",
     kind: "leaf",
     position: 1,
@@ -652,11 +653,11 @@ test("dependency evidence binding keeps missing source summary explicit", () => 
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["computer_write_file"],
+    requiredCapabilities: ["workspace_artifact_write"],
     evidenceContract: { requiredKinds: ["artifact_path"], caveatPolicy: "none" },
     successCriteria: [],
     status: "running",
-  };
+  });
   const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
     step: nextStep,
     plan: {
@@ -688,7 +689,7 @@ test("dependency evidence binding keeps missing source summary explicit", () => 
 });
 
 test("execution context exposes prior conversation artifacts as reusable context", () => {
-  const step: PlanStep = {
+  const step = planStep({
     id: "continue",
     kind: "leaf",
     position: 0,
@@ -698,11 +699,11 @@ test("execution context exposes prior conversation artifacts as reusable context
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    recommendedToolNames: ["computer_write_file"],
+    requiredCapabilities: ["workspace_artifact_write"],
     evidenceContract: { requiredKinds: ["artifact_path"], caveatPolicy: "none" },
     successCriteria: [],
     status: "running",
-  };
+  });
   const workset: ConversationWorkingSet = {
     schema: "conversation.workset/v1",
     conversationId: "conversation-1",
@@ -719,7 +720,7 @@ test("execution context exposes prior conversation artifacts as reusable context
       reusable: true,
     }],
     failedBoundaries: [],
-    recommendedCapabilities: { skillIds: [], toolNames: ["computer_write_file"] },
+    recommendedCapabilities: { skillIds: [], capabilityIds: ["workspace_artifact_write"] },
     evidenceLedger: {
       schema: "conversation.evidenceLedger/v1",
       sourceSummaries: [{
@@ -768,6 +769,39 @@ test("execution context exposes prior conversation artifacts as reusable context
   assert.equal(reuseContext.reusableArtifacts[0]?.path, "summary_data.json");
   assert.equal(reuseContext.sourceSummaries[0]?.facts[0]?.claim.includes("18 staff"), true);
 });
+
+function planStep(step: Omit<PlanStep, "executionBinding">): PlanStep {
+  return {
+    ...step,
+    executionBinding: createStepExecutionBinding({
+      step,
+      availableToolNames: new Set([
+        "read_source",
+        "visible_index_directory",
+        "visible_find_files",
+        "visible_read_file",
+        "visible_read_files",
+        "visible_search_text",
+        "visible_extract_tables",
+        "computer_list_directory",
+        "computer_find_files",
+        "computer_search_text",
+        "computer_read_file",
+        "computer_read_json",
+        "computer_summarize_table_artifact",
+        "computer_write_file",
+        "computer_patch_file",
+        "computer_run_command",
+        "materialize_paginated_html",
+        "convert_artifact",
+        "verify_artifact_acceptance",
+        "load_skill",
+        "mcp_route_query",
+      ]),
+      evidenceContract: step.evidenceContract,
+    }),
+  };
+}
 
 function executionContextPayload(content: string): Record<string, unknown> {
   const match = content.match(/<execution_context source="server">\n(.*?)\n<\/execution_context>/s);

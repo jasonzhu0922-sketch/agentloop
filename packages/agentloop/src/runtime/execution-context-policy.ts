@@ -1,4 +1,5 @@
 import type { ConversationWorkingSet, ExecutionPlan, EvidenceKind, StepEvidence } from "../planning/contracts.ts";
+import { stepHasSourceKind, stepResolvedToolNames, stepUsesTool } from "../planning/step-execution-binding.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import { skillExecutionRootEnvName } from "../tools/skill-loader.ts";
@@ -29,9 +30,10 @@ export function buildStepRuntimeContextSnapshot(input: {
   const visibleDirectories = input.visibleDirectories ?? [];
   const sources = input.sources ?? [];
   const skillExecutionRoots = input.skillExecutionRoots ?? [];
-  const usesWebTools = input.step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch");
-  const usesVisibleDirectoryTools = input.step.recommendedToolNames.some((name) => name.startsWith("visible_"));
-  const usesSourceTools = input.step.recommendedToolNames.some((name) => name === "read_source");
+  const resolvedToolNames = stepResolvedToolNames(input.step);
+  const usesWebTools = stepHasSourceKind(input.step, "web");
+  const usesVisibleDirectoryTools = stepHasSourceKind(input.step, "visible_directory");
+  const usesSourceTools = stepHasSourceKind(input.step, "uploaded_source");
   const dependencyEvidenceBindings = buildDependencyEvidenceBindings(input.step, input.plan);
   const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(dependencyEvidenceBindings);
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
@@ -59,8 +61,8 @@ export function buildStepRuntimeContextSnapshot(input: {
       "<execution_context source=\"server\">",
       JSON.stringify({
         toolSelectionPolicy: {
-          recommendedToolNamesAreAdvisory: true,
-          instruction: "Use the recommended tools as a starting point, but choose any currently exposed tool when it better satisfies the current step evidence contract.",
+          executionBindingIsAuthoritative: true,
+          instruction: "Use the step execution binding as the server-resolved capability-to-tool boundary; choose among currently exposed tools to satisfy the current step evidence contract.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
           beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, contradictory, or explicitly refreshed requirements. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },
@@ -68,7 +70,9 @@ export function buildStepRuntimeContextSnapshot(input: {
           id: input.step.id,
           objective: input.step.objective,
           role: input.step.role,
-          recommendedToolNames: input.step.recommendedToolNames,
+          requiredCapabilities: input.step.requiredCapabilities,
+          executionBinding: input.step.executionBinding,
+          resolvedToolNames,
           ...(input.step.evidenceContract === undefined ? {} : { evidenceContract: input.step.evidenceContract }),
           successCriteria: input.step.successCriteria,
         },
@@ -85,7 +89,8 @@ export function buildStepRuntimeContextSnapshot(input: {
             id: item.id,
             objective: item.objective,
             status: item.status,
-            recommendedToolNames: item.recommendedToolNames,
+            requiredCapabilities: item.requiredCapabilities,
+            executionBinding: item.executionBinding,
             successCriteria: item.successCriteria,
           })),
         dependencyOutputs: input.step.dependencies.map((dependencyId) => {
@@ -322,12 +327,12 @@ function requiredInputsFromCurrentStep(
   for (const kind of currentKinds) {
     if (nextKinds.has(kind) || isReusableEvidenceKind(kind)) result.add(kind);
   }
-  if (next.recommendedToolNames.some((name) => /(?:write|create|export|verify|artifact)/iu.test(name))) {
+  if (stepUsesTool(next, (name) => /(?:write|create|export|verify|artifact)/iu.test(name))) {
     for (const kind of ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"] as const) {
       if (currentKinds.has(kind)) result.add(kind);
     }
   }
-  if (next.recommendedToolNames.some((name) => /(?:read|source|visible|web|search|fetch)/iu.test(name))) {
+  if (stepUsesTool(next, (name) => /(?:read|source|visible|web|search|fetch)/iu.test(name))) {
     for (const kind of ["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const) {
       if (currentKinds.has(kind)) result.add(kind);
     }
@@ -408,8 +413,8 @@ export function buildStepToolProgressPolicy(input: {
     scope: stepRequiresArtifactEvidence(input.step)
       ? "artifact"
       : stepRequiresSourceEvidence(requiredKinds) ? "source" : "generic",
-    additionalExploratoryToolNames: input.step.recommendedToolNames,
-    additionalEvidenceProducingToolNames: input.step.recommendedToolNames,
+    additionalExploratoryToolNames: stepResolvedToolNames(input.step),
+    additionalEvidenceProducingToolNames: stepResolvedToolNames(input.step),
   });
 }
 

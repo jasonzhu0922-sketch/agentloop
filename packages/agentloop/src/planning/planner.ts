@@ -20,6 +20,7 @@ import type {
   TaskSpec,
 } from "./contracts.ts";
 import { admitPlan, hasFileProducer } from "./admission.ts";
+import { planningCapabilitiesFromToolNames } from "./step-execution-binding.ts";
 
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
@@ -57,14 +58,14 @@ const CAVEAT_POLICY_VALUES = [
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["id", "objective", "dependsOn", "role", "skillIds", "recommendedToolNames", "evidenceContract"],
+  required: ["id", "objective", "dependsOn", "role", "skillIds", "requiredCapabilities", "evidenceContract"],
   properties: {
     id: { type: "string" },
     objective: { type: "string" },
     dependsOn: { type: "array", items: { type: "string" } },
     role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
-    recommendedToolNames: { type: "array", uniqueItems: true, items: { type: "string" } },
+    requiredCapabilities: { type: "array", uniqueItems: true, items: { type: "string" } },
     evidenceContract: {
       type: "object",
       additionalProperties: false,
@@ -217,7 +218,7 @@ export class ModelPlanner implements Planner {
       baseInstructions: [
         "You are the Planner for a Plan-first Runtime.",
         "Return exactly one submit_outcome_plan tool call; do not execute work, call other tools, or declare completion.",
-        "Use only supplied context facts, Tool summaries, and Skill catalog entries.",
+        "Use only supplied context facts, capability catalog entries, and Skill catalog entries.",
       ],
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
@@ -231,7 +232,7 @@ export class ModelPlanner implements Planner {
         "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
         "Evidence contracts must contain only core requiredKinds and caveatPolicy; do not turn optional enhancements into blocking evidence.",
         "For factual materials, require available source grounding and explicit caveats for unavailable facts; do not require inaccessible official/full-text sources as a blocking criterion unless the user asked for strict official-source verification.",
-        "All leaf IDs, Skill IDs, Tool names, dependencies, roles, and evidence kinds must match the submit_outcome_plan schema and supplied catalogs.",
+        "All leaf IDs, Skill IDs, capability IDs, dependencies, roles, and evidence kinds must match the submit_outcome_plan schema and supplied catalogs.",
       ],
       taskProfile,
     });
@@ -358,7 +359,7 @@ function responseOnlyPlan(input: string): PlanProposal {
       dependencies: [],
       role: "deliver",
       skillIds: [],
-      recommendedToolNames: [],
+      requiredCapabilities: ["conversation_delivery"],
       evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
       successCriteria: [{ id: "answered", description: "A non-empty direct answer is returned.", source: "planner" }],
     }],
@@ -476,7 +477,7 @@ function plannerToolContractDirective(response: Awaited<ReturnType<ModelAdapter[
     "Your previous planning response attempted tool calls that are not callable in the planning phase.",
     `Attempted tools: ${attemptedTools || "none"}.`,
     "Do not inspect files, read artifacts, run commands, load Skills, or execute any work during planning.",
-    "Submit exactly one submit_outcome_plan call. Put advisory execution tools in each leaf's recommendedToolNames.",
+    "Submit exactly one submit_outcome_plan call. Put semantic capability IDs in each leaf's requiredCapabilities.",
     "For a user-reported defect in a prior artifact, plan a repair leaf that locates the prior artifact, verifies the defect, regenerates or edits the artifact, and records artifact_acceptance evidence.",
   ].join("\n");
 }
@@ -518,10 +519,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 function planningTaskProfile(task: TaskSpec): TaskProfile {
   const taskIntent = classifyTaskIntent({
     objective: planningIntentObjective(task),
-    recommendedToolNames: [
-      ...task.availableToolNames,
-      ...(task.conversationWorkingSet?.recommendedCapabilities.toolNames ?? []),
-    ],
+    toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
   });
@@ -646,8 +644,7 @@ function planningRuntimeContext(
     content: [
       "<planning_context source=\"server\">",
       JSON.stringify({
-        availableToolNames: task.availableToolNames,
-        availableTools: task.availableTools ?? task.availableToolNames.map((name) => ({ name })),
+        availableCapabilities: task.availableCapabilities ?? planningCapabilitiesFromToolNames(task.availableToolNames),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
@@ -683,7 +680,7 @@ function planningRuntimeContext(
         outcomePlanContract: {
           schema: "agentloop.outcomePlan/v2",
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
-          executionToolCatalogSemantics: "Execution tools are plan references only in this phase; they are not callable by the Planner.",
+          capabilityCatalogSemantics: "Capabilities are planning semantics only. Runtime Admission resolves them to execution tools after the Plan is submitted.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -763,7 +760,7 @@ function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationP
       task.conversationWorkingSet?.resumeSuggestion ?? "",
     ].join("\n"),
     successCriteria: [],
-    recommendedToolNames: task.conversationWorkingSet?.recommendedCapabilities.toolNames ?? [],
+    toolNames: [],
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
   });
@@ -774,7 +771,7 @@ function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationP
       task.conversationWorkingSet?.resumeSuggestion ?? "",
     ].join("\n"),
     successCriteria: [],
-    recommendedToolNames: task.conversationWorkingSet?.recommendedCapabilities.toolNames ?? [],
+    toolNames: [],
     skillNames: task.availableSkills.map((skill) => skill.name),
   });
   const selectedIds = new Set([selected.id]);
@@ -830,7 +827,7 @@ function buildArtifactFollowupContext(task: TaskSpec): {
     && /(?:\b(?:edit|update|modify|change|correct|rename|title)\b|修改|更改|改为|改成|标题|重命名|修正)/iu.test(text);
   const taskIntent = classifyTaskIntent({
     objective: task.input,
-    recommendedToolNames: task.availableToolNames,
+    toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
   });
@@ -950,7 +947,7 @@ function summarizePlanningError(message: string): string {
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
   const taskIntent = classifyTaskIntent({
     objective: task.input,
-    recommendedToolNames: task.availableToolNames,
+    toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
   });
@@ -998,13 +995,7 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
 
 function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {
   if (step.skillIds.length > 0) return true;
-  if (step.recommendedToolNames.some((name) =>
-    name === "materialize_paginated_html"
-    || name === "computer_patch_file"
-    || name === "computer_write_file"
-    || name === "computer_run_command"
-    || /(^|_)(write|create|generate|render|export|save)(_|$)/.test(name)
-  )) return true;
+  if (step.requiredCapabilities.includes("workspace_artifact_write")) return true;
   return step.evidenceContract?.requiredKinds.some((kind) =>
     kind === "artifact_path"
     || kind === "artifact_non_empty"
@@ -1105,12 +1096,8 @@ function isWorkspaceInspectionStep(step: PlanStepProposal): boolean {
     ...step.successCriteria.map((criterion) => criterion.description),
   ].join("\n"));
   if (isArtifactDeliveryReceiptStep(step, text)) return false;
-  const usesInspectionTools = step.recommendedToolNames.some((tool) =>
-    tool === "computer_list_directory"
-    || tool === "computer_find_files"
-    || tool === "computer_search_text"
-    || tool === "computer_read_file"
-  );
+  const usesInspectionTools = step.requiredCapabilities.includes("workspace_file_read")
+    || step.requiredCapabilities.includes("visible_directory_read");
   return usesInspectionTools
     && /(?:workspace|project|repo|repository|codebase|entry|framework|directory|folder|工作区|项目|仓库|代码库|入口|技术栈|目录|文件结构)/iu.test(text)
     && /(?:inspect|scan|explore|identify|determine|survey|inventory|勘察|检查|识别|确定|梳理|探查)/iu.test(text);
@@ -1126,9 +1113,8 @@ function isArtifactDeliveryReceiptStep(step: PlanStepProposal, text: string): bo
 }
 
 function isArtifactProducingStep(step: PlanStepProposal): boolean {
-  return step.recommendedToolNames.some((tool) =>
-    /(?:write|create|generate|render|export|convert|build|patch|edit|image|pdf|docx|pptx|artifact)/iu.test(tool)
-  );
+  return step.requiredCapabilities.includes("workspace_artifact_write")
+    || step.evidenceContract?.requiredKinds.some((kind) => isArtifactDeliveryEvidenceKind(kind)) === true;
 }
 
 function isUnrequestedOptionalEnhancementCriterion(description: string, userInput: string): boolean {
@@ -1271,7 +1257,7 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     dependencies: requireStringArray(record.dependsOn, `leaves[${index}].dependsOn`, 100),
     role: parseOutcomeLeafRole(record.role, index),
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
-    recommendedToolNames: canonicalStringSet(record.recommendedToolNames, `leaves[${index}].recommendedToolNames`, 100),
+    requiredCapabilities: canonicalStringSet(record.requiredCapabilities, `leaves[${index}].requiredCapabilities`, 100),
     evidenceContract,
     successCriteria: evidenceContract.requiredKinds.map((kind) => ({
       id: kind,

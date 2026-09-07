@@ -224,7 +224,7 @@ function skeletonFromProposal(proposal: PlanProposal): readonly PlanStepSkeleton
       inputBindings: {},
       requiredEvidenceKinds,
       producedEvidenceKinds: requiredEvidenceKinds,
-      requiredCapabilities: unique(step.recommendedToolNames),
+      requiredCapabilities: unique(step.requiredCapabilities),
       skillRoleHints: selectedSkillRoleHints(step),
     };
   });
@@ -241,8 +241,8 @@ function operationRef(step: PlanStepProposal, index: number): string {
   const role = step.role === "fact_acquisition" || step.role === "repair" ? step.role : "produce";
   const skill = step.skillIds[0];
   if (skill !== undefined) return `${role}:${skill}`;
-  const tool = step.recommendedToolNames[0];
-  if (tool !== undefined) return `${role}:${tool}`;
+  const capability = step.requiredCapabilities[0];
+  if (capability !== undefined) return `${role}:${capability}`;
   return `${role}:step_${index + 1}`;
 }
 

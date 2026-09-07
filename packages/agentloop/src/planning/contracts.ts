@@ -37,6 +37,20 @@ export type CaveatPolicy =
   | "none"
   | "mark_unverified_facts"
   | "strict_fail_on_missing_source";
+export type SourceKind =
+  | "uploaded_source"
+  | "visible_directory"
+  | "workspace_file"
+  | "web"
+  | "conversation_workset"
+  | "generated_artifact";
+export type CapabilitySideEffect =
+  | "none"
+  | "workspace_read"
+  | "workspace_write"
+  | "external_read"
+  | "external_write";
+export type CapabilityRisk = "low" | "medium" | "high";
 
 export interface SelectedSkillRole {
   readonly skillId: string;
@@ -49,6 +63,25 @@ export interface EvidenceContract {
   readonly caveatPolicy: CaveatPolicy;
 }
 
+export interface PlanningCapability {
+  readonly id: string;
+  readonly label?: string;
+  readonly produces: readonly EvidenceKind[];
+  readonly sourceKinds: readonly SourceKind[];
+  readonly sideEffect: CapabilitySideEffect;
+  readonly risk: CapabilityRisk;
+  readonly constraints?: readonly string[];
+}
+
+export interface StepExecutionBinding {
+  readonly schema: "agentloop.stepExecutionBinding/v1";
+  readonly requiredCapabilities: readonly string[];
+  readonly resolvedToolNames: readonly string[];
+  readonly sourceKinds: readonly SourceKind[];
+  readonly sideEffect: CapabilitySideEffect;
+  readonly evidenceKinds: readonly EvidenceKind[];
+}
+
 export interface TaskSpec {
   readonly runId: string;
   readonly input: string;
@@ -56,6 +89,7 @@ export interface TaskSpec {
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
+  readonly availableCapabilities?: readonly PlanningCapability[];
   readonly workspaceFacts?: PlanningWorkspaceFacts;
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   readonly sources?: readonly UploadedSourceSummary[];
@@ -169,7 +203,8 @@ export interface ConversationPlanStepCursor {
   readonly objective: string;
   readonly dependencies: readonly string[];
   readonly skillIds: readonly string[];
-  readonly recommendedToolNames: readonly string[];
+  readonly requiredCapabilities: readonly string[];
+  readonly executionBinding: StepExecutionBinding;
   readonly output?: string;
   readonly error?: string;
 }
@@ -184,7 +219,7 @@ export interface ConversationReusableArtifact {
   readonly sourceToolCallId?: string;
   readonly sourcePlanStepId?: string;
   readonly sourceSkillIds?: readonly string[];
-  readonly sourceToolNames?: readonly string[];
+  readonly sourceCapabilities?: readonly string[];
   readonly reusable: boolean;
 }
 
@@ -200,7 +235,7 @@ export interface ConversationFailedBoundary {
 
 export interface ConversationRecommendedCapabilities {
   readonly skillIds: readonly string[];
-  readonly toolNames: readonly string[];
+  readonly capabilityIds: readonly string[];
 }
 
 export interface PlanningVisibleDirectory {
@@ -238,7 +273,7 @@ export interface PlanStepProposal {
   readonly refinementState?: RefinementState;
   readonly requiredFacts?: readonly RequiredFact[];
   readonly skillIds: readonly string[];
-  readonly recommendedToolNames: readonly string[];
+  readonly requiredCapabilities: readonly string[];
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
 }
@@ -258,6 +293,8 @@ export interface PlanStep extends PlanStepProposal {
   readonly status: PlanStepStatus;
   readonly refinementState: RefinementState;
   readonly requiredFacts: readonly RequiredFact[];
+  readonly requiredCapabilities: readonly string[];
+  readonly executionBinding: StepExecutionBinding;
   readonly output?: string;
   readonly evidence?: StepEvidence;
   readonly error?: string;

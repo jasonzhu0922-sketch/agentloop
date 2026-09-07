@@ -34,7 +34,9 @@ interface StepRow {
   refinement_state: "not_refinable" | "pending_facts" | "ready_to_refine" | "refining" | "refined";
   required_facts_json: string;
   skill_ids_json: string;
-  recommended_tool_names_json: string;
+  required_capabilities_json?: string;
+  recommended_tool_names_json?: string;
+  execution_binding_json?: string | null;
   evidence_contract_json: string | null;
   success_criteria_json: string;
   status: PlanStepStatus;
@@ -81,8 +83,9 @@ export class PlanRepository {
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
           role, refinement_state, required_facts_json, skill_ids_json,
-          recommended_tool_names_json, evidence_contract_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          required_capabilities_json, recommended_tool_names_json, execution_binding_json,
+          evidence_contract_json, success_criteria_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const step of plan.steps) {
         await insertStep.run(
@@ -97,7 +100,9 @@ export class PlanRepository {
           step.refinementState,
           JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
-          JSON.stringify(step.recommendedToolNames),
+          JSON.stringify(step.requiredCapabilities),
+          JSON.stringify([]),
+          JSON.stringify(step.executionBinding),
           step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
           JSON.stringify(step.successCriteria),
           step.status,
@@ -267,8 +272,9 @@ export class PlanRepository {
         INSERT INTO plan_steps(
           plan_id, step_id, kind, parent_step_id, position, objective, dependencies_json,
           role, refinement_state, required_facts_json, skill_ids_json,
-          recommended_tool_names_json, evidence_contract_json, success_criteria_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+          required_capabilities_json, recommended_tool_names_json, execution_binding_json,
+          evidence_contract_json, success_criteria_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
       `);
       let nextPosition = Math.max(-1, ...current.steps.map((step) => step.position)) + 1;
       for (const step of next.steps) {
@@ -285,7 +291,9 @@ export class PlanRepository {
           step.refinementState,
           JSON.stringify(step.requiredFacts),
           JSON.stringify(step.skillIds),
-          JSON.stringify(step.recommendedToolNames),
+          JSON.stringify(step.requiredCapabilities),
+          JSON.stringify([]),
+          JSON.stringify(step.executionBinding),
           step.evidenceContract === undefined ? null : JSON.stringify(step.evidenceContract),
           JSON.stringify(step.successCriteria),
         );
@@ -339,7 +347,8 @@ export class PlanRepository {
         refinementState: step.refinementState,
         requiredFacts: step.requiredFacts,
         skillIds: step.skillIds,
-        recommendedToolNames: step.recommendedToolNames,
+        requiredCapabilities: step.requiredCapabilities,
+        executionBinding: step.executionBinding,
         ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
         successCriteria: step.successCriteria,
         status: step.status,
@@ -371,6 +380,14 @@ function parseAssessmentMethod(value: string | undefined): AssessmentMethod {
 }
 
 function toStep(row: StepRow): PlanStep {
+  const evidenceContract = row.evidence_contract_json === null ? undefined : JSON.parse(row.evidence_contract_json);
+  if (row.execution_binding_json === undefined || row.execution_binding_json === null) {
+    throw new Error(`Plan step ${row.step_id} lacks execution binding; replan required`);
+  }
+  const executionBinding = JSON.parse(row.execution_binding_json);
+  if (executionBinding.schema !== "agentloop.stepExecutionBinding/v1" || !Array.isArray(executionBinding.requiredCapabilities)) {
+    throw new Error(`Plan step ${row.step_id} has invalid execution binding; replan required`);
+  }
   return {
     id: row.step_id,
     kind: row.kind ?? "leaf",
@@ -382,8 +399,9 @@ function toStep(row: StepRow): PlanStep {
     refinementState: row.refinement_state ?? "not_refinable",
     requiredFacts: row.required_facts_json === undefined ? [] : JSON.parse(row.required_facts_json),
     skillIds: JSON.parse(row.skill_ids_json),
-    recommendedToolNames: JSON.parse(row.recommended_tool_names_json),
-    ...(row.evidence_contract_json === null ? {} : { evidenceContract: JSON.parse(row.evidence_contract_json) }),
+    requiredCapabilities: executionBinding.requiredCapabilities,
+    executionBinding,
+    ...(evidenceContract === undefined ? {} : { evidenceContract }),
     successCriteria: JSON.parse(row.success_criteria_json),
     status: row.status,
     ...(row.output === null ? {} : { output: row.output }),
@@ -405,7 +423,8 @@ function samePlanStepDefinition(left: PlanStep, right: PlanStep): boolean {
     && left.refinementState === right.refinementState
     && JSON.stringify(left.requiredFacts) === JSON.stringify(right.requiredFacts)
     && JSON.stringify(left.skillIds) === JSON.stringify(right.skillIds)
-    && JSON.stringify(left.recommendedToolNames) === JSON.stringify(right.recommendedToolNames)
+    && JSON.stringify(left.requiredCapabilities) === JSON.stringify(right.requiredCapabilities)
+    && JSON.stringify(left.executionBinding) === JSON.stringify(right.executionBinding)
     && JSON.stringify(left.evidenceContract ?? null) === JSON.stringify(right.evidenceContract ?? null)
     && JSON.stringify(left.successCriteria) === JSON.stringify(right.successCriteria);
 }

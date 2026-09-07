@@ -170,7 +170,9 @@ export class AppDatabase implements SqlConnection {
           CHECK(refinement_state IN ('not_refinable', 'pending_facts', 'ready_to_refine', 'refining', 'refined')),
         required_facts_json TEXT NOT NULL DEFAULT '[]',
         skill_ids_json TEXT NOT NULL,
+        required_capabilities_json TEXT NOT NULL DEFAULT '[]',
         recommended_tool_names_json TEXT NOT NULL,
+        execution_binding_json TEXT,
         evidence_contract_json TEXT,
         success_criteria_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed')),
@@ -426,6 +428,7 @@ export class AppDatabase implements SqlConnection {
     if (this.dialect === "sqlite") {
       await this.dropLegacyUserForeignKeys();
       await this.renameColumnIfNeeded("plan_steps", "required_tool_names_json", "recommended_tool_names_json", "TEXT NOT NULL DEFAULT '[]'");
+      await this.connection.prepare("UPDATE plan_steps SET recommended_tool_names_json = '[]'").run();
       await this.ensureColumn("skills", "source_kind", "TEXT NOT NULL DEFAULT 'inline'");
       await this.ensureColumn("skills", "source_url", "TEXT");
       await this.ensureColumn("skills", "source_revision", "TEXT");
@@ -443,6 +446,8 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("plan_steps", "role", "TEXT");
       await this.ensureColumn("plan_steps", "refinement_state", "TEXT NOT NULL DEFAULT 'not_refinable'");
       await this.ensureColumn("plan_steps", "required_facts_json", "TEXT NOT NULL DEFAULT '[]'");
+      await this.ensureColumn("plan_steps", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'");
+      await this.ensureColumn("plan_steps", "execution_binding_json", "TEXT");
       await this.ensureColumn("plan_steps", "evidence_contract_json", "TEXT");
       await this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
       await this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");

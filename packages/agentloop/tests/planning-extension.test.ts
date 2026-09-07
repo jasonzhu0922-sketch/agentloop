@@ -114,7 +114,7 @@ class ContextAssertingPlanner implements Planner {
         dependencies: [],
         role: "deliver" as const,
         skillIds: [],
-        recommendedToolNames: [],
+        requiredCapabilities: [],
         evidenceContract: { requiredKinds: ["delivery_receipt" as const], caveatPolicy: "none" as const },
         successCriteria: [{
           id: "answered",

@@ -295,9 +295,9 @@ test("Uploaded CID-font PDFs with ToUnicode maps become readable source chunks",
 
     assert.equal(source.status, "ready");
     assert.equal(source.chunkCount, 1);
-    assert.match(source.summary ?? "", /上海虹桥站 碳减排评估报告/);
+    assert.match(source.summary ?? "", /上海虹桥站\s*碳减排评估报告/);
     const chunks = await new SourceRepository(database).chunks(source.id);
-    assert.match(chunks[0]?.content ?? "", /上海虹桥站 碳减排评估报告/);
+    assert.match(chunks[0]?.content ?? "", /上海虹桥站\s*碳减排评估报告/);
   } finally {
     await database.close();
     await fs.rm(workspace, { recursive: true, force: true });
@@ -401,7 +401,7 @@ class VisibleDirectoryPlanner implements Planner {
         objective: "Find and read market-brief.md from the authorized visible directory.",
         dependencies: [],
         skillIds: [],
-        recommendedToolNames: ["visible_find_files", "visible_read_file"],
+        requiredCapabilities: ["visible_directory_read"],
         successCriteria: [{ id: "read", description: "The visible directory file content was read.", source: "planner" }],
       }],
     };
@@ -429,7 +429,7 @@ class RecordingVisibleDirectoryPlanner implements Planner {
         objective: "Record whether visible directory bindings were supplied to this run.",
         dependencies: [],
         skillIds: [],
-        recommendedToolNames: hasVisibleTools ? ["visible_find_files"] : [],
+        requiredCapabilities: hasVisibleTools ? ["visible_directory_read"] : [],
         successCriteria: [{
           id: "recorded",
           description: "The visible directory binding count was observed by the planner.",
@@ -492,7 +492,7 @@ class UploadedSourcePlanner implements Planner {
         objective: "Read the uploaded revenue source and summarize the observed rows.",
         dependencies: [],
         skillIds: [],
-        recommendedToolNames: ["read_source"],
+        requiredCapabilities: ["uploaded_source_read"],
         successCriteria: [{ id: "read-source", description: "The uploaded source chunk was read.", source: "planner" }],
       }],
     };

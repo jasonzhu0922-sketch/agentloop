@@ -1,4 +1,5 @@
 import type { ConversationWorkingSet, EvidenceKind, ExecutionPlan } from "../planning/contracts.ts";
+import { stepHasSourceKind, stepHasTool, stepResolvedToolNames, stepUsesTool } from "../planning/step-execution-binding.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { TaskProfile } from "./dynamic-prompt.ts";
 import type { OperationProfileId } from "./operation-profiles.ts";
@@ -146,9 +147,9 @@ function normalizeOperationProfileId(
   if (value !== undefined && OPERATION_PROFILE_IDS.has(value as OperationProfileId)) {
     return value as OperationProfileId;
   }
-  if (input.step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) return "web_research";
+  if (stepHasSourceKind(input.step, "web")) return "web_research";
   if (input.step.role === "fact_acquisition") return "data_analysis";
-  if (input.step.recommendedToolNames.some((name) => name.startsWith("visible_") || name === "read_source")) return "data_analysis";
+  if (stepHasSourceKind(input.step, "visible_directory") || stepHasSourceKind(input.step, "uploaded_source")) return "data_analysis";
   if (input.requiresFileOutput || input.taskProfile.deliverySurface === "workspace_artifact") return "artifact_build";
   if (input.taskProfile.sourceNeed !== undefined && input.taskProfile.sourceNeed !== "none") return "web_research";
   if (input.step.role === "deliver") return "direct_answer";
@@ -223,7 +224,7 @@ function deriveEvidenceSources(
       reusePolicy: "must_reuse_first",
     });
   }
-  if (input.step.recommendedToolNames.some((name) => name.startsWith("visible_")) || (needsSource && input.visibleDirectories.length > 0)) {
+  if (stepHasSourceKind(input.step, "visible_directory") || (needsSource && input.visibleDirectories.length > 0)) {
     result.push({
       kind: "visible_directory",
       required: needsSource || input.step.role === "fact_acquisition",
@@ -231,7 +232,7 @@ function deriveEvidenceSources(
       reusePolicy: input.step.dependencies.length === 0 ? "fresh_required" : "may_reuse",
     });
   }
-  if (input.step.recommendedToolNames.includes("read_source") || (needsSource && input.sources.length > 0)) {
+  if (stepHasSourceKind(input.step, "uploaded_source") || (needsSource && input.sources.length > 0)) {
     result.push({
       kind: "uploaded_source",
       required: needsSource || input.step.role === "fact_acquisition",
@@ -239,7 +240,7 @@ function deriveEvidenceSources(
       reusePolicy: input.step.dependencies.length === 0 ? "fresh_required" : "may_reuse",
     });
   }
-  if (input.step.recommendedToolNames.some((name) => name === "websearch" || name === "webfetch")) {
+  if (stepHasSourceKind(input.step, "web")) {
     result.push({
       kind: "web",
       required: needsSource || input.step.role === "fact_acquisition",
@@ -254,7 +255,7 @@ function deriveEvidenceSources(
       reusePolicy: "must_reuse_first",
     });
   }
-  if (input.step.recommendedToolNames.some((name) => /^computer_(?:read|find|search|run)/u.test(name))) {
+  if (stepHasSourceKind(input.step, "workspace_file") || stepUsesTool(input.step, (name) => /^computer_(?:read|find|search|run)/u.test(name))) {
     result.push({
       kind: "workspace_file",
       required: needsSource || input.step.role === "fact_acquisition",
@@ -312,7 +313,7 @@ function deriveEvidenceMode(
   if (evidenceSources.some((source) => source.kind === "conversation_workset" && source.reusePolicy === "must_reuse_first")) {
     return "reuse_conversation_evidence";
   }
-  if (!requiresFileOutput && step.recommendedToolNames.includes("verify_artifact_acceptance")) return "verify_existing_artifact";
+  if (!requiresFileOutput && stepHasTool(step, "verify_artifact_acceptance")) return "verify_existing_artifact";
   if (evidenceSources.some((source) => source.kind !== "none" && source.required)) return "acquire_new_evidence";
   return "produce_without_external_evidence";
 }

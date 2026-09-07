@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Planner, StepAssessor } from "../src/planning/contracts.ts";
+import { planningCapabilitiesFromToolNames } from "../src/planning/step-execution-binding.ts";
 
 export const TEST_MODEL_LIMITS = {
   contextWindowTokens: 1_000_000,
@@ -33,7 +34,7 @@ export function singleStepTestPlanner(): Planner {
         dependencies: [],
         role: "deliver",
         skillIds: task.availableSkills.map((skill) => skill.id),
-        recommendedToolNames: [...task.availableToolNames],
+        requiredCapabilities: planningCapabilitiesFromToolNames(task.availableToolNames).map((capability) => capability.id),
         evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
         successCriteria: [{
           id: "test-output",

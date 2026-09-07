@@ -238,7 +238,7 @@ function parseStep(value: unknown, index: number): PlanStepProposal {
     ...(record.role === undefined ? {} : { role: parseOutcomeLeafRole(record.role, index) }),
     ...(record.refinementState === undefined ? {} : { refinementState: parseRefinementState(record.refinementState, index) }),
     skillIds: requireStringArray(record.skillIds, `planRevision.steps[${index}].skillIds`, 100),
-    recommendedToolNames: requireStringArray(record.recommendedToolNames, `planRevision.steps[${index}].recommendedToolNames`, 100),
+    requiredCapabilities: requireStringArray(record.requiredCapabilities, `planRevision.steps[${index}].requiredCapabilities`, 100),
     ...(record.evidenceContract === undefined ? {} : { evidenceContract: parseEvidenceContract(record.evidenceContract, index) }),
     successCriteria: record.successCriteria.map((criterion, criterionIndex): SuccessCriterion => {
       const row = requireRecord(criterion, `planRevision.steps[${index}].successCriteria[${criterionIndex}]`);

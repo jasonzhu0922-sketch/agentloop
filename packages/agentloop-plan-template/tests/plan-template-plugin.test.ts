@@ -705,7 +705,7 @@ test("observed and routed matches are both marked completed on outcome", async (
       planId: "plan-outcome-rewrite",
       proposal: apiQueryPlanProposal({
         role: "deliver",
-        recommendedToolNames: ["websearch", "webfetch"],
+        requiredCapabilities: ["web_research"],
       }),
     });
     await plugin.extension().afterOutcome?.({
@@ -843,9 +843,9 @@ test("miner promotes repeated completed observations to candidate templates only
         planId: `plan-${runId}`,
         proposal: apiQueryPlanProposal({
           role: index === 0 ? "produce" : "deliver",
-          recommendedToolNames: index === 0
-            ? ["load_skill", "computer_run_command"]
-            : ["load_skill", "computer_run_command", "computer_read_file"],
+          requiredCapabilities: index === 0
+            ? ["skill_instruction_load", "workspace_artifact_write"]
+            : ["skill_instruction_load", "workspace_artifact_write", "workspace_file_read"],
         }),
       });
       await plugin.extension().afterOutcome?.({
@@ -890,7 +890,7 @@ test("miner promotes repeated completed observations to candidate templates only
     assert.equal(templates[0].status, "candidate");
     assert.equal(templates[0].intentFamily, "research");
     assert.equal(templates[0].planSkeleton[0].objective, undefined);
-    assert.deepEqual(templates[0].planSkeleton[0].requiredCapabilities, ["load_skill", "computer_run_command"]);
+    assert.deepEqual(templates[0].planSkeleton[0].requiredCapabilities, ["skill_instruction_load", "workspace_artifact_write"]);
     assert.equal(templates[0].positiveExampleRefs.length, 2);
   } finally {
     await plugin.close();
@@ -960,7 +960,7 @@ test("manual management can approve and retire mined templates", async () => {
 
 function apiQueryPlanProposal(input?: {
   readonly role?: "produce" | "deliver";
-  readonly recommendedToolNames?: readonly string[];
+  readonly requiredCapabilities?: readonly string[];
 }): PlanProposal {
   return {
     schema: "agentloop.outcomePlan/v2",
@@ -975,7 +975,7 @@ function apiQueryPlanProposal(input?: {
       dependencies: [],
       role: input?.role ?? "produce",
       skillIds: ["discovered:api-query"],
-      recommendedToolNames: input?.recommendedToolNames ?? ["load_skill", "computer_run_command"],
+      requiredCapabilities: input?.requiredCapabilities ?? ["skill_instruction_load", "workspace_artifact_write"],
       evidenceContract: {
         requiredKinds: ["delivery_receipt", "explicit_caveats"],
         caveatPolicy: "mark_unverified_facts",
