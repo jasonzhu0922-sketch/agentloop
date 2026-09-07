@@ -3,6 +3,8 @@ export type {
   MaterializedTools,
   PreparedToolCall,
   RuntimeTool,
+  ToolSourceCapability,
+  ToolSourceDescriptor,
   ToolExecutionContext,
 } from "./tool-registry.ts";
 export { createArtifactConverterTools, parseConvertArtifactInput } from "./artifact-converter.ts";

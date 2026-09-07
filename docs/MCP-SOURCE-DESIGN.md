@@ -63,7 +63,15 @@ type McpAuthConfig =
         "secretEnv": "AMAP_MCP_KEY"
       },
       "trust": "trusted",
-      "timeoutMs": 15000
+      "timeoutMs": 15000,
+      "aliases": ["高德", "amap"],
+      "capabilities": [
+        {
+          "id": "spatial_planning.route",
+          "category": "spatial_planning",
+          "label": "Route planning"
+        }
+      ]
     }
   ]
 }
@@ -71,6 +79,8 @@ type McpAuthConfig =
 
 语义：
 - `key` 是命名空间前缀，最终工具名形如 `mcp_<key>_<toolName>`。
+- `aliases` 是宿主为来源登记的显式匹配词。用户说出其中任一名称时，Planner 必须把该来源写入叶子的 `sourceConstraint`；不要用工具名前缀或供应商特例推断。
+- `capabilities` 是来源声明的开放词汇；`category`（如 `information_retrieval`、`spatial_planning`）用于分类，`id`（如 `spatial_planning.route`）用于实际绑定。内核不会维护供应商或 MCP 专用枚举。
 - `trust` 默认 `untrusted`，未显式授权时按危险工具处理。
 - `toolAllowlist` / `toolBlocklist` 作为后续扩展点，可用于按 server 限制暴露工具。
 - 当前 v1 先实现 HTTP transport；stdio 可作为后续扩展再补。

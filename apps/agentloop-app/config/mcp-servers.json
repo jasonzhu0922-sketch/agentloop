@@ -11,7 +11,16 @@
         "secretEnv": "AMAP_MCP_KEY"
       },
       "trust": "trusted",
-      "timeoutMs": 15000
+      "timeoutMs": 15000,
+      "aliases": ["高德", "amap"],
+      "capabilities": [
+        {
+          "id": "spatial_planning.route",
+          "category": "spatial_planning",
+          "label": "Route planning",
+          "description": "Plan routes and travel options using this map source."
+        }
+      ]
     }
   ]
 }

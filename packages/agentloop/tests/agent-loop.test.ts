@@ -3542,6 +3542,10 @@ test("streaming turns emit live deltas before the durable assistant checkpoint",
   assert.equal((firstEvents[0].data.request as { canonicalMessageCount?: number }).canonicalMessageCount, 1);
   const streamingEvents = events.filter((event) => event.type === "assistant.streaming");
   assert.equal(streamingEvents.length >= 1, true);
+  assert.equal(
+    streamingEvents.some((event) => event.data.reasoningContent === "先检查 echo 的输入，再调用工具。"),
+    true,
+  );
   const committedIndex = events.findIndex((event) => event.type === "assistant.committed");
   assert.equal(committedIndex >= 0, true);
   assert.equal(events.findIndex((event) => event.type === "model.request.started") < events.findIndex((event) => event.type === "model.stream.first_event"), true);
@@ -4286,14 +4290,24 @@ class StreamingScenarioModel implements ModelAdapter {
 
   async streamComplete(
     _request: ModelInvocation,
-    sink: (event: { type: "text_delta"; text: string } | { type: "tool_call_delta"; index: number; id?: string; name?: string; argumentsDelta: string }) => Promise<void> | void,
+    sink: (event:
+      | { type: "text_delta"; text: string }
+      | { type: "reasoning_delta"; text: string }
+      | { type: "tool_call_delta"; index: number; id?: string; name?: string; argumentsDelta: string }
+    ) => Promise<void> | void,
   ): Promise<ModelResponse> {
     this.calls += 1;
     if (this.calls === 1) {
       await sink({ type: "text_delta", text: "echoing " });
       await sink({ type: "text_delta", text: "value" });
+      await sink({ type: "reasoning_delta", text: "先检查 echo 的输入，再调用工具。" });
       await sink({ type: "tool_call_delta", index: 0, id: "call-echo", name: "echo", argumentsDelta: "{\"value\":7}" });
-      return { content: "echoing value", finishReason: "tool_calls", toolCalls: [{ id: "call-echo", name: "echo", arguments: { value: 7 } }] };
+      return {
+        content: "echoing value",
+        reasoningContent: "先检查 echo 的输入，再调用工具。",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-echo", name: "echo", arguments: { value: 7 } }],
+      };
     }
     return { content: "done", finishReason: "stop", toolCalls: [] };
   }

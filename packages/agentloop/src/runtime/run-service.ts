@@ -24,6 +24,7 @@ import type {
   PlanStepProposal,
   Planner,
   PlanRevisionAssessor,
+  PlanningToolSummary,
   PlanningExtensionContext,
   SelectedSkillRole,
   SkillComplianceAssessment,
@@ -44,7 +45,8 @@ import { PlanRepository } from "../planning/plan-repository.ts";
 import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
 import { DependencyScheduler } from "../planning/scheduler.ts";
 import {
-  planningCapabilitiesFromToolNames,
+  planningCapabilitiesFromTools,
+  requiredSourceIdsFromInput,
   stepHasSourceKind,
   stepHasTool,
   stepResolvedToolNames,
@@ -831,7 +833,7 @@ export class RunService {
   async events(actorUserId: string, runId: string): Promise<StoredRunEvent[]> {
     await this.get(actorUserId, runId);
     const rows = await this.runs.eventsByRun(runId);
-    return this.eventsFromRows(rows).map(redactPublicRunEvent);
+    return this.eventsFromRows(rows).map(publicRunEvent);
   }
 
   private eventsFromRows(rows: readonly RunEventRow[]): StoredRunEvent[] {
@@ -1392,6 +1394,7 @@ export class RunService {
         responseOnly,
       });
       const allowedToolSummaries = toolSummaries(allTools, new Set(allowedToolNames));
+      const requiredSourceIds = requiredSourceIdsFromInput(input, allowedToolSummaries);
       const rootGrant = createCapabilityGrant({
         actorUserId,
         runId,
@@ -1449,7 +1452,8 @@ export class RunService {
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
-        availableCapabilities: planningCapabilitiesFromToolNames(allowedToolNames),
+        availableCapabilities: planningCapabilitiesFromTools(allowedToolSummaries),
+        ...(requiredSourceIds.length === 0 ? {} : { requiredSourceIds }),
         workspaceFacts: planningWorkspace,
         visibleDirectories,
         sources: availableSources,
@@ -1496,6 +1500,8 @@ export class RunService {
           proposal,
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
+          availableTools: allowedToolSummaries,
+          ...(requiredSourceIds.length === 0 ? {} : { requiredSourceIds }),
           taskIntent,
         });
       } catch (error) {
@@ -1529,6 +1535,8 @@ export class RunService {
           proposal,
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
+          availableTools: allowedToolSummaries,
+          ...(requiredSourceIds.length === 0 ? {} : { requiredSourceIds }),
           taskIntent,
         });
       }
@@ -2372,7 +2380,7 @@ export class RunService {
     const data = this.projectRunEventDataForStorage(event);
     const projectedEvent: RuntimeEvent = { type: event.type, data };
     const seq = await this.runs.appendEvent(runId, { type: event.type, data, createdAt });
-    this.eventHub.publish(runId, redactPublicRunEvent({
+    this.eventHub.publish(runId, publicRunEvent({
       seq,
       type: event.type,
       data,
@@ -2574,21 +2582,9 @@ function shouldLogRunEvent(type: string): boolean {
   return TERMINAL_EVENT_TYPES.has(type);
 }
 
-function redactPublicRunEvent(event: StoredRunEvent): StoredRunEvent {
-  if (event.type !== "assistant.committed" || !("reasoningContent" in event.data)) return event;
-  const { reasoningContent, ...data } = event.data;
-  const characters = typeof reasoningContent === "string" ? reasoningContent.length : 0;
-  return {
-    ...event,
-    data: {
-      ...data,
-      privateReasoning: {
-        schema: "agentloop.privateReasoningProjection/v1",
-        redacted: true,
-        ...(characters > 0 ? { characters } : {}),
-      },
-    },
-  };
+/** The run event API intentionally exposes provider reasoning content to its owner. */
+function publicRunEvent(event: StoredRunEvent): StoredRunEvent {
+  return event;
 }
 
 function formatRunEventLogLine(runId: string, seq: number, event: RuntimeEvent, createdAt: number): string {
@@ -3824,13 +3820,14 @@ function actionKindForPhase(phase: RuntimeContextSnapshot["phase"]): Exclude<Run
 function toolSummaries(
   tools: readonly RuntimeTool<unknown>[],
   allowedToolNames: ReadonlySet<string>,
-): Array<{ name: string; description: string; dangerous: boolean }> {
+): PlanningToolSummary[] {
   return tools
     .filter((tool) => allowedToolNames.has(tool.name))
     .map((tool) => ({
       name: tool.name,
       description: tool.description,
       dangerous: DANGEROUS_COMPUTER_TOOL_NAMES.has(tool.name),
+      ...(tool.source === undefined ? {} : { source: tool.source }),
     }))
     .sort((left, right) => left.name.localeCompare(right.name, "en"));
 }

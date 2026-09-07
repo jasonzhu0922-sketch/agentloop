@@ -20,7 +20,7 @@ import type {
   TaskSpec,
 } from "./contracts.ts";
 import { admitPlan, hasFileProducer } from "./admission.ts";
-import { planningCapabilitiesFromToolNames } from "./step-execution-binding.ts";
+import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools } from "./step-execution-binding.ts";
 
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
@@ -66,6 +66,14 @@ const OUTCOME_LEAF_SCHEMA = {
     role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
     requiredCapabilities: { type: "array", uniqueItems: true, items: { type: "string" } },
+    sourceConstraint: {
+      type: "object",
+      additionalProperties: false,
+      required: ["requiredSourceIds"],
+      properties: {
+        requiredSourceIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+    },
     evidenceContract: {
       type: "object",
       additionalProperties: false,
@@ -225,7 +233,7 @@ export class ModelPlanner implements Planner {
         "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
         "Use one leaf for ordinary answer or artifact tasks and two leaves only when source facts must be acquired before production.",
         "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
-        "Bind primary/source Skills to concrete leaves, but do not expand unloaded Skill internals.",
+        "Bind listed Skills only to concrete leaves; do not expand unloaded Skill internals.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
         "For browser-presentable, presentation-style, or document-like artifacts, basic openability and requested format/type are core delivery evidence; navigation, interaction, visual polish, examples, and exercises are Skill-owned QA unless the loaded Skill rubric requires them.",
@@ -308,6 +316,8 @@ export class ModelPlanner implements Planner {
           proposal,
           availableSkills: task.availableSkills,
           availableToolNames: new Set(task.availableToolNames),
+          ...(task.availableTools === undefined ? {} : { availableTools: task.availableTools }),
+          ...(task.requiredSourceIds === undefined ? {} : { requiredSourceIds: task.requiredSourceIds }),
           taskIntent: {
             deliverySurface: taskProfile.deliverySurface,
             artifactKind: taskProfile.artifactKind,
@@ -489,6 +499,7 @@ function plannerOutcomePlanAdmissionDirective(planningError: AppError): string {
     "Submit exactly one corrected submit_outcome_plan call for the same user goal.",
     "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
     "For initial execution plans, selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only.",
+    "selectedSkillRoles[].skillId and leaves[].skillIds may contain only IDs in planning_context.availableSkillIds. Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds in either Skill field; use leaves[].requiredCapabilities for capabilities. If availableSkillIds is empty, both Skill fields must be empty arrays.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
@@ -644,7 +655,14 @@ function planningRuntimeContext(
     content: [
       "<planning_context source=\"server\">",
       JSON.stringify({
-        availableCapabilities: task.availableCapabilities ?? planningCapabilitiesFromToolNames(task.availableToolNames),
+        availableSkillIds: task.availableSkills.map((skill) => skill.id),
+        availableCapabilities: task.availableCapabilities
+          ?? (task.availableTools === undefined
+            ? planningCapabilitiesFromToolNames(task.availableToolNames)
+            : planningCapabilitiesFromTools(task.availableTools)),
+        ...(task.requiredSourceIds === undefined || task.requiredSourceIds.length === 0
+          ? {}
+          : { requiredSourceIds: task.requiredSourceIds }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
@@ -681,6 +699,8 @@ function planningRuntimeContext(
           schema: "agentloop.outcomePlan/v2",
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
           capabilityCatalogSemantics: "Capabilities are planning semantics only. Runtime Admission resolves them to execution tools after the Plan is submitted.",
+          skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
+          sourceConstraintPolicy: "Bind every requiredSourceIds item through a leaf.sourceConstraint; do not substitute another source.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1258,6 +1278,7 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     role: parseOutcomeLeafRole(record.role, index),
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
     requiredCapabilities: canonicalStringSet(record.requiredCapabilities, `leaves[${index}].requiredCapabilities`, 100),
+    ...(record.sourceConstraint === undefined ? {} : { sourceConstraint: parseSourceConstraint(record.sourceConstraint, index) }),
     evidenceContract,
     successCriteria: evidenceContract.requiredKinds.map((kind) => ({
       id: kind,
@@ -1265,6 +1286,13 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
       source: "planner",
     })),
   };
+}
+
+function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
+  const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
+  const requiredSourceIds = canonicalStringSet(record.requiredSourceIds, `leaves[${index}].sourceConstraint.requiredSourceIds`, 20);
+  if (requiredSourceIds.length === 0) throw badRequest(`leaves[${index}].sourceConstraint.requiredSourceIds must not be empty`);
+  return { requiredSourceIds };
 }
 
 function parseOutcomeLeafRole(value: unknown, index: number): OutcomeLeafRole {

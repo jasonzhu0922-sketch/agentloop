@@ -53,6 +53,8 @@ export type {
   MaterializedTools,
   PreparedToolCall,
   RuntimeTool,
+  ToolSourceCapability,
+  ToolSourceDescriptor,
   ToolExecutionContext,
   WebToolsOptions,
 } from "./tools/index.ts";

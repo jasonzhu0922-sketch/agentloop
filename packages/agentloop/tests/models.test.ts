@@ -741,7 +741,7 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
       tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
       toolChoice: { name: "lookup" },
     }, async (event) => {
-      if (event.type === "text_delta") {
+      if (event.type === "text_delta" || event.type === "reasoning_delta") {
         deltas.push({ type: event.type, text: event.text });
       } else if (event.type === "tool_call_delta") {
         deltas.push({ type: event.type, argumentsDelta: event.argumentsDelta, name: event.name });
@@ -758,9 +758,10 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 3 });
     assert.deepEqual(
       deltas.map((item) => item.type),
-      ["text_delta", "text_delta", "tool_call_delta", "tool_call_delta", "tool_call_ready"],
+      ["text_delta", "reasoning_delta", "reasoning_delta", "text_delta", "tool_call_delta", "tool_call_delta", "tool_call_ready"],
     );
     assert.equal(deltas.filter((item) => item.type === "text_delta").reduce((total, item) => total + (item.text ?? ""), ""), "Hello world");
+    assert.equal(deltas.filter((item) => item.type === "reasoning_delta").reduce((total, item) => total + (item.text ?? ""), ""), "opaque-thinking");
     assert.equal(deltas.find((item) => item.type === "tool_call_delta")?.name, "lookup");
     assert.deepEqual(deltas.find((item) => item.type === "tool_call_ready")?.arguments, { q: "status" });
   } finally {
@@ -1518,6 +1519,45 @@ test("Responses adapter preserves final message text when completed response omi
     assert.equal(result.content, "Loaded skill");
     assert.equal(result.finishReason, "stop");
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 2 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter requests and streams the provider reasoning summary", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse([
+      'data: {"type":"response.reasoning_summary_text.delta","delta":"先检查输入"}\n\n',
+      'data: {"type":"response.reasoning_summary_text.delta","delta":"，再生成结果。"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"先检查输入，再生成结果。"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      reasoningSummary: "auto",
+    });
+    const deltas: string[] = [];
+    const result = await model.streamComplete!({
+      runId: "run-responses-reasoning-summary",
+      systemPrompt: "System instructions",
+      phase: "execution",
+      messages: [{ role: "user", content: "Check" }],
+      tools: [],
+    }, async (event) => {
+      if (event.type === "reasoning_delta") deltas.push(event.text);
+    });
+
+    assert.deepEqual(capturedBody?.reasoning, { summary: "auto" });
+    assert.deepEqual(deltas, ["先检查输入", "，再生成结果。"]);
+    assert.equal(result.reasoningContent, "先检查输入，再生成结果。");
   } finally {
     globalThis.fetch = originalFetch;
   }

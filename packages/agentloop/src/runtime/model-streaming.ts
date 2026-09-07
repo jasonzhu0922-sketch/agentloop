@@ -35,8 +35,8 @@ export interface ModelStreamingOptions {
 }
 
 /**
- * Prefer the model adapter's streaming path. Incremental text and tool-call
- * argument deltas are coalesced into throttled `assistant.streaming` events;
+ * Prefer the model adapter's streaming path. Incremental reply, reasoning, and
+ * tool-call argument deltas are coalesced into throttled `assistant.streaming` events;
  * the aggregated ModelResponse is returned unchanged. Adapters without native
  * streaming fall back to complete().
  */
@@ -85,6 +85,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
     }
   }
   let partialContent = "";
+  let partialReasoningContent = "";
   const partialToolCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
   let lastFlush = 0;
 
@@ -101,11 +102,16 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
   const flush = async (force: boolean): Promise<void> => {
     const now = Date.now();
     if (!force && now - lastFlush < STREAM_FLUSH_INTERVAL_MS) return;
-    if (partialContent.length === 0 && partialToolCalls.size === 0) return;
+    if (partialContent.length === 0 && partialReasoningContent.length === 0 && partialToolCalls.size === 0) return;
     lastFlush = now;
     await emit({
       type: "assistant.streaming",
-      data: { ...base, content: partialContent, toolCalls: snapshot() },
+      data: {
+        ...base,
+        content: partialContent,
+        ...(partialReasoningContent.length === 0 ? {} : { reasoningContent: partialReasoningContent }),
+        toolCalls: snapshot(),
+      },
     });
   };
 
@@ -126,6 +132,8 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
       }
       if (event.type === "text_delta") {
         partialContent += event.text;
+      } else if (event.type === "reasoning_delta") {
+        partialReasoningContent += event.text;
       } else if (event.type === "tool_call_delta") {
         const accumulated = partialToolCalls.get(event.index) ?? { arguments: "" };
         if (event.id !== undefined) accumulated.id = event.id;
@@ -165,7 +173,7 @@ function describeInvocationToolChoice(value: ModelInvocation["toolChoice"]): str
 }
 
 function streamEventIdentity(event: ModelStreamEvent): Record<string, unknown> {
-  if (event.type === "text_delta") return {};
+  if (event.type === "text_delta" || event.type === "reasoning_delta") return {};
   if (event.type === "tool_call_delta") {
     return {
       index: event.index,

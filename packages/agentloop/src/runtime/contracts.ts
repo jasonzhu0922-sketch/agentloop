@@ -38,7 +38,7 @@ export type ModelMessage =
       readonly role: "assistant";
       readonly content: string;
       readonly toolCalls?: readonly ModelToolCall[];
-      /** Opaque provider continuation data. Never rendered as user-visible text. */
+      /** Provider reasoning content, also preserved when the provider needs it for continuation. */
       readonly reasoningContent?: string;
     }
   | {
@@ -77,7 +77,7 @@ export interface ModelResponse {
   readonly content: string;
   readonly toolCalls: readonly ModelToolCall[];
   readonly finishReason: "stop" | "tool_calls" | "length" | "error";
-  /** Opaque continuation required by reasoning-mode Chat Completions providers. */
+  /** Provider reasoning content, retained for continuation and exposed in the run event stream. */
   readonly reasoningContent?: string;
   /** Provider-supplied cause for a non-completed response, when available. */
   readonly finishReasonDetail?: string;
@@ -108,6 +108,7 @@ export interface ModelRequestLogContext {
  */
 export type ModelStreamEvent =
   | { readonly type: "text_delta"; readonly text: string }
+  | { readonly type: "reasoning_delta"; readonly text: string }
   | {
       readonly type: "tool_call_delta";
       readonly index: number;

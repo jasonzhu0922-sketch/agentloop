@@ -1,5 +1,6 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
+import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -65,7 +66,10 @@ export interface EvidenceContract {
 
 export interface PlanningCapability {
   readonly id: string;
+  readonly category?: string;
   readonly label?: string;
+  readonly description?: string;
+  readonly sourceIds?: readonly string[];
   readonly produces: readonly EvidenceKind[];
   readonly sourceKinds: readonly SourceKind[];
   readonly sideEffect: CapabilitySideEffect;
@@ -80,6 +84,7 @@ export interface StepExecutionBinding {
   readonly sourceKinds: readonly SourceKind[];
   readonly sideEffect: CapabilitySideEffect;
   readonly evidenceKinds: readonly EvidenceKind[];
+  readonly requiredSourceIds?: readonly string[];
 }
 
 export interface TaskSpec {
@@ -90,6 +95,8 @@ export interface TaskSpec {
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableCapabilities?: readonly PlanningCapability[];
+  /** Source identifiers explicitly named by the user and resolved by the host registry. */
+  readonly requiredSourceIds?: readonly string[];
   readonly workspaceFacts?: PlanningWorkspaceFacts;
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   readonly sources?: readonly UploadedSourceSummary[];
@@ -248,6 +255,11 @@ export interface PlanningToolSummary {
   readonly name: string;
   readonly description: string;
   readonly dangerous?: boolean;
+  readonly source?: ToolSourceDescriptor;
+}
+
+export interface SourceConstraint {
+  readonly requiredSourceIds: readonly string[];
 }
 
 export interface SuccessCriterion {
@@ -274,6 +286,7 @@ export interface PlanStepProposal {
   readonly requiredFacts?: readonly RequiredFact[];
   readonly skillIds: readonly string[];
   readonly requiredCapabilities: readonly string[];
+  readonly sourceConstraint?: SourceConstraint;
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
 }

@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 import {
   createStepExecutionBinding,
+  unknownToolSourceIds,
   unknownPlanningCapabilities,
+  unresolvedToolSourceIds,
   unsatisfiedToolCapabilities,
 } from "./step-execution-binding.ts";
 
@@ -34,6 +36,8 @@ export function admitPlan(input: {
   proposal: PlanProposal;
   availableSkills: readonly PrivateSkill[];
   availableToolNames: ReadonlySet<string>;
+  availableTools?: readonly PlanningToolSummary[];
+  requiredSourceIds?: readonly string[];
   taskIntent?: {
     readonly deliverySurface?: "conversation" | "workspace_artifact";
     readonly artifactKind?: string;
@@ -86,6 +90,12 @@ export function admitPlan(input: {
     });
     assertUnique(stepSkillIds, `Skill bindings for step ${step.id}`);
     assertUnique(step.requiredCapabilities, `required capabilities for step ${step.id}`);
+    const constrainedSourceIds = step.sourceConstraint?.requiredSourceIds ?? [];
+    assertUnique(constrainedSourceIds, `required ToolSources for step ${step.id}`);
+    const unknownSourceIds = unknownToolSourceIds(constrainedSourceIds, input.availableTools ?? []);
+    if (unknownSourceIds.length > 0) {
+      reject(`Step ${step.id} requires unavailable ToolSource(s): ${unknownSourceIds.join(", ")}`);
+    }
     if (!recoveryPlan && step.role === "repair") {
       reject(`Initial OutcomePlan cannot contain repair leaf ${step.id}`);
     }
@@ -147,15 +157,29 @@ export function admitPlan(input: {
     const executionBinding = createStepExecutionBinding({
       step: { ...step, requiredCapabilities: [...requiredCapabilities] },
       availableToolNames: input.availableToolNames,
+      ...(input.availableTools === undefined ? {} : { availableTools: input.availableTools }),
       evidenceContract: completionEvidenceContract,
     });
-    const unknownCapabilities = unknownPlanningCapabilities(executionBinding.requiredCapabilities);
+    const unknownCapabilities = unknownPlanningCapabilities(executionBinding.requiredCapabilities, input.availableTools);
     if (unknownCapabilities.length > 0) {
       reject(`Step ${step.id} requires unknown capabilities: ${unknownCapabilities.join(", ")}`);
     }
-    const unsatisfiedCapabilities = unsatisfiedToolCapabilities(executionBinding.requiredCapabilities, input.availableToolNames);
+    const unsatisfiedCapabilities = unsatisfiedToolCapabilities(
+      executionBinding.requiredCapabilities,
+      input.availableToolNames,
+      input.availableTools,
+      executionBinding.requiredSourceIds,
+    );
     if (unsatisfiedCapabilities.length > 0) {
       reject(`Step ${step.id} requires capabilities that cannot be satisfied by this Run: ${unsatisfiedCapabilities.join(", ")}`);
+    }
+    const unresolvedSourceIds = unresolvedToolSourceIds(
+      executionBinding.requiredSourceIds ?? [],
+      executionBinding.resolvedToolNames,
+      input.availableTools ?? [],
+    );
+    if (unresolvedSourceIds.length > 0) {
+      reject(`Step ${step.id} constrains ToolSource(s) without a resolved Tool: ${unresolvedSourceIds.join(", ")}`);
     }
     return {
       ...step,
@@ -182,6 +206,14 @@ export function admitPlan(input: {
   }
   if (steps.every((step) => step.kind !== "leaf")) {
     reject("Plan must contain at least one executable leaf step");
+  }
+  const requiredSourceIds = new Set(input.requiredSourceIds ?? []);
+  if (requiredSourceIds.size > 0) {
+    const boundSourceIds = new Set(steps.flatMap((step) => step.executionBinding.requiredSourceIds ?? []));
+    const missingSourceIds = [...requiredSourceIds].filter((sourceId) => !boundSourceIds.has(sourceId));
+    if (missingSourceIds.length > 0) {
+      reject(`Plan does not bind user-required ToolSource(s): ${missingSourceIds.join(", ")}`);
+    }
   }
   assertParentTree(steps);
   assertAcyclic(steps);

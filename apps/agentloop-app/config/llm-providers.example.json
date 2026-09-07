@@ -28,6 +28,7 @@
       "retryDelayMs": 250,
       "toolChoiceMode": "native",
       "runtimeContextPlacement": "system",
+      "reasoningSummary": "auto",
       "protocol": "responses"
     }
   },

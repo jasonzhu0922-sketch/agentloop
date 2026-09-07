@@ -236,7 +236,7 @@ test("RunService writes safe terminal summaries for durable run events when conf
   }
 });
 
-test("RunService keeps provider reasoning continuation out of public events", async () => {
+test("RunService exposes provider reasoning content in public events", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const auth = new AuthService(database);
@@ -283,14 +283,8 @@ test("RunService keeps provider reasoning continuation out of public events", as
 
     const storedCommitted = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "assistant.committed");
     const liveCommitted = liveEvents.find((event) => event.type === "assistant.committed");
-    assert.equal(storedCommitted?.data.reasoningContent, undefined);
-    assert.equal(liveCommitted?.data.reasoningContent, undefined);
-    assert.deepEqual(storedCommitted?.data.privateReasoning, {
-      schema: "agentloop.privateReasoningProjection/v1",
-      redacted: true,
-      characters: "opaque-thinking-state".length,
-    });
-    assert.deepEqual(liveCommitted?.data.privateReasoning, storedCommitted?.data.privateReasoning);
+    assert.equal(storedCommitted?.data.reasoningContent, "opaque-thinking-state");
+    assert.equal(liveCommitted?.data.reasoningContent, "opaque-thinking-state");
   } finally {
     database.close();
   }

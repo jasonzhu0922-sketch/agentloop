@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import { AppError, badRequest } from "@zhujun/agentloop";
-import type { RuntimeTool, ToolExecutionContext } from "@zhujun/agentloop";
+import type { RuntimeTool, ToolExecutionContext, ToolSourceCapability } from "@zhujun/agentloop";
 import { requireRecord, requireString } from "@zhujun/agentloop";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -24,6 +24,10 @@ export interface McpServerRegistration {
   readonly timeoutMs?: number;
   readonly toolAllowlist?: readonly string[];
   readonly toolBlocklist?: readonly string[];
+  /** Host-owned matching terms for an explicitly requested ToolSource. */
+  readonly aliases?: readonly string[];
+  /** Host-owned vocabulary exposed to planning for this source. */
+  readonly capabilities?: readonly ToolSourceCapability[];
 }
 
 export type McpAuthConfig =
@@ -140,6 +144,8 @@ function parseMcpServerRegistration(value: unknown, label: string): McpServerReg
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(record.toolAllowlist === undefined ? {} : { toolAllowlist: parseStringArray(record.toolAllowlist, `${label}.toolAllowlist`) }),
     ...(record.toolBlocklist === undefined ? {} : { toolBlocklist: parseStringArray(record.toolBlocklist, `${label}.toolBlocklist`) }),
+    ...(record.aliases === undefined ? {} : { aliases: parseStringArray(record.aliases, `${label}.aliases`) }),
+    ...(record.capabilities === undefined ? {} : { capabilities: parseToolSourceCapabilities(record.capabilities, `${label}.capabilities`) }),
   };
 }
 
@@ -192,6 +198,12 @@ function createRuntimeTool(
   return {
     name: toolName,
     description: [tool.title, tool.description, `source=${server.key}`, `trust=${trust}`].filter(Boolean).join(" "),
+    source: {
+      id: server.key,
+      ...(server.aliases === undefined ? {} : { aliases: server.aliases }),
+      transport: "mcp",
+      capabilities: server.capabilities ?? [],
+    },
     inputSchema: isRecord(tool.inputSchema) ? tool.inputSchema as Record<string, unknown> : { type: "object" },
     executionMode: "exclusive",
     replaySafe: false,
@@ -592,6 +604,27 @@ function parseStringRecord(value: unknown, label: string): Readonly<Record<strin
 function parseStringArray(value: unknown, label: string): readonly string[] {
   if (!Array.isArray(value)) throw badRequest(`${label} must be an array`);
   return value.map((item, index) => requireString(item, `${label}[${index}]`, { min: 1 }));
+}
+
+function parseToolSourceCapabilities(value: unknown, label: string): readonly ToolSourceCapability[] {
+  if (!Array.isArray(value)) throw badRequest(`${label} must be an array`);
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const itemLabel = `${label}[${index}]`;
+    const record = requireRecord(entry, itemLabel);
+    const id = requireString(record.id, `${itemLabel}.id`, { min: 1, max: 160 });
+    if (seen.has(id)) throw badRequest(`${label} contains duplicate capability ${id}`);
+    seen.add(id);
+    const category = requireString(record.category, `${itemLabel}.category`, { min: 1, max: 80 });
+    const labelValue = record.label === undefined ? undefined : requireString(record.label, `${itemLabel}.label`, { min: 1, max: 160 });
+    const description = record.description === undefined ? undefined : requireString(record.description, `${itemLabel}.description`, { min: 1, max: 1_000 });
+    return {
+      id,
+      category,
+      ...(labelValue === undefined ? {} : { label: labelValue }),
+      ...(description === undefined ? {} : { description }),
+    };
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

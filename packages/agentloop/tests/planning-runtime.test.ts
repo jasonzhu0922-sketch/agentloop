@@ -11,6 +11,10 @@ import { ModelStepAssessor, ProfiledRuleStepAssessor, RuleBasedStepAssessor } fr
 import { ModelPlanner } from "../src/planning/planner.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { DependencyScheduler } from "../src/planning/scheduler.ts";
+import {
+  planningCapabilitiesFromTools,
+  requiredSourceIdsFromInput,
+} from "../src/planning/step-execution-binding.ts";
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
@@ -63,6 +67,7 @@ function submitOutcomePlanToolCall(
         role: outcomeLeafRoleForFixture(step),
         skillIds: step.skillIds,
         requiredCapabilities: step.requiredCapabilities,
+        ...(step.sourceConstraint === undefined ? {} : { sourceConstraint: step.sourceConstraint }),
         evidenceContract: evidenceContractForFixture(step),
       })),
     },
@@ -237,6 +242,76 @@ test("ModelPlanner retries once when the planning model returns an empty respons
 
   assert.equal(calls, 2);
   assert.deepEqual(plan.steps.map((step) => step.id), ["build_poster"]);
+});
+
+test("ModelPlanner corrects a capability mistakenly submitted as a Skill", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        assert.match(request.runtimeContext?.content ?? "", /\"availableSkillIds\":\[\]/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("capability-as-skill", {
+            goal: "Summarize the uploaded source.",
+            selectedSkillRoles: [{
+              skillId: "uploaded_source_read",
+              role: "source_provider",
+              reason: "Read the uploaded source.",
+            }],
+            steps: [{
+              id: "read_upload",
+              objective: "Read the uploaded source and summarize it.",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: ["uploaded_source_read"],
+              requiredCapabilities: ["uploaded_source_read"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "explicit_caveats"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+          })],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("capability-corrected", {
+          goal: "Summarize the uploaded source.",
+          selectedSkillRoles: [],
+          steps: [{
+            id: "read_upload",
+            objective: "Read the uploaded source and summarize it.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["uploaded_source_read"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-capability-not-skill",
+    input: "Summarize the uploaded source.",
+    availableSkills: [],
+    availableToolNames: ["read_source"],
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.selectedSkillIds, []);
+  assert.deepEqual(plan.steps[0].skillIds, []);
+  assert.deepEqual(plan.steps[0].requiredCapabilities, ["uploaded_source_read"]);
 });
 
 test("Task intent treats Chinese summary files as workspace document artifacts", () => {
@@ -832,6 +907,95 @@ test("ModelPlanner accepts aggregate artifact_acceptance evidence contracts", as
   assert.deepEqual(
     plan.steps[0].successCriteria.map((criterion) => criterion.id),
     ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+  );
+});
+
+test("ToolSource capability categories and explicit source constraints stay host-declared", async () => {
+  const source = {
+    id: "amap-maps",
+    aliases: ["高德", "amap"],
+    transport: "mcp",
+    capabilities: [{
+      id: "spatial_planning.route",
+      category: "spatial_planning",
+      label: "Route planning",
+    }],
+  } as const;
+  const availableTools = [{
+    name: "mcp_amap_maps_direction",
+    description: "Plan a driving route.",
+    source,
+  }, {
+    name: "websearch",
+    description: "Search the web.",
+  }];
+  const requiredSourceIds = requiredSourceIdsFromInput("请调用高德 MCP 查询路线", availableTools);
+  assert.deepEqual(requiredSourceIds, ["amap-maps"]);
+
+  let planningContext = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      planningContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("source-bound-route", {
+          goal: "Plan the requested route with the named map source.",
+          steps: [{
+            id: "plan-route",
+            objective: "Use the named map source to plan the requested route.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["spatial_planning.route"],
+            sourceConstraint: { requiredSourceIds },
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const proposal = await planner.plan({
+    runId: "source-bound-route",
+    input: "请调用高德 MCP 查询路线",
+    availableSkills: [],
+    availableToolNames: availableTools.map((tool) => tool.name),
+    availableTools,
+    availableCapabilities: planningCapabilitiesFromTools(availableTools),
+    requiredSourceIds,
+  });
+  assert.match(planningContext, /"category":"spatial_planning"/);
+  assert.match(planningContext, /"requiredSourceIds":\["amap-maps"\]/);
+
+  const admitted = admitPlan({
+    runId: "source-bound-route",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(availableTools.map((tool) => tool.name)),
+    availableTools,
+    requiredSourceIds,
+  });
+  assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["mcp_amap_maps_direction"]);
+  assert.deepEqual(admitted.steps[0]?.executionBinding.requiredSourceIds, ["amap-maps"]);
+
+  assert.throws(
+    () => admitPlan({
+      runId: "source-bound-route-missing-constraint",
+      proposal: {
+        ...proposal,
+        steps: proposal.steps.map((step) => ({ ...step, sourceConstraint: undefined })),
+      },
+      availableSkills: [],
+      availableToolNames: new Set(availableTools.map((tool) => tool.name)),
+      availableTools,
+      requiredSourceIds,
+    }),
+    (error: unknown) => error instanceof AppError && /does not bind user-required ToolSource/.test(error.message),
   );
 });
 

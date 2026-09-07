@@ -9,6 +9,7 @@ import {
   type LiveFeedItem,
   liveEventFeed,
   livePlan,
+  latestProviderReasoning,
   modelWaitText,
   progressText,
   retryText,
@@ -106,15 +107,23 @@ function PlanStepsPanel({ id, steps }: { readonly id: string; readonly steps: re
 function LiveStreamOutput({
   items,
   fallback,
+  reasoningContent,
 }: {
   readonly items: readonly LiveFeedItem[];
   readonly fallback: string;
+  readonly reasoningContent: string;
 }): React.ReactNode {
   const current = items[items.length - 1] ?? null;
   const view = liveOutputView(items, fallback);
   return (
     <div className="live-output" aria-label="实时 SSE 输出">
       <div className="live-output-text">{view.body}</div>
+      {reasoningContent ? (
+        <details className="live-reasoning" open>
+          <summary>模型思考</summary>
+          <div>{reasoningContent}</div>
+        </details>
+      ) : null}
       <div className={"live-output-activity " + (current?.kind ?? "thinking")}>
         <span className="live-output-dot" aria-hidden="true" />
         <span>{view.activity}</span>
@@ -127,7 +136,10 @@ function liveOutputView(items: readonly LiveFeedItem[], fallback: string): { rea
   const current = items[items.length - 1] ?? null;
   if (items.length === 0) return { body: fallback, activity: "等待实时返回" };
   const latestReply = findLatestItem(items, "reply");
-  const body = latestReply?.detail || current?.detail || current?.title || fallback;
+  const body = latestReply?.detail
+    || (current?.title === "模型思考" ? fallback : current?.detail)
+    || current?.title
+    || fallback;
   return {
     body,
     activity: activityText(current),
@@ -162,6 +174,7 @@ function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; rea
   const retry = retryText(events);
   const idle = streamTool || modelWaitText(events) || progressText(events, plan);
   const feed = liveEventFeed(events, 4);
+  const reasoningContent = latestProviderReasoning(events);
   return (
     <article className="msg assistant live">
       <div className="msg-avatar">A</div>
@@ -184,7 +197,11 @@ function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; rea
           </div>
           {planOpen ? <PlanStepsPanel id={planPanelId} steps={steps} /> : null}
           {retry ? <div className="live-retry">{retry}</div> : null}
-          <LiveStreamOutput items={feed} fallback={content ? previewText(content) : idle} />
+          <LiveStreamOutput
+            items={feed}
+            fallback={content ? previewText(content) : idle}
+            reasoningContent={reasoningContent}
+          />
         </div>
       </div>
     </article>
@@ -251,11 +268,13 @@ function FinalAnswer({
   steps,
   artifacts,
   loaded,
+  reasoningContent,
 }: {
   readonly run: RunRecord;
   readonly steps: readonly PlanStep[];
   readonly artifacts: readonly ProcessArtifact[];
   readonly loaded: boolean;
+  readonly reasoningContent: string;
 }): React.ReactNode {
   return (
     <article className="msg assistant">
@@ -265,6 +284,12 @@ function FinalAnswer({
         <div className="msg-text md">
           {run.output ? <Markdown text={run.output} /> : <span className="muted">（没有产生文本输出）</span>}
         </div>
+        {reasoningContent ? (
+          <details className="live-reasoning" open>
+            <summary>模型思考</summary>
+            <div>{reasoningContent}</div>
+          </details>
+        ) : null}
         <TurnPlanner steps={steps} />
         <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>
@@ -400,7 +425,17 @@ export function ConversationView(): React.ReactNode {
     } else if (r.status === "completed") {
       const artifacts = isLoaded ? (detail?.artifacts ?? []) : [];
       const steps = isLoaded ? (detail?.detail.plan.steps ?? []) : [];
-      parts.push(<FinalAnswer key={"f" + r.id} run={r} steps={steps} artifacts={artifacts} loaded={isLoaded} />);
+      const events = isLoaded ? (detail?.events ?? []) : [];
+      parts.push(
+        <FinalAnswer
+          key={"f" + r.id}
+          run={r}
+          steps={steps}
+          artifacts={artifacts}
+          loaded={isLoaded}
+          reasoningContent={latestProviderReasoning(events)}
+        />,
+      );
     } else if (r.status === "failed" || r.status === "cancelled") {
       const failEvents = isLoaded ? (detail?.events ?? []) : [];
       const artifacts = isLoaded ? (detail?.artifacts ?? []) : [];

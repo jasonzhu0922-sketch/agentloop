@@ -11,9 +11,33 @@ export interface ToolExecutionContext {
   readonly signal?: AbortSignal;
 }
 
+/**
+ * Declarative, host-owned semantics for a ToolSource capability. The kernel
+ * treats identifiers as vocabulary entries: categories and capabilities can be
+ * added by an App or plugin without extending a kernel enum.
+ */
+export interface ToolSourceCapability {
+  readonly id: string;
+  readonly category: string;
+  readonly label?: string;
+  readonly description?: string;
+}
+
+/**
+ * Stable provenance for Tools materialized by one source. `transport` is an
+ * implementation detail; planning matches source identity and capabilities.
+ */
+export interface ToolSourceDescriptor {
+  readonly id: string;
+  readonly aliases?: readonly string[];
+  readonly transport?: string;
+  readonly capabilities: readonly ToolSourceCapability[];
+}
+
 export interface RuntimeTool<TInput = unknown> {
   readonly name: string;
   readonly description: string;
+  readonly source?: ToolSourceDescriptor;
   readonly inputSchema: JsonSchema;
   readonly executionMode: "parallel" | "exclusive";
   readonly replaySafe: boolean;

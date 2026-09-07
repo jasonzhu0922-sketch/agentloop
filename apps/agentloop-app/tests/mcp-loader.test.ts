@@ -21,6 +21,12 @@ test("MCP registration file parses server auth and materializes runtime tools", 
         url: "https://mcp.amap.com/mcp",
         auth: { kind: "query", name: "key", secretEnv: "AMAP_MCP_KEY" },
         toolAllowlist: ["search", "route"],
+        aliases: ["高德", "amap"],
+        capabilities: [{
+          id: "spatial_planning.route",
+          category: "spatial_planning",
+          label: "Route planning",
+        }],
       },
     ],
   });
@@ -55,6 +61,16 @@ test("MCP registration file parses server auth and materializes runtime tools", 
   assert.equal(integration.loadedServers.length, 1);
   assert.equal(integration.tools.length, 1);
   assert.equal(integration.tools[0]?.name, "mcp_amap_maps_search");
+  assert.deepEqual(integration.tools[0]?.source, {
+    id: "amap-maps",
+    aliases: ["高德", "amap"],
+    transport: "mcp",
+    capabilities: [{
+      id: "spatial_planning.route",
+      category: "spatial_planning",
+      label: "Route planning",
+    }],
+  });
 
   const result = await integration.tools[0]!.execute(
     {

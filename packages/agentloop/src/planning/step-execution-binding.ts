@@ -5,6 +5,7 @@ import type {
   PlanStep,
   PlanStepProposal,
   PlanningCapability,
+  PlanningToolSummary,
   SourceKind,
   StepExecutionBinding,
 } from "./contracts.ts";
@@ -30,10 +31,17 @@ const SOURCE_EVIDENCE_KINDS = new Set<EvidenceKind>([
 export function createStepExecutionBinding(input: {
   readonly step: PlanStepProposal;
   readonly availableToolNames: ReadonlySet<string>;
+  readonly availableTools?: readonly PlanningToolSummary[];
   readonly evidenceContract?: EvidenceContract;
 }): StepExecutionBinding {
   const requiredCapabilities = uniqueStrings(input.step.requiredCapabilities);
-  const resolvedToolNames = resolveToolNamesForCapabilities(requiredCapabilities, input.availableToolNames);
+  const requiredSourceIds = uniqueStrings(input.step.sourceConstraint?.requiredSourceIds ?? []);
+  const resolvedToolNames = resolveToolNamesForCapabilities(
+    requiredCapabilities,
+    input.availableToolNames,
+    input.availableTools,
+    requiredSourceIds,
+  );
   const evidenceKinds = uniqueEvidenceKinds(input.evidenceContract?.requiredKinds ?? []);
   return {
     schema: "agentloop.stepExecutionBinding/v1",
@@ -42,6 +50,7 @@ export function createStepExecutionBinding(input: {
     sourceKinds: inferSourceKinds(requiredCapabilities, evidenceKinds),
     sideEffect: inferSideEffect(requiredCapabilities),
     evidenceKinds,
+    requiredSourceIds,
   };
 }
 
@@ -86,6 +95,77 @@ export function planningCapabilitiesFromToolNames(toolNames: readonly string[]):
     .map(({ resolvedToolNames: _resolvedToolNames, ...definition }) => definition);
 }
 
+/**
+ * Merges kernel capabilities with host-declared source vocabulary. The host
+ * owns vocabulary registration; the kernel only binds declared IDs to Tools.
+ */
+export function planningCapabilitiesFromTools(tools: readonly PlanningToolSummary[]): PlanningCapability[] {
+  const staticCapabilities = planningCapabilitiesFromToolNames(tools.map((tool) => tool.name));
+  const dynamic = new Map<string, PlanningCapability>();
+  for (const tool of tools) {
+    const source = tool.source;
+    if (source === undefined) continue;
+    for (const capability of source.capabilities) {
+      const current = dynamic.get(capability.id);
+      if (current === undefined) {
+        dynamic.set(capability.id, {
+          id: capability.id,
+          category: capability.category,
+          ...(capability.label === undefined ? {} : { label: capability.label }),
+          ...(capability.description === undefined ? {} : { description: capability.description }),
+          sourceIds: [source.id],
+          produces: ["source_summary", "explicit_caveats"],
+          sourceKinds: ["web"],
+          sideEffect: "external_read",
+          risk: "medium",
+        });
+        continue;
+      }
+      if (!current.sourceIds?.includes(source.id)) {
+        dynamic.set(capability.id, { ...current, sourceIds: [...(current.sourceIds ?? []), source.id] });
+      }
+    }
+  }
+  return [...staticCapabilities, ...dynamic.values()];
+}
+
+/**
+ * Resolves source names deliberately mentioned in user input. Source aliases
+ * are host registration data, so this remains independent of a transport,
+ * provider, or individual Tool name.
+ */
+export function requiredSourceIdsFromInput(input: string, tools: readonly PlanningToolSummary[]): string[] {
+  const normalizedInput = normalizeSourceMatchText(input);
+  if (normalizedInput.length === 0) return [];
+  const sources = new Map<string, NonNullable<PlanningToolSummary["source"]>>();
+  for (const tool of tools) {
+    if (tool.source !== undefined && !sources.has(tool.source.id)) sources.set(tool.source.id, tool.source);
+  }
+  return [...sources.values()]
+    .filter((source) => [source.id, ...(source.aliases ?? [])]
+      .map(normalizeSourceMatchText)
+      .some((alias) => alias.length > 0 && normalizedInput.includes(alias)))
+    .map((source) => source.id);
+}
+
+export function unknownToolSourceIds(
+  sourceIds: readonly string[],
+  availableTools: readonly PlanningToolSummary[],
+): string[] {
+  const available = new Set(availableTools.flatMap((tool) => tool.source === undefined ? [] : [tool.source.id]));
+  return uniqueStrings(sourceIds).filter((sourceId) => !available.has(sourceId));
+}
+
+export function unresolvedToolSourceIds(
+  sourceIds: readonly string[],
+  resolvedToolNames: readonly string[],
+  availableTools: readonly PlanningToolSummary[],
+): string[] {
+  const sourceByToolName = new Map(availableTools.map((tool) => [tool.name, tool.source?.id]));
+  const resolvedSourceIds = new Set(resolvedToolNames.map((toolName) => sourceByToolName.get(toolName)));
+  return uniqueStrings(sourceIds).filter((sourceId) => !resolvedSourceIds.has(sourceId));
+}
+
 export function capabilityRequiresTool(capability: string): boolean {
   if (capability === "external_api_call") return true;
   if (capability === "custom_tool_call") return true;
@@ -93,23 +173,34 @@ export function capabilityRequiresTool(capability: string): boolean {
   return binding !== undefined && binding.length > 0;
 }
 
-export function unknownPlanningCapabilities(capabilities: readonly string[]): string[] {
-  return uniqueStrings(capabilities).filter((capability) => CAPABILITY_TOOL_BINDINGS[capability] === undefined);
+export function unknownPlanningCapabilities(
+  capabilities: readonly string[],
+  availableTools: readonly PlanningToolSummary[] = [],
+): string[] {
+  const dynamic = dynamicCapabilityIds(availableTools);
+  return uniqueStrings(capabilities).filter((capability) =>
+    CAPABILITY_TOOL_BINDINGS[capability] === undefined && !dynamic.has(capability)
+  );
 }
 
 export function unsatisfiedToolCapabilities(
   capabilities: readonly string[],
   availableToolNames: ReadonlySet<string>,
+  availableTools: readonly PlanningToolSummary[] = [],
+  requiredSourceIds: readonly string[] = [],
 ): string[] {
+  const dynamic = dynamicCapabilityIds(availableTools);
   return uniqueStrings(capabilities).filter((capability) =>
-    capabilityRequiresTool(capability)
-    && resolveToolNamesForCapabilities([capability], availableToolNames).length === 0
+    (capabilityRequiresTool(capability) || dynamic.has(capability))
+    && resolveToolNamesForCapabilities([capability], availableToolNames, availableTools, requiredSourceIds).length === 0
   );
 }
 
 export function resolveToolNamesForCapabilities(
   capabilities: readonly string[],
   availableToolNames: ReadonlySet<string>,
+  availableTools: readonly PlanningToolSummary[] = [],
+  requiredSourceIds: readonly string[] = [],
 ): string[] {
   const resolved = new Set<string>();
   for (const capability of capabilities) {
@@ -126,12 +217,29 @@ export function resolveToolNamesForCapabilities(
       continue;
     }
     const definition = CAPABILITY_TOOL_BINDINGS[capability];
-    if (definition === undefined) continue;
-    for (const toolName of definition) {
-      if (availableToolNames.has(toolName)) resolved.add(toolName);
+    if (definition !== undefined) {
+      for (const toolName of definition) {
+        if (availableToolNames.has(toolName)) resolved.add(toolName);
+      }
+      continue;
+    }
+    for (const tool of availableTools) {
+      if (
+        availableToolNames.has(tool.name)
+        && tool.source?.capabilities.some((declared) => declared.id === capability)
+      ) {
+        resolved.add(tool.name);
+      }
     }
   }
-  return [...resolved];
+  if (requiredSourceIds.length === 0) return [...resolved];
+  const required = new Set(requiredSourceIds);
+  const sourceByTool = new Map(availableTools.map((tool) => [tool.name, tool.source?.id]));
+  return [...resolved].filter((toolName) => required.has(sourceByTool.get(toolName) ?? ""));
+}
+
+function dynamicCapabilityIds(tools: readonly PlanningToolSummary[]): ReadonlySet<string> {
+  return new Set(tools.flatMap((tool) => tool.source?.capabilities.map((capability) => capability.id) ?? []));
 }
 
 function isExternalApiToolName(toolName: string): boolean {
@@ -176,6 +284,13 @@ function uniqueEvidenceKinds(values: readonly EvidenceKind[]): EvidenceKind[] {
 
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
+function normalizeSourceMatchText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 const CORE_WORKSPACE_TOOL_NAMES = new Set([
@@ -237,6 +352,7 @@ const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
 const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   {
     id: "uploaded_source_read",
+    category: "information_retrieval",
     label: "Read uploaded source",
     produces: ["source_summary", "explicit_caveats"],
     sourceKinds: ["uploaded_source"],
@@ -246,6 +362,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "visible_directory_read",
+    category: "information_retrieval",
     label: "Read visible directory",
     produces: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
     sourceKinds: ["visible_directory"],
@@ -255,6 +372,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "web_research",
+    category: "information_retrieval",
     label: "Research web sources",
     produces: ["source_summary", "source_urls", "explicit_caveats"],
     sourceKinds: ["web"],
@@ -263,6 +381,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "workspace_file_read",
+    category: "information_retrieval",
     label: "Read workspace files",
     produces: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
     sourceKinds: ["workspace_file"],
@@ -271,6 +390,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "workspace_artifact_write",
+    category: "artifact_production",
     label: "Write workspace artifact",
     produces: ["artifact_path", "artifact_non_empty", "format_matches_request"],
     sourceKinds: ["workspace_file", "generated_artifact"],
@@ -279,6 +399,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "external_api_call",
+    category: "external_integration",
     label: "Call external API capability",
     produces: ["source_summary", "explicit_caveats"],
     sourceKinds: ["web"],
@@ -288,6 +409,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "artifact_acceptance",
+    category: "artifact_verification",
     label: "Verify artifact acceptance",
     produces: ["artifact_acceptance", "artifact_openable", "explicit_caveats"],
     sourceKinds: ["generated_artifact"],
@@ -296,6 +418,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "skill_instruction_load",
+    category: "skill_application",
     label: "Load selected Skill instructions",
     produces: ["explicit_caveats"],
     sourceKinds: ["workspace_file"],
@@ -305,6 +428,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "custom_tool_call",
+    category: "external_integration",
     label: "Use authorized custom tool",
     produces: ["explicit_caveats"],
     sourceKinds: ["workspace_file"],
@@ -314,6 +438,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
   },
   {
     id: "conversation_delivery",
+    category: "conversation_delivery",
     label: "Deliver conversation answer",
     produces: ["delivery_receipt", "explicit_caveats"],
     sourceKinds: ["conversation_workset"],

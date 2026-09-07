@@ -31,6 +31,8 @@ export interface OpenAICompatibleModelOptions {
    */
   readonly toolChoiceMode?: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement?: RuntimeContextPlacement;
+  /** Request a public reasoning summary from Responses-compatible models. */
+  readonly reasoningSummary?: "auto";
   /** Optional server-authored reporter invoked before each retry attempt. */
   readonly onRetry?: ModelRetryReporter;
 }
@@ -118,6 +120,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly retryDelayMs: number;
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
+  private readonly reasoningSummary?: "auto";
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -148,6 +151,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     this.retryDelayMs = options.retryDelayMs ?? 250;
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
+    this.reasoningSummary = options.reasoningSummary;
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -164,6 +168,9 @@ export class OpenAICompatibleModel implements ModelAdapter {
     }
     if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
       throw new TypeError("runtime context placement must be system or user-envelope");
+    }
+    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto") {
+      throw new TypeError("reasoning summary must be auto");
     }
   }
 
@@ -428,7 +435,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
         await emit({ type: "text_delta", text: deltaContent });
       }
       const reasoningDelta = choice?.delta?.reasoning_content;
-      if (typeof reasoningDelta === "string") reasoningContent += reasoningDelta;
+      if (typeof reasoningDelta === "string" && reasoningDelta.length > 0) {
+        reasoningContent += reasoningDelta;
+        await emit({ type: "reasoning_delta", text: reasoningDelta });
+      }
       for (const call of choice?.delta?.tool_calls ?? []) {
         const index = typeof call.index === "number" ? call.index : toolCallAccumulator.size;
         const accumulated = toolCallAccumulator.get(index) ?? { arguments: "" };
@@ -537,6 +547,7 @@ export class ResponsesModel implements ModelAdapter {
   private readonly retryDelayMs: number;
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
+  private readonly reasoningSummary?: "auto";
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -567,6 +578,7 @@ export class ResponsesModel implements ModelAdapter {
     this.retryDelayMs = options.retryDelayMs ?? 250;
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
+    this.reasoningSummary = options.reasoningSummary;
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -583,6 +595,9 @@ export class ResponsesModel implements ModelAdapter {
     }
     if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
       throw new TypeError("runtime context placement must be system or user-envelope");
+    }
+    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto") {
+      throw new TypeError("reasoning summary must be auto");
     }
   }
 
@@ -696,6 +711,7 @@ export class ResponsesModel implements ModelAdapter {
       input,
       tools: providerTools,
       ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+      ...(this.reasoningSummary === undefined ? {} : { reasoning: { summary: this.reasoningSummary } }),
       max_output_tokens: Math.min(
         invocation.maxOutputTokens ?? this.limits.maxOutputTokens,
         this.limits.maxOutputTokens,
@@ -729,6 +745,7 @@ export class ResponsesModel implements ModelAdapter {
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
+    let reasoningContent = "";
     const functionCalls = new Map<string, {
       itemId: string; index: number; callId?: string; name?: string; arguments: string;
     }>();
@@ -752,6 +769,12 @@ export class ResponsesModel implements ModelAdapter {
       }
       assertResponsesPayload(chunk);
       switch (chunk.type) {
+        case "response.reasoning_summary_text.delta":
+          if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
+            reasoningContent += chunk.delta;
+            await sink({ type: "reasoning_delta", text: chunk.delta });
+          }
+          break;
         case "response.output_text.delta":
           if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
             content += chunk.delta;
@@ -876,6 +899,7 @@ export class ResponsesModel implements ModelAdapter {
         ...final,
         toolCalls: finalToolCalls,
         finishReason: normalizeFinishReason(final.finishReason, finalToolCalls.length),
+        ...(reasoningContent.length === 0 ? {} : { reasoningContent }),
         ...(inputTokens === undefined && outputTokens === undefined
           ? {}
           : {
@@ -891,6 +915,7 @@ export class ResponsesModel implements ModelAdapter {
       content,
       toolCalls,
       finishReason: normalizeFinishReason(undefined, toolCalls.length),
+      ...(reasoningContent.length === 0 ? {} : { reasoningContent }),
       ...(inputTokens === undefined && outputTokens === undefined
         ? {}
         : {
@@ -940,6 +965,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
   const output = Array.isArray(record.output) ? record.output as Array<Record<string, unknown>> : [];
   const toolCalls: ModelToolCall[] = [];
   const content = responseOutputText(record, output, fallbackContent);
+  const reasoningContent = responseReasoningSummary(output);
   for (const [index, item] of output.entries()) {
     if (item.type !== "function_call") continue;
     const callId = typeof item.call_id === "string" ? item.call_id : undefined;
@@ -961,6 +987,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
     content,
     toolCalls,
     finishReason,
+    ...(reasoningContent.length === 0 ? {} : { reasoningContent }),
     ...(status === "incomplete" && typeof incompleteDetails?.reason === "string"
       ? { finishReasonDetail: incompleteDetails.reason }
       : {}),
@@ -973,6 +1000,19 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
           },
         }),
   };
+}
+
+function responseReasoningSummary(output: readonly Record<string, unknown>[]): string {
+  const text: string[] = [];
+  for (const item of output) {
+    if (item.type !== "reasoning" || !Array.isArray(item.summary)) continue;
+    for (const part of item.summary) {
+      if (part === null || typeof part !== "object" || Array.isArray(part)) continue;
+      const record = part as Record<string, unknown>;
+      if (record.type === "summary_text" && typeof record.text === "string") text.push(record.text);
+    }
+  }
+  return text.join("\n");
 }
 
 function assertResponsesPayload(payload: unknown): void {

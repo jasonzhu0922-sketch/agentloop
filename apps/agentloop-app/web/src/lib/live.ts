@@ -17,6 +17,7 @@ export interface ExecutionInsight {
 
 export interface StreamingStatus {
   readonly content: string;
+  readonly reasoningContent: string;
   readonly toolName?: string;
   readonly toolArgumentCharacters?: number;
   readonly toolArguments?: unknown;
@@ -91,17 +92,34 @@ export function streamingToolProgress(stream: RunEvent | null): string {
 export function streamingStatus(stream: RunEvent | null): StreamingStatus | null {
   if (!stream?.data) return null;
   const content = typeof stream.data.content === "string" ? stream.data.content : "";
+  const reasoningContent = typeof stream.data.reasoningContent === "string" ? stream.data.reasoningContent : "";
   const calls = Array.isArray(stream.data.toolCalls) ? (stream.data.toolCalls as Array<{ name?: string; arguments?: unknown; argumentsRef?: { characters?: number } }>) : [];
-  if (!calls.length) return { content };
+  if (!calls.length) return { content, reasoningContent };
   const call = calls[calls.length - 1] ?? {};
   const name = typeof call.name === "string" && call.name.length > 0 ? call.name : undefined;
   const chars = toolArgumentCharacters(call.arguments, call.argumentsRef);
   return {
     content,
+    reasoningContent,
     ...(name === undefined ? {} : { toolName: name }),
     ...(chars > 0 ? { toolArgumentCharacters: chars } : {}),
     ...("arguments" in call ? { toolArguments: call.arguments } : {}),
   };
+}
+
+/**
+ * The live activity feed is intentionally short. Keep the latest real
+ * provider reasoning separate from that window so completion/tool events do
+ * not make an already-received reasoning delta disappear from the UI.
+ */
+export function latestProviderReasoning(events: readonly RunEvent[]): string {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== "assistant.streaming" && event.type !== "assistant.committed") continue;
+    const reasoningContent = typeof event.data?.reasoningContent === "string" ? event.data.reasoningContent.trim() : "";
+    if (reasoningContent) return reasoningContent;
+  }
+  return "";
 }
 
 function toolArgumentCharacters(argumentsValue: unknown, ref: { readonly characters?: number } | undefined): number {
@@ -190,6 +208,15 @@ function liveFeedItemsForEvent(event: RunEvent, planned: ReadonlyMap<string, Run
     const status = streamingStatus(event);
     const items: LiveFeedItem[] = [];
     const streamPhase = phaseLabel(event.data?.phase);
+    if (status?.reasoningContent.trim()) {
+      items.push({
+        ...base,
+        key: feedKey(event, "thinking"),
+        kind: "thinking",
+        title: "模型思考",
+        detail: status.reasoningContent,
+      });
+    }
     if (status?.content.trim()) {
       items.push({
         ...base,
@@ -222,7 +249,7 @@ function liveFeedItemsForEvent(event: RunEvent, planned: ReadonlyMap<string, Run
     const calls = Array.isArray(event.data?.toolCalls) ? event.data.toolCalls : [];
     const finish = String(event.data?.finishReason ?? "");
     const translated = translateRunEvent(event, planned);
-    const items = privateReasoningFeedItem(event);
+    const items = reasoningFeedItem(event);
     if (finish === "tool_calls" || calls.length > 0) {
       return [...items, {
         ...base,
@@ -430,19 +457,14 @@ function feedKey(event: RunEvent, suffix: string): string {
   return String(event.seq ?? event.type) + ":" + suffix;
 }
 
-function privateReasoningFeedItem(event: RunEvent): readonly LiveFeedItem[] {
-  const projection = event.data?.privateReasoning;
-  if (projection === null || typeof projection !== "object" || Array.isArray(projection)) return [];
-  const record = projection as Record<string, unknown>;
-  if (record.schema !== "agentloop.privateReasoningProjection/v1" || record.redacted !== true) return [];
-  const characters = typeof record.characters === "number" && record.characters > 0
-    ? " · 约 " + record.characters + " 字符"
-    : "";
+function reasoningFeedItem(event: RunEvent): readonly LiveFeedItem[] {
+  const reasoningContent = typeof event.data?.reasoningContent === "string" ? event.data.reasoningContent.trim() : "";
+  if (!reasoningContent) return [];
   return [{
     key: feedKey(event, "thinking"),
     kind: "thinking",
-    title: "推理状态已保留",
-    detail: "模型内部推理状态已作为私有上下文保留，公共事件不展示原文" + characters + "。",
+    title: "模型思考",
+    detail: reasoningContent,
     rawType: event.type,
     ...(event.seq === undefined ? {} : { seq: event.seq }),
   }];

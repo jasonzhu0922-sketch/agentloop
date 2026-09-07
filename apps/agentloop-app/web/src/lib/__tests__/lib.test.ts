@@ -5,7 +5,7 @@ import { commandActivities, commandLine, commandSummary, fullCommandLine } from 
 import { executionCapabilities } from "../execution-capabilities";
 import { eventLabel, fmtBytes, toolAction, truncate } from "../format";
 import { plannedEventMap, translateRunEvent, translatedTimeline } from "../event-translator";
-import { executionInsights, liveEventFeed, livePlan, currentStepWhy, failureSummary, stepToolPurposes, streamingStatus, streamingToolProgress, toolActivityItems } from "../live";
+import { executionInsights, liveEventFeed, livePlan, latestProviderReasoning, currentStepWhy, failureSummary, stepToolPurposes, streamingStatus, streamingToolProgress, toolActivityItems } from "../live";
 import { mergeRunIntoConversation, projectConversationRun } from "../../state/run-state";
 import type { ConversationDetail, RunEvent, RunRecord } from "../types";
 import type { ProcessArtifact } from "../types";
@@ -312,6 +312,7 @@ describe("live projection", () => {
 
     expect(streamingStatus(stream)).toEqual({
       content: "数据已完整获取。现在我来生成 HTML 报告。",
+      reasoningContent: "provider-private-continuation",
       toolName: "computer_write_file",
       toolArgumentCharacters: 17715,
       toolArguments: {
@@ -325,7 +326,7 @@ describe("live projection", () => {
     expect(eventLabel(stream)).toContain("实时草稿");
     expect(translateRunEvent(stream).title).toBe("收到实时草稿");
 
-    const feed = liveEventFeed([
+    const events = [
       { seq: 8, type: "context.assembled", createdAt: 0, data: { estimatedInputTokens: 2048 } },
       {
         ...stream,
@@ -343,11 +344,7 @@ describe("live projection", () => {
         data: {
           content: "我会生成 HTML 报告。",
           finishReason: "stop",
-          privateReasoning: {
-            schema: "agentloop.privateReasoningProjection/v1",
-            redacted: true,
-            characters: 31,
-          },
+          reasoningContent: "模型已确认文件范围，准备生成交付物。",
         },
       },
       {
@@ -356,12 +353,15 @@ describe("live projection", () => {
         createdAt: 0,
         data: { toolCallId: "call-write", toolName: "computer_write_file", arguments: { path: "report.html" } },
       },
-    ]);
-    expect(feed.map((item) => item.kind)).toEqual(["thinking", "reply", "tool", "thinking", "reply", "tool"]);
-    expect(feed.map((item) => item.title)).toEqual(["整理上下文", "回复草稿", "正在生成交付文件", "推理状态已保留", "回复已提交", "准备工具"]);
-    expect(feed.map((item) => item.detail).join("\n")).not.toContain("provider-private-continuation");
+    ];
+    const feed = liveEventFeed(events);
+    expect(feed.map((item) => item.kind)).toEqual(["thinking", "thinking", "reply", "tool", "thinking", "reply", "tool"]);
+    expect(feed.map((item) => item.title)).toEqual(["整理上下文", "模型思考", "回复草稿", "正在生成交付文件", "模型思考", "回复已提交", "准备工具"]);
+    expect(feed.map((item) => item.detail).join("\n")).toContain("provider-private-continuation");
+    expect(feed.map((item) => item.detail).join("\n")).toContain("模型已确认文件范围");
     expect(feed.map((item) => item.detail).join("\n")).not.toContain("computer_write_file");
     expect(feed.map((item) => item.detail).join("\n")).not.toContain("参数 17715 字符");
+    expect(latestProviderReasoning(events)).toBe("模型已确认文件范围，准备生成交付物。");
   });
 
   it("projects run-limit failures into a friendly stopped summary", () => {

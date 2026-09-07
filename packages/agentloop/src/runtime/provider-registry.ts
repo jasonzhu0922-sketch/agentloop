@@ -36,6 +36,7 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly retryDelayMs: number;
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
+  readonly reasoningSummary?: "auto";
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -49,6 +50,7 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly retryDelayMs: number;
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
+  readonly reasoningSummary?: "auto";
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -179,6 +181,7 @@ export class LlmProviderRegistry {
       retryDelayMs: model.retryDelayMs,
       toolChoiceMode: model.toolChoiceMode,
       runtimeContextPlacement: model.runtimeContextPlacement,
+      ...(model.reasoningSummary === undefined ? {} : { reasoningSummary: model.reasoningSummary }),
       ...(onRetry === undefined ? {} : { onRetry }),
     };
     return model.protocol === "responses"
@@ -242,6 +245,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
       "retryDelayMs",
       "toolChoiceMode",
       "runtimeContextPlacement",
+      "reasoningSummary",
       "protocol",
     ],
     label,
@@ -292,6 +296,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     config.runtimeContextPlacement,
     `${label}.runtimeContextPlacement`,
   );
+  const reasoningSummary = optionalReasoningSummary(config.reasoningSummary, `${label}.reasoningSummary`);
   const protocol = optionalProtocol(config.protocol, `${label}.protocol`);
   return {
     key: providerKey,
@@ -306,6 +311,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     retryDelayMs,
     toolChoiceMode,
     runtimeContextPlacement,
+    ...(reasoningSummary === undefined ? {} : { reasoningSummary }),
     protocol,
   };
 }
@@ -344,6 +350,7 @@ function parseModel(
       "retryDelayMs",
       "toolChoiceMode",
       "runtimeContextPlacement",
+      "reasoningSummary",
       "protocol",
     ],
     label,
@@ -384,6 +391,11 @@ function parseModel(
       `${label}.runtimeContextPlacement`,
       provider.runtimeContextPlacement,
     ),
+    reasoningSummary: optionalReasoningSummary(
+      config.reasoningSummary,
+      `${label}.reasoningSummary`,
+      provider.reasoningSummary,
+    ),
     protocol: optionalProtocol(config.protocol, `${label}.protocol`, provider.protocol),
   };
 }
@@ -406,6 +418,7 @@ function legacyModelsFromProviders(
     retryDelayMs: provider.retryDelayMs,
     toolChoiceMode: provider.toolChoiceMode,
     runtimeContextPlacement: provider.runtimeContextPlacement,
+    ...(provider.reasoningSummary === undefined ? {} : { reasoningSummary: provider.reasoningSummary }),
     protocol: provider.protocol,
   }));
 }
@@ -514,4 +527,14 @@ function optionalProtocol(
   if (value === undefined) return fallback;
   if (value === "chat-completions" || value === "responses") return value;
   throw new Error(`${label} must be chat-completions or responses`);
+}
+
+function optionalReasoningSummary(
+  value: unknown,
+  label: string,
+  fallback?: "auto",
+): "auto" | undefined {
+  if (value === undefined) return fallback;
+  if (value === "auto") return value;
+  throw new Error(`${label} must be auto`);
 }
