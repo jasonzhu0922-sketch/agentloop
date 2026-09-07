@@ -46,7 +46,7 @@ import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
 import { DependencyScheduler } from "../planning/scheduler.ts";
 import {
   planningCapabilitiesFromTools,
-  requiredSourceIdsFromInput,
+  requiredToolSourceIdsFromInput,
   stepHasSourceKind,
   stepHasTool,
   stepResolvedToolNames,
@@ -56,7 +56,7 @@ import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
-import { SourceRepository } from "../storage/repositories/source-repository.ts";
+import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
@@ -1133,19 +1133,27 @@ export class RunService {
       events: await this.resolveToolArgumentReferences(await this.runtimeEvents(runId)),
     });
     const privateSkills = await this.skills.resolveForConversation(actorUserId);
+    const visibleDirectories = await this.runs.visibleDirectoriesForRun(runId);
+    const sources = (await this.sources.listByRun(runId)).map(sourceSummary);
     const allTools = composeRunTools({
       coreTools: this.coreTools,
       sourceRepository: this.sources,
       privateSkills,
+      visibleDirectories,
+      uploadedSources: sources,
     });
     assertNoDuplicateTools(allTools);
-    const allowedToolNames = this.recoveryAvailableToolNames(privateSkills, run.allowDangerousTools);
+    const allowedToolNames = new Set(allTools
+      .map((tool) => tool.name)
+      .filter((name) => run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
     const rootGrant = createCapabilityGrant({
       actorUserId,
       runId,
       ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
       depth: run.depth,
       workspaceRoot: runWorkspaceRoot,
+      visibleDirectories,
+      uploadedSources: sources,
       allowedToolNames,
       allowedSkillIds: privateSkills.map((skill) => skill.id),
     });
@@ -1174,8 +1182,8 @@ export class RunService {
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
         registry: new ToolRegistry(allTools),
         emit,
-        visibleDirectories: [],
-        sources: [],
+        visibleDirectories,
+        sources,
         ...(run.conversationId === undefined
           ? {}
           : { conversationHistory: await this.conversationHistory(run.conversationId) }),
@@ -1275,6 +1283,7 @@ export class RunService {
         sourceIds: executeOptions.sourceIds,
         createdAt,
       });
+      await this.runs.bindRunVisibleDirectories({ runId, visibleDirectories });
     });
     const availableSources = mergeUploadedSources(
       await Promise.all(
@@ -1394,7 +1403,7 @@ export class RunService {
         responseOnly,
       });
       const allowedToolSummaries = toolSummaries(allTools, new Set(allowedToolNames));
-      const requiredSourceIds = requiredSourceIdsFromInput(input, allowedToolSummaries);
+      const requiredToolSourceIds = requiredToolSourceIdsFromInput(input, allowedToolSummaries);
       const rootGrant = createCapabilityGrant({
         actorUserId,
         runId,
@@ -1453,7 +1462,7 @@ export class RunService {
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
         availableCapabilities: planningCapabilitiesFromTools(allowedToolSummaries),
-        ...(requiredSourceIds.length === 0 ? {} : { requiredSourceIds }),
+        ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
         workspaceFacts: planningWorkspace,
         visibleDirectories,
         sources: availableSources,
@@ -1501,7 +1510,9 @@ export class RunService {
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
-          ...(requiredSourceIds.length === 0 ? {} : { requiredSourceIds }),
+          ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+          availableUploadedSourceIds: availableSources.map((source) => source.id),
+          availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
           taskIntent,
         });
       } catch (error) {
@@ -1536,7 +1547,9 @@ export class RunService {
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
-          ...(requiredSourceIds.length === 0 ? {} : { requiredSourceIds }),
+          ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+          availableUploadedSourceIds: availableSources.map((source) => source.id),
+          availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
           taskIntent,
         });
       }
@@ -1838,14 +1851,19 @@ export class RunService {
           input.rootGrant.allowedToolNames.has(name)
           && (name !== SKILL_LOADER_TOOL_NAME || stepSkillIds.length > 0)
         );
+      const stepVisibleDirectories = visibleDirectoriesForStep(
+        input.visibleDirectories,
+        activeStep.executionBinding.requiredVisibleDirectoryIds,
+      );
+      const stepSources = uploadedSourcesForStep(input.sources, activeStep.executionBinding.requiredUploadedSourceIds);
       const stepGrant = createCapabilityGrant({
         actorUserId: input.actorUserId,
         runId: input.runId,
         ...(input.rootGrant.conversationId === undefined ? {} : { conversationId: input.rootGrant.conversationId }),
         depth: input.rootGrant.depth,
         ...(input.rootGrant.workspaceRoot === undefined ? {} : { workspaceRoot: input.rootGrant.workspaceRoot }),
-        visibleDirectories: input.visibleDirectories,
-        uploadedSources: input.sources,
+        visibleDirectories: stepVisibleDirectories,
+        uploadedSources: stepSources,
         skillExecutionRoots,
         allowedToolNames: stepAllowedToolNames,
         allowedSkillIds: stepSkillIds,
@@ -1883,8 +1901,8 @@ export class RunService {
         step: activeStep,
         plan,
         skills: stepSkills,
-        visibleDirectories: input.visibleDirectories,
-        sources: input.sources,
+        visibleDirectories: stepVisibleDirectories,
+        sources: stepSources,
         taskProfile: stepTaskProfile,
         operationProfileId: stepTaskProfile.operations[0]?.id,
         requiresFileOutput: fileOutputStep,
@@ -1905,8 +1923,8 @@ export class RunService {
             plan,
             stepSkills,
             input.rootGrant.workspaceRoot ?? this.workspaceRoot,
-            input.visibleDirectories,
-            input.sources,
+            stepVisibleDirectories,
+            stepSources,
             skillExecutionRoots,
             stepTaskProfile,
             input.conversationWorkingSet,
@@ -1917,6 +1935,8 @@ export class RunService {
             stepSkills,
             input.rootGrant.workspaceRoot ?? this.workspaceRoot,
             recovery.facts,
+            stepVisibleDirectories,
+            stepSources,
             skillExecutionRoots,
             stepTaskProfile,
             input.conversationWorkingSet,
@@ -2146,7 +2166,20 @@ export class RunService {
       throw new AppError("PLAN_NOT_ADMITTED", "Plan revision requires the persisted current Plan", 422);
     }
     const privateSkills = await this.skills.resolveForConversation(input.run.ownerUserId);
-    const availableToolNames = this.recoveryAvailableToolNames(privateSkills, input.run.allowDangerousTools);
+    const visibleDirectories = await this.runs.visibleDirectoriesForRun(input.run.id);
+    const sources = (await this.sources.listByRun(input.run.id)).map(sourceSummary);
+    const allTools = composeRunTools({
+      coreTools: this.coreTools,
+      sourceRepository: this.sources,
+      privateSkills,
+      visibleDirectories,
+      uploadedSources: sources,
+    });
+    assertNoDuplicateTools(allTools);
+    const availableToolNames = new Set(allTools
+      .map((tool) => tool.name)
+      .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
+    const availableToolSummaries = toolSummaries(allTools, availableToolNames);
     const taskIntent = classifyTaskIntent({
       objective: input.run.input,
       toolNames: [...availableToolNames],
@@ -2157,6 +2190,9 @@ export class RunService {
       proposal: input.decision.planRevision,
       availableSkills: privateSkills,
       availableToolNames,
+      availableTools: availableToolSummaries,
+      availableUploadedSourceIds: sources.map((source) => source.id),
+      availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
       taskIntent,
     });
     const proposedIds = new Set(admitted.steps.map((step) => step.id));
@@ -2236,18 +2272,14 @@ export class RunService {
     const runWorkspaceRoot = input.run.conversationId === undefined
       ? this.workspaceRoot
       : await this.ensureConversationWorkspace(input.run.conversationId);
-    const allTools = composeRunTools({
-      coreTools: this.coreTools,
-      sourceRepository: this.sources,
-      privateSkills,
-    });
-    assertNoDuplicateTools(allTools);
     const rootGrant = createCapabilityGrant({
       actorUserId: input.actorUserId,
       runId: input.run.id,
       ...(input.run.conversationId === undefined ? {} : { conversationId: input.run.conversationId }),
       depth: input.run.depth,
       workspaceRoot: runWorkspaceRoot,
+      visibleDirectories,
+      uploadedSources: sources,
       allowedToolNames: availableToolNames,
       allowedSkillIds: privateSkills.map((skill) => skill.id),
     });
@@ -2266,8 +2298,8 @@ export class RunService {
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
         registry: new ToolRegistry(allTools),
         emit: async (event) => this.appendRunEvent(input.run.id, event),
-        visibleDirectories: [],
-        sources: [],
+        visibleDirectories,
+        sources,
         ...(input.run.conversationId === undefined
           ? {}
           : { conversationHistory: await this.conversationHistory(input.run.conversationId) }),
@@ -2316,15 +2348,6 @@ export class RunService {
       }
       throw appError;
     }
-  }
-
-  private recoveryAvailableToolNames(
-    privateSkills: readonly PrivateSkill[],
-    allowDangerousTools: boolean,
-  ): Set<string> {
-    const allowed = new Set(this.coreTools.map((tool) => tool.name));
-    if (privateSkills.length > 0) allowed.add(SKILL_LOADER_TOOL_NAME);
-    return new Set([...allowed].filter((name) => allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
   }
 
   private async assertRetirementHasNoUnconfirmedUnsafeEffect(
@@ -4977,11 +5000,23 @@ function buildRecoveredStepRuntimeContext(
   skills: readonly PrivateSkill[],
   workspaceRoot: string,
   recoveryFacts: unknown,
+  visibleDirectories: readonly VisibleDirectoryGrant[] = [],
+  sources: readonly UploadedSourceSummary[] = [],
   skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
   taskProfile: TaskProfile = executionTaskProfileForStep(step, skills),
   conversationWorkingSet?: ConversationWorkingSet,
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
-  const base = buildStepRuntimeContext(step, plan, skills, workspaceRoot, [], [], skillExecutionRoots, taskProfile, conversationWorkingSet);
+  const base = buildStepRuntimeContext(
+    step,
+    plan,
+    skills,
+    workspaceRoot,
+    visibleDirectories,
+    sources,
+    skillExecutionRoots,
+    taskProfile,
+    conversationWorkingSet,
+  );
   return {
     ...base,
     content: [
@@ -5064,6 +5099,24 @@ function mergeUploadedSources(sources: readonly UploadedSourceSummary[]): Upload
     merged.push(source);
   }
   return merged;
+}
+
+function uploadedSourcesForStep(
+  sources: readonly UploadedSourceSummary[],
+  requiredUploadedSourceIds: readonly string[] | undefined,
+): readonly UploadedSourceSummary[] {
+  if (requiredUploadedSourceIds === undefined || requiredUploadedSourceIds.length === 0) return sources;
+  const required = new Set(requiredUploadedSourceIds);
+  return sources.filter((source) => required.has(source.id));
+}
+
+function visibleDirectoriesForStep(
+  visibleDirectories: readonly VisibleDirectoryGrant[],
+  requiredVisibleDirectoryIds: readonly string[] | undefined,
+): readonly VisibleDirectoryGrant[] {
+  if (requiredVisibleDirectoryIds === undefined || requiredVisibleDirectoryIds.length === 0) return visibleDirectories;
+  const required = new Set(requiredVisibleDirectoryIds);
+  return visibleDirectories.filter((directory) => required.has(directory.id));
 }
 
 function sourceEventSummary(source: UploadedSourceSummary): Record<string, unknown> {

@@ -69,9 +69,11 @@ const OUTCOME_LEAF_SCHEMA = {
     sourceConstraint: {
       type: "object",
       additionalProperties: false,
-      required: ["requiredSourceIds"],
+      minProperties: 1,
       properties: {
-        requiredSourceIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        requiredToolSourceIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        requiredUploadedSourceIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        requiredVisibleDirectoryIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
       },
     },
     evidenceContract: {
@@ -317,7 +319,9 @@ export class ModelPlanner implements Planner {
           availableSkills: task.availableSkills,
           availableToolNames: new Set(task.availableToolNames),
           ...(task.availableTools === undefined ? {} : { availableTools: task.availableTools }),
-          ...(task.requiredSourceIds === undefined ? {} : { requiredSourceIds: task.requiredSourceIds }),
+          ...(task.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: task.requiredToolSourceIds }),
+          ...(task.sources === undefined ? {} : { availableUploadedSourceIds: task.sources.map((source) => source.id) }),
+          ...(task.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: task.visibleDirectories.map((directory) => directory.id) }),
           taskIntent: {
             deliverySurface: taskProfile.deliverySurface,
             artifactKind: taskProfile.artifactKind,
@@ -660,9 +664,9 @@ function planningRuntimeContext(
           ?? (task.availableTools === undefined
             ? planningCapabilitiesFromToolNames(task.availableToolNames)
             : planningCapabilitiesFromTools(task.availableTools)),
-        ...(task.requiredSourceIds === undefined || task.requiredSourceIds.length === 0
+        ...(task.requiredToolSourceIds === undefined || task.requiredToolSourceIds.length === 0
           ? {}
-          : { requiredSourceIds: task.requiredSourceIds }),
+          : { requiredToolSourceIds: task.requiredToolSourceIds }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
@@ -700,7 +704,7 @@ function planningRuntimeContext(
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
           capabilityCatalogSemantics: "Capabilities are planning semantics only. Runtime Admission resolves them to execution tools after the Plan is submitted.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
-          sourceConstraintPolicy: "Bind every requiredSourceIds item through a leaf.sourceConstraint; do not substitute another source.",
+          sourceConstraintPolicy: "Use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Never cross these identity namespaces.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1290,9 +1294,23 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
 
 function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
   const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
-  const requiredSourceIds = canonicalStringSet(record.requiredSourceIds, `leaves[${index}].sourceConstraint.requiredSourceIds`, 20);
-  if (requiredSourceIds.length === 0) throw badRequest(`leaves[${index}].sourceConstraint.requiredSourceIds must not be empty`);
-  return { requiredSourceIds };
+  const requiredToolSourceIds = record.requiredToolSourceIds === undefined
+    ? []
+    : canonicalStringSet(record.requiredToolSourceIds, `leaves[${index}].sourceConstraint.requiredToolSourceIds`, 20);
+  const requiredUploadedSourceIds = record.requiredUploadedSourceIds === undefined
+    ? []
+    : canonicalStringSet(record.requiredUploadedSourceIds, `leaves[${index}].sourceConstraint.requiredUploadedSourceIds`, 20);
+  const requiredVisibleDirectoryIds = record.requiredVisibleDirectoryIds === undefined
+    ? []
+    : canonicalStringSet(record.requiredVisibleDirectoryIds, `leaves[${index}].sourceConstraint.requiredVisibleDirectoryIds`, 20);
+  if (requiredToolSourceIds.length === 0 && requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) {
+    throw badRequest(`leaves[${index}].sourceConstraint must bind at least one ToolSource, uploaded source, or visible directory`);
+  }
+  return {
+    ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+    ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
+    ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
+  };
 }
 
 function parseOutcomeLeafRole(value: unknown, index: number): OutcomeLeafRole {

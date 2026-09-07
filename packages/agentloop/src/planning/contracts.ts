@@ -84,7 +84,12 @@ export interface StepExecutionBinding {
   readonly sourceKinds: readonly SourceKind[];
   readonly sideEffect: CapabilitySideEffect;
   readonly evidenceKinds: readonly EvidenceKind[];
-  readonly requiredSourceIds?: readonly string[];
+  /** Registered ToolSource identifiers, such as an MCP provider key. */
+  readonly requiredToolSourceIds?: readonly string[];
+  /** Concrete uploaded source identifiers authorized for this step. */
+  readonly requiredUploadedSourceIds?: readonly string[];
+  /** Concrete visible-directory identifiers authorized for this step. */
+  readonly requiredVisibleDirectoryIds?: readonly string[];
 }
 
 export interface TaskSpec {
@@ -95,8 +100,8 @@ export interface TaskSpec {
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableCapabilities?: readonly PlanningCapability[];
-  /** Source identifiers explicitly named by the user and resolved by the host registry. */
-  readonly requiredSourceIds?: readonly string[];
+  /** ToolSource identifiers explicitly named by the user and resolved by the host registry. */
+  readonly requiredToolSourceIds?: readonly string[];
   readonly workspaceFacts?: PlanningWorkspaceFacts;
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   readonly sources?: readonly UploadedSourceSummary[];
@@ -259,7 +264,9 @@ export interface PlanningToolSummary {
 }
 
 export interface SourceConstraint {
-  readonly requiredSourceIds: readonly string[];
+  readonly requiredToolSourceIds?: readonly string[];
+  readonly requiredUploadedSourceIds?: readonly string[];
+  readonly requiredVisibleDirectoryIds?: readonly string[];
 }
 
 export interface SuccessCriterion {

@@ -35,12 +35,14 @@ export function createStepExecutionBinding(input: {
   readonly evidenceContract?: EvidenceContract;
 }): StepExecutionBinding {
   const requiredCapabilities = uniqueStrings(input.step.requiredCapabilities);
-  const requiredSourceIds = uniqueStrings(input.step.sourceConstraint?.requiredSourceIds ?? []);
+  const requiredToolSourceIds = uniqueStrings(input.step.sourceConstraint?.requiredToolSourceIds ?? []);
+  const requiredUploadedSourceIds = uniqueStrings(input.step.sourceConstraint?.requiredUploadedSourceIds ?? []);
+  const requiredVisibleDirectoryIds = uniqueStrings(input.step.sourceConstraint?.requiredVisibleDirectoryIds ?? []);
   const resolvedToolNames = resolveToolNamesForCapabilities(
     requiredCapabilities,
     input.availableToolNames,
     input.availableTools,
-    requiredSourceIds,
+    requiredToolSourceIds,
   );
   const evidenceKinds = uniqueEvidenceKinds(input.evidenceContract?.requiredKinds ?? []);
   return {
@@ -50,7 +52,9 @@ export function createStepExecutionBinding(input: {
     sourceKinds: inferSourceKinds(requiredCapabilities, evidenceKinds),
     sideEffect: inferSideEffect(requiredCapabilities),
     evidenceKinds,
-    requiredSourceIds,
+    ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+    ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
+    ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
   };
 }
 
@@ -134,7 +138,7 @@ export function planningCapabilitiesFromTools(tools: readonly PlanningToolSummar
  * are host registration data, so this remains independent of a transport,
  * provider, or individual Tool name.
  */
-export function requiredSourceIdsFromInput(input: string, tools: readonly PlanningToolSummary[]): string[] {
+export function requiredToolSourceIdsFromInput(input: string, tools: readonly PlanningToolSummary[]): string[] {
   const normalizedInput = normalizeSourceMatchText(input);
   if (normalizedInput.length === 0) return [];
   const sources = new Map<string, NonNullable<PlanningToolSummary["source"]>>();
@@ -154,6 +158,19 @@ export function unknownToolSourceIds(
 ): string[] {
   const available = new Set(availableTools.flatMap((tool) => tool.source === undefined ? [] : [tool.source.id]));
   return uniqueStrings(sourceIds).filter((sourceId) => !available.has(sourceId));
+}
+
+export function unknownUploadedSourceIds(sourceIds: readonly string[], availableUploadedSourceIds: readonly string[]): string[] {
+  const available = new Set(availableUploadedSourceIds);
+  return uniqueStrings(sourceIds).filter((sourceId) => !available.has(sourceId));
+}
+
+export function unknownVisibleDirectoryIds(
+  directoryIds: readonly string[],
+  availableVisibleDirectoryIds: readonly string[],
+): string[] {
+  const available = new Set(availableVisibleDirectoryIds);
+  return uniqueStrings(directoryIds).filter((directoryId) => !available.has(directoryId));
 }
 
 export function unresolvedToolSourceIds(
@@ -187,12 +204,12 @@ export function unsatisfiedToolCapabilities(
   capabilities: readonly string[],
   availableToolNames: ReadonlySet<string>,
   availableTools: readonly PlanningToolSummary[] = [],
-  requiredSourceIds: readonly string[] = [],
+  requiredToolSourceIds: readonly string[] = [],
 ): string[] {
   const dynamic = dynamicCapabilityIds(availableTools);
   return uniqueStrings(capabilities).filter((capability) =>
     (capabilityRequiresTool(capability) || dynamic.has(capability))
-    && resolveToolNamesForCapabilities([capability], availableToolNames, availableTools, requiredSourceIds).length === 0
+    && resolveToolNamesForCapabilities([capability], availableToolNames, availableTools, requiredToolSourceIds).length === 0
   );
 }
 
@@ -200,7 +217,7 @@ export function resolveToolNamesForCapabilities(
   capabilities: readonly string[],
   availableToolNames: ReadonlySet<string>,
   availableTools: readonly PlanningToolSummary[] = [],
-  requiredSourceIds: readonly string[] = [],
+  requiredToolSourceIds: readonly string[] = [],
 ): string[] {
   const resolved = new Set<string>();
   for (const capability of capabilities) {
@@ -232,8 +249,8 @@ export function resolveToolNamesForCapabilities(
       }
     }
   }
-  if (requiredSourceIds.length === 0) return [...resolved];
-  const required = new Set(requiredSourceIds);
+  if (requiredToolSourceIds.length === 0) return [...resolved];
+  const required = new Set(requiredToolSourceIds);
   const sourceByTool = new Map(availableTools.map((tool) => [tool.name, tool.source?.id]));
   return [...resolved].filter((toolName) => required.has(sourceByTool.get(toolName) ?? ""));
 }

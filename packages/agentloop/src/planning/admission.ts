@@ -5,6 +5,8 @@ import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 import {
   createStepExecutionBinding,
+  unknownUploadedSourceIds,
+  unknownVisibleDirectoryIds,
   unknownToolSourceIds,
   unknownPlanningCapabilities,
   unresolvedToolSourceIds,
@@ -37,7 +39,9 @@ export function admitPlan(input: {
   availableSkills: readonly PrivateSkill[];
   availableToolNames: ReadonlySet<string>;
   availableTools?: readonly PlanningToolSummary[];
-  requiredSourceIds?: readonly string[];
+  requiredToolSourceIds?: readonly string[];
+  availableUploadedSourceIds?: readonly string[];
+  availableVisibleDirectoryIds?: readonly string[];
   taskIntent?: {
     readonly deliverySurface?: "conversation" | "workspace_artifact";
     readonly artifactKind?: string;
@@ -90,11 +94,26 @@ export function admitPlan(input: {
     });
     assertUnique(stepSkillIds, `Skill bindings for step ${step.id}`);
     assertUnique(step.requiredCapabilities, `required capabilities for step ${step.id}`);
-    const constrainedSourceIds = step.sourceConstraint?.requiredSourceIds ?? [];
-    assertUnique(constrainedSourceIds, `required ToolSources for step ${step.id}`);
-    const unknownSourceIds = unknownToolSourceIds(constrainedSourceIds, input.availableTools ?? []);
-    if (unknownSourceIds.length > 0) {
-      reject(`Step ${step.id} requires unavailable ToolSource(s): ${unknownSourceIds.join(", ")}`);
+    const constrainedToolSourceIds = step.sourceConstraint?.requiredToolSourceIds ?? [];
+    const constrainedUploadedSourceIds = step.sourceConstraint?.requiredUploadedSourceIds ?? [];
+    const constrainedVisibleDirectoryIds = step.sourceConstraint?.requiredVisibleDirectoryIds ?? [];
+    assertUnique(constrainedToolSourceIds, `required ToolSources for step ${step.id}`);
+    assertUnique(constrainedUploadedSourceIds, `required uploaded sources for step ${step.id}`);
+    assertUnique(constrainedVisibleDirectoryIds, `required visible directories for step ${step.id}`);
+    const unknownToolSources = unknownToolSourceIds(constrainedToolSourceIds, input.availableTools ?? []);
+    if (unknownToolSources.length > 0) {
+      reject(`Step ${step.id} requires unavailable ToolSource(s): ${unknownToolSources.join(", ")}`);
+    }
+    const unknownUploadedSources = unknownUploadedSourceIds(constrainedUploadedSourceIds, input.availableUploadedSourceIds ?? []);
+    if (unknownUploadedSources.length > 0) {
+      reject(`Step ${step.id} requires unavailable uploaded source(s): ${unknownUploadedSources.join(", ")}`);
+    }
+    const unknownVisibleDirectories = unknownVisibleDirectoryIds(
+      constrainedVisibleDirectoryIds,
+      input.availableVisibleDirectoryIds ?? [],
+    );
+    if (unknownVisibleDirectories.length > 0) {
+      reject(`Step ${step.id} requires unavailable visible directory(s): ${unknownVisibleDirectories.join(", ")}`);
     }
     if (!recoveryPlan && step.role === "repair") {
       reject(`Initial OutcomePlan cannot contain repair leaf ${step.id}`);
@@ -168,13 +187,13 @@ export function admitPlan(input: {
       executionBinding.requiredCapabilities,
       input.availableToolNames,
       input.availableTools,
-      executionBinding.requiredSourceIds,
+      executionBinding.requiredToolSourceIds,
     );
     if (unsatisfiedCapabilities.length > 0) {
       reject(`Step ${step.id} requires capabilities that cannot be satisfied by this Run: ${unsatisfiedCapabilities.join(", ")}`);
     }
     const unresolvedSourceIds = unresolvedToolSourceIds(
-      executionBinding.requiredSourceIds ?? [],
+      executionBinding.requiredToolSourceIds ?? [],
       executionBinding.resolvedToolNames,
       input.availableTools ?? [],
     );
@@ -207,12 +226,12 @@ export function admitPlan(input: {
   if (steps.every((step) => step.kind !== "leaf")) {
     reject("Plan must contain at least one executable leaf step");
   }
-  const requiredSourceIds = new Set(input.requiredSourceIds ?? []);
-  if (requiredSourceIds.size > 0) {
-    const boundSourceIds = new Set(steps.flatMap((step) => step.executionBinding.requiredSourceIds ?? []));
-    const missingSourceIds = [...requiredSourceIds].filter((sourceId) => !boundSourceIds.has(sourceId));
-    if (missingSourceIds.length > 0) {
-      reject(`Plan does not bind user-required ToolSource(s): ${missingSourceIds.join(", ")}`);
+  const requiredToolSourceIds = new Set(input.requiredToolSourceIds ?? []);
+  if (requiredToolSourceIds.size > 0) {
+    const boundToolSourceIds = new Set(steps.flatMap((step) => step.executionBinding.requiredToolSourceIds ?? []));
+    const missingToolSourceIds = [...requiredToolSourceIds].filter((sourceId) => !boundToolSourceIds.has(sourceId));
+    if (missingToolSourceIds.length > 0) {
+      reject(`Plan does not bind user-required ToolSource(s): ${missingToolSourceIds.join(", ")}`);
     }
   }
   assertParentTree(steps);

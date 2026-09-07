@@ -13,7 +13,7 @@ import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { DependencyScheduler } from "../src/planning/scheduler.ts";
 import {
   planningCapabilitiesFromTools,
-  requiredSourceIdsFromInput,
+  requiredToolSourceIdsFromInput,
 } from "../src/planning/step-execution-binding.ts";
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
@@ -30,6 +30,7 @@ import { SkillService, type PrivateSkill } from "../src/skills/skill-service.ts"
 import { AppDatabase } from "../src/storage/database.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import { RunOutcomeRepository } from "../src/storage/repositories/outcome-repository.ts";
+import { RunRepository } from "../src/storage/repositories/run-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
 type LegacyPlanStepFixture = Omit<PlanProposal["steps"][number], "successCriteria"> & {
@@ -929,8 +930,8 @@ test("ToolSource capability categories and explicit source constraints stay host
     name: "websearch",
     description: "Search the web.",
   }];
-  const requiredSourceIds = requiredSourceIdsFromInput("请调用高德 MCP 查询路线", availableTools);
-  assert.deepEqual(requiredSourceIds, ["amap-maps"]);
+  const requiredToolSourceIds = requiredToolSourceIdsFromInput("请调用高德 MCP 查询路线", availableTools);
+  assert.deepEqual(requiredToolSourceIds, ["amap-maps"]);
 
   let planningContext = "";
   const planner = new ModelPlanner({
@@ -949,7 +950,7 @@ test("ToolSource capability categories and explicit source constraints stay host
             role: "fact_acquisition",
             skillIds: [],
             requiredCapabilities: ["spatial_planning.route"],
-            sourceConstraint: { requiredSourceIds },
+            sourceConstraint: { requiredToolSourceIds },
             evidenceContract: {
               requiredKinds: ["source_summary", "explicit_caveats"],
               caveatPolicy: "mark_unverified_facts",
@@ -967,10 +968,10 @@ test("ToolSource capability categories and explicit source constraints stay host
     availableToolNames: availableTools.map((tool) => tool.name),
     availableTools,
     availableCapabilities: planningCapabilitiesFromTools(availableTools),
-    requiredSourceIds,
+    requiredToolSourceIds,
   });
   assert.match(planningContext, /"category":"spatial_planning"/);
-  assert.match(planningContext, /"requiredSourceIds":\["amap-maps"\]/);
+  assert.match(planningContext, /"requiredToolSourceIds":\["amap-maps"\]/);
 
   const admitted = admitPlan({
     runId: "source-bound-route",
@@ -978,10 +979,10 @@ test("ToolSource capability categories and explicit source constraints stay host
     availableSkills: [],
     availableToolNames: new Set(availableTools.map((tool) => tool.name)),
     availableTools,
-    requiredSourceIds,
+    requiredToolSourceIds,
   });
   assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["mcp_amap_maps_direction"]);
-  assert.deepEqual(admitted.steps[0]?.executionBinding.requiredSourceIds, ["amap-maps"]);
+  assert.deepEqual(admitted.steps[0]?.executionBinding.requiredToolSourceIds, ["amap-maps"]);
 
   assert.throws(
     () => admitPlan({
@@ -993,10 +994,154 @@ test("ToolSource capability categories and explicit source constraints stay host
       availableSkills: [],
       availableToolNames: new Set(availableTools.map((tool) => tool.name)),
       availableTools,
-      requiredSourceIds,
+      requiredToolSourceIds,
     }),
     (error: unknown) => error instanceof AppError && /does not bind user-required ToolSource/.test(error.message),
   );
+});
+
+test("uploaded source IDs bind read_source without entering the ToolSource namespace", () => {
+  const sourceId = "src_525eab4b68f44652a4601ca72ccbf69e";
+  const proposal: PlanProposal = {
+    goal: "Summarize the selected uploaded source.",
+    selectedSkillIds: [],
+    steps: [{
+      id: "extract-source-points",
+      objective: "Read the selected upload and extract its key points.",
+      dependencies: [],
+      skillIds: [],
+      role: "fact_acquisition",
+      requiredCapabilities: ["uploaded_source_read"],
+      sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source evidence is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are explicit when needed.", source: "planner" },
+      ],
+    }],
+  };
+  const admitted = admitPlan({
+    runId: "uploaded-source-binding",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["read_source"]),
+    availableTools: [{ name: "read_source", description: "Read authorized uploaded source chunks." }],
+    availableUploadedSourceIds: [sourceId],
+  });
+
+  assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["read_source"]);
+  assert.deepEqual(admitted.steps[0]?.executionBinding.requiredUploadedSourceIds, [sourceId]);
+  assert.equal(admitted.steps[0]?.executionBinding.requiredToolSourceIds, undefined);
+  assert.throws(
+    () => admitPlan({
+      runId: "uploaded-source-binding-unknown",
+      proposal,
+      availableSkills: [],
+      availableToolNames: new Set(["read_source"]),
+      availableTools: [{ name: "read_source", description: "Read authorized uploaded source chunks." }],
+      availableUploadedSourceIds: [],
+    }),
+    (error: unknown) => error instanceof AppError && /requires unavailable uploaded source/.test(error.message),
+  );
+});
+
+test("visible directory IDs bind visible tools without entering the ToolSource namespace", () => {
+  const directoryId = "visible_dir_1";
+  const proposal: PlanProposal = {
+    goal: "Summarize the selected visible directory.",
+    selectedSkillIds: [],
+    steps: [{
+      id: "index-visible-directory",
+      objective: "Index the selected visible directory and summarize its contents.",
+      dependencies: [],
+      skillIds: [],
+      role: "fact_acquisition",
+      requiredCapabilities: ["visible_directory_read"],
+      sourceConstraint: { requiredVisibleDirectoryIds: [directoryId] },
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Directory evidence is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Directory caveats are explicit when needed.", source: "planner" },
+      ],
+    }],
+  };
+  const input = {
+    availableSkills: [],
+    availableToolNames: new Set(["visible_read_file"]),
+    availableTools: [{ name: "visible_read_file", description: "Read an authorized visible directory file." }],
+    availableVisibleDirectoryIds: [directoryId],
+  };
+
+  const admitted = admitPlan({ runId: "visible-directory-binding", proposal, ...input });
+  assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["visible_read_file"]);
+  assert.deepEqual(admitted.steps[0]?.executionBinding.requiredVisibleDirectoryIds, [directoryId]);
+  assert.equal(admitted.steps[0]?.executionBinding.requiredToolSourceIds, undefined);
+  assert.throws(
+    () => admitPlan({ runId: "visible-directory-binding-unknown", proposal, ...input, availableVisibleDirectoryIds: [] }),
+    (error: unknown) => error instanceof AppError && /requires unavailable visible directory/.test(error.message),
+  );
+});
+
+test("visible directory Plan bindings narrow step context and persist the Run snapshot", async () => {
+  const database = new AppDatabase(":memory:");
+  const first = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-bound-first-"));
+  const second = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-bound-second-"));
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionContext = "";
+    const planner: Planner = {
+      plan: async (task) => ({
+        goal: "Summarize only the first visible directory.",
+        selectedSkillIds: [],
+        steps: [{
+          id: "summarize-first-directory",
+          objective: "Summarize only the first authorized directory.",
+          dependencies: [],
+          skillIds: [],
+          role: "deliver",
+          requiredCapabilities: ["visible_directory_read"],
+          sourceConstraint: { requiredVisibleDirectoryIds: [task.visibleDirectories![0]!.id] },
+          evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
+          successCriteria: [{ id: "delivery_receipt", description: "The directory summary is delivered.", source: "planner" }],
+        }],
+      }),
+    };
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if (request.phase === "execution") executionContext = request.runtimeContext?.content ?? "";
+        return { content: "The first directory summary was delivered.", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.execute(owner.user.id, "只总结第一个目录", { visibleDirectories: [first, second] });
+
+    assert.equal(run.status, "completed");
+    assert.match(executionContext, /visible_dir_1/);
+    assert.doesNotMatch(executionContext, /visible_dir_2/);
+    const persisted = await new RunRepository(database).visibleDirectoriesForRun(run.id);
+    assert.deepEqual(persisted.map((directory) => directory.path), [await fs.realpath(first), await fs.realpath(second)]);
+    const started = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "plan.step.started");
+    assert.deepEqual((started?.data.executionBinding as { requiredVisibleDirectoryIds?: string[] } | undefined)?.requiredVisibleDirectoryIds, ["visible_dir_1"]);
+  } finally {
+    await fs.rm(first, { recursive: true, force: true });
+    await fs.rm(second, { recursive: true, force: true });
+    await database.close();
+  }
 });
 
 test("ModelPlanner keeps Skill-owned QA evidence out of generic evidence contracts", async () => {
@@ -7489,6 +7634,7 @@ test("produce source-summary steps deliver a user summary instead of internal so
               skillIds: [],
               role: "produce",
               requiredCapabilities: ["uploaded_source_read"],
+              sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
               evidenceContract: {
                 requiredKinds: ["source_summary", "explicit_caveats"],
                 caveatPolicy: "mark_unverified_facts",

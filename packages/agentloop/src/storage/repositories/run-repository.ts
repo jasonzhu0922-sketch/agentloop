@@ -1,5 +1,6 @@
 import type { SqlConnection } from "../connection.ts";
 import { AppError, notFound } from "../../shared/errors.ts";
+import type { VisibleDirectoryGrant } from "../../runtime/contracts.ts";
 
 export type RunStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -97,6 +98,29 @@ export class RunRepository {
       input.input,
       input.createdAt,
     );
+  }
+
+  async bindRunVisibleDirectories(input: {
+    runId: string;
+    visibleDirectories: readonly VisibleDirectoryGrant[];
+  }): Promise<void> {
+    if (input.visibleDirectories.length === 0) return;
+    const insert = this.connection.prepare(`
+      INSERT INTO run_visible_directories(run_id, directory_id, name, path, position)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const [position, directory] of input.visibleDirectories.entries()) {
+      await insert.run(input.runId, directory.id, directory.name, directory.path, position);
+    }
+  }
+
+  async visibleDirectoriesForRun(runId: string): Promise<VisibleDirectoryGrant[]> {
+    return await this.connection.prepare(`
+      SELECT directory_id AS id, name, path
+      FROM run_visible_directories
+      WHERE run_id = ?
+      ORDER BY position ASC
+    `).all(runId) as unknown as VisibleDirectoryGrant[];
   }
 
   async listConversationSummaries(

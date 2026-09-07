@@ -373,6 +373,16 @@ export class AppDatabase implements SqlConnection {
         UNIQUE(run_id, position)
       );
 
+      CREATE TABLE IF NOT EXISTS run_visible_directories (
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        directory_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        PRIMARY KEY(run_id, directory_id),
+        UNIQUE(run_id, position)
+      );
+
       CREATE TABLE IF NOT EXISTS batches (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL,
