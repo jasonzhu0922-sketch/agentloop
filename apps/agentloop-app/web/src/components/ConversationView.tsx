@@ -268,13 +268,11 @@ function FinalAnswer({
   steps,
   artifacts,
   loaded,
-  reasoningContent,
 }: {
   readonly run: RunRecord;
   readonly steps: readonly PlanStep[];
   readonly artifacts: readonly ProcessArtifact[];
   readonly loaded: boolean;
-  readonly reasoningContent: string;
 }): React.ReactNode {
   return (
     <article className="msg assistant">
@@ -284,12 +282,6 @@ function FinalAnswer({
         <div className="msg-text md">
           {run.output ? <Markdown text={run.output} /> : <span className="muted">（没有产生文本输出）</span>}
         </div>
-        {reasoningContent ? (
-          <details className="live-reasoning" open>
-            <summary>模型思考</summary>
-            <div>{reasoningContent}</div>
-          </details>
-        ) : null}
         <TurnPlanner steps={steps} />
         <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>
@@ -425,7 +417,6 @@ export function ConversationView(): React.ReactNode {
     } else if (r.status === "completed") {
       const artifacts = isLoaded ? (detail?.artifacts ?? []) : [];
       const steps = isLoaded ? (detail?.detail.plan.steps ?? []) : [];
-      const events = isLoaded ? (detail?.events ?? []) : [];
       parts.push(
         <FinalAnswer
           key={"f" + r.id}
@@ -433,7 +424,6 @@ export function ConversationView(): React.ReactNode {
           steps={steps}
           artifacts={artifacts}
           loaded={isLoaded}
-          reasoningContent={latestProviderReasoning(events)}
         />,
       );
     } else if (r.status === "failed" || r.status === "cancelled") {
