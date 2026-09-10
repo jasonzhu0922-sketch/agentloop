@@ -10,10 +10,23 @@ agentloop/
 ├── packages/agentloop-skills/    可发布的内置 Skills 包
 ├── packages/agentloop-plan-template/
 │                                 可选的 Plan Template / fast-path 插件
-├── apps/agentloop-app/           参考应用：HTTP API、登录鉴权、React Web
-├── apps/agentloop-multi-runtime/ 多 Runtime Web、Router、Host 的参考设计与构建模块
+├── apps/agentloop-app/           单 Runtime 参考应用：HTTP API、登录鉴权、React Web
+├── apps/agentloop-multi-runtime/ 多 Runtime 参考应用：Web、Router 与 Runtime Host
 └── docs/                         架构、集成、运维和设计文档
 ```
+
+## 应用形态与定位
+
+`packages/agentloop` 是可复用的 Runtime 内核；两个 `apps/` 目录是建立在该内核之上的不同参考应用与部署拓扑，并不是同一个服务的两种开关。
+
+| 入口 | 定位 | 运行边界 | 适用场景 |
+|---|---|---|---|
+| [`apps/agentloop-app`](apps/agentloop-app/) | **单 Runtime 参考应用** | 一个 Node 进程承载 HTTP API、应用鉴权、Run 与 React Web；默认使用应用自己的 SQLite 数据库和本地工作目录。 | 本地开发、功能演示、单节点或内网部署。 |
+| [`apps/agentloop-multi-runtime`](apps/agentloop-multi-runtime/) | **多 Runtime 参考应用** | 独立 Web 只连接 Router；Router 负责会话入口、附件与调度；多个 Runtime Host 分别加载内核并完整执行一个 Run，共享状态库和任务工作区。 | 需要按会话分流、扩展 Host 容量，或把控制面与执行面分离的部署。 |
+
+两者各自拥有入口、配置、Web、认证/接入边界和运行数据，不能把 `agentloop-app` 的 SQLite、工作目录或 Web 直接接到 Multi Runtime 的 Router/Host 上。Multi Runtime 的一个 Run 始终由一个 Host 完整执行：不会把同一 Run 的 Plan 或 Step 拆到多个 Host，也不支持运行中的 Run 在 Host 间迁移。需要接入第三方业务系统时，应依赖 `@zhujun/agentloop` 内核包，而不是把任一参考应用当作 SDK。
+
+选择单 Runtime 时按下文启动 `agentloop-app`；选择 Multi Runtime 时请使用 [`apps/agentloop-multi-runtime/README.md`](apps/agentloop-multi-runtime/README.md) 的 Router、Host、Web 或 Docker Compose 启动方式。
 
 ## 核心机制
 
@@ -94,7 +107,7 @@ AgentLoop 的执行链路是：
 - Responses Provider 的 reasoning summary 会在 Run 进行中实时展示；最终回复出现后不再渲染该实时面板。
 - 可选 Plan Template 插件用于观察历史 Run、挖掘候选模板和启用低风险 fast-path。
 
-## 快速启动
+## 快速启动：agentloop-app（单 Runtime）
 
 要求 Node.js 26 或更高版本。
 
@@ -168,7 +181,7 @@ node_modules/
 dist/
 ```
 
-默认数据库路径是 `apps/agentloop-app/data/agentloop.db`。数据库文件不进入 Git；新用户通过 `npm run init-db` 创建空库，启动服务时也会复用 Runtime 的迁移逻辑补齐表结构。
+单 Runtime 默认数据库路径是 `apps/agentloop-app/data/agentloop.db`。数据库文件不进入 Git；新用户通过 `npm run init-db` 创建空库，启动服务时也会复用 Runtime 的迁移逻辑补齐表结构。Multi Runtime 的 `.env`、Provider 配置、控制面数据库、Host 本地数据与附件也都是本地状态；具体目录与共享状态库要求见其 [运行说明](apps/agentloop-multi-runtime/README.md#存储模式切换)。
 
 Provider JSON 只保存 Provider 类型、地址、模型和 `apiKeyEnv` 变量名；密钥值放在本地 `.env` 或部署环境变量中，不写入 JSON、SQLite 或 Run 记录。
 
@@ -296,6 +309,6 @@ AgentLoop 的 Runtime 设计参考并源码级核验了：
 
 ## 部署边界
 
-当前参考应用适合单节点本地或内网部署：SQLite、单进程 API、同步 Run、Vite 前端独立托管。生产多副本部署建议替换为 PostgreSQL、队列、fenced lease、独立 Worker、HttpOnly Cookie、CSRF/OIDC/MFA，并把不可信命令放入容器或 WASM Sandbox。
+`agentloop-app` 适合单节点本地或内网部署：SQLite、单进程 API、同步 Run、Vite 前端独立托管。`agentloop-multi-runtime` 提供 Router 与独立 Runtime Host 的参考拓扑；生产多副本必须使用共享 PostgreSQL、共享 POSIX workspace、fenced lease、独立 Worker，以及受部署环境管理的鉴权与密钥。SQLite 仅适合其单机开发模式，不能放在 NFS/RWX 卷上供多节点共享。两种形态都应使用 HttpOnly Cookie、CSRF/OIDC/MFA 等生产认证措施，并把不可信命令置于容器或 WASM Sandbox。
 
 详细架构见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。
