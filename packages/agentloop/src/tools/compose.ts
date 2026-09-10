@@ -8,6 +8,7 @@ import { createArtifactConverterTools } from "./artifact-converter.ts";
 import { createComputerTools } from "./computer-tools.ts";
 import { createSkillLoader } from "./skill-loader.ts";
 import { createSourceTools } from "./source-tools.ts";
+import { createHumanLoopTool } from "./human-loop-tool.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 import { createVisibleDirectoryTools } from "./visible-directory-tools.ts";
 
@@ -20,6 +21,7 @@ export interface CoreToolsOptions {
 
 export function createCoreTools(options: CoreToolsOptions): readonly RuntimeTool<unknown>[] {
   return [
+    createHumanLoopTool(),
     ...createComputerTools(options.executor, options.driver, options.acceptanceService),
     ...createArtifactConverterTools(options.executor),
     ...(options.pluginTools ?? []),

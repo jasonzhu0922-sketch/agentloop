@@ -2,6 +2,7 @@ import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, 
 import { createCoalescedUpdater } from "./live-update-scheduler.js";
 import { persistJson, persistSessions } from "./session-persistence.js";
 import { openArtifactPreview } from "./artifact-preview.js";
+import { renderMarkdown } from "./markdown-renderer.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -75,6 +76,7 @@ async function reconcilePersistedRuns() {
       const body = await response.json();
       if (applyRecoveredRunState(message, body?.run)) changed = true;
       if (await replayPersistedRunEvents(message, tenantId, userId)) changed = true;
+      if (await refreshHumanLoop(message.assignmentId, message, tenantId, userId)) changed = true;
     } catch {}
   })));
   if (changed) { saveSessions(); render(); }
@@ -281,6 +283,10 @@ function onEvent(event, conversation, assistant) {
   assistant.events = mergeRuntimeEvents(assistant.events, [event]);
   if (terminal) completeAssistantMessage(assistant, event);
   conversation.updatedAt = Date.now();
+  if (event.type === "run.waiting_user" && assistant.assignmentId) {
+    void refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => { if (changed) { saveSessions(); render(); } });
+    setStatus("等待你的确认或补充信息", "running");
+  }
   if (terminal) { liveUpdates.flush(); setStatus(event.type === "run.completed" ? "已完成" : event.type === "run.cancelled" ? "已停止" : "执行失败", assistant.status === "completed" ? "ok" : "error"); return true; }
   liveUpdates.request();
   return false;
@@ -337,6 +343,7 @@ function render() {
     assistant.planOpen = assistant.planOpen !== true;
     render();
   }));
+  document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
   const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
   const activeRun = activeRunsByConversation.get(conversation.id);
   $("submit").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0;
@@ -360,8 +367,9 @@ function renderMessage(message) {
   const plan = projectPlanStatuses(message.plan || [], message.events || []);
   const runtime = message.runtimeId ? ` · ${message.runtimeId}` : "";
   const reasoning = isLive && message.reasoning ? `<details class="live-reasoning" open><summary>模型思考</summary><div class="reasoning-body">${formatText(message.reasoning)}</div></details>` : "";
-  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || "Run 失败")}</div>` : message.text ? (message.status === "completed" ? renderMarkdown(message.text) : formatText(message.text)) : `<span class="thinking"><i></i><i></i><i></i></span>`;
-  const stateLabel = message.status === "running" ? "执行中" : message.status === "completed" ? "已完成" : message.status === "failed" ? "未完成" : message.status || "";
+  const humanLoop = renderHumanLoop(message);
+  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || "Run 失败")}</div>` : message.text ? (message.status === "completed" ? renderMarkdown(message.text) : formatText(message.text)) : humanLoop || `<span class="thinking"><i></i><i></i><i></i></span>`;
+  const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.status === "running" ? "执行中" : message.status === "completed" ? "已完成" : message.status === "failed" ? "未完成" : message.status || "";
   const stateIcon = message.status === "completed" ? "✓" : message.status === "failed" ? "!" : "";
   const completedAt = formatMessageTime(message.completedAt);
   const duration = formatConversationDuration(message.createdAt, message.completedAt);
@@ -371,6 +379,46 @@ function renderMessage(message) {
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
   return `<article class="msg assistant ${isLive ? "live" : "final"}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${message.status === "completed" ? "completed" : message.status === "failed" ? "failed" : ""}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text">${output}</div>${responseTiming}</div></div></article>`;
+}
+
+async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
+  try {
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assignmentId)}/human-loop/current`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
+    if (!response.ok) return false;
+    const request = (await response.json())?.request;
+    const next = request && request.status === "open" ? request : undefined;
+    if (JSON.stringify(assistant.humanLoop) === JSON.stringify(next)) return false;
+    assistant.humanLoop = next;
+    return true;
+  } catch { return false; }
+}
+
+function renderHumanLoop(message) {
+  const request = message.humanLoop;
+  if (!request || request.status !== "open") return "";
+  const schema = request.responseSchema || {};
+  const key = `${message.id}-${request.id}`;
+  let fields = "";
+  if (schema.type === "select") fields = `<div class="human-loop-options">${(schema.options || []).map((option) => `<label class="human-loop-option"><input type="checkbox" name="human-${key}" value="${escapeHtml(option.id)}" ${schema.maxSelections === 1 ? "data-human-single" : ""}/><span><b>${escapeHtml(option.label)}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}</div>`;
+  else if (schema.type === "form") fields = `<div class="human-loop-form">${(schema.fields || []).map((field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}${field.valueType === "textarea" ? `<textarea data-human-field="${escapeHtml(field.id)}" ${field.required ? "required" : ""}></textarea>` : `<input data-human-field="${escapeHtml(field.id)}" type="${field.valueType === "date" ? "date" : field.valueType === "number" ? "number" : "text"}" ${field.required ? "required" : ""}/>`}${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}</label>`).join("")}</div>`;
+  else fields = `<div class="human-loop-confirm"><label><input type="radio" name="human-${key}" value="accept" checked/>${escapeHtml(schema.acceptLabel || "确认")}</label><label><input type="radio" name="human-${key}" value="reject"/>${escapeHtml(schema.rejectLabel || "拒绝")}</label></div>`;
+  return `<section class="human-loop-card" data-human-loop="${escapeHtml(request.id)}" data-human-kind="${escapeHtml(schema.type || "")}" data-human-revision="${request.revision}"><b>${escapeHtml(request.title)}</b><p>${escapeHtml(request.prompt)}</p>${fields}<button type="button" class="human-loop-submit" data-human-loop-submit="${message.id}">提交</button><small class="human-loop-error" aria-live="polite"></small></section>`;
+}
+
+async function submitHumanLoop(messageId) {
+  const assistant = [...(activeConversation()?.messages || [])].find((message) => message.id === messageId);
+  const request = assistant?.humanLoop; const card = document.querySelector(`[data-human-loop="${CSS.escape(request?.id || "")}"]`);
+  if (!assistant?.assignmentId || !request || !card) return;
+  const schema = request.responseSchema || {}; let value;
+  if (schema.type === "select") value = [...card.querySelectorAll("input:checked")].map((input) => input.value);
+  else if (schema.type === "form") { value = {}; card.querySelectorAll("[data-human-field]").forEach((field) => { value[field.dataset.humanField] = field.value; }); }
+  else value = card.querySelector("input:checked")?.value === "reject" ? { accepted: false } : true;
+  const error = card.querySelector(".human-loop-error");
+  try {
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/human-loop/${encodeURIComponent(request.id)}/respond`, { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() }, body: JSON.stringify({ value, expectedRevision: request.revision }) });
+    const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    assistant.humanLoop = undefined; saveSessions(); render(); setStatus("已收到你的回答，继续执行", "running");
+  } catch (cause) { if (error) error.textContent = `提交失败：${cause instanceof Error ? cause.message : String(cause)}`; }
 }
 
 function completeAssistantMessage(assistant, event) {
@@ -582,29 +630,6 @@ function formatDuration(ms) { if (typeof ms !== "number") return ""; if (ms < 10
 function formatBytes(bytes) { if (typeof bytes !== "number") return "大小未知"; if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
 function setStatus(text, tone = "") { $("runtime-status").innerHTML = `<i class="status-dot"></i> ${escapeHtml(text)}`; $("runtime-status").className = `status-pill ${tone}`; }
 function formatText(text) { return escapeHtml(text).replace(/\n/g, "<br />"); }
-function renderMarkdown(text) {
-  const fence = "```";
-  return escapeHtml(text).split(fence).map((part, index) => index % 2 ? `<pre class="md-code"><code>${part.replace(/^\n|\n$/g, "")}</code></pre>` : renderMarkdownBlocks(part)).join("");
-}
-function renderMarkdownBlocks(text) {
-  const lines = text.split("\n"); const output = []; let paragraph = []; let listTag = ""; let listItems = [];
-  const flushParagraph = () => { if (paragraph.length) { output.push(`<p>${paragraph.map(renderMarkdownInline).join("<br />")}</p>`); paragraph = []; } };
-  const flushList = () => { if (listTag) { output.push(`<${listTag}>${listItems.join("")}</${listTag}>`); listTag = ""; listItems = []; } };
-  for (const line of lines) {
-    const heading = /^(#{1,3})\s+(.+)$/u.exec(line);
-    const unordered = /^(?:-|\*)\s+(.+)$/u.exec(line);
-    const ordered = /^\d+\.\s+(.+)$/u.exec(line);
-    if (heading) { flushParagraph(); flushList(); output.push(`<h${heading[1].length}>${renderMarkdownInline(heading[2])}</h${heading[1].length}>`); }
-    else if (unordered || ordered) { flushParagraph(); const nextListTag = unordered ? "ul" : "ol"; if (listTag !== nextListTag) { flushList(); listTag = nextListTag; } listItems.push(`<li>${renderMarkdownInline((unordered || ordered)[1])}</li>`); }
-    else if (/^&gt;\s+/.test(line)) { flushParagraph(); flushList(); output.push(`<blockquote>${renderMarkdownInline(line.slice(5))}</blockquote>`); }
-    else if (!line.trim()) { flushParagraph(); flushList(); }
-    else { flushList(); paragraph.push(renderMarkdownInline(line)); }
-  }
-  flushParagraph(); flushList(); return output.join("");
-}
-function renderMarkdownInline(text) {
-  return text.replace(/`([^`]+)`/g, '<code class="md-inline">$1</code>').replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-}
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>\"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char])); }
 async function call(path, tenantId, userId, body, signal) { const response = await fetch(`${api}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": tenantId, "x-user-id": userId }, body: JSON.stringify(body), ...(signal === undefined ? {} : { signal }) }); const parsed = await response.json(); if (!response.ok) throw new Error(parsed.error || `HTTP ${response.status}`); return parsed; }
 async function toBase64(file) { const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary); }

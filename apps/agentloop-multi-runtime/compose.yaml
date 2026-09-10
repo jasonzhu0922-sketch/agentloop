@@ -8,7 +8,7 @@ x-runtime-environment: &runtime_environment
   # This exact in-container location is mounted from one shared volume on every
   # Runtime Host. RunService isolates task files by conversations/<conversationId>.
   WORKSPACE_ROOT: /app/apps/agentloop-multi-runtime/workspace
-  MAX_CONCURRENT_RUNS: 2
+  MAX_CONCURRENT_RUNS: 20
   # Keep the local demo control plane responsive after a Router restart.
   HEARTBEAT_INTERVAL_MS: 1000
 

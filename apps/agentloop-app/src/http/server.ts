@@ -302,6 +302,31 @@ export function createAgentLoopServer(
           actions: await dependencies.runs.actionsForRun(user.id, decodeURIComponent(runActionsMatch[1])),
         });
       }
+      const currentHumanLoopMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/human-loop\/current$/);
+      if (request.method === "GET" && currentHumanLoopMatch !== null) {
+        return sendJson(response, 200, {
+          request: await dependencies.runs.currentHumanLoop(user.id, decodeURIComponent(currentHumanLoopMatch[1])),
+        });
+      }
+      const humanLoopHistoryMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/human-loop\/history$/);
+      if (request.method === "GET" && humanLoopHistoryMatch !== null) {
+        return sendJson(response, 200, {
+          requests: await dependencies.runs.humanLoopHistory(user.id, decodeURIComponent(humanLoopHistoryMatch[1])),
+        });
+      }
+      const humanLoopResponseMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/human-loop\/([^/]+)\/respond$/);
+      if (request.method === "POST" && humanLoopResponseMatch !== null) {
+        const body = requireRecord(await readJson(request));
+        return sendJson(response, 200, {
+          response: await dependencies.runs.respondHumanLoop(
+            user.id,
+            decodeURIComponent(humanLoopResponseMatch[1]),
+            decodeURIComponent(humanLoopResponseMatch[2]),
+            body.value,
+            body.expectedRevision,
+          ),
+        });
+      }
       const runRecoveryMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/recovery$/);
       if (request.method === "GET" && runRecoveryMatch !== null) {
         return sendJson(response, 200, await dependencies.runs.recoveryForRun(user.id, decodeURIComponent(runRecoveryMatch[1])));

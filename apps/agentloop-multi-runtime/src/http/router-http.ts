@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
+import type { HumanLoopRequest, HumanLoopResponse } from "@zhujun/agentloop";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 
@@ -14,6 +15,8 @@ interface RouterTaskApi {
   heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
   cancel?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus }>;
   events?(id: string, afterSeq: number): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>;
+  currentHumanLoop?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly request: HumanLoopRequest | undefined } | undefined>;
+  respondHumanLoop?(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly response: HumanLoopResponse } | undefined>;
 }
 
 export function createRouterHttpServer(router: RouterTaskApi, options: {
@@ -134,6 +137,23 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         }
         return json(response, 200, await router.cancel(decodeURIComponent(cancelMatch[1])));
       }
+      const humanLoopCurrentMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/human-loop\/current$/);
+      if (request.method === "GET" && humanLoopCurrentMatch !== null) {
+        if (router.currentHumanLoop === undefined) return json(response, 501, { error: "human_loop_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.currentHumanLoop(decodeURIComponent(humanLoopCurrentMatch[1]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
+        return json(response, 200, { request: projection.request });
+      }
+      const humanLoopRespondMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/human-loop\/([^/]+)\/respond$/);
+      if (request.method === "POST" && humanLoopRespondMatch !== null) {
+        if (router.respondHumanLoop === undefined) return json(response, 501, { error: "human_loop_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const body = record(await readJson(request), "request body");
+        const projection = await router.respondHumanLoop(decodeURIComponent(humanLoopRespondMatch[1]), decodeURIComponent(humanLoopRespondMatch[2]), { value: body.value, expectedRevision: positiveInteger(body.expectedRevision, "expectedRevision") });
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
+        return json(response, 200, { response: projection.response });
+      }
       const eventsMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events$/);
       const eventsStreamMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events\/stream$/);
       if (request.method === "GET" && eventsStreamMatch !== null) {
@@ -245,6 +265,24 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     const body = await response.json() as { events?: RuntimeRunEvent[]; error?: string };
     if (!response.ok || !Array.isArray(body.events)) throw new Error(body.error ?? `runtime events failed with HTTP ${response.status}`);
     return body.events;
+  }
+
+  async currentHumanLoop(remoteRunId: string) {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/human-loop/current`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { request?: import("@zhujun/agentloop").HumanLoopRequest; error?: string };
+    if (!response.ok) throw new Error(body.error ?? `runtime Human-in-the-Loop query failed with HTTP ${response.status}`);
+    return body.request;
+  }
+
+  async respondHumanLoop(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }) {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/human-loop/${encodeURIComponent(requestId)}/respond`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      method: "POST", headers: { "content-type": "application/json", ...(this.authorization === undefined ? {} : { authorization: this.authorization }) }, body: JSON.stringify(input),
+    });
+    const body = await response.json() as { response?: import("@zhujun/agentloop").HumanLoopResponse; error?: string };
+    if (!response.ok || body.response === undefined) throw new Error(body.error ?? `runtime Human-in-the-Loop response failed with HTTP ${response.status}`);
+    return body.response;
   }
 }
 

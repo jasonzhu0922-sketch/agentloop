@@ -9,6 +9,7 @@ import type {
   SourceKind,
   StepExecutionBinding,
 } from "./contracts.ts";
+import type { UploadedSourceSummary } from "../runtime/contracts.ts";
 
 const ARTIFACT_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "artifact_path",
@@ -89,9 +90,13 @@ export function stepHasSourceKind(step: Pick<PlanStep, "executionBinding">, kind
   return step.executionBinding.sourceKinds.includes(kind);
 }
 
-export function planningCapabilitiesFromToolNames(toolNames: readonly string[]): PlanningCapability[] {
+export function planningCapabilitiesFromToolNames(
+  toolNames: readonly string[],
+  sources?: readonly UploadedSourceSummary[],
+): PlanningCapability[] {
   const available = new Set(toolNames);
   return CAPABILITY_DEFINITIONS
+    .filter((definition) => capabilityIsAvailableForSources(definition.id, sources))
     .map((definition) => ({
       ...definition,
       resolvedToolNames: resolveToolNamesForCapabilities([definition.id], available),
@@ -104,8 +109,11 @@ export function planningCapabilitiesFromToolNames(toolNames: readonly string[]):
  * Merges kernel capabilities with host-declared source vocabulary. The host
  * owns vocabulary registration; the kernel only binds declared IDs to Tools.
  */
-export function planningCapabilitiesFromTools(tools: readonly PlanningToolSummary[]): PlanningCapability[] {
-  const staticCapabilities = planningCapabilitiesFromToolNames(tools.map((tool) => tool.name));
+export function planningCapabilitiesFromTools(
+  tools: readonly PlanningToolSummary[],
+  sources?: readonly UploadedSourceSummary[],
+): PlanningCapability[] {
+  const staticCapabilities = planningCapabilitiesFromToolNames(tools.map((tool) => tool.name), sources);
   const dynamic = new Map<string, PlanningCapability>();
   for (const tool of tools) {
     const source = tool.source;
@@ -267,11 +275,11 @@ function isExternalApiToolName(toolName: string): boolean {
 
 function inferSourceKinds(capabilities: readonly string[], evidenceKinds: readonly EvidenceKind[]): SourceKind[] {
   const kinds = new Set<SourceKind>();
-  if (capabilities.includes("uploaded_source_read")) kinds.add("uploaded_source");
-  if (capabilities.includes("visible_directory_read")) kinds.add("visible_directory");
+  if (capabilities.includes("uploaded_source_read") || capabilities.includes("uploaded_table_extraction")) kinds.add("uploaded_source");
+  if (capabilities.includes("visible_directory_read") || capabilities.includes("visible_table_extraction")) kinds.add("visible_directory");
   if (capabilities.includes("web_research")) kinds.add("web");
   if (capabilities.includes("external_api_call")) kinds.add("web");
-  if (capabilities.includes("workspace_file_read") || capabilities.includes("workspace_artifact_write")) kinds.add("workspace_file");
+  if (capabilities.includes("workspace_file_read") || capabilities.includes("workspace_structured_artifact_read") || capabilities.includes("workspace_artifact_write")) kinds.add("workspace_file");
   if (evidenceKinds.some((kind) => SOURCE_EVIDENCE_KINDS.has(kind)) && kinds.size === 0) {
     kinds.add("conversation_workset");
   }
@@ -287,8 +295,11 @@ function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect 
   if (capabilities.includes("custom_tool_call")) return "workspace_write";
   if (
     capabilities.includes("uploaded_source_read")
+    || capabilities.includes("uploaded_table_extraction")
     || capabilities.includes("visible_directory_read")
+    || capabilities.includes("visible_table_extraction")
     || capabilities.includes("workspace_file_read")
+    || capabilities.includes("workspace_structured_artifact_read")
     || capabilities.includes("skill_instruction_load")
   ) {
     return "workspace_read";
@@ -335,22 +346,38 @@ const CORE_WORKSPACE_TOOL_NAMES = new Set([
   "load_skill",
 ]);
 
+function capabilityIsAvailableForSources(
+  capability: string,
+  sources: readonly UploadedSourceSummary[] | undefined,
+): boolean {
+  if (capability !== "uploaded_table_extraction" || sources === undefined) return true;
+  return sources.some((source) => source.status === "ready" && isTabularUpload(source.extension));
+}
+
+function isTabularUpload(extension: string): boolean {
+  return extension === ".csv" || extension === ".xlsx" || extension === ".xlsm";
+}
+
 const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
-  uploaded_source_read: ["read_source", "extract_source_tables"],
+  uploaded_source_read: ["read_source"],
+  uploaded_table_extraction: ["extract_source_tables"],
   visible_directory_read: [
     "visible_index_directory",
     "visible_find_files",
     "visible_read_file",
     "visible_read_files",
     "visible_search_text",
-    "visible_extract_tables",
   ],
+  visible_table_extraction: ["visible_extract_tables"],
   web_research: ["websearch", "webfetch"],
   workspace_file_read: [
     "computer_list_directory",
     "computer_find_files",
     "computer_search_text",
     "computer_read_file",
+    "computer_read_json",
+  ],
+  workspace_structured_artifact_read: [
     "computer_read_json",
     "computer_summarize_table_artifact",
     "computer_aggregate_table_artifact",
@@ -374,21 +401,41 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "uploaded_source_read",
     category: "information_retrieval",
     label: "Read uploaded source",
-    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    produces: ["source_summary", "explicit_caveats"],
     sourceKinds: ["uploaded_source"],
     sideEffect: "none",
     risk: "low",
     constraints: ["requires uploaded source grant"],
   },
   {
+    id: "uploaded_table_extraction",
+    category: "structured_extraction",
+    label: "Extract uploaded table",
+    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    sourceKinds: ["uploaded_source"],
+    sideEffect: "workspace_write",
+    risk: "low",
+    constraints: ["requires at least one authorized tabular uploaded source"],
+  },
+  {
     id: "visible_directory_read",
     category: "information_retrieval",
     label: "Read visible directory",
-    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    produces: ["source_summary", "explicit_caveats"],
     sourceKinds: ["visible_directory"],
     sideEffect: "workspace_read",
     risk: "low",
     constraints: ["requires visible directory grant"],
+  },
+  {
+    id: "visible_table_extraction",
+    category: "structured_extraction",
+    label: "Extract visible table",
+    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    sourceKinds: ["visible_directory"],
+    sideEffect: "workspace_read",
+    risk: "low",
+    constraints: ["requires a visible-directory table source selected by Runtime tools"],
   },
   {
     id: "web_research",
@@ -403,10 +450,20 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "workspace_file_read",
     category: "information_retrieval",
     label: "Read workspace files",
+    produces: ["source_summary", "explicit_caveats"],
+    sourceKinds: ["workspace_file"],
+    sideEffect: "workspace_read",
+    risk: "low",
+  },
+  {
+    id: "workspace_structured_artifact_read",
+    category: "structured_data",
+    label: "Read structured workspace artifact",
     produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "derived_aggregation", "explicit_caveats"],
     sourceKinds: ["workspace_file"],
     sideEffect: "workspace_read",
     risk: "low",
+    constraints: ["requires a durable structured artifact produced by an earlier step"],
   },
   {
     id: "workspace_artifact_write",

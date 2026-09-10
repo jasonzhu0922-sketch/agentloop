@@ -15,6 +15,18 @@ export function createRuntimeHostHttpServer(host: AgentLoopRuntimeHost, options:
         }
         return json(response, 200, await host.getRun(decodeURIComponent(runMatch[1])));
       }
+      const humanLoopCurrentMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/human-loop\/current$/);
+      if (request.method === "GET" && humanLoopCurrentMatch !== undefined && humanLoopCurrentMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        return json(response, 200, { request: await host.currentHumanLoop(decodeURIComponent(humanLoopCurrentMatch[1])) });
+      }
+      const humanLoopRespondMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/human-loop\/([^/]+)\/respond$/);
+      if (request.method === "POST" && humanLoopRespondMatch !== undefined && humanLoopRespondMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        const body = readRecord(await readJson(request));
+        if (typeof body.expectedRevision !== "number") throw new TypeError("expectedRevision must be a number");
+        return json(response, 200, { response: await host.respondHumanLoop(decodeURIComponent(humanLoopRespondMatch[1]), decodeURIComponent(humanLoopRespondMatch[2]), { value: body.value, expectedRevision: body.expectedRevision }) });
+      }
       const artifactPreviewMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/artifacts\/([^/]+)\/preview$/);
       if (request.method === "GET" && artifactPreviewMatch !== undefined && artifactPreviewMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
@@ -75,6 +87,7 @@ async function readJson(request: import("node:http").IncomingMessage): Promise<u
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
+function readRecord(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("request body must be an object"); return value as Record<string, unknown>; }
 
 function json(response: import("node:http").ServerResponse, status: number, body: unknown): void {
   response.statusCode = status;

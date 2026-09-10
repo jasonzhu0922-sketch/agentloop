@@ -97,6 +97,7 @@ import {
 import { TerminalCommitter } from "./terminal-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
+import { HumanLoopRepository, type HumanLoopRequest, type HumanLoopResponse, type HumanLoopRequirement } from "./human-loop.ts";
 import {
   ModelPlanRevisionAssessor,
   ModelRecoveryPlanner,
@@ -289,6 +290,7 @@ export class RunService {
   private readonly terminal: TerminalCommitter;
   private readonly actions: RuntimeActionRepository;
   private readonly recovery: RecoveryRepository;
+  private readonly humanLoops: HumanLoopRepository;
   private readonly eventHub = new RunEventHub();
   private readonly runEventLogSink?: RunEventLogSink;
   private readonly activeRunControllers = new Map<string, AbortController>();
@@ -352,7 +354,8 @@ export class RunService {
     this.plans = new PlanRepository(options.database);
     this.sources = new SourceRepository(options.database);
     this.sourceIntake = new SourceIntakeService(this.sources, this.workspaceRoot);
-    this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database));
+    this.humanLoops = new HumanLoopRepository(options.database);
+    this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
     this.actions = new RuntimeActionRepository(options.database);
     this.recovery = new RecoveryRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
@@ -409,6 +412,45 @@ export class RunService {
     const row = await this.runs.getByOwner(runId, actorUserId);
     if (row === undefined) throw notFound("Run");
     return this.toRunRecordWithSources(row);
+  }
+
+  async currentHumanLoop(actorUserId: string, runId: string): Promise<HumanLoopRequest | undefined> {
+    await this.get(actorUserId, runId);
+    return this.humanLoops.current(runId);
+  }
+
+  async humanLoopHistory(actorUserId: string, runId: string): Promise<HumanLoopRequest[]> {
+    await this.get(actorUserId, runId);
+    return this.humanLoops.list(runId);
+  }
+
+  async respondHumanLoop(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<HumanLoopResponse> {
+    await this.get(actorUserId, runId);
+    const revision = optionalPositiveInteger(expectedRevision, "expectedRevision", 1, Number.MAX_SAFE_INTEGER);
+    if (revision === undefined) throw new AppError("BAD_REQUEST", "expectedRevision is required", 400);
+    const request = await this.humanLoops.current(runId);
+    if (request?.id !== requestId) throw new AppError("CONFLICT", "Human-in-the-Loop request is no longer open", 409);
+    const response = await this.humanLoops.respond({ requestId, runId, actorUserId, expectedRevision: revision, value });
+    if (request.actionId !== undefined) {
+      const action = (await this.actions.list(runId)).find((item) => item.id === request.actionId);
+      if (action !== undefined && action.state === "recovery_required") {
+        const decision = await this.recovery.submit(runId, {
+          actionId: action.id,
+          expectedActionRevision: action.revision,
+          decision: "resume_step",
+          rationale: "A validated Human-in-the-Loop response is available for the interrupted Step.",
+          evidenceRefs: [request.id, response.id],
+        });
+        await this.recovery.admit(decision.id, { kind: "ready_to_resume" });
+        void this.resumeRecovery(actorUserId, runId).catch(async (error) => {
+          await this.appendRunEvent(runId, {
+            type: "human_loop.resume_failed",
+            data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
+          });
+        });
+      }
+    }
+    return response;
   }
 
   async hostRun(actorUserId: string, runId: string): Promise<HostRunProjection> {
@@ -1472,7 +1514,7 @@ export class RunService {
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
-        availableCapabilities: planningCapabilitiesFromTools(allowedToolSummaries),
+        availableCapabilities: planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
         ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
         workspaceFacts: planningWorkspace,
         visibleDirectories,
@@ -1521,6 +1563,7 @@ export class RunService {
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
+          availableCapabilities: planningTask.availableCapabilities,
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
@@ -1558,6 +1601,7 @@ export class RunService {
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
+          availableCapabilities: planningTask.availableCapabilities,
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
@@ -1630,6 +1674,28 @@ export class RunService {
         ? error
         : new AppError("INTERNAL_ERROR", "Run failed", 500);
       if ((await this.runs.get(runId))?.status === "running") {
+        if (appError.code === "HUMAN_LOOP_REQUIRED" && planId !== undefined && runningStepId !== undefined) {
+          const requirement = appError.details?.requirement;
+          if (requirement === undefined || typeof requirement !== "object" || Array.isArray(requirement)) {
+            throw new AppError("INTERNAL_ERROR", "Human-in-the-Loop request was not structured", 500);
+          }
+          const action = await this.actions.requireHumanLoopResume({
+            runId,
+            planId,
+            stepId: runningStepId,
+            metadata: { sourceToolCallId: appError.details?.sourceToolCallId },
+          });
+          const request = await this.humanLoops.create({
+            ...(requirement as HumanLoopRequirement),
+            runId,
+            planId,
+            stepId: runningStepId,
+            actionId: action.id,
+            origin: "tool",
+          });
+          await emit({ type: "run.waiting_user", data: { runId, planId, stepId: runningStepId, requestId: request.id, kind: request.kind } });
+          return this.get(actorUserId, runId);
+        }
         const failedBoundary = failedBoundaryFromErrorDetails(appError.details);
         if (
           appError.code === "STEP_NOT_COMPLETED"
@@ -2038,6 +2104,7 @@ export class RunService {
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
           const evidence: StepEvidence = {
             candidateOutput: candidate.output,
+            deliveryCandidate: candidate.deliveryCandidate,
             toolCalls: candidate.toolEvidence,
             modelSteps: candidate.modelSteps,
           };
@@ -2049,6 +2116,7 @@ export class RunService {
             : input.assessor;
           const modelEvidence: StepEvidence = {
             candidateOutput: candidate.output,
+            deliveryCandidate: candidate.deliveryCandidate,
             toolCalls: candidate.projectedToolEvidence,
             modelSteps: candidate.modelSteps,
           };
@@ -2234,6 +2302,7 @@ export class RunService {
       availableSkills: privateSkills,
       availableToolNames,
       availableTools: availableToolSummaries,
+      availableCapabilities: planningCapabilitiesFromTools(availableToolSummaries, sources),
       availableUploadedSourceIds: sources.map((source) => source.id),
       availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
       taskIntent,
@@ -4934,6 +5003,7 @@ function stepAssessmentSignature(input: {
 function assessmentEvidenceSignature(evidence: StepEvidence): Record<string, unknown> {
   return {
     candidateOutput: evidence.candidateOutput.trim(),
+    deliveryCandidate: evidence.deliveryCandidate,
     toolCalls: [
       ...new Set(evidence.toolCalls.map((toolCall) => [
         toolCall.toolName,

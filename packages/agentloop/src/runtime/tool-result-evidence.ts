@@ -27,20 +27,38 @@ export function runtimeEvidenceRecordsFromToolResult(result: string): readonly R
 
 export function runtimeEvidenceKindArrays(record: Record<string, unknown> | undefined): RuntimeEvidenceKindArrays {
   const evidenceKinds = recordValue(record?.evidenceKinds);
+  // Source receipts commonly carry durable references and caveats as their
+  // structured fields. They are semantic evidence in their own right; a
+  // producer must not have to duplicate them in a parallel kind list merely
+  // for Runtime assessment to observe them.
+  const hasSourceReferences = hasObservableSourceReference(record?.sourceRefs);
+  const hasCaveats = stringArrayValue(record?.caveats).length > 0;
   return {
     satisfied: uniqueStrings([
       ...stringArrayValue(evidenceKinds?.satisfied),
       ...stringArrayValue(record?.satisfiedEvidenceKinds),
+      ...(hasSourceReferences ? ["source_urls"] : []),
     ]),
     caveated: uniqueStrings([
       ...stringArrayValue(evidenceKinds?.caveated),
       ...stringArrayValue(record?.caveatedEvidenceKinds),
+      ...(hasCaveats ? ["explicit_caveats"] : []),
     ]),
     failed: uniqueStrings([
       ...stringArrayValue(evidenceKinds?.failed),
       ...stringArrayValue(record?.failedEvidenceKinds),
     ]),
   };
+}
+
+function hasObservableSourceReference(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((item) => {
+    if (stringValue(item) !== undefined) return true;
+    const reference = recordValue(item);
+    return reference !== undefined && ["uri", "url", "serverKey", "toolName", "receiptId"]
+      .some((field) => stringValue(reference[field]) !== undefined);
+  });
 }
 
 export function canonicalArtifactAcceptanceVerdict(record: Record<string, unknown> | undefined): string | undefined {

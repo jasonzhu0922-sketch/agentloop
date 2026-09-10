@@ -82,8 +82,11 @@ function outcomeLeafRoleForFixture(step: LegacyPlanStepFixture): "fact_acquisiti
     name === "web_research"
     || name === "external_api_call"
     || name === "uploaded_source_read"
+    || name === "uploaded_table_extraction"
     || name === "visible_directory_read"
+    || name === "visible_table_extraction"
     || name === "workspace_file_read"
+    || name === "workspace_structured_artifact_read"
   )) return "fact_acquisition";
   if (/repair|fix|修复/.test(text)) return "repair";
   if (step.requiredCapabilities.some((name) => name === "workspace_artifact_write" || name === "artifact_acceptance")) return "produce";
@@ -99,8 +102,11 @@ function evidenceContractForFixture(step: LegacyPlanStepFixture): {
     name === "web_research"
     || name === "external_api_call"
     || name === "uploaded_source_read"
+    || name === "uploaded_table_extraction"
     || name === "visible_directory_read"
+    || name === "visible_table_extraction"
     || name === "workspace_file_read"
+    || name === "workspace_structured_artifact_read"
   )) {
     return { requiredKinds: ["source_summary", "source_urls", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" };
   }
@@ -1148,7 +1154,7 @@ test("uploaded source IDs bind read_source without entering the ToolSource names
   );
 });
 
-test("uploaded source bindings expose structured extraction alongside text reading when both tools are authorized", () => {
+test("uploaded table extraction is a distinct capability from uploaded source reading", () => {
   const sourceId = "src_63636363636363636363636363636363";
   const proposal: PlanProposal = {
     goal: "Analyze the selected uploaded spreadsheet.",
@@ -1159,7 +1165,7 @@ test("uploaded source bindings expose structured extraction alongside text readi
       dependencies: [],
       skillIds: [],
       role: "fact_acquisition",
-      requiredCapabilities: ["uploaded_source_read"],
+      requiredCapabilities: ["uploaded_source_read", "uploaded_table_extraction"],
       sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
       evidenceContract: {
         requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
@@ -1183,6 +1189,58 @@ test("uploaded source bindings expose structured extraction alongside text readi
 
   assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["read_source", "extract_source_tables"]);
   assert.deepEqual(admitted.steps[0]?.executionBinding.requiredUploadedSourceIds, [sourceId]);
+});
+
+test("source capability catalog and admission never promise tabular extraction for a non-tabular upload", () => {
+  const sourceId = "src_73737373737373737373737373737373";
+  const source = {
+    id: sourceId,
+    originalName: "project-materials.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: ".docx",
+    byteSize: 1024,
+    sha256: "b".repeat(64),
+    status: "ready" as const,
+    chunkCount: 1,
+    truncated: false,
+  };
+  const tools = [
+    { name: "read_source", description: "Read authorized uploaded source chunks." },
+    { name: "extract_source_tables", description: "Extract authorized uploaded spreadsheet tables." },
+  ];
+  const capabilities = planningCapabilitiesFromTools(tools, [source]);
+  assert.equal(capabilities.some((capability) => capability.id === "uploaded_table_extraction"), false);
+
+  assert.throws(
+    () => admitPlan({
+      runId: "non-tabular-structured-contract",
+      proposal: {
+        goal: "Extract document facts.",
+        selectedSkillIds: [],
+        steps: [{
+          id: "extract-document-facts",
+          objective: "Read the uploaded document and make its facts reusable.",
+          dependencies: [],
+          skillIds: [],
+          role: "fact_acquisition",
+          requiredCapabilities: ["uploaded_source_read"],
+          sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+          evidenceContract: {
+            requiredKinds: ["source_summary", "structured_extraction_artifact", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+          successCriteria: [{ id: "facts", description: "Document facts are available.", source: "planner" }],
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(tools.map((tool) => tool.name)),
+      availableTools: tools,
+      availableCapabilities: capabilities,
+      availableUploadedSourceIds: [sourceId],
+    }),
+    (error: unknown) => error instanceof AppError
+      && /bound capabilities cannot produce: structured_extraction_artifact/.test(error.message),
+  );
 });
 
 test("visible directory IDs bind visible tools without entering the ToolSource namespace", () => {
@@ -1517,13 +1575,61 @@ test("Plan admission normalizes conversation-only data analysis final leaves awa
     "structured_extraction_artifact",
     "explicit_caveats",
   ]);
-  assert.deepEqual(admitted.steps[1].evidenceContract?.requiredKinds, [
-    "explicit_caveats",
-  ]);
+  assert.equal(admitted.steps[1].evidenceContract, undefined);
   assert.deepEqual(admitted.steps[1].successCriteria.map((criterion) => criterion.id), [
     "delivery_receipt",
-    "explicit_caveats",
   ]);
+});
+
+test("Plan admission reuses completed source evidence for a conversation terminal leaf", () => {
+  const proposal: PlanProposal = {
+    goal: "assess an uploaded project document in the conversation",
+    selectedSkillIds: [],
+    steps: [{
+      id: "acquire-project-facts",
+      objective: "Read the uploaded source and record bounded project facts and missing data.",
+      dependencies: [],
+      role: "fact_acquisition",
+      skillIds: [],
+      requiredCapabilities: ["uploaded_source_read"],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source facts are available.", source: "planner" },
+        { id: "explicit_caveats", description: "Source gaps are explicit.", source: "planner" },
+      ],
+    }, {
+      id: "deliver-assessment",
+      objective: "Use the acquired facts to provide a user-facing assessment.",
+      dependencies: ["acquire-project-facts"],
+      role: "produce",
+      skillIds: [],
+      requiredCapabilities: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source facts are available.", source: "planner" },
+        { id: "explicit_caveats", description: "Source gaps are explicit.", source: "planner" },
+      ],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-reuse-source-evidence",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["read_source"]),
+    taskIntent: { deliverySurface: "conversation", artifactKind: "none" },
+  });
+
+  assert.deepEqual(admitted.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "explicit_caveats"]);
+  assert.equal(admitted.steps[1]?.evidenceContract, undefined);
+  assert.deepEqual(admitted.steps[1]?.successCriteria.map((criterion) => criterion.id), ["conversation_delivery"]);
+  assert.deepEqual(admitted.steps[1]?.executionBinding.evidenceKinds, []);
 });
 
 test("Plan admission preserves artifact gates for workspace artifact delivery", () => {
@@ -4799,6 +4905,52 @@ test("evidence-gate rejects an artifact receipt when a source contract is unmet"
   assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["source_summary", "explicit_caveats"]);
 });
 
+test("evidence-gate recognizes source references and caveats embedded in a source receipt", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("query-enterprise"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Source facts are available.", source: "planner" },
+        { id: "source_urls", description: "Source URLs or equivalent references are available.", source: "planner" },
+        { id: "explicit_caveats", description: "Source limitations are explicit.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "The source returned a bounded enterprise record with the stated limitations.",
+      toolCalls: [{
+        toolCallId: "enterprise-detail",
+        toolName: "computer_run_command",
+        isError: false,
+        result: JSON.stringify({
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            sourceRefs: [{ uri: "https://example.test/enterprise/detail", title: "Enterprise detail" }],
+            caveats: ["The response is a point-in-time record."],
+            evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.feedback, "");
+});
+
 test("evidence-gate accepts structured source evidence and semantic caveats", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
@@ -5532,7 +5684,9 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
       modelFactory: () => new StaticModel({ content: "partial result", toolCalls: [], finishReason: "stop" }),
       plannerFactory: () => singleStepTestPlanner(),
       assessorFactory: () => ({
-        assess: async (input) => ({
+        assess: async (input) => {
+          assert.equal(input.evidence.deliveryCandidate?.schema, "agentloop.runtimeDeliveryCandidate/v1");
+          return {
           id: `reject-${input.attempt}`,
           planId: input.planId,
           stepId: input.step.id,
@@ -5551,7 +5705,8 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
           feedback: "Delivery receipt evidence is missing.",
           failedBoundary,
           createdAt: Date.now(),
-        }),
+          };
+        },
       }),
       maxSteps: 2,
     });

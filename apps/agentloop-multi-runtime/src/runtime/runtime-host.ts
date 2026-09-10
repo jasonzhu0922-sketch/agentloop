@@ -1,4 +1,4 @@
-import type { ProcessArtifact, ProcessArtifactPreview, RunService } from "@zhujun/agentloop";
+import type { HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RunService } from "@zhujun/agentloop";
 import type { PortableResourceRef, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeRunEvent, RuntimeRunStatus } from "../domain/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "./host-dispatch-store.ts";
 
@@ -19,7 +19,7 @@ export interface RuntimeCapacityGate {
 export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   private readonly dispatches = new Map<string, Promise<RuntimeDispatchResult>>();
   private readonly ownersByRunId = new Map<string, string>();
-  private readonly runs: Pick<RunService, "start" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact">>;
+  private readonly runs: Pick<RunService, "start" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "currentHumanLoop" | "respondHumanLoop">>;
   private readonly resourceImporter: ResourceImporter;
   private readonly capacity?: RuntimeCapacityGate;
   private readonly dispatchStore?: HostDispatchStore;
@@ -93,6 +93,18 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     return (await this.runs.events(ownerUserId, remoteRunId))
       .filter((event) => event.seq > afterSeq)
       .map((event) => ({ seq: event.seq, type: event.type, data: event.data, createdAt: event.createdAt }));
+  }
+
+  async currentHumanLoop(remoteRunId: string): Promise<HumanLoopRequest | undefined> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined || this.runs.currentHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop query is not configured");
+    return this.runs.currentHumanLoop(ownerUserId, remoteRunId);
+  }
+
+  async respondHumanLoop(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<HumanLoopResponse> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined || this.runs.respondHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop response is not configured");
+    return this.runs.respondHumanLoop(ownerUserId, remoteRunId, requestId, input.value, input.expectedRevision);
   }
 
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult> {

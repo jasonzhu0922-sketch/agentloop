@@ -6,14 +6,14 @@
       "endpoint": "http://runtime-general-01:8791",
       "profile": "general",
       "capabilities": ["document"],
-      "maxConcurrentRuns": 2
+      "maxConcurrentRuns": 20
     },
     {
       "id": "general-02",
       "endpoint": "http://runtime-general-02:8792",
       "profile": "general",
       "capabilities": ["document"],
-      "maxConcurrentRuns": 2
+      "maxConcurrentRuns": 20
     }
   ]
 }

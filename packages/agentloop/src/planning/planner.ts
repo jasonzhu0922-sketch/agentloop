@@ -321,6 +321,7 @@ export class ModelPlanner implements Planner {
           availableSkills: task.availableSkills,
           availableToolNames: new Set(task.availableToolNames),
           ...(task.availableTools === undefined ? {} : { availableTools: task.availableTools }),
+          ...(task.availableCapabilities === undefined ? {} : { availableCapabilities: task.availableCapabilities }),
           ...(task.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: task.requiredToolSourceIds }),
           ...(task.sources === undefined ? {} : { availableUploadedSourceIds: task.sources.map((source) => source.id) }),
           ...(task.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: task.visibleDirectories.map((directory) => directory.id) }),
@@ -664,7 +665,7 @@ function planningRuntimeContext(
         availableCapabilities: task.availableCapabilities
           ?? (task.availableTools === undefined
             ? planningCapabilitiesFromToolNames(task.availableToolNames)
-            : planningCapabilitiesFromTools(task.availableTools)),
+            : planningCapabilitiesFromTools(task.availableTools, task.sources)),
         ...(task.requiredToolSourceIds === undefined || task.requiredToolSourceIds.length === 0
           ? {}
           : { requiredToolSourceIds: task.requiredToolSourceIds }),
@@ -735,7 +736,7 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
   const capabilities = task.availableCapabilities
     ?? (task.availableTools === undefined
       ? planningCapabilitiesFromToolNames(task.availableToolNames)
-      : planningCapabilitiesFromTools(task.availableTools));
+      : planningCapabilitiesFromTools(task.availableTools, task.sources));
   const producibleSourceKinds = new Set(capabilities.flatMap((capability) => capability.produces));
   const sourceKinds = (["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
     .filter((kind) => producibleSourceKinds.has(kind));
@@ -1085,7 +1086,7 @@ function normalizeStructuredAggregationLeaf(
   return {
     ...step,
     role: step.role === undefined ? "deliver" : step.role,
-    requiredCapabilities: [...new Set([...step.requiredCapabilities, "workspace_file_read"])],
+    requiredCapabilities: [...new Set([...step.requiredCapabilities, "workspace_structured_artifact_read"])],
     evidenceContract: { requiredKinds, caveatPolicy },
     successCriteria: requiredKinds.map((kind) => ({
       id: kind,
@@ -1108,8 +1109,14 @@ function dependsOnStructuredExtraction(
     if (candidate === undefined) return false;
     if (
       candidate.evidenceContract?.requiredKinds.includes("structured_extraction_artifact")
-      || candidate.requiredCapabilities.includes("uploaded_source_read")
+      || (
+        (
+          candidate.requiredCapabilities.includes("uploaded_table_extraction")
+          || candidate.requiredCapabilities.includes("visible_table_extraction")
+          || candidate.requiredCapabilities.includes("workspace_structured_artifact_read")
+        )
         && /(?:extract|table|spreadsheet|workbook|csv|xlsx|xlsm|表格|工作簿|工作表|抽取)/iu.test(candidate.objective)
+      )
     ) return true;
     return candidate.dependencies.some(visit);
   };

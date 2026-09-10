@@ -94,12 +94,21 @@ export class HostDispatchStore {
     return row?.owner_user_id;
   }
 
-  /** Counts only Runs this Host accepted, even when every Host shares one database. */
+  /**
+   * Counts only Runs this Host is actively executing, even when every Host
+   * shares one database. A Run paused for durable recovery has no executing
+   * model/tool action, so it must not retain an admission slot while it waits.
+   */
   async activeRunCount(): Promise<number> {
     const row = await this.database.prepare(`
       SELECT COUNT(*) AS count
       FROM mr_run_executors executors JOIN runs ON runs.id = executors.remote_run_id
-      WHERE executors.runtime_id = ? AND runs.status = 'running'
+      WHERE executors.runtime_id = ?
+        AND runs.status = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM run_recovery_states recovery
+          WHERE recovery.run_id = runs.id
+        )
     `).get(this.runtimeId) as { count: number } | undefined;
     return Number(row?.count ?? 0);
   }

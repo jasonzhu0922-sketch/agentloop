@@ -973,6 +973,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       data: { step, toolResults: outcomes.map((item) => ({ toolCallId: item.call.id, isError: item.isError })) },
     });
 
+    const humanLoop = humanLoopRequirementFromEvidence(latestToolEvidence);
+    if (humanLoop !== undefined) {
+      await emit({
+        type: "human_loop.required",
+        data: { step, toolCallId: humanLoop.toolCallId, requirement: humanLoop.requirement },
+      });
+      throw new AppError("HUMAN_LOOP_REQUIRED", "A user response is required before this Step can continue", 409, {
+        requirement: humanLoop.requirement,
+        sourceToolCallId: humanLoop.toolCallId,
+      });
+    }
+
     const prepareRejectionSignature = allPrepareRejectionSignature(outcomes);
     if (prepareRejectionSignature !== undefined) {
       if (prepareRejectionSignature === previousPrepareRejectionSignature) {
@@ -1816,6 +1828,18 @@ function lengthTruncationRepairDirective(input: {
     "If the artifact appears complete but lacks acceptance evidence, call the available acceptance or verification Tool.",
     "Use read-only Tools only for one specifically missing fact that is not already available from recent evidence.",
   ].join("\n");
+}
+
+function humanLoopRequirementFromEvidence(evidence: readonly AgentLoopToolEvidence[]): { toolCallId: string; requirement: Record<string, unknown> } | undefined {
+  for (const item of evidence) {
+    if (item.isError) continue;
+    const parsed = parseJsonRecord(item.result);
+    const nested = parsed === undefined || typeof parsed.stdout !== "string" ? undefined : parseJsonRecord(parsed.stdout);
+    const rawRequirement = parsed?.humanLoopRequirement ?? nested?.humanLoopRequirement;
+    const requirement = isPlainRecord(rawRequirement) ? rawRequirement : undefined;
+    if (requirement !== undefined) return { toolCallId: item.toolCallId, requirement };
+  }
+  return undefined;
 }
 
 function toolEvidenceMetrics(toolName: string, content: string): Record<string, unknown> {

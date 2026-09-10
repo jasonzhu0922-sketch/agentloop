@@ -3,17 +3,21 @@ import type { PlanRepository } from "../planning/plan-repository.ts";
 import type { PlanStep, SkillComplianceAssessment } from "../planning/contracts.ts";
 import { activeLeafSteps } from "../planning/plan-utils.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
+import type { HumanLoopRepository } from "./human-loop.ts";
 
 export class TerminalCommitter {
   private readonly plans: PlanRepository;
   private readonly outcomes: RunOutcomeRepository;
+  private readonly humanLoops?: HumanLoopRepository;
 
-  constructor(plans: PlanRepository, outcomes: RunOutcomeRepository) {
+  constructor(plans: PlanRepository, outcomes: RunOutcomeRepository, humanLoops?: HumanLoopRepository) {
     this.plans = plans;
     this.outcomes = outcomes;
+    this.humanLoops = humanLoops;
   }
 
   async commitCompleted(runId: string, planId: string, output: string): Promise<void> {
+    await this.assertNoOpenHumanLoop(runId);
     const plan = await this.plans.get(planId);
     const leafSteps = activeLeafSteps(plan);
     if (plan.runId !== runId || leafSteps.some((step) => step.status !== "completed")) {
@@ -38,6 +42,7 @@ export class TerminalCommitter {
   }
 
   async commitCompletedWithCaveats(runId: string, planId: string, output: string, reasonCode: string): Promise<void> {
+    await this.assertNoOpenHumanLoop(runId);
     const plan = await this.plans.get(planId);
     const leafSteps = activeLeafSteps(plan);
     if (plan.runId !== runId || leafSteps.some((step) => step.status !== "completed")) {
@@ -76,6 +81,12 @@ export class TerminalCommitter {
     reasonCode: string;
   }): Promise<void> {
     await this.outcomes.commitStopped(input);
+  }
+
+  private async assertNoOpenHumanLoop(runId: string): Promise<void> {
+    if (await this.humanLoops?.hasOpen(runId)) {
+      throw new AppError("CONFLICT", "HUMAN_LOOP_UNRESOLVED", 409);
+    }
   }
 }
 

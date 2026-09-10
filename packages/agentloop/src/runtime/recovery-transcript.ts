@@ -43,9 +43,14 @@ export function reconstructRecoveryTranscript(input: {
   const outcomes = new Map<string, ToolOutcome>();
   const assistants: AssistantCheckpoint[] = [];
   const candidateOutputs: string[] = [];
+  const humanResponses: unknown[] = [];
   const toolCallCommitted = new Map<string, { name: string; arguments: unknown; seq: number }>();
   const coveredToolCallIds = new Set<string>();
   for (const event of scope) {
+    if (event.type === "human_loop.answered") {
+      humanResponses.push(event.data.value);
+      continue;
+    }
     if (event.type === "assistant.committed") {
       const content = typeof event.data.content === "string" ? event.data.content : "";
       const toolCalls = asToolCalls(event.data.toolCalls);
@@ -191,6 +196,9 @@ export function reconstructRecoveryTranscript(input: {
         if (!outcomes.has(call.id)) unfinishedToolCalls.push({ toolCallId: call.id, toolName: call.name });
       }
     }
+  }
+  for (const response of humanResponses) {
+    messages.push({ role: "user", content: `Human-in-the-Loop response: ${JSON.stringify(response)}` });
   }
 
   return {

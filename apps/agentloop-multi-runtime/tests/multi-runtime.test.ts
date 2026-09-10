@@ -29,6 +29,7 @@ import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
+import { renderMarkdown } from "../web/markdown-renderer.js";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -166,11 +167,25 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /projectAssistantEvent\(assistant, event\)/);
   assert.match(app, /mergeRuntimeEvents\(assistant\.events, \[event\]\)/);
   assert.match(app, /message\.status === "completed" \? renderMarkdown\(message\.text\) : formatText\(message\.text\)/);
-  assert.match(app, /function renderMarkdown\(text\)/);
+  assert.match(app, /import \{ renderMarkdown \} from "\.\/markdown-renderer\.js"/);
   assert.match(app, /function toolOutcomeLabel\(tool\)/);
   assert.match(app, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
   assert.match(app, /\$\{tool\.rejectedCalls\} 次被拒绝/);
   assert.match(overrides, /\.tool-tag\.partial \.tool-status-dot/);
+});
+
+test("completed-message Markdown renders screenshot-style GFM tables as structured HTML", () => {
+  const html = renderMarkdown([
+    "其余相关接口及参数如下：",
+    "",
+    "| 接口 | API ID | 入参 |",
+    "|---|---|---|",
+    "| 员工画像标签人员查询2 | `M_ADS_FACT_MDYG_USER_TRIP_LABEL.D_A_BSTAMDYG_CL0021` | `countNum`、`sql`（均非必填） |",
+  ].join("\n"));
+  assert.match(html, /<div class="md-table-wrap"><table>/);
+  assert.match(html, /<th>接口<\/th>/);
+  assert.match(html, /<code class="md-inline">M_ADS_FACT_MDYG_USER_TRIP_LABEL\.D_A_BSTAMDYG_CL0021<\/code>/);
+  assert.doesNotMatch(html, /<p>\| 接口 \| API ID \| 入参 \|/);
 });
 
 test("Web recovery replays Host Plan events instead of leaving a completed card with a running step", () => {
@@ -1009,6 +1024,25 @@ test("a shared state database reports active Runs only to their accepting Host",
   await hostA.accept("dispatch-shared-a", "shared-run-a", 101);
   assert.equal(await hostA.activeRunCount(), 1);
   assert.equal(await hostB.activeRunCount(), 0);
+
+  await database.prepare(`
+    INSERT INTO runtime_actions(
+      id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
+      replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
+      result_ref, error_code, created_at, updated_at, closed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "recovery-action-a", "shared-run-a", null, null, "recovery_review", "recovery_required", 0, 0,
+    "unsafe", null, null, 0, 1, "{}", null, null, 102, 102, null,
+  );
+  await database.prepare(`
+    INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
+    VALUES (?, 'waiting_recovery', ?, NULL, ?)
+  `).run("shared-run-a", "recovery-action-a", 102);
+
+  // The Run is recoverable but no executor is running. It must release the
+  // Host admission slot until recovery resumes and removes this state.
+  assert.equal(await hostA.activeRunCount(), 0);
   await database.close();
 });
 

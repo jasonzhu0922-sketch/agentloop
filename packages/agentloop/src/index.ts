@@ -36,12 +36,14 @@ export {
   createArtifactConverterTools,
   createComputerTools,
   createCoreTools,
+  createHumanLoopTool,
   createSkillLoader,
   createSourceTools,
   createVisibleDirectoryTools,
   createWebTools,
   DANGEROUS_COMPUTER_TOOL_NAMES,
   SKILL_LOADER_TOOL_NAME,
+  HUMAN_LOOP_TOOL_NAME,
   skillExecutionCwd,
   ToolRegistry,
   VISIBLE_DIRECTORY_TOOL_NAMES,
@@ -102,6 +104,16 @@ export type {
   RuntimeActionRecord,
   RuntimeActionState,
 } from "./runtime/runtime-action-repository.ts";
+export { HumanLoopRepository } from "./runtime/human-loop.ts";
+export type {
+  HumanLoopKind,
+  HumanLoopOrigin,
+  HumanLoopRequest,
+  HumanLoopRequirement,
+  HumanLoopResponse,
+  HumanLoopResponseSchema,
+  HumanLoopStatus,
+} from "./runtime/human-loop.ts";
 export { RunService } from "./runtime/run-service.ts";
 export type {
   AssessorFactory,

@@ -121,6 +121,20 @@ export class PersistentMultiRuntimeRouter {
     return { assignment: (await this.store.assignment(id)) ?? assignment, events };
   }
 
+  async currentHumanLoop(id: string) {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const request = await this.endpointFactory(assignment.runtimeEndpoint).currentHumanLoop?.(assignment.remoteRunId);
+    return { assignment, request };
+  }
+
+  async respondHumanLoop(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }) {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const response = await this.endpointFactory(assignment.runtimeEndpoint).respondHumanLoop?.(assignment.remoteRunId, requestId, input);
+    return response === undefined ? undefined : { assignment, response };
+  }
+
   async heartbeat(input: Parameters<ControlPlaneStore["heartbeat"]>[0]): Promise<void> {
     await this.store.heartbeat(input);
   }

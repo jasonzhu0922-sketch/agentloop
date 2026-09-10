@@ -219,6 +219,37 @@ export class AppDatabase implements SqlConnection {
       CREATE INDEX IF NOT EXISTS runtime_actions_run_idx ON runtime_actions(run_id, created_at);
       CREATE INDEX IF NOT EXISTS runtime_actions_recovery_idx ON runtime_actions(state, lease_until, deadline_at);
 
+      CREATE TABLE IF NOT EXISTS human_loop_requests (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
+        step_id TEXT,
+        action_id TEXT REFERENCES runtime_actions(id) ON DELETE SET NULL,
+        origin TEXT NOT NULL CHECK(origin IN ('skill', 'tool', 'planner', 'assessor', 'recovery')),
+        kind TEXT NOT NULL CHECK(kind IN ('selection', 'input', 'confirmation', 'approval')),
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        response_schema_json TEXT NOT NULL,
+        resume_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('open', 'answered', 'superseded', 'cancelled', 'expired')),
+        revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS human_loop_requests_run_idx ON human_loop_requests(run_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS human_loop_responses (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE REFERENCES human_loop_requests(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        request_revision INTEGER NOT NULL,
+        response_json TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS human_loop_responses_run_idx ON human_loop_responses(run_id, created_at);
+
       CREATE TABLE IF NOT EXISTS run_recovery_states (
         run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
         state TEXT NOT NULL CHECK(state IN ('waiting_recovery', 'waiting_user', 'ready_to_resume')),

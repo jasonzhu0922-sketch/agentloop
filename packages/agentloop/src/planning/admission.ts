@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { EvidenceContract, ExecutionPlan, PlanProposal, PlanStep, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import type { EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 import {
   createStepExecutionBinding,
   unknownUploadedSourceIds,
@@ -11,6 +11,8 @@ import {
   unknownPlanningCapabilities,
   unresolvedToolSourceIds,
   unsatisfiedToolCapabilities,
+  planningCapabilitiesFromToolNames,
+  planningCapabilitiesFromTools,
 } from "./step-execution-binding.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
@@ -28,6 +30,28 @@ const ARTIFACT_DELIVERY_EVIDENCE_KINDS = new Set([
   "artifact_openable",
   "format_matches_request",
 ]);
+const TOOL_PRODUCED_EVIDENCE_KINDS = new Set([
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "derived_aggregation",
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+]);
+const REUSABLE_SOURCE_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "derived_aggregation",
+  "explicit_caveats",
+]);
 
 export function admitPlan(input: {
   runId: string;
@@ -35,6 +59,7 @@ export function admitPlan(input: {
   availableSkills: readonly PrivateSkill[];
   availableToolNames: ReadonlySet<string>;
   availableTools?: readonly PlanningToolSummary[];
+  availableCapabilities?: readonly PlanningCapability[];
   requiredToolSourceIds?: readonly string[];
   availableUploadedSourceIds?: readonly string[];
   availableVisibleDirectoryIds?: readonly string[];
@@ -209,6 +234,20 @@ export function admitPlan(input: {
     };
   });
 
+  const admittedSteps = normalizeConversationTerminalEvidenceReuse(steps, input.taskIntent);
+  const availableCapabilities = input.availableCapabilities
+    ?? (input.availableTools === undefined
+      ? planningCapabilitiesFromToolNames([...input.availableToolNames])
+      : planningCapabilitiesFromTools(input.availableTools));
+  for (const step of admittedSteps) {
+    assertEvidenceContractIsProducible({
+      stepId: step.id,
+      evidenceContract: step.evidenceContract,
+      requiredCapabilities: step.executionBinding.requiredCapabilities,
+      availableCapabilities,
+    });
+  }
+
   for (const skillId of selectedSet) {
     const selectedRole = selectedRoleBySkillId.get(skillId);
     const nonExecutingRecoveryRole = recoveryPlan
@@ -217,19 +256,19 @@ export function admitPlan(input: {
       reject(`Selected Skill ${skillId} is not bound to any Plan step`);
     }
   }
-  if (steps.every((step) => step.kind !== "leaf")) {
+  if (admittedSteps.every((step) => step.kind !== "leaf")) {
     reject("Plan must contain at least one executable leaf step");
   }
   const requiredToolSourceIds = new Set(input.requiredToolSourceIds ?? []);
   if (requiredToolSourceIds.size > 0) {
-    const boundToolSourceIds = new Set(steps.flatMap((step) => step.executionBinding.requiredToolSourceIds ?? []));
+    const boundToolSourceIds = new Set(admittedSteps.flatMap((step) => step.executionBinding.requiredToolSourceIds ?? []));
     const missingToolSourceIds = [...requiredToolSourceIds].filter((sourceId) => !boundToolSourceIds.has(sourceId));
     if (missingToolSourceIds.length > 0) {
       reject(`Plan does not bind user-required ToolSource(s): ${missingToolSourceIds.join(", ")}`);
     }
   }
-  assertParentTree(steps);
-  assertAcyclic(steps);
+  assertParentTree(admittedSteps);
+  assertAcyclic(admittedSteps);
   const now = input.now ?? Date.now();
   return {
     id: randomUUID(),
@@ -238,10 +277,75 @@ export function admitPlan(input: {
     goal: proposal.goal,
     selectedSkillIds,
     status: "admitted",
-    steps,
+    steps: admittedSteps,
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * Source evidence is owned by the acquisition leaf that produced it. A later
+ * conversation-only delivery leaf may rely on that completed dependency, but
+ * must not be forced to repeat the acquisition merely to recreate the same
+ * receipt in its local tool-call list.
+ */
+function normalizeConversationTerminalEvidenceReuse(
+  steps: readonly PlanStep[],
+  taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
+): readonly PlanStep[] {
+  if (taskIntent?.deliverySurface !== "conversation" || taskIntent.artifactKind !== "none") return steps;
+  const dependedOn = new Set(steps.flatMap((step) => step.dependencies));
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  return steps.map((step) => {
+    if (
+      step.kind !== "leaf"
+      || dependedOn.has(step.id)
+      || step.role === "fact_acquisition"
+      || step.role === "repair"
+      || step.evidenceContract === undefined
+      || step.executionBinding.sourceKinds.some((kind) => kind !== "conversation_workset")
+    ) return step;
+    const reusedKinds = step.evidenceContract.requiredKinds.filter((kind) =>
+      REUSABLE_SOURCE_EVIDENCE_KINDS.has(kind)
+      && dependencyProvidesEvidenceKind(step.dependencies, kind, byId),
+    );
+    if (reusedKinds.length === 0) return step;
+    const reusedKindIds = new Set<string>(reusedKinds);
+    const requiredKinds = step.evidenceContract.requiredKinds.filter((kind) => !reusedKindIds.has(kind));
+    const successCriteria = step.successCriteria.filter((criterion) => !reusedKindIds.has(criterion.id));
+    return {
+      ...step,
+      ...(requiredKinds.length === 0 ? { evidenceContract: undefined } : {
+        evidenceContract: { ...step.evidenceContract, requiredKinds },
+      }),
+      successCriteria: successCriteria.length > 0 ? successCriteria : [{
+        id: "conversation_delivery",
+        description: "A complete user-facing response is returned in the conversation.",
+        source: "planner",
+      }],
+      executionBinding: {
+        ...step.executionBinding,
+        evidenceKinds: requiredKinds,
+      },
+    };
+  });
+}
+
+function dependencyProvidesEvidenceKind(
+  dependencyIds: readonly string[],
+  kind: EvidenceKind,
+  byId: ReadonlyMap<string, PlanStep>,
+): boolean {
+  const seen = new Set<string>();
+  const visit = (stepId: string): boolean => {
+    if (seen.has(stepId)) return false;
+    seen.add(stepId);
+    const dependency = byId.get(stepId);
+    if (dependency === undefined) return false;
+    if (dependency.evidenceContract?.requiredKinds.includes(kind)) return true;
+    return dependency.dependencies.some(visit);
+  };
+  return dependencyIds.some(visit);
 }
 
 function normalizeRefinementState(kind: "leaf" | "milestone", value: RefinementState | undefined): RefinementState {
@@ -282,6 +386,25 @@ function assertEvidenceContract(stepId: string, contract: EvidenceContract): voi
     && contract.caveatPolicy !== "strict_fail_on_missing_source"
   ) {
     reject(`Step ${stepId} evidenceContract has an invalid caveat policy`);
+  }
+}
+
+function assertEvidenceContractIsProducible(input: {
+  readonly stepId: string;
+  readonly evidenceContract?: EvidenceContract;
+  readonly requiredCapabilities: readonly string[];
+  readonly availableCapabilities: readonly PlanningCapability[];
+}): void {
+  if (input.evidenceContract === undefined) return;
+  const capabilityById = new Map(input.availableCapabilities.map((capability) => [capability.id, capability]));
+  const produced = new Set(input.requiredCapabilities.flatMap((id) => capabilityById.get(id)?.produces ?? []));
+  const unavailable = input.evidenceContract.requiredKinds.filter((kind) =>
+    TOOL_PRODUCED_EVIDENCE_KINDS.has(kind) && !produced.has(kind),
+  );
+  if (unavailable.length > 0) {
+    reject(
+      `Step ${input.stepId} requires evidence that its bound capabilities cannot produce: ${unavailable.join(", ")}`,
+    );
   }
 }
 

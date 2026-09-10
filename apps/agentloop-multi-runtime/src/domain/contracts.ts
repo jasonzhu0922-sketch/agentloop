@@ -1,4 +1,4 @@
-import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
+import type { HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 
 export type RuntimeProfile = "general" | "artifact";
 export type RuntimeStatus = "ready" | "draining" | "offline";
@@ -72,6 +72,8 @@ export interface RuntimeEndpoint {
   previewArtifact?(remoteRunId: string, artifactId: string): Promise<ProcessArtifactPreview>;
   cancelRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
   events?(remoteRunId: string, afterSeq: number): Promise<readonly RuntimeRunEvent[]>;
+  currentHumanLoop?(remoteRunId: string): Promise<HumanLoopRequest | undefined>;
+  respondHumanLoop?(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<HumanLoopResponse>;
 }
 
 /**

@@ -162,6 +162,7 @@ export class RuntimeActionRepository {
         await this.createRecoveryReview({
           runId: run.id,
           reason: "legacy_state_incomplete",
+          replayPolicy: "unsafe",
           createdAt: now,
         });
         reconciled += 1;
@@ -229,6 +230,25 @@ export class RuntimeActionRepository {
     readonly reason: string;
     readonly metadata?: Readonly<Record<string, unknown>>;
   }): Promise<RuntimeActionRecord> {
+    return this.requireRecoveryReviewWithPolicy(input, "unsafe");
+  }
+
+  async requireHumanLoopResume(input: {
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }): Promise<RuntimeActionRecord> {
+    return this.requireRecoveryReviewWithPolicy({ ...input, reason: "human_loop_requested" }, "safe");
+  }
+
+  private async requireRecoveryReviewWithPolicy(input: {
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly reason: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }, replayPolicy: ReplayPolicy): Promise<RuntimeActionRecord> {
     const now = Date.now();
     let actionId = "";
     await this.database.transaction(async () => {
@@ -248,6 +268,7 @@ export class RuntimeActionRepository {
         stepId: input.stepId,
         reason: input.reason,
         metadata: input.metadata,
+        replayPolicy,
         createdAt: now,
       });
     });
@@ -290,6 +311,7 @@ export class RuntimeActionRepository {
     readonly stepId?: string;
     readonly reason: string;
     readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly replayPolicy: ReplayPolicy;
     readonly createdAt: number;
   }): Promise<string> {
     const id = randomUUID();
@@ -300,12 +322,13 @@ export class RuntimeActionRepository {
         replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, 'recovery_review', 'recovery_required', 0, 0,
-                'unsafe', NULL, NULL, 0, 1, ?, ?, ?)
+                ?, NULL, NULL, 0, 1, ?, ?, ?)
     `).run(
       id,
       input.runId,
       input.planId ?? null,
       input.stepId ?? null,
+      input.replayPolicy,
       JSON.stringify(metadata),
       input.createdAt,
       input.createdAt,
