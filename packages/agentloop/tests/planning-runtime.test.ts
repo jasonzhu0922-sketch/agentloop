@@ -3509,6 +3509,36 @@ test("selectPlanningSkills recalls an API source-provider Skill for Chinese para
   assert.deepEqual(selected.map((skill) => skill.name), ["api-query"]);
 });
 
+test("selectPlanningSkills recalls a Chinese source-provider Skill for an enterprise query", () => {
+  const enterpriseInfo = skillFixture({
+    id: "enterprise-info",
+    name: "enterprise-info",
+    description: "查询中国大陆企业工商注册信息、企业详情、统一社会信用代码、法人、注册资本和经营范围。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+
+  const selected = selectPlanningSkills(
+    [enterpriseInfo],
+    "查询宝武共享服务有限公司的工商信息和法定代表人",
+    [],
+  );
+
+  assert.deepEqual(selected.map((skill) => skill.name), ["enterprise-info"]);
+});
+
+test("selectPlanningSkills selects a source-provider for current Chinese news without an explicit research keyword", () => {
+  const aihot = skillFixture({
+    id: "aihot",
+    name: "aihot",
+    description: "查询 AIHOT 的中文 AI 资讯、精选、当前热点和日报。用户询问今天或最近的 AI 新闻时使用。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+
+  const selected = selectPlanningSkills([aihot], "今天有什么 AI 热点新闻", []);
+
+  assert.deepEqual(selected.map((skill) => skill.name), ["aihot"]);
+});
+
 test("selectPlanningSkills recalls the checked-in presentation Skill for PPTX artifact requests", async () => {
   const inspected = await inspectSkillPackage(resolve(import.meta.dirname, "..", "..", "agentloop-skills", "skills", "presentation-skill"));
   const presentation = skillFixture({
@@ -4726,7 +4756,7 @@ test("ProfiledRuleStepAssessor does not block Skill-bound lookup completion on u
   assert.equal(assessment.failedBoundary, undefined);
 });
 
-test("evidence-gate keeps source semantics model-owned when an observable operation succeeded", async () => {
+test("evidence-gate rejects an artifact receipt when a source contract is unmet", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
     planId: "plan",
@@ -4765,8 +4795,60 @@ test("evidence-gate keeps source semantics model-owned when an observable operat
     attempt: 1,
   });
 
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["source_summary", "explicit_caveats"]);
+});
+
+test("evidence-gate accepts structured source evidence and semantic caveats", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("query-api"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Structured source evidence is present", source: "planner" },
+        { id: "source_urls", description: "Source URLs are present", source: "planner" },
+        { id: "explicit_caveats", description: "Source caveats are explicit", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "已基于当前 API 响应整理结果，并标注范围限制。",
+      deliveryCandidate: {
+        schema: "agentloop.runtimeDeliveryCandidate/v1",
+        output: "已基于当前 API 响应整理结果，并标注范围限制。",
+        caveats: ["响应只覆盖当前可用条目。"],
+        evidenceKinds: { satisfied: ["source_summary", "source_urls"], caveated: ["explicit_caveats"], failed: [] },
+        sourceToolCallIds: ["source-call"],
+      },
+      toolCalls: [{
+        toolCallId: "source-call",
+        toolName: "webfetch",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.webFetch/v1",
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            evidenceKinds: { satisfied: ["source_summary", "source_urls"], caveated: ["explicit_caveats"], failed: [] },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
   assert.equal(assessment.approved, true);
-  assert.equal(assessment.failedBoundary, undefined);
+  assert.equal(assessment.feedback, "");
 });
 
 test("RuleBasedStepAssessor accepts source summary receipts for directory analysis evidence gates", async () => {
@@ -4873,7 +4955,7 @@ test("ProfiledRuleStepAssessor treats explicit empty caveats as satisfied source
   assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "explicit_caveats")?.satisfied, true);
 });
 
-test("ProfiledRuleStepAssessor accepts a model-produced extraction without semantic tool attestation", async () => {
+test("ProfiledRuleStepAssessor rejects an artifact that lacks its declared source evidence", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
     planId: "plan",
@@ -4921,8 +5003,12 @@ test("ProfiledRuleStepAssessor accepts a model-produced extraction without seman
     attempt: 1,
   });
 
-  assert.equal(assessment.approved, true);
-  assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, [
+    "source_summary",
+    "structured_extraction_artifact",
+    "explicit_caveats",
+  ]);
 });
 
 test("ProfiledRuleStepAssessor accepts artifact receipts from written file evidence gates", async () => {
@@ -5178,7 +5264,7 @@ test("ProfiledRuleStepAssessor accepts artifact acceptance JSON emitted on comma
   assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
 });
 
-test("ProfiledRuleStepAssessor does not re-assess the model's claimed table coverage", async () => {
+test("ProfiledRuleStepAssessor rejects incomplete table coverage despite the model claim", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
     planId: "plan",
@@ -5252,9 +5338,9 @@ test("ProfiledRuleStepAssessor does not re-assess the model's claimed table cove
     assessmentProfile: "evidence_gate",
   });
 
-  assert.equal(assessment.approved, true);
-  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "table_coverage")?.satisfied, true);
-  assert.equal(assessment.feedback, "");
+  assert.equal(assessment.approved, false);
+  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "table_coverage")?.satisfied, false);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["table_coverage", "explicit_caveats"]);
 });
 
 test("ProfiledRuleStepAssessor does not re-assess the model's interpretation of an aggregation", async () => {
@@ -5483,6 +5569,86 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
     const boundary = events.find((event) => event.type === "assessment.failed_boundary");
     assert.deepEqual((boundary?.data as { failedBoundary?: unknown } | undefined)?.failedBoundary, failedBoundary);
     assert.equal(events.some((event) => event.type === "run.recovery_required"), true);
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService terminally fails source evidence gaps with no acquisition path", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({ content: "The requested source was not acquired.", toolCalls: [], finishReason: "stop" }),
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "summarize current source material",
+          selectedSkillIds: [],
+          steps: [{
+            id: "summarize-current-source",
+            objective: "Summarize the current source material.",
+            dependencies: [],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: [],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "A current source summary is recorded.", source: "planner" },
+              { id: "source_urls", description: "Source URLs are recorded.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+      assessorFactory: () => ({
+        assess: async (input) => ({
+          id: `reject-${input.attempt}`,
+          planId: input.planId,
+          stepId: input.step.id,
+          attempt: input.attempt,
+          assessmentProfile: input.assessmentProfile,
+          assessmentMethod: "model",
+          approved: false,
+          criteria: input.step.successCriteria.map((criterion) => ({
+            criterionId: criterion.id,
+            satisfied: false,
+            rationale: "No source was acquired.",
+            evidenceRefs: [],
+          })),
+          skills: [],
+          evidenceDigest: "no-source-evidence",
+          feedback: "No source evidence was acquired.",
+          failedBoundary: {
+            stepId: input.step.id,
+            missingEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+            violatedSkillRequirements: [],
+            reusableEvidenceRefs: [],
+            suggestedRepairShape: "repair_leaf",
+          },
+          createdAt: Date.now(),
+        }),
+      }),
+    });
+
+    const run = await runs.execute(owner.user.id, "summarize the current source material");
+
+    assert.equal(run.status, "failed");
+    const detail = await runs.plan(owner.user.id, run.id);
+    assert.deepEqual(detail.plan.steps[0]?.executionBinding.sourceKinds, ["conversation_workset"]);
+    assert.equal(detail.plan.steps[0]?.status, "failed");
+    const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(run.id) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "failed");
+    assert.equal(outcome.reason_code, "STEP_NOT_COMPLETED");
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) => event.type === "run.failed"), true);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+    assert.equal((await runs.recoveryForRun(owner.user.id, run.id)).state, undefined);
   } finally {
     database.close();
   }

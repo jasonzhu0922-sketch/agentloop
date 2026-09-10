@@ -340,12 +340,18 @@ interface RuntimeObservableReceipt {
 
 /**
  * The principle gate verifies only effects that Runtime can observe without
- * interpreting the model's work.  Source summaries, extraction structure,
- * coverage, aggregation, and caveats remain part of the Plan's instructions,
- * but their factual adequacy belongs to the model that produced the answer;
- * they must not require a tool to attest to those semantics.
+ * interpreting the model's work. Structured source receipts establish that
+ * source material was actually acquired, while the model remains responsible
+ * for interpreting that material. Artifact receipts never prove source facts.
  */
 const RUNTIME_OBSERVABLE_GATE_KINDS = new Set([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -364,15 +370,15 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
     if (toolCall.isError) continue;
     for (const parsed of runtimeEvidenceRecordsFromToolResult(toolCall.result)) {
       const topLevelSchema = typeof parsed.schema === "string" ? parsed.schema : undefined;
-      const nestedReceipt = parseToolResultObject(parsed.artifactReceipt);
-      const schema = topLevelSchema === "agentloop.artifactAcceptance/v1"
+      const nestedReceipt = parseToolResultObject(parsed.evidenceReceipt)
+        ?? parseToolResultObject(parsed.artifactReceipt);
+      const schema = isRuntimeEvidenceReceiptSchema(topLevelSchema)
         ? topLevelSchema
-        : typeof nestedReceipt?.schema === "string"
+        : typeof nestedReceipt?.schema === "string" && isRuntimeEvidenceReceiptSchema(nestedReceipt.schema)
           ? nestedReceipt.schema
           : undefined;
       if (
-        schema !== "agentloop.artifactAcceptance/v1"
-        && schema !== "agentloop.artifactReceipt/v1"
+        schema === undefined
       ) continue;
       const evidenceKinds = runtimeEvidenceKindArrays(nestedReceipt ?? parsed);
       receipts.push({
@@ -407,6 +413,10 @@ function evidenceKindSatisfiedByGate(
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
 ): boolean {
+  if (kind === "explicit_caveats") {
+    return candidate?.evidenceKinds.satisfied.includes(kind) === true
+      || candidate?.evidenceKinds.caveated.includes(kind) === true;
+  }
   if (kind === "delivery_receipt") {
     return candidate?.deliveryReceipt !== undefined
       && successfulToolRefs.includes(candidate.deliveryReceipt.sourceToolCallId);
@@ -425,6 +435,13 @@ function evidenceKindSatisfiedByGate(
     if (receipt.failed.has(kind)) return false;
     return receipt.satisfied.has(kind);
   });
+}
+
+function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
+  return schema === "agentloop.artifactAcceptance/v1"
+    || schema === "agentloop.artifactReceipt/v1"
+    || schema === "agentloop.sourceSummary/v1"
+    || schema === "agentloop.toolEvidenceReceipt/v1";
 }
 
 /**

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createStepExecutionStrategyProfile, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
+import { createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories } from "../config/config.ts";
 import { HttpResourceImporter } from "../runtime/http-resource-importer.ts";
@@ -10,6 +10,12 @@ import { AgentLoopRuntimeHost } from "../runtime/runtime-host.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../storage/state-database.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
+// This non-sensitive path is the only Enterprise Info setting passed to
+// Skill-owned commands. The script reads credentials from the deployment file.
+const enterpriseInfoEnvironmentFile = resolve(
+  appRoot,
+  process.env.ENTERPRISE_INFO_ENV_FILE ?? "./.env",
+);
 const host = process.env.HOST ?? "127.0.0.1";
 const port = integer(process.env.PORT, 8791);
 const runtimeId = requiredEnv("RUNTIME_ID");
@@ -36,7 +42,10 @@ const stepExecutionStrategy = createStepExecutionStrategyProfile(
   stepExecutionStrategyConfig.profile,
   stepExecutionStrategyConfig.projection,
 );
-
+// Web research is a generic Host capability. Source-provider Skills consume it
+// through their declared workflow, rather than an incidental shell command or
+// a Router-specific integration.
+const integrationTools = process.env.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools();
 const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
   environment: process.env,
   appRoot,
@@ -59,6 +68,10 @@ const runs = new RunService({
   modelKeys: providers.modelKeys(),
   workspaceRoot,
   stepExecutionStrategy,
+  tools: integrationTools,
+  computerCommandEnvironment: {
+    ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
+  },
   runEventLogSink: (line) => process.stdout.write(`[${runtimeId}] ${line}\n`),
 });
 await runs.reconcileInterruptedRuns();

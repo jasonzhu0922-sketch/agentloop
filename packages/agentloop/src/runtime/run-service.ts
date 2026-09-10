@@ -1639,6 +1639,35 @@ export class RunService {
           && failedBoundary.stepId === runningStepId
         ) {
           await this.plans.failStep(planId, runningStepId, appError.message);
+          if (failedBoundaryHasNoAcquisitionPath(
+            await this.plans.getByRun(runId),
+            runningStepId,
+            failedBoundary,
+            observedReceiptShapes(
+              await this.events(actorUserId, runId),
+              failedBoundary.reusableEvidenceRefs,
+            ),
+          )) {
+            await this.terminal.commitStopped({ runId, planId, status: "failed", reasonCode: appError.code });
+            await this.notifyPlanningExtensionsAfterOutcome({
+              runId,
+              status: "failed",
+              planId,
+              reasonCode: appError.code,
+              ...(admittedPlanSource === undefined ? {} : { source: admittedPlanSource }),
+            }, emit);
+            await emit({
+              type: "run.failed",
+              data: {
+                runId,
+                planId,
+                code: appError.code,
+                message: appError.message,
+                details: appError.details,
+              },
+            });
+            return this.get(actorUserId, runId);
+          }
           const action = await this.actions.requireRecoveryReview({
             runId,
             planId,
@@ -2338,6 +2367,34 @@ export class RunService {
         && failedBoundary.stepId === runningStepId
       ) {
         await this.plans.failStep(revised.id, runningStepId, appError.message);
+        if (failedBoundaryHasNoAcquisitionPath(
+          revised,
+          runningStepId,
+          failedBoundary,
+          observedReceiptShapes(
+            await this.events(input.actorUserId, input.run.id),
+            failedBoundary.reusableEvidenceRefs,
+          ),
+        )) {
+          await this.terminal.commitStopped({
+            runId: input.run.id,
+            planId: revised.id,
+            status: "failed",
+            reasonCode: appError.code,
+          });
+          await this.appendRunEvent(input.run.id, {
+            type: "run.failed",
+            data: {
+              runId: input.run.id,
+              planId: revised.id,
+              code: appError.code,
+              message: appError.message,
+              details: appError.details,
+              recovered: true,
+            },
+          });
+          return;
+        }
         const action = await this.actions.requireRecoveryReview({
           runId: input.run.id,
           planId: revised.id,
@@ -3393,6 +3450,35 @@ function planContractMismatchRequiresRevision(
   return stepRequiresSourceContract && observedShapes.has("artifact") && !observedShapes.has("source");
 }
 
+function failedBoundaryHasNoAcquisitionPath(
+  plan: ExecutionPlan | undefined,
+  stepId: string,
+  failedBoundary: FailedBoundary,
+  observedShapes: ReadonlySet<ReceiptShape>,
+): boolean {
+  const requiresSourceEvidence = failedBoundary.missingEvidenceKinds.some((kind) =>
+    kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "table_coverage"
+    || kind === "structured_extraction_artifact"
+    || kind === "derived_aggregation",
+  );
+  if (
+    !requiresSourceEvidence
+    || plan === undefined
+    || observedShapes.size > 0
+    || failedBoundary.reusableEvidenceRefs.length > 0
+  ) return false;
+  const step = plan.steps.find((candidate) => candidate.id === stepId && candidate.retiredAt === undefined);
+  if (step === undefined) return false;
+  // A conversation-only binding cannot obtain the source evidence it is
+  // missing. Retrying it through repair leaves would only reproduce the same
+  // candidate; terminate rather than strand the Run in empty recovery.
+  return step.executionBinding.sourceKinds.every((kind) => kind === "conversation_workset");
+}
+
 type ReceiptShape = "artifact" | "source";
 
 function observedReceiptShapes(
@@ -3504,6 +3590,11 @@ export function selectPlanningSkillRoles(
   // Letting old deliverables select today's Skill leaks prior work into the
   // current capability decision.
   const signal = normalizePlanningSignal(taskInput);
+  // Skill relevance must use the same semantic intent classifier as planning.
+  // A current-news request is source work even when it does not literally say
+  // "source", "research", or "lookup".
+  const sourceWorkRequested = requestsSourceWork(signal)
+    || classifyTaskIntent({ objective: taskInput }).sourceNeed !== "none";
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
@@ -3513,6 +3604,7 @@ export function selectPlanningSkillRoles(
       signal,
       exactSkillMention(signal, skill) || bound.has(skill.id),
       sourceKinds,
+      sourceWorkRequested,
     );
     if (selection === undefined) return false;
     roleBySkillId.set(skill.id, selection);
@@ -3575,6 +3667,7 @@ function selectFirstRoundSkillRole(
   signal: string,
   explicitlyRequested: boolean,
   sourceKinds: ReadonlySet<string>,
+  sourceWorkRequested: boolean,
 ): SelectedSkillRole | undefined {
   const metadata = skill.agentLoop;
   if (metadata === undefined) return undefined;
@@ -3593,7 +3686,7 @@ function selectFirstRoundSkillRole(
   }
   if (
     roles.has("source_provider")
-    && requestsSourceWork(signal)
+    && sourceWorkRequested
     && (explicitlyRequested || skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
   ) {
     return {
@@ -3634,7 +3727,7 @@ function requestedArtifactKinds(signal: string): Set<string> {
 }
 
 function requestsSourceWork(signal: string): boolean {
-  return /(?:source|research|lookup|cite|citation|standard|policy|regulation|rating|certification|api|database|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处|接口|数据源)/iu.test(signal);
+  return /(?:source|research|lookup|query|cite|citation|standard|policy|regulation|rating|certification|api|database|来源|调研|检索|查询|引用|标准|政策|法规|评级|认证|出处|接口|数据源)/iu.test(signal);
 }
 
 function explicitSupportSkillRequested(signal: string): boolean {
