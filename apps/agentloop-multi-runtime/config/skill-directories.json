@@ -1,0 +1,6 @@
+{
+  "schema": "agentloop.skillDirectories/v1",
+  "customSkillDirectories": [
+    "./custom-skills"
+  ]
+}

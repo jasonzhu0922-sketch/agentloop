@@ -28,10 +28,6 @@ const ARTIFACT_DELIVERY_EVIDENCE_KINDS = new Set([
   "artifact_openable",
   "format_matches_request",
 ]);
-const OUTPUT_EVIDENCE_KINDS = new Set([
-  ...ARTIFACT_DELIVERY_EVIDENCE_KINDS,
-  "delivery_receipt",
-]);
 
 export function admitPlan(input: {
   runId: string;
@@ -142,7 +138,7 @@ export function admitPlan(input: {
         `Step ${step.id} is only a Skill activation step; bind the Skill to a concrete user-deliverable step instead`,
       );
     }
-    const fileProducingStep = kind === "leaf" && requiresFileProduction(step);
+    const fileProducingStep = kind === "leaf" && requiresFileProduction(step, input.taskIntent);
     if (!canProduceFiles && fileProducingStep) {
       reject(
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
@@ -160,10 +156,7 @@ export function admitPlan(input: {
     const completionEvidenceContract = normalizeCompletionEvidenceContract(step.role, evidenceContract, input.taskIntent);
     const completionCriteria = normalizeCompletionSuccessCriteria(step.role, step.successCriteria, input.taskIntent);
     normalizeCompletionCapabilities(step.role, requiredCapabilities, input.taskIntent);
-    const criteria: SuccessCriterion[] = [
-      ...completionCriteria,
-      ...completionEvidenceSuccessCriteria(completionCriteria, completionEvidenceContract),
-    ];
+    const criteria: SuccessCriterion[] = [...completionCriteria];
     for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
       const skill = availableSkills.get(skillId);
@@ -200,8 +193,9 @@ export function admitPlan(input: {
     if (unresolvedSourceIds.length > 0) {
       reject(`Step ${step.id} constrains ToolSource(s) without a resolved Tool: ${unresolvedSourceIds.join(", ")}`);
     }
+    const { evidenceContract: _proposalEvidenceContract, ...stepWithoutEvidenceContract } = step;
     return {
-      ...step,
+      ...stepWithoutEvidenceContract,
       kind,
       position,
       skillIds: stepSkillIds,
@@ -293,9 +287,13 @@ function assertEvidenceContract(stepId: string, contract: EvidenceContract): voi
 
 function normalizeEvidenceContract(contract: EvidenceContract | undefined): EvidenceContract | undefined {
   if (contract === undefined) return undefined;
-  const requiredKinds = contract.requiredKinds.filter((kind) => !SKILL_QA_ONLY_EVIDENCE_KINDS.has(kind));
+  // Delivery is already a durable Runtime event. Keeping it in a Plan's
+  // required evidence turns an audit record into a circular completion gate.
+  const requiredKinds = contract.requiredKinds.filter((kind) =>
+    !SKILL_QA_ONLY_EVIDENCE_KINDS.has(kind) && kind !== "delivery_receipt"
+  );
   if (requiredKinds.length === 0) {
-    reject("Plan evidenceContract must retain at least one Runtime evidence kind after Skill-owned QA evidence is excluded");
+    return undefined;
   }
   return { ...contract, requiredKinds };
 }
@@ -305,27 +303,15 @@ function normalizeCompletionEvidenceContract(
   contract: EvidenceContract | undefined,
   taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
 ): EvidenceContract | undefined {
+  // Evidence contracts are explicit semantic requirements, not a generic
+  // delivery protocol. Runtime records every delivery and Tool result for
+  // audit; admission must not turn those observations into a hard criterion.
   if (contract === undefined || role === undefined || role === "fact_acquisition" || role === "repair") return contract;
   if (taskIntent?.deliverySurface === "conversation" && taskIntent.artifactKind === "none") {
     const requiredKinds = contract.requiredKinds.filter((kind) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind));
-    if (!requiredKinds.includes("delivery_receipt")) requiredKinds.push("delivery_receipt");
-    return { ...contract, requiredKinds };
+    return requiredKinds.length === 0 ? undefined : { ...contract, requiredKinds };
   }
-  if (contract.requiredKinds.some((kind) => OUTPUT_EVIDENCE_KINDS.has(kind))) return contract;
-  return { ...contract, requiredKinds: [...contract.requiredKinds, "delivery_receipt"] };
-}
-
-function completionEvidenceSuccessCriteria(
-  criteria: readonly SuccessCriterion[],
-  contract: EvidenceContract | undefined,
-): SuccessCriterion[] {
-  if (contract === undefined || !contract.requiredKinds.includes("delivery_receipt")) return [];
-  if (criteria.some((criterion) => criterion.id === "delivery_receipt")) return [];
-  return [{
-    id: "delivery_receipt",
-    description: "The final user-facing result is present as text or an artifact delivery receipt.",
-    source: "planner",
-  }];
+  return contract;
 }
 
 function normalizeCompletionSuccessCriteria(
@@ -335,7 +321,12 @@ function normalizeCompletionSuccessCriteria(
 ): readonly SuccessCriterion[] {
   if (role === undefined || role === "fact_acquisition" || role === "repair") return criteria;
   if (taskIntent?.deliverySurface !== "conversation" || taskIntent.artifactKind !== "none") return criteria;
-  return criteria.filter((criterion) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id));
+  const normalized = criteria.filter((criterion) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id));
+  return normalized.length > 0 ? normalized : [{
+    id: "conversation_delivery",
+    description: "A complete user-facing response is returned in the conversation.",
+    source: "planner",
+  }];
 }
 
 function normalizeCompletionCapabilities(
@@ -434,15 +425,19 @@ export function hasFileProducer(availableToolNames: ReadonlySet<string>): boolea
   return false;
 }
 
-function requiresFileProduction(step: PlanProposal["steps"][number]): boolean {
-  const text = normalizePlanText([
-    step.id,
-    step.objective,
-    ...step.successCriteria.map((criterion) => criterion.description),
-  ].join(" "));
-  const mentionsFileArtifact = /(?:\.(?:png|pdf|md|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv)\b|\b(?:png|pdf|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv)\b|文件|档案|\bfile\b)/i.test(text);
-  const hasProductionVerb = /\b(create|produce|generate|write|save|export|render|materialize|build|deliver|output)\b|创建|生成|写入|保存|导出|渲染|产出|输出|交付|制作/.test(text);
-  return mentionsFileArtifact && hasProductionVerb;
+function requiresFileProduction(
+  step: PlanProposal["steps"][number],
+  taskIntent: {
+    readonly deliverySurface?: "conversation" | "workspace_artifact";
+    readonly artifactKind?: string;
+  } | undefined,
+): boolean {
+  // A file producer is an authorization requirement, so it must be derived
+  // from the structured delivery contract rather than natural-language text.
+  if (taskIntent?.deliverySurface === "conversation" && taskIntent.artifactKind === "none") return false;
+  return step.requiredCapabilities.includes("workspace_artifact_write")
+    || step.evidenceContract?.requiredKinds.some((kind) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind)) === true
+    || step.successCriteria.some((criterion) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id));
 }
 
 function reject(message: string): never {

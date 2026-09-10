@@ -1,0 +1,120 @@
+x-runtime-environment: &runtime_environment
+  HOST: 0.0.0.0
+  ROUTER_URL: http://router:8788
+  RUNTIME_DISPATCH_TOKEN: ${RUNTIME_DISPATCH_TOKEN:?set in environment}
+  RUNTIME_ATTACHMENT_TOKEN: ${RUNTIME_ATTACHMENT_TOKEN:?set in environment}
+  LLM_PROVIDER_CONFIG_PATH: /run/config/llm-providers.json
+  STEP_EXECUTION_STRATEGY_CONFIG_PATH: ./config/step-execution-strategy.json
+  # This exact in-container location is mounted from one shared volume on every
+  # Runtime Host. RunService isolates task files by conversations/<conversationId>.
+  WORKSPACE_ROOT: /app/apps/agentloop-multi-runtime/workspace
+  MAX_CONCURRENT_RUNS: 2
+  # Keep the local demo control plane responsive after a Router restart.
+  HEARTBEAT_INTERVAL_MS: 1000
+
+# All four services run the same application image. Build it once through the
+# Router service; the Runtime Hosts and Web service reuse its local tag.
+x-app-build: &app_build
+  context: ../..
+  dockerfile: apps/agentloop-multi-runtime/Dockerfile
+  args:
+    NODE_IMAGE: ${NODE_IMAGE:-node:26-bookworm}
+    HTTP_PROXY: ${DOCKER_BUILD_HTTP_PROXY:-}
+    HTTPS_PROXY: ${DOCKER_BUILD_HTTPS_PROXY:-}
+    NO_PROXY: ${DOCKER_BUILD_NO_PROXY:-}
+    # Alibaba Cloud public npm mirror; replace with the enterprise mirror when required.
+    NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+
+x-app-image: &app_image agentloop-multi-runtime:local
+
+services:
+  router:
+    image: *app_image
+    build: *app_build
+    command: npm run start
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8788
+      RUNTIME_CONFIG_PATH: ./config/runtimes.compose.json
+      AGENTLOOP_STATE_DRIVER: ${AGENTLOOP_STATE_DRIVER:-sqlite}
+      AGENTLOOP_STATE_SQLITE_PATH: ${AGENTLOOP_STATE_SQLITE_PATH:-./data/state/agentloop.db}
+      AGENTLOOP_STATE_DATABASE_URL: ${AGENTLOOP_STATE_DATABASE_URL:-}
+      AGENTLOOP_STATE_POOL_SIZE: ${AGENTLOOP_STATE_POOL_SIZE:-}
+      ATTACHMENT_BASE_URL: http://router:8788
+      WEB_ORIGIN: http://localhost:5174,http://127.0.0.1:5174
+      RUNTIME_DISPATCH_TOKEN: ${RUNTIME_DISPATCH_TOKEN:?set in environment}
+      RUNTIME_ATTACHMENT_TOKEN: ${RUNTIME_ATTACHMENT_TOKEN:?set in environment}
+    ports: ["8788:8788"]
+    volumes:
+      - router-data:/app/apps/agentloop-multi-runtime/data
+      - runtime-state:/app/apps/agentloop-multi-runtime/data/state
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 3s
+
+  runtime-general-01:
+    image: *app_image
+    command: npm run start:runtime-host
+    # Provider keys belong only to Runtime Hosts.  Keep this file out of Git
+    # and do not inject it into the browser-facing Router or Web containers.
+    env_file:
+      - ${LLM_PROVIDER_ENV_FILE:?set absolute provider environment path}
+    volumes:
+      - runtime-general-01-data:/app/apps/agentloop-multi-runtime/data
+      - runtime-state:/app/apps/agentloop-multi-runtime/data/state
+      - ${RUNTIME_WORKSPACE_HOST_PATH:-./data/docker/workspace}:/app/apps/agentloop-multi-runtime/workspace
+      # Every Host receives one identical, read-only extension Skill root.
+      - ${CUSTOM_SKILLS_HOST_PATH:-./custom-skills}:/app/apps/agentloop-multi-runtime/custom-skills:ro
+      - ${LLM_PROVIDER_CONFIG_FILE:?set absolute config path}:/run/config/llm-providers.json:ro
+    environment:
+      <<: *runtime_environment
+      RUNTIME_ID: general-01
+      PORT: 8791
+      AGENTLOOP_STATE_DRIVER: ${AGENTLOOP_STATE_DRIVER:-sqlite}
+      AGENTLOOP_STATE_SQLITE_PATH: ${AGENTLOOP_STATE_SQLITE_PATH:-./data/state/agentloop.db}
+      AGENTLOOP_STATE_DATABASE_URL: ${AGENTLOOP_STATE_DATABASE_URL:-}
+      AGENTLOOP_STATE_POOL_SIZE: ${AGENTLOOP_STATE_POOL_SIZE:-}
+    depends_on:
+      router:
+        condition: service_healthy
+
+  runtime-general-02:
+    image: *app_image
+    command: npm run start:runtime-host
+    env_file:
+      - ${LLM_PROVIDER_ENV_FILE:?set absolute provider environment path}
+    environment:
+      <<: *runtime_environment
+      RUNTIME_ID: general-02
+      PORT: 8792
+      AGENTLOOP_STATE_DRIVER: ${AGENTLOOP_STATE_DRIVER:-sqlite}
+      AGENTLOOP_STATE_SQLITE_PATH: ${AGENTLOOP_STATE_SQLITE_PATH:-./data/state/agentloop.db}
+      AGENTLOOP_STATE_DATABASE_URL: ${AGENTLOOP_STATE_DATABASE_URL:-}
+      AGENTLOOP_STATE_POOL_SIZE: ${AGENTLOOP_STATE_POOL_SIZE:-}
+    depends_on:
+      router:
+        condition: service_healthy
+    volumes:
+      - runtime-general-02-data:/app/apps/agentloop-multi-runtime/data
+      - runtime-state:/app/apps/agentloop-multi-runtime/data/state
+      - ${RUNTIME_WORKSPACE_HOST_PATH:-./data/docker/workspace}:/app/apps/agentloop-multi-runtime/workspace
+      - ${CUSTOM_SKILLS_HOST_PATH:-./custom-skills}:/app/apps/agentloop-multi-runtime/custom-skills:ro
+      - ${LLM_PROVIDER_CONFIG_FILE:?set absolute config path}:/run/config/llm-providers.json:ro
+
+  web:
+    image: *app_image
+    command: npm run start:web
+    environment:
+      HOST: 0.0.0.0
+      WEB_PORT: 5174
+      ROUTER_URL: http://localhost:8788
+    ports: ["5174:5174"]
+
+volumes:
+  router-data: {}
+  runtime-state: {}
+  runtime-general-01-data: {}
+  runtime-general-02-data: {}

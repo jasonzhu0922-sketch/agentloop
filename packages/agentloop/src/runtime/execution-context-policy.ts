@@ -36,6 +36,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   const usesSourceTools = stepHasSourceKind(input.step, "uploaded_source");
   const dependencyEvidenceBindings = buildDependencyEvidenceBindings(input.step, input.plan);
   const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(dependencyEvidenceBindings);
+  const requiresDerivedAggregation = input.step.evidenceContract?.requiredKinds.includes("derived_aggregation") === true;
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
   const stepSemanticFrame = deriveStepSemanticFrame({
     step: input.step,
@@ -104,6 +105,12 @@ export function buildStepRuntimeContextSnapshot(input: {
               "Dependency evidence includes durable structured JSON artifacts. First inspect artifact schema and any manifest in dependencyEvidenceBindings; for agentloop.tableExtractionArtifact/v1, use the manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
           }
           : {}),
+        ...(requiresDerivedAggregation
+          ? {
+            derivedAggregationDiscipline:
+              "This step answers an aggregation question from structured dependency evidence. Use computer_aggregate_table_artifact against the referenced durable extraction artifact for count, group, rank, distribution, or numeric statistics; preserve its coverage and caveats in the answer. A caveat is not a substitute for the requested result when that Tool reports complete coverage. Do not claim the aggregate cannot be determined without first reporting why the structured aggregation receipt is incomplete or unavailable.",
+          }
+          : {}),
         ...(evidenceAcquisitionDiscipline === undefined ? {} : { evidenceAcquisitionDiscipline }),
         workspace: { root: input.workspaceRoot, filePolicy: "workspace-write" },
         visibleDirectories,
@@ -153,7 +160,7 @@ export function buildStepRuntimeContextSnapshot(input: {
         ...(usesSourceTools
           ? {
             uploadedSourceDiscipline:
-              "Use read_source for uploaded sources listed in sources. Treat read_source results as canonical "
+              "Use extract_source_tables for authorized uploaded CSV, XLSX, or XLSM sources when structured fields, rows, or counts are needed; it returns coordinate-preserving evidence and a durable artifact. Use read_source for text/chunk inspection. Treat both results as canonical "
               + "source evidence. When reading consecutive uploaded chunks, pass chunkIndex as the start and "
               + "maxChunks as the window size. "
               + "Do not use computer_read_file for uploaded sources; uploaded source storage "
@@ -601,17 +608,20 @@ function buildConversationReuseContext(
       readonly instruction: string;
       readonly reusableArtifacts: ConversationWorkingSet["reusableArtifacts"];
       readonly sourceSummaries?: NonNullable<ConversationWorkingSet["evidenceLedger"]>["sourceSummaries"];
+      readonly completedStepHandoffs?: NonNullable<ConversationWorkingSet["completedStepHandoffs"]>;
     }
   | undefined {
   if (workset === undefined) return undefined;
   const sourceSummaries = workset.evidenceLedger?.sourceSummaries ?? [];
-  if (workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0) return undefined;
+  const completedStepHandoffs = workset.completedStepHandoffs ?? [];
+  if (workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepHandoffs.length === 0) return undefined;
   return {
     schema: "agentloop.conversationReuseContext/v1",
     instruction:
-      "Use prior conversation artifacts and source summaries as reusable context before re-running equivalent acquisition. Re-read or regenerate only when the current step needs fresher, stricter, missing, or contradictory evidence.",
+      "Use prior accepted step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. Re-read or regenerate only when the current step needs fresher, stricter, missing, or contradictory evidence. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
     reusableArtifacts: workset.reusableArtifacts,
     ...(sourceSummaries.length === 0 ? {} : { sourceSummaries }),
+    ...(completedStepHandoffs.length === 0 ? {} : { completedStepHandoffs }),
   };
 }
 

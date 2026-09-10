@@ -1,0 +1,14 @@
+# This repository is a monorepo, but the multi-runtime image needs only its
+# own application, the shared packages, and the workspace manifests. Keeping
+# the build context allow-listed avoids sending local Runs, uploads, secrets,
+# and dependencies to the Docker daemon.
+*
+!package.json
+!package-lock.json
+!packages/
+!packages/**
+!apps/
+!apps/agentloop-app/
+!apps/agentloop-app/package.json
+!apps/agentloop-multi-runtime/
+!apps/agentloop-multi-runtime/**

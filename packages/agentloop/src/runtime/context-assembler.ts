@@ -1040,6 +1040,7 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
   const sourceSchema = stringValue(value.sourceSchema) ?? stringValue(value.schema);
   const sourceRefLimit = sourceRefProjectionLimit(sourceType, sourceSchema);
   const uploadedSource = sourceType === "uploaded_source" ? uploadedSourceProjection(value) : undefined;
+  const analysisResultRef = tableAggregationResultRefProjection(value.resultRef);
   const contentLocation = commandOutputContentLocationProjection(value);
   const projection = {
     schema: "agentloop.contextEvidenceProjection/v1",
@@ -1049,6 +1050,7 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
     truncated: booleanValue(value.truncated),
     maxTotalCharacters: numberValue(value.maxTotalCharacters),
     uploadedSource,
+    analysisResultRef,
     contentLocation,
     evidenceReceipt: {
       schema: stringValue(receipt.schema),
@@ -1063,6 +1065,8 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
     },
     instruction: contentLocation !== undefined
       ? "Use the structured evidence first. If exact omitted command output is required, read only the contentLocation path and verify its sha256; do not rerun the same command solely to recover prior output."
+      : analysisResultRef !== undefined
+      ? "This is a durable deterministic analysis result. Use its resultPointer or groupsPointer with computer_read_json and an offset/limit window whenever exact values are needed; do not infer omitted groups from the receipt."
       : sourceType === "uploaded_source"
       ? "Use read_source with sourceId, chunkIndex, and maxChunks for uploaded source content; chunkIndex plus maxChunks reads a consecutive window starting at chunkIndex. Uploaded sources are not filesystem paths; do not search upload storage roots or other conversation directories to recover them."
       : "Use these structured facts and sourceRefs. Reread explicit paths/ranges only when exact omitted text is required.",
@@ -1639,6 +1643,7 @@ function compactEvidenceFactForLedger(value: unknown): unknown {
     fieldProfiles: compactFieldProfiles(record.fieldProfiles, 8, 8),
     spreadsheetProfile: compactSpreadsheetProfile(record.spreadsheetProfile),
     artifact: compactArtifactPointer(record.artifact),
+    resultRef: tableAggregationResultRefProjection(record.resultRef),
     extractionSha256: stringValue(record.extractionSha256),
     textGroups: compactTextGroups(record.textGroups, 12, 240, 2),
     pathGroups: compactPathGroups(record.pathGroups, 12),
@@ -1649,6 +1654,43 @@ function compactEvidenceFactForLedger(value: unknown): unknown {
     sections,
     excerptCharacters: typeof record.excerpt === "string" ? record.excerpt.length : undefined,
     excerptSha256: typeof record.excerpt === "string" ? digest(record.excerpt) : undefined,
+  });
+}
+
+function tableAggregationResultRefProjection(value: unknown): unknown {
+  const record = recordValue(value);
+  if (record === undefined || stringValue(record.schema) !== "agentloop.tableAggregationResultRef/v1") return undefined;
+  const coverage = recordValue(record.coverage);
+  const results = Array.isArray(record.results) ? record.results.slice(0, 20).map((item) => {
+    const result = recordValue(item);
+    if (result === undefined) return item;
+    return omitUndefinedDeep({
+      queryIndex: numberValue(result.queryIndex),
+      operation: stringValue(result.operation),
+      field: stringValue(result.field),
+      groupBy: stringValue(result.groupBy),
+      where: Array.isArray(result.where) ? result.where.slice(0, 20) : undefined,
+      inputRecordCount: numberValue(result.inputRecordCount),
+      matchedRecordCount: numberValue(result.matchedRecordCount),
+      groupCount: numberValue(result.groupCount),
+      returnedGroupCount: numberValue(result.returnedGroupCount),
+      resultPointer: stringValue(result.resultPointer),
+      groupsPointer: stringValue(result.groupsPointer),
+      complete: booleanValue(result.complete),
+    });
+  }) : undefined;
+  return omitUndefinedDeep({
+    schema: stringValue(record.schema),
+    path: stringValue(record.path),
+    sha256: stringValue(record.sha256),
+    coverage: coverage === undefined ? undefined : omitUndefinedDeep({
+      complete: booleanValue(coverage.complete),
+      totalTables: numberValue(coverage.totalTables),
+      totalRecords: numberValue(coverage.totalRecords),
+      truncated: booleanValue(coverage.truncated),
+    }),
+    results,
+    instruction: stringValue(record.instruction),
   });
 }
 

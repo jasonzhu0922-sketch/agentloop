@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import type { LocalDirectoryListing, SourceSummary } from "../lib/types";
 import { useAgentLoop } from "../state/context";
 
-const SOURCE_FILE_ACCEPT = ".txt,.md,.csv,.json,.html,.htm,.pdf,.docx,.xlsx,.pptx";
+const SOURCE_FILE_ACCEPT = ".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx";
 
 function Thinking(): React.ReactNode {
   return (

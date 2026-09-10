@@ -1,9 +1,13 @@
 .env
 .env.before-*
 apps/agentloop-app/.env
+apps/agentloop-multi-runtime/.env.docker
 apps/*/.env.before-*
 apps/agentloop-app/config/llm-providers.json
+apps/agentloop-multi-runtime/config/llm-providers.json
 apps/agentloop-app/custom-skills/
+apps/agentloop-multi-runtime/custom-skills/*
+!apps/agentloop-multi-runtime/custom-skills/.gitkeep
 apps/agentloop-app/data/
 apps/agentloop-app/conversations/
 apps/agentloop-app/uploads/

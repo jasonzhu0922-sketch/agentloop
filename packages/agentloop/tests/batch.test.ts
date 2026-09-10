@@ -33,6 +33,7 @@ test("Batch enforces concurrency, idempotency, continue, and fail-fast policies"
     };
     const first = await batches.create(owner.user.id, request);
     assert.equal(first.status, "failed");
+    assert.equal(first.allowDangerousTools, true);
     assert.equal(first.completed, 2);
     assert.equal(first.failed, 1);
     assert.ok(tracker.maximum <= 2);

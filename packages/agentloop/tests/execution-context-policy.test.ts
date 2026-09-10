@@ -5,7 +5,7 @@ import { createStepExecutionBinding } from "../src/planning/step-execution-bindi
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
 
-test("source evidence steps receive a global Runtime progress policy", () => {
+test("source semantics stay out of the global Runtime progress policy", () => {
   const step = planStep({
     id: "extract-source",
     kind: "leaf",
@@ -31,13 +31,7 @@ test("source evidence steps receive a global Runtime progress policy", () => {
   });
 
   assert.notEqual(policy, undefined);
-  assert.deepEqual(policy?.requiredEvidenceKinds, [
-    "source_summary",
-    "record_counts",
-    "structured_extraction_artifact",
-    "explicit_caveats",
-    "delivery_receipt",
-  ]);
+  assert.deepEqual(policy?.requiredEvidenceKinds, ["delivery_receipt"]);
   assert.equal(policy?.maxExploratoryPrimarySteps, 8);
   assert.equal(policy?.exploratoryToolNames.includes("read_source"), true);
   assert.equal(policy?.evidenceProducingToolNames.includes("computer_write_file"), true);
@@ -439,9 +433,9 @@ test("execution context prefers structured JSON reads for table extraction artif
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    requiredCapabilities: [],
+    requiredCapabilities: ["workspace_file_read"],
     evidenceContract: {
-      requiredKinds: ["delivery_receipt", "explicit_caveats"],
+      requiredKinds: ["derived_aggregation", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
@@ -471,6 +465,8 @@ test("execution context prefers structured JSON reads for table extraction artif
   assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_summarize_table_artifact/);
   assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_read_json/);
   assert.match(payload.structuredArtifactConsumptionDiscipline, /Use computer_search_text only/);
+  assert.match(payload.derivedAggregationDiscipline, /computer_aggregate_table_artifact/);
+  assert.match(payload.derivedAggregationDiscipline, /caveat is not a substitute/i);
   const bindings = payload.dependencyEvidenceBindings as {
     readonly bindings: readonly Array<{
       readonly toolEvidence: readonly Array<{

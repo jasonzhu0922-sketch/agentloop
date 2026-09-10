@@ -6,10 +6,11 @@ import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
 import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptance-provider.ts";
-import { admitPlan, hasFileProducer } from "../planning/admission.ts";
+import { admitPlan } from "../planning/admission.ts";
 import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import type {
   AssessmentProfileId,
+  ConversationCompletedStepHandoff,
   ConversationEvidenceLedger,
   ConversationFailedBoundary,
   ConversationReusableArtifact,
@@ -142,6 +143,8 @@ export const DEFAULT_MAX_STEPS = 24;
 const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
 const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
 const CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT = 8;
+const CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT = 12;
+const CONVERSATION_COMPLETED_STEP_HANDOFF_OUTPUT_CHARACTERS = 3_000;
 const MAX_COMMAND_OUTPUT_REFERENCE_BYTES = 50 * 1024 * 1024;
 const TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES = 8 * 1024;
 const TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS = 600;
@@ -392,6 +395,16 @@ export class RunService {
     return created;
   }
 
+  /** Ensure a Router-owned conversation id exists before a Runtime starts a Run. */
+  async ensureConversation(actorUserId: string, conversationId: string, input: string): Promise<void> {
+    await this.runs.ensureConversation({
+      id: requireString(conversationId, "conversationId"),
+      ownerUserId: actorUserId,
+      title: titleFromInput(requireString(input, "input")),
+      now: Date.now(),
+    });
+  }
+
   async get(actorUserId: string, runId: string): Promise<RunRecord> {
     const row = await this.runs.getByOwner(runId, actorUserId);
     if (row === undefined) throw notFound("Run");
@@ -590,6 +603,7 @@ export class RunService {
     const consideredRuns = allRuns.slice(-CONVERSATION_WORKING_SET_RUN_LIMIT);
     const planCursors: Array<ConversationWorkingSet["planCursors"][number]> = [];
     const reusableArtifacts: ConversationReusableArtifact[] = [];
+    const completedStepHandoffs: ConversationCompletedStepHandoff[] = [];
     const failedBoundaries: ConversationFailedBoundary[] = [];
     const requiredSkillIds = new Set<string>();
     const recommendedCapabilityIds = new Set<string>();
@@ -612,6 +626,8 @@ export class RunService {
         for (const step of plan.steps) {
           const sourceSummary = conversationSourceSummaryFromStep(run.id, plan.id, step);
           if (sourceSummary !== undefined) sourceSummaries.push(sourceSummary);
+          const handoff = conversationCompletedStepHandoff(run.id, plan.id, step);
+          if (handoff !== undefined) completedStepHandoffs.push(handoff);
         }
         const cursor = {
           runId: run.id,
@@ -695,6 +711,7 @@ export class RunService {
 
     const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
     const boundedSourceSummaries = sourceSummaries.slice(-CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT);
+    const boundedStepHandoffs = completedStepHandoffs.slice(-CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT);
     for (const artifact of boundedArtifacts) {
       for (const skillId of artifact.sourceSkillIds ?? []) requiredSkillIds.add(skillId);
       for (const capability of artifact.sourceCapabilities ?? []) recommendedCapabilityIds.add(capability);
@@ -719,6 +736,7 @@ export class RunService {
         capabilityIds: [...recommendedCapabilityIds],
       },
       ...(evidenceLedger === undefined ? {} : { evidenceLedger }),
+      ...(boundedStepHandoffs.length === 0 ? {} : { completedStepHandoffs: boundedStepHandoffs }),
       ...(resumeSuggestion === undefined ? {} : { resumeSuggestion }),
     };
   }
@@ -1425,13 +1443,6 @@ export class RunService {
         availableSources,
       );
       const planningSkills = planningSkillRoles.map((item) => item.skill);
-      if (planningSkills.some((skill) => skillRequiresFileOutput(skill)) && !canProduceFiles(new Set(allowedToolNames))) {
-        throw new AppError(
-          "PLAN_NOT_ADMITTED",
-          "The selected Skill requires file-producing tools, but this Run does not allow any write or command Tool",
-          422,
-        );
-      }
       if (!responseOnly) {
         await emit({
           type: "planning.skills.selected",
@@ -1895,7 +1906,10 @@ export class RunService {
       const fileOutputStep = (stepAllowsSkillFileOutput(activeStep)
         && stepSkills.some((skill) => skillRequiresFileOutput(skill)))
         || stepRequiresFileOutput(activeStep);
-      const lookupEvidenceStep = !fileOutputStep && stepCanConvergeFromLookupEvidence(activeStep);
+      const lookupEvidenceStep = !fileOutputStep && (
+        stepCanConvergeFromLookupEvidence(activeStep)
+        || stepAllowsSourceSummaryCandidateConvergence(activeStep)
+      );
       const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills);
       const stepSemanticFrame = deriveStepSemanticFrame({
         step: activeStep,
@@ -2871,7 +2885,9 @@ function conversationSourceSummaryFromStep(
 ): ConversationSourceSummary | undefined {
   if (step.status !== "completed" || step.evidence === undefined) return undefined;
   const candidate = parseJsonRecord(step.evidence.candidateOutput);
-  if (candidate?.schema !== "agentloop.sourceSummaryCandidate/v1") return undefined;
+  if (candidate?.schema !== "agentloop.sourceSummaryCandidate/v1") {
+    return conversationSourceSummaryFromReceipts(runId, planId, step);
+  }
   const facts = Array.isArray(candidate.facts)
     ? candidate.facts
       .map((value): ConversationSourceFact | undefined => {
@@ -2908,6 +2924,126 @@ function conversationSourceSummaryFromStep(
     ...(typeof candidate.recommendedNextStep === "string" && candidate.recommendedNextStep.trim().length > 0
       ? { recommendedNextStep: truncateWorkingSetText(candidate.recommendedNextStep, 320) }
       : {}),
+  };
+}
+
+/**
+ * Older completed fact leaves may have a canonical structured receipt but no
+ * model-produced sourceSummaryCandidate (for example when a later leaf fails
+ * before the Run can finish).  Preserve the neutral receipt facts so a later
+ * turn can reuse the evidence without trusting or reconstructing model prose.
+ */
+function conversationSourceSummaryFromReceipts(
+  runId: string,
+  planId: string,
+  step: ExecutionPlan["steps"][number],
+): ConversationSourceSummary | undefined {
+  const facts: ConversationSourceFact[] = [];
+  const sourceRefs: ConversationSourceReference[] = [];
+  const coveredTopics = new Set<string>();
+  const missingOrUnverified = new Set<string>();
+  for (const toolCall of step.evidence?.toolCalls ?? []) {
+    if (toolCall.isError) continue;
+    const result = parseJsonRecord(toolCall.result);
+    const receipt = parseJsonRecord(result?.evidenceReceipt);
+    const evidenceKinds = parseJsonRecord(receipt?.evidenceKinds ?? result?.evidenceKinds);
+    if (!stringArrayField(evidenceKinds?.satisfied).some((kind) =>
+      kind === "source_summary"
+      || kind === "source_urls"
+      || kind === "schema_summary"
+      || kind === "record_counts"
+      || kind === "structured_extraction_artifact"
+    )) continue;
+    const sourceType = typeof receipt?.sourceType === "string" ? receipt.sourceType : toolCall.toolName;
+    coveredTopics.add(truncateWorkingSetText(sourceType, 120));
+    const receiptRefs = Array.isArray(receipt?.sourceRefs) ? receipt.sourceRefs : [];
+    for (const value of receiptRefs) {
+      const ref = asRecord(value);
+      if (ref === undefined) continue;
+      const sourceRefId = firstNonEmptyString(ref.sourceRefId, ref.path, ref.sourceId, ref.originalName);
+      const url = firstNonEmptyString(ref.url);
+      if (sourceRefId !== undefined || url !== undefined) {
+        sourceRefs.push({
+          ...(sourceRefId === undefined ? {} : { sourceRefId: truncateWorkingSetText(sourceRefId, 180) }),
+          ...(url === undefined ? {} : { url: truncateWorkingSetText(url, 500) }),
+        });
+      }
+    }
+    const receiptFacts = Array.isArray(receipt?.facts) ? receipt.facts : [];
+    for (const value of receiptFacts) {
+      const fact = asRecord(value);
+      if (fact === undefined) continue;
+      const claim = neutralReceiptFactClaim(toolCall.toolName, fact);
+      if (claim === undefined) continue;
+      const artifact = asRecord(fact.artifact);
+      const artifactPath = firstNonEmptyString(artifact?.path);
+      if (artifactPath !== undefined) sourceRefs.push({ sourceRefId: truncateWorkingSetText(artifactPath, 180) });
+      facts.push({
+        claim,
+        sourceRefs: [{ sourceRefId: toolCall.toolCallId }],
+        confidence: "receipt_backed",
+      });
+    }
+    for (const caveat of stringArrayField(receipt?.caveats)) {
+      missingOrUnverified.add(truncateWorkingSetText(caveat, 300));
+    }
+  }
+  if (facts.length === 0 && sourceRefs.length === 0) return undefined;
+  const dedupedRefs = dedupeConversationSourceReferences(sourceRefs).slice(0, 8);
+  return {
+    runId,
+    planId,
+    stepId: step.id,
+    schema: "agentloop.sourceSummaryCandidate/v1",
+    coveredTopics: [...coveredTopics].slice(0, 5),
+    facts: facts.slice(0, 6).map((fact) => ({
+      ...fact,
+      sourceRefs: dedupeConversationSourceReferences([...fact.sourceRefs, ...dedupedRefs]).slice(0, 8),
+    })),
+    missingOrUnverified: [...missingOrUnverified].slice(0, 8),
+    recommendedNextStep: "Reuse the persisted source receipt before acquiring the same source again.",
+  };
+}
+
+function neutralReceiptFactClaim(toolName: string, fact: Record<string, unknown>): string | undefined {
+  const kind = firstNonEmptyString(fact.kind) ?? "source evidence";
+  const originalName = firstNonEmptyString(fact.originalName);
+  const totalRecords = numberValue(fact.totalRecords) ?? numberValue(fact.recordCount);
+  const totalRows = numberValue(fact.totalRows) ?? numberValue(fact.rowCount);
+  const artifact = asRecord(fact.artifact);
+  const artifactPath = firstNonEmptyString(artifact?.path);
+  const parts = [
+    `${toolName} recorded ${kind}`,
+    originalName === undefined ? "" : `for ${originalName}`,
+    totalRecords === undefined ? "" : `with ${totalRecords} record(s)`,
+    totalRows === undefined ? "" : `and ${totalRows} row(s)`,
+    artifactPath === undefined ? "" : `at ${artifactPath}`,
+  ].filter((part) => part.length > 0);
+  return parts.length === 0 ? undefined : truncateWorkingSetText(parts.join(" "), 240);
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+function conversationCompletedStepHandoff(
+  runId: string,
+  planId: string,
+  step: ExecutionPlan["steps"][number],
+): ConversationCompletedStepHandoff | undefined {
+  if (step.status !== "completed" || step.output === undefined || step.output.trim().length === 0) return undefined;
+  const output = truncateWorkingSetText(step.output, CONVERSATION_COMPLETED_STEP_HANDOFF_OUTPUT_CHARACTERS);
+  return {
+    runId,
+    planId,
+    stepId: step.id,
+    ...(step.role === undefined ? {} : { role: step.role }),
+    objective: truncateWorkingSetText(step.objective, 600),
+    output,
+    outputTruncated: output.length < step.output.replace(/\s+/g, " ").trim().length,
   };
 }
 
@@ -3893,10 +4029,6 @@ async function planningWorkspaceFacts(
   }
 }
 
-function canProduceFiles(allowedToolNames: ReadonlySet<string>): boolean {
-  return hasFileProducer(allowedToolNames);
-}
-
 async function commitCompletedPlan(
   terminal: TerminalCommitter,
   assessments: readonly SkillComplianceAssessment[],
@@ -4013,9 +4145,10 @@ function requiresStrictExternalSourceCompletion(value: string): boolean {
 }
 
 function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment): boolean {
-  if (assessment.approved) return true;
-  if (assessment.criteria.length === 0) return true;
-  return assessment.criteria.some((criterion) => criterion.satisfied);
+  // A repair limit only bounds retries. It must never override an Assessment
+  // rejection: deferred-validation and evidence-boundary completion are
+  // explicit, separately classified outcomes.
+  return assessment.approved;
 }
 
 /**
@@ -4055,10 +4188,9 @@ const SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT = [
   "This response is only a candidate: the independent assessor and Terminal Committer remain authoritative.",
   "</runtime_source_evidence_convergence>",
 ].join("\n");
-function skillRequiresFileOutput(skill: Pick<PrivateSkill, "name" | "description">): boolean {
-  const text = `${skill.name}\n${skill.description}`.toLowerCase();
-  return /(?:\.(?:png|pdf|md|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv)\b|\b(?:png|pdf|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv)\b|文件|档案)/i.test(text)
-    || /(create|produce|generate|write|save|export|render|materialize|build|deliver|output|design|make|create beautiful|创作|生成|创建|制作|输出|产出)/i.test(text);
+function skillRequiresFileOutput(skill: Pick<PrivateSkill, "agentLoop">): boolean {
+  return skill.agentLoop?.executionProfiles?.includes("local_script") === true
+    || skill.agentLoop?.artifactKinds.some((kind) => kind !== "none") === true;
 }
 
 function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
@@ -4092,7 +4224,14 @@ function shouldConvergeAfterLookupEvidence(
   context: ToolStepConvergenceContext,
   sources: readonly UploadedSourceSummary[] = [],
 ): { converge: boolean; reason?: string } {
-  if (!stepCanConvergeFromLookupEvidence(step)) return { converge: false };
+  // A fact-acquisition step may carry workspace-write capability solely because
+  // its authorized extractor materializes a durable evidence artifact.  That
+  // capability must not prevent convergence once a complete, structured
+  // extraction receipt exists: continuing to offer the full tool catalog lets
+  // the model re-read the same source instead of persisting a cross-turn
+  // source-summary candidate.
+  const sourceSummaryCandidateStep = stepAllowsSourceSummaryCandidateConvergence(step);
+  if (!stepCanConvergeFromLookupEvidence(step) && !sourceSummaryCandidateStep) return { converge: false };
   const latestSuccessfulLookupEvidence = context.latestToolEvidence
     .filter((item) => !item.isError && isLookupToolName(item.toolName));
   if (latestSuccessfulLookupEvidence.length === 0) return { converge: false };
@@ -4108,6 +4247,13 @@ function shouldConvergeAfterLookupEvidence(
   const minimumSourceReads = minimumSourceReadsForLookupStep(step, successfulLookupEvidence);
   if (requiresContentRead && latestVisibleSourceReadHasContinuation(latestSuccessfulLookupEvidence)) {
     return { converge: false };
+  }
+  if (
+    sourceSummaryCandidateStep
+    && hasSatisfiedEvidenceKind(successfulLookupEvidence, "source_summary")
+    && hasCompleteStructuredExtractionEvidence(successfulLookupEvidence)
+  ) {
+    return { converge: true, reason: "lookup_evidence_ready:complete_structured_extraction" };
   }
   if (stepUsesUploadedSourceEvidence(step)) {
     const coverage = uploadedSourceCoverageSummary(successfulLookupEvidence, sources);
@@ -4126,7 +4272,7 @@ function shouldConvergeAfterLookupEvidence(
       }
     }
   }
-  if (stepAllowsSourceSummaryCandidateConvergence(step)) {
+  if (sourceSummaryCandidateStep) {
     if (!hasSatisfiedEvidenceKind(successfulLookupEvidence, "source_summary")) {
       return { converge: false };
     }
@@ -4300,6 +4446,7 @@ function isLookupToolName(name: string): boolean {
     name === "visible_find_files"
     || name === "visible_index_directory"
     || name === "visible_extract_tables"
+    || name === "extract_source_tables"
     || name === "visible_search_text"
     || name === "visible_read_file"
     || name === "visible_read_files"
@@ -4310,6 +4457,7 @@ function isLookupToolName(name: string): boolean {
 
 function isSourceContentReadToolName(name: string): boolean {
   return name === "webfetch"
+    || name === "extract_source_tables"
     || name === "visible_read_file"
     || name === "visible_read_files"
     || name === "visible_extract_tables"
@@ -4528,6 +4676,26 @@ function hasSatisfiedEvidenceKind(
   });
 }
 
+/**
+ * `extract_source_tables` reads an authorized structured upload in full (up
+ * to its declared bounds) and writes a content-addressed extraction artifact.
+ * It is therefore a complete source read in its own right, unlike a projected
+ * `read_source` chunk.  Keep this check receipt-shaped rather than relying on
+ * a tool name alone so a truncated extraction still remains tool-enabled.
+ */
+function hasCompleteStructuredExtractionEvidence(evidence: readonly AgentLoopToolEvidence[]): boolean {
+  return evidence.some((item) => {
+    if (item.isError || item.toolName !== "extract_source_tables") return false;
+    const parsed = parseJsonRecord(item.result);
+    if (parsed?.schema !== "agentloop.visibleTableExtraction/v1" || parsed.truncated === true) return false;
+    const artifact = parseJsonRecord(parsed.artifact);
+    if (typeof artifact?.path !== "string" || artifact.path.trim().length === 0) return false;
+    const receipt = parseJsonRecord(parsed.evidenceReceipt);
+    const evidenceKinds = parseJsonRecord(receipt?.evidenceKinds ?? parsed.evidenceKinds);
+    return stringArrayField(evidenceKinds?.satisfied).includes("structured_extraction_artifact");
+  });
+}
+
 function latestSourceReadAddsNoNewSources(
   allEvidence: readonly AgentLoopToolEvidence[],
   latestEvidence: readonly AgentLoopToolEvidence[],
@@ -4716,6 +4884,7 @@ const RUNTIME_RECEIPT_ASSESSMENT_KINDS = new Set([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
+  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -4829,7 +4998,8 @@ function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): bool
     || requiredKinds.includes("source_summary")
     || requiredKinds.includes("schema_summary")
     || requiredKinds.includes("record_counts")
-    || requiredKinds.includes("structured_extraction_artifact");
+    || requiredKinds.includes("structured_extraction_artifact")
+    || requiredKinds.includes("derived_aggregation");
 }
 
 function stepUsesOnlyDirectDelivery(step: ExecutionPlan["steps"][number]): boolean {
@@ -4837,8 +5007,7 @@ function stepUsesOnlyDirectDelivery(step: ExecutionPlan["steps"][number]): boole
   return step.role === "deliver"
     && stepResolvedToolNames(step).length === 0
     && step.requiredFacts.length === 0
-    && requiredKinds.length > 0
-    && requiredKinds.every((kind) => kind === "delivery_receipt");
+    && (requiredKinds.length === 0 || requiredKinds.every((kind) => kind === "delivery_receipt"));
 }
 
 const ARTIFACT_DELIVERY_EVIDENCE_KINDS = new Set([
@@ -5135,7 +5304,7 @@ function sourceEventSummary(source: UploadedSourceSummary): Record<string, unkno
 }
 
 function parseExecuteOptions(value: unknown): ExecuteOptions {
-  if (value === undefined) return { allowDangerousTools: false, visibleDirectories: [], sourceIds: [] };
+  if (value === undefined) return { allowDangerousTools: true, visibleDirectories: [], sourceIds: [] };
   const record = requireRecord(value, "run options");
   if (record.allowDangerousTools !== undefined && typeof record.allowDangerousTools !== "boolean") {
     throw new AppError("BAD_REQUEST", "allowDangerousTools must be boolean", 400);
@@ -5152,7 +5321,7 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
     throw new AppError("BAD_REQUEST", "conversationIntent must be auto", 400);
   }
   return {
-    allowDangerousTools: record.allowDangerousTools === true,
+    allowDangerousTools: record.allowDangerousTools !== false,
     visibleDirectories,
     sourceIds,
     ...(conversationId === undefined ? {} : { conversationId }),
@@ -5394,6 +5563,7 @@ function requiresConversationWorksetExecution(
   if (conversationWorkingSet === undefined) return false;
   if (requestsPriorArtifactChange(input)) return true;
   const hasReusablePriorWork = conversationWorkingSet.reusableArtifacts.length > 0
+    || (conversationWorkingSet.completedStepHandoffs?.length ?? 0) > 0
     || conversationWorkingSetHasCompletedStepOutput(conversationWorkingSet);
   if (!hasReusablePriorWork) return false;
   return classifyTaskIntent({
@@ -5413,6 +5583,7 @@ function requiresDeterministicConversationExecution(
 function conversationWorkingSetHasCompletedStepOutput(
   conversationWorkingSet: ConversationWorkingSet,
 ): boolean {
+  if ((conversationWorkingSet.completedStepHandoffs?.length ?? 0) > 0) return true;
   return conversationWorkingSet.planCursors.some((cursor) =>
     cursor.steps.some((step) =>
       step.status === "completed"

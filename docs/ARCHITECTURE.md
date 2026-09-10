@@ -12,7 +12,7 @@
 - 运行面拥有不可变能力凭证、Agent Loop、Tool Registry、上下文组装、模型适配器、事件持久化和预算。
 - LLM 只负责生成内容、选择已暴露工具、填写参数、读取结果并继续推理。它不能决定自己能访问哪个 Skill、是否绕过预算，或宣告一个失败的运行已完成。
 - 顶层 `skills/` 是服务端正式发现源；每个结构有效的第三方 Package 在使用前原样物化到当前用户隔离的只读 Store。来源锁仅在存在且匹配时提供可选溯源信息；显式 `.disabled.json` 可隔离不能进入 Runtime 的用户侧目录。Skill 目录 API 与 Skill 正文分离；Planner 和已绑定 Step 初始只接收授权目录，必须通过 `load_skill` 激活当前 Run 的精确版本。`load_skill` 不能成为越权入口。
-- 运行是单 Agent 的：服务端使用固定 persona 驱动每个 Run，没有 Agent 定义、Skill 绑定或委派概念。Run 的 Skills 由用户身份决定（私有 + 官方发现），执行工具集只由 `allowDangerousTools` 门控；模型不能要求、交换或提升工具。
+- 运行是单 Agent 的：服务端使用固定 persona 驱动每个 Run，没有 Agent 定义、Skill 绑定或委派概念。Run 的 Skills 由用户身份决定（私有 + 官方发现），执行工具集只由 `allowDangerousTools` 门控（默认开启，显式 `false` 可关闭）；模型不能要求、交换或提升工具。
 - 会话是单 Agent 的会话：后续轮次通过 `conversationId` 继承同一会话的上下文，`parent_run_id` 只表达同一会话内的轮次先后，不构成委派谱系。
 - 批次是 `Batch → BatchItem → Run → Plan`，并发和失败策略只调度独立 Run，不能绕过单 Run 的规划、Skill 和终态提交链。
 
@@ -240,7 +240,7 @@ stateDiagram-v2
 
 ```text
 allowedTools  = 全部已注册工具
-             − 危险 Computer 工具（除非 allowDangerousTools）
+             − 危险 Computer 工具（默认开启，除非 allowDangerousTools=false）
 rootGrant     = { actor, workspace, allowedTools, allowedSkillIds }
 recommendedTools = step.recommendedToolNames  // 推荐清单，不是授权边界
 stepTools     = rootGrant.allowedToolNames
@@ -520,7 +520,7 @@ usage.recorded / context.compacted
 | Agent Loop | `src/runtime/agent-loop.ts`, `src/runtime/context-assembler.ts` | 已有有界 Tool 结算、候选完成、投影式 prune/compaction 和 Skill 重激活；待 streaming/恢复 |
 | Tool Registry | `src/runtime/tool-registry.ts` | 已按 Grant 动态物化 |
 | Computer | `src/computer/*` | 文件/搜索/命令已实现；GUI 通过 Driver 插件；生产待容器沙箱 |
-| Single-Agent Run | `src/runtime/run-service.ts` | 固定 persona、用户级 Skill 解析、`allowDangerousTools` 门控、会话轮次；待后台 handle/inbox |
+| Single-Agent Run | `src/runtime/run-service.ts` | 固定 persona、用户级 Skill 解析、默认开启的 `allowDangerousTools` 门控、会话轮次；待后台 handle/inbox |
 | Batch | `src/batch/batch-service.ts` | 已有并发/幂等/失败策略和逐项状态 |
 | Model Gateway | `src/runtime/contracts.ts`, `src/runtime/prompt-protocol.ts`, `src/runtime/models.ts`, `src/runtime/provider-registry.ts` | Provider-neutral Invocation、OpenAI-compatible Prompt Encoder、wire 预算估算、结构化 Tool Choice 和有界传输重试 |
 | Event Store | `src/storage/database.ts` | SQLite Plan/Evidence/Assessment/Outcome/Event；待 PostgreSQL/lease |

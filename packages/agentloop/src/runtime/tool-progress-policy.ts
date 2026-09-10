@@ -221,11 +221,17 @@ export function runtimeStepToolProgressPolicy(
   } = {},
 ): RuntimeToolProgressPolicy {
   const scope = options.scope ?? "generic";
+  const observableRequiredEvidenceKinds = requiredEvidenceKinds.filter((kind) =>
+    OBSERVABLE_COMPLETION_EVIDENCE_KINDS.has(kind)
+  );
   return {
     schema: "agentloop.runtimeToolProgressPolicy/v1",
-    requiredEvidenceKinds,
+    // Source/extraction semantics instruct the model, but must not hold the
+    // loop open until a Tool signs an interpretation of those semantics.
+    // Progress policy tracks only observable delivery effects.
+    requiredEvidenceKinds: observableRequiredEvidenceKinds,
     ...(options.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: options.expectedArtifactKind }),
-    autoCompleteFromEvidence: requiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
+    autoCompleteFromEvidence: observableRequiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
     maxExploratoryPrimarySteps: scope === "source" ? 8 : 3,
     maxExploratoryGraceSteps: scope === "source" ? 3 : 2,
     exploratoryToolNames: uniqueStrings([
@@ -235,6 +241,7 @@ export function runtimeStepToolProgressPolicy(
       "computer_read_files",
       "computer_read_json",
       "computer_search_text",
+      "extract_source_tables",
       "read_source",
       "visible_find_files",
       "visible_index_directory",
@@ -253,6 +260,7 @@ export function runtimeStepToolProgressPolicy(
       "computer_run_command",
       "computer_summarize_table_artifact",
       "convert_artifact",
+      "extract_source_tables",
       "materialize_paginated_html",
       "visible_extract_tables",
       "verify_artifact_acceptance",
@@ -263,7 +271,7 @@ export function runtimeStepToolProgressPolicy(
       scope === "source"
         ? "Read-only exploration has exceeded the bounded exploration budget for this source-evidence step."
         : "Read-only exploration has exceeded the bounded exploration budget for this artifact-producing step.",
-      `Required evidence kinds: ${requiredEvidenceKinds.length === 0 ? "unspecified" : requiredEvidenceKinds.join(", ")}.`,
+      `Required observable evidence kinds: ${observableRequiredEvidenceKinds.length === 0 ? "unspecified" : observableRequiredEvidenceKinds.join(", ")}.`,
       scope === "source"
         ? "Use one focused evidence-producing action next: emit a durable structured extraction artifact, run a source parser, summarize an extracted table artifact, or return a completion candidate with explicit caveats when the remaining evidence cannot be produced locally."
         : "Use an evidence-producing tool next: write or update the artifact source, run the Skill validator/build/render command, or verify artifact acceptance.",
@@ -278,7 +286,7 @@ export function runtimeStepToolProgressPolicy(
       scope === "source"
         ? "A recent parser, extraction, validator, or source tool result already named a concrete source-evidence diagnostic."
         : "A recent validator, build, render, parser, or acceptance tool result already named a concrete artifact diagnostic.",
-      `Required evidence kinds: ${requiredEvidenceKinds.length === 0 ? "unspecified" : requiredEvidenceKinds.join(", ")}.`,
+      `Required observable evidence kinds: ${observableRequiredEvidenceKinds.length === 0 ? "unspecified" : observableRequiredEvidenceKinds.join(", ")}.`,
       scope === "source"
         ? "Use an evidence-producing tool next: repair the named extraction/source artifact, rerun the parser, or produce a bounded source evidence receipt."
         : "Use an evidence-producing tool next: patch the named source file, rerun the validator/build/render command, or call verify_artifact_acceptance for the produced artifact.",
@@ -289,6 +297,15 @@ export function runtimeStepToolProgressPolicy(
 }
 
 const AUTO_COMPLETABLE_EVIDENCE_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+  "delivery_receipt",
+]);
+
+const OBSERVABLE_COMPLETION_EVIDENCE_KINDS = new Set([
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -649,6 +666,7 @@ const SOURCE_EVIDENCE_PRODUCER_TOOL_NAMES = [
   "computer_write_file",
   "computer_run_command",
   "computer_summarize_table_artifact",
+  "extract_source_tables",
   "visible_extract_tables",
 ] as const;
 

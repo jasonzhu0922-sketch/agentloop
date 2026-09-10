@@ -754,8 +754,73 @@ test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analys
   assert.deepEqual(plan.steps.map((step) => step.id), ["profile_visible_spreadsheets", "deliver_analysis_reply"]);
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["visible_directory_read"]);
   assert.deepEqual(plan.steps[1].dependencies, ["profile_visible_spreadsheets"]);
-  assert.deepEqual(plan.steps[1].evidenceContract?.requiredKinds, ["delivery_receipt", "explicit_caveats"]);
-  assert.deepEqual(plan.steps[1].successCriteria.map((criterion) => criterion.id), ["delivery_receipt", "explicit_caveats"]);
+  assert.deepEqual(plan.steps[1].evidenceContract?.requiredKinds, ["explicit_caveats"]);
+  assert.deepEqual(plan.steps[1].successCriteria.map((criterion) => criterion.id), ["explicit_caveats"]);
+});
+
+test("ModelPlanner requires derived aggregation evidence for a structured dependency count question", async () => {
+  const planner = new ModelPlanner(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [submitOutcomePlanToolCall("structured-count", {
+      goal: "Count records by owner from the uploaded table.",
+      shape: "fact_then_produce",
+      steps: [{
+        id: "extract_table",
+        objective: "Extract the uploaded workbook into durable structured table evidence.",
+        dependencies: [],
+        role: "fact_acquisition",
+        skillIds: [],
+        requiredCapabilities: ["uploaded_source_read"],
+        evidenceContract: {
+          requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+          caveatPolicy: "mark_unverified_facts",
+        },
+      }, {
+        id: "answer_count",
+        objective: "统计每位责任人的任务数量、并列最多和最少情况。",
+        dependencies: ["extract_table"],
+        role: "deliver",
+        skillIds: [],
+        requiredCapabilities: [],
+        evidenceContract: {
+          requiredKinds: ["explicit_caveats"],
+          caveatPolicy: "mark_unverified_facts",
+        },
+      }],
+    })],
+  }));
+
+  const plan = await planner.plan({
+    runId: "run-structured-aggregation-contract",
+    input: "统计这个表里每位责任人的任务数量，谁最多、谁最少？",
+    availableSkills: [],
+    availableToolNames: [
+      "read_source",
+      "extract_source_tables",
+      "computer_read_json",
+      "computer_summarize_table_artifact",
+      "computer_aggregate_table_artifact",
+    ],
+    sources: [{
+      id: "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      originalName: "tasks.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 1024,
+      sha256: "a".repeat(64),
+      status: "ready",
+      summary: "task records",
+      chunkCount: 1,
+      truncated: false,
+    }],
+  });
+
+  const answer = plan.steps.find((step) => step.id === "answer_count");
+  assert.ok(answer);
+  assert.ok(answer.requiredCapabilities.includes("workspace_file_read"));
+  assert.deepEqual(answer.evidenceContract?.requiredKinds, ["explicit_caveats", "derived_aggregation"]);
+  assert.deepEqual(answer.successCriteria.map((criterion) => criterion.id), ["explicit_caveats", "derived_aggregation"]);
 });
 
 test("ModelPlanner canonicalizes duplicate names in the set-valued Tool capability field", async () => {
@@ -911,6 +976,41 @@ test("ModelPlanner accepts aggregate artifact_acceptance evidence contracts", as
   );
 });
 
+test("ModelPlanner accepts ordinary delivery leaves without an evidence contract", async () => {
+  const planner = new ModelPlanner(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [{
+      id: "ordinary-delivery",
+      name: "submit_outcome_plan",
+      arguments: {
+        schema: "agentloop.outcomePlan/v2",
+        goal: "Explain the design trade-off",
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        leaves: [{
+          id: "answer",
+          objective: "Explain the design trade-off directly to the user.",
+          dependsOn: [],
+          role: "deliver",
+          skillIds: [],
+          requiredCapabilities: [],
+        }],
+      },
+    }],
+  }));
+
+  const plan = await planner.plan({
+    runId: "run-ordinary-delivery",
+    input: "Explain the design trade-off",
+    availableSkills: [],
+    availableToolNames: [],
+  });
+
+  assert.equal(plan.steps[0]?.evidenceContract, undefined);
+  assert.deepEqual(plan.steps[0]?.successCriteria.map((criterion) => criterion.id), ["delivered"]);
+});
+
 test("ToolSource capability categories and explicit source constraints stay host-declared", async () => {
   const source = {
     id: "amap-maps",
@@ -1046,6 +1146,43 @@ test("uploaded source IDs bind read_source without entering the ToolSource names
     }),
     (error: unknown) => error instanceof AppError && /requires unavailable uploaded source/.test(error.message),
   );
+});
+
+test("uploaded source bindings expose structured extraction alongside text reading when both tools are authorized", () => {
+  const sourceId = "src_63636363636363636363636363636363";
+  const proposal: PlanProposal = {
+    goal: "Analyze the selected uploaded spreadsheet.",
+    selectedSkillIds: [],
+    steps: [{
+      id: "extract-uploaded-table",
+      objective: "Read the selected spreadsheet as structured source evidence.",
+      dependencies: [],
+      skillIds: [],
+      role: "fact_acquisition",
+      requiredCapabilities: ["uploaded_source_read"],
+      sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+      evidenceContract: {
+        requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [{ id: "structured_evidence", description: "Structured source evidence is available.", source: "planner" }],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "uploaded-structured-source-binding",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["read_source", "extract_source_tables"]),
+    availableTools: [
+      { name: "read_source", description: "Read authorized uploaded source chunks." },
+      { name: "extract_source_tables", description: "Extract authorized uploaded spreadsheet tables." },
+    ],
+    availableUploadedSourceIds: [sourceId],
+  });
+
+  assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["read_source", "extract_source_tables"]);
+  assert.deepEqual(admitted.steps[0]?.executionBinding.requiredUploadedSourceIds, [sourceId]);
 });
 
 test("visible directory IDs bind visible tools without entering the ToolSource namespace", () => {
@@ -1250,7 +1387,7 @@ test("Plan admission normalizes Skill-owned QA evidence out of Runtime evidence 
   ]);
 });
 
-test("Plan admission adds delivery evidence to non-acquisition source-only leaves", () => {
+test("Plan admission retains source-only evidence without making delivery audit a completion gate", () => {
   const proposal: PlanProposal = {
     goal: "summarize uploaded source",
     selectedSkillIds: [],
@@ -1282,9 +1419,8 @@ test("Plan admission adds delivery evidence to non-acquisition source-only leave
   assert.deepEqual(admitted.steps[0].evidenceContract?.requiredKinds, [
     "source_summary",
     "explicit_caveats",
-    "delivery_receipt",
   ]);
-  assert.equal(admitted.steps[0].successCriteria.some((criterion) => criterion.id === "delivery_receipt"), true);
+  assert.equal(admitted.steps[0].successCriteria.some((criterion) => criterion.id === "delivery_receipt"), false);
 });
 
 test("Plan admission leaves acquisition source evidence contracts source-only", () => {
@@ -1382,7 +1518,6 @@ test("Plan admission normalizes conversation-only data analysis final leaves awa
     "explicit_caveats",
   ]);
   assert.deepEqual(admitted.steps[1].evidenceContract?.requiredKinds, [
-    "delivery_receipt",
     "explicit_caveats",
   ]);
   assert.deepEqual(admitted.steps[1].successCriteria.map((criterion) => criterion.id), [
@@ -1427,7 +1562,6 @@ test("Plan admission preserves artifact gates for workspace artifact delivery", 
     "artifact_path",
     "artifact_non_empty",
     "format_matches_request",
-    "delivery_receipt",
   ]);
 });
 
@@ -1550,6 +1684,135 @@ test("Plan admission rejects file artifact delivery when the Run has no producer
   });
   assert.deepEqual(admitted.steps[0].requiredCapabilities, ["workspace_artifact_write", "skill_instruction_load"]);
   assert.deepEqual(admitted.steps[0].executionBinding.resolvedToolNames, ["computer_write_file", "load_skill"]);
+});
+
+test("Plan admission keeps tool-backed direct answers text-only when plan wording mentions file output", () => {
+  const proposal: PlanProposal = {
+    goal: "answer using the available tool",
+    selectedSkillIds: [],
+    steps: [{
+      id: "leaf_direct_answer_tools_used",
+      objective: "Use the available lookup Tool and include its file output details in the direct answer.",
+      dependencies: [],
+      role: "deliver",
+      skillIds: [],
+      requiredCapabilities: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [{
+        id: "artifact_path",
+        description: "The tool-backed answer includes its file output details.",
+        source: "planner",
+      }],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-direct-answer-tools-used",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["websearch"]),
+    taskIntent: { deliverySurface: "conversation", artifactKind: "none" },
+  });
+
+  assert.equal(admitted.steps[0].id, "leaf_direct_answer_tools_used");
+  assert.equal(admitted.steps[0].evidenceContract, undefined);
+  assert.deepEqual(admitted.steps[0].successCriteria.map((criterion) => criterion.id), ["conversation_delivery"]);
+});
+
+test("Plan admission ignores negated file creation in a conversation delivery objective", () => {
+  const admitted = admitPlan({
+    runId: "run-conversation-no-file-creation",
+    proposal: {
+      goal: "仅回复用户要求的最小文本",
+      selectedSkillIds: [],
+      steps: [{
+        id: "answer",
+        objective: "直接返回非空文本，不调用外部工具或创建文件。",
+        dependencies: [],
+        role: "deliver",
+        skillIds: [],
+        requiredCapabilities: [],
+        successCriteria: [{
+          id: "answered",
+          description: "A non-empty answer is returned in the conversation.",
+          source: "planner",
+        }],
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(["websearch"]),
+    taskIntent: { deliverySurface: "conversation", artifactKind: "none" },
+  });
+
+  assert.equal(admitted.steps[0].id, "answer");
+  assert.deepEqual(admitted.steps[0].requiredCapabilities, ["conversation_delivery"]);
+});
+
+test("Plan admission does not infer a file contract from unstructured plan wording", () => {
+  const admitted = admitPlan({
+    runId: "run-unstructured-file-wording",
+    proposal: {
+      goal: "answer the question",
+      selectedSkillIds: [],
+      steps: [{
+        id: "leaf_direct_answer_tools_used",
+        objective: "Create a direct answer that explains the available tool's file output.",
+        dependencies: [],
+        role: "deliver",
+        skillIds: [],
+        requiredCapabilities: [],
+        successCriteria: [{
+          id: "answered",
+          description: "A tool-backed direct answer is returned in the conversation.",
+          source: "planner",
+        }],
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(["websearch"]),
+  });
+
+  assert.equal(admitted.steps[0].id, "leaf_direct_answer_tools_used");
+});
+
+test("ModelPlanner admits tool-backed direct answers with incidental file wording in one turn", async () => {
+  let planningCalls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      planningCalls += 1;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("direct-answer-tools", {
+          goal: "answer using the available lookup tool",
+          steps: [{
+            id: "leaf_direct_answer_tools_used",
+            objective: "Use the available lookup Tool and include its file output details in the direct answer.",
+            dependencies: [],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: [],
+            evidenceContract: { requiredKinds: ["artifact_path"], caveatPolicy: "none" },
+            successCriteria: [{ id: "artifact_path", description: "The tool output details are included in the answer." }],
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-direct-answer-tools-planner",
+    input: "Use the lookup tool to answer my question directly.",
+    availableSkills: [],
+    availableToolNames: ["websearch"],
+  });
+
+  assert.equal(planningCalls, 1);
+  assert.equal(plan.steps[0].evidenceContract, undefined);
 });
 
 test("ModelPlanner caps the planning model output budget", async () => {
@@ -1827,6 +2090,15 @@ test("ModelPlanner rejects text-only plans for requested observable artifacts", 
       input: "设计一个足球世界杯的登录首页。",
       availableSkills: [],
       availableToolNames: ["computer_write_file", "verify_artifact_acceptance"],
+    }),
+    (error: unknown) => hasCode(error, "PLANNING_ERROR"),
+  );
+  await assert.rejects(
+    () => planner.plan({
+      runId: "operation-profile-designed-page-text-only-without-producer-rejected",
+      input: "设计一个足球世界杯的登录首页。",
+      availableSkills: [],
+      availableToolNames: [],
     }),
     (error: unknown) => hasCode(error, "PLANNING_ERROR"),
   );
@@ -3155,6 +3427,7 @@ test("ModelPlanner creates response-only conversational Plans without a planning
     skillIds: [],
     requiredCapabilities: ["conversation_delivery"],
   }]);
+  assert.equal(plan.steps[0]?.evidenceContract, undefined);
 });
 
 test("selectPlanningSkills prefers the matching Skill summary and allows no-skill", () => {
@@ -4453,7 +4726,7 @@ test("ProfiledRuleStepAssessor does not block Skill-bound lookup completion on u
   assert.equal(assessment.failedBoundary, undefined);
 });
 
-test("evidence-gate assessment marks source-versus-artifact receipt mismatches for Plan revision", async () => {
+test("evidence-gate keeps source semantics model-owned when an observable operation succeeded", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
     planId: "plan",
@@ -4492,8 +4765,8 @@ test("evidence-gate assessment marks source-versus-artifact receipt mismatches f
     attempt: 1,
   });
 
-  assert.equal(assessment.approved, false);
-  assert.equal(assessment.failedBoundary?.suggestedRepairShape, "revise_plan");
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.failedBoundary, undefined);
 });
 
 test("RuleBasedStepAssessor accepts source summary receipts for directory analysis evidence gates", async () => {
@@ -4598,6 +4871,58 @@ test("ProfiledRuleStepAssessor treats explicit empty caveats as satisfied source
 
   assert.equal(assessment.approved, true);
   assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "explicit_caveats")?.satisfied, true);
+});
+
+test("ProfiledRuleStepAssessor accepts a model-produced extraction without semantic tool attestation", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("extract-design"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "structured_extraction_artifact", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "The source was summarized.", source: "planner" },
+        { id: "structured_extraction_artifact", description: "A structured extraction was produced.", source: "planner" },
+        { id: "explicit_caveats", description: "Unknowns are marked.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "已基于设计稿生成结构化提取 JSON，并标注未覆盖事项。",
+      toolCalls: [{
+        toolCallId: "write-extraction",
+        toolName: "computer_write_file",
+        isError: false,
+        result: JSON.stringify({
+          path: "game-facts.json",
+          bytes: 512,
+          sha256: "a".repeat(64),
+          artifactReceipt: {
+            schema: "agentloop.artifactReceipt/v1",
+            receiptId: "artifact:game-facts",
+            sourceTool: "computer_write_file",
+            artifact: { path: "game-facts.json", bytes: 512, characters: 300, totalLines: 12, sha256: "a".repeat(64) },
+            inspection: { sha256: "a".repeat(64), characters: 300, totalLines: 12, outline: [], outlineTruncated: false, sampleRangeCount: 1 },
+            evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+            canonicalEvidence: { fullInspectionInToolResult: true },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
 });
 
 test("ProfiledRuleStepAssessor accepts artifact receipts from written file evidence gates", async () => {
@@ -4729,6 +5054,69 @@ test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking fo
   assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
 });
 
+test("ProfiledRuleStepAssessor uses the latest acceptance for a repaired artifact", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("repair-artifact-acceptance"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_acceptance"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [{
+        id: "artifact_acceptance",
+        description: "The repaired artifact has a valid final acceptance receipt.",
+        source: "planner",
+      }],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Delivered repaired report.html.",
+      toolCalls: [{
+        toolCallId: "accept-before-repair",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "report.html" },
+          verdict: "rejected",
+          evidenceKinds: {
+            satisfied: [],
+            caveated: [],
+            failed: ["artifact_acceptance"],
+          },
+        }),
+      }, {
+        toolCallId: "accept-after-repair",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "report.html" },
+          verdict: "caveated",
+          evidenceKinds: {
+            satisfied: ["artifact_acceptance"],
+            caveated: ["artifact_acceptance"],
+            failed: [],
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria[0]?.satisfied, true);
+});
+
 test("ProfiledRuleStepAssessor accepts artifact acceptance JSON emitted on command stdout", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
@@ -4790,7 +5178,7 @@ test("ProfiledRuleStepAssessor accepts artifact acceptance JSON emitted on comma
   assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
 });
 
-test("ProfiledRuleStepAssessor requires full table artifact coverage before approving all-tables analysis", async () => {
+test("ProfiledRuleStepAssessor does not re-assess the model's claimed table coverage", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
     planId: "plan",
@@ -4864,9 +5252,67 @@ test("ProfiledRuleStepAssessor requires full table artifact coverage before appr
     assessmentProfile: "evidence_gate",
   });
 
-  assert.equal(assessment.approved, false);
-  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "table_coverage")?.satisfied, false);
-  assert.ok(assessment.feedback.length > 0);
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "table_coverage")?.satisfied, true);
+  assert.equal(assessment.feedback, "");
+});
+
+test("ProfiledRuleStepAssessor does not re-assess the model's interpretation of an aggregation", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("answer-owner-count"),
+      objective: "Count records by owner from the structured artifact.",
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["derived_aggregation", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "derived_aggregation", description: "A complete aggregation is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are explicit.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "无法确认每位责任人的任务数量。",
+      toolCalls: [{
+        toolCallId: "aggregate",
+        toolName: "computer_aggregate_table_artifact",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.tableArtifactAggregation/v1",
+          coverage: { complete: true, totalTables: 1, totalRecords: 18, truncated: false },
+          results: [{ operation: "count", groupBy: "责任人", groups: [{ value: "甲", count: 1 }], complete: true }],
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            sourceType: "table_artifact_aggregation",
+            receiptId: "complete-aggregation",
+            sourceRefs: [],
+            facts: [{ kind: "table_artifact_aggregation", complete: true }],
+            caveats: [],
+            evidenceKinds: {
+              satisfied: ["derived_aggregation"],
+              caveated: [],
+              failed: [],
+            },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "derived_aggregation")?.satisfied, true);
+  assert.equal(assessment.feedback, "");
 });
 
 test("ModelStepAssessor receives candidate projection instead of full long output", async () => {
@@ -4938,10 +5384,9 @@ test("RunService keeps Planner-declared direct-answer leaves rule-assessed witho
           role: "deliver",
           skillIds: [],
           requiredCapabilities: [],
-          evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
           successCriteria: [{
-            id: "delivery_receipt",
-            description: "A delivery receipt identifies the final user-facing result.",
+            id: "answered",
+            description: "A complete answer addresses the user's request.",
             source: "planner",
           }],
         }],
@@ -5026,6 +5471,8 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
     });
 
     const run = await runs.execute(owner.user.id, "produce a delivery receipt");
+    const started = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "run.started");
+    assert.equal((started?.data as { allowDangerousTools?: boolean } | undefined)?.allowDangerousTools, true);
     const recovery = await waitForRecoveryState(runs, owner.user.id, run.id, "waiting_recovery");
     assert.equal((await runs.get(owner.user.id, run.id)).status, "running");
     assert.equal(recovery.action?.stepId, "test-step");
@@ -5109,7 +5556,7 @@ test("failedBoundary recovery creates and executes only a targeted repair leaf",
     assert.notEqual(original?.retiredAt, undefined);
     assert.equal(repair?.role, "repair");
     assert.equal(repair?.status, "completed");
-    assert.deepEqual(repair?.evidenceContract, { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" });
+    assert.equal(repair?.evidenceContract, undefined);
     assert.equal(detail.assessments.some((assessment) => assessment.stepId === "test-step" && !assessment.approved), true);
     assert.equal(detail.assessments.some((assessment) => assessment.stepId === "test-step.repair.2" && assessment.approved), true);
     const events = await runs.events(owner.user.id, run.id);
@@ -6157,6 +6604,13 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
     assert.equal(workset?.evidenceLedger?.sourceSummaries[0]?.facts[0]?.sourceRefs[0]?.url, "https://source.test/training");
     assert.match(executionRuntimeContext, /conversationEvidenceLedger/);
     assert.match(executionRuntimeContext, /企业培训场景/);
+    const extractHandoff = workset?.completedStepHandoffs?.find((handoff) => handoff.stepId === "extract");
+    assert.equal(extractHandoff?.runId, priorRunId);
+    assert.equal(extractHandoff?.output, "Created reusable source outline at artifacts/content.md.");
+    assert.equal(extractHandoff?.outputTruncated, false);
+    assert.match(executionRuntimeContext, /conversationReuseContext/);
+    assert.match(executionRuntimeContext, /completedStepHandoffs/);
+    assert.match(executionRuntimeContext, /Created reusable source outline/);
     assert.ok(executionRuntimeContext.length < 20_000);
     assert.deepEqual(workset?.recommendedCapabilities.skillIds, [skill.id]);
     assert.equal(workset?.recommendedCapabilities.capabilityIds.includes("workspace_artifact_write"), true);
@@ -7724,6 +8178,108 @@ test("uploaded source reads converge once all chunks are covered without injecti
       event.type === "loop.convergence_queued"
       && (event.data as { reason?: string }).reason === "lookup_evidence_ready:uploaded_source_coverage_complete"
     ), true);
+  } finally {
+    database.close();
+  }
+});
+
+test("fact acquisition converges a complete structured upload extraction despite artifact-write capability", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const model = new StructuredUploadExtractionModel();
+    let useContinuationModel = false;
+    let continuationTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => useContinuationModel
+        ? new StaticModel({ content: "Continued from the persisted extraction receipt.", finishReason: "stop", toolCalls: [] })
+        : model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          if (task.input === "继续") {
+            continuationTask = task;
+            return {
+              goal: "continue from persisted extraction evidence",
+              selectedSkillIds: [],
+              steps: [{
+                id: "continue-from-extraction",
+                objective: "Use the persisted extraction evidence without rereading the source.",
+                dependencies: [],
+                skillIds: [],
+                role: "deliver",
+                requiredCapabilities: [],
+                successCriteria: [{ id: "continued", description: "The persisted evidence is reused." }],
+              }],
+            };
+          }
+          const sourceId = task.sources?.[0]?.id;
+          assert.ok(sourceId);
+          model.sourceId = sourceId;
+          return {
+            goal: "extract reusable task-table facts",
+            selectedSkillIds: [],
+            steps: [{
+              id: "extract-task-table",
+              objective: "Extract the uploaded task table into a durable structured artifact for the following analysis step.",
+              dependencies: [],
+              skillIds: [],
+              role: "fact_acquisition",
+              requiredCapabilities: ["uploaded_source_read", "workspace_artifact_write"],
+              sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+              evidenceContract: {
+                requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+              successCriteria: [{ id: "extracted", description: "A complete structured extraction artifact is available." }],
+            }],
+          };
+        },
+      }),
+    });
+    const source = await runs.uploadSource(owner.user.id, {
+      originalName: "tasks.csv",
+      content: Buffer.from("任务名称,责任人\n任务A,张三\n任务B,李四\n", "utf8"),
+    });
+
+    const run = await runs.execute(owner.user.id, "统计上传任务表", { sourceIds: [source.id] });
+
+    assert.equal(run.status, "completed");
+    assert.equal(model.sawConvergenceTurn, true);
+    assert.equal(model.executionCalls, 2);
+    const plan = await runs.plan(owner.user.id, run.id);
+    assert.match(plan.plan.steps[0]?.evidence?.candidateOutput ?? "", /agentloop\.sourceSummaryCandidate\/v1/);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) =>
+      event.type === "loop.convergence_queued"
+      && (event.data as { reason?: string }).reason === "lookup_evidence_ready:complete_structured_extraction"
+    ), true);
+
+    // Simulate a Run produced before source-summary convergence existed: the
+    // accepted extraction receipt remains, but the model candidate was prose
+    // and the later Run terminalized with a provider failure.
+    await database.prepare("UPDATE plan_steps SET evidence_json = ? WHERE plan_id = ? AND step_id = ?").run(
+      JSON.stringify({
+        ...plan.plan.steps[0]?.evidence,
+        candidateOutput: "Legacy prose did not preserve a structured source summary.",
+      }),
+      plan.plan.id,
+      "extract-task-table",
+    );
+    await database.prepare("UPDATE plans SET status = 'failed' WHERE id = ?").run(plan.plan.id);
+    await database.prepare("UPDATE runs SET status = 'failed', output = NULL, error_code = 'MODEL_ERROR' WHERE id = ?").run(run.id);
+    await database.prepare("UPDATE run_outcomes SET status = 'failed', output = NULL, reason_code = 'MODEL_ERROR' WHERE run_id = ?").run(run.id);
+
+    useContinuationModel = true;
+    const continuation = await runs.execute(owner.user.id, "继续", { conversationId: run.conversationId });
+    assert.equal(continuation.status, "completed");
+    const fallbackSummary = continuationTask?.conversationWorkingSet?.evidenceLedger?.sourceSummaries
+      .find((summary) => summary.runId === run.id);
+    assert.ok(fallbackSummary);
+    assert.equal(fallbackSummary?.facts[0]?.claim.includes("2 record(s)"), true);
+    assert.equal(fallbackSummary?.facts[0]?.sourceRefs.some((ref) => ref.sourceRefId === "extract-task-table"), true);
   } finally {
     database.close();
   }
@@ -9406,7 +9962,6 @@ class PlannedDirectAnswerModel implements ModelAdapter {
       return { content: "", finishReason: "stop", toolCalls: [] };
     }
     this.executionToolCounts.push(request.tools.length);
-    assert.equal(request.tools.some((tool) => tool.name === "websearch"), true);
     return {
       content: "根据上一轮已取得的信息，宝信软件董事长是夏雪松。",
       finishReason: "stop",
@@ -9484,6 +10039,48 @@ class UploadedSourceCoverageModel implements ModelAdapter {
     this.repeatedReadAttempted = request.tools.some((tool) => tool.name === "read_source");
     return {
       content: "已基于上传材料的全部 chunk 覆盖生成中文总结。",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class StructuredUploadExtractionModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  sourceId = "";
+  executionCalls = 0;
+  sawConvergenceTurn = false;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase !== "execution") return { content: "", finishReason: "stop", toolCalls: [] };
+    this.executionCalls += 1;
+    if (this.executionCalls === 1) {
+      assert.equal(request.tools.some((tool) => tool.name === "extract_source_tables"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "extract-task-table",
+          name: "extract_source_tables",
+          arguments: { sourceId: this.sourceId, maxRowsPerSheet: 100 },
+        }],
+      };
+    }
+    this.sawConvergenceTurn = true;
+    assert.equal(request.tools.length, 0);
+    assert.match(request.runtimeContext?.content ?? "", /agentloop\.sourceSummaryCandidate\/v1/);
+    return {
+      content: JSON.stringify({
+        schema: "agentloop.sourceSummaryCandidate/v1",
+        coveredTopics: ["任务名称和责任人"],
+        facts: [{
+          claim: "tasks.csv 已完整提取为结构化表格，共 2 条任务记录，可供后续按责任人聚合。",
+          sourceRefs: ["extract-task-table"],
+          confidence: "source_supported",
+        }],
+        missingOrUnverified: [],
+        recommendedNextStep: "aggregate_tasks_by_owner",
+      }),
       finishReason: "stop",
       toolCalls: [],
     };

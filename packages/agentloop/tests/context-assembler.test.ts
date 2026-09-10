@@ -74,6 +74,61 @@ test("ContextAssembler projects structured Tool evidence instead of raw read con
   assert.equal(events.some((event) => event.type === "context.tool_outputs_projected" && event.data.reason === "structured_evidence"), true);
 });
 
+test("ContextAssembler exposes a durable aggregation result reference without inlining groups", async () => {
+  const toolResult = JSON.stringify({
+    schema: "agentloop.tableArtifactAggregation/v1",
+    resultRef: {
+      schema: "agentloop.tableAggregationResultRef/v1",
+      path: ".agentloop/table-aggregations/aa/result.json",
+      sha256: "a".repeat(64),
+      coverage: { complete: true, totalTables: 1, totalRecords: 18, truncated: false },
+      results: [{
+        queryIndex: 0,
+        operation: "count",
+        groupBy: "责任人",
+        groupCount: 18,
+        returnedGroupCount: 18,
+        resultPointer: "/results/0",
+        groupsPointer: "/results/0/groups",
+        complete: true,
+      }],
+      instruction: "Use computer_read_json with this path and a resultPointer or groupsPointer.",
+    },
+    results: [{ groups: [{ value: "不应进入上下文", count: 18 }] }],
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1",
+      sourceType: "table_artifact_aggregation",
+      receiptId: "aggregation-receipt",
+      sourceRefs: [],
+      facts: [{ kind: "table_artifact_aggregation", totalRecords: 18 }],
+      caveats: [],
+      evidenceKinds: { satisfied: ["derived_aggregation", "table_coverage"], caveated: [], failed: [] },
+    },
+  });
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-aggregation-result-ref",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "aggregate", name: "computer_aggregate_table_artifact", arguments: {} }] },
+    { role: "tool", toolCallId: "aggregate", name: "computer_aggregate_table_artifact", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+
+  assert.match(projected, /agentloop\.tableAggregationResultRef\/v1/);
+  assert.match(projected, /\.agentloop\/table-aggregations\/aa\/result\.json/);
+  assert.match(projected, /\/results\/0\/groups/);
+  assert.match(projected, /computer_read_json/);
+  assert.doesNotMatch(projected, /不应进入上下文/);
+});
+
 test("ContextAssembler preserves a bounded web-page preview in structured evidence", async () => {
   const textPreview = "The source describes measurable process controls and evidence requirements. ".repeat(40);
   const toolResult = JSON.stringify({

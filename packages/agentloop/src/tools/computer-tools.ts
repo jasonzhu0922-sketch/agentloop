@@ -22,6 +22,8 @@ const JSON_READ_MAX_ARRAY_LIMIT = 500;
 const TABLE_ARTIFACT_SUMMARY_MAX_TABLES = 200;
 const TABLE_ARTIFACT_SUMMARY_MAX_SAMPLE_RECORDS = 5;
 const TABLE_ARTIFACT_SUMMARY_MAX_TEXT_SAMPLES = 6;
+const TABLE_ARTIFACT_AGGREGATION_MAX_QUERIES = 20;
+const TABLE_ARTIFACT_AGGREGATION_MAX_GROUPS = 500;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
   "convert_artifact",
@@ -224,7 +226,10 @@ export function createComputerTools(
             additionalProperties: false,
             required: ["pointer"],
             properties: {
-              pointer: { type: "string", maxLength: JSON_READ_MAX_POINTER_LENGTH },
+              // The root profile is requested by omitting `queries`; an empty
+              // JSON Pointer is not a supported selector and must be rejected
+              // consistently by both the exposed schema and parser.
+              pointer: { type: "string", minLength: 1, maxLength: JSON_READ_MAX_POINTER_LENGTH },
               offset: { type: "integer", minimum: 0 },
               limit: { type: "integer", minimum: 1, maximum: JSON_READ_MAX_ARRAY_LIMIT },
             },
@@ -311,6 +316,111 @@ export function createComputerTools(
           maxTables: input.maxTables ?? TABLE_ARTIFACT_SUMMARY_MAX_TABLES,
           sampleRecords: input.sampleRecords ?? 2,
         });
+      },
+    },
+    {
+      name: "computer_aggregate_table_artifact",
+      description: [
+        "Derive deterministic count, group-count, sum, average, minimum, or maximum statistics from a durable agentloop.visibleTableExtraction/v1 JSON artifact.",
+        "Use this for a downstream count, grouping, distribution, ranking, or numeric aggregate question after structured extraction; it reads every selected record and returns coverage, source ranges, filters, values/groups, and a reusable derived_aggregation evidence receipt.",
+        "This Tool preserves data semantics only. It does not decide business labels or write the user-facing conclusion.",
+      ].join(" "),
+      inputSchema: objectSchema(["path", "queries"], {
+        path: { type: "string" },
+        queries: {
+          type: "array",
+          minItems: 1,
+          maxItems: TABLE_ARTIFACT_AGGREGATION_MAX_QUERIES,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["operation"],
+            properties: {
+              operation: { type: "string", enum: ["count", "sum", "average", "min", "max"] },
+              field: { type: "string", minLength: 1, maxLength: 512 },
+              groupBy: { type: "string", minLength: 1, maxLength: 512 },
+              order: { type: "string", enum: ["asc", "desc"] },
+              maxGroups: { type: "integer", minimum: 1, maximum: TABLE_ARTIFACT_AGGREGATION_MAX_GROUPS },
+              where: {
+                type: "array",
+                maxItems: 20,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["field", "equals"],
+                  properties: {
+                    field: { type: "string", minLength: 1, maxLength: 512 },
+                    equals: { type: ["string", "number", "boolean"] },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+      executionMode: "parallel",
+      replaySafe: true,
+      maxResultCharacters: 120_000,
+      parse: (value) => {
+        const record = requireRecord(value, "computer_aggregate_table_artifact arguments");
+        return {
+          path: requireString(record.path, "path", { max: 4_000 }),
+          queries: parseTableArtifactAggregationQueries(record.queries),
+        };
+      },
+      execute: async (context, value) => {
+        const input = value as { path: string; queries: readonly TableArtifactAggregationQuery[] };
+        const scopedExecutor = executorForContext(executor, context);
+        const file = await scopedExecutor.readFile(input.path, JSON_READ_MAX_BYTES);
+        if (file.truncated) {
+          throw badRequest(`JSON file exceeds the ${JSON_READ_MAX_BYTES} byte structured read limit; use a narrower artifact or purpose-built parser`);
+        }
+        let document: unknown;
+        try {
+          document = JSON.parse(file.content);
+        } catch {
+          throw badRequest("path must identify a valid JSON file");
+        }
+        const aggregation = aggregateTableExtractionArtifact({
+          path: file.resolvedPath ?? input.path,
+          requestedPath: file.requestedPath,
+          bytes: file.bytes,
+          sha256: createHash("sha256").update(file.content).digest("hex"),
+          document,
+          queries: input.queries,
+        });
+        const materialization = JSON.stringify({
+          schema: "agentloop.tableAggregationResult/v1",
+          sourceArtifact: {
+            path: aggregation.path,
+            sha256: aggregation.sha256,
+            sourceSchema: aggregation.sourceSchema,
+          },
+          coverage: aggregation.coverage,
+          results: aggregation.materializedResults,
+          caveats: aggregation.caveats,
+        });
+        const resultHash = createHash("sha256").update(materialization).digest("hex");
+        const stored = await scopedExecutor.writeFile(
+          `.agentloop/table-aggregations/${resultHash.slice(0, 2)}/${resultHash}.json`,
+          materialization,
+          "overwrite",
+        );
+        const resultRef = tableAggregationResultRef({
+          path: stored.path,
+          sha256: stored.sha256,
+          coverage: aggregation.coverage,
+          results: aggregation.materializedResults,
+        });
+        const { materializedResults: _materializedResults, ...response } = aggregation;
+        return {
+          ...response,
+          resultRef,
+          evidenceReceipt: {
+            ...response.evidenceReceipt,
+            facts: response.evidenceReceipt.facts.map((fact) => ({ ...fact, resultRef })),
+          },
+        };
       },
     },
     {
@@ -1015,6 +1125,292 @@ function summarizeTableArtifactTable(
       })),
     textSamples: Object.fromEntries([...textSamples.entries()].sort(([left], [right]) => left.localeCompare(right))),
     sampleRecords: sheet.records.slice(0, sampleRecords),
+  };
+}
+
+type TableArtifactAggregationOperation = "count" | "sum" | "average" | "min" | "max";
+
+interface TableArtifactAggregationQuery {
+  readonly operation: TableArtifactAggregationOperation;
+  readonly field?: string;
+  readonly groupBy?: string;
+  readonly order?: "asc" | "desc";
+  readonly maxGroups?: number;
+  readonly where: readonly { readonly field: string; readonly equals: string | number | boolean }[];
+}
+
+function parseTableArtifactAggregationQueries(value: unknown): TableArtifactAggregationQuery[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > TABLE_ARTIFACT_AGGREGATION_MAX_QUERIES) {
+    throw badRequest(`queries must contain 1 to ${TABLE_ARTIFACT_AGGREGATION_MAX_QUERIES} aggregation requests`);
+  }
+  return value.map((item, index) => {
+    const record = requireRecord(item, `queries[${index}]`);
+    const operation = requireString(record.operation, `queries[${index}].operation`, { max: 32 });
+    if (!isTableArtifactAggregationOperation(operation)) {
+      throw badRequest(`queries[${index}].operation must be count, sum, average, min, or max`);
+    }
+    const field = record.field === undefined ? undefined : requireString(record.field, `queries[${index}].field`, { max: 512 });
+    const groupBy = record.groupBy === undefined ? undefined : requireString(record.groupBy, `queries[${index}].groupBy`, { max: 512 });
+    if (operation !== "count" && field === undefined) {
+      throw badRequest(`queries[${index}].field is required for ${operation}`);
+    }
+    if (operation !== "count" && groupBy !== undefined) {
+      throw badRequest(`queries[${index}].groupBy is supported only for count`);
+    }
+    const order = record.order === undefined ? undefined : requireString(record.order, `queries[${index}].order`, { max: 8 });
+    if (order !== undefined && order !== "asc" && order !== "desc") {
+      throw badRequest(`queries[${index}].order must be asc or desc`);
+    }
+    const maxGroups = optionalBoundedInteger(record.maxGroups, `queries[${index}].maxGroups`, 1, TABLE_ARTIFACT_AGGREGATION_MAX_GROUPS);
+    if (maxGroups !== undefined && groupBy === undefined) {
+      throw badRequest(`queries[${index}].maxGroups requires groupBy`);
+    }
+    const where = parseTableArtifactAggregationWhere(record.where, index);
+    return {
+      operation,
+      ...(field === undefined ? {} : { field }),
+      ...(groupBy === undefined ? {} : { groupBy }),
+      ...(order === undefined ? {} : { order }),
+      ...(maxGroups === undefined ? {} : { maxGroups }),
+      where,
+    };
+  });
+}
+
+function isTableArtifactAggregationOperation(value: string): value is TableArtifactAggregationOperation {
+  return value === "count" || value === "sum" || value === "average" || value === "min" || value === "max";
+}
+
+function parseTableArtifactAggregationWhere(
+  value: unknown,
+  queryIndex: number,
+): Array<{ field: string; equals: string | number | boolean }> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw badRequest(`queries[${queryIndex}].where must contain at most 20 equality filters`);
+  }
+  return value.map((item, index) => {
+    const record = requireRecord(item, `queries[${queryIndex}].where[${index}]`);
+    const equals = record.equals;
+    if (typeof equals !== "string" && typeof equals !== "number" && typeof equals !== "boolean") {
+      throw badRequest(`queries[${queryIndex}].where[${index}].equals must be a string, number, or boolean`);
+    }
+    return {
+      field: requireString(record.field, `queries[${queryIndex}].where[${index}].field`, { max: 512 }),
+      equals,
+    };
+  });
+}
+
+function aggregateTableExtractionArtifact(input: {
+  readonly path: string;
+  readonly requestedPath?: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly document: unknown;
+  readonly queries: readonly TableArtifactAggregationQuery[];
+}) {
+  const artifact = requireTableExtractionArtifact(input.document);
+  const tables = tableExtractionTables(artifact);
+  const tableRecords = tables.flatMap(({ file, fileIndex, sheet, sheetIndex }) => sheet.records.map((record) => ({
+    values: record.values,
+    fileIndex,
+    sheetIndex,
+    filePath: file.path,
+    sheetName: sheet.name,
+    sourceRange: record.sourceRange,
+  })));
+  const caveats = [...artifact.caveats];
+  if (artifact.truncated || tables.some((table) => table.sheet.truncated)) {
+    caveats.push("The structured extraction is truncated, so aggregations cover only the extracted records.");
+  }
+  const computedResults = input.queries.map((query, index) => aggregateTableArtifactQuery({
+    query,
+    queryIndex: index,
+    records: tableRecords,
+    sourceTruncated: artifact.truncated || tables.some((table) => table.sheet.truncated),
+  }));
+  const results = computedResults.map(({ materializedGroups: _materializedGroups, materializedComplete: _materializedComplete, ...result }) => result);
+  const materializedResults = computedResults.map(({ materializedGroups, materializedComplete, ...result }) => ({
+    ...result,
+    ...(materializedGroups === undefined ? {} : {
+      groups: materializedGroups,
+      returnedGroupCount: materializedGroups.length,
+      nextGroupOffset: undefined,
+    }),
+    complete: materializedComplete,
+  }));
+  for (const result of results) caveats.push(...result.caveats);
+  const complete = materializedResults.every((result) => result.complete);
+  const deduplicatedCaveats = [...new Set(caveats)];
+  const sourceRefs = tables.map(({ file, fileIndex, sheet, sheetIndex }) => ({
+    fileIndex,
+    sheetIndex,
+    filePath: file.path,
+    sheetName: sheet.name,
+    recordsPointer: `/files/${fileIndex}/sheets/${sheetIndex}/records`,
+    sourceRange: sheet.sourceRange,
+    recordCount: sheet.recordCount,
+    extractedRecordCount: sheet.records.length,
+    truncated: sheet.truncated,
+  }));
+  const facts = [{
+    kind: "table_artifact_aggregation",
+    artifactPath: input.path,
+    artifactSha256: input.sha256,
+    queryCount: results.length,
+    complete,
+    totalTables: tables.length,
+    totalRecords: tableRecords.length,
+    artifactTruncated: artifact.truncated || tables.some((table) => table.sheet.truncated),
+  }];
+  return {
+    schema: "agentloop.tableArtifactAggregation/v1" as const,
+    path: input.path,
+    ...(input.requestedPath === undefined ? {} : { requestedPath: input.requestedPath }),
+    bytes: input.bytes,
+    sha256: input.sha256,
+    sourceSchema: artifact.schema,
+    coverage: {
+      complete,
+      totalTables: tables.length,
+      totalRecords: tableRecords.length,
+      truncated: artifact.truncated || tables.some((table) => table.sheet.truncated),
+    },
+    results,
+    materializedResults,
+    caveats: deduplicatedCaveats,
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1" as const,
+      sourceType: "table_artifact_aggregation",
+      receiptId: createHash("sha256").update(JSON.stringify({ path: input.path, sha256: input.sha256, queries: input.queries, results: materializedResults })).digest("hex"),
+      sourceRefs,
+      facts,
+      caveats: deduplicatedCaveats,
+      evidenceKinds: {
+        satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", ...(complete ? ["derived_aggregation", "table_coverage"] : [])],
+        caveated: deduplicatedCaveats.length === 0 ? [] : ["explicit_caveats"],
+        failed: complete ? [] : ["derived_aggregation"],
+      },
+    },
+  };
+}
+
+function aggregateTableArtifactQuery(input: {
+  readonly query: TableArtifactAggregationQuery;
+  readonly queryIndex: number;
+  readonly records: readonly { readonly values: Record<string, unknown> }[];
+  readonly sourceTruncated: boolean;
+}) {
+  const caveats: string[] = [];
+  const relevantFields = [input.query.field, input.query.groupBy, ...input.query.where.map((filter) => filter.field)]
+    .filter((field): field is string => field !== undefined);
+  const missingFields = relevantFields.filter((field) => !input.records.some((record) => Object.hasOwn(record.values, field)));
+  if (missingFields.length > 0) caveats.push(`Requested aggregation field(s) were absent from extracted records: ${[...new Set(missingFields)].join(", ")}.`);
+  const filtered = input.records.filter((record) => input.query.where.every((filter) => record.values[filter.field] === filter.equals));
+  const base = {
+    queryIndex: input.queryIndex,
+    operation: input.query.operation,
+    ...(input.query.field === undefined ? {} : { field: input.query.field }),
+    ...(input.query.groupBy === undefined ? {} : { groupBy: input.query.groupBy }),
+    where: input.query.where,
+    inputRecordCount: input.records.length,
+    matchedRecordCount: filtered.length,
+  };
+  if (input.query.operation === "count" && input.query.groupBy !== undefined) {
+    const groups = new Map<string, { value: unknown; count: number }>();
+    let missingGroupValues = 0;
+    for (const record of filtered) {
+      const value = record.values[input.query.groupBy];
+      if (value === undefined || value === null || value === "") {
+        missingGroupValues += 1;
+        continue;
+      }
+      const key = `${typeof value}:${JSON.stringify(value)}`;
+      const current = groups.get(key) ?? { value, count: 0 };
+      current.count += 1;
+      groups.set(key, current);
+    }
+    const order = input.query.order ?? "desc";
+    const allGroups = [...groups.values()].sort((left, right) => order === "desc"
+      ? right.count - left.count || String(left.value).localeCompare(String(right.value))
+      : left.count - right.count || String(left.value).localeCompare(String(right.value)));
+    const maxGroups = input.query.maxGroups ?? TABLE_ARTIFACT_AGGREGATION_MAX_GROUPS;
+    if (allGroups.length > maxGroups) caveats.push(`Only ${maxGroups} of ${allGroups.length} groups were returned; increase maxGroups for a complete ranking.`);
+    const materializedComplete = !input.sourceTruncated && missingFields.length === 0;
+    return {
+      ...base,
+      groupCount: allGroups.length,
+      missingGroupValues,
+      groups: allGroups.slice(0, maxGroups),
+      returnedGroupCount: Math.min(allGroups.length, maxGroups),
+      ...(allGroups.length > maxGroups ? { nextGroupOffset: maxGroups } : {}),
+      complete: materializedComplete && allGroups.length <= maxGroups,
+      materializedGroups: allGroups,
+      materializedComplete,
+      caveats,
+    };
+  }
+  if (input.query.operation === "count") {
+    const materializedComplete = !input.sourceTruncated && missingFields.length === 0;
+    return {
+      ...base,
+      value: filtered.length,
+      complete: materializedComplete,
+      materializedGroups: undefined,
+      materializedComplete,
+      caveats,
+    };
+  }
+  const numeric = filtered
+    .map((record) => record.values[input.query.field as string])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (numeric.length === 0) caveats.push(`No finite numeric values were available for ${input.query.field}.`);
+  const value = numeric.length === 0 ? undefined
+    : input.query.operation === "sum" ? numeric.reduce((total, item) => total + item, 0)
+    : input.query.operation === "average" ? numeric.reduce((total, item) => total + item, 0) / numeric.length
+    : input.query.operation === "min" ? Math.min(...numeric)
+    : Math.max(...numeric);
+  const materializedComplete = !input.sourceTruncated && missingFields.length === 0 && numeric.length > 0;
+  return {
+    ...base,
+    numericValueCount: numeric.length,
+    ...(value === undefined ? {} : { value: Number(value.toFixed(6)) }),
+    complete: materializedComplete,
+    materializedGroups: undefined,
+    materializedComplete,
+    caveats,
+  };
+}
+
+function tableAggregationResultRef(input: {
+  readonly path: string;
+  readonly sha256: string;
+  readonly coverage: { readonly complete: boolean; readonly totalTables: number; readonly totalRecords: number; readonly truncated: boolean };
+  readonly results: readonly Record<string, unknown>[];
+}) {
+  return {
+    schema: "agentloop.tableAggregationResultRef/v1" as const,
+    path: input.path,
+    sha256: input.sha256,
+    coverage: input.coverage,
+    results: input.results.map((result, index) => ({
+      queryIndex: typeof result.queryIndex === "number" ? result.queryIndex : index,
+      operation: result.operation,
+      ...(typeof result.field === "string" ? { field: result.field } : {}),
+      ...(typeof result.groupBy === "string" ? { groupBy: result.groupBy } : {}),
+      ...(Array.isArray(result.where) ? { where: result.where } : {}),
+      inputRecordCount: result.inputRecordCount,
+      matchedRecordCount: result.matchedRecordCount,
+      ...(typeof result.groupCount === "number" ? {
+        groupCount: result.groupCount,
+        returnedGroupCount: result.returnedGroupCount,
+        groupsPointer: `/results/${index}/groups`,
+      } : {}),
+      resultPointer: `/results/${index}`,
+      complete: result.complete,
+    })),
+    instruction: "Use computer_read_json with this path and a resultPointer or groupsPointer. For an array pointer, supply offset and limit to read only the needed window.",
   };
 }
 

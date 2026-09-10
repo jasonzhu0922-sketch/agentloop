@@ -67,7 +67,7 @@ test("HTTP upload creates an owned uploaded source without exposing file paths",
   }
 });
 
-test("source intake extracts HTML, PDF, DOCX, XLSX, and PPTX uploads into readable chunks", async () => {
+test("source intake extracts HTML, PDF, DOC, DOCX, XLSX, and PPTX uploads into readable chunks", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-source-intake-formats-"));
   const database = new AppDatabase(":memory:");
   try {
@@ -94,6 +94,7 @@ test("source intake extracts HTML, PDF, DOCX, XLSX, and PPTX uploads into readab
         rejected: /color:red|console\.log|display:none/,
       },
       { name: "brief.pdf", bytes: minimalPdf("PDF intake evidence") },
+      { name: "brief.doc", bytes: minimalWordMlDoc("DOC intake evidence") },
       { name: "brief.docx", bytes: minimalDocx("DOCX intake evidence") },
       { name: "brief.xlsx", bytes: minimalXlsx("Region", "North", "120") },
       { name: "brief.pptx", bytes: minimalPptx("PPTX intake evidence") },
@@ -177,6 +178,13 @@ function minimalDocx(text: string): Buffer {
         <w:body><w:p><w:r><w:t>${xmlEscape(text)}</w:t></w:r></w:p></w:body>
       </w:document>`,
   });
+}
+
+function minimalWordMlDoc(text: string): Buffer {
+  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">
+      <w:body><w:p><w:r><w:t>${xmlEscape(text)}</w:t></w:r></w:p></w:body>
+    </w:wordDocument>`, "utf8");
 }
 
 function minimalXlsx(header: string, name: string, value: string): Buffer {

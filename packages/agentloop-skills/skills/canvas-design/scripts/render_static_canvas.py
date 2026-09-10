@@ -40,6 +40,29 @@ LAYOUT_FAMILIES = [
     "emblem-grid",
 ]
 
+# A family names the visual grammar; a variant names the actual composition.
+# Keeping those separate prevents a topic such as a public anniversary from
+# repeatedly collapsing into one silhouette just because the grammar is apt.
+LAYOUT_VARIANTS = {
+    "signal-field": ["constellation", "cartographic", "orbital"],
+    "monument-axis": ["radiant-spire", "procession", "archive-seal"],
+    "editorial-blocks": ["overlap", "index", "split-spread"],
+    "kinetic-ribbons": ["sweep", "streamers", "cross-current"],
+    "emblem-grid": ["radial", "totem", "stamp-sheet"],
+}
+
+MOTIF_KINDS = {"star", "banner", "figure", "building", "leaf", "orb", "peak", "flight"}
+
+# This is a visual-design contract, not a subject-specific template. It keeps
+# the model from using institutional scale as a proxy for a commemorative axis.
+DESIGN_INTENT_FAMILIES = {
+    "technology-system": "signal-field",
+    "campaign-launch": "kinetic-ribbons",
+    "commemoration": "monument-axis",
+    "editorial-publication": "editorial-blocks",
+    "identity-recognition": "emblem-grid",
+}
+
 SPEC_SCHEMA = {
     "schema": "agentloop.canvasDesignSpec/v1",
     "fields": {
@@ -47,7 +70,9 @@ SPEC_SCHEMA = {
         "title": "Visible primary title, CJK-safe.",
         "subtitle": "Visible secondary phrase, CJK-safe.",
         "movement": "Short Latin style marker for the upper-left label.",
+        "designIntent": "Required for new specs: technology-system, campaign-launch, commemoration, editorial-publication, or identity-recognition. It determines the compatible layout family.",
         "layoutFamily": "Optional composition grammar: signal-field, monument-axis, editorial-blocks, kinetic-ribbons, or emblem-grid.",
+        "compositionVariant": "Optional named composition within the chosen grammar. Use one returned by --schema; omit or use auto only when the subject has no specific spatial direction.",
         "palette": {
             "backgroundTop": "#08111f",
             "backgroundBottom": "#030711",
@@ -58,18 +83,24 @@ SPEC_SCHEMA = {
             "mutedText": "#9db5c8",
         },
         "labels": "Up to 8 compact labels rendered near the lower field.",
+        "visualMotifs": "Up to 6 visible subject motifs. Each item is {kind: star|banner|figure|building|leaf|orb|peak|flight, label?: string}; motifs are drawn as graphic elements, not converted into footer labels.",
         "texture": "0.0-1.0 grain intensity.",
         "density": "0.1-1.0 field density.",
         "seed": "Integer deterministic composition seed.",
         "canvas": {"width": "900-3600", "height": "1200-5400"},
     },
     "layoutFamilies": LAYOUT_FAMILIES,
+    "layoutVariants": LAYOUT_VARIANTS,
+    "motifKinds": sorted(MOTIF_KINDS),
+    "designIntentFamilies": DESIGN_INTENT_FAMILIES,
     "example": {
         "output": "poster.png",
         "title": "城市更新论坛",
         "subtitle": "连接空间 · 技术 · 公共生活",
         "movement": "Civic Pulse",
+        "designIntent": "editorial-publication",
         "layoutFamily": "editorial-blocks",
+        "compositionVariant": "split-spread",
         "palette": {
             "backgroundTop": "#f2eee6",
             "backgroundBottom": "#d8e4df",
@@ -80,6 +111,7 @@ SPEC_SCHEMA = {
             "mutedText": "#5f6f73",
         },
         "labels": ["主旨演讲", "城市实验", "公共数据", "设计工作坊", "治理创新", "开放展陈"],
+        "visualMotifs": [{"kind": "building", "label": "公共空间"}, {"kind": "orb", "label": "数据流"}],
         "texture": 0.18,
         "density": 0.62,
         "seed": 311,
@@ -103,7 +135,7 @@ def main() -> int:
         raise ValueError("output must be a relative workspace path")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    image, layout_family = render(spec)
+    image, layout_family, composition_variant, visual_motifs, design_intent = render(spec)
     image.save(output, "PNG", optimize=True)
     print(json.dumps({
         "schema": "agentloop.canvasDesignRender/v1",
@@ -111,11 +143,14 @@ def main() -> int:
         "width": image.width,
         "height": image.height,
         "layoutFamily": layout_family,
+        "compositionVariant": composition_variant,
+        "visualMotifs": visual_motifs,
+        "designIntent": design_intent,
     }, ensure_ascii=False))
     return 0
 
 
-def render(spec: dict[str, Any]) -> tuple[Image.Image, str]:
+def render(spec: dict[str, Any]) -> tuple[Image.Image, str, str, list[dict[str, str]], str | None]:
     seed = int(spec.get("seed", 42))
     rng = random.Random(seed)
     canvas = spec.get("canvas") if isinstance(spec.get("canvas"), dict) else {}
@@ -128,7 +163,10 @@ def render(spec: dict[str, Any]) -> tuple[Image.Image, str]:
     if isinstance(spec.get("palette"), dict):
         palette.update({k: v for k, v in spec["palette"].items() if isinstance(v, str)})
 
-    layout_family = normalize_layout_family(spec.get("layoutFamily") or spec.get("layout_family") or auto_layout_family(spec))
+    design_intent = normalize_design_intent(spec.get("designIntent") or spec.get("design_intent"))
+    layout_family = resolve_layout_family(spec, design_intent)
+    composition_variant = resolve_composition_variant(spec, layout_family)
+    visual_motifs = normalize_visual_motifs(spec.get("visualMotifs") or spec.get("visual_motifs"))
 
     img = Image.new("RGB", (width, height), hex_color(palette["backgroundTop"]))
     draw_gradient(img, hex_color(palette["backgroundTop"]), hex_color(palette["backgroundBottom"]))
@@ -149,7 +187,7 @@ def render(spec: dict[str, Any]) -> tuple[Image.Image, str]:
     label_font = fit_font_for_text(max(labels, key=len) if labels else title, int(width * 0.24), max(24, width // 40), prefer_cjk=True)
 
     if layout_family == "monument-axis":
-        draw_monument_axis(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        draw_monument_axis(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font, composition_variant)
     elif layout_family == "editorial-blocks":
         draw_editorial_blocks(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
     elif layout_family == "kinetic-ribbons":
@@ -159,10 +197,10 @@ def render(spec: dict[str, Any]) -> tuple[Image.Image, str]:
     else:
         draw_signal_field(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
 
+    draw_visual_motifs(draw, width, height, palette, visual_motifs, composition_variant)
     add_grain(img, rng, texture)
-    frame = int(width * 0.04)
-    draw.rectangle((frame, frame, width - frame, height - frame), outline=hex_color(palette["primary"]) + (80,), width=max(2, width // 900))
-    return img, layout_family
+    draw_variant_frame(draw, width, height, palette, composition_variant)
+    return img, layout_family, composition_variant, visual_motifs, design_intent
 
 
 def normalize_layout_family(value: Any) -> str:
@@ -182,6 +220,72 @@ def normalize_layout_family(value: Any) -> str:
     }
     candidate = aliases.get(raw, raw)
     return candidate if candidate in LAYOUT_FAMILIES else "signal-field"
+
+
+def normalize_design_intent(value: Any) -> str | None:
+    raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "technology": "technology-system",
+        "system": "technology-system",
+        "tech": "technology-system",
+        "campaign": "campaign-launch",
+        "launch": "campaign-launch",
+        "memorial": "commemoration",
+        "ceremony": "commemoration",
+        "editorial": "editorial-publication",
+        "publication": "editorial-publication",
+        "identity": "identity-recognition",
+        "recognition": "identity-recognition",
+    }
+    candidate = aliases.get(raw, raw)
+    return candidate if candidate in DESIGN_INTENT_FAMILIES else None
+
+
+def resolve_layout_family(spec: dict[str, Any], design_intent: str | None) -> str:
+    requested = spec.get("layoutFamily") or spec.get("layout_family")
+    if design_intent:
+        expected = DESIGN_INTENT_FAMILIES[design_intent]
+        if requested and normalize_layout_family(requested) != expected:
+            raise ValueError(f"designIntent={design_intent} requires layoutFamily={expected}")
+        return expected
+    return normalize_layout_family(requested or auto_layout_family(spec))
+
+
+def resolve_composition_variant(spec: dict[str, Any], layout_family: str) -> str:
+    variants = LAYOUT_VARIANTS[layout_family]
+    requested = str(spec.get("compositionVariant") or spec.get("composition_variant") or "").strip().lower().replace("_", "-")
+    if requested and requested != "auto" and requested in variants:
+        return requested
+
+    # Use all authored direction, not just a generic family or a fixed default
+    # seed. Two different briefs in the same grammar therefore do not inherit
+    # the same silhouette by accident, while an explicit variant stays stable.
+    signature = json.dumps({
+        "layout": layout_family,
+        "title": clean_text(spec.get("title", "")),
+        "subtitle": clean_text(spec.get("subtitle", "")),
+        "movement": clean_text(spec.get("movement", "")),
+        "labels": [clean_text(item) for item in spec.get("labels", []) if clean_text(item)],
+        "motifs": spec.get("visualMotifs") or spec.get("visual_motifs") or [],
+        "seed": spec.get("seed", 42),
+    }, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha256(signature.encode("utf-8")).digest()
+    return variants[digest[0] % len(variants)]
+
+
+def normalize_visual_motifs(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    motifs: list[dict[str, str]] = []
+    for item in value[:6]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", "")).strip().lower().replace("_", "-")
+        if kind not in MOTIF_KINDS:
+            continue
+        label = clean_text(item.get("label", ""))[:40]
+        motifs.append({"kind": kind, "label": label})
+    return motifs
 
 
 def auto_layout_family(spec: dict[str, Any]) -> str:
@@ -257,13 +361,21 @@ def draw_monument_axis(
     label_font: ImageFont.ImageFont,
     latin_font: ImageFont.ImageFont,
     mono_font: ImageFont.ImageFont,
+    composition_variant: str,
 ) -> None:
     primary = hex_color(palette["primary"])
     secondary = hex_color(palette["secondary"])
     tertiary = hex_color(palette["tertiary"])
     text = hex_color(palette["text"])
     muted = hex_color(palette["mutedText"])
-    draw_metadata(draw, width, height, palette, movement, "MONUMENT AXIS", latin_font, mono_font)
+    if composition_variant == "procession":
+        draw_monument_procession(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        return
+    if composition_variant == "archive-seal":
+        draw_monument_archive_seal(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        return
+
+    draw_metadata(draw, width, height, palette, movement, "RADIANT SPIRE", latin_font, mono_font)
 
     base_y = int(height * 0.68)
     center_x = width // 2
@@ -292,6 +404,96 @@ def draw_monument_axis(
         draw_centered(draw, (center_x, int(height * 0.215)), subtitle, subtitle_font, muted + (225,))
     draw_label_column(draw, int(width * 0.12), int(height * 0.77), palette, labels[::2], label_font, 0)
     draw_label_column(draw, int(width * 0.64), int(height * 0.77), palette, labels[1::2], label_font, 1)
+
+
+def draw_monument_procession(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    palette: dict[str, str],
+    rng: random.Random,
+    density: float,
+    title: str,
+    subtitle: str,
+    movement: str,
+    labels: list[str],
+    title_font: ImageFont.ImageFont,
+    subtitle_font: ImageFont.ImageFont,
+    label_font: ImageFont.ImageFont,
+    latin_font: ImageFont.ImageFont,
+    mono_font: ImageFont.ImageFont,
+) -> None:
+    primary, secondary, tertiary = (hex_color(palette[key]) for key in ("primary", "secondary", "tertiary"))
+    text, muted = hex_color(palette["text"]), hex_color(palette["mutedText"])
+    draw_metadata(draw, width, height, palette, movement, "CIVIC PROCESSION", latin_font, mono_font)
+    sun_x, sun_y, radius = int(width * 0.74), int(height * 0.33), int(width * 0.16)
+    draw.ellipse((sun_x - radius, sun_y - radius, sun_x + radius, sun_y + radius), fill=primary + (52,), outline=primary + (170,), width=max(2, width // 480))
+    for index in range(int(14 + density * 16)):
+        angle = math.tau * index / int(14 + density * 16)
+        inner, outer = radius * 1.08, radius * (1.28 + rng.random() * 0.42)
+        draw.line((sun_x + math.cos(angle) * inner, sun_y + math.sin(angle) * inner, sun_x + math.cos(angle) * outer, sun_y + math.sin(angle) * outer), fill=secondary + (110,), width=max(2, width // 520))
+    horizon = int(height * 0.69)
+    for index in range(5):
+        x0 = int(width * (0.08 + index * 0.18))
+        x1 = x0 + int(width * (0.13 + rng.random() * 0.08))
+        building_top = horizon - int(height * (0.06 + rng.random() * 0.13))
+        draw.rectangle((x0, building_top, x1, horizon), fill=tertiary + (60 + index * 15,), outline=primary + (105,))
+    for index in range(4):
+        x = int(width * (0.18 + index * 0.19))
+        y = horizon - int(height * (0.04 + (index % 2) * 0.025))
+        head = max(10, width // 95)
+        draw.ellipse((x - head, y - head * 3, x + head, y - head), fill=text + (180,))
+        draw.line((x, y - head, x, y + head * 3), fill=text + (170,), width=max(3, width // 320))
+        draw.line((x - head * 2, y + head, x + head * 2, y + head), fill=text + (150,), width=max(2, width // 460))
+    for index in range(3):
+        x = int(width * (0.08 + index * 0.29))
+        points = [(x, int(height * 0.55)), (x + int(width * 0.20), int(height * 0.49)), (x + int(width * 0.12), int(height * 0.63))]
+        draw.polygon(points, fill=[primary, secondary, tertiary][index] + (58,), outline=[primary, secondary, tertiary][index] + (150,))
+    draw.text((int(width * 0.10), int(height * 0.14)), title, font=title_font, fill=text + (248,))
+    if subtitle:
+        draw.text((int(width * 0.105), int(height * 0.14) + font_height(title_font) + int(height * 0.018)), subtitle, font=subtitle_font, fill=muted + (225,))
+    draw_label_grid(draw, width, height, palette, labels, label_font, int(height * 0.80), 3)
+
+
+def draw_monument_archive_seal(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    palette: dict[str, str],
+    rng: random.Random,
+    density: float,
+    title: str,
+    subtitle: str,
+    movement: str,
+    labels: list[str],
+    title_font: ImageFont.ImageFont,
+    subtitle_font: ImageFont.ImageFont,
+    label_font: ImageFont.ImageFont,
+    latin_font: ImageFont.ImageFont,
+    mono_font: ImageFont.ImageFont,
+) -> None:
+    primary, secondary, tertiary = (hex_color(palette[key]) for key in ("primary", "secondary", "tertiary"))
+    text, muted = hex_color(palette["text"]), hex_color(palette["mutedText"])
+    draw_metadata(draw, width, height, palette, movement, "ARCHIVE SEAL", latin_font, mono_font)
+    cx, cy = int(width * 0.67), int(height * 0.48)
+    outer = int(width * 0.27)
+    for index in range(5):
+        inset = index * int(outer * 0.13)
+        color = [primary, secondary, tertiary, text, primary][index]
+        draw.ellipse((cx - outer + inset, cy - outer + inset, cx + outer - inset, cy + outer - inset), outline=color + (175 - index * 22,), width=max(2, width // 410))
+    for index in range(12):
+        angle = math.tau * index / 12
+        x = cx + math.cos(angle) * outer * 0.78
+        y = cy + math.sin(angle) * outer * 0.78
+        draw.ellipse((x - width * 0.008, y - width * 0.008, x + width * 0.008, y + width * 0.008), fill=secondary + (160,))
+    draw.rectangle((int(width * 0.10), int(height * 0.28), int(width * 0.16), int(height * 0.73)), fill=primary + (75,), outline=primary + (150,))
+    for index in range(int(8 + density * 10)):
+        y = int(height * (0.24 + index * 0.035))
+        draw.line((int(width * 0.22), y, int(width * 0.48), y), fill=tertiary + (70 + (index % 3) * 24,), width=max(1, width // 650))
+    draw.text((int(width * 0.11), int(height * 0.13)), title, font=title_font, fill=text + (248,))
+    if subtitle:
+        draw.text((int(width * 0.115), int(height * 0.13) + font_height(title_font) + int(height * 0.018)), subtitle, font=subtitle_font, fill=muted + (225,))
+    draw_label_column(draw, int(width * 0.12), int(height * 0.79), palette, labels, label_font, 0)
 
 
 def draw_editorial_blocks(
@@ -547,6 +749,104 @@ def draw_label_column(
 ) -> None:
     for index, label in enumerate(labels[:4]):
         draw_label(draw, x, y + index * 92, label, font, palette, index + offset)
+
+
+def draw_visual_motifs(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    palette: dict[str, str],
+    motifs: list[dict[str, str]],
+    composition_variant: str,
+) -> None:
+    """Draw brief-owned visual subjects as marks, separate from footer labels."""
+    if not motifs:
+        return
+    primary, secondary, tertiary = (hex_color(palette[key]) for key in ("primary", "secondary", "tertiary"))
+    text = hex_color(palette["text"])
+    positions = {
+        "radiant-spire": [(0.16, 0.49), (0.84, 0.48), (0.20, 0.62), (0.80, 0.63)],
+        "procession": [(0.16, 0.61), (0.83, 0.59), (0.23, 0.48), (0.75, 0.43)],
+        "archive-seal": [(0.32, 0.66), (0.70, 0.72), (0.82, 0.31), (0.47, 0.54)],
+    }.get(composition_variant, [(0.16, 0.56), (0.84, 0.55), (0.23, 0.67), (0.77, 0.68)])
+    for index, motif in enumerate(motifs):
+        x_ratio, y_ratio = positions[index % len(positions)]
+        x, y = int(width * x_ratio), int(height * y_ratio)
+        size = max(24, width // 34)
+        color = [primary, secondary, tertiary][index % 3]
+        draw_motif_symbol(draw, motif["kind"], x, y, size, color, text)
+        if motif["label"]:
+            font = fit_font_for_text(motif["label"], int(width * 0.18), max(16, width // 72), prefer_cjk=contains_cjk(motif["label"]))
+            draw_centered(draw, (x, y + int(size * 1.65)), motif["label"], font, text + (205,))
+
+
+def draw_motif_symbol(
+    draw: ImageDraw.ImageDraw,
+    kind: str,
+    x: int,
+    y: int,
+    size: int,
+    color: tuple[int, int, int],
+    text: tuple[int, int, int],
+) -> None:
+    fill, outline = color + (105,), color + (220,)
+    if kind == "star":
+        points = []
+        for index in range(10):
+            angle = -math.pi / 2 + index * math.pi / 5
+            radius = size if index % 2 == 0 else size * 0.42
+            points.append((x + math.cos(angle) * radius, y + math.sin(angle) * radius))
+        draw.polygon(points, fill=fill, outline=outline)
+    elif kind == "banner":
+        draw.line((x - size * 0.8, y - size, x - size * 0.8, y + size), fill=outline, width=max(2, size // 8))
+        draw.polygon([(x - size * 0.72, y - size * 0.85), (x + size, y - size * 0.58), (x + size * 0.36, y + size * 0.18), (x - size * 0.72, y - size * 0.05)], fill=fill, outline=outline)
+    elif kind == "figure":
+        head = int(size * 0.31)
+        draw.ellipse((x - head, y - size, x + head, y - size + head * 2), fill=fill, outline=outline)
+        draw.line((x, y - size + head * 2, x, y + size * 0.72), fill=outline, width=max(3, size // 6))
+        draw.line((x - size * 0.65, y - size * 0.1, x + size * 0.65, y - size * 0.1), fill=outline, width=max(2, size // 8))
+        draw.line((x, y + size * 0.68, x - size * 0.55, y + size), fill=outline, width=max(2, size // 8))
+        draw.line((x, y + size * 0.68, x + size * 0.55, y + size), fill=outline, width=max(2, size // 8))
+    elif kind == "building":
+        draw.rectangle((x - size * 0.7, y - size, x + size * 0.7, y + size), fill=fill, outline=outline, width=max(2, size // 10))
+        for row in range(3):
+            for col in range(2):
+                wx = x - size * 0.38 + col * size * 0.45
+                wy = y - size * 0.58 + row * size * 0.48
+                draw.rectangle((wx, wy, wx + size * 0.18, wy + size * 0.2), fill=text + (145,))
+    elif kind == "leaf":
+        draw.ellipse((x - size * 0.45, y - size, x + size * 0.6, y + size * 0.32), fill=fill, outline=outline)
+        draw.line((x - size * 0.25, y + size * 0.78, x + size * 0.35, y - size * 0.6), fill=outline, width=max(2, size // 10))
+    elif kind == "orb":
+        draw.ellipse((x - size, y - size, x + size, y + size), outline=outline, width=max(2, size // 9))
+        draw.ellipse((x - size * 0.42, y - size * 0.42, x + size * 0.42, y + size * 0.42), outline=color + (120,), width=max(1, size // 14))
+        draw.line((x - size * 1.35, y, x + size * 1.35, y), fill=color + (135,), width=max(1, size // 14))
+    elif kind == "peak":
+        draw.polygon([(x - size, y + size), (x, y - size), (x + size, y + size)], fill=fill, outline=outline)
+        draw.polygon([(x - size * 0.28, y + size * 0.15), (x, y - size), (x + size * 0.27, y + size * 0.15)], fill=text + (105,))
+    elif kind == "flight":
+        draw.polygon([(x - size, y + size * 0.25), (x + size, y - size * 0.24), (x + size * 0.25, y + size * 0.12), (x + size * 0.52, y + size * 0.82)], fill=fill, outline=outline)
+        draw.line((x - size * 0.35, y + size * 0.38, x - size * 0.95, y + size * 0.95), fill=text + (155,), width=max(2, size // 9))
+
+
+def draw_variant_frame(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    palette: dict[str, str],
+    composition_variant: str,
+) -> None:
+    primary, secondary = hex_color(palette["primary"]), hex_color(palette["secondary"])
+    frame = int(width * 0.04)
+    if composition_variant in {"procession", "streamers", "cross-current"}:
+        draw.line((frame, int(height * 0.11), width - frame, int(height * 0.11)), fill=primary + (120,), width=max(2, width // 700))
+        draw.line((frame, int(height * 0.89), width - frame, int(height * 0.89)), fill=secondary + (120,), width=max(2, width // 700))
+    elif composition_variant in {"archive-seal", "stamp-sheet", "index"}:
+        draw.rectangle((frame, frame, width - frame, height - frame), outline=secondary + (135,), width=max(2, width // 800))
+        inset = int(width * 0.022)
+        draw.rectangle((frame + inset, frame + inset, width - frame - inset, height - frame - inset), outline=primary + (75,), width=max(1, width // 1200))
+    else:
+        draw.rectangle((frame, frame, width - frame, height - frame), outline=primary + (80,), width=max(2, width // 900))
 
 
 def add_grain(img: Image.Image, rng: random.Random, amount: float) -> None:

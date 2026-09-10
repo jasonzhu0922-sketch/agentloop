@@ -272,36 +272,12 @@ function TurnArtifacts({
   );
 }
 
-function TurnPlanner({ steps }: { readonly steps: readonly PlanStep[] }): React.ReactNode {
-  const [planOpen, setPlanOpen] = useState(false);
-  const planPanelId = useId();
-  if (steps.length === 0) return null;
-  const done = steps.filter((step) => step.status === "completed").length;
-  return (
-    <div className="turn-planner">
-      <button
-        type="button"
-        className="live-step-toggle turn-plan-toggle"
-        aria-expanded={planOpen}
-        aria-controls={planPanelId}
-        onClick={() => setPlanOpen((open) => !open)}
-      >
-        Planner {done}/{steps.length}
-        <span className="live-step-caret" aria-hidden="true">⌄</span>
-      </button>
-      {planOpen ? <PlanStepsPanel id={planPanelId} steps={steps} /> : null}
-    </div>
-  );
-}
-
 function FinalAnswer({
   run,
-  steps,
   artifacts,
   loaded,
 }: {
   readonly run: RunRecord;
-  readonly steps: readonly PlanStep[];
   readonly artifacts: readonly ProcessArtifact[];
   readonly loaded: boolean;
 }): React.ReactNode {
@@ -313,7 +289,6 @@ function FinalAnswer({
         <div className="msg-text md">
           {run.output ? <Markdown text={run.output} /> : <span className="muted">（没有产生文本输出）</span>}
         </div>
-        <TurnPlanner steps={steps} />
         <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>
     </article>
@@ -351,7 +326,6 @@ function ErrorMessage({
           <p>{summary.progress}</p>
           <p>{summary.nextAction}</p>
         </div>
-        <TurnPlanner steps={steps} />
         <TurnArtifacts run={run} artifacts={artifacts} loaded={loaded} />
       </div>
     </article>
@@ -447,12 +421,10 @@ export function ConversationView(): React.ReactNode {
       parts.push(<LiveCard key={"l" + r.id} events={events} steps={steps} />);
     } else if (r.status === "completed") {
       const artifacts = isLoaded ? (detail?.artifacts ?? []) : [];
-      const steps = isLoaded ? (detail?.detail.plan.steps ?? []) : [];
       parts.push(
         <FinalAnswer
           key={"f" + r.id}
           run={r}
-          steps={steps}
           artifacts={artifacts}
           loaded={isLoaded}
         />,

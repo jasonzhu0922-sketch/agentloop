@@ -182,7 +182,6 @@
 @media (max-width:720px){.app-shell{grid-template-columns:1fr}.sidebar{display:none}.topbar{padding:12px 16px}.messages{padding:20px 14px 28px}.composer{padding:12px 14px 16px}.msg.user .msg-body{max-width:92%}.preview-backdrop{padding:10px}.preview-dialog{width:calc(100vw - 20px);height:calc(100vh - 20px)}.preview-body{padding:12px}.preview-text,.preview-doc{padding:16px}.preview-head{align-items:flex-start}}
 .chip.static{background:var(--bg-3)}
 .turn-footer{margin-top:8px}.text-btn{padding:0;color:var(--text-3);font-size:11px;text-decoration:none}.text-btn:hover{color:var(--brand)}
-.turn-planner{display:grid;justify-items:start;gap:8px;margin-top:10px}.turn-planner .live-plan-panel{width:100%}.turn-plan-toggle{margin-left:0}
 .failure-card{display:grid;gap:8px;border:1px solid rgba(220,38,38,.18);border-radius:8px;background:var(--bg-2);padding:14px 16px;box-shadow:0 6px 20px rgba(20,30,60,.04)}
 .failure-card .msg-heading{margin-bottom:0}
 .failure-title{color:var(--text);font-size:15px;line-height:1.45}

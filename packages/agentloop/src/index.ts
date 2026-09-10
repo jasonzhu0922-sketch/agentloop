@@ -70,7 +70,7 @@ export {
   FullCatalogToolExposurePolicy,
 } from "./runtime/step-execution-strategy.ts";
 export type {
-  HiddenToolGroup,
+  DeprioritizedToolGroup,
   LoopStepFrame,
   LoopStepPolicy,
   PromptProjectionDecision,

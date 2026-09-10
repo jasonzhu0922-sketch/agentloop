@@ -319,7 +319,7 @@ interface McpServerRegistration {
 - 与现有链路零特判：包装后的工具走 `composeRunTools` → Planner 目录 → Admission 校验 → Capability Grant 门控，无任何新旁路
 - 快照一致性沿用现有哲学：每步重新物化 Tool Schema（OpenCode 移植边界），MCP 工具列表变化自然反映
 
-**安全红线**：stdio 子进程环境由服务端构造，拒绝含 KEY/TOKEN/SECRET/PASSWORD/AUTH 字样的变量名（与 `TRUSTED_COMMAND_ENV_JSON` 同规则）；`untrusted` 服务器的工具必须 Run 显式 `allowDangerousTools` 才暴露给模型。
+**安全红线**：stdio 子进程环境由服务端构造，拒绝含 KEY/TOKEN/SECRET/PASSWORD/AUTH 字样的变量名（与 `TRUSTED_COMMAND_ENV_JSON` 同规则）；危险工具默认暴露，调用方可通过 Run 的 `allowDangerousTools=false` 显式关闭。
 
 **验收测试**：
 - 内存 stub MCP server：注册后工具出现在 `/v1/tools` 与 Planner 目录；Plan 声明后可调用并产出 receipt

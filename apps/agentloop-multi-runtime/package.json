@@ -1,0 +1,22 @@
+{
+  "name": "agentloop-multi-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference multi-runtime control plane and AgentLoop runtime host",
+  "engines": { "node": ">=26" },
+  "dependencies": {
+    "@zhujun/agentloop": "*",
+    "@zhujun/agentloop-skills": "*",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": { "@types/node": "^26.3.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/entrypoints/router-main.ts",
+    "start:runtime-host": "node --env-file-if-exists=.env src/entrypoints/runtime-host-main.ts",
+    "start:local": "node scripts/start-local.mjs",
+    "start:web": "node web/server.mjs",
+    "test": "node --test --test-isolation=process tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

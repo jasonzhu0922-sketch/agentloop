@@ -1,4 +1,5 @@
-import type { AgentLoopToolEvidence, RuntimeDeliveryCandidate, RuntimeDeliveryCandidateEvidenceKinds } from "./contracts.ts";
+import type { AgentLoopToolEvidence, RuntimeDeliveryCandidate, RuntimeDeliveryCandidateEvidenceKinds, RuntimeDeliveryReceipt } from "./contracts.ts";
+import { canonicalArtifactAcceptanceVerdict } from "./tool-result-evidence.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 
 export function normalizeDeliveryCandidate(input: {
@@ -6,6 +7,7 @@ export function normalizeDeliveryCandidate(input: {
   readonly evidenceKinds?: Partial<RuntimeDeliveryCandidateEvidenceKinds>;
   readonly caveats?: readonly string[];
   readonly sourceToolCallIds?: readonly string[];
+  readonly deliveryReceipt?: RuntimeDeliveryReceipt;
 }): RuntimeDeliveryCandidate {
   const satisfied = uniqueStrings(input.evidenceKinds?.satisfied ?? []);
   const caveated = uniqueStrings(input.evidenceKinds?.caveated ?? []);
@@ -21,6 +23,7 @@ export function normalizeDeliveryCandidate(input: {
       failed,
     },
     sourceToolCallIds: uniqueStrings(input.sourceToolCallIds ?? []),
+    ...(input.deliveryReceipt === undefined ? {} : { deliveryReceipt: input.deliveryReceipt }),
   };
 }
 
@@ -60,6 +63,7 @@ export function buildRuntimeDeliveryCandidate(input: {
   readonly sourceToolCallIds?: readonly string[];
 }): RuntimeDeliveryCandidate {
   const evidenceKinds = collectEvidenceKinds(input.toolEvidence, input.stepSemanticFrame);
+  const deliveryReceipt = collectDeliveryReceipt(input.toolEvidence);
   const caveats = uniqueStrings([
     ...(input.caveats ?? []),
     ...semanticCaveats(input.stepSemanticFrame, input.caveats),
@@ -69,6 +73,7 @@ export function buildRuntimeDeliveryCandidate(input: {
     evidenceKinds,
     caveats,
     sourceToolCallIds: input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.toolCallId),
+    ...(deliveryReceipt === undefined ? {} : { deliveryReceipt }),
   }));
 }
 
@@ -87,6 +92,7 @@ function collectEvidenceKinds(
   const satisfied = new Set<string>();
   const caveated = new Set<string>();
   const failed = new Set<string>();
+  let hasDeliveryReceipt = false;
   for (const item of evidence) {
     if (item.isError) continue;
     const parsed = parseJsonRecord(item.result);
@@ -94,12 +100,14 @@ function collectEvidenceKinds(
     const records = [parsed, parseJsonRecord(parsed.evidenceReceipt), parseJsonRecord(parsed.artifactReceipt)];
     for (const record of records) {
       if (record === undefined) continue;
+      if (deliveryReceiptFromRecord(record, item.toolCallId) !== undefined) hasDeliveryReceipt = true;
       const evidenceKinds = isPlainRecord(record.evidenceKinds) ? record.evidenceKinds : undefined;
       collectStrings(evidenceKinds?.satisfied, satisfied);
       collectStrings(evidenceKinds?.caveated, caveated);
       collectStrings(evidenceKinds?.failed, failed);
     }
   }
+  if (hasDeliveryReceipt) satisfied.add("delivery_receipt");
   if (stepSemanticFrame !== undefined && shouldMarkSemanticCaveats(stepSemanticFrame)) {
     caveated.add("explicit_caveats");
   }
@@ -107,6 +115,43 @@ function collectEvidenceKinds(
     satisfied: [...satisfied].sort(),
     caveated: [...caveated].sort(),
     failed: [...failed].sort(),
+  };
+}
+
+function collectDeliveryReceipt(evidence: readonly AgentLoopToolEvidence[]): RuntimeDeliveryReceipt | undefined {
+  for (const item of evidence) {
+    if (item.isError) continue;
+    const parsed = parseJsonRecord(item.result);
+    if (parsed === undefined) continue;
+    const records = [parsed, parseJsonRecord(parsed.evidenceReceipt), parseJsonRecord(parsed.artifactReceipt)];
+    for (const record of records) {
+      const receipt = record === undefined ? undefined : deliveryReceiptFromRecord(record, item.toolCallId);
+      if (receipt !== undefined) return receipt;
+    }
+  }
+  return undefined;
+}
+
+function deliveryReceiptFromRecord(record: Record<string, unknown>, toolCallId: string): RuntimeDeliveryReceipt | undefined {
+  const schema = typeof record.schema === "string" ? record.schema : undefined;
+  if (schema !== "agentloop.artifactAcceptance/v1") return undefined;
+  const verdict = canonicalArtifactAcceptanceVerdict(record);
+  if (verdict !== "accepted" && verdict !== "caveated") return undefined;
+  const artifact = isPlainRecord(record.artifact) ? record.artifact : undefined;
+  const path = typeof artifact?.path === "string" && artifact.path.trim().length > 0 ? artifact.path : undefined;
+  if (path === undefined) return undefined;
+  const bytes = typeof artifact?.bytes === "number" && Number.isFinite(artifact.bytes) ? artifact.bytes : undefined;
+  const sha256 = typeof artifact?.sha256 === "string" && artifact.sha256.trim().length > 0 ? artifact.sha256 : undefined;
+  const kind = typeof artifact?.kind === "string" ? artifact.kind : typeof artifact?.profileId === "string" ? artifact.profileId : undefined;
+  const caveats = Array.isArray(record.caveats)
+    ? record.caveats.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  return {
+    schema: "agentloop.runtimeDeliveryReceipt/v1",
+    artifact: { path, ...(bytes === undefined ? {} : { bytes }), ...(sha256 === undefined ? {} : { sha256 }), ...(kind === undefined ? {} : { kind }) },
+    verdict,
+    caveats,
+    sourceToolCallId: toolCallId,
   };
 }
 

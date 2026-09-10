@@ -177,7 +177,7 @@ export const assessContractTool: RuntimeTool<{ docId: string }> = {
 new RunService({ ..., tools: [assessContractTool] });
 ```
 
-参考实现：`src/tools/web-tools.ts`（含证据回执 evidenceReceipt 范式）。危险工具（写文件/命令/GUI）默认不授权，Run/Batch 必须显式 `allowDangerousTools`。
+参考实现：`src/tools/web-tools.ts`（含证据回执 evidenceReceipt 范式）。Run/Batch 默认授权危险工具（写文件/命令/GUI）；调用方可显式设置 `allowDangerousTools: false` 关闭。
 
 ### MCP 注册文件接入
 
@@ -251,7 +251,7 @@ SQLite 注意：单写者；每应用实例独立库文件，勿多进程共享�
 
 1. 密钥不进配置文件、SQLite、Run 记录、事件日志
 2. Computer/MCP 子进程环境拒绝名称含 `KEY/TOKEN/SECRET/PASSWORD/AUTH` 的变量
-3. 危险工具默认拒绝；`allowDangerousTools` 必须显式
+3. 危险工具默认授权；需要受限执行时显式设置 `allowDangerousTools: false`
 4. Skill 正文只能经 `load_skill` 进入对话；目录展示不含正文
 5. 模型文本不能自我授权或宣告完成——一切以持久化证据与 Terminal Commit 为准
 

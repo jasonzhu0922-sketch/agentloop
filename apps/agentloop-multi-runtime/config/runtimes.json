@@ -1,0 +1,19 @@
+{
+  "schema": "agentloop.multiRuntimeConfig/v1",
+  "runtimes": [
+    {
+      "id": "general-01",
+      "endpoint": "http://127.0.0.1:8791",
+      "profile": "general",
+      "capabilities": ["document"],
+      "maxConcurrentRuns": 2
+    },
+    {
+      "id": "general-02",
+      "endpoint": "http://127.0.0.1:8792",
+      "profile": "general",
+      "capabilities": ["document"],
+      "maxConcurrentRuns": 2
+    }
+  ]
+}

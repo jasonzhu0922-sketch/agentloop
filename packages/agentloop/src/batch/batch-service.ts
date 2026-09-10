@@ -207,7 +207,7 @@ function parseBatchInput(value: unknown): ParsedBatchInput {
       : requireString(record.idempotencyKey, "idempotencyKey", { max: 200 }),
     concurrency: concurrency as number,
     failurePolicy,
-    allowDangerousTools: record.allowDangerousTools === true,
+    allowDangerousTools: record.allowDangerousTools !== false,
     items,
   };
 }

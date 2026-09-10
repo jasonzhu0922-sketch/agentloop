@@ -19,7 +19,7 @@ import type {
   SelectedSkillRole,
   TaskSpec,
 } from "./contracts.ts";
-import { admitPlan, hasFileProducer } from "./admission.ts";
+import { admitPlan } from "./admission.ts";
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools } from "./step-execution-binding.ts";
 
 const EVIDENCE_KIND_VALUES = [
@@ -27,7 +27,9 @@ const EVIDENCE_KIND_VALUES = [
   "source_urls",
   "schema_summary",
   "record_counts",
+  "table_coverage",
   "structured_extraction_artifact",
+  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -58,7 +60,7 @@ const CAVEAT_POLICY_VALUES = [
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["id", "objective", "dependsOn", "role", "skillIds", "requiredCapabilities", "evidenceContract"],
+  required: ["id", "objective", "dependsOn", "role", "skillIds", "requiredCapabilities"],
   properties: {
     id: { type: "string" },
     objective: { type: "string" },
@@ -240,7 +242,7 @@ export class ModelPlanner implements Planner {
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
         "For browser-presentable, presentation-style, or document-like artifacts, basic openability and requested format/type are core delivery evidence; navigation, interaction, visual polish, examples, and exercises are Skill-owned QA unless the loaded Skill rubric requires them.",
         "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
-        "Evidence contracts must contain only core requiredKinds and caveatPolicy; do not turn optional enhancements into blocking evidence.",
+        "Use contracts only for source provenance, artifacts, high-risk facts, or external effects. Runtime audits normal delivery automatically; do not require its receipt.",
         "For factual materials, require available source grounding and explicit caveats for unavailable facts; do not require inaccessible official/full-text sources as a blocking criterion unless the user asked for strict official-source verification.",
         "All leaf IDs, Skill IDs, capability IDs, dependencies, roles, and evidence kinds must match the submit_outcome_plan schema and supplied catalogs.",
       ],
@@ -374,7 +376,6 @@ function responseOnlyPlan(input: string): PlanProposal {
       role: "deliver",
       skillIds: [],
       requiredCapabilities: ["conversation_delivery"],
-      evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
       successCriteria: [{ id: "answered", description: "A non-empty direct answer is returned.", source: "planner" }],
     }],
   };
@@ -708,7 +709,7 @@ function planningRuntimeContext(
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
-          evidenceContractPolicy: evidenceContractPolicyForTask(taskProfile),
+          evidenceContractPolicy: evidenceContractPolicyForTask(task, taskProfile),
           firstRoundRules: [
             "submit exactly one OutcomePlan",
             "do not submit plan patches",
@@ -730,8 +731,14 @@ function planningRuntimeContext(
   };
 }
 
-function evidenceContractPolicyForTask(taskProfile: TaskProfile): Record<string, unknown> {
-  const sourceKinds = ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"];
+function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile): Record<string, unknown> {
+  const capabilities = task.availableCapabilities
+    ?? (task.availableTools === undefined
+      ? planningCapabilitiesFromToolNames(task.availableToolNames)
+      : planningCapabilitiesFromTools(task.availableTools));
+  const producibleSourceKinds = new Set(capabilities.flatMap((capability) => capability.produces));
+  const sourceKinds = (["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
+    .filter((kind) => producibleSourceKinds.has(kind));
   if (taskProfile.deliverySurface === "conversation" && taskProfile.artifactKind === "none") {
     return {
       schema: "agentloop.evidenceContractPolicy/v1",
@@ -743,9 +750,9 @@ function evidenceContractPolicyForTask(taskProfile: TaskProfile): Record<string,
         note: "Use structured extraction artifacts for reusable data evidence, but do not treat that source artifact as the final user deliverable.",
       },
       finalProduceOrDeliverLeaf: {
-        requiredKinds: ["delivery_receipt", "explicit_caveats"],
+        defaultRequiredKinds: [],
         forbiddenKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
-        note: "For conversation-only answers, the final leaf delivers text in the conversation; it must not require a workspace artifact path unless the user asked for a file.",
+        note: "For conversation-only answers, Runtime retains delivery events automatically; require evidence only for source provenance, high-risk facts, or external side effects.",
       },
     };
   }
@@ -769,7 +776,7 @@ function evidenceContractPolicyForTask(taskProfile: TaskProfile): Record<string,
     schema: "agentloop.evidenceContractPolicy/v1",
     principle: "Use the smallest evidence contract that matches the task semantics; do not add artifact evidence unless the user requested a workspace artifact.",
     finalProduceOrDeliverLeaf: {
-      requiredKinds: ["delivery_receipt"],
+      defaultRequiredKinds: [],
     },
   };
 }
@@ -977,7 +984,6 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
   });
   if (
     taskIntent.deliverySurface === "workspace_artifact"
-    && hasFileProducer(new Set(task.availableToolNames))
     && proposal.steps.every((step) => !stepCanProduceObservableArtifact(step))
   ) {
     throw new AppError(
@@ -1032,25 +1038,90 @@ function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {
 function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): PlanProposal {
   const taskProfile = planningTaskProfile(task);
   const terminalStepIds = terminalLeafStepIds(proposal.steps);
+  const normalizedSteps: PlanStepProposal[] = proposal.steps.map((step) => {
+    const deliveryNormalized = normalizeConversationOnlyTerminalStep(step, terminalStepIds, taskProfile, task);
+    if (deliveryNormalized.evidenceContract !== undefined) return deliveryNormalized;
+    const coreCriteria = deliveryNormalized.successCriteria.filter((criterion) =>
+      !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
+    );
+    if (coreCriteria.length > 0) return { ...deliveryNormalized, successCriteria: coreCriteria };
+    return {
+      ...deliveryNormalized,
+      successCriteria: [{
+        id: `${step.id}-core-delivery`,
+        description: coreSuccessCriterionDescription(deliveryNormalized),
+        source: "planner" as const,
+      }],
+    };
+  });
   return {
     ...proposal,
-    steps: proposal.steps.map((step) => {
-      const deliveryNormalized = normalizeConversationOnlyTerminalStep(step, terminalStepIds, taskProfile);
-      if (deliveryNormalized.evidenceContract !== undefined) return deliveryNormalized;
-      const coreCriteria = deliveryNormalized.successCriteria.filter((criterion) =>
-        !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
-      );
-      if (coreCriteria.length > 0) return { ...deliveryNormalized, successCriteria: coreCriteria };
-      return {
-        ...deliveryNormalized,
-        successCriteria: [{
-          id: `${step.id}-core-delivery`,
-          description: coreSuccessCriterionDescription(deliveryNormalized),
-          source: "planner",
-        }],
-      };
-    }),
+    steps: normalizedSteps.map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task)),
   };
+}
+
+/**
+ * A complete structured artifact is an input to a count/group/rank question,
+ * not an optional hint. Keep this at the Plan boundary: tools expose neutral
+ * records and receipts, while this rule only recognizes aggregation semantics.
+ */
+function normalizeStructuredAggregationLeaf(
+  step: PlanStepProposal,
+  allSteps: readonly PlanStepProposal[],
+  task: TaskSpec,
+): PlanStepProposal {
+  if (
+    step.role === "fact_acquisition"
+    || !aggregationRequested(`${task.input}\n${step.objective}`)
+    || !dependsOnStructuredExtraction(step, allSteps)
+    || !task.availableToolNames.includes("computer_aggregate_table_artifact")
+  ) return step;
+  const requiredKinds = uniqueEvidenceKinds([
+    ...(step.evidenceContract?.requiredKinds ?? []),
+    "derived_aggregation",
+    "explicit_caveats",
+  ]);
+  const caveatPolicy = step.evidenceContract?.caveatPolicy ?? "mark_unverified_facts";
+  return {
+    ...step,
+    role: step.role === undefined ? "deliver" : step.role,
+    requiredCapabilities: [...new Set([...step.requiredCapabilities, "workspace_file_read"])],
+    evidenceContract: { requiredKinds, caveatPolicy },
+    successCriteria: requiredKinds.map((kind) => ({
+      id: kind,
+      description: evidenceCriterionDescription(kind, caveatPolicy),
+      source: "planner" as const,
+    })),
+  };
+}
+
+function dependsOnStructuredExtraction(
+  step: PlanStepProposal,
+  allSteps: readonly PlanStepProposal[],
+): boolean {
+  const byId = new Map(allSteps.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const visit = (stepId: string): boolean => {
+    if (seen.has(stepId)) return false;
+    seen.add(stepId);
+    const candidate = byId.get(stepId);
+    if (candidate === undefined) return false;
+    if (
+      candidate.evidenceContract?.requiredKinds.includes("structured_extraction_artifact")
+      || candidate.requiredCapabilities.includes("uploaded_source_read")
+        && /(?:extract|table|spreadsheet|workbook|csv|xlsx|xlsm|表格|工作簿|工作表|抽取)/iu.test(candidate.objective)
+    ) return true;
+    return candidate.dependencies.some(visit);
+  };
+  return step.dependencies.some(visit);
+}
+
+function aggregationRequested(value: string): boolean {
+  return /(?:\b(?:count|how many|group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total)\b|数量|多少|计数|统计|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|总数|合计|汇总|占比)/iu.test(value);
+}
+
+function uniqueEvidenceKinds(values: readonly EvidenceKind[]): EvidenceKind[] {
+  return [...new Set(values)];
 }
 
 function terminalLeafStepIds(steps: readonly PlanStepProposal[]): ReadonlySet<string> {
@@ -1064,21 +1135,31 @@ function normalizeConversationOnlyTerminalStep(
   step: PlanStepProposal,
   terminalStepIds: ReadonlySet<string>,
   taskProfile: TaskProfile,
+  task: TaskSpec,
 ): PlanStepProposal {
-  if (taskProfile.deliverySurface !== "conversation" || taskProfile.artifactKind !== "none") return step;
+  const conversationOnly = (taskProfile.deliverySurface === "conversation" && taskProfile.artifactKind === "none")
+    || task.responseOnly === true;
+  if (!conversationOnly) return step;
   if (!terminalStepIds.has(step.id) || step.role === "fact_acquisition" || step.role === "repair") return step;
-  if (step.evidenceContract === undefined) return {
+  const evidenceContract = step.evidenceContract;
+  if (evidenceContract === undefined) return {
     ...step,
     successCriteria: step.successCriteria.filter((criterion) => !isArtifactDeliveryEvidenceKind(criterion.id)),
   };
-  const requiredKinds = step.evidenceContract.requiredKinds.filter((kind) => !isArtifactDeliveryEvidenceKind(kind));
-  if (!requiredKinds.includes("delivery_receipt")) requiredKinds.push("delivery_receipt");
+  const requiredKinds = evidenceContract.requiredKinds.filter((kind) =>
+    !isArtifactDeliveryEvidenceKind(kind) && kind !== "delivery_receipt"
+  );
+  if (requiredKinds.length === 0) return {
+    ...step,
+    evidenceContract: undefined,
+    successCriteria: step.successCriteria.filter((criterion) => !isArtifactDeliveryEvidenceKind(criterion.id)),
+  };
   return {
     ...step,
-    evidenceContract: { ...step.evidenceContract, requiredKinds },
+    evidenceContract: { ...evidenceContract, requiredKinds },
     successCriteria: requiredKinds.map((kind) => ({
       id: kind,
-      description: evidenceCriterionDescription(kind, step.evidenceContract?.caveatPolicy ?? "none"),
+      description: evidenceCriterionDescription(kind, evidenceContract.caveatPolicy),
       source: "planner",
     })),
   };
@@ -1273,7 +1354,9 @@ function parseSkillRole(value: unknown, index: number): SelectedSkillRole["role"
 
 function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   const record = requireRecord(value, `leaves[${index}]`);
-  const evidenceContract = parseEvidenceContract(record.evidenceContract, index);
+  const evidenceContract = record.evidenceContract === undefined
+    ? undefined
+    : parseEvidenceContract(record.evidenceContract, index);
   return {
     id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
     kind: "leaf",
@@ -1283,12 +1366,20 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
     requiredCapabilities: canonicalStringSet(record.requiredCapabilities, `leaves[${index}].requiredCapabilities`, 100),
     ...(record.sourceConstraint === undefined ? {} : { sourceConstraint: parseSourceConstraint(record.sourceConstraint, index) }),
-    evidenceContract,
-    successCriteria: evidenceContract.requiredKinds.map((kind) => ({
-      id: kind,
-      description: evidenceCriterionDescription(kind, evidenceContract.caveatPolicy),
-      source: "planner",
-    })),
+    ...(evidenceContract === undefined ? {
+      successCriteria: [{
+        id: "delivered",
+        description: "The requested outcome is delivered to the user.",
+        source: "planner" as const,
+      }],
+    } : {
+      evidenceContract,
+      successCriteria: evidenceContract.requiredKinds.map((kind) => ({
+        id: kind,
+        description: evidenceCriterionDescription(kind, evidenceContract.caveatPolicy),
+        source: "planner" as const,
+      })),
+    }),
   };
 }
 
@@ -1357,6 +1448,8 @@ function evidenceCriterionDescription(kind: EvidenceKind, caveatPolicy: CaveatPo
       return `All extracted tables are covered by the summary.${suffix}`;
     case "structured_extraction_artifact":
       return `A durable structured extraction artifact or content-addressed reference is available.${suffix}`;
+    case "derived_aggregation":
+      return `A complete, coverage-backed aggregation derived from the structured records is available.${suffix}`;
     case "artifact_path":
       return "The delivered artifact path is recorded.";
     case "artifact_non_empty":

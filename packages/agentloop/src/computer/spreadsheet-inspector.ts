@@ -31,8 +31,15 @@ interface ZipFile {
 }
 
 export interface SpreadsheetFileEntry {
+  /** Stable, user-facing source identity used in evidence and extension detection. */
   readonly path: string;
   readonly bytes: number;
+  /**
+   * Host-owned physical location. This is deliberately separate from `path` so
+   * a server-managed upload named `original` can still be parsed as its real
+   * `.xlsx` / `.csv` source without exposing that location to a model.
+   */
+  readonly readPath?: string;
 }
 
 export interface SpreadsheetProfileOptions {
@@ -342,9 +349,10 @@ async function profileSpreadsheetFile(rootPath: string, file: SpreadsheetFileEnt
     if (workbookType === "csv" && file.bytes > CSV_PROFILE_MAX_BYTES) {
       return errorProfile(file, workbookType, "file_too_large", [`CSV exceeds ${CSV_PROFILE_MAX_BYTES} bytes and was not profiled.`]);
     }
+    const inputPath = spreadsheetReadPath(rootPath, file);
     const parsed = workbookType === "csv"
-      ? await parseCsvWorkbook(rootPath, file.path, { maxRows: CSV_PROFILE_MAX_ROWS })
-      : await parseXlsxWorkbook(rootPath, file.path, { maxRows: CSV_PROFILE_MAX_ROWS });
+      ? await parseCsvWorkbook(inputPath, { maxRows: CSV_PROFILE_MAX_ROWS })
+      : await parseXlsxWorkbook(inputPath, { maxRows: CSV_PROFILE_MAX_ROWS });
     caveats.push(...parsed.flatMap((sheet) => sheet.truncated ? [`${file.path}:${sheet.name} profile was truncated.`] : []));
     const sheets = parsed.slice(0, PROFILE_WORKSHEET_LIMIT).map(worksheetProfile);
     if (parsed.length > sheets.length) caveats.push(`Workbook has ${parsed.length} sheets; profile includes first ${sheets.length}.`);
@@ -374,9 +382,10 @@ async function extractSpreadsheetFile(
   const workbookType = spreadsheetWorkbookType(extension);
   const caveats: string[] = [];
   try {
+    const inputPath = spreadsheetReadPath(rootPath, file);
     const parsed = workbookType === "csv"
-      ? await parseCsvWorkbook(rootPath, file.path, { maxRows: options.maxRowsPerSheet })
-      : await parseXlsxWorkbook(rootPath, file.path, { maxRows: options.maxRowsPerSheet });
+      ? await parseCsvWorkbook(inputPath, { maxRows: options.maxRowsPerSheet })
+      : await parseXlsxWorkbook(inputPath, { maxRows: options.maxRowsPerSheet });
     let usedCells = 0;
     let truncated = false;
     const sheets: SpreadsheetExtractionSheet[] = [];
@@ -441,8 +450,12 @@ async function extractSpreadsheetFile(
   }
 }
 
-async function parseXlsxWorkbook(rootPath: string, path: string, options: { readonly maxRows: number }): Promise<ParsedWorksheet[]> {
-  const zip = await JSZip.loadAsync(await fs.readFile(resolve(rootPath, path)));
+function spreadsheetReadPath(rootPath: string, file: SpreadsheetFileEntry): string {
+  return file.readPath ?? resolve(rootPath, file.path);
+}
+
+async function parseXlsxWorkbook(path: string, options: { readonly maxRows: number }): Promise<ParsedWorksheet[]> {
+  const zip = await JSZip.loadAsync(await fs.readFile(path));
   const workbookXml = await zipText(zip, "xl/workbook.xml");
   const relsXml = await zipText(zip, "xl/_rels/workbook.xml.rels").catch(() => "");
   const rels = parseWorkbookRelationships(relsXml);
@@ -454,8 +467,8 @@ async function parseXlsxWorkbook(rootPath: string, path: string, options: { read
   });
 }
 
-async function parseCsvWorkbook(rootPath: string, path: string, options: { readonly maxRows: number }): Promise<ParsedWorksheet[]> {
-  const content = await fs.readFile(resolve(rootPath, path), "utf8");
+async function parseCsvWorkbook(path: string, options: { readonly maxRows: number }): Promise<ParsedWorksheet[]> {
+  const content = await fs.readFile(path, "utf8");
   const rows = parseCsvRows(content, options.maxRows + 1);
   const truncated = rows.length > options.maxRows;
   const selectedRows = truncated ? rows.slice(0, options.maxRows) : rows;

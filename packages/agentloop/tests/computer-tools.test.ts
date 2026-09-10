@@ -126,6 +126,11 @@ test("computer_read_json returns structured pointer windows for durable artifact
     assert.equal(result.queries[1]?.sourceRange, "/files/0/sheets/0/records[1:2]");
     assert.deepEqual(result.queries[1]?.value, [{ row: 3, values: { Name: "Bob", Score: 82 } }]);
     assert.match(result.caveats.join("\n"), /returned 1 of 2 array items/);
+    assert.throws(() => allowed.prepare({
+      id: "read-json-root",
+      name: "computer_read_json",
+      arguments: { path: ".agentloop/table-extractions/aa/artifact.json", queries: [{ pointer: "" }] },
+    }), /pointer must contain at least 1 characters/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -3229,6 +3234,124 @@ test("computer_summarize_table_artifact covers all extracted tables with compact
     assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("record_counts"));
     assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("structured_extraction_artifact"));
     assert.equal(result.evidenceReceipt.evidenceKinds.caveated.length, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_aggregate_table_artifact derives complete group counts from structured records", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-table-artifact-aggregate-"));
+  try {
+    const directory = join(root, ".agentloop", "table-extractions", "aa");
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(join(directory, "artifact.json"), JSON.stringify({
+      schema: "agentloop.visibleTableExtraction/v1",
+      requested: 1,
+      returned: 1,
+      totalRows: 5,
+      totalRecords: 4,
+      totalCells: 8,
+      truncated: false,
+      caveats: [],
+      files: [{
+        path: "tasks.xlsx",
+        sheets: [{
+          name: "Tasks",
+          index: 0,
+          sourceRange: "A1:B5",
+          columns: [
+            { index: 1, address: "A", name: "Owner", nonEmptyCellCount: 4, valueKinds: { text: 4 } },
+            { index: 2, address: "B", name: "State", nonEmptyCellCount: 4, valueKinds: { text: 4 } },
+          ],
+          records: [
+            { row: 2, sourceRange: "A2:B2", values: { Owner: "A", State: "failed" }, cellCount: 2 },
+            { row: 3, sourceRange: "A3:B3", values: { Owner: "B", State: "done" }, cellCount: 2 },
+            { row: 4, sourceRange: "A4:B4", values: { Owner: "A", State: "failed" }, cellCount: 2 },
+            { row: 5, sourceRange: "A5:B5", values: { Owner: "C", State: "done" }, cellCount: 2 },
+          ],
+          rowCount: 5,
+          recordCount: 4,
+          cellCount: 10,
+          truncated: false,
+        }],
+      }],
+    }));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_aggregate_table_artifact"]));
+    const prepared = allowed.prepare({
+      id: "aggregate-table-artifact",
+      name: "computer_aggregate_table_artifact",
+      arguments: {
+        path: ".agentloop/table-extractions/aa/artifact.json",
+        queries: [{ operation: "count", groupBy: "Owner" }, { operation: "count", where: [{ field: "State", equals: "failed" }] }],
+      },
+    });
+    const result = await prepared.tool.execute(
+      grantContext(["computer_aggregate_table_artifact"]),
+      prepared.input,
+    ) as {
+      schema: string;
+      coverage: { complete: boolean; totalRecords: number; truncated: boolean };
+      results: Array<{ groupBy?: string; groups?: Array<{ value: string; count: number }>; value?: number; complete: boolean }>;
+      resultRef: { schema: string; path: string; sha256: string; results: Array<{ groupsPointer?: string }> };
+      evidenceReceipt: { evidenceKinds: { satisfied: string[]; failed: string[] } };
+    };
+
+    assert.equal(result.schema, "agentloop.tableArtifactAggregation/v1");
+    assert.deepEqual(result.coverage, { complete: true, totalTables: 1, totalRecords: 4, truncated: false });
+    assert.deepEqual(result.results[0]?.groups, [{ value: "A", count: 2 }, { value: "B", count: 1 }, { value: "C", count: 1 }]);
+    assert.equal(result.results[1]?.value, 2);
+    assert.ok(result.results.every((item) => item.complete));
+    assert.equal(result.resultRef.schema, "agentloop.tableAggregationResultRef/v1");
+    assert.equal(result.resultRef.results[0]?.groupsPointer, "/results/0/groups");
+    const materialized = JSON.parse(await fs.readFile(join(root, result.resultRef.path), "utf8")) as {
+      schema: string;
+      results: Array<{ groups?: Array<{ value: string; count: number }> }>;
+    };
+    assert.equal(materialized.schema, "agentloop.tableAggregationResult/v1");
+    assert.deepEqual(materialized.results[0]?.groups, [{ value: "A", count: 2 }, { value: "B", count: 1 }, { value: "C", count: 1 }]);
+    const reader = registry.materialize(grant(["computer_read_json"]));
+    const readGroups = reader.prepare({
+      id: "read-materialized-groups",
+      name: "computer_read_json",
+      arguments: {
+        path: result.resultRef.path,
+        queries: [{ pointer: "/results/0/groups", offset: 1, limit: 1 }],
+      },
+    });
+    const groupWindow = await readGroups.tool.execute(
+      grantContext(["computer_read_json"]),
+      readGroups.input,
+    ) as { queries: Array<{ value?: Array<{ value: string; count: number }>; returned?: number; totalItems?: number }> };
+    assert.equal(groupWindow.queries[0]?.totalItems, 3);
+    assert.deepEqual(groupWindow.queries[0]?.value, [{ value: "B", count: 1 }]);
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("derived_aggregation"));
+    assert.equal(result.evidenceReceipt.evidenceKinds.failed.includes("derived_aggregation"), false);
+
+    const limited = allowed.prepare({
+      id: "aggregate-table-artifact-window",
+      name: "computer_aggregate_table_artifact",
+      arguments: {
+        path: ".agentloop/table-extractions/aa/artifact.json",
+        queries: [{ operation: "count", groupBy: "Owner", maxGroups: 2 }],
+      },
+    });
+    const limitedResult = await limited.tool.execute(
+      grantContext(["computer_aggregate_table_artifact"]),
+      limited.input,
+    ) as {
+      results: Array<{ groups?: Array<{ value: string; count: number }>; complete: boolean; groupCount?: number; returnedGroupCount?: number; nextGroupOffset?: number }>;
+      resultRef: { path: string };
+    };
+    assert.equal(limitedResult.results[0]?.groups?.length, 2);
+    assert.equal(limitedResult.results[0]?.groupCount, 3);
+    assert.equal(limitedResult.results[0]?.returnedGroupCount, 2);
+    assert.equal(limitedResult.results[0]?.nextGroupOffset, 2);
+    assert.equal(limitedResult.results[0]?.complete, false);
+    const completeWindowSource = JSON.parse(await fs.readFile(join(root, limitedResult.resultRef.path), "utf8")) as {
+      results: Array<{ groups?: Array<{ value: string; count: number }> }>;
+    };
+    assert.equal(completeWindowSource.results[0]?.groups?.length, 3);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

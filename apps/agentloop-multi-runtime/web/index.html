@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentLoop Multi Runtime</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/runtime-overrides.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><div class="logo">A</div><div class="brand-text"><strong>AgentLoop</strong><small>智能助手</small></div></div>
+        <button id="new-chat" class="new-chat" type="button">＋ 新对话</button>
+        <div class="sidebar-label">会话</div>
+        <div id="sessions" class="sessions"></div>
+        <div class="sidebar-foot">
+          <div class="identity">demo-user@agentloop.local</div>
+          <div class="identity-fields"><label class="identity-field">用户 ID<input id="user-id" value="demo-user" /></label><label class="identity-field">租户 ID<input id="tenant-id" value="demo-tenant" /></label></div>
+          <div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题">◐</button><button class="icon-btn" type="button" title="刷新会话" onclick="location.reload()">⟳</button></div>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div class="crumb">会话 / <b id="conversation-title">新对话</b></div>
+          <div class="topbar-right"><span id="runtime-status" class="status-pill"><i class="status-dot"></i> 未配置模型</span></div>
+        </header>
+        <div class="workspace">
+          <section class="conversation">
+            <div id="conversation-scroll" class="conversation-scroll"><div id="empty-state" class="empty-state"><div class="empty-logo">A</div><h2>我能帮你做什么？</h2><p class="empty-sub">我可以在不同 Runtime Host 上执行任务，并通过 Planner、Step Agent Loop 和工具链给出可核验的结果。</p><p class="empty-hint">在下方输入任务，我会先制定计划、执行，并在完成后给出结果。你可以在同一个对话里继续提出后续要求。</p><div class="suggestions"><button type="button" class="suggestion" data-suggest="帮我写一份清晰的项目周报">帮我写一份清晰的项目周报</button><button type="button" class="suggestion" data-suggest="把这段内容整理成要点">把这段内容整理成要点</button><button type="button" class="suggestion" data-suggest="检查并修复这段代码的问题">检查并修复这段代码的问题</button></div></div><div id="messages" class="messages"></div></div>
+            <form id="composer" class="composer">
+              <div class="composer-box">
+                <textarea id="input" class="composer-input" rows="1" placeholder="给 AgentLoop 一个任务……（Enter 发送，Shift+Enter 换行）"></textarea>
+                <div id="pending-attachments" class="source-row" aria-label="本次上传文件" hidden></div>
+                <div class="composer-tools"><div class="composer-bar"><button type="button" class="dir-picker-btn" disabled title="云端 Multi Runtime 不暴露本地目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select"><option value="">使用 Runtime 默认模型</option></select></label><label class="chip runtime-chip">Runtime<select id="runtime"><option value="">自动</option></select></label><span class="composer-hint">Enter 发送 · Shift+Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="cancel" class="stop-btn" type="button" disabled>■</button><button id="submit" class="send-btn" type="submit">↑</button></div></div>
+              </div>
+            </form>
+          </section>
+          <aside class="details">
+            <div class="details-head"><span id="details-title">执行详情</span><span id="event-count" class="muted">0 events</span></div>
+            <section class="detail-section"><h3>当前任务</h3><p id="details-task" class="detail-value">选择或启动一个对话</p><p class="detail-meta">Runtime：<span id="details-runtime">自动分配</span></p></section>
+            <section class="detail-section"><h3>实际使用</h3><div id="details-tools" class="detail-tags"><span class="muted">本轮尚未调用工具。</span></div></section>
+            <section class="detail-section"><h3>命令脚本</h3><div id="details-commands" class="command-list"><span class="muted">本轮尚未执行命令。</span></div></section>
+            <section class="detail-section"><h3>最终回复</h3><div id="details-output" class="detail-output"><span class="muted">暂无最终回复。</span></div></section>
+            <section id="artifacts-section" class="detail-section"><h3>产物</h3><div id="details-artifacts" class="artifact-list"><span class="muted">本轮暂无可预览或下载的产物。</span></div></section>
+            <section id="plan-section" class="detail-section" hidden><h3>Planner</h3><div id="plan" class="plan-empty">提交任务后显示 Planner。</div></section>
+            <section id="events-section" class="detail-section events-section" hidden><h3>SSE 事件流</h3><div id="events" class="events"></div></section>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <script src="/runtime-config.js"></script>
+    <script type="module" src="/artifact-preview.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

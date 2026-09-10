@@ -22,6 +22,8 @@ interface AssistantCheckpoint {
   readonly content: string;
   readonly toolCalls: readonly ModelToolCall[];
   readonly reasoningContent?: string;
+  readonly finishReason?: string;
+  readonly providerReplayableToolCallIds?: readonly string[];
 }
 
 interface ToolOutcome {
@@ -50,11 +52,17 @@ export function reconstructRecoveryTranscript(input: {
       const reasoningContent = typeof event.data.reasoningContent === "string" && event.data.reasoningContent.length > 0
         ? event.data.reasoningContent
         : undefined;
+      const finishReason = typeof event.data.finishReason === "string" ? event.data.finishReason : undefined;
+      const providerReplayableToolCallIds = Array.isArray(event.data.providerReplayableToolCallIds)
+        ? event.data.providerReplayableToolCallIds.filter((value): value is string => typeof value === "string")
+        : undefined;
       assistants.push({
         event,
         content,
         toolCalls,
         ...(reasoningContent === undefined ? {} : { reasoningContent }),
+        ...(finishReason === undefined ? {} : { finishReason }),
+        ...(providerReplayableToolCallIds === undefined ? {} : { providerReplayableToolCallIds }),
       });
       for (const call of toolCalls) coveredToolCallIds.add(call.id);
       if (toolCalls.length === 0 && content.length > 0) candidateOutputs.push(content);
@@ -99,9 +107,27 @@ export function reconstructRecoveryTranscript(input: {
   let checkpointEventSeq: number | undefined;
   for (const assistant of assistants) {
     if (assistant.toolCalls.length === 0) continue;
-    const complete = assistant.toolCalls.every((call) => outcomes.has(call.id));
+    const replayableToolCallIds = assistant.providerReplayableToolCallIds === undefined
+      ? assistant.finishReason === "length"
+        ? new Set<string>()
+        : new Set(assistant.toolCalls.filter((call) => isToolArgumentsObject(call.arguments)).map((call) => call.id))
+      : new Set(assistant.providerReplayableToolCallIds);
+    const replayableCalls = assistant.toolCalls.filter((call) =>
+      replayableToolCallIds.has(call.id) && isToolArgumentsObject(call.arguments),
+    );
+    const suppressedCalls = assistant.toolCalls.filter((call) => !replayableToolCallIds.has(call.id) || !isToolArgumentsObject(call.arguments));
+    for (const call of suppressedCalls) {
+      const outcome = outcomes.get(call.id);
+      if (outcome === undefined) {
+        unfinishedToolCalls.push({ toolCallId: call.id, toolName: call.name });
+        continue;
+      }
+      toolEvidence.push(toolEvidenceFromOutcome(call, outcome));
+    }
+    if (replayableCalls.length === 0) continue;
+    const complete = replayableCalls.every((call) => outcomes.has(call.id));
     if (!complete) {
-      for (const call of assistant.toolCalls) {
+      for (const call of replayableCalls) {
         if (!outcomes.has(call.id)) unfinishedToolCalls.push({ toolCallId: call.id, toolName: call.name });
       }
       continue;
@@ -109,10 +135,10 @@ export function reconstructRecoveryTranscript(input: {
     messages.push({
       role: "assistant",
       content: assistant.content,
-      toolCalls: assistant.toolCalls,
+      toolCalls: replayableCalls,
       ...(assistant.reasoningContent === undefined ? {} : { reasoningContent: assistant.reasoningContent }),
     });
-      for (const call of assistant.toolCalls) {
+      for (const call of replayableCalls) {
         const outcome = outcomes.get(call.id)!;
       messages.push({
         role: "tool",
@@ -121,13 +147,7 @@ export function reconstructRecoveryTranscript(input: {
         content: outcome.content,
         isError: outcome.isError,
       });
-      toolEvidence.push({
-        toolCallId: call.id,
-        toolName: call.name,
-        result: outcome.content,
-        isError: outcome.isError,
-        ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
-      });
+      toolEvidence.push(toolEvidenceFromOutcome(call, outcome));
       }
     checkpointEventSeq = assistant.event.seq;
   }
@@ -202,4 +222,18 @@ function asToolCalls(value: unknown): ModelToolCall[] {
     if (typeof call.id !== "string" || typeof call.name !== "string") return [];
     return [{ id: call.id, name: call.name, arguments: call.arguments }];
   });
+}
+
+function isToolArgumentsObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function toolEvidenceFromOutcome(call: ModelToolCall, outcome: ToolOutcome): AgentLoopToolEvidence {
+  return {
+    toolCallId: call.id,
+    toolName: call.name,
+    result: outcome.content,
+    isError: outcome.isError,
+    ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
+  };
 }

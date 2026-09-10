@@ -26,6 +26,8 @@ export type EvidenceKind =
   | "record_counts"
   | "table_coverage"
   | "structured_extraction_artifact"
+  /** A deterministic count/group/rank/value aggregation derived from structured records. */
+  | "derived_aggregation"
   | "artifact_path"
   | "artifact_non_empty"
   | "artifact_acceptance"
@@ -153,6 +155,12 @@ export interface ConversationWorkingSet {
   readonly runCount: number;
   readonly activeGoal?: ConversationActiveGoal;
   readonly planCursors: readonly ConversationPlanCursor[];
+  /**
+   * Bounded, accepted step outputs retained independently of a Run's terminal
+   * output.  A failed Run can have useful completed predecessors even though
+   * its own `runs.output` is empty.
+   */
+  readonly completedStepHandoffs?: readonly ConversationCompletedStepHandoff[];
   readonly reusableArtifacts: readonly ConversationReusableArtifact[];
   readonly failedBoundaries: readonly ConversationFailedBoundary[];
   readonly recommendedCapabilities: ConversationRecommendedCapabilities;
@@ -219,6 +227,16 @@ export interface ConversationPlanStepCursor {
   readonly executionBinding: StepExecutionBinding;
   readonly output?: string;
   readonly error?: string;
+}
+
+export interface ConversationCompletedStepHandoff {
+  readonly runId: string;
+  readonly planId: string;
+  readonly stepId: string;
+  readonly role?: OutcomeLeafRole;
+  readonly objective: string;
+  readonly output: string;
+  readonly outputTruncated: boolean;
 }
 
 export interface ConversationReusableArtifact {

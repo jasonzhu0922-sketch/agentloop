@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "build:kernel": "npm run build --workspace @zhujun/agentloop",
+    "build:artifact-preview": "npm run build --workspace @zhujun/agentloop-artifact-preview",
     "build:skills": "npm run build --workspace @zhujun/agentloop-skills",
     "build:plan-template": "npm run build --workspace @zhujun/agentloop-plan-template",
     "init-db": "npm run init-db --workspace agentloop-app",
@@ -20,7 +21,8 @@
     "pack:skills": "npm run build:skills && npm pack ./packages/agentloop-skills",
     "pack:plan-template": "npm run build:kernel && npm run build:plan-template && npm pack ./packages/agentloop-plan-template",
     "build:web": "npm run build --prefix apps/agentloop-app/web",
-    "build": "npm run build:kernel && npm run build:skills && npm run build:plan-template && npm run build:web",
+    "build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run build:web",
+    "start:multi-runtime": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run start:local --workspace agentloop-multi-runtime --",
     "dev": "npm run build:kernel && npm run build:skills && npm run build:plan-template && node apps/agentloop-app/scripts/dev.mjs",
     "start": "npm run build:kernel && npm run build:skills && npm run build:plan-template && npm run start --workspace agentloop-app",
     "test": "npm run test --workspaces --if-present",

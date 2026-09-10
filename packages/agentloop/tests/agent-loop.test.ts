@@ -81,7 +81,7 @@ test("single leaf execution carries loop step handoff across model steps", async
       calls += 1;
       contexts.push(request.runtimeContext?.content ?? "");
       if (calls === 1) {
-        assert.match(request.runtimeContext?.content ?? "", /agentloop\.loopStepFrame\/v1/);
+        assert.match(request.runtimeContext?.content ?? "", /agentloop\.loopStepFrame\/v2/);
         assert.match(request.runtimeContext?.content ?? "", /"mode":"current_to_next"/);
         assert.match(request.runtimeContext?.content ?? "", /"toolCallCount":0/);
         assert.match(request.runtimeContext?.content ?? "", /first bounded evidence\/tool batch/);
@@ -95,7 +95,7 @@ test("single leaf execution carries loop step handoff across model steps", async
           }],
         };
       }
-      assert.match(request.runtimeContext?.content ?? "", /agentloop\.loopStepFrame\/v1/);
+      assert.match(request.runtimeContext?.content ?? "", /agentloop\.loopStepFrame\/v2/);
       assert.match(request.runtimeContext?.content ?? "", /"mode":"current_to_next"/);
       assert.match(request.runtimeContext?.content ?? "", /"toolCallCount":1/);
       assert.match(request.runtimeContext?.content ?? "", /"recentToolNames":\["lookup_route"\]/);
@@ -139,17 +139,17 @@ test("single leaf execution carries loop step handoff across model steps", async
   assert.equal(contexts.length, 2);
 });
 
-test("custom step execution strategy can replace loop frame, tool exposure, and prompt projection", async () => {
+test("custom step execution strategy keeps deprioritized Run-authorized tools callable", async () => {
   const events: RuntimeEvent[] = [];
   const observedTools: string[][] = [];
   const observedContexts: string[] = [];
   const strategy: StepExecutionStrategy = {
     id: "test.customStepExecutionStrategy/v1",
     prepareModelStep: (input) => ({
-      schema: "agentloop.stepExecutionDecision/v1",
+      schema: "agentloop.stepExecutionDecision/v2",
       strategyId: "test.customStepExecutionStrategy/v1",
       loopStepFrame: {
-        schema: "agentloop.loopStepFrame/v1",
+        schema: "agentloop.loopStepFrame/v2",
         mode: "current_to_next",
         modelStep: input.modelStep,
         limits: {
@@ -165,22 +165,23 @@ test("custom step execution strategy can replace loop frame, tool exposure, and 
         },
         currentStage: {
           objective: "Use the focused custom strategy.",
-          toolUsePolicy: "Call only the active test tool.",
-          availableToolCount: 1,
+          toolUsePolicy: "Prefer the focused test tool, but use any Run-authorized tool when needed.",
+          availableToolCount: 2,
         },
         handoffContract: {
           reusableOutputPolicy: "Preserve the custom strategy receipt.",
-          forbiddenMoves: ["do not call hidden_tool"],
+          forbiddenMoves: [],
         },
         toolCatalog: {
           policyId: "test.customToolExposurePolicy/v1",
-          mode: "narrowed",
-          activeToolCount: 1,
-          hiddenToolGroups: [{
-            group: "hidden-test-tools",
+          mode: "full",
+          availableToolCount: 2,
+          preferredToolCount: 1,
+          deprioritizedToolGroups: [{
+            group: "deprioritized-test-tools",
             toolNames: ["hidden_tool"],
-            hiddenReason: "custom strategy keeps this tool out of the current model step",
-            unlockWhen: "a later strategy decision exposes it",
+            reason: "custom strategy ranks this tool after the preferred tool",
+            preferWhen: "the preferred tool cannot supply the needed evidence",
           }],
         },
         projectionIntent: {
@@ -193,15 +194,16 @@ test("custom step execution strategy can replace loop frame, tool exposure, and 
         },
       },
       toolCatalog: {
-        schema: "agentloop.toolCatalogDecision/v1",
+        schema: "agentloop.toolCatalogDecision/v2",
         policyId: "test.customToolExposurePolicy/v1",
-        mode: "narrowed",
-        activeToolNames: ["allowed_tool"],
-        hiddenToolGroups: [{
-          group: "hidden-test-tools",
+        mode: "full",
+        availableToolNames: ["allowed_tool", "hidden_tool"],
+        preferredToolNames: ["allowed_tool"],
+        deprioritizedToolGroups: [{
+          group: "deprioritized-test-tools",
           toolNames: ["hidden_tool"],
-          hiddenReason: "custom strategy keeps this tool out of the current model step",
-          unlockWhen: "a later strategy decision exposes it",
+          reason: "custom strategy ranks this tool after the preferred tool",
+          preferWhen: "the preferred tool cannot supply the needed evidence",
         }],
       },
       promptProjection: {
@@ -229,14 +231,14 @@ test("custom step execution strategy can replace loop frame, tool exposure, and 
       observedTools.push(request.tools.map((tool) => tool.name));
       observedContexts.push(request.runtimeContext?.content ?? "");
       if (calls === 1) {
-        assert.deepEqual(request.tools.map((tool) => tool.name), ["allowed_tool"]);
+        assert.deepEqual(request.tools.map((tool) => tool.name), ["allowed_tool", "hidden_tool"]);
         assert.match(request.runtimeContext?.content ?? "", /test\.customStepExecutionStrategy\/v1|custom strategy receipt/);
-        assert.match(request.runtimeContext?.content ?? "", /custom strategy keeps this tool out of the current model step/);
+        assert.match(request.runtimeContext?.content ?? "", /custom strategy ranks this tool after the preferred tool/);
         assert.match(request.runtimeContext?.content ?? "", /prompt_projection_policy/);
         return {
           content: "",
           finishReason: "tool_calls",
-          toolCalls: [{ id: "allowed-call", name: "allowed_tool", arguments: {} }],
+          toolCalls: [{ id: "deprioritized-call", name: "hidden_tool", arguments: {} }],
         };
       }
       return { content: "custom strategy completed", finishReason: "stop", toolCalls: [] };
@@ -251,9 +253,9 @@ test("custom step execution strategy can replace loop frame, tool exposure, and 
     parse: (value) => value,
     execute: async () => "allowed result",
   };
-  const hiddenTool: RuntimeTool<unknown> = {
+  const deprioritizedTool: RuntimeTool<unknown> = {
     name: "hidden_tool",
-    description: "Hidden by the custom strategy",
+    description: "Deprioritized by the custom strategy",
     inputSchema: { type: "object" },
     executionMode: "parallel",
     replaySafe: true,
@@ -266,7 +268,7 @@ test("custom step execution strategy can replace loop frame, tool exposure, and 
     systemPrompt: "Complete the current Plan step.",
     input: "use custom strategy",
     model,
-    tools: new ToolRegistry([allowedTool, hiddenTool]),
+    tools: new ToolRegistry([allowedTool, deprioritizedTool]),
     grant: makeGrant(["allowed_tool", "hidden_tool"]),
     maxSteps: 3,
     stepExecutionStrategy: strategy,
@@ -274,12 +276,13 @@ test("custom step execution strategy can replace loop frame, tool exposure, and 
   });
 
   assert.equal(result.output, "custom strategy completed");
-  assert.deepEqual(observedTools[0], ["allowed_tool"]);
+  assert.deepEqual(observedTools[0], ["allowed_tool", "hidden_tool"]);
   assert.match(observedContexts[0], /Project only custom test receipts/);
   const policyEvent = events.find((event) => event.type === "step_execution.policy_applied");
   assert.equal(policyEvent?.data.strategyId, "test.customStepExecutionStrategy/v1");
-  assert.equal(policyEvent?.data.activeToolCount, 1);
-  assert.equal(policyEvent?.data.hiddenToolGroupCount, 1);
+  assert.equal(policyEvent?.data.availableToolCount, 2);
+  assert.equal(policyEvent?.data.preferredToolCount, 1);
+  assert.equal(policyEvent?.data.deprioritizedToolGroupCount, 1);
 });
 
 test("batch source reads are observed as one tool action with many source receipts", async () => {
@@ -381,6 +384,7 @@ test("tool calls from a length-truncated model response are never dispatched", a
   };
   const model = new TruncatedScenarioModel();
   const grant = makeGrant(["unsafe_write"]);
+  const events: RuntimeEvent[] = [];
   const result = await runAgentLoop({
     runId: grant.runId,
     systemPrompt: "Test agent",
@@ -389,11 +393,16 @@ test("tool calls from a length-truncated model response are never dispatched", a
     tools: new ToolRegistry([tool]),
     grant,
     maxSteps: 3,
+    emit: (event) => { events.push(event); },
   });
   assert.equal(result.output, "recovered");
   assert.equal(executions, 0);
-  const toolMessage = result.messages.find((message) => message.role === "tool");
-  assert.match(toolMessage?.content ?? "", /output limit/);
+  assert.equal(result.messages.some((message) => message.role === "tool"), false);
+  assert.equal(events.some((event) =>
+    event.type === "tool.rejected"
+    && event.data.toolCallId === "call-unsafe"
+    && event.data.failurePhase === "runtime",
+  ), true);
 });
 
 test("the runtime, not model prose, enforces the step budget", async () => {
@@ -795,8 +804,8 @@ test("conversation delivery does not turn a helper script into an artifact-accep
       modelCalls += 1;
       const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
       assert.equal(semanticState.nextAction, "submit_completion_candidate");
-      assert.deepEqual(semanticState.missingRequiredEvidenceKinds, ["delivery_receipt", "explicit_caveats"]);
-      assert.deepEqual(semanticState.pendingCandidateEvidenceKinds, ["delivery_receipt", "explicit_caveats"]);
+      assert.deepEqual(semanticState.missingRequiredEvidenceKinds, ["delivery_receipt"]);
+      assert.deepEqual(semanticState.pendingCandidateEvidenceKinds, ["delivery_receipt"]);
       assert.deepEqual(semanticState.missingToolEvidenceKinds, []);
       assert.equal(semanticState.workProduct.status, "none");
       assert.deepEqual(semanticState.knownArtifacts, []);
@@ -1522,7 +1531,11 @@ test("candidate repair assessment limit accepts the latest output with a caveat"
     emit: (event) => { events.push(event); },
     evaluateCandidate: async () => {
       assessments += 1;
-      return { approved: false, feedback: "Quality issue remained after repair." };
+      return {
+        approved: false,
+        feedback: "Quality issue remained after repair.",
+        allowRepairLimitCompletion: true,
+      };
     },
   });
 
@@ -1533,6 +1546,36 @@ test("candidate repair assessment limit accepts the latest output with a caveat"
   assert.doesNotMatch(result.output, /Quality issue remained after repair/);
   assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 1);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("candidate repair assessment limit does not turn a rejected completion into a caveated success by default", async () => {
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({ content: "partial candidate", finishReason: "stop", toolCalls: [] }),
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Produce the candidate.",
+      input: "produce",
+      model,
+      tools: new ToolRegistry([]),
+      grant,
+      maxSteps: 3,
+      emit: (event) => { events.push(event); },
+      evaluateCandidate: async () => ({
+        approved: false,
+        feedback: "A required source receipt remains missing.",
+      }),
+    }),
+    (error) => error instanceof Error && /cannot be accepted with a repair-limit caveat/.test(error.message),
+  );
+
+  assert.equal(events.filter((event) => event.type === "candidate.repair_limit_blocked").length, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 0);
 });
 
 test("candidate repair assessment limit can be blocked for unmet prerequisite criteria", async () => {
@@ -1716,7 +1759,7 @@ test("artifact grace records excessive read-only exploration as advice without v
       }
       if (calls === 5) {
         assert.match(request.runtimeContext?.content ?? "", /runtime_tool_progress_repair/);
-        assert.match(request.runtimeContext?.content ?? "", /Required evidence kinds: artifact_path, artifact_acceptance/);
+        assert.match(request.runtimeContext?.content ?? "", /Required observable evidence kinds: artifact_path, artifact_acceptance/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -2628,7 +2671,7 @@ test("artifact progress policy allows diagnostic-driven intermediate source repa
   assert.equal(renderAttempts, 2);
 });
 
-test("artifact progress policy allows required source evidence after process artifacts exist", async () => {
+test("artifact progress policy does not require a semantic source receipt after process artifacts exist", async () => {
   const executions: string[] = [];
   let calls = 0;
   const writeTool: RuntimeTool<unknown> = {
@@ -2736,24 +2779,15 @@ test("artifact progress policy allows required source evidence after process art
       }
       if (calls === 2) {
         const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
-        assert.equal(semanticState.nextAction, "acquire_source_evidence");
-        assert.deepEqual(semanticState.processArtifacts.map((artifact) => artifact.path), ["build-report.py"]);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "read-required-source", name: "read_source", arguments: { sourceId: "brief", maxChunks: 1 } }],
-        };
-      }
-      if (calls === 3) {
-        const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
         assert.equal(semanticState.nextAction, "produce_artifact");
+        assert.deepEqual(semanticState.processArtifacts.map((artifact) => artifact.path), ["build-report.py"]);
         return {
           content: "",
           finishReason: "tool_calls",
           toolCalls: [{ id: "build-report", name: "computer_run_command", arguments: { command: "python3 build-report.py" } }],
         };
       }
-      if (calls === 4) {
+      if (calls === 3) {
         return {
           content: "",
           finishReason: "tool_calls",
@@ -2787,10 +2821,7 @@ test("artifact progress policy allows required source evidence after process art
   });
 
   assert.equal(result.output, "report.html accepted");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "read-source", "run", "verify"]);
-  assert.equal(events.some((event) =>
-    event.type === "tool.rejected" && event.data.toolCallId === "read-required-source"
-  ), false);
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "run", "verify"]);
 });
 
 test("artifact progress policy allows a targeted rebase read after patch precondition failure", async () => {
@@ -3952,7 +3983,7 @@ class TruncatedScenarioModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   private calls = 0;
 
-  async complete(): Promise<ModelResponse> {
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
     this.calls += 1;
     if (this.calls === 1) {
       return {
@@ -3961,6 +3992,9 @@ class TruncatedScenarioModel implements ModelAdapter {
         toolCalls: [{ id: "call-unsafe", name: "unsafe_write", arguments: { partial: true } }],
       };
     }
+    assert.equal(request.messages.some((message) => message.role === "tool"), false);
+    assert.equal(request.messages.some((message) => message.role === "assistant"), false);
+    assert.match(request.runtimeContext?.content ?? "", /output limit/);
     return { content: "recovered", finishReason: "stop", toolCalls: [] };
   }
 }

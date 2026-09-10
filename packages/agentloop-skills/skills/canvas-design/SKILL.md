@@ -125,7 +125,7 @@ Download and use whatever fonts are needed to make this a reality. Get creative 
 
 For poster, key-art, announcement, and single-page static image requests, prefer the packaged renderer over writing a full custom drawing program from scratch when its supported visual grammars can express the request. The fast path is:
 1. Write the concise design philosophy `.md`.
-2. Pick one `layoutFamily` that matches the topic and write one compact JSON spec file for the artwork.
+2. First classify a `designIntent`, then use its compatible `layoutFamily` and a `compositionVariant`; identify the 2–6 requested subject elements as `visualMotifs` before writing the compact JSON spec.
 3. Run the packaged renderer from this Skill package to create the PNG.
 4. Inspect or verify the generated artifact once.
 
@@ -133,7 +133,9 @@ The packaged renderer lives at `scripts/render_static_canvas.py`. Because Skill 
 
 `python3 -c "import os,runpy;runpy.run_path(os.path.join(os.environ['AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN'],'scripts','render_static_canvas.py'), run_name='__main__')" spec.json`
 
-The JSON spec should be small and design-oriented, not a dumped drawing program. Do not copy domain text from the example. Do not reuse the same `layoutFamily` by habit across unrelated poster topics. Do not read the renderer source just to discover fields; the supported contract is below, and the renderer can also print it with `--schema`.
+The JSON spec should be small and design-oriented, not a dumped drawing program. Do not copy domain text from the example. Do not reuse the same `layoutFamily` or `compositionVariant` by habit across unrelated poster topics. A `layoutFamily` is only a grammar; it is not a complete composition. Treat user-requested objects (people, plants, buildings, flight, symbols, and so on) as visible `visualMotifs`, never as footer labels standing in for an illustration.
+
+Classify `designIntent` before choosing a layout: `technology-system` → `signal-field`; `campaign-launch` → `kinetic-ribbons`; `commemoration` → `monument-axis`; `editorial-publication` → `editorial-blocks`; `identity-recognition` → `emblem-grid`. Enterprise, institutional, “沉稳”, “大气”, or “高端” alone are **not** commemoration. Use `monument-axis` only when the brief itself calls for remembrance, anniversary, history, ceremony, solemn tribute, or comparable symbolic commemoration. A technology/platform/AI release remains `technology-system` unless the user explicitly asks for a commemorative treatment. The renderer rejects an explicit `designIntent` whose `layoutFamily` conflicts with this mapping, so do not use a mismatched pair. Do not read the renderer source just to discover fields; the supported contract is below, and the renderer can also print it with `--schema`.
 
 ```json
 {
@@ -141,7 +143,9 @@ The JSON spec should be small and design-oriented, not a dumped drawing program.
   "title": "城市更新论坛",
   "subtitle": "连接空间 · 技术 · 公共生活",
   "movement": "Civic Pulse",
+  "designIntent": "editorial-publication",
   "layoutFamily": "editorial-blocks",
+  "compositionVariant": "split-spread",
   "palette": {
     "backgroundTop": "#f2eee6",
     "backgroundBottom": "#d8e4df",
@@ -152,6 +156,10 @@ The JSON spec should be small and design-oriented, not a dumped drawing program.
     "mutedText": "#5f6f73"
   },
   "labels": ["主旨演讲", "城市实验", "公共数据", "设计工作坊", "治理创新", "开放展陈"],
+  "visualMotifs": [
+    {"kind": "building", "label": "公共空间"},
+    {"kind": "orb", "label": "数据流"}
+  ],
   "texture": 0.18,
   "density": 0.62,
   "seed": 311,
@@ -159,14 +167,16 @@ The JSON spec should be small and design-oriented, not a dumped drawing program.
 }
 ```
 
-Supported fields are `output`, `title`, `subtitle`, `movement`, `layoutFamily`, `palette`, `labels`, `texture`, `density`, `seed`, and `canvas`. Supported `layoutFamily` values are:
+Supported fields are `output`, `title`, `subtitle`, `movement`, `designIntent`, `layoutFamily`, `compositionVariant`, `palette`, `labels`, `visualMotifs`, `texture`, `density`, `seed`, and `canvas`. For new work `designIntent` is required and must be one returned by `--schema`; the paired `layoutFamily` must match its mapping. `compositionVariant` must be a variant returned by `--schema` for that family (or `auto`); write it explicitly when an art direction calls for a particular spatial treatment. `visualMotifs` contains up to six `{kind, label?}` objects; supported kinds are `star`, `banner`, `figure`, `building`, `leaf`, `orb`, `peak`, and `flight`.
+
+Supported `layoutFamily` values are:
 - `signal-field`: networked signals, data flow, systems, technology, maps of invisible relations.
 - `monument-axis`: ceremonial, commemorative, institutional, historical, solemn, or symbolic subjects.
 - `editorial-blocks`: magazine, forum, exhibition, cultural, civic, report-like, or design-led publicity.
 - `kinetic-ribbons`: campaigns, launches, festivals, events, sport, movement, performance, or high-energy announcements.
 - `emblem-grid`: identity, brand, awards, badges, memberships, achievements, or logo-like symbolic posters.
 
-Use CJK title/subtitle text directly in the spec when needed; the renderer performs font selection and glyph smoke checks internally. If the request needs a specific visual grammar outside these families, write a compact custom renderer instead of forcing it through an unsuitable packaged family.
+Use CJK title/subtitle text directly in the spec when needed; the renderer performs font selection and glyph smoke checks internally. The render receipt returns the chosen `compositionVariant` and the accepted visual motifs: use that receipt when reviewing whether the required subjects were represented. If the request needs a specific visual grammar or an illustrated subject outside these families and generic motifs, write a compact custom renderer instead of forcing it through an unsuitable packaged family.
 
 After `verify_artifact_acceptance` passes for the final PNG, use that acceptance receipt plus the `computer_write_file` receipts as completion evidence. Do not reread the philosophy or JSON spec merely to restate what the receipts already prove.
 

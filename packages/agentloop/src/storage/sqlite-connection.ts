@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { DatabaseSync } from "node:sqlite";
 import type { SqlConnection, SqlDialect, SqlRunResult, SqlStatement } from "./connection.ts";
 
-/** SQLite adapter over the `node:sqlite` built-in, synchronous and single-process. */
+/** SQLite adapter over the `node:sqlite` built-in with cross-process startup contention handling. */
 export class SqliteConnection implements SqlConnection {
   readonly dialect: SqlDialect = "sqlite";
 
@@ -12,9 +12,12 @@ export class SqliteConnection implements SqlConnection {
 
   constructor(filename: string) {
     this.database = new DatabaseSync(filename);
+    // This must be configured before WAL mode. Router and multiple Runtime
+    // Hosts can open the shared state database concurrently during startup;
+    // changing journal mode otherwise fails immediately with SQLITE_BUSY.
+    this.database.exec("PRAGMA busy_timeout = 5000");
     this.database.exec("PRAGMA foreign_keys = ON");
     this.database.exec("PRAGMA journal_mode = WAL");
-    this.database.exec("PRAGMA busy_timeout = 5000");
   }
 
   async exec(sql: string): Promise<void> {

@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import { badRequest, forbidden } from "../shared/errors.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { SourceRepository } from "../storage/repositories/source-repository.ts";
+import { extractSpreadsheetTables } from "../computer/spreadsheet-inspector.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
+import { writeTableExtractionArtifact, type TableExtractionArtifactManifest } from "./visible-directory-tools.ts";
 
 const DEFAULT_FILTERED_SOURCE_READ_CHUNKS = 5;
 const DEFAULT_UNFILTERED_SOURCE_READ_CHUNKS = 10;
@@ -120,7 +123,156 @@ export function createSourceTools(repository: SourceRepository): RuntimeTool<unk
         },
       };
     },
+  }, {
+    name: "extract_source_tables",
+    description: [
+      "Extract bounded, coordinate-preserving table records from one authorized uploaded CSV, XLSX, or XLSM source.",
+      "Use sourceId from sources in runtime context. This reads the server-owned original through the source grant; it never exposes an upload storage path.",
+      "Returns sheets, cells, header-derived columns, records, source ranges, counts, hashes, caveats, and a durable JSON artifact under the Runtime workspace.",
+      "Use this instead of reconstructing a spreadsheet from read_source text when field-based analysis, grouping, or counting is needed.",
+    ].join(" "),
+    inputSchema: objectSchema(["sourceId"], {
+      sourceId: { type: "string" },
+      maxRowsPerSheet: { type: "integer", minimum: 1, maximum: 2_000 },
+      maxTotalCells: { type: "integer", minimum: 1, maximum: 100_000 },
+    }),
+    executionMode: "parallel",
+    replaySafe: true,
+    maxResultCharacters: 250_000,
+    parse: (value) => {
+      const record = requireRecord(value, "extract_source_tables arguments");
+      return {
+        sourceId: requireString(record.sourceId, "sourceId", { max: 80, pattern: /^src_[a-f0-9]{32}$/ }),
+        maxRowsPerSheet: optionalBoundedInteger(record.maxRowsPerSheet, "maxRowsPerSheet", 1, 2_000),
+        maxTotalCells: optionalBoundedInteger(record.maxTotalCells, "maxTotalCells", 1, 100_000),
+      };
+    },
+    execute: async (context, value) => {
+      const input = value as { sourceId: string; maxRowsPerSheet?: number; maxTotalCells?: number };
+      const source = (context.grant.uploadedSources ?? []).find((item) => item.id === input.sourceId);
+      if (source === undefined) throw forbidden("Source is not authorized for this run");
+      if (source.status !== "ready") throw badRequest(`Source is not ready: ${source.status}`);
+      if (!isStructuredSpreadsheetExtension(source.extension)) {
+        throw badRequest(`extract_source_tables supports .csv, .xlsx, and .xlsm uploads; received ${source.extension || "an extensionless source"}`);
+      }
+      if (context.grant.workspaceRoot === undefined) {
+        throw badRequest("extract_source_tables requires a Runtime workspaceRoot to write a durable extraction artifact");
+      }
+      const row = await repository.requireByOwner(context.grant.actorUserId, input.sourceId);
+      const stat = await fs.stat(row.storage_path).catch(() => undefined);
+      if (stat === undefined || !stat.isFile()) throw badRequest("Authorized source original is unavailable for structured extraction");
+      const extraction = await extractSpreadsheetTables(".", [{
+        path: source.originalName,
+        bytes: stat.size,
+        readPath: row.storage_path,
+      }], {
+        maxRowsPerSheet: input.maxRowsPerSheet,
+        maxTotalCells: input.maxTotalCells,
+      });
+      const artifact = await writeTableExtractionArtifact(context.grant.workspaceRoot, extraction);
+      const result = {
+        sourceId: source.id,
+        originalName: source.originalName,
+        sourceSha256: source.sha256,
+        ...extraction,
+        artifact,
+      };
+      return {
+        ...result,
+        evidenceReceipt: uploadedTableExtractionReceipt(result),
+      };
+    },
   }];
+}
+
+function isStructuredSpreadsheetExtension(extension: string): boolean {
+  return extension === ".csv" || extension === ".xlsx" || extension === ".xlsm";
+}
+
+function uploadedTableExtractionReceipt(result: {
+  readonly sourceId: string;
+  readonly originalName: string;
+  readonly sourceSha256: string;
+  readonly files: readonly {
+    readonly path: string;
+    readonly sha256: string;
+    readonly bytes: number;
+    readonly sheets: readonly {
+      readonly name: string;
+      readonly sourceRange?: string;
+      readonly rowCount: number;
+      readonly recordCount: number;
+      readonly cellCount: number;
+      readonly truncated: boolean;
+    }[];
+    readonly truncated: boolean;
+    readonly error?: string;
+  }[];
+  readonly requested: number;
+  readonly returned: number;
+  readonly totalRows: number;
+  readonly totalRecords: number;
+  readonly totalCells: number;
+  readonly truncated: boolean;
+  readonly sha256: string;
+  readonly caveats: readonly string[];
+  readonly artifact: {
+    readonly schema: string;
+    readonly path: string;
+    readonly bytes: number;
+    readonly sha256: string;
+    readonly manifest: TableExtractionArtifactManifest;
+    readonly caveats: readonly string[];
+  };
+}) {
+  return {
+    schema: "agentloop.toolEvidenceReceipt/v1",
+    sourceType: "uploaded_table_extraction",
+    receiptId: createHash("sha256").update([result.sourceId, result.sourceSha256, result.sha256].join("\n")).digest("hex"),
+    sourceRefs: result.files.map((file) => ({
+      sourceId: result.sourceId,
+      originalName: result.originalName,
+      path: file.path,
+      sha256: file.sha256,
+      bytes: file.bytes,
+      sheets: file.sheets.map((sheet) => ({
+        name: sheet.name,
+        sourceRange: sheet.sourceRange,
+        rowCount: sheet.rowCount,
+        recordCount: sheet.recordCount,
+        cellCount: sheet.cellCount,
+        truncated: sheet.truncated,
+      })),
+      truncated: file.truncated,
+      ...(file.error === undefined ? {} : { error: file.error }),
+    })),
+    facts: [{
+      kind: "structured_table_extraction",
+      sourceId: result.sourceId,
+      originalName: result.originalName,
+      requested: result.requested,
+      returned: result.returned,
+      totalRows: result.totalRows,
+      totalRecords: result.totalRecords,
+      totalCells: result.totalCells,
+      truncated: result.truncated,
+      artifact: {
+        schema: result.artifact.schema,
+        path: result.artifact.path,
+        bytes: result.artifact.bytes,
+        sha256: result.artifact.sha256,
+        manifest: result.artifact.manifest,
+        caveats: result.artifact.caveats,
+      },
+      extractionSha256: result.sha256,
+    }],
+    caveats: result.caveats,
+    evidenceKinds: {
+      satisfied: ["source_summary", "source_read", "source_refs", "schema_summary", "record_counts", "structured_extraction_artifact"],
+      caveated: result.caveats.length === 0 ? [] : ["explicit_caveats"],
+      failed: [],
+    },
+  };
 }
 
 function selectChunks(
@@ -222,6 +374,14 @@ function optionalNonNegativeInteger(value: unknown, label: string, maximum: numb
   if (value === undefined || value === null) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > maximum) {
     throw badRequest(`${label} must be an integer between 0 and ${maximum}`);
+  }
+  return value as number;
+}
+
+function optionalBoundedInteger(value: unknown, label: string, minimum: number, maximum: number): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw badRequest(`${label} must be an integer between ${minimum} and ${maximum}`);
   }
   return value as number;
 }

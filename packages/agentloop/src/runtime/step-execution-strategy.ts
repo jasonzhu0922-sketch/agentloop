@@ -14,7 +14,7 @@ export interface StepExecutionInput {
 }
 
 export interface StepExecutionDecision {
-  readonly schema: "agentloop.stepExecutionDecision/v1";
+  readonly schema: "agentloop.stepExecutionDecision/v2";
   readonly strategyId: string;
   readonly loopStepFrame: LoopStepFrame;
   readonly toolCatalog: ToolCatalogDecision;
@@ -48,7 +48,7 @@ export interface LoopStepFrameInput extends StepExecutionInput {
 }
 
 export interface LoopStepFrame {
-  readonly schema: "agentloop.loopStepFrame/v1";
+  readonly schema: "agentloop.loopStepFrame/v2";
   readonly mode: "current_to_next" | "terminal_candidate";
   readonly modelStep: number;
   readonly limits: {
@@ -115,25 +115,29 @@ export interface CompactLoopArtifactRef {
 }
 
 export interface ToolCatalogDecision {
-  readonly schema: "agentloop.toolCatalogDecision/v1";
+  readonly schema: "agentloop.toolCatalogDecision/v2";
   readonly policyId: string;
-  readonly mode: "full" | "narrowed" | "none";
-  readonly activeToolNames: readonly string[];
-  readonly hiddenToolGroups: readonly HiddenToolGroup[];
+  // The Run CapabilityGrant is the authorization boundary. A step policy
+  // can recommend an order, but cannot make an authorized tool unavailable.
+  readonly mode: "full" | "none";
+  readonly availableToolNames: readonly string[];
+  readonly preferredToolNames: readonly string[];
+  readonly deprioritizedToolGroups: readonly DeprioritizedToolGroup[];
 }
 
-export interface HiddenToolGroup {
+export interface DeprioritizedToolGroup {
   readonly group: string;
   readonly toolNames: readonly string[];
-  readonly hiddenReason: string;
-  readonly unlockWhen: string;
+  readonly reason: string;
+  readonly preferWhen: string;
 }
 
 export interface LoopStepToolCatalogFrame {
   readonly policyId: string;
   readonly mode: ToolCatalogDecision["mode"];
-  readonly activeToolCount: number;
-  readonly hiddenToolGroups: readonly HiddenToolGroup[];
+  readonly availableToolCount: number;
+  readonly preferredToolCount: number;
+  readonly deprioritizedToolGroups: readonly DeprioritizedToolGroup[];
 }
 
 export interface PromptProjectionDecision {
@@ -183,7 +187,7 @@ export class DefaultStepExecutionStrategy implements StepExecutionStrategy {
       promptProjection,
     });
     return {
-      schema: "agentloop.stepExecutionDecision/v1",
+      schema: "agentloop.stepExecutionDecision/v2",
       strategyId: this.id,
       loopStepFrame,
       toolCatalog,
@@ -205,11 +209,11 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
   buildFrame(input: LoopStepFrameInput): LoopStepFrame {
     const priorSuccess = input.priorToolEvidence.filter((item) => !item.isError);
     const priorFailures = input.priorToolEvidence.filter((item) => item.isError);
-    const mode = input.convergenceOnly || input.toolCatalog.activeToolNames.length === 0
+    const mode = input.convergenceOnly || input.toolCatalog.mode === "none"
       ? "terminal_candidate"
       : "current_to_next";
     return {
-      schema: "agentloop.loopStepFrame/v1",
+      schema: "agentloop.loopStepFrame/v2",
       mode,
       modelStep: input.modelStep,
       limits: {
@@ -242,7 +246,7 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
           : input.priorToolEvidence.length === 0
             ? "If tools are needed, choose one bounded batch that advances the current Plan step evidence boundary."
             : "Inspect reusable prior evidence first; call tools only for missing, stale, contradictory, or explicitly refreshed facts.",
-        availableToolCount: input.toolCatalog.activeToolNames.length,
+        availableToolCount: input.toolCatalog.availableToolNames.length,
       },
       ...(mode === "terminal_candidate"
         ? {}
@@ -265,8 +269,9 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
       toolCatalog: {
         policyId: input.toolCatalog.policyId,
         mode: input.toolCatalog.mode,
-        activeToolCount: input.toolCatalog.activeToolNames.length,
-        hiddenToolGroups: input.toolCatalog.hiddenToolGroups,
+        availableToolCount: input.toolCatalog.availableToolNames.length,
+        preferredToolCount: input.toolCatalog.preferredToolNames.length,
+        deprioritizedToolGroups: input.toolCatalog.deprioritizedToolGroups,
       },
       projectionIntent: input.promptProjection,
     };
@@ -280,16 +285,12 @@ export class DefaultToolExposurePolicy implements ToolExposurePolicy {
     const availableToolNames = input.availableTools.map((tool) => tool.name);
     if (input.convergenceOnly) {
       return {
-        schema: "agentloop.toolCatalogDecision/v1",
+        schema: "agentloop.toolCatalogDecision/v2",
         policyId: this.id,
         mode: "none",
-        activeToolNames: [],
-        hiddenToolGroups: hiddenToolGroups({
-          hiddenToolNames: availableToolNames,
-          state: input.stepEvidenceState,
-          reason: "convergence-only model step",
-          unlockWhen: "a later execution step exposes tools again",
-        }),
+        availableToolNames: [],
+        preferredToolNames: [],
+        deprioritizedToolGroups: [],
       };
     }
     if (input.stepEvidenceState === undefined) {
@@ -299,23 +300,22 @@ export class DefaultToolExposurePolicy implements ToolExposurePolicy {
     if (selected === undefined) {
       return fullToolCatalog(this.id, availableToolNames);
     }
-    const activeToolNames = selected.filter((name) => availableToolNames.includes(name));
-    if (activeToolNames.length === 0 && input.stepEvidenceState.nextAction !== "submit_completion_candidate") {
+    const preferredToolNames = selected.filter((name) => availableToolNames.includes(name));
+    if (preferredToolNames.length === 0 && input.stepEvidenceState.nextAction !== "submit_completion_candidate") {
       return fullToolCatalog(this.id, availableToolNames);
     }
-    const hiddenToolNames = availableToolNames.filter((name) => !activeToolNames.includes(name));
+    const deprioritizedToolNames = availableToolNames.filter((name) => !preferredToolNames.includes(name));
     return {
-      schema: "agentloop.toolCatalogDecision/v1",
+      schema: "agentloop.toolCatalogDecision/v2",
       policyId: this.id,
-      mode: activeToolNames.length === availableToolNames.length
-        ? "full"
-        : activeToolNames.length === 0 ? "none" : "narrowed",
-      activeToolNames,
-      hiddenToolGroups: hiddenToolGroups({
-        hiddenToolNames,
+      mode: "full",
+      availableToolNames,
+      preferredToolNames,
+      deprioritizedToolGroups: deprioritizedToolGroups({
+        deprioritizedToolNames,
         state: input.stepEvidenceState,
         reason: `current nextAction is ${input.stepEvidenceState.nextAction}`,
-        unlockWhen: unlockWhenForEvidenceState(input.stepEvidenceState),
+        preferWhen: unlockWhenForEvidenceState(input.stepEvidenceState),
       }),
     };
   }
@@ -365,8 +365,8 @@ export class FullCatalogToolExposurePolicy implements ToolExposurePolicy {
   readonly id = "agentloop.fullCatalogToolExposurePolicy/v1";
 
   selectTools(input: StepExecutionInput): ToolCatalogDecision {
-    const activeToolNames = input.convergenceOnly ? [] : input.availableTools.map((tool) => tool.name);
-    return fullToolCatalog(this.id, activeToolNames);
+    const availableToolNames = input.convergenceOnly ? [] : input.availableTools.map((tool) => tool.name);
+    return fullToolCatalog(this.id, availableToolNames);
   }
 }
 
@@ -394,13 +394,14 @@ export function createStepExecutionStrategyProfile(
   });
 }
 
-function fullToolCatalog(policyId: string, activeToolNames: readonly string[]): ToolCatalogDecision {
+function fullToolCatalog(policyId: string, availableToolNames: readonly string[]): ToolCatalogDecision {
   return {
-    schema: "agentloop.toolCatalogDecision/v1",
+    schema: "agentloop.toolCatalogDecision/v2",
     policyId,
-    mode: activeToolNames.length === 0 ? "none" : "full",
-    activeToolNames,
-    hiddenToolGroups: [],
+    mode: availableToolNames.length === 0 ? "none" : "full",
+    availableToolNames,
+    preferredToolNames: availableToolNames,
+    deprioritizedToolGroups: [],
   };
 }
 
@@ -430,18 +431,18 @@ function activeToolNamesForEvidenceState(
   }
 }
 
-function hiddenToolGroups(input: {
-  readonly hiddenToolNames: readonly string[];
+function deprioritizedToolGroups(input: {
+  readonly deprioritizedToolNames: readonly string[];
   readonly state?: RuntimeStepEvidenceState;
   readonly reason: string;
-  readonly unlockWhen: string;
-}): readonly HiddenToolGroup[] {
-  if (input.hiddenToolNames.length === 0) return [];
+  readonly preferWhen: string;
+}): readonly DeprioritizedToolGroup[] {
+  if (input.deprioritizedToolNames.length === 0) return [];
   const groups = [
-    toolGroup("setup", input.hiddenToolNames.filter((name) => SETUP_TOOL_NAMES.has(name))),
-    toolGroup("read_only_exploration", input.hiddenToolNames.filter((name) => isExploratoryTool(name, input.state))),
-    toolGroup("evidence_production", input.hiddenToolNames.filter((name) => isEvidenceProducingTool(name, input.state))),
-    toolGroup("other_authorized_tools", input.hiddenToolNames.filter((name) =>
+    toolGroup("setup", input.deprioritizedToolNames.filter((name) => SETUP_TOOL_NAMES.has(name))),
+    toolGroup("read_only_exploration", input.deprioritizedToolNames.filter((name) => isExploratoryTool(name, input.state))),
+    toolGroup("evidence_production", input.deprioritizedToolNames.filter((name) => isEvidenceProducingTool(name, input.state))),
+    toolGroup("other_authorized_tools", input.deprioritizedToolNames.filter((name) =>
       !SETUP_TOOL_NAMES.has(name)
       && !isExploratoryTool(name, input.state)
       && !isEvidenceProducingTool(name, input.state)
@@ -452,8 +453,8 @@ function hiddenToolGroups(input: {
     .map((group) => ({
       group: group.group,
       toolNames: group.toolNames,
-      hiddenReason: input.reason,
-      unlockWhen: input.unlockWhen,
+      reason: input.reason,
+      preferWhen: input.preferWhen,
     }));
 }
 
@@ -546,6 +547,7 @@ const EXPLORATORY_TOOL_NAMES = new Set([
   "computer_read_files",
   "computer_read_json",
   "computer_search_text",
+  "extract_source_tables",
   "read_source",
   "visible_find_files",
   "visible_read_file",
@@ -560,6 +562,7 @@ const EVIDENCE_PRODUCING_TOOL_NAMES = new Set([
   "computer_write_file",
   "computer_run_command",
   "convert_artifact",
+  "extract_source_tables",
   "materialize_paginated_html",
   "visible_extract_tables",
   "verify_artifact_acceptance",

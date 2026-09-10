@@ -1,0 +1,30 @@
+{
+  "defaultProvider": "openai",
+  "defaultModelKey": "gpt-5.6-terra",
+  "providers": {
+    "openai": {
+      "kind": "openai-compatible",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "defaultModel": "gpt-5.6-terra",
+      "contextWindowTokens": 400000,
+      "maxOutputTokens": 32768,
+      "timeoutMs": 180000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
+      "toolChoiceMode": "native",
+      "runtimeContextPlacement": "system",
+      "reasoningSummary": "auto",
+      "protocol": "responses"
+    }
+  },
+  "models": {
+    "gpt-5.6-terra": {
+      "providerKey": "openai",
+      "providerModel": "gpt-5.6-terra",
+      "displayName": "GPT-5.6 Terra",
+      "protocol": "responses",
+      "reasoningSummary": "auto"
+    }
+  }
+}

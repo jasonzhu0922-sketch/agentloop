@@ -7,7 +7,7 @@ import {
 } from "../src/runtime/step-execution-strategy.ts";
 import type { RuntimeStepEvidenceState } from "../src/runtime/tool-progress-policy.ts";
 
-test("action-aware step execution strategy narrows tools to artifact acceptance", () => {
+test("action-aware step execution strategy recommends artifact acceptance without hiding granted tools", () => {
   const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 2,
@@ -31,14 +31,21 @@ test("action-aware step execution strategy narrows tools to artifact acceptance"
     }),
   });
 
-  assert.equal(decision.toolCatalog.mode, "narrowed");
-  assert.deepEqual(decision.toolCatalog.activeToolNames, ["verify_artifact_acceptance"]);
-  assert.equal(decision.loopStepFrame.currentStage.availableToolCount, 1);
+  assert.equal(decision.toolCatalog.mode, "full");
+  assert.deepEqual(decision.toolCatalog.availableToolNames, [
+    "computer_read_file",
+    "computer_write_file",
+    "computer_run_command",
+    "verify_artifact_acceptance",
+  ]);
+  assert.deepEqual(decision.toolCatalog.preferredToolNames, ["verify_artifact_acceptance"]);
+  assert.equal(decision.loopStepFrame.currentStage.availableToolCount, 4);
+  assert.equal(decision.loopStepFrame.toolCatalog?.preferredToolCount, 1);
   assert.equal(decision.loopStepFrame.currentEvidenceState?.nextAction, "verify_existing_artifact");
   assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 2048);
 });
 
-test("action-aware step execution strategy hides read-only tools during diagnostic repair", () => {
+test("action-aware step execution strategy deprioritizes read-only tools during diagnostic repair", () => {
   const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 3,
@@ -63,9 +70,9 @@ test("action-aware step execution strategy hides read-only tools during diagnost
     }),
   });
 
-  assert.deepEqual(decision.toolCatalog.activeToolNames, ["computer_write_file", "computer_run_command"]);
+  assert.deepEqual(decision.toolCatalog.preferredToolNames, ["computer_write_file", "computer_run_command"]);
   assert.deepEqual(
-    decision.toolCatalog.hiddenToolGroups.flatMap((group) => group.toolNames).sort(),
+    decision.toolCatalog.deprioritizedToolGroups.flatMap((group) => group.toolNames).sort(),
     ["computer_read_file", "computer_search_text"],
   );
   assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 4096);
@@ -93,7 +100,7 @@ test("full-catalog step execution profile keeps all granted tools visible", () =
 
   assert.equal(decision.toolCatalog.policyId, "agentloop.fullCatalogToolExposurePolicy/v1");
   assert.equal(decision.toolCatalog.mode, "full");
-  assert.deepEqual(decision.toolCatalog.activeToolNames, [
+  assert.deepEqual(decision.toolCatalog.availableToolNames, [
     "computer_read_file",
     "computer_write_file",
     "computer_run_command",
@@ -121,7 +128,7 @@ test("default step execution strategy keeps every Plan-granted tool visible", ()
   });
 
   assert.equal(decision.toolCatalog.mode, "full");
-  assert.deepEqual(decision.toolCatalog.activeToolNames, [
+  assert.deepEqual(decision.toolCatalog.availableToolNames, [
     "load_skill",
     "computer_write_file",
     "computer_run_command",
@@ -148,10 +155,10 @@ test("action-aware delivery-only submit stage keeps tools visible before non-set
   });
 
   assert.equal(decision.toolCatalog.mode, "full");
-  assert.deepEqual(decision.toolCatalog.activeToolNames, ["load_skill", "computer_write_file", "webfetch"]);
+  assert.deepEqual(decision.toolCatalog.availableToolNames, ["load_skill", "computer_write_file", "webfetch"]);
 });
 
-test("action-aware submit stage hides production tools after non-setup evidence exists", () => {
+test("action-aware submit stage keeps production tools callable after non-setup evidence exists", () => {
   const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
   const decision = strategy.prepareModelStep({
     modelStep: 3,
@@ -174,9 +181,10 @@ test("action-aware submit stage hides production tools after non-setup evidence 
     }),
   });
 
-  assert.equal(decision.toolCatalog.mode, "narrowed");
-  assert.deepEqual(decision.toolCatalog.activeToolNames, ["load_skill", "webfetch"]);
-  assert.deepEqual(decision.toolCatalog.hiddenToolGroups.flatMap((group) => group.toolNames), ["computer_write_file"]);
+  assert.equal(decision.toolCatalog.mode, "full");
+  assert.deepEqual(decision.toolCatalog.availableToolNames, ["load_skill", "computer_write_file", "webfetch"]);
+  assert.deepEqual(decision.toolCatalog.preferredToolNames, ["load_skill", "webfetch"]);
+  assert.deepEqual(decision.toolCatalog.deprioritizedToolGroups.flatMap((group) => group.toolNames), ["computer_write_file"]);
 });
 
 function tools(names: readonly string[]): Array<{ name: string; description: string; inputSchema: { type: "object" } }> {

@@ -1,29 +1,11 @@
 import type { ProcessArtifact } from "./types";
-
-export type ArtifactPreviewMode = "html" | "image" | "pdf" | "structured";
-
-export function artifactMimeBase(mimeType: string): string {
-  return mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
-}
-
-export function artifactExtension(nameOrPath: string): string {
-  const clean = nameOrPath.split(/[?#]/)[0] ?? "";
-  const dot = clean.lastIndexOf(".");
-  return dot < 0 ? "" : clean.slice(dot + 1).toLowerCase();
-}
-
-export function artifactPreviewMode(artifact: ProcessArtifact): ArtifactPreviewMode {
-  const mimeBase = artifactMimeBase(artifact.mimeType);
-  const extension = artifactExtension(artifact.name || artifact.path);
-  if (mimeBase === "text/html" || extension === "html" || extension === "htm") return "html";
-  if (mimeBase.startsWith("image/")) return "image";
-  if (mimeBase === "application/pdf" || extension === "pdf") return "pdf";
-  return "structured";
-}
-
-export function usesBlobPreview(artifact: ProcessArtifact): boolean {
-  return artifactPreviewMode(artifact) !== "structured";
-}
+export {
+  artifactExtension,
+  artifactMimeBase,
+  artifactPreviewMode,
+  usesBlobPreview,
+} from "@zhujun/agentloop-artifact-preview";
+import { artifactExtension } from "@zhujun/agentloop-artifact-preview";
 
 export function prioritizedArtifacts(
   artifacts: readonly ProcessArtifact[],

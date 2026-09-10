@@ -358,7 +358,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     rejectedCandidateAssessments += 1;
     if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
-      if (evaluation.allowRepairLimitCompletion === false) {
+      if (evaluation.allowRepairLimitCompletion !== true) {
         await emit({
           type: "candidate.repair_limit_blocked",
           data: {
@@ -462,11 +462,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       stepEvidenceState,
       stepSemanticFrame: options.stepSemanticFrame,
     });
-    const materialized = options.tools.materialize(scopedGrantForStepExecution(
-      options.grant,
-      grantedMaterialized.definitions,
+    validateToolRecommendations(
+      convergenceOnly ? [] : grantedMaterialized.definitions,
       stepExecutionDecision,
-    ));
+    );
+    // Recommendations order the model-visible catalog; they never rewrite the
+    // Run grant. A tool that is not preferred for this step remains callable.
+    const executionDefinitions = orderDefinitionsByPreference(
+      grantedMaterialized.definitions,
+      stepExecutionDecision.toolCatalog.preferredToolNames,
+    );
     contextAssembler.setRuntimeStepFrame(JSON.stringify(stepExecutionDecision.loopStepFrame));
     contextAssembler.setPromptProjectionPolicy(stepExecutionDecision.promptProjection);
     await emit({
@@ -475,13 +480,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         step,
         strategyId: stepExecutionDecision.strategyId,
         toolCatalogMode: stepExecutionDecision.toolCatalog.mode,
-        activeToolCount: materialized.definitions.length,
-        hiddenToolGroupCount: stepExecutionDecision.toolCatalog.hiddenToolGroups.length,
+        availableToolCount: executionDefinitions.length,
+        preferredToolCount: stepExecutionDecision.toolCatalog.preferredToolNames.length,
+        deprioritizedToolGroupCount: stepExecutionDecision.toolCatalog.deprioritizedToolGroups.length,
         promptProjectionMode: stepExecutionDecision.promptProjection.mode,
         trace: stepExecutionDecision.trace,
       },
     });
-    let assembly = await contextAssembler.assemble(messages, convergenceOnly ? [] : materialized.definitions, options.signal);
+    let assembly = await contextAssembler.assemble(messages, convergenceOnly ? [] : executionDefinitions, options.signal);
 
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
@@ -492,8 +498,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         phase: "execution",
         runtimeContext: assembly.runtimeContext,
         messages: assembly.messages,
-        tools: convergenceOnly ? [] : materialized.definitions,
-        ...(convergenceOnly || materialized.definitions.length === 0
+        tools: convergenceOnly ? [] : executionDefinitions,
+        ...(convergenceOnly || executionDefinitions.length === 0
           ? {}
           : { toolChoice: "auto" as const }),
         maxOutputTokens: convergenceOnly
@@ -508,7 +514,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         step,
         signal: options.signal,
         grant: options.grant,
-        prepare: (call) => materialized.prepare(call),
+        prepare: (call) => grantedMaterialized.prepare(call),
         maxToolResultCharacters,
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
@@ -527,7 +533,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         contextAssembler.setRuntimeDirective(EMPTY_CANDIDATE_REPAIR_PROMPT);
         assembly = await contextAssembler.assemble(
           messages,
-          convergenceOnly ? [] : materialized.definitions,
+          convergenceOnly ? [] : executionDefinitions,
           options.signal,
         );
         continue;
@@ -559,13 +565,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       break;
     }
     if (response === undefined) throw new AppError("MODEL_ERROR", "Model did not produce a response", 502);
+    // A length-truncated response can contain an incomplete native tool call.
+    // Only calls that a provider explicitly marked ready may have executed, so
+    // never carry the remaining calls into the next provider-native transcript.
+    // Their outcomes still become Runtime-owned evidence below.
+    const replayableToolCalls = response.finishReason === "length"
+      ? response.toolCalls.filter((call) => earlyOutcomes.has(call.id))
+      : response.toolCalls;
+    const replayableToolCallIds = new Set(replayableToolCalls.map((call) => call.id));
     const assistantMessage: ModelMessage = {
       role: "assistant",
       content: response.content,
-      ...(response.toolCalls.length === 0 ? {} : { toolCalls: response.toolCalls }),
+      ...(replayableToolCalls.length === 0 ? {} : { toolCalls: replayableToolCalls }),
       ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
     };
-    messages.push(assistantMessage);
+    // Do not retain an unexecuted, truncated assistant turn as a prior model
+    // message. The next-turn Runtime directive carries its explicit failure
+    // evidence without pretending that a native function exchange occurred.
+    if (response.finishReason !== "length" || replayableToolCalls.length > 0) messages.push(assistantMessage);
 
     // This awaited event is the durable checkpoint before any external effect.
     await emit({
@@ -575,6 +592,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         content: response.content,
         finishReason: response.finishReason,
         toolCalls: response.toolCalls,
+        ...(response.finishReason === "length"
+          ? { providerReplayableToolCallIds: replayableToolCalls.map((call) => call.id) }
+          : {}),
         ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
         ...(response.usage === undefined ? {} : { usage: response.usage }),
       },
@@ -600,7 +620,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         contextAssembler.setRuntimeDirective(lengthTruncationRepairDirective({
           feedback,
           convergenceOnly,
-          toolAvailable: materialized.definitions.length > 0,
+          toolAvailable: executionDefinitions.length > 0,
         }));
         continue;
       }
@@ -725,7 +745,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       rejectedCandidateAssessments += 1;
       if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
-        if (evaluation.allowRepairLimitCompletion === false) {
+        if (evaluation.allowRepairLimitCompletion !== true) {
           await emit({
             type: "candidate.repair_limit_blocked",
             data: {
@@ -865,7 +885,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       const prepared: PreparedEntry[] = [];
       for (const call of remainingCalls) {
         try {
-          const value = materialized.prepare(call);
+          const value = grantedMaterialized.prepare(call);
           await emit({
             type: "tool.planned",
             data: {
@@ -921,13 +941,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       };
       toolEvidence.push(evidence);
       latestToolEvidence.push(evidence);
-      messages.push({
-        role: "tool",
-        toolCallId: outcome.call.id,
-        name: outcome.call.name,
-        content: outcome.content,
-        isError: outcome.isError,
-      });
+      if (replayableToolCallIds.has(outcome.call.id)) {
+        messages.push({
+          role: "tool",
+          toolCallId: outcome.call.id,
+          name: outcome.call.name,
+          content: outcome.content,
+          isError: outcome.isError,
+        });
+      }
       if (!outcome.isError && outcome.call.name === "load_skill") {
         const name = skillNameFromArguments(outcome.call.arguments);
         const skill = name === undefined ? undefined : availableSkills.get(name);
@@ -1121,28 +1143,48 @@ function currentHardLimit(
   return maxSteps + convergenceGraceSteps + candidateRepairGraceSteps + finalConvergenceGraceSteps;
 }
 
-function scopedGrantForStepExecution(
-  grant: CapabilityGrant,
+function validateToolRecommendations(
   availableTools: readonly { readonly name: string }[],
   decision: StepExecutionDecision,
-): CapabilityGrant {
+): void {
   const availableToolNames = new Set(availableTools.map((tool) => tool.name));
-  const invalidToolNames = decision.toolCatalog.activeToolNames.filter((name) => !availableToolNames.has(name));
-  if (invalidToolNames.length > 0) {
+  const invalidToolNames = [
+    ...decision.toolCatalog.availableToolNames,
+    ...decision.toolCatalog.preferredToolNames,
+  ].filter((name) => !availableToolNames.has(name));
+  const omittedToolNames = [...availableToolNames].filter((name) => !decision.toolCatalog.availableToolNames.includes(name));
+  if (invalidToolNames.length > 0 || omittedToolNames.length > 0) {
     throw new AppError(
       "INTERNAL_ERROR",
-      "Step execution strategy selected tools outside the current capability grant",
+      "Step execution strategy recommended tools outside the current capability grant",
       500,
       {
         strategyId: decision.strategyId,
-        invalidToolNames,
+        invalidToolNames: [...new Set(invalidToolNames)],
+        omittedToolNames,
       },
     );
   }
-  return {
-    ...grant,
-    allowedToolNames: new Set(decision.toolCatalog.activeToolNames),
-  };
+}
+
+function orderDefinitionsByPreference<T extends { readonly name: string }>(
+  definitions: readonly T[],
+  preferredToolNames: readonly string[],
+): T[] {
+  const preferredOrder = new Map(preferredToolNames.map((name, index) => [name, index]));
+  return definitions
+    .map((definition, index) => ({
+      definition,
+      index,
+      preference: preferredOrder.get(definition.name),
+    }))
+    .sort((left, right) => {
+      if (left.preference === undefined && right.preference === undefined) return left.index - right.index;
+      if (left.preference === undefined) return 1;
+      if (right.preference === undefined) return -1;
+      return left.preference - right.preference;
+    })
+    .map(({ definition }) => definition);
 }
 
 async function shouldUseFinalConvergence(
@@ -1733,6 +1775,21 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
     lines.push(
       "The exact completion candidate was already assessed against the same evidence. Do not resubmit it; gather new evidence with current-step tools or provide a materially changed candidate.",
     );
+  }
+  if (evaluation.failedBoundary !== undefined) {
+    const { missingEvidenceKinds, violatedSkillRequirements, reusableEvidenceRefs, suggestedRepairShape } = evaluation.failedBoundary;
+    if (missingEvidenceKinds.length > 0) {
+      lines.push(`Required completion evidence still missing: ${missingEvidenceKinds.join(", ")}.`);
+    }
+    if (violatedSkillRequirements.length > 0) {
+      lines.push(`Unmet Skill requirements: ${violatedSkillRequirements.join(", ")}.`);
+    }
+    if (reusableEvidenceRefs.length > 0) {
+      lines.push(`Reuse or inspect these canonical evidence references before repeating work: ${reusableEvidenceRefs.join(", ")}.`);
+    }
+    if (suggestedRepairShape === "revise_plan") {
+      lines.push("The recorded evidence shape does not match this Plan boundary; do not claim completion from it. Let Runtime route the failure to Plan revision.");
+    }
   }
   lines.push("</runtime_candidate_repair>");
   return lines.join("\n");

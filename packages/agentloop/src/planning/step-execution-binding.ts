@@ -25,6 +25,7 @@ const SOURCE_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
+  "derived_aggregation",
   "explicit_caveats",
 ]);
 
@@ -324,6 +325,7 @@ const CORE_WORKSPACE_TOOL_NAMES = new Set([
   "computer_read_file",
   "computer_read_json",
   "computer_summarize_table_artifact",
+  "computer_aggregate_table_artifact",
   "computer_write_file",
   "computer_patch_file",
   "computer_run_command",
@@ -334,7 +336,7 @@ const CORE_WORKSPACE_TOOL_NAMES = new Set([
 ]);
 
 const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
-  uploaded_source_read: ["read_source"],
+  uploaded_source_read: ["read_source", "extract_source_tables"],
   visible_directory_read: [
     "visible_index_directory",
     "visible_find_files",
@@ -351,6 +353,7 @@ const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
     "computer_read_file",
     "computer_read_json",
     "computer_summarize_table_artifact",
+    "computer_aggregate_table_artifact",
   ],
   workspace_artifact_write: [
     "computer_write_file",
@@ -371,7 +374,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "uploaded_source_read",
     category: "information_retrieval",
     label: "Read uploaded source",
-    produces: ["source_summary", "explicit_caveats"],
+    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
     sourceKinds: ["uploaded_source"],
     sideEffect: "none",
     risk: "low",
@@ -381,7 +384,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "visible_directory_read",
     category: "information_retrieval",
     label: "Read visible directory",
-    produces: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
     sourceKinds: ["visible_directory"],
     sideEffect: "workspace_read",
     risk: "low",
@@ -400,7 +403,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "workspace_file_read",
     category: "information_retrieval",
     label: "Read workspace files",
-    produces: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "derived_aggregation", "explicit_caveats"],
     sourceKinds: ["workspace_file"],
     sideEffect: "workspace_read",
     risk: "low",

@@ -189,6 +189,24 @@ export class RunRepository {
     `).run(input.id, input.ownerUserId, input.title, input.createdAt, input.createdAt);
   }
 
+  /** Provision a Router-owned conversation id while preserving owner isolation. */
+  async ensureConversation(input: { id: string; ownerUserId: string; title: string; now: number }): Promise<void> {
+    await this.connection.transaction(async () => {
+      const existing = await this.connection.prepare(`
+        SELECT owner_user_id FROM conversations WHERE id = ?
+      `).get(input.id) as { owner_user_id: string } | undefined;
+      if (existing !== undefined) {
+        if (existing.owner_user_id !== input.ownerUserId) throw notFound("Conversation");
+        await this.touchConversation(input.id, input.now);
+        return;
+      }
+      await this.connection.prepare(`
+        INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.id, input.ownerUserId, input.title, input.now, input.now);
+    });
+  }
+
   async deleteConversation(ownerUserId: string, conversationId: string): Promise<void> {
     await this.connection.transaction(async () => {
       const conversation = await this.connection.prepare(`

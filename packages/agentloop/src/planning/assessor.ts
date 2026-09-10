@@ -296,18 +296,19 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const successfulToolRefs = input.evidence.toolCalls
       .filter((toolCall) => !toolCall.isError)
       .map((toolCall) => toolCall.toolCallId);
-    const receipts = runtimeEvidenceReceipts(input.evidence.toolCalls);
+    const receipts = runtimeObservableReceipts(input.evidence.toolCalls);
     const requiredKinds = runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []);
     const requiredKindsSatisfied = requiredKinds.every((kind) =>
       evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate)
     );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
-      const satisfied = nonEmpty && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate);
+      const satisfied = nonEmpty
+        && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate);
       return {
         criterionId: criterion.id,
         satisfied,
         rationale: satisfied
-          ? "The required Runtime delivery candidate and evidence receipts satisfy the principle assessment gate; detailed QA remains owned by the producing Skill or Tool."
+          ? "The completion candidate and required observable Runtime operations satisfy the principle assessment gate."
           : rejectedEvidenceGateRationale(nonEmpty, receipts, requiredKinds, successfulToolRefs),
         evidenceRefs: satisfied
           ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId), ...(deliveryCandidate?.sourceToolCallIds ?? [])]
@@ -318,77 +319,68 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
       skillId: skill.id,
       status: "not_assessed",
       followed: false,
-      rationale: "Runtime principle assessment does not reperform Skill QA; completion is governed by required QA/delivery receipts and admitted criteria.",
+      rationale: "Runtime principle assessment does not reperform Skill QA or attest to the model's source interpretation; it only checks required observable delivery effects.",
       evidenceRefs: [`skill:${skill.id}:${skill.contentHash}`, ...receipts.map((receipt) => receipt.toolCallId)],
     }));
     const feedback = criteria.every((criterion) => criterion.satisfied)
       ? ""
-      : "Completion rejected by principle assessment; provide the missing Runtime evidence receipt or repair the failed receipt.";
+      : "Completion rejected by principle assessment; provide the missing observable Runtime operation or repair the failed artifact.";
     return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
   }
 }
 
-interface RuntimeEvidenceReceipt {
+interface RuntimeObservableReceipt {
   readonly toolCallId: string;
   readonly schema: string;
   readonly verdict?: string;
-  readonly explicitNoCaveats: boolean;
+  readonly artifactPath?: string;
   readonly satisfied: ReadonlySet<string>;
-  readonly caveated: ReadonlySet<string>;
   readonly failed: ReadonlySet<string>;
 }
 
-const RUNTIME_EVIDENCE_GATE_KINDS = new Set([
-  "source_summary",
-  "source_urls",
-  "schema_summary",
-  "record_counts",
-  "table_coverage",
-  "structured_extraction_artifact",
+/**
+ * The principle gate verifies only effects that Runtime can observe without
+ * interpreting the model's work.  Source summaries, extraction structure,
+ * coverage, aggregation, and caveats remain part of the Plan's instructions,
+ * but their factual adequacy belongs to the model that produced the answer;
+ * they must not require a tool to attest to those semantics.
+ */
+const RUNTIME_OBSERVABLE_GATE_KINDS = new Set([
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
   "artifact_openable",
   "format_matches_request",
   "delivery_receipt",
-  "explicit_caveats",
 ]);
 
 function runtimeGateRequiredKinds(requiredKinds: readonly string[]): string[] {
-  return requiredKinds.filter((kind) => RUNTIME_EVIDENCE_GATE_KINDS.has(kind));
+  return requiredKinds.filter((kind) => RUNTIME_OBSERVABLE_GATE_KINDS.has(kind));
 }
 
-function runtimeEvidenceReceipts(toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string }[]): RuntimeEvidenceReceipt[] {
-  const receipts: RuntimeEvidenceReceipt[] = [];
+function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string }[]): RuntimeObservableReceipt[] {
+  const receipts: RuntimeObservableReceipt[] = [];
   for (const toolCall of toolCalls) {
     if (toolCall.isError) continue;
     for (const parsed of runtimeEvidenceRecordsFromToolResult(toolCall.result)) {
       const topLevelSchema = typeof parsed.schema === "string" ? parsed.schema : undefined;
-      const nestedReceipt = parseToolResultObject(parsed.evidenceReceipt ?? parsed.artifactReceipt);
-      const schema = topLevelSchema === "agentloop.artifactAcceptance/v1" || topLevelSchema === "agentloop.sourceSummary/v1"
+      const nestedReceipt = parseToolResultObject(parsed.artifactReceipt);
+      const schema = topLevelSchema === "agentloop.artifactAcceptance/v1"
         ? topLevelSchema
         : typeof nestedReceipt?.schema === "string"
           ? nestedReceipt.schema
           : undefined;
       if (
         schema !== "agentloop.artifactAcceptance/v1"
-        && schema !== "agentloop.sourceSummary/v1"
         && schema !== "agentloop.artifactReceipt/v1"
-        && schema !== "agentloop.toolEvidenceReceipt/v1"
       ) continue;
       const evidenceKinds = runtimeEvidenceKindArrays(nestedReceipt ?? parsed);
-      const caveats = Array.isArray(nestedReceipt?.caveats)
-        ? nestedReceipt.caveats
-        : Array.isArray(parsed.caveats)
-          ? parsed.caveats
-          : undefined;
       receipts.push({
         toolCallId: toolCall.toolCallId,
         schema,
         verdict: canonicalArtifactAcceptanceVerdict(parsed),
-        explicitNoCaveats: caveats !== undefined && caveats.length === 0,
+        ...(schema === "agentloop.artifactAcceptance/v1" ? { artifactPath: artifactPathFromRecord(parsed) } : {}),
         satisfied: new Set(evidenceKinds.satisfied),
-        caveated: new Set(evidenceKinds.caveated),
         failed: new Set(evidenceKinds.failed),
       });
     }
@@ -400,7 +392,7 @@ function criterionSatisfiedByEvidenceGate(
   criterionId: string,
   requiredKinds: readonly string[],
   requiredKindsSatisfied: boolean,
-  receipts: readonly RuntimeEvidenceReceipt[],
+  receipts: readonly RuntimeObservableReceipt[],
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
 ): boolean {
@@ -411,13 +403,16 @@ function criterionSatisfiedByEvidenceGate(
 
 function evidenceKindSatisfiedByGate(
   kind: string,
-  receipts: readonly RuntimeEvidenceReceipt[],
+  receipts: readonly RuntimeObservableReceipt[],
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
 ): boolean {
-  if (kind === "delivery_receipt") return successfulToolRefs.length > 0;
+  if (kind === "delivery_receipt") {
+    return candidate?.deliveryReceipt !== undefined
+      && successfulToolRefs.includes(candidate.deliveryReceipt.sourceToolCallId);
+  }
   if (kind === "artifact_acceptance") {
-    const acceptance = receipts.find((receipt) => receipt.schema === "agentloop.artifactAcceptance/v1");
+    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate);
     return acceptance !== undefined
       && (
         acceptance.verdict === "accepted"
@@ -426,30 +421,49 @@ function evidenceKindSatisfiedByGate(
       )
       && acceptance.failed.size === 0;
   }
-  if (kind === "explicit_caveats" && candidate !== undefined) {
-    return candidate.caveats.length > 0
-      || candidate.evidenceKinds.caveated.includes(kind)
-      || candidate.evidenceKinds.satisfied.includes(kind);
-  }
   return receipts.some((receipt) => {
     if (receipt.failed.has(kind)) return false;
-    if (kind === "explicit_caveats") return receipt.satisfied.has(kind) || receipt.caveated.has(kind) || receipt.explicitNoCaveats;
     return receipt.satisfied.has(kind);
   });
 }
 
+/**
+ * An artifact can be checked repeatedly while it is repaired. A later check is
+ * the authoritative observation for that artifact; retaining an earlier
+ * rejection as a permanent failure strands an otherwise deliverable Run.
+ */
+function latestArtifactAcceptanceReceipt(
+  receipts: readonly RuntimeObservableReceipt[],
+  candidate?: RuntimeDeliveryCandidate,
+): RuntimeObservableReceipt | undefined {
+  const acceptances = receipts.filter((receipt) => receipt.schema === "agentloop.artifactAcceptance/v1");
+  const deliveredPath = candidate?.deliveryReceipt?.artifact.path;
+  if (deliveredPath !== undefined) {
+    return acceptances.filter((receipt) => receipt.artifactPath === deliveredPath).at(-1);
+  }
+  return acceptances.at(-1);
+}
+
+function artifactPathFromRecord(record: Record<string, unknown>): string | undefined {
+  const artifact = record.artifact;
+  if (typeof artifact === "string" && artifact.trim().length > 0) return artifact;
+  if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact)) return undefined;
+  const path = (artifact as Record<string, unknown>).path;
+  return typeof path === "string" && path.trim().length > 0 ? path : undefined;
+}
+
 function rejectedEvidenceGateRationale(
   nonEmpty: boolean,
-  receipts: readonly RuntimeEvidenceReceipt[],
+  receipts: readonly RuntimeObservableReceipt[],
   requiredKinds: readonly string[],
   successfulToolRefs: readonly string[],
 ): string {
   if (!nonEmpty) return "The candidate output is empty.";
-  if (successfulToolRefs.length === 0) return "No successful Runtime evidence receipts are available.";
-  if (receipts.length === 0) return "No structured Runtime evidence receipt is available for the principle assessment gate.";
+  if (successfulToolRefs.length === 0) return "No successful Runtime operation is available.";
+  if (receipts.length === 0 && requiredKinds.length > 0) return "No observable Runtime artifact or acceptance receipt is available for the principle assessment gate.";
   const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs));
   if (missing.length > 0) return `The principle assessment gate is missing required evidence kind(s): ${missing.join(", ")}.`;
-  return "The Runtime evidence receipts do not satisfy the principle assessment gate.";
+  return "The observable Runtime operations do not satisfy the principle assessment gate.";
 }
 
 function parseToolResultObject(value: unknown): Record<string, unknown> | undefined {
@@ -603,9 +617,7 @@ function deriveFailedBoundary(
   const reusableEvidenceRefs = [
     ...failedCriteria.flatMap((criterion) => criterion.evidenceRefs),
   ];
-  const suggestedRepairShape = sourceContractMismatch(input, missingEvidenceKinds)
-    ? "revise_plan"
-    : missingEvidenceKinds.length === 0
+  const suggestedRepairShape = missingEvidenceKinds.length === 0
       && input.evidence.candidateOutput.trim().length === 0
     ? "ask_user"
     : "repair_leaf";
@@ -616,27 +628,6 @@ function deriveFailedBoundary(
     reusableEvidenceRefs: uniqueStrings(reusableEvidenceRefs),
     suggestedRepairShape,
   };
-}
-
-function sourceContractMismatch(input: StepAssessmentInput, missingEvidenceKinds: readonly string[]): boolean {
-  const sourceKinds = new Set(["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"]);
-  if (!missingEvidenceKinds.some((kind) => sourceKinds.has(kind))) return false;
-  if (!input.step.evidenceContract?.requiredKinds.some((kind) => sourceKinds.has(kind))) return false;
-  const receipts = runtimeEvidenceReceipts(input.evidence.toolCalls);
-  const hasSourceReceipt = receipts.some((receipt) =>
-    receipt.schema === "agentloop.sourceSummary/v1"
-    || receipt.satisfied.has("source_summary")
-    || receipt.satisfied.has("source_urls")
-    || receipt.satisfied.has("schema_summary")
-    || receipt.satisfied.has("record_counts")
-    || receipt.satisfied.has("structured_extraction_artifact")
-  );
-  const hasArtifactReceipt = receipts.some((receipt) =>
-    receipt.schema === "agentloop.artifactReceipt/v1"
-    || receipt.schema === "agentloop.artifactAcceptance/v1"
-    || Array.from(receipt.satisfied).some((kind) => kind.startsWith("artifact_") || kind === "delivery_receipt")
-  );
-  return hasArtifactReceipt && !hasSourceReceipt;
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { artifactPreviewMode, prioritizedArtifacts, usesBlobPreview } from "../lib/artifact-preview";
+import { artifactPreviewMode, prioritizedArtifacts } from "../lib/artifact-preview";
 import {
   commandActivities,
   commandLine,
@@ -13,6 +13,8 @@ import {
 import { executionCapabilities, type ExecutedToolStatus } from "../lib/execution-capabilities";
 import { fmtBytes, fmtTime, statusLabel } from "../lib/format";
 import { useAgentLoop } from "../state/context";
+import { renderMarkdown } from "../lib/md";
+import { openArtifactPreview } from "@zhujun/agentloop-artifact-preview";
 import type {
   ArtifactPreview,
   CommandOutputContent,
@@ -58,7 +60,9 @@ async function downloadArtifact(token: string, runId: string, artifact: ProcessA
   window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
-function PreviewDialog({
+// Kept as an exported compatibility surface for extensions that imported the
+// old React dialog. New previews use the shared DOM component below.
+export function PreviewDialog({
   state,
   onClose,
 }: {
@@ -385,34 +389,15 @@ export function ArtifactList({
   readonly previewRequest?: ArtifactPreviewRequest | null;
 }): React.ReactNode {
   const { state } = useAgentLoop();
-  const [preview, setPreview] = useState<PreviewState | null>(null);
   const openPreview = useCallback((artifact: ProcessArtifact): void => {
     const owningRunId = artifactRunId(artifact, runId);
-    setPreview((previous) => {
-      if (previous?.url) URL.revokeObjectURL(previous.url);
-      return { artifact, runId: owningRunId, loading: true };
-    });
-    void (async () => {
-      if (usesBlobPreview(artifact)) {
-        const url = await artifactBlobUrl(state.token, owningRunId, artifact);
-        setPreview({ artifact, runId: owningRunId, url, loading: false });
-        return;
-      }
-      const body = await api.runArtifactPreview(state.token, owningRunId, artifact.id);
-      setPreview({ artifact, runId: owningRunId, preview: body.preview, loading: false });
-    })().catch((error) => {
-      setPreview({
-        artifact,
-        runId: owningRunId,
-        loading: false,
-        error: error instanceof Error ? error.message : "无法生成预览",
-      });
+    openArtifactPreview({
+      artifact,
+      fetchBytes: () => api.runArtifactBytes(state.token, owningRunId, artifact.id),
+      fetchStructuredPreview: async () => (await api.runArtifactPreview(state.token, owningRunId, artifact.id)).preview,
+      renderMarkdown,
     });
   }, [runId, state.token]);
-  const closePreview = (): void => {
-    if (preview?.url) URL.revokeObjectURL(preview.url);
-    setPreview(null);
-  };
   useEffect(() => {
     if (previewRequest === undefined || previewRequest === null) return;
     const artifact = artifacts.find((item) =>
@@ -440,7 +425,6 @@ export function ArtifactList({
           </div>
         ))}
       </div>
-      <PreviewDialog state={preview} onClose={closePreview} />
     </>
   );
 }

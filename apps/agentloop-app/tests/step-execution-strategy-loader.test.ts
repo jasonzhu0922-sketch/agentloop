@@ -83,7 +83,7 @@ test("step execution strategy loader reads configured profile", async () => {
 
   assert.equal(strategy.id, "agentloop.fullCatalogStepExecutionStrategy/v1");
   assert.equal(decision.toolCatalog.policyId, "agentloop.fullCatalogToolExposurePolicy/v1");
-  assert.deepEqual(decision.toolCatalog.activeToolNames, ["read"]);
+  assert.deepEqual(decision.toolCatalog.availableToolNames, ["read"]);
 });
 
 test("step execution strategy loader reads a custom global strategy module", async () => {
@@ -100,14 +100,15 @@ test("step execution strategy loader reads a custom global strategy module", asy
         id: "test.customStepExecutionStrategy/v1",
         prepareModelStep(input) {
           return {
-            schema: "agentloop.stepExecutionDecision/v1",
+          schema: "agentloop.stepExecutionDecision/v2",
             strategyId: "test.customStepExecutionStrategy/v1",
             toolCatalog: {
-              schema: "agentloop.toolCatalogDecision/v1",
+              schema: "agentloop.toolCatalogDecision/v2",
               policyId: "test.customToolExposurePolicy/v1",
               mode: "none",
-              activeToolNames: [],
-              hiddenToolGroups: [],
+              availableToolNames: [],
+              preferredToolNames: [],
+              deprioritizedToolGroups: [],
             },
             promptProjection: {
               schema: "agentloop.promptProjectionPolicy/v1",
@@ -116,7 +117,7 @@ test("step execution strategy loader reads a custom global strategy module", asy
               instruction: "custom projection",
             },
             loopStepFrame: {
-              schema: "agentloop.loopStepFrame/v1",
+              schema: "agentloop.loopStepFrame/v2",
               mode: "terminal_candidate",
               modelStep: input.modelStep,
               limits: {

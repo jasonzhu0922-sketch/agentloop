@@ -117,3 +117,37 @@ test("recovery preserves tool failure phase for prepare and execute failures", (
     { toolCallId: "call-execute", toolName: "run_step", result: "spawn . EACCES", isError: true, failurePhase: "execute" },
   ]);
 });
+
+test("recovery keeps truncated or malformed tool calls out of the provider transcript", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "build the deck",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["assistant.committed", {
+        step: 1,
+        content: "I will write the deck.",
+        finishReason: "length",
+        toolCalls: [{ id: "call-partial", name: "write_file", arguments: "{\"path\":\"deck.js\"" }],
+        providerReplayableToolCallIds: [],
+      }],
+      ["tool.rejected", {
+        step: 1,
+        toolCallId: "call-partial",
+        toolName: "write_file",
+        reason: "Tool call was not executed because the model response hit its output limit",
+        failurePhase: "runtime",
+      }],
+    ),
+  });
+
+  assert.deepEqual(transcript.messages, [{ role: "user", content: "build the deck" }]);
+  assert.deepEqual(transcript.toolEvidence, [{
+    toolCallId: "call-partial",
+    toolName: "write_file",
+    result: "Tool call was not executed because the model response hit its output limit",
+    isError: true,
+    failurePhase: "runtime",
+  }]);
+  assert.deepEqual(transcript.facts.unfinishedToolCalls, []);
+});

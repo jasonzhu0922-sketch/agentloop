@@ -1,10 +1,23 @@
 import { testOwner } from "./runtime-test-helpers.ts";
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { SourceIntakeService } from "../src/runtime/source-intake-service.ts";
 import { createSourceTools } from "../src/tools/source-tools.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
+
+const require = createRequire(import.meta.url);
+const JSZip = require("jszip") as {
+  new(): {
+    file(path: string, content: string): unknown;
+    generateAsync(options: { type: "nodebuffer" }): Promise<Buffer>;
+  };
+};
 
 test("read_source returns uploaded chunk content with receipt coverage and explicit caveats", async () => {
   const database = new AppDatabase(":memory:");
@@ -97,6 +110,122 @@ test("read_source returns uploaded chunk content with receipt coverage and expli
     assert.ok(missing.evidenceReceipt.evidenceKinds.caveated.includes("explicit_caveats"));
   } finally {
     await database.close();
+  }
+});
+
+test("extract_source_tables preserves sparse uploaded XLSX columns and embedded delimiters", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-uploaded-table-workspace-"));
+  const storage = join(workspace, "server-owned-original");
+  try {
+    const owner = testOwner();
+    const repository = new SourceRepository(database);
+    const workbook = await sparsePlanWorkbook();
+    await fs.writeFile(storage, workbook);
+    const now = Date.now();
+    const source = await repository.insertSource({
+      id: "src_44444444444444444444444444444444",
+      ownerUserId: owner.user.id,
+      originalName: "7月产品组推进计划.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: workbook.length,
+      sha256: "uploaded-workbook-sha",
+      storagePath: storage,
+      status: "ready",
+      summary: "Uploaded workbook is ready.",
+      tokenEstimate: 10,
+      characterCount: 20,
+      truncated: false,
+      createdAt: now,
+    });
+    const tool = createSourceTools(repository).find((item) => item.name === "extract_source_tables");
+    if (tool === undefined) throw new Error("extract_source_tables is missing");
+    const grant = createCapabilityGrant({
+      actorUserId: owner.user.id,
+      runId: "run-uploaded-table",
+      depth: 0,
+      workspaceRoot: workspace,
+      uploadedSources: [{
+        id: source.id,
+        originalName: source.original_name,
+        mimeType: source.mime_type,
+        extension: source.extension,
+        byteSize: source.byte_size,
+        sha256: source.sha256,
+        status: source.status,
+        summary: source.summary ?? undefined,
+        chunkCount: 1,
+        truncated: false,
+      }],
+      allowedToolNames: ["extract_source_tables"],
+      allowedSkillIds: [],
+    });
+
+    const result = await tool.execute({ grant }, tool.parse({ sourceId: source.id })) as {
+      sourceId: string;
+      originalName: string;
+      totalRecords: number;
+      files: Array<{
+        path: string;
+        sheets: Array<{
+          columns: Array<{ name: string; index: number }>;
+          records: Array<{ row: number; values: Record<string, string | number | boolean> }>;
+        }>;
+      }>;
+      artifact: { path: string; manifest: { tables: Array<{ recordsPointer: string; fields: Array<{ name: string }> }> } };
+      evidenceReceipt: { sourceType: string; evidenceKinds: { satisfied: string[] } };
+    };
+
+    assert.equal(result.sourceId, source.id);
+    assert.equal(result.originalName, "7月产品组推进计划.xlsx");
+    assert.equal(result.totalRecords, 2);
+    const sheet = result.files[0]?.sheets[0];
+    assert.deepEqual(sheet?.columns.map((column) => [column.name, column.index]), [
+      ["序号", 1], ["任务名称", 2], ["责任人", 3], ["月度目标", 4],
+    ]);
+    assert.deepEqual(sheet?.records[0]?.values, {
+      "序号": 1,
+      "任务名称": "平台建设",
+      "责任人": "王明杰",
+      "月度目标": "数据查询执行适配,标准化查询执行",
+    });
+    assert.deepEqual(sheet?.records[1]?.values, {
+      "序号": 2,
+      "责任人": "王乙茜",
+      "月度目标": "连接器迁移适配",
+    });
+    assert.match(result.artifact.path, /^\.agentloop\/table-extractions\//);
+    assert.equal(result.artifact.manifest.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+    assert.deepEqual(result.artifact.manifest.tables[0]?.fields.map((field) => field.name), ["序号", "任务名称", "责任人", "月度目标"]);
+    assert.equal(result.evidenceReceipt.sourceType, "uploaded_table_extraction");
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("structured_extraction_artifact"));
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("XLSX source preview keeps sparse physical columns as JSON rows", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-uploaded-xlsx-preview-"));
+  try {
+    const owner = testOwner();
+    const repository = new SourceRepository(database);
+    const intake = new SourceIntakeService(repository, workspace);
+    const source = await intake.upload({
+      ownerUserId: owner.user.id,
+      originalName: "7月产品组推进计划.xlsx",
+      content: await sparsePlanWorkbook(),
+    });
+
+    const preview = (await repository.chunks(source.id)).map((chunk) => chunk.content).join("\n");
+    assert.match(preview, /\["1","平台建设","王明杰","数据查询执行适配,标准化查询执行"\]/);
+    assert.match(preview, /\["2","","王乙茜","连接器迁移适配"\]/);
+    assert.doesNotMatch(preview, /2,王乙茜,连接器迁移适配/);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
   }
 });
 
@@ -333,3 +462,36 @@ test("read_source treats blank query as omitted and defaults unfiltered reads to
     await database.close();
   }
 });
+
+async function sparsePlanWorkbook(): Promise<Buffer> {
+  const zip = new JSZip();
+  zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?>
+    <workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <sheets><sheet name="工作表1" sheetId="1" r:id="rId1"/></sheets>
+    </workbook>`);
+  zip.file("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+    </Relationships>`);
+  zip.file("xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?>
+    <worksheet><sheetData>
+      <row r="1">
+        <c r="A1" t="inlineStr"><is><t>序号</t></is></c>
+        <c r="B1" t="inlineStr"><is><t>任务名称</t></is></c>
+        <c r="C1" t="inlineStr"><is><t>责任人</t></is></c>
+        <c r="D1" t="inlineStr"><is><t>月度目标</t></is></c>
+      </row>
+      <row r="2">
+        <c r="A2"><v>1</v></c>
+        <c r="B2" t="inlineStr"><is><t>平台建设</t></is></c>
+        <c r="C2" t="inlineStr"><is><t>王明杰</t></is></c>
+        <c r="D2" t="inlineStr"><is><t>数据查询执行适配,标准化查询执行</t></is></c>
+      </row>
+      <row r="3">
+        <c r="A3"><v>2</v></c>
+        <c r="C3" t="inlineStr"><is><t>王乙茜</t></is></c>
+        <c r="D3" t="inlineStr"><is><t>连接器迁移适配</t></is></c>
+      </row>
+    </sheetData></worksheet>`);
+  return zip.generateAsync({ type: "nodebuffer" });
+}

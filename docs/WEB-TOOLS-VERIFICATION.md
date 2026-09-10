@@ -39,7 +39,7 @@ run `d122954c-c894-4240-af9d-6f281a30689f` 因 `RUN_LIMIT_EXCEEDED` 失败：模
 ### 4.1 环境
 
 - 独立实例：`PORT=8788`、`DATABASE_PATH=./data/verify-web.db`、空 `SKILL_DIRECTORY`（隔离 discovered skills 干扰，详见 5.2）。
-- 新建用户 `verify-web@example.com`，直接发起 run（单 Agent 模型不再创建 agent；`webfetch`/`websearch` 作为非危险插件工具始终注册，无需 toolNames 配置，allowDangerousTools=false）。
+- 新建用户 `verify-web@example.com`，直接发起 run（单 Agent 模型不再创建 agent；`webfetch`/`websearch` 作为非危险插件工具始终注册，无需 toolNames 配置；危险工具默认开启，可显式传 `allowDangerousTools=false`）。
 
 ### 4.2 任务与结果
 
@@ -69,9 +69,9 @@ run `529f4789-8677-4658-9af0-f78b0a78e4fe`：**status = completed，耗时 171s*
 
 ### 5.2 用户级 Skill 解析会把全部 discovered skills 带入每个 Run
 
-`src/skills/skill-service.ts` 的 `resolveForConversation(ownerUserId)` 返回该用户全部私有 Skill + 官方 `skills/` 目录发现结果（单 Agent 模型不再有 agent 级 `boundSkillIds` 过滤）。后果：`./skills` 下若有需要文件产出的 skill（如 canvas-design），无写工具的 run（`allowDangerousTools=false` 且步骤未要求写/命令工具）会在 `executeInternal` 中被 `PLAN_NOT_ADMITTED("The selected Skill requires file-producing tools...")` 拒绝。
+`src/skills/skill-service.ts` 的 `resolveForConversation(ownerUserId)` 返回该用户全部私有 Skill + 官方 `skills/` 目录发现结果（单 Agent 模型不再有 agent 级 `boundSkillIds` 过滤）。如需限制文件产出，显式使用 `allowDangerousTools=false`；此时需要文件产出的 Skill 会在 `executeInternal` 中被 `PLAN_NOT_ADMITTED("The selected Skill requires file-producing tools...")` 拒绝。
 
-本次验证用空 `SKILL_DIRECTORY` 隔离绕过；对需要文件产出的任务，应显式开启 `allowDangerousTools`（或让步骤声明写/命令工具）。
+本次验证用空 `SKILL_DIRECTORY` 隔离绕过；对需要限制文件产出的任务，应显式关闭 `allowDangerousTools`。
 
 ### 5.3 百度间歇性反爬
 

@@ -88,7 +88,7 @@ AgentLoop 的执行链路是：
 - Capability-first Planner：Planner 只声明 `requiredCapabilities`，Admission 解析为 StepExecutionBinding；Runtime 再在 Run 授权范围内物化执行工具。
 - 可选 MCP ToolSource：宿主可用别名和 capability 注册外部来源，仍由 Admission、Step binding 与危险工具授权统一约束。
 - Computer Tool 支持目录、读文件、文本搜索、写文件、命令执行和可插拔 GUI/浏览器驱动。
-- 危险 Tool 默认关闭，Run/Batch 必须显式授权。
+- 危险 Tool 默认开启；需要受限执行时，Run/Batch 可显式设置 `allowDangerousTools: false`。
 - SQLite 持久化 Run、Plan、Step、Evidence、Assessment、Outcome、Batch 和 Event。
 - React + Vite Web 前端展示聊天、实时进度、Plan 和最终结果。
 - Responses Provider 的 reasoning summary 会在 Run 进行中实时展示；最终回复出现后不再渲染该实时面板。

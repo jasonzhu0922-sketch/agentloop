@@ -12,7 +12,7 @@ import type { UploadedSourceSummary, UploadedSourceStatus } from "./contracts.ts
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const MAX_EXTRACTED_CHARACTERS = 120_000;
 const CHUNK_CHARACTERS = 8_000;
-const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".xlsx", ".pptx"]);
+const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".doc", ".docx", ".xlsx", ".pptx"]);
 const execFileAsync = promisify(execFile);
 
 export class SourceIntakeService {
@@ -150,6 +150,7 @@ async function decodeSourceText(input: {
       const pdftotext = await extractPdfTextWithPdftotext(input.content);
       if (pdftotext !== undefined) return { ok: true, text: pdftotext };
     }
+    if (input.extension === ".doc") return { ok: true, text: await extractDocText(input.content) };
     if (input.extension === ".docx") return { ok: true, text: extractDocxText(input.content) };
     if (input.extension === ".xlsx") return { ok: true, text: extractXlsxText(input.content) };
     if (input.extension === ".pptx") return { ok: true, text: extractPptxText(input.content) };
@@ -202,6 +203,7 @@ function extractionError(
 function extractionErrorCode(extension: string): string {
   if (extension === ".json") return "invalid_json";
   if (extension === ".pdf") return "pdf_extract_failed";
+  if (extension === ".doc") return "doc_extract_failed";
   if (extension === ".docx") return "docx_extract_failed";
   if (extension === ".xlsx") return "xlsx_extract_failed";
   if (extension === ".pptx") return "pptx_extract_failed";
@@ -246,6 +248,79 @@ function extractDocxText(content: Buffer): string {
   return text;
 }
 
+async function extractDocText(content: Buffer): Promise<string> {
+  const xml = content.toString("utf8");
+  if (!xml.includes("\uFFFD") && /<w:wordDocument\b/i.test(xml)) return extractWordMlText(xml);
+  const converted = await extractLegacyDocText(content);
+  if (converted !== undefined) return converted;
+  throw new Error("DOC contains no extractable text; install LibreOffice, antiword, or textutil to read binary DOC files");
+}
+
+function extractWordMlText(xml: string): string {
+  const paragraphs = [...xml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
+    .map((match) => wordParagraphText(match[0]))
+    .filter((line) => line.length > 0);
+  const text = paragraphs.join("\n");
+  if (text.trim() === "") throw new Error("DOC contains no extractable WordML text");
+  return text;
+}
+
+async function extractLegacyDocText(content: Buffer): Promise<string | undefined> {
+  const directory = await fs.mkdtemp(join(tmpdir(), "agentloop-doc-"));
+  const inputPath = join(directory, "input.doc");
+  const outputPath = join(directory, "input.txt");
+  try {
+    await fs.writeFile(inputPath, content);
+    const textutil = await extractDocWithTextutil(inputPath, outputPath);
+    if (textutil !== undefined) return textutil;
+    const antiword = await extractDocWithAntiword(inputPath);
+    if (antiword !== undefined) return antiword;
+    return await extractDocWithLibreOffice(inputPath, outputPath, directory);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function extractDocWithTextutil(inputPath: string, outputPath: string): Promise<string | undefined> {
+  try {
+    await execFileAsync("textutil", ["-convert", "txt", "-output", outputPath, inputPath], { timeout: 30_000 });
+    return await readExtractedText(outputPath);
+  } catch {
+    return undefined;
+  }
+}
+
+async function extractDocWithAntiword(inputPath: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("antiword", [inputPath], { timeout: 30_000, maxBuffer: MAX_EXTRACTED_CHARACTERS * 4 });
+    return normalizedExtractedText(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+async function extractDocWithLibreOffice(inputPath: string, outputPath: string, directory: string): Promise<string | undefined> {
+  try {
+    await execFileAsync("soffice", ["--headless", "--convert-to", "txt:Text", "--outdir", directory, inputPath], { timeout: 30_000 });
+    return await readExtractedText(outputPath);
+  } catch {
+    return undefined;
+  }
+}
+
+async function readExtractedText(path: string): Promise<string | undefined> {
+  try {
+    return normalizedExtractedText(await fs.readFile(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizedExtractedText(text: string): string | undefined {
+  const normalized = text.replace(/\u0000/g, "").trim();
+  return normalized === "" ? undefined : normalized;
+}
+
 function wordParagraphText(xml: string): string {
   return [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
     .map((match) => decodeXmlText(match[1] ?? ""))
@@ -267,7 +342,10 @@ function extractXlsxText(content: Buffer): string {
     if (rows.length === 0) continue;
     sections.push([
       `Sheet: ${sheet.name}`,
-      ...rows.map((row) => row.join(",")),
+      // JSON rows preserve sparse cells and embedded delimiters for the
+      // text-preview fallback. Field-level work must use
+      // extract_source_tables, but read_source must never left-shift columns.
+      ...rows.map((row) => JSON.stringify(row)),
     ].join("\n"));
   }
   const text = sections.join("\n\n");
@@ -310,19 +388,32 @@ function sharedStringTable(xml: string): string[] {
 }
 
 function worksheetRows(xml: string, sharedStrings: readonly string[]): string[][] {
-  return [...xml.matchAll(/<row\b[\s\S]*?<\/row>/g)].map((rowMatch) =>
-    [...rowMatch[0].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)].map((cellMatch) => {
+  return [...xml.matchAll(/<row\b[\s\S]*?<\/row>/g)].map((rowMatch) => {
+    const values: string[] = [];
+    for (const [fallbackIndex, cellMatch] of [...rowMatch[0].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)].entries()) {
       const attributes = parseXmlAttributes(cellMatch[1] ?? "");
       const value = /<v>([\s\S]*?)<\/v>/.exec(cellMatch[2] ?? "")?.[1] ?? "";
-      if (attributes.get("t") === "s") return sharedStrings[Number(value)] ?? "";
+      const column = xlsxColumnIndex(attributes.get("r")) ?? fallbackIndex + 1;
+      if (attributes.get("t") === "s") {
+        values[column - 1] = sharedStrings[Number(value)] ?? "";
+        continue;
+      }
       if (attributes.get("t") === "inlineStr") {
-        return [...(cellMatch[2] ?? "").matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)]
+        values[column - 1] = [...(cellMatch[2] ?? "").matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)]
           .map((match) => decodeXmlText(match[1] ?? ""))
           .join("");
+        continue;
       }
-      return decodeXmlText(value);
-    })
-  ).filter((row) => row.some((cell) => cell.trim() !== ""));
+      values[column - 1] = decodeXmlText(value);
+    }
+    return Array.from({ length: values.length }, (_, index) => values[index] ?? "");
+  }).filter((row) => row.some((cell) => cell.trim() !== ""));
+}
+
+function xlsxColumnIndex(address: string | undefined): number | undefined {
+  const column = /^([A-Za-z]+)\d+$/.exec(address ?? "")?.[1];
+  if (column === undefined) return undefined;
+  return [...column.toUpperCase()].reduce((value, character) => value * 26 + character.charCodeAt(0) - 64, 0);
 }
 
 function extractPptxText(content: Buffer): string {

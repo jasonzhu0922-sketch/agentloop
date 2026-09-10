@@ -18,12 +18,26 @@ export interface RuntimeDeliveryCandidateEvidenceKinds {
   readonly failed: readonly string[];
 }
 
+export interface RuntimeDeliveryReceipt {
+  readonly schema: "agentloop.runtimeDeliveryReceipt/v1";
+  readonly artifact: {
+    readonly path: string;
+    readonly bytes?: number;
+    readonly sha256?: string;
+    readonly kind?: string;
+  };
+  readonly verdict: "accepted" | "caveated";
+  readonly caveats: readonly string[];
+  readonly sourceToolCallId: string;
+}
+
 export interface RuntimeDeliveryCandidate {
   readonly schema: "agentloop.runtimeDeliveryCandidate/v1";
   readonly output: string;
   readonly caveats: readonly string[];
   readonly evidenceKinds: RuntimeDeliveryCandidateEvidenceKinds;
   readonly sourceToolCallIds: readonly string[];
+  readonly deliveryReceipt?: RuntimeDeliveryReceipt;
 }
 
 export interface ModelToolCall {

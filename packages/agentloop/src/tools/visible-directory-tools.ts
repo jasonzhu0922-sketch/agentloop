@@ -231,7 +231,7 @@ export function createVisibleDirectoryTools(): RuntimeTool<unknown>[] {
           maxRowsPerSheet: input.maxRowsPerSheet,
           maxTotalCells: input.maxTotalCells,
         });
-        const artifact = await writeVisibleTableExtractionArtifact(context.grant.workspaceRoot, extraction);
+        const artifact = await writeTableExtractionArtifact(context.grant.workspaceRoot, extraction);
         const caveats = uniqueStrings(extraction.caveats);
         const result = {
           rootId: input.rootId,
@@ -632,7 +632,7 @@ function visibleDirectoryIndexReceipt(
   });
 }
 
-interface TableExtractionArtifactManifest {
+export interface TableExtractionArtifactManifest {
   readonly schema: "agentloop.tableExtractionArtifactManifest/v1";
   readonly artifactSchema: "agentloop.visibleTableExtraction/v1";
   readonly totalFiles: number;
@@ -1071,7 +1071,11 @@ function parseTableExtractionFiles(value: unknown): Array<{ path: string; source
   });
 }
 
-async function writeVisibleTableExtractionArtifact(
+/**
+ * Persist the neutral table-extraction payload once so every authorized source
+ * surface can hand downstream steps the same JSON-pointer navigable evidence.
+ */
+export async function writeTableExtractionArtifact(
   workspaceRoot: string | undefined,
   extraction: {
     readonly schema: "agentloop.visibleTableExtraction/v1";
@@ -1141,7 +1145,7 @@ async function writeVisibleTableExtractionArtifact(
 }
 
 function buildTableExtractionArtifactManifest(
-  extraction: Parameters<typeof writeVisibleTableExtractionArtifact>[1],
+  extraction: Parameters<typeof writeTableExtractionArtifact>[1],
 ): TableExtractionArtifactManifest {
   const tables: TableExtractionManifestTable[] = [];
   const caveats: string[] = [];
