@@ -5,10 +5,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { formatAvailableSkills, formatLoadedSkill } from "../src/skills/skill-context.ts";
+import { readSkillExecutionManifest } from "../src/skills/skill-execution-manifest.ts";
 import { discoverSkillDirectory } from "../src/skills/skill-directory.ts";
 import { inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { createSkillLoader } from "../src/tools/skill-loader.ts";
 
 const ROOT = resolve(import.meta.dirname, "..", "..", "agentloop-skills");
 const SKILL_DIRECTORY = resolve(ROOT, "skills");
@@ -157,6 +160,110 @@ test("loaded package Skills show the Runtime path contract before Skill instruct
   );
   assert.match(loaded, /relative writable task paths such as decks\/my-deck/);
   assert.match(loaded, /execution_context\.workspace\.root/);
+});
+
+test("a package execution manifest exposes an action interface without putting command details in Skill prose", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-executor-manifest-"));
+  try {
+    await fs.writeFile(join(workspace, "agentloop.executors.json"), JSON.stringify({
+      schema: "agentloop.skillExecutors/v1",
+      executors: [{
+        id: "company-query",
+        description: "Query a company registry.",
+        command: "python3",
+        script: "scripts/company.py",
+        actions: [{
+          id: "search",
+          description: "Find company candidates.",
+          inputs: [{ name: "name", description: "A company name or clue.", required: true }],
+          args: ["--action", "search", "--name", "{{name}}"],
+          result: "Candidate companies.",
+        }],
+      }],
+    }), "utf8");
+    const entrypoints = await readSkillExecutionManifest(workspace);
+    const loaded = formatLoadedSkill({
+      id: "discovered:company-query",
+      ownerUserId: "system",
+      name: "company-query",
+      description: "Company registry lookup.",
+      instructions: "Use registry facts and ask for confirmation when identities are ambiguous.",
+      version: 1,
+      sourceKind: "package",
+      contentHash: "a".repeat(64),
+      updatedAt: 0,
+      package: {
+        root: workspace,
+        entrypointPath: "SKILL.md",
+        packageHash: "a".repeat(64),
+        fileCount: 2,
+        totalBytes: 1,
+      },
+    }, { executionEntrypoints: entrypoints });
+
+    assert.match(loaded, /<skill_execution_entrypoints>/);
+    assert.match(loaded, /command="python3" script="scripts\/company\.py"/);
+    assert.match(loaded, /<args>--action search --name \{\{name\}\}<\/args>/);
+    assert.doesNotMatch("Use registry facts and ask for confirmation when identities are ambiguous.", /--action|python3|scripts\//);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("load_skill reads a package execution manifest and tells the model to invoke it directly", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-loader-manifest-"));
+  try {
+    await fs.writeFile(join(workspace, "agentloop.executors.json"), JSON.stringify({
+      schema: "agentloop.skillExecutors/v1",
+      executors: [{
+        id: "company-query",
+        description: "Query a company registry.",
+        command: "python3",
+        script: "scripts/company.py",
+        actions: [{
+          id: "search",
+          description: "Find company candidates.",
+          inputs: [{ name: "name", description: "A company name.", required: true }],
+          args: ["--action", "search", "--name", "{{name}}"],
+          result: "Candidate companies.",
+        }],
+      }],
+    }), "utf8");
+    const skill = {
+      id: "discovered:company-query",
+      ownerUserId: "system",
+      name: "company-query",
+      description: "Company registry lookup.",
+      instructions: "Search candidates before showing registration details.",
+      version: 1,
+      sourceKind: "package" as const,
+      contentHash: "a".repeat(64),
+      updatedAt: 0,
+      package: {
+        root: workspace,
+        entrypointPath: "SKILL.md",
+        packageHash: "a".repeat(64),
+        fileCount: 2,
+        totalBytes: 1,
+      },
+    };
+    const loader = createSkillLoader([skill]);
+    const loaded = await loader.execute({
+      grant: createCapabilityGrant({
+        actorUserId: "test-user",
+        runId: "test-run",
+        depth: 0,
+        allowedToolNames: ["load_skill"],
+        allowedSkillIds: [skill.id],
+      }),
+    }, loader.parse({ name: skill.name }));
+
+    assert.match(String(loaded), /command="python3" script="scripts\/company\.py"/);
+    assert.match(String(loaded), /invoke it directly with computer_run_command/);
+    assert.match(String(loaded), /do not list package directories/);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("presentation Skill body does not teach workspace-relative paths under the read-only Skill cwd", async () => {

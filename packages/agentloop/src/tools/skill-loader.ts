@@ -1,6 +1,7 @@
 import { notFound } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import { formatLoadedSkill } from "../skills/skill-context.ts";
+import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
@@ -37,9 +38,13 @@ export function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<
     execute: async (context, value) => {
       const skill = byReference.get((value as { name: string }).name);
       if (skill === undefined || !context.grant.allowedSkillIds.has(skill.id)) throw notFound("Skill");
+      const executionEntrypoints = skill.package === undefined
+        ? []
+        : await readSkillExecutionManifest(skill.package.root);
       return formatLoadedSkill(skill, {
         executionCwd: skillExecutionCwd,
         executionRootEnvName: skillExecutionRootEnvName,
+        executionEntrypoints,
       });
     },
   };

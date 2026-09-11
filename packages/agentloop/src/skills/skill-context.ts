@@ -1,9 +1,11 @@
 import type { PrivateSkill } from "./skill-service.ts";
+import type { SkillExecutionEntrypoint } from "./skill-execution-manifest.ts";
 
 export interface SkillContextOptions {
   readonly packageRoot?: (skill: PrivateSkill) => string;
   readonly executionCwd?: (skill: PrivateSkill) => string | undefined;
   readonly executionRootEnvName?: (skill: PrivateSkill) => string | undefined;
+  readonly executionEntrypoints?: readonly SkillExecutionEntrypoint[];
 }
 
 /**
@@ -66,6 +68,7 @@ export function formatLoadedSkill(
           `Script-readable Skill root environment variable: ${executionRootEnvName}`,
           `Generated scripts that need read-only Skill assets should read process.env.${executionRootEnvName} / os.environ["${executionRootEnvName}"] and join package-relative asset paths from there.`,
         ]),
+        ...formatExecutionEntrypoints(options.executionEntrypoints ?? []),
         `Base directory for this Skill: ${packageRoot}`,
         `Read-only package directory for this Skill: ${packageRoot}`,
         "Relative paths in this Skill are relative to the Skill root.",
@@ -80,6 +83,29 @@ export function formatLoadedSkill(
     skill.instructions,
     "</skill_content>",
   ].join("\n");
+}
+
+function formatExecutionEntrypoints(entrypoints: readonly SkillExecutionEntrypoint[]): string[] {
+  if (entrypoints.length === 0) return [];
+  return [
+    "",
+    "<skill_execution_entrypoints>",
+    "The following executor actions are the complete supported package interface. When an action applies, invoke it directly with computer_run_command using this Skill's Runtime execution cwd; do not list package directories, inspect script source, or run a help command merely to discover how to use it.",
+    ...entrypoints.flatMap((entrypoint) => [
+      `  <executor id="${escapeXml(entrypoint.id)}" command="${escapeXml(entrypoint.command)}" script="${escapeXml(entrypoint.script)}">`,
+      `    <description>${escapeXml(entrypoint.description)}</description>`,
+      ...entrypoint.actions.flatMap((action) => [
+        `    <action id="${escapeXml(action.id)}">`,
+        `      <description>${escapeXml(action.description)}</description>`,
+        ...action.inputs.map((input) => `      <input name="${escapeXml(input.name)}" required="${input.required}">${escapeXml(input.description)}</input>`),
+        `      <args>${escapeXml(action.args.join(" "))}</args>`,
+        `      <result>${escapeXml(action.result)}</result>`,
+        "    </action>",
+      ]),
+      "  </executor>",
+    ]),
+    "</skill_execution_entrypoints>",
+  ];
 }
 
 function formatSourceAttributes(url: string | undefined, revision: string | undefined): string {
