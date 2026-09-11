@@ -191,7 +191,7 @@ export function inferOperationProfile(input: OperationProfileInput): OperationPr
   if (matchesDataAnalysis(text)) {
     return profile("data_analysis");
   }
-  if (intent.deliverySurface === "workspace_artifact" || hasFileProducerTool(tools)) {
+  if (intent.deliverySurface === "workspace_artifact") {
     return profile("artifact_build");
   }
   if (matchesContentGeneration(text)) {
@@ -240,15 +240,4 @@ function matchesContentGeneration(value: string): boolean {
 function matchesCodeChange(value: string): boolean {
   return /(?:\b(?:code|repo|repository|test|bug|fix|implement|refactor|compile|typescript|javascript|python|api|config|runtime|module)\b|代码|仓库|测试|修复|实现|重构|编译|接口|配置|模块)/iu
     .test(value);
-}
-
-function hasFileProducerTool(tools: ReadonlySet<string>): boolean {
-  for (const name of tools) {
-    if (name === "convert_artifact") return true;
-    if (name === "materialize_paginated_html") return true;
-    if (name === "computer_patch_file") return true;
-    if (name === "computer_write_file") return true;
-    if (/(^|_)(write|create|generate|render|export|convert|save)(_|$)/.test(name)) return true;
-  }
-  return false;
 }

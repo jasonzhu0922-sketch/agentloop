@@ -332,6 +332,71 @@ test("Task intent treats Chinese summary files as workspace document artifacts",
   assert.equal(intent.wantsArtifact, true);
 });
 
+test("Task intent keeps a referenced uploaded HTML source conversational when file writers are available", () => {
+  const intent = classifyTaskIntent({
+    objective: "阅读这个 html",
+    toolNames: ["read_source", "computer_write_file", "verify_artifact_acceptance"],
+  });
+
+  assert.equal(intent.artifactKind, "none");
+  assert.equal(intent.deliverySurface, "conversation");
+  assert.equal(intent.wantsArtifact, false);
+});
+
+test("ModelPlanner admits an uploaded HTML reading plan without inventing a workspace artifact", async () => {
+  const sourceId = "src_uploaded_html";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"deliverySurface":"conversation"/);
+      assert.doesNotMatch(context, /"artifactKind":"html"/);
+      assert.doesNotMatch(context, /"id":"artifact_build"/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("read-uploaded-html", {
+          goal: "阅读并概述用户上传的 HTML 文件内容。",
+          steps: [{
+            id: "read_html",
+            objective: "读取上传的 HTML 文件，并向用户概述其内容与未确认之处。",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["uploaded_source_read"],
+            sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-read-uploaded-html",
+    input: "阅读这个 html",
+    availableSkills: [],
+    availableToolNames: ["read_source", "computer_write_file", "verify_artifact_acceptance"],
+    sources: [{
+      id: sourceId,
+      originalName: "chapter.html",
+      mimeType: "text/html",
+      extension: ".html",
+      byteSize: 512,
+      sha256: "a".repeat(64),
+      status: "ready",
+      summary: "Uploaded HTML chapter.",
+      chunkCount: 1,
+      truncated: false,
+    }],
+  });
+
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["uploaded_source_read"]);
+});
+
 test("Task intent treats Chinese market price queries as fresh lookup", () => {
   const intent = classifyTaskIntent({
     objective: "帮我查查上海市螺纹钢的市场价格，型号任选。",

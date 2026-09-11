@@ -40,11 +40,12 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
   const artifactKind = detectArtifactKindSignal(text);
   const sourceNeed = inferSourceNeedFromIntent(text);
   const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
-  const hasFileProducer = (input.toolNames ?? []).some(isFileProducerToolName);
   const wantsArtifact = artifactKind !== "none"
-    && (signals.action.length > 0 || hasFileProducer)
+    // Tool availability authorizes a possible workspace write, but it never
+    // turns a referenced input format into a requested output artifact.
+    && signals.action.length > 0
     && input.responseOnly !== true;
-  const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0 && !hasFileProducer;
+  const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0;
   return {
     deliverySurface: wantsArtifact && !explicitConversationOnly ? "workspace_artifact" : "conversation",
     artifactKind: wantsArtifact ? artifactKind : "none",
@@ -195,11 +196,6 @@ function matchedSourceSignals(text: string): string[] {
 
 function matchSignals(text: string, patterns: readonly [string, RegExp][]): string[] {
   return patterns.flatMap(([id, pattern]) => pattern.test(text) ? [id] : []);
-}
-
-function isFileProducerToolName(name: string): boolean {
-  if (name === "materialize_paginated_html" || name === "computer_patch_file" || name === "computer_write_file" || name === "computer_run_command") return true;
-  return /(^|_)(write|create|generate|render|export|save)(_|$)/.test(name);
 }
 
 function normalize(value: string): string {
