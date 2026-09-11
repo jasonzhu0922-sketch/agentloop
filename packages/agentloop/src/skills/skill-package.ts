@@ -5,6 +5,7 @@ import { AppError, badRequest } from "../shared/errors.ts";
 import {
   SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES,
   SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES,
+  SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES,
   SKILL_AGENT_LOOP_QA_KIND_VALUES,
   SKILL_AGENT_LOOP_ROLE_VALUES,
   SKILL_AGENT_LOOP_SOURCE_KIND_VALUES,
@@ -12,6 +13,7 @@ import {
 import type {
   SkillAgentLoopArtifactKind,
   SkillAgentLoopExecutionProfile,
+  SkillAgentLoopProducedEvidenceKind,
   SkillAgentLoopMetadata,
   SkillAgentLoopQaKind,
   SkillAgentLoopRole,
@@ -21,6 +23,7 @@ import type {
 export type {
   SkillAgentLoopArtifactKind,
   SkillAgentLoopExecutionProfile,
+  SkillAgentLoopProducedEvidenceKind,
   SkillAgentLoopMetadata,
   SkillAgentLoopQaKind,
   SkillAgentLoopRole,
@@ -51,6 +54,7 @@ const ARTIFACT_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_ARTIFACT_KIND_VALU
 const SOURCE_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_SOURCE_KIND_VALUES);
 const QA_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_QA_KIND_VALUES);
 const EXECUTION_PROFILE_VALUES = new Set<string>(SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES);
+const PRODUCED_EVIDENCE_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES);
 
 export interface SkillPackageInspection {
   readonly root: string;
@@ -361,6 +365,10 @@ function parseAgentLoopFrontmatter(lines: readonly string[], closing: number): S
     .map((value) => parseAgentLoopQaKind(value));
   const executionProfiles = (fields.get("executionProfiles") ?? [])
     .map((value) => parseAgentLoopExecutionProfile(value));
+  const producesEvidenceKinds = (fields.get("producesEvidenceKinds") ?? [])
+    .map((value) => parseAgentLoopProducedEvidenceKind(value));
+  const requiredSkillNames = (fields.get("requiredSkillNames") ?? [])
+    .map((value) => normalizeAgentLoopSkillName(value));
   if (roles.length === 0) throw invalidPackage("agentloop.roles must declare at least one role");
   return {
     roles: unique(roles),
@@ -368,6 +376,8 @@ function parseAgentLoopFrontmatter(lines: readonly string[], closing: number): S
     sourceKinds: unique(sourceKinds),
     qaKinds: unique(qaKinds),
     ...(executionProfiles.length === 0 ? {} : { executionProfiles: unique(executionProfiles) }),
+    ...(producesEvidenceKinds.length === 0 ? {} : { producesEvidenceKinds: unique(producesEvidenceKinds) }),
+    ...(requiredSkillNames.length === 0 ? {} : { requiredSkillNames: unique(requiredSkillNames) }),
   };
 }
 
@@ -402,6 +412,20 @@ function parseAgentLoopQaKind(value: string): SkillAgentLoopQaKind {
 function parseAgentLoopExecutionProfile(value: string): SkillAgentLoopExecutionProfile {
   if (EXECUTION_PROFILE_VALUES.has(value)) return value as SkillAgentLoopExecutionProfile;
   throw invalidPackage(`agentloop.executionProfiles contains unsupported execution profile ${value}`);
+}
+
+function parseAgentLoopProducedEvidenceKind(value: string): SkillAgentLoopProducedEvidenceKind {
+  const normalized = normalizeAgentLoopString(value, "producesEvidenceKinds");
+  if (PRODUCED_EVIDENCE_KIND_VALUES.has(normalized)) return normalized as SkillAgentLoopProducedEvidenceKind;
+  throw invalidPackage(`agentloop.producesEvidenceKinds contains unsupported evidence kind ${normalized}`);
+}
+
+function normalizeAgentLoopSkillName(value: string): string {
+  const normalized = value.trim();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(normalized)) {
+    throw invalidPackage("agentloop.requiredSkillNames contains an invalid Skill name");
+  }
+  return normalized;
 }
 
 function normalizeAgentLoopString(value: string, key: string): string {

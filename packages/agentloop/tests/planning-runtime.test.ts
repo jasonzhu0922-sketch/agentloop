@@ -12,13 +12,14 @@ import { ModelPlanner } from "../src/planning/planner.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { DependencyScheduler } from "../src/planning/scheduler.ts";
 import {
+  planningCapabilitiesFromSkills,
   planningCapabilitiesFromTools,
   requiredToolSourceIdsFromInput,
 } from "../src/planning/step-execution-binding.ts";
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
-import { RunService, selectPlanningSkills } from "../src/runtime/run-service.ts";
+import { RunService, selectPlanningSkillRoles, selectPlanningSkills } from "../src/runtime/run-service.ts";
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
@@ -3620,6 +3621,99 @@ test("selectPlanningSkills prefers the matching Skill summary and allows no-skil
     [],
   );
   assert.deepEqual(none, []);
+});
+
+test("selectPlanningSkillRoles expands a selected Skill's declared source-provider companion", () => {
+  const analysis = skillFixture({
+    id: "steel-analysis",
+    name: "steel-market-analysis",
+    description: "分析钢材市场价格走势。",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"], ["local_script"]),
+      requiredSkillNames: ["mysql-steel-data"],
+    },
+  });
+  const mysql = skillFixture({
+    id: "steel-data",
+    name: "mysql-steel-data",
+    description: "读取钢材市场 MySQL 指标数据。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"], ["local_script"]),
+  });
+
+  const selected = selectPlanningSkillRoles([analysis, mysql], "分析唐山热轧盘螺价格走势", []);
+
+  assert.deepEqual(selected.map((item) => ({
+    name: item.skill.name,
+    role: item.selection.role,
+    companionForSkillId: item.companionForSkillId,
+  })), [
+    { name: "steel-market-analysis", role: "primary_builder", companionForSkillId: undefined },
+    { name: "mysql-steel-data", role: "source_provider", companionForSkillId: "steel-analysis" },
+  ]);
+});
+
+test("Admission expands a bound source-provider Skill's declared evidence capability before validating the leaf", () => {
+  const mysql = skillFixture({
+    id: "steel-data",
+    name: "mysql-steel-data",
+    agentLoop: {
+      roles: ["source_provider"],
+      artifactKinds: ["none"],
+      sourceKinds: ["database"],
+      qaKinds: [],
+      executionProfiles: ["local_script"],
+      producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+    },
+  });
+  const proposal: PlanProposal = {
+    goal: "Read bounded MySQL steel data for the analysis.",
+    selectedSkillIds: [mysql.id],
+    selectedSkillRoles: [{ skillId: mysql.id, role: "source_provider", reason: "Required market data source." }],
+    steps: [{
+      id: "acquire_mysql_steel_data",
+      objective: "Inspect the mapped MySQL schema and obtain bounded raw records.",
+      dependencies: [],
+      role: "fact_acquisition",
+      skillIds: [mysql.id],
+      requiredCapabilities: [],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [{ id: "mysql_source", description: "Bounded source evidence is available.", source: "planner" }],
+    }],
+  };
+  const admitted = admitPlan({
+    runId: "bound-mysql-source-provider",
+    proposal,
+    availableSkills: [mysql],
+    availableToolNames: new Set(["load_skill", "computer_run_command"]),
+    availableCapabilities: planningCapabilitiesFromSkills([mysql]),
+  });
+
+  const binding = admitted.steps[0]!.executionBinding;
+  assert.deepEqual(binding.sourceKinds, ["database", "workspace_file"]);
+  assert.ok(binding.requiredCapabilities.includes("skill_source_provider.database.steel-data"));
+  assert.ok(binding.resolvedToolNames.includes("computer_run_command"));
+  assert.equal(binding.requiredCapabilities.includes("web_research"), false);
+  assert.equal(binding.requiredCapabilities.includes("external_api_call"), false);
+
+  assert.throws(
+    () => admitPlan({
+      runId: "bound-mysql-source-provider-derived-aggregation",
+      proposal: {
+        ...proposal,
+        steps: proposal.steps.map((step) => ({
+          ...step,
+          evidenceContract: { ...step.evidenceContract!, requiredKinds: [...step.evidenceContract!.requiredKinds, "derived_aggregation"] },
+        })),
+      },
+      availableSkills: [mysql],
+      availableToolNames: new Set(["load_skill", "computer_run_command"]),
+      availableCapabilities: planningCapabilitiesFromSkills([mysql]),
+    }),
+    (error: unknown) => error instanceof AppError && /bound capabilities cannot produce: derived_aggregation/.test(error.message),
+  );
 });
 
 test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and subphrases", () => {

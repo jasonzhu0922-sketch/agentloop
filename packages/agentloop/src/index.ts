@@ -151,6 +151,7 @@ export {
   SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES,
   SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES,
   SKILL_AGENT_LOOP_METADATA_FIELDS,
+  SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES,
   SKILL_AGENT_LOOP_QA_KIND_VALUES,
   SKILL_AGENT_LOOP_ROLE_VALUES,
   SKILL_AGENT_LOOP_SOURCE_KIND_VALUES,
@@ -158,6 +159,7 @@ export {
 export type {
   SkillAgentLoopArtifactKind,
   SkillAgentLoopExecutionProfile,
+  SkillAgentLoopProducedEvidenceKind,
   SkillAgentLoopMetadata,
   SkillAgentLoopQaKind,
   SkillAgentLoopRole,

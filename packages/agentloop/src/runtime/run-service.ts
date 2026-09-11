@@ -47,6 +47,7 @@ import { activeLeafSteps, isPlanLeafComplete } from "../planning/plan-utils.ts";
 import { DependencyScheduler } from "../planning/scheduler.ts";
 import {
   planningCapabilitiesFromTools,
+  planningCapabilitiesFromSkills,
   requiredToolSourceIdsFromInput,
   stepHasSourceKind,
   stepHasTool,
@@ -1555,7 +1556,10 @@ export class RunService {
         ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
-        availableCapabilities: planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
+        availableCapabilities: [
+          ...planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
+          ...planningCapabilitiesFromSkills(planningSkills),
+        ],
         ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
         workspaceFacts: planningWorkspace,
         visibleDirectories,
@@ -1581,7 +1585,10 @@ export class RunService {
             : { planningExtensionContexts: planningExtensionResolution.contexts }
         ),
       }, runController.signal, emit);
-      let proposal = planningExtensionResolution.proposal ?? await proposalFromPlanner();
+      let proposal = bindRequiredSkillCompanions(
+        planningExtensionResolution.proposal ?? await proposalFromPlanner(),
+        planningSkillRoles,
+      );
       let proposalSource = planningExtensionResolution.proposalSource;
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       await emit({
@@ -1629,7 +1636,7 @@ export class RunService {
             message: error instanceof Error ? error.message : "Plan was not admitted",
           },
         });
-        proposal = await proposalFromPlanner();
+        proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), planningSkillRoles);
         proposalSource = undefined;
         await throwIfRunCancelled(this.runs, runId, runController.signal);
         await emit({
@@ -3685,6 +3692,40 @@ function failedBoundaryQuestion(failedBoundary: FailedBoundary): string {
 export interface PlanningSkillRoleSelection {
   readonly skill: PrivateSkill;
   readonly selection: SelectedSkillRole;
+  /** The matched Skill that declared this required companion. */
+  readonly companionForSkillId?: string;
+}
+
+function bindRequiredSkillCompanions(
+  proposal: PlanProposal,
+  selections: readonly PlanningSkillRoleSelection[],
+): PlanProposal {
+  const companions = selections.filter((selection) => selection.companionForSkillId !== undefined);
+  if (companions.length === 0) return proposal;
+  const selected = new Set(proposal.selectedSkillIds);
+  const roles = [...(proposal.selectedSkillRoles ?? [])];
+  let steps = proposal.steps;
+  for (const companion of companions) {
+    const parentId = companion.companionForSkillId!;
+    if (!selected.has(parentId)) continue;
+    selected.add(companion.skill.id);
+    if (!roles.some((role) => role.skillId === companion.skill.id)) roles.push(companion.selection);
+    const databaseProvider = companion.skill.agentLoop?.sourceKinds.includes("database") === true;
+    steps = steps.map((step) => {
+      if (!step.skillIds.includes(parentId)) return step;
+      const skillIds = step.skillIds.includes(companion.skill.id) ? step.skillIds : [...step.skillIds, companion.skill.id];
+      const requiredCapabilities = databaseProvider
+        ? step.requiredCapabilities.filter((capability) => capability !== "external_api_call" && capability !== "web_research")
+        : step.requiredCapabilities;
+      return { ...step, skillIds, requiredCapabilities };
+    });
+  }
+  return {
+    ...proposal,
+    selectedSkillIds: [...selected],
+    ...(roles.length === 0 ? {} : { selectedSkillRoles: roles }),
+    steps,
+  };
 }
 
 export function selectPlanningSkills(
@@ -3731,10 +3772,10 @@ export function selectPlanningSkillRoles(
   if (roleEligibleSkills.length === 0) return [];
   const exactMatches = roleEligibleSkills.filter((skill) => exactSkillMention(signal, skill));
   if (exactMatches.length > 0) {
-    return exactMatches.slice(0, MAX_PLANNING_SKILLS).map((skill) => ({
+    return expandRequiredPlanningSkills(exactMatches.slice(0, MAX_PLANNING_SKILLS).map((skill) => ({
       skill,
       selection: roleBySkillId.get(skill.id)!,
-    }));
+    })), skills);
   }
   const scored = roleEligibleSkills.map((skill, index) => ({
     skill,
@@ -3745,10 +3786,10 @@ export function selectPlanningSkillRoles(
   const topScore = scored[0]?.score ?? 0;
   if (topScore < MIN_PLANNING_SKILL_SCORE) {
     if (topScore < LOW_CONFIDENCE_PLANNING_SKILL_SCORE) return [];
-    return scored
+    return expandRequiredPlanningSkills(scored
       .filter((entry) => entry.score === topScore)
       .slice(0, LOW_CONFIDENCE_PLANNING_SKILL_LIMIT)
-      .map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! }));
+      .map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! })), skills);
   }
   const secondScore = scored[1]?.score ?? 0;
   const strongWinner = topScore - secondScore >= STRONG_WINNER_GAP;
@@ -3768,7 +3809,48 @@ export function selectPlanningSkillRoles(
       });
     }
   }
-  return selected.map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! }));
+  return expandRequiredPlanningSkills(
+    selected.map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! })),
+    skills,
+  );
+}
+
+/**
+ * Skill cooperation is resolved from package metadata before planning. A
+ * Planner may shape work, but it must not be responsible for remembering a
+ * domain Skill's declared data provider.
+ */
+function expandRequiredPlanningSkills(
+  initial: readonly PlanningSkillRoleSelection[],
+  allSkills: readonly PrivateSkill[],
+): PlanningSkillRoleSelection[] {
+  const byName = new Map(allSkills.map((skill) => [skill.name, skill]));
+  const selected = new Map(initial.map((item) => [item.skill.id, item]));
+  const visit = (item: PlanningSkillRoleSelection): void => {
+    for (const name of item.skill.agentLoop?.requiredSkillNames ?? []) {
+      const companion = byName.get(name);
+      if (companion === undefined) {
+        throw new TypeError(`Skill ${item.skill.name} requires unavailable Skill ${name}`);
+      }
+      if (selected.has(companion.id)) continue;
+      const role = companion.agentLoop?.roles.includes("source_provider") === true
+        ? "source_provider"
+        : "primary_builder";
+      const next: PlanningSkillRoleSelection = {
+        skill: companion,
+        selection: {
+          skillId: companion.id,
+          role,
+          reason: `Required by selected Skill ${item.skill.name}.`,
+        },
+        companionForSkillId: item.skill.id,
+      };
+      selected.set(companion.id, next);
+      visit(next);
+    }
+  };
+  for (const item of initial) visit(item);
+  return [...selected.values()];
 }
 
 // This is a relevance prefilter, not a capability boundary. Keep enough

@@ -10,6 +10,7 @@ import type {
   StepExecutionBinding,
 } from "./contracts.ts";
 import type { UploadedSourceSummary } from "../runtime/contracts.ts";
+import type { PrivateSkill } from "../skills/skill-service.ts";
 
 const ARTIFACT_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "artifact_path",
@@ -142,6 +143,35 @@ export function planningCapabilitiesFromTools(
   return [...staticCapabilities, ...dynamic.values()];
 }
 
+const SKILL_SOURCE_PROVIDER_CAPABILITY_PREFIX = "skill_source_provider.";
+
+/**
+ * The Runtime selects source-provider Skills before planning. Their declared
+ * evidence interface is then available to the Planner and is added to every
+ * bound leaf by Admission; the Planner never needs to reconstruct it.
+ */
+export function planningCapabilitiesFromSkills(skills: readonly PrivateSkill[]): PlanningCapability[] {
+  return skills.flatMap((skill) => {
+    const metadata = skill.agentLoop;
+    const produces = metadata?.producesEvidenceKinds ?? [];
+    if (!metadata?.roles.includes("source_provider") || produces.length === 0) return [];
+    return metadata.sourceKinds.map((sourceKind) => ({
+      id: skillSourceProviderCapabilityId(skill.id, sourceKind),
+      category: "skill_source_provider",
+      label: `Read ${skill.name} source`,
+      produces: [...produces],
+      sourceKinds: [sourceKind],
+      sideEffect: "external_read",
+      risk: "medium",
+      constraints: ["requires the declaring source-provider Skill to be bound to the step"],
+    }));
+  });
+}
+
+export function skillSourceProviderCapabilityId(skillId: string, sourceKind: string): string {
+  return `${SKILL_SOURCE_PROVIDER_CAPABILITY_PREFIX}${sourceKind}.${skillId}`;
+}
+
 /**
  * Resolves source names deliberately mentioned in user input. Source aliases
  * are host registration data, so this remains independent of a transport,
@@ -202,10 +232,12 @@ export function capabilityRequiresTool(capability: string): boolean {
 export function unknownPlanningCapabilities(
   capabilities: readonly string[],
   availableTools: readonly PlanningToolSummary[] = [],
+  declaredCapabilities: readonly PlanningCapability[] = [],
 ): string[] {
   const dynamic = dynamicCapabilityIds(availableTools);
+  const declared = new Set(declaredCapabilities.map((capability) => capability.id));
   return uniqueStrings(capabilities).filter((capability) =>
-    CAPABILITY_TOOL_BINDINGS[capability] === undefined && !dynamic.has(capability)
+    CAPABILITY_TOOL_BINDINGS[capability] === undefined && !dynamic.has(capability) && !declared.has(capability)
   );
 }
 
@@ -275,6 +307,10 @@ function isExternalApiToolName(toolName: string): boolean {
 
 function inferSourceKinds(capabilities: readonly string[], evidenceKinds: readonly EvidenceKind[]): SourceKind[] {
   const kinds = new Set<SourceKind>();
+  for (const capability of capabilities) {
+    const match = capability.match(/^skill_source_provider\.([a-z]+)\./u);
+    if (match !== null && isSkillSourceKind(match[1])) kinds.add(match[1]);
+  }
   if (capabilities.includes("uploaded_source_read") || capabilities.includes("uploaded_table_extraction")) kinds.add("uploaded_source");
   if (capabilities.includes("visible_directory_read") || capabilities.includes("visible_table_extraction")) kinds.add("visible_directory");
   if (capabilities.includes("web_research")) kinds.add("web");
@@ -285,6 +321,15 @@ function inferSourceKinds(capabilities: readonly string[], evidenceKinds: readon
   }
   if (evidenceKinds.some((kind) => ARTIFACT_EVIDENCE_KINDS.has(kind))) kinds.add("generated_artifact");
   return [...kinds];
+}
+
+function isSkillSourceKind(value: string): value is SourceKind {
+  return value === "api"
+    || value === "database"
+    || value === "dataset"
+    || value === "document"
+    || value === "repository"
+    || value === "rubric";
 }
 
 function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect {

@@ -16,6 +16,13 @@ const enterpriseInfoEnvironmentFile = resolve(
   appRoot,
   process.env.ENTERPRISE_INFO_ENV_FILE ?? "./.env",
 );
+// Like other Skill-owned integrations, pass only the deployment configuration
+// path. The mysql Skill reads credentials itself; neither Planner nor model
+// context ever receives them.
+const steelMarketDatabaseEnvironmentFile = resolve(
+  appRoot,
+  process.env.STEEL_MARKET_DB_ENV_FILE ?? "./.env",
+);
 const host = process.env.HOST ?? "127.0.0.1";
 const port = integer(process.env.PORT, 8791);
 const runtimeId = requiredEnv("RUNTIME_ID");
@@ -71,6 +78,7 @@ const runs = new RunService({
   tools: integrationTools,
   computerCommandEnvironment: {
     ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
+    STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
   },
   runEventLogSink: (line) => process.stdout.write(`[${runtimeId}] ${line}\n`),
 });

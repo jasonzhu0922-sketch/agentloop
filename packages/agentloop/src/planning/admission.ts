@@ -13,6 +13,7 @@ import {
   unsatisfiedToolCapabilities,
   planningCapabilitiesFromToolNames,
   planningCapabilitiesFromTools,
+  skillSourceProviderCapabilityId,
 } from "./step-execution-binding.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
@@ -197,7 +198,11 @@ export function admitPlan(input: {
       ...(input.availableTools === undefined ? {} : { availableTools: input.availableTools }),
       evidenceContract: completionEvidenceContract,
     });
-    const unknownCapabilities = unknownPlanningCapabilities(executionBinding.requiredCapabilities, input.availableTools);
+    const unknownCapabilities = unknownPlanningCapabilities(
+      executionBinding.requiredCapabilities,
+      input.availableTools,
+      input.availableCapabilities,
+    );
     if (unknownCapabilities.length > 0) {
       reject(`Step ${step.id} requires unknown capabilities: ${unknownCapabilities.join(", ")}`);
     }
@@ -533,6 +538,11 @@ function capabilitiesRequiredBySkill(skill: PrivateSkill): string[] {
   const profiles = skill.agentLoop?.executionProfiles ?? [];
   const capabilities = new Set<string>();
   if (profiles.includes("local_script")) capabilities.add("workspace_artifact_write");
+  if (skill.agentLoop?.roles.includes("source_provider") && (skill.agentLoop.producesEvidenceKinds?.length ?? 0) > 0) {
+    for (const sourceKind of skill.agentLoop.sourceKinds) {
+      capabilities.add(skillSourceProviderCapabilityId(skill.id, sourceKind));
+    }
+  }
   return [...capabilities];
 }
 

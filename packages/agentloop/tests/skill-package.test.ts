@@ -59,6 +59,9 @@ test("AgentLoop role metadata is parsed from Skill package frontmatter", async (
       "  sourceKinds: []",
       "  executionProfiles:",
       "    - local_script",
+      "  producesEvidenceKinds:",
+      "    - source_summary",
+      "    - record_counts",
       "  qaKinds:",
       "    - openability",
       "---",
@@ -74,6 +77,7 @@ test("AgentLoop role metadata is parsed from Skill package frontmatter", async (
       sourceKinds: [],
       qaKinds: ["openability"],
       executionProfiles: ["local_script"],
+      producesEvidenceKinds: ["source_summary", "record_counts"],
     });
   } finally {
     await removeSkillPackage(workspace);

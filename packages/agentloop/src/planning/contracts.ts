@@ -41,6 +41,12 @@ export type CaveatPolicy =
   | "mark_unverified_facts"
   | "strict_fail_on_missing_source";
 export type SourceKind =
+  | "api"
+  | "database"
+  | "dataset"
+  | "document"
+  | "repository"
+  | "rubric"
   | "uploaded_source"
   | "visible_directory"
   | "workspace_file"
