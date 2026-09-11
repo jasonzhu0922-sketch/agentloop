@@ -46,6 +46,54 @@ test("generic request_human_loop Tool stops the loop before a completion candida
   }), (error: unknown) => error instanceof AppError && error.code === "HUMAN_LOOP_REQUIRED");
 });
 
+test("request_human_loop exposes its typed response and resume contracts to the model", () => {
+  const definition = createHumanLoopTool();
+  const schema = definition.inputSchema as {
+    readonly properties?: {
+      readonly responseSchema?: { readonly oneOf?: readonly { readonly properties?: { readonly type?: { readonly enum?: readonly string[] } } }[] };
+      readonly resume?: { readonly required?: readonly string[]; readonly properties?: { readonly mode?: { readonly enum?: readonly string[] } } };
+    };
+  };
+  const responseVariants = schema.properties?.responseSchema?.oneOf ?? [];
+
+  assert.deepEqual(responseVariants.map((variant) => variant.properties?.type?.enum?.[0]), ["select", "form", "confirm"]);
+  assert.deepEqual(schema.properties?.resume?.required, ["mode"]);
+  assert.deepEqual(schema.properties?.resume?.properties?.mode?.enum, ["continue_step", "replan_step", "recovery_review"]);
+  assert.match(definition.description, /not a JSON Schema/);
+});
+
+test("a malformed request_human_loop call fails closed instead of continuing without user input", async () => {
+  const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-invalid-hil", depth: 0, allowedToolNames: [HUMAN_LOOP_TOOL_NAME], allowedSkillIds: [] });
+  const events: RuntimeEvent[] = [];
+  let modelCalls = 0;
+  await assert.rejects(() => runAgentLoop({
+    runId: grant.runId, systemPrompt: "test", input: "confirm before proceeding", grant, maxSteps: 2,
+    tools: new ToolRegistry([createHumanLoopTool()]),
+    emit: async (event) => { events.push(event); },
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async () => {
+        modelCalls += 1;
+        return {
+          content: "", finishReason: "tool_calls" as const,
+          toolCalls: [{
+            id: "invalid-ask", name: HUMAN_LOOP_TOOL_NAME,
+            arguments: {
+              kind: "selection", title: "Choose", prompt: "Choose", rationale: "Need user direction", evidenceRefs: [],
+              // This is a JSON Schema, not the HIL select response schema.
+              responseSchema: { type: "object", properties: { selection: { type: "string" } } },
+              resume: { nextAction: "continue after selection" },
+            },
+          }],
+        };
+      },
+    },
+  }), (error: unknown) => error instanceof AppError && error.code === "HUMAN_LOOP_INVALID");
+  assert.equal(modelCalls, 1);
+  assert.equal(events.some((event) => event.type === "tool.rejected"), true);
+  assert.equal(events.some((event) => event.type === "human_loop.required"), false);
+});
+
 test("a projected Skill command HIL signal pauses before the next model call", async () => {
   const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-hil-command", depth: 0, allowedToolNames: ["computer_run_command"], allowedSkillIds: [] });
   const requirement = {

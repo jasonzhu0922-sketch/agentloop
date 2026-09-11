@@ -23,6 +23,7 @@ import type {
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import type { PreparedToolCall } from "../tools/tool-registry.ts";
 import { ToolRegistry } from "../tools/tool-registry.ts";
+import { HUMAN_LOOP_TOOL_NAME } from "../tools/human-loop-tool.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
 import {
@@ -987,6 +988,25 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         requirement: humanLoop.requirement,
         sourceToolCallId: humanLoop.toolCallId,
       });
+    }
+
+    // Calling the Runtime-owned HIL Tool is an explicit assertion that this
+    // Step cannot safely advance without a user response. If its request is
+    // malformed, no durable request exists for the user to answer. Treat that
+    // as a control-boundary failure rather than a normal tool repair, which
+    // could otherwise continue to a delivery without the requested approval.
+    const rejectedHumanLoop = outcomes.find((outcome) =>
+      outcome.call.name === HUMAN_LOOP_TOOL_NAME
+      && outcome.isError
+      && outcome.failurePhase === "prepare"
+    );
+    if (rejectedHumanLoop !== undefined) {
+      throw new AppError(
+        "HUMAN_LOOP_INVALID",
+        "Human-in-the-Loop request must be valid before this Step can continue",
+        422,
+        { sourceToolCallId: rejectedHumanLoop.call.id, reason: rejectedHumanLoop.content },
+      );
     }
 
     const prepareRejectionSignature = allPrepareRejectionSignature(outcomes);
