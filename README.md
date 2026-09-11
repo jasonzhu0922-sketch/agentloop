@@ -26,7 +26,7 @@ agentloop/
 
 两者各自拥有入口、配置、Web、认证/接入边界和运行数据，不能把 `agentloop-app` 的 SQLite、工作目录或 Web 直接接到 Multi Runtime 的 Router/Host 上。Multi Runtime 的一个 Run 始终由一个 Host 完整执行：不会把同一 Run 的 Plan 或 Step 拆到多个 Host，也不支持运行中的 Run 在 Host 间迁移。需要接入第三方业务系统时，应依赖 `@zhujun/agentloop` 内核包，而不是把任一参考应用当作 SDK。
 
-选择单 Runtime 时按下文启动 `agentloop-app`；选择 Multi Runtime 时请使用 [`apps/agentloop-multi-runtime/README.md`](apps/agentloop-multi-runtime/README.md) 的 Router、Host、Web 或 Docker Compose 启动方式。
+选择单 Runtime 时按下文启动 `agentloop-app`；选择 Multi Runtime 时可先按下文用一条命令启动本地拓扑；需要分别运行 Router、Host、Web 或使用 Docker Compose 时，再查阅 [`apps/agentloop-multi-runtime/README.md`](apps/agentloop-multi-runtime/README.md)。
 
 ## 核心机制
 
@@ -158,6 +158,35 @@ npm run dev
 ```bash
 npm start
 ```
+
+## 快速启动：agentloop-multi-runtime（多 Runtime）
+
+要求 Node.js 26 或更高版本，且根目录已执行过 `npm install`。本地启动器会启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Host，不会传给 Router 或 Web。
+
+1. 创建多 Runtime 自有的 Provider 配置和本地密钥文件：
+
+```bash
+cp apps/agentloop-multi-runtime/config/llm-providers.example.json \
+  apps/agentloop-multi-runtime/config/llm-providers.json
+cp apps/agentloop-multi-runtime/.env.example \
+  apps/agentloop-multi-runtime/.env
+```
+
+2. 编辑 `apps/agentloop-multi-runtime/config/llm-providers.json` 中的 Provider、Base URL、默认模型和 `apiKeyEnv`；在 `apps/agentloop-multi-runtime/.env` 填入该变量对应的密钥（例如 `OPENAI_API_KEY`）。不要把密钥写入 JSON 配置或提交到 Git。
+
+3. 从仓库根目录启动：
+
+```bash
+npm run start:multi-runtime
+```
+
+默认 Web 地址为 `http://127.0.0.1:5174/`，Router API 为 `http://127.0.0.1:8788/`。以 4 个 Host 启动：
+
+```bash
+npm run start:multi-runtime -- --runtimes 4
+```
+
+可用 `RUNTIME_COUNT=4`、`--runtime-count 4` 或 `-n 4` 指定 Host 数量。`Ctrl-C` 会同时停止启动器创建的所有进程；端口冲突时可通过 `PORT`、`WEB_PORT` 和 `RUNTIME_BASE_PORT` 覆盖默认值。分角色启动、Docker Compose、共享 PostgreSQL/POSIX workspace 等部署方式见 [Multi Runtime 运行说明](apps/agentloop-multi-runtime/README.md)。
 
 ## 本地数据与 Git 边界
 
@@ -295,6 +324,8 @@ npm run typecheck
 npm run init-db
 npm run dev
 npm start
+npm run start:multi-runtime
+npm run start:multi-runtime -- --runtimes 4
 ```
 
 ## 上游来源
