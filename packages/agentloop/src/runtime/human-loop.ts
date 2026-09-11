@@ -103,6 +103,21 @@ export class HumanLoopRepository {
 
 interface Row { id: string; run_id: string; plan_id: string | null; step_id: string | null; action_id: string | null; origin: HumanLoopOrigin; kind: HumanLoopKind; title: string; prompt: string; rationale: string; evidence_refs_json: string; response_schema_json: string; resume_json: string; status: HumanLoopStatus; revision: number; created_at: number; resolved_at: number | null; }
 function requestFromRow(row: Row): HumanLoopRequest { return { schema: "agentloop.humanLoopRequest/v1", id: row.id, runId: row.run_id, ...(row.plan_id === null ? {} : { planId: row.plan_id }), ...(row.step_id === null ? {} : { stepId: row.step_id }), ...(row.action_id === null ? {} : { actionId: row.action_id }), origin: row.origin, kind: row.kind, title: row.title, prompt: row.prompt, rationale: row.rationale, evidenceRefs: JSON.parse(row.evidence_refs_json), responseSchema: JSON.parse(row.response_schema_json), resume: JSON.parse(row.resume_json), status: row.status, revision: row.revision, createdAt: row.created_at, ...(row.resolved_at === null ? {} : { resolvedAt: row.resolved_at }) }; }
+/**
+ * Returns a typed requirement only when it is safe to persist as a HIL
+ * request. Runtime control-signal producers use this before a signal crosses
+ * a compacted tool-result boundary.
+ */
+export function humanLoopRequirementFromUnknown(value: unknown): HumanLoopRequirement | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try {
+    validateRequirement(value as HumanLoopRequirement);
+    return value as HumanLoopRequirement;
+  } catch {
+    return undefined;
+  }
+}
+
 function validateRequirement(value: HumanLoopRequirement): void {
   if (!["selection", "input", "confirmation", "approval"].includes(value.kind)) throw badRequest("Invalid Human-in-the-Loop kind");
   for (const text of [value.title, value.prompt, value.rationale]) if (typeof text !== "string" || !text.trim() || text.length > 10_000) throw badRequest("Human-in-the-Loop text is invalid");
@@ -112,6 +127,8 @@ function validateRequirement(value: HumanLoopRequirement): void {
   if (schema.type === "select" && (!Array.isArray(schema.options) || schema.options.length === 0 || !Number.isInteger(schema.minSelections) || !Number.isInteger(schema.maxSelections) || schema.minSelections < 0 || schema.maxSelections < schema.minSelections || schema.maxSelections > schema.options.length || schema.options.some((option) => !option || typeof option.id !== "string" || !option.id || typeof option.label !== "string" || !option.label))) throw badRequest("Human-in-the-Loop select schema is invalid");
   if (schema.type === "form" && (!Array.isArray(schema.fields) || schema.fields.length === 0 || schema.fields.some((field) => !field || typeof field.id !== "string" || !field.id || typeof field.label !== "string" || !field.label || typeof field.required !== "boolean" || !["text", "textarea", "date", "number", "file_ref"].includes(field.valueType)))) throw badRequest("Human-in-the-Loop form schema is invalid");
   if (schema.type === "confirm" && (!schema.acceptLabel || !schema.rejectLabel)) throw badRequest("Human-in-the-Loop confirm schema is invalid");
+  const resume = value.resume;
+  if (!resume || !["continue_step", "replan_step", "recovery_review"].includes(resume.mode) || (resume.targetStepId !== undefined && (typeof resume.targetStepId !== "string" || !resume.targetStepId))) throw badRequest("Human-in-the-Loop resume is invalid");
 }
 function validateResponse(schema: HumanLoopResponseSchema, value: unknown): void { if (schema.type === "select") { if (!Array.isArray(value) || value.length < schema.minSelections || value.length > schema.maxSelections || value.some((x) => typeof x !== "string") || new Set(value).size !== value.length || value.some((x) => !schema.options.some((option) => option.id === x))) throw badRequest("Human-in-the-Loop selection is invalid"); return; } if (schema.type === "confirm") { if (value === true) return; if (value && typeof value === "object" && (value as { accepted?: unknown }).accepted === false) return; throw badRequest("Human-in-the-Loop confirmation is invalid"); } if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("Human-in-the-Loop form is invalid"); const form = value as Record<string, unknown>; for (const field of schema.fields) { const answer = form[field.id]; if (field.required && (typeof answer !== "string" || !answer.trim())) throw badRequest(`Human-in-the-Loop field ${field.id} is required`); if (typeof answer === "string" && answer.length > (field.maxLength ?? 20_000)) throw badRequest(`Human-in-the-Loop field ${field.id} is too long`); } }
 async function appendEvent(database: SqlConnection, runId: string, type: string, payload: Record<string, unknown>, createdAt: number): Promise<void> { const row = await database.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?").get(runId) as { seq: number }; await database.prepare("INSERT INTO run_events(run_id, seq, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, row.seq, type, JSON.stringify(payload), createdAt); }

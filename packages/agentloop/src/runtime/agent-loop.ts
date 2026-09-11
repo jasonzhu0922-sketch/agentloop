@@ -37,6 +37,10 @@ import {
   initialRuntimeToolProgressState,
   type RuntimeToolProgressPolicy,
 } from "./tool-progress-policy.ts";
+import {
+  createHumanLoopControlSignal,
+  firstHumanLoopControlSignal,
+} from "./runtime-control-signal.ts";
 
 export interface AgentLoopOptions {
   readonly runId: string;
@@ -1834,10 +1838,24 @@ function humanLoopRequirementFromEvidence(evidence: readonly AgentLoopToolEviden
   for (const item of evidence) {
     if (item.isError) continue;
     const parsed = parseJsonRecord(item.result);
-    const nested = parsed === undefined || typeof parsed.stdout !== "string" ? undefined : parseJsonRecord(parsed.stdout);
-    const rawRequirement = parsed?.humanLoopRequirement ?? nested?.humanLoopRequirement;
-    const requirement = isPlainRecord(rawRequirement) ? rawRequirement : undefined;
-    if (requirement !== undefined) return { toolCallId: item.toolCallId, requirement };
+    if (parsed === undefined) continue;
+
+    // The explicit Runtime HIL Tool publishes a top-level, schema-tagged
+    // signal. Do not treat arbitrary Tool JSON as a pause request.
+    const direct = parsed.schema === "agentloop.humanLoopRequirement/v1"
+      ? createHumanLoopControlSignal(parsed.humanLoopRequirement)
+      : undefined;
+    if (direct !== undefined) return { toolCallId: item.toolCallId, requirement: direct.requirement as unknown as Record<string, unknown> };
+
+    // Command stdout can carry a signal only after Computer has validated it
+    // and projected it from an immutable, registered Skill command root. In
+    // particular, never inspect computer_read_file.content: user files are
+    // content, not Runtime control-plane input.
+    if (item.toolName !== "computer_run_command" || typeof parsed.stdout !== "string") continue;
+    const projection = parseJsonRecord(parsed.stdout);
+    if (projection?.schema !== "agentloop.commandOutputProjection/v1" || projection.stream !== "stdout") continue;
+    const commandSignal = firstHumanLoopControlSignal(projection.controlSignals);
+    if (commandSignal !== undefined) return { toolCallId: item.toolCallId, requirement: commandSignal.requirement as unknown as Record<string, unknown> };
   }
   return undefined;
 }

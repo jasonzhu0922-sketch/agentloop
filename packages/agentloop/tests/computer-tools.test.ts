@@ -1885,6 +1885,95 @@ test("computer_run_command stores large stdout as reusable content-addressed evi
   }
 });
 
+test("computer_run_command preserves validated HIL signals from a registered Skill command root", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-hil-signal-"));
+  const skillRoot = join(root, "installed-skill");
+  try {
+    await fs.mkdir(skillRoot);
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(skillRootGrant(["computer_run_command"], skillRoot));
+    const requirement = {
+      kind: "selection",
+      title: "Choose a target",
+      prompt: "Several targets are distinguishable. Choose one.",
+      rationale: "The Runtime cannot infer identity equivalence.",
+      evidenceRefs: [],
+      responseSchema: {
+        type: "select",
+        minSelections: 1,
+        maxSelections: 1,
+        options: [{ id: "target-a", label: "Target A" }, { id: "target-b", label: "Target B" }],
+      },
+      resume: { mode: "continue_step" },
+    };
+    const prepared = allowed.prepare({
+      id: "skill-hil-output",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["-e", `process.stdout.write(${JSON.stringify(JSON.stringify({ schema: "skill-result/v1", humanLoopRequirement: requirement }))})`],
+        cwd: "@skills/demo-skill",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, prepared.input) as {
+      stdout: string;
+      stdoutRef?: { path: string };
+    };
+    assert.ok(result.stdoutRef !== undefined);
+    const projection = JSON.parse(result.stdout) as {
+      schema: string;
+      controlSignals?: Array<{ schema: string; kind: string; requirement: { title: string } }>;
+    };
+    assert.equal(projection.schema, "agentloop.commandOutputProjection/v1");
+    assert.deepEqual(projection.controlSignals, [{
+      schema: "agentloop.runtimeControlSignal/v1",
+      kind: "human_loop",
+      requirement,
+    }]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command does not promote workspace stdout to a control signal", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-untrusted-hil-"));
+  try {
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(grant(["computer_run_command"]));
+    const payload = {
+      schema: "workspace-result/v1",
+      humanLoopRequirement: {
+        kind: "confirmation",
+        title: "Do not promote",
+        prompt: "This is ordinary workspace stdout.",
+        rationale: "It lacks registered Skill-root provenance.",
+        evidenceRefs: [],
+        responseSchema: { type: "confirm", acceptLabel: "Continue", rejectLabel: "Stop" },
+        resume: { mode: "continue_step" },
+      },
+    };
+    const prepared = allowed.prepare({
+      id: "workspace-hil-output",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["-e", `process.stdout.write(${JSON.stringify(JSON.stringify(payload))})`],
+        cwd: ".",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as { stdout: string };
+    assert.deepEqual(JSON.parse(result.stdout), payload);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_run_command preserves structured delivery candidates when stdout is referenced", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-structured-ref-"));
   try {

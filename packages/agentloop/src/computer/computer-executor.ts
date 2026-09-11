@@ -6,6 +6,10 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "
 import { createInterface } from "node:readline";
 import { AppError, badRequest, conflict, forbidden } from "../shared/errors.ts";
 import {
+  createHumanLoopControlSignal,
+  type HumanLoopControlSignal,
+} from "../runtime/runtime-control-signal.ts";
+import {
   extractSpreadsheetTables,
   profileSpreadsheets,
   type SpreadsheetDirectoryProfile,
@@ -1279,7 +1283,12 @@ export class ComputerExecutor {
                 );
               }
             }
-            const stdoutProjection = await this.projectCommandOutput("stdout", stdout.toString("utf8"));
+            // Only an immutable, Runtime-registered Skill package may publish
+            // a control signal through command stdout. Workspace commands and
+            // later file reads remain ordinary content, never control-plane
+            // input.
+            const allowControlSignals = cwdResolution.readOnlyRoot?.id.startsWith("@skills/") === true;
+            const stdoutProjection = await this.projectCommandOutput("stdout", stdout.toString("utf8"), { allowControlSignals });
             const stderrProjection = await this.projectCommandOutput("stderr", stderr.toString("utf8"));
             const evidenceReceipt = extractStdoutEvidenceReceipt(stdout.toString("utf8"));
             resolvePromise({
@@ -1303,11 +1312,15 @@ export class ComputerExecutor {
     });
   }
 
-  private async projectCommandOutput(kind: "stdout" | "stderr", content: string): Promise<{
+  private async projectCommandOutput(
+    kind: "stdout" | "stderr",
+    content: string,
+    options: { readonly allowControlSignals?: boolean } = {},
+  ): Promise<{
     content: string;
     reference?: CommandOutputReference;
   }> {
-    if (content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD && structuredCommandOutput(content, kind) === undefined) {
+    if (content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD && structuredCommandOutput(content, kind, options) === undefined) {
       return { content };
     }
     const sha256 = createHash("sha256").update(content).digest("hex");
@@ -1330,7 +1343,7 @@ export class ComputerExecutor {
         bytes,
         characters: content.length,
         previewCharacters: COMMAND_OUTPUT_REFERENCE_PREVIEW,
-      }),
+      }, options),
       reference: {
         path,
         sha256,
@@ -1673,8 +1686,9 @@ function projectReferencedCommandOutput(
   kind: "stdout" | "stderr",
   content: string,
   reference: CommandOutputReference,
+  options: { readonly allowControlSignals?: boolean },
 ): string {
-  const structured = structuredStdoutProjection(kind, content, reference);
+  const structured = structuredStdoutProjection(kind, content, reference, options);
   if (structured !== undefined) return structured;
   return [
     content.slice(0, COMMAND_OUTPUT_REFERENCE_PREVIEW),
@@ -1687,10 +1701,11 @@ function structuredStdoutProjection(
   kind: "stdout" | "stderr",
   content: string,
   reference: CommandOutputReference,
+  options: { readonly allowControlSignals?: boolean },
 ): string | undefined {
-  const structured = structuredCommandOutput(content, kind);
+  const structured = structuredCommandOutput(content, kind, options);
   if (structured === undefined) return undefined;
-  const { parsed, deliveryCandidate, evidenceReceipt } = structured;
+  const { parsed, deliveryCandidate, evidenceReceipt, controlSignals } = structured;
   const contentLocation = {
     kind: "content_addressed",
     stream: kind,
@@ -1708,6 +1723,7 @@ function structuredStdoutProjection(
     ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
     ...(typeof parsed.delivery_markdown === "string" ? { delivery_markdown: parsed.delivery_markdown } : {}),
     ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+    ...(controlSignals === undefined ? {} : { controlSignals }),
     ...(parsed.assessmentProjection === undefined ? {} : { assessmentProjection: parsed.assessmentProjection }),
     ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
     contentLocation,
@@ -1727,16 +1743,22 @@ function structuredStdoutProjection(
     ...(parsed.assessmentProjection === undefined ? {} : { assessmentProjection: parsed.assessmentProjection }),
     ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
     ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+    ...(controlSignals === undefined ? {} : { controlSignals }),
     contentLocation,
     stdoutRef: reference,
     stdoutReferenceNotice: commandOutputReferenceNotice(kind, reference),
   }, null, 2);
 }
 
-function structuredCommandOutput(content: string, kind: "stdout" | "stderr"): {
+function structuredCommandOutput(
+  content: string,
+  kind: "stdout" | "stderr",
+  options: { readonly allowControlSignals?: boolean } = {},
+): {
   readonly parsed: Record<string, unknown>;
   readonly deliveryCandidate?: Record<string, unknown>;
   readonly evidenceReceipt?: Record<string, unknown>;
+  readonly controlSignals?: readonly HumanLoopControlSignal[];
 } | undefined {
   if (kind !== "stdout") return undefined;
   const parsed = parseJsonRecord(content);
@@ -1749,11 +1771,15 @@ function structuredCommandOutput(content: string, kind: "stdout" | "stderr"): {
   const hasDeliveryMarkdown = typeof parsed.delivery_markdown === "string"
     && parsed.delivery_markdown.trim().length > 0;
   const evidenceReceipt = extractEvidenceReceipt(parsed);
-  if (!hasDeliveryOutput && !hasDeliveryMarkdown && evidenceReceipt === undefined) return undefined;
+  const humanLoopSignal = options.allowControlSignals === true
+    ? createHumanLoopControlSignal(parsed.humanLoopRequirement)
+    : undefined;
+  if (!hasDeliveryOutput && !hasDeliveryMarkdown && evidenceReceipt === undefined && humanLoopSignal === undefined) return undefined;
   return {
     parsed,
     ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
     ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+    ...(humanLoopSignal === undefined ? {} : { controlSignals: [humanLoopSignal] }),
   };
 }
 
