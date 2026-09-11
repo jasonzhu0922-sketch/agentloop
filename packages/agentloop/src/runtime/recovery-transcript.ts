@@ -32,6 +32,18 @@ interface ToolOutcome {
   readonly failurePhase?: "prepare" | "execute" | "runtime";
 }
 
+interface HumanLoopResponseEvent {
+  readonly requestId?: string;
+  readonly value: unknown;
+}
+
+interface HumanLoopRequestSnapshot {
+  readonly kind: string;
+  readonly title: string;
+  readonly prompt: string;
+  readonly responseSchema: Record<string, unknown>;
+}
+
 /** Rebuild only provider-valid exchanges from persisted Runtime events. */
 export function reconstructRecoveryTranscript(input: {
   userInput: string;
@@ -43,12 +55,22 @@ export function reconstructRecoveryTranscript(input: {
   const outcomes = new Map<string, ToolOutcome>();
   const assistants: AssistantCheckpoint[] = [];
   const candidateOutputs: string[] = [];
-  const humanResponses: unknown[] = [];
+  const humanResponses: HumanLoopResponseEvent[] = [];
+  const humanLoopRequests = new Map<string, HumanLoopRequestSnapshot>();
   const toolCallCommitted = new Map<string, { name: string; arguments: unknown; seq: number }>();
   const coveredToolCallIds = new Set<string>();
   for (const event of scope) {
     if (event.type === "human_loop.answered") {
-      humanResponses.push(event.data.value);
+      humanResponses.push({
+        ...(typeof event.data.requestId === "string" ? { requestId: event.data.requestId } : {}),
+        value: event.data.value,
+      });
+      continue;
+    }
+    if (event.type === "run.waiting_user") {
+      const requestId = typeof event.data.requestId === "string" ? event.data.requestId : undefined;
+      const request = humanLoopRequestSnapshot(event.data.request);
+      if (requestId !== undefined && request !== undefined) humanLoopRequests.set(requestId, request);
       continue;
     }
     if (event.type === "assistant.committed") {
@@ -198,7 +220,13 @@ export function reconstructRecoveryTranscript(input: {
     }
   }
   for (const response of humanResponses) {
-    messages.push({ role: "user", content: `Human-in-the-Loop response: ${JSON.stringify(response)}` });
+    const request = response.requestId === undefined ? undefined : humanLoopRequests.get(response.requestId);
+    messages.push({
+      role: "user",
+      content: request === undefined
+        ? `Human-in-the-Loop response: ${JSON.stringify(response.value)}`
+        : `Human-in-the-Loop resolution: ${JSON.stringify(humanLoopResolution(request, response.value))}`,
+    });
   }
 
   return {
@@ -211,6 +239,61 @@ export function reconstructRecoveryTranscript(input: {
       candidateOutputs,
     },
   };
+}
+
+/**
+ * The waiting event carries a durable HIL request snapshot.  Preserve its
+ * neutral response semantics for recovery without teaching Runtime about any
+ * Skill's domain fields.
+ */
+function humanLoopRequestSnapshot(value: unknown): HumanLoopRequestSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.kind !== "string" || typeof value.title !== "string" || typeof value.prompt !== "string") return undefined;
+  if (!isRecord(value.responseSchema) || typeof value.responseSchema.type !== "string") return undefined;
+  return {
+    kind: value.kind,
+    title: value.title,
+    prompt: value.prompt,
+    responseSchema: value.responseSchema,
+  };
+}
+
+function humanLoopResolution(request: HumanLoopRequestSnapshot, value: unknown): Record<string, unknown> {
+  const resolution: Record<string, unknown> = {
+    schema: "agentloop.humanLoopResolution/v1",
+    request: {
+      kind: request.kind,
+      title: request.title,
+      prompt: request.prompt,
+      responseSchema: { type: request.responseSchema.type },
+    },
+    value,
+  };
+  if (request.responseSchema.type === "select" && Array.isArray(value)) {
+    const options = Array.isArray(request.responseSchema.options) ? request.responseSchema.options : [];
+    const byId = new Map(options.flatMap((option) => {
+      if (!isRecord(option) || typeof option.id !== "string" || typeof option.label !== "string") return [];
+      return [[option.id, option] as const];
+    }));
+    resolution.selectedOptions = value.flatMap((id) => {
+      if (typeof id !== "string") return [];
+      const option = byId.get(id);
+      if (option === undefined) return [];
+      return [{
+        id: option.id,
+        label: option.label,
+        ...(typeof option.description === "string" ? { description: option.description } : {}),
+        ...(Array.isArray(option.evidenceRefs)
+          ? { evidenceRefs: option.evidenceRefs.filter((reference): reference is string => typeof reference === "string") }
+          : {}),
+      }];
+    });
+  }
+  return resolution;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function lastStepStart(events: readonly RecoveryEvent[], stepId: string): number {

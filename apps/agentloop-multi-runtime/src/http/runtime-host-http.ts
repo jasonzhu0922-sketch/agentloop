@@ -68,6 +68,20 @@ export function createRuntimeHostHttpServer(host: AgentLoopRuntimeHost, options:
         }
         return json(response, 200, { events: await host.events(decodeURIComponent(eventsMatch[1]), Number(eventsMatch[2] ?? 0)) });
       }
+      const recoveryAdvanceMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/recovery\/advance$/);
+      if (request.method === "POST" && recoveryAdvanceMatch !== undefined && recoveryAdvanceMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
+          return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        }
+        return json(response, 200, { recovery: await host.advanceRecovery(decodeURIComponent(recoveryAdvanceMatch[1])) });
+      }
+      const recoveryResumeMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/recovery\/resume$/);
+      if (request.method === "POST" && recoveryResumeMatch !== undefined && recoveryResumeMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
+          return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        }
+        return json(response, 200, { run: await host.resumeRecovery(decodeURIComponent(recoveryResumeMatch[1])) });
+      }
       if (request.method !== "POST" || request.url !== "/v1/runtime-dispatches") return json(response, 404, { error: "not_found" });
       if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
         return json(response, 401, { error: "runtime_dispatch_unauthorized" });

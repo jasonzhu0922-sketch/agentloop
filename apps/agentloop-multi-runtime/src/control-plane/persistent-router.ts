@@ -1,5 +1,5 @@
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
-import type { ProcessArtifact } from "@zhujun/agentloop";
+import type { ProcessArtifact, RecoveryDetail } from "@zhujun/agentloop";
 import { ControlPlaneStore, RuntimeCapacityError, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
 
 export class PersistentMultiRuntimeRouter {
@@ -119,6 +119,24 @@ export class PersistentMultiRuntimeRouter {
     // status read to repair it later.
     await this.store.observeRun(id, terminalRun, this.now());
     return { assignment: (await this.store.assignment(id)) ?? assignment, events };
+  }
+
+  async advanceRecovery(id: string): Promise<{ readonly assignment: StoredAssignment; readonly recovery: RecoveryDetail } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const advanceRecovery = this.endpointFactory(assignment.runtimeEndpoint).advanceRecovery;
+    if (advanceRecovery === undefined) throw new TypeError("Runtime endpoint does not support recovery advance");
+    return { assignment, recovery: await advanceRecovery(assignment.remoteRunId) };
+  }
+
+  async resumeRecovery(id: string): Promise<{ readonly assignment: StoredAssignment; readonly run: RuntimeRunStatus } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const resumeRecovery = this.endpointFactory(assignment.runtimeEndpoint).resumeRecovery;
+    if (resumeRecovery === undefined) throw new TypeError("Runtime endpoint does not support recovery resume");
+    const run = await resumeRecovery(assignment.remoteRunId);
+    await this.store.observeRun(assignment.id, run, this.now());
+    return { assignment: (await this.store.assignment(id)) ?? assignment, run };
   }
 
   async currentHumanLoop(id: string) {

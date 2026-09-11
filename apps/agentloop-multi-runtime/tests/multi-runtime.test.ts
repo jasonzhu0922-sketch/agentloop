@@ -195,6 +195,9 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /projectAssistantEvent\(assistant, event\)/);
   assert.match(app, /mergeRuntimeEvents\(assistant\.events, \[event\]\)/);
   assert.match(app, /message\.status === "completed" \? renderMarkdown\(message\.text\) : formatText\(message\.text\)/);
+  assert.match(app, /function renderRecovery\(message\)/);
+  assert.match(app, /recovery\/advance/);
+  assert.match(app, /recovery\/resume/);
   assert.match(app, /import \{ renderMarkdown \} from "\.\/markdown-renderer\.js"/);
   assert.match(app, /function toolOutcomeLabel\(tool\)/);
   assert.match(app, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
@@ -240,6 +243,41 @@ test("Web recovery replays Host Plan events instead of leaving a completed card 
   assert.equal(assistant.status, "completed");
   assert.deepEqual(assistant.plan.map((step) => step.status), ["completed", "completed"]);
   assert.equal(hasIncompleteCompletedPlan(assistant), false);
+});
+
+test("Web projects the persisted Human-in-the-Loop request from its waiting event", () => {
+  const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [], humanLoop: undefined as unknown };
+  const request = {
+    id: "hil-choice", runId: "run-choice", status: "open", revision: 1, kind: "selection",
+    title: "Choose a company", prompt: "Select one candidate.", rationale: "Candidates differ.", evidenceRefs: [],
+    responseSchema: { type: "select", minSelections: 1, maxSelections: 1, options: [{ id: "company-a", label: "Company A" }] },
+    resume: { mode: "continue_step" }, createdAt: 1,
+  };
+  assert.equal(projectAssistantEvent(assistant, {
+    seq: 7, type: "run.waiting_user", data: { runId: "run-choice", requestId: request.id, kind: request.kind, request }, createdAt: 7,
+  }), false);
+  assert.deepEqual(assistant.humanLoop, request);
+});
+
+test("Web projects a durable recovery boundary without treating it as a terminal failure", () => {
+  const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [], recovery: undefined as unknown };
+  assert.equal(projectAssistantEvent(assistant, {
+    seq: 9,
+    type: "run.recovery_required",
+    data: {
+      runId: "run-recovery",
+      actionId: "action-recovery",
+      failedBoundary: { stepId: "lookup", missingEvidenceKinds: ["source_summary", "explicit_caveats"] },
+    },
+    createdAt: 9,
+  }), false);
+  assert.deepEqual(assistant.recovery, {
+    status: "required",
+    runId: "run-recovery",
+    actionId: "action-recovery",
+    failedBoundary: { stepId: "lookup", missingEvidenceKinds: ["source_summary", "explicit_caveats"] },
+  });
+  assert.equal(assistant.status, "running");
 });
 
 test("Web bounds persisted event payloads without truncating the live assistant projection", () => {
@@ -1140,6 +1178,41 @@ test("persistent Router forwards cancellation to the assigned Host and persists 
   const cancelled = await router.cancel(assignment.id);
   assert.equal(cancelled.run.status, "cancelled");
   assert.equal(cancelled.assignment.status, "cancelled");
+  await database.close();
+});
+
+test("persistent Router forwards recovery advance and resume to the assigned Host", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-recovery"), endpoint: "http://runtime-recovery" }], 100);
+  await store.heartbeat({ runtimeId: "runtime-recovery", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  const calls: string[] = [];
+  const router = new PersistentMultiRuntimeRouter({
+    store,
+    now: () => 200,
+    heartbeatTtlMs: 1_000,
+    endpointFactory: () => ({
+      async dispatch() { return { remoteRunId: "run-recovery" }; },
+      async advanceRecovery(remoteRunId) {
+        calls.push(`advance:${remoteRunId}`);
+        return {
+          state: { runId: remoteRunId, actionId: "action-recovery", state: "ready_to_resume", updatedAt: 200 },
+          decisions: [], planRevisionAssessments: [], userResponses: [],
+        };
+      },
+      async resumeRecovery(remoteRunId) {
+        calls.push(`resume:${remoteRunId}`);
+        return { remoteRunId, status: "running" as const };
+      },
+    }),
+  });
+  const assignment = await router.submit(task("user-recovery", "message-recovery"));
+  const advanced = await router.advanceRecovery(assignment.id);
+  assert.equal(advanced?.recovery.state?.state, "ready_to_resume");
+  const resumed = await router.resumeRecovery(assignment.id);
+  assert.equal(resumed?.run.status, "running");
+  assert.deepEqual(calls, ["advance:run-recovery", "resume:run-recovery"]);
   await database.close();
 });
 

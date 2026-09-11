@@ -1734,7 +1734,12 @@ export class RunService {
             actionId: action.id,
             origin: "tool",
           });
-          await emit({ type: "run.waiting_user", data: { runId, planId, stepId: runningStepId, requestId: request.id, kind: request.kind } });
+          // A waiting-user event is a displayable Runtime state, not merely a
+          // notification that the browser should make a second best-effort
+          // request.  Carry the persisted request snapshot so an active SSE
+          // connection (and its durable replay) can render the required
+          // interaction even if that follow-up lookup is temporarily absent.
+          await emit({ type: "run.waiting_user", data: { runId, planId, stepId: runningStepId, requestId: request.id, kind: request.kind, request } });
           return this.get(actorUserId, runId);
         }
         const failedBoundary = failedBoundaryFromErrorDetails(appError.details);

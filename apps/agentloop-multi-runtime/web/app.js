@@ -15,6 +15,7 @@ let activeId = sessions[0]?.id ?? newConversation().id;
 const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
+const recoveringAssignmentIds = new Set();
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
 loadIdentity();
@@ -356,6 +357,7 @@ function render() {
     render();
   }));
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
+  document.querySelectorAll("[data-recovery-advance]").forEach((button) => button.addEventListener("click", () => void advanceRecovery(button.dataset.recoveryAdvance)));
   const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
   const activeRun = activeRunsByConversation.get(conversation.id);
   const cancelTarget = cancellationTarget(activeRun, messages);
@@ -381,8 +383,13 @@ function renderMessage(message) {
   const runtime = message.runtimeId ? ` · ${message.runtimeId}` : "";
   const reasoning = isLive && message.reasoning ? `<details class="live-reasoning" open><summary>模型思考</summary><div class="reasoning-body">${formatText(message.reasoning)}</div></details>` : "";
   const humanLoop = renderHumanLoop(message);
-  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || "Run 失败")}</div>` : message.text ? (message.status === "completed" ? renderMarkdown(message.text) : formatText(message.text)) : humanLoop || `<span class="thinking"><i></i><i></i><i></i></span>`;
-  const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.status === "running" ? "执行中" : message.status === "completed" ? "已完成" : message.status === "failed" ? "未完成" : message.status || "";
+  const recovery = renderRecovery(message);
+  const interimOutput = message.text ? (message.status === "completed" ? renderMarkdown(message.text) : formatText(message.text)) : "";
+  // A pending Human-in-the-Loop request is the current actionable state. Keep
+  // any useful interim model text, but never let it displace the response
+  // controls the user needs in order to continue the Run.
+  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || "Run 失败")}</div>` : `${interimOutput}${humanLoop}${recovery}` || `<span class="thinking"><i></i><i></i><i></i></span>`;
+  const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : message.status === "running" ? "执行中" : message.status === "completed" ? "已完成" : message.status === "failed" ? "未完成" : message.status || "";
   const stateIcon = message.status === "completed" ? "✓" : message.status === "failed" ? "!" : "";
   const completedAt = formatMessageTime(message.completedAt);
   const duration = formatConversationDuration(message.createdAt, message.completedAt);
@@ -416,6 +423,49 @@ function renderHumanLoop(message) {
   else if (schema.type === "form") fields = `<div class="human-loop-form">${(schema.fields || []).map((field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}${field.valueType === "textarea" ? `<textarea data-human-field="${escapeHtml(field.id)}" ${field.required ? "required" : ""}></textarea>` : `<input data-human-field="${escapeHtml(field.id)}" type="${field.valueType === "date" ? "date" : field.valueType === "number" ? "number" : "text"}" ${field.required ? "required" : ""}/>`}${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}</label>`).join("")}</div>`;
   else fields = `<div class="human-loop-confirm"><label><input type="radio" name="human-${key}" value="accept" checked/>${escapeHtml(schema.acceptLabel || "确认")}</label><label><input type="radio" name="human-${key}" value="reject"/>${escapeHtml(schema.rejectLabel || "拒绝")}</label></div>`;
   return `<section class="human-loop-card" data-human-loop="${escapeHtml(request.id)}" data-human-kind="${escapeHtml(schema.type || "")}" data-human-revision="${request.revision}"><b>${escapeHtml(request.title)}</b><p>${escapeHtml(request.prompt)}</p>${fields}<button type="button" class="human-loop-submit" data-human-loop-submit="${message.id}">提交</button><small class="human-loop-error" aria-live="polite"></small></section>`;
+}
+
+function renderRecovery(message) {
+  const recovery = message.recovery;
+  if (!recovery || (recovery.status !== "required" && recovery.status !== "advancing")) return "";
+  const boundary = recovery.failedBoundary || {};
+  const missing = Array.isArray(boundary.missingEvidenceKinds) && boundary.missingEvidenceKinds.length > 0
+    ? `缺少可观察证据：${boundary.missingEvidenceKinds.map((kind) => String(kind)).join("、")}`
+    : "上一步未满足完成契约，需要由 Runtime 重新制定恢复方案。";
+  const advancing = recovery.status === "advancing";
+  const canAdvance = typeof message.assignmentId === "string" && !advancing && !recoveringAssignmentIds.has(message.assignmentId);
+  return `<section class="human-loop-card recovery-card"><b>${advancing ? "正在恢复" : "需要恢复"}</b><p>${escapeHtml(missing)}</p>${canAdvance ? `<button type="button" class="human-loop-submit" data-recovery-advance="${message.id}">继续恢复</button>` : ""}<small class="human-loop-error" aria-live="polite">${advancing ? "Runtime 正在分析失败边界并决定继续、修订计划或请求补充信息。" : ""}</small></section>`;
+}
+
+async function advanceRecovery(messageId) {
+  const assistant = [...(activeConversation()?.messages || [])].find((message) => message.id === messageId);
+  if (!assistant?.assignmentId || recoveringAssignmentIds.has(assistant.assignmentId)) return;
+  recoveringAssignmentIds.add(assistant.assignmentId);
+  assistant.recovery = { ...assistant.recovery, status: "advancing" };
+  saveSessions(); render(); setStatus("正在恢复", "running");
+  try {
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/recovery/advance`, {
+      method: "POST",
+      headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() },
+    });
+    const body = await response.json().catch(() => undefined);
+    if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+    if (body?.recovery?.state?.state === "ready_to_resume") {
+      const resume = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/recovery/resume`, {
+        method: "POST",
+        headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() },
+      });
+      const resumed = await resume.json().catch(() => undefined);
+      if (!resume.ok) throw new Error(resumed?.error || `HTTP ${resume.status}`);
+      assistant.recovery = undefined;
+    }
+  } catch (error) {
+    assistant.recovery = { ...assistant.recovery, status: "required" };
+    setStatus(`恢复失败：${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally {
+    recoveringAssignmentIds.delete(assistant.assignmentId);
+    saveSessions(); render();
+  }
 }
 
 async function submitHumanLoop(messageId) {

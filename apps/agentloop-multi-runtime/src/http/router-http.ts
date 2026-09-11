@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
-import type { HumanLoopRequest, HumanLoopResponse } from "@zhujun/agentloop";
+import type { HumanLoopRequest, HumanLoopResponse, RecoveryDetail } from "@zhujun/agentloop";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 
@@ -21,6 +21,8 @@ interface RouterTaskApi {
   heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
   cancel?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus }>;
   events?(id: string, afterSeq: number): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>;
+  advanceRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly recovery: RecoveryDetail } | undefined>;
+  resumeRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus } | undefined>;
   currentHumanLoop?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly request: HumanLoopRequest | undefined } | undefined>;
   respondHumanLoop?(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly response: HumanLoopResponse } | undefined>;
 }
@@ -92,6 +94,26 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         const body = await readJson(request);
         const task = await taskFromRequest(body, request.headers["x-tenant-id"], request.headers["x-user-id"], options.attachments);
         return json(response, 202, { assignment: await router.submit(task) });
+      }
+      const recoveryAdvanceMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/recovery\/advance$/);
+      if (request.method === "POST" && recoveryAdvanceMatch !== null) {
+        if (router.advanceRecovery === undefined) return json(response, 501, { error: "recovery_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.advanceRecovery(decodeURIComponent(recoveryAdvanceMatch[1]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) {
+          return json(response, 404, { error: "assignment_not_found" });
+        }
+        return json(response, 200, { recovery: projection.recovery });
+      }
+      const recoveryResumeMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/recovery\/resume$/);
+      if (request.method === "POST" && recoveryResumeMatch !== null) {
+        if (router.resumeRecovery === undefined) return json(response, 501, { error: "recovery_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.resumeRecovery(decodeURIComponent(recoveryResumeMatch[1]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) {
+          return json(response, 404, { error: "assignment_not_found" });
+        }
+        return json(response, 200, { run: projection.run });
       }
       const assignmentId = assignmentIdFromPath(url.pathname);
       if (request.method === "GET" && assignmentId !== undefined) {
@@ -271,6 +293,26 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     const body = await response.json() as { events?: RuntimeRunEvent[]; error?: string };
     if (!response.ok || !Array.isArray(body.events)) throw new Error(body.error ?? `runtime events failed with HTTP ${response.status}`);
     return body.events;
+  }
+
+  async advanceRecovery(remoteRunId: string): Promise<RecoveryDetail> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/recovery/advance`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      method: "POST",
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { recovery?: RecoveryDetail; error?: string };
+    if (!response.ok || body.recovery === undefined) throw new Error(body.error ?? `runtime recovery advance failed with HTTP ${response.status}`);
+    return body.recovery;
+  }
+
+  async resumeRecovery(remoteRunId: string): Promise<RuntimeRunStatus> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/recovery/resume`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      method: "POST",
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { run?: RuntimeRunStatus; error?: string };
+    if (!response.ok || body.run === undefined) throw new Error(body.error ?? `runtime recovery resume failed with HTTP ${response.status}`);
+    return body.run;
   }
 
   async currentHumanLoop(remoteRunId: string) {

@@ -1,4 +1,4 @@
-import type { HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RunService } from "@zhujun/agentloop";
+import type { HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RecoveryDetail, RunService } from "@zhujun/agentloop";
 import type { PortableResourceRef, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeRunEvent, RuntimeRunStatus } from "../domain/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "./host-dispatch-store.ts";
 
@@ -19,14 +19,14 @@ export interface RuntimeCapacityGate {
 export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   private readonly dispatches = new Map<string, Promise<RuntimeDispatchResult>>();
   private readonly ownersByRunId = new Map<string, string>();
-  private readonly runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "currentHumanLoop" | "respondHumanLoop">>;
+  private readonly runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "advanceRecovery" | "resumeRecovery" | "currentHumanLoop" | "respondHumanLoop">>;
   private readonly resourceImporter: ResourceImporter;
   private readonly capacity?: RuntimeCapacityGate;
   private readonly dispatchStore?: HostDispatchStore;
   private admissionTail: Promise<void> = Promise.resolve();
 
   constructor(
-    runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events">>,
+    runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "advanceRecovery" | "resumeRecovery" | "currentHumanLoop" | "respondHumanLoop">>,
     resourceImporter: ResourceImporter,
     capacity?: RuntimeCapacityGate,
     dispatchStore?: HostDispatchStore,
@@ -93,6 +93,25 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     return (await this.runs.events(ownerUserId, remoteRunId))
       .filter((event) => event.seq > afterSeq)
       .map((event) => ({ seq: event.seq, type: event.type, data: event.data, createdAt: event.createdAt }));
+  }
+
+  async advanceRecovery(remoteRunId: string): Promise<RecoveryDetail> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined || this.runs.advanceRecovery === undefined) throw new TypeError("runtime recovery advance is not configured");
+    return await this.runs.advanceRecovery(ownerUserId, remoteRunId);
+  }
+
+  async resumeRecovery(remoteRunId: string): Promise<RuntimeRunStatus> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined || this.runs.resumeRecovery === undefined) throw new TypeError("runtime recovery resume is not configured");
+    const run = await this.runs.resumeRecovery(ownerUserId, remoteRunId);
+    return {
+      remoteRunId: run.id,
+      status: run.status,
+      ...(run.output === undefined ? {} : { output: run.output }),
+      ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
+      ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+    };
   }
 
   async currentHumanLoop(remoteRunId: string): Promise<HumanLoopRequest | undefined> {

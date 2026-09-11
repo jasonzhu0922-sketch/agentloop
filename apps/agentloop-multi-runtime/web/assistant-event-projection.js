@@ -23,21 +23,38 @@ export function projectAssistantEvent(assistant, event) {
   if (event.type === "plan.proposed" || event.type === "plan.admitted") {
     if (Array.isArray(data.steps)) assistant.plan = data.steps;
   }
+  // `run.waiting_user` carries the durable request snapshot.  Do not depend on
+  // a second asynchronous read before exposing a user action: that read is a
+  // reconciliation path after reconnect, not the only display path.
+  if (event.type === "run.waiting_user" && data.request?.status === "open") {
+    assistant.humanLoop = data.request;
+  }
+  if (event.type === "run.recovery_required") {
+    assistant.recovery = {
+      status: "required",
+      ...(typeof data.runId === "string" ? { runId: data.runId } : {}),
+      ...(typeof data.actionId === "string" ? { actionId: data.actionId } : {}),
+      ...(data.failedBoundary && typeof data.failedBoundary === "object" ? { failedBoundary: data.failedBoundary } : {}),
+    };
+  }
   applyPlanStepEvent(assistant, event);
   if (event.type === "run.completed") {
     if (typeof data.output === "string") assistant.text = data.output;
     assistant.status = "completed";
     assistant.reasoning = "";
+    assistant.recovery = undefined;
   }
   if (event.type === "run.failed") {
     assistant.status = "failed";
     assistant.error = failureMessage(data);
     assistant.text = assistant.error;
     assistant.reasoning = "";
+    assistant.recovery = undefined;
   }
   if (event.type === "run.cancelled") {
     assistant.status = "cancelled";
     assistant.reasoning = "";
+    assistant.recovery = undefined;
   }
   return TERMINAL_EVENT_TYPES.has(event.type);
 }

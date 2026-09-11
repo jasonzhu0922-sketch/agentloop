@@ -151,3 +151,70 @@ test("recovery keeps truncated or malformed tool calls out of the provider trans
   }]);
   assert.deepEqual(transcript.facts.unfinishedToolCalls, []);
 });
+
+test("recovery resolves selected HIL options from the persisted waiting-request snapshot", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "查询企业信息",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["run.waiting_user", {
+        requestId: "request-1",
+        request: {
+          schema: "agentloop.humanLoopRequest/v1",
+          kind: "selection",
+          title: "请选择企业",
+          prompt: "请选择要继续查询的企业主体。",
+          responseSchema: {
+            type: "select",
+            minSelections: 1,
+            maxSelections: 1,
+            options: [{
+              id: "company-1",
+              label: "中国平安保险（集团）股份有限公司",
+              description: "统一社会信用代码：91440300100012316L",
+              evidenceRefs: ["search-result-1"],
+            }],
+          },
+        },
+      }],
+      ["human_loop.answered", { requestId: "request-1", value: ["company-1"] }],
+    ),
+  });
+
+  assert.deepEqual(transcript.messages.at(-1), {
+    role: "user",
+    content: "Human-in-the-Loop resolution: " + JSON.stringify({
+      schema: "agentloop.humanLoopResolution/v1",
+      request: {
+        kind: "selection",
+        title: "请选择企业",
+        prompt: "请选择要继续查询的企业主体。",
+        responseSchema: { type: "select" },
+      },
+      value: ["company-1"],
+      selectedOptions: [{
+        id: "company-1",
+        label: "中国平安保险（集团）股份有限公司",
+        description: "统一社会信用代码：91440300100012316L",
+        evidenceRefs: ["search-result-1"],
+      }],
+    }),
+  });
+});
+
+test("recovery keeps the legacy raw HIL value when historical events lack a request snapshot", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "do the thing",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["human_loop.answered", { requestId: "old-request", value: ["option-1"] }],
+    ),
+  });
+
+  assert.deepEqual(transcript.messages.at(-1), {
+    role: "user",
+    content: "Human-in-the-Loop response: [\"option-1\"]",
+  });
+});
