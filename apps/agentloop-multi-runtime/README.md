@@ -1,6 +1,6 @@
 # AgentLoop Multi Runtime
 
-`agentloop-multi-runtime` 是一个可本地运行的多 Runtime 参考应用。完整部署有三个角色：
+`agentloop-multi-runtime` 有三个独立发布、独立扩缩容的部署角色；本地启动器只是同时启动它们的开发便利工具：
 
 ```text
 Browser Web → Router API / 控制面 → Runtime Host A | Runtime Host B | Runtime Host N
@@ -20,17 +20,18 @@ Router 还可以作为应用集成与鉴权钩子的承载面：Host 通过受�
 
 ```text
 src/
-├── domain/         跨进程协议和领域类型
-├── config/         Runtime 配置解析与校验
-├── control-plane/  Router 调度、Assignment 和控制面持久化
-├── runtime/        Runtime Host 执行、资源导入和 dispatch 幂等
-├── attachments/    Router-owned 附件存储与资源引用
-├── http/           Router/Host HTTP 协议适配
-└── entrypoints/    Router 与 Runtime Host 进程装配入口
+├── domain/         唯一允许跨 Router/Host 的版本化协议
+├── config/         无角色语义的部署配置解析
+├── storage/        无角色语义的共享状态库适配
+├── control-plane/  Router 专属：调度、Assignment 和控制面持久化
+├── attachments/    Router 专属：附件元数据和受控资源引用
+├── runtime/        Host 专属：Run 执行、资源导入和 dispatch 幂等
+├── http/           router-http 与 runtime-host-http 两套受控传输适配
+└── entrypoints/    三个角色各自的进程装配入口
 config/             本应用的 Runtime/Provider 配置模板
 ```
 
-各层通过 `domain/contracts.ts` 交换中立协议类型；HTTP 层不承载调度规则，入口层只负责依赖装配，Runtime Host 不依赖 Router 的控制面实现。
+各层通过 `domain/contracts.ts` 交换中立协议类型；HTTP 层不承载调度规则，入口层只负责依赖装配。测试会递归检查依赖闭包：Router 不得引入 `runtime/`，Host 不得引入 `control-plane/` 或 `router-http`。新增跨角色能力必须先进入 `domain/` 的版本化协议，不能以进程内 import 绕过边界。
 
 ```bash
 npm run typecheck --workspace agentloop-multi-runtime
@@ -60,6 +61,8 @@ npm run start:multi-runtime -- --runtimes 4
 | 生产 | `AGENTLOOP_STATE_DRIVER=postgres`，所有副本共用连接串 | RWX POSIX 卷（EFS、CephFS 或受控 NFS） | 多 Router、多 Host |
 
 SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应将附件、不可变交付物与 checkpoint 放入 S3 或兼容对象存储；活跃的 Tool 工作目录、临时文件和原子重命名仍留在共享 workspace。完整边界见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
+
+当前生产部署基线将附件元数据写入共享 PostgreSQL，并把不可变附件字节放在仅 Router 共享的 RWX 挂载；Host 始终经 Router 的受控下载接口读取附件，而不会拿到存储路径。对象存储 BlobStore 是下一步替换此挂载的演进点，不是已经宣称完成的能力。可直接使用 [Kubernetes 多主机部署清单](deploy/kubernetes/README.md) 构建并独立发布 `router`、`runtime-host`、`web` 三个镜像目标。
 
 ### Step execution policy
 
@@ -111,7 +114,7 @@ RUNTIME_DISPATCH_TOKEN=development-dispatch-token-123 \
 RUNTIME_ATTACHMENT_TOKEN=development-attachment-token-123 \
 CONTROL_PLANE_DATABASE_PATH=./data/control-plane.db \
 WEB_ORIGIN=http://127.0.0.1:5174 \
-npm run start --workspace agentloop-multi-runtime
+npm run start:router --workspace agentloop-multi-runtime
 
 # 终端 2：Runtime Host general-01
 RUNTIME_ID=general-01 PORT=8791 \

@@ -4,6 +4,12 @@ import type { HumanLoopRequest, HumanLoopResponse } from "@zhujun/agentloop";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 
+interface AttachmentBroker {
+  upload(input: Parameters<FileAttachmentBroker["upload"]>[0]): ReturnType<FileAttachmentBroker["upload"]>;
+  resolveForTask(input: Parameters<FileAttachmentBroker["resolveForTask"]>[0]): ReturnType<FileAttachmentBroker["resolveForTask"]> | Promise<ReturnType<FileAttachmentBroker["resolveForTask"]>>;
+  readForRuntime(id: string): ReturnType<FileAttachmentBroker["readForRuntime"]>;
+}
+
 interface RouterTaskApi {
   submit(task: SubmitConversationTask): Promise<{ readonly id: string; readonly tenantId: string; readonly ownerUserId: string }>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
@@ -20,7 +26,7 @@ interface RouterTaskApi {
 }
 
 export function createRouterHttpServer(router: RouterTaskApi, options: {
-  readonly attachments?: FileAttachmentBroker;
+  readonly attachments?: AttachmentBroker;
   readonly runtimeAttachmentToken?: string;
   readonly runtimeDispatchToken?: string;
   readonly webOrigin?: string;
@@ -84,7 +90,7 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       }
       if (request.method === "POST" && url.pathname === "/v1/tasks") {
         const body = await readJson(request);
-        const task = taskFromRequest(body, request.headers["x-tenant-id"], request.headers["x-user-id"], options.attachments);
+        const task = await taskFromRequest(body, request.headers["x-tenant-id"], request.headers["x-user-id"], options.attachments);
         return json(response, 202, { assignment: await router.submit(task) });
       }
       const assignmentId = assignmentIdFromPath(url.pathname);
@@ -292,12 +298,12 @@ async function readJson(request: import("node:http").IncomingMessage): Promise<u
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-export function taskFromRequest(
+export async function taskFromRequest(
   body: unknown,
   tenantHeader: string | string[] | undefined,
   userHeader: string | string[] | undefined,
-  attachments: FileAttachmentBroker | undefined,
-): SubmitConversationTask {
+  attachments: AttachmentBroker | undefined,
+): Promise<SubmitConversationTask> {
   const value = record(body, "request body");
   if (Object.hasOwn(value, "visibleDirectories")) {
     throw new TypeError("visibleDirectories are disabled for the cloud multi-runtime application");
@@ -310,6 +316,7 @@ export function taskFromRequest(
   const attachmentIds = value.attachmentIds === undefined ? [] : stringArray(value.attachmentIds, "attachmentIds");
   if (attachmentIds.length > 0 && attachments === undefined) throw new TypeError("attachments are not configured");
   const conversationId = stringValue(value.conversationId, "conversationId");
+  const resourceRefs = await (attachments?.resolveForTask({ ...identity, conversationId, attachmentIds }) ?? []);
   return {
     ...identity,
     conversationId,
@@ -322,7 +329,7 @@ export function taskFromRequest(
       : { requiredCapabilities: stringArray(value.requiredCapabilities, "requiredCapabilities") }),
     ...(value.requestedModelKey === undefined ? {} : { requestedModelKey: stringValue(value.requestedModelKey, "requestedModelKey") }),
     allowDangerousTools: value.allowDangerousTools !== false,
-    resourceRefs: attachments?.resolveForTask({ ...identity, conversationId, attachmentIds }) ?? [],
+    resourceRefs,
   };
 }
 

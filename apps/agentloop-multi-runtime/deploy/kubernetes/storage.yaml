@@ -1,0 +1,31 @@
+# The cluster storage class selected here must provide real RWX POSIX
+# semantics. Do not use these claims for SQLite.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentloop-workspace-rwx
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentloop-attachments-rwx
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentloop-skills-rwx
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 5Gi

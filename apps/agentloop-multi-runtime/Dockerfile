@@ -1,7 +1,7 @@
 # Keep the default official Docker Hub image, but allow deployments whose
 # network cannot reach Docker Hub to select a compatible registry proxy.
 ARG NODE_IMAGE=node:26-bookworm
-FROM ${NODE_IMAGE}
+FROM ${NODE_IMAGE} AS application
 
 # These are build-only proxy arguments for npm. They are intentionally not
 # persisted with ENV in the final image.
@@ -27,3 +27,15 @@ RUN npm config set registry "${NPM_REGISTRY}" \
   && npm config delete replace-registry-host
 
 WORKDIR /app/apps/agentloop-multi-runtime
+
+# Each target is a separately publishable deployment role. They share only the
+# immutable application build layers; Router, Web, and Runtime Host have no
+# shared process or local state contract.
+FROM application AS router
+CMD ["npm", "run", "start:router"]
+
+FROM application AS runtime-host
+CMD ["npm", "run", "start:runtime-host"]
+
+FROM application AS web
+CMD ["npm", "run", "start:web"]

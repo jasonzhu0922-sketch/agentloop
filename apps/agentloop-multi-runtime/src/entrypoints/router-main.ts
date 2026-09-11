@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
+import { SharedFilesystemAttachmentBroker } from "../attachments/shared-filesystem-attachment-broker.ts";
 import { loadMultiRuntimeConfig, toRuntimeInstance } from "../config/config.ts";
 import { ControlPlaneStore } from "../control-plane/control-plane-store.ts";
 import { createRouterHttpServer, HttpRuntimeEndpoint } from "../http/router-http.ts";
@@ -31,8 +31,10 @@ const router = new PersistentMultiRuntimeRouter({
   heartbeatTtlMs: positiveInteger(process.env.RUNTIME_HEARTBEAT_TTL_MS, 15_000),
   reservationTtlMs: positiveInteger(process.env.RUNTIME_RESERVATION_TTL_MS, 30_000),
 });
-const attachments = new FileAttachmentBroker(attachmentRoot, attachmentBaseUrl);
-await attachments.load();
+// Attachment metadata is shared with every Router through the state database;
+// bytes require an RWX mount when Router replicas run on different machines.
+const attachments = new SharedFilesystemAttachmentBroker(database, attachmentRoot, attachmentBaseUrl);
+await attachments.ready();
 const server = createRouterHttpServer(router, {
   attachments,
   runtimeAttachmentToken,

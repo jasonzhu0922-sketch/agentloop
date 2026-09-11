@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentloop-runtime-config
+data:
+  runtimes.json: |
+    {
+      "schema": "agentloop.multiRuntimeConfig/v1",
+      "runtimes": [
+        { "id": "agentloop-runtime-host-0", "endpoint": "http://agentloop-runtime-host-0.agentloop-runtime-host:8791", "profile": "general", "capabilities": ["document", "web"], "maxConcurrentRuns": 20 },
+        { "id": "agentloop-runtime-host-1", "endpoint": "http://agentloop-runtime-host-1.agentloop-runtime-host:8791", "profile": "general", "capabilities": ["document", "web"], "maxConcurrentRuns": 20 }
+      ]
+    }
+  step-execution-strategy.json: |
+    {
+      "schema": "agentloop.stepExecutionStrategyConfig/v1",
+      "profile": "action-aware",
+      "projection": { "diagnosticProjectionCharacters": 4096, "diagnosticPreviewCharacters": 1200, "terminalProjectionCharacters": 2048, "terminalPreviewCharacters": 800 }
+    }
+  skill-directories.json: |
+    { "schema": "agentloop.skillDirectories/v1", "customSkillDirectories": ["/mnt/agentloop-skills"] }
+---
+# Replace the example URL before apply. The browser must reach this URL; it is
+# deliberately separate from Router-to-Host cluster traffic.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentloop-public-config
+data:
+  router-url: https://agentloop.example.invalid

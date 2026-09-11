@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentloop-router
+spec:
+  selector:
+    app.kubernetes.io/name: agentloop-router
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentloop-router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentloop-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentloop-router
+    spec:
+      containers:
+        - name: router
+          image: registry.example.invalid/agentloop/router:replace-at-release
+          ports:
+            - name: http
+              containerPort: 8788
+          env:
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "8788"
+            - name: RUNTIME_CONFIG_PATH
+              value: /etc/agentloop/runtimes.json
+            - name: ATTACHMENT_ROOT
+              value: /var/lib/agentloop/attachments
+            - name: ATTACHMENT_BASE_URL
+              value: http://agentloop-router
+            - name: WEB_ORIGIN
+              valueFrom:
+                configMapKeyRef: { name: agentloop-public-config, key: router-url }
+            - name: AGENTLOOP_STATE_DRIVER
+              value: postgres
+            - name: AGENTLOOP_STATE_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: agentloop-state, key: database-url }
+            - name: RUNTIME_DISPATCH_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentloop-runtime-auth, key: dispatch-token }
+            - name: RUNTIME_ATTACHMENT_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentloop-runtime-auth, key: attachment-token }
+          volumeMounts:
+            - name: runtime-config
+              mountPath: /etc/agentloop
+              readOnly: true
+            - name: attachments
+              mountPath: /var/lib/agentloop/attachments
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+      volumes:
+        - name: runtime-config
+          configMap: { name: agentloop-runtime-config }
+        - name: attachments
+          persistentVolumeClaim: { claimName: agentloop-attachments-rwx }

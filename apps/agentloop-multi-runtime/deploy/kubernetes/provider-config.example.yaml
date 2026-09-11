@@ -1,0 +1,9 @@
+# Copy to provider-config.yaml, add it to kustomization.yaml, and replace the
+# example with the non-secret provider configuration used by Runtime Hosts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentloop-provider-config
+data:
+  llm-providers.json: |
+    { "schema": "agentloop.llmProviderConfig/v1", "providers": [] }

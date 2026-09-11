@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FileAttachmentBroker } from "../src/attachments/attachment-broker.ts";
+import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
 import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/control-plane/router.ts";
 import { AgentLoopRuntimeHost } from "../src/runtime/runtime-host.ts";
 import { HttpResourceImporter } from "../src/runtime/http-resource-importer.ts";
@@ -46,6 +48,19 @@ function runtime(id: string, overrides: Partial<RuntimeInstance> = {}): RuntimeI
   };
 }
 
+async function localModuleClosure(entry: string, files = new Set<string>()): Promise<Set<string>> {
+  if (files.has(entry)) return files;
+  files.add(entry);
+  const source = await readFile(entry, "utf8");
+  const imports = source.matchAll(/(?:from\s+|import\s*)["']([^"']+)["']/g);
+  for (const match of imports) {
+    const specifier = match[1];
+    if (specifier === undefined || !specifier.startsWith(".")) continue;
+    await localModuleClosure(resolve(dirname(entry), specifier), files);
+  }
+  return files;
+}
+
 test("shared state configuration switches between local SQLite and PostgreSQL without changing Host code", () => {
   assert.deepEqual(stateDatabaseConfigFromEnvironment({
     environment: {}, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db",
@@ -66,6 +81,13 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "postgres" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
   );
+});
+
+test("Router and Runtime Host remain isolated deployment dependency closures", async () => {
+  const routerFiles = await localModuleClosure(fileURLToPath(new URL("../src/entrypoints/router-main.ts", import.meta.url)));
+  const hostFiles = await localModuleClosure(fileURLToPath(new URL("../src/entrypoints/runtime-host-main.ts", import.meta.url)));
+  assert.equal([...routerFiles].some((path) => path.includes("/src/runtime/")), false, "Router must not import Runtime Host execution");
+  assert.equal([...hostFiles].some((path) => path.includes("/src/control-plane/") || path.endsWith("/src/http/router-http.ts")), false, "Runtime Host must not import Router control-plane code");
 });
 
 test("Web runtime config preserves the launcher-selected Router URL", () => {
@@ -615,7 +637,7 @@ test("Router converts owned attachment IDs and never accepts browser resource re
       mediaType: "text/plain",
       content: Buffer.from("hello router attachment"),
     });
-    const dispatched = taskFromRequest({
+    const dispatched = await taskFromRequest({
       tenantId: "tenant",
       ownerUserId: "user",
       conversationId: "conversation-user",
@@ -624,19 +646,41 @@ test("Router converts owned attachment IDs and never accepts browser resource re
       attachmentIds: [attachment.id],
     }, undefined, undefined, attachments);
     assert.equal(dispatched.allowDangerousTools, true);
-    assert.equal(taskFromRequest({
+    assert.equal((await taskFromRequest({
       tenantId: "tenant",
       ownerUserId: "user",
       conversationId: "conversation-user",
       clientMessageId: "message-1-disabled",
       input: "summarize attachment",
       allowDangerousTools: false,
-    }, undefined, undefined, attachments).allowDangerousTools, false);
+    }, undefined, undefined, attachments)).allowDangerousTools, false);
     assert.equal(dispatched.resourceRefs?.[0]?.originalName, "brief.txt");
     assert.equal(dispatched.resourceRefs?.[0]?.byteSize, "hello router attachment".length);
-    assert.throws(() => taskFromRequest({ ...task("user", "message-intent"), conversationIntent: "auto" }, undefined, undefined, attachments), /conversationIntent is Runtime-owned/);
-    assert.throws(() => taskFromRequest({ ...task("user", "message-2"), resourceRefs: [] }, undefined, undefined, attachments), /resourceRefs are Router-owned/);
+    await assert.rejects(taskFromRequest({ ...task("user", "message-intent"), conversationIntent: "auto" }, undefined, undefined, attachments), /conversationIntent is Runtime-owned/);
+    await assert.rejects(taskFromRequest({ ...task("user", "message-2"), resourceRefs: [] }, undefined, undefined, attachments), /resourceRefs are Router-owned/);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shared attachment metadata is visible to another Router replica", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-multi-runtime-attachments-"));
+  const database = new AppDatabase(join(root, "state.db"));
+  const first = new SharedFilesystemAttachmentBroker(database, join(root, "attachments"), "http://router.test");
+  const second = new SharedFilesystemAttachmentBroker(database, join(root, "attachments"), "http://router.test");
+  try {
+    await Promise.all([first.ready(), second.ready()]);
+    const attachment = await first.upload({
+      tenantId: "tenant", ownerUserId: "user", conversationId: "conversation-user",
+      originalName: "shared.txt", mediaType: "text/plain", content: Buffer.from("available to both routers"),
+    });
+    const [reference] = await second.resolveForTask({
+      tenantId: "tenant", ownerUserId: "user", conversationId: "conversation-user", attachmentIds: [attachment.id],
+    });
+    assert.equal(reference?.attachmentId, attachment.id);
+    assert.equal((await second.readForRuntime(attachment.id)).content.toString("utf8"), "available to both routers");
+  } finally {
+    await database.close();
     await rm(root, { recursive: true, force: true });
   }
 });

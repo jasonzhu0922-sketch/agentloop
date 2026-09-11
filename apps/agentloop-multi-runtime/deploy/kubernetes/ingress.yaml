@@ -1,0 +1,22 @@
+# Configure the ingress class, TLS secret, and host for the target cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentloop
+spec:
+  rules:
+    - host: agentloop.example.invalid
+      http:
+        paths:
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service: { name: agentloop-router, port: { name: http } }
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service: { name: agentloop-router, port: { name: http } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: agentloop-web, port: { name: http } }

@@ -12,7 +12,7 @@
   },
   "devDependencies": { "@types/node": "^26.3.0" },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/entrypoints/router-main.ts",
+    "start:router": "node --env-file-if-exists=.env src/entrypoints/router-main.ts",
     "start:runtime-host": "node --env-file-if-exists=.env src/entrypoints/runtime-host-main.ts",
     "start:local": "node scripts/start-local.mjs",
     "start:web": "node web/server.mjs",

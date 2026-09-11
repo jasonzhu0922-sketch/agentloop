@@ -31,7 +31,7 @@ services:
   router:
     image: *app_image
     build: *app_build
-    command: npm run start
+    command: npm run start:router
     environment:
       HOST: 0.0.0.0
       PORT: 8788
