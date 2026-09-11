@@ -99,6 +99,12 @@ export interface TaskSpec {
   readonly input: string;
   readonly availableSkills: readonly PrivateSkill[];
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
+  /**
+   * Skills bound by accepted completed steps in this conversation. They are
+   * candidates for the Planner's multi-turn continuation decision, never a
+   * mandate to reuse an unrelated prior capability.
+   */
+  readonly continuationSkillIds?: readonly string[];
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableCapabilities?: readonly PlanningCapability[];
@@ -235,6 +241,12 @@ export interface ConversationCompletedStepHandoff {
   readonly stepId: string;
   readonly role?: OutcomeLeafRole;
   readonly objective: string;
+  /**
+   * Canonical bindings of the completed step.  A follow-up may still need the
+   * same Skill even though this step is no longer unfinished.
+   */
+  readonly skillIds: readonly string[];
+  readonly requiredCapabilities: readonly string[];
   readonly output: string;
   readonly outputTruncated: boolean;
 }

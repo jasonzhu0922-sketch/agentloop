@@ -786,6 +786,10 @@ export class RunService {
     const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
     const boundedSourceSummaries = sourceSummaries.slice(-CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT);
     const boundedStepHandoffs = completedStepHandoffs.slice(-CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT);
+    for (const handoff of boundedStepHandoffs) {
+      for (const skillId of handoff.skillIds) requiredSkillIds.add(skillId);
+      for (const capability of handoff.requiredCapabilities) recommendedCapabilityIds.add(capability);
+    }
     for (const artifact of boundedArtifacts) {
       for (const skillId of artifact.sourceSkillIds ?? []) requiredSkillIds.add(skillId);
       for (const capability of artifact.sourceCapabilities ?? []) recommendedCapabilityIds.add(capability);
@@ -1518,6 +1522,9 @@ export class RunService {
         availableSources,
       );
       const planningSkills = planningSkillRoles.map((item) => item.skill);
+      const continuationSkillIds = planningSkills
+        .filter((skill) => conversationWorkingSet?.recommendedCapabilities.skillIds.includes(skill.id) === true)
+        .map((skill) => skill.id);
       if (!responseOnly) {
         await emit({
           type: "planning.skills.selected",
@@ -1545,6 +1552,7 @@ export class RunService {
         input,
         availableSkills: planningSkills,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
+        ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
         availableToolNames: allowedToolNames,
         availableTools: allowedToolSummaries,
         availableCapabilities: planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
@@ -3201,6 +3209,8 @@ function conversationCompletedStepHandoff(
     stepId: step.id,
     ...(step.role === undefined ? {} : { role: step.role }),
     objective: truncateWorkingSetText(step.objective, 600),
+    skillIds: step.skillIds,
+    requiredCapabilities: step.requiredCapabilities,
     output,
     outputTruncated: output.length < step.output.replace(/\s+/g, " ").trim().length,
   };
@@ -3688,9 +3698,10 @@ export function selectPlanningSkillRoles(
   sources: readonly UploadedSourceSummary[] = [],
 ): PlanningSkillRoleSelection[] {
   if (skills.length === 0) return [];
-  // Conversation history is model context, not authorization or task scope.
-  // Letting old deliverables select today's Skill leaks prior work into the
-  // current capability decision.
+  // The latest turn still drives ordinary relevance, but a Skill canonically
+  // bound by an accepted prior step must remain available as a *candidate*.
+  // The Planner LLM receives the full history and working set and decides
+  // whether this turn actually continues that prior work.
   const signal = normalizePlanningSignal(taskInput);
   // Skill relevance must use the same semantic intent classifier as planning.
   // A current-news request is source work even when it does not literally say
@@ -3788,13 +3799,15 @@ function selectFirstRoundSkillRole(
   }
   if (
     roles.has("source_provider")
-    && sourceWorkRequested
+    && (sourceWorkRequested || explicitlyRequested)
     && (explicitlyRequested || skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
   ) {
     return {
       skillId: skill.id,
       role: "source_provider",
-      reason: "Skill metadata declares source_provider for requested source-grounded work.",
+      reason: sourceWorkRequested
+        ? "Skill metadata declares source_provider for requested source-grounded work."
+        : "Prior completed-plan binding keeps this source_provider available as a multi-turn continuation candidate; the Planner decides whether the latest turn continues it.",
     };
   }
   if (roles.has("support") && explicitSupportSkillRequested(signal)) {

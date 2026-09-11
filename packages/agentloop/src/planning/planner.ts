@@ -681,6 +681,12 @@ function planningRuntimeContext(
         operationProfiles: taskProfile.operations,
         taskProfile,
         selectedSkillRoles,
+        ...(task.continuationSkillIds === undefined || task.continuationSkillIds.length === 0
+          ? {}
+          : {
+            continuationSkillIds: task.continuationSkillIds,
+            continuationSkillPolicy: "These are Skills canonically bound by completed prior steps. Decide their relevance from the latest request together with conversation history and completedStepHandoffs; do not infer continuation from a keyword alone.",
+          }),
         ...(taskProfile.researchPolicy === undefined
           ? {}
           : {

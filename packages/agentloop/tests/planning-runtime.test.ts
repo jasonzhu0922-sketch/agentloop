@@ -3697,6 +3697,120 @@ test("selectPlanningSkills recalls a Chinese source-provider Skill for an enterp
   assert.deepEqual(selected.map((skill) => skill.name), ["enterprise-info"]);
 });
 
+test("selectPlanningSkills retains a completed source-provider binding as a multi-turn candidate", () => {
+  const enterpriseInfo = skillFixture({
+    id: "enterprise-info",
+    name: "enterprise-info",
+    description: "查询中国大陆企业工商注册信息、企业详情、统一社会信用代码、法人、注册资本和经营范围。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+
+  // This is deliberately not a keyword test: the candidate exists because a
+  // canonical earlier step selected it. The Planner LLM receives history and
+  // completed-step context to decide whether this ambiguous turn is a follow-up.
+  const continuationCandidates = selectPlanningSkills(
+    [enterpriseInfo],
+    "再看看华东分公司的情况",
+    [enterpriseInfo.id],
+  );
+  const unrelatedCandidates = selectPlanningSkills(
+    [enterpriseInfo],
+    "再看看华东分公司的情况",
+    [],
+  );
+
+  assert.deepEqual(continuationCandidates.map((skill) => skill.id), [enterpriseInfo.id]);
+  assert.deepEqual(unrelatedCandidates, []);
+});
+
+test("ModelPlanner lets the LLM decide a Skill continuation from history and canonical handoff", async () => {
+  const enterpriseInfo = skillFixture({
+    id: "enterprise-info",
+    name: "enterprise-info",
+    description: "查询中国大陆企业工商注册信息、企业详情、统一社会信用代码、法人、注册资本和经营范围。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      assert.deepEqual(request.messages, [
+        { role: "user", content: "查询宝武共享的企业基本信息" },
+        { role: "assistant", content: "已查询宝武共享服务有限公司华中分公司。" },
+        { role: "user", content: "再看看华东分公司的情况" },
+      ]);
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /continuationSkillIds/);
+      assert.match(context, /enterprise-info/);
+      assert.match(context, /completedStepHandoffs/);
+      assert.match(context, /do not infer continuation from a keyword alone/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("enterprise-followup", {
+          goal: "查询宝武共享服务有限公司华东分公司的企业基本信息",
+          shape: "single_leaf",
+          selectedSkillRoles: [{
+            skillId: enterpriseInfo.id,
+            role: "source_provider",
+            reason: "The current request narrows the same enterprise lookup to the East China branch.",
+          }],
+          steps: [{
+            id: "query_east_china_branch",
+            objective: "Load the enterprise-info Skill and query the East China branch using its source workflow.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [enterpriseInfo.id],
+            requiredCapabilities: ["skill_instruction_load", "web_research"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-enterprise-followup",
+    input: "再看看华东分公司的情况",
+    conversationHistory: [
+      { role: "user", content: "查询宝武共享的企业基本信息" },
+      { role: "assistant", content: "已查询宝武共享服务有限公司华中分公司。" },
+    ],
+    availableSkills: [enterpriseInfo],
+    selectedSkillRoles: [{
+      skillId: enterpriseInfo.id,
+      role: "source_provider",
+      reason: "Prior completed-plan binding keeps this source_provider available as a multi-turn continuation candidate; the Planner decides whether the latest turn continues it.",
+    }],
+    continuationSkillIds: [enterpriseInfo.id],
+    availableToolNames: ["load_skill", "websearch", "webfetch"],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-enterprise-followup",
+      runCount: 1,
+      planCursors: [],
+      reusableArtifacts: [],
+      failedBoundaries: [],
+      recommendedCapabilities: { skillIds: [enterpriseInfo.id], capabilityIds: ["skill_instruction_load", "web_research"] },
+      completedStepHandoffs: [{
+        runId: "run-enterprise-first",
+        planId: "plan-enterprise-first",
+        stepId: "lookup",
+        objective: "查询宝武共享的企业基本信息",
+        skillIds: [enterpriseInfo.id],
+        requiredCapabilities: ["skill_instruction_load", "web_research"],
+        output: "已查询宝武共享服务有限公司华中分公司。",
+        outputTruncated: false,
+      }],
+    },
+  });
+
+  assert.deepEqual(plan.selectedSkillIds, [enterpriseInfo.id]);
+  assert.deepEqual(plan.steps[0]?.skillIds, [enterpriseInfo.id]);
+});
+
 test("selectPlanningSkills selects a source-provider for current Chinese news without an explicit research keyword", () => {
   const aihot = skillFixture({
     id: "aihot",
@@ -6761,12 +6875,12 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
       0,
       "Extract source-grounded deck outline.",
       JSON.stringify([]),
-      JSON.stringify([]),
-      JSON.stringify(["workspace_artifact_write"]),
+      JSON.stringify([skill.id]),
+      JSON.stringify(["skill_instruction_load", "workspace_artifact_write"]),
       JSON.stringify([]),
       executionBindingJson({
-        requiredCapabilities: ["workspace_artifact_write"],
-        resolvedToolNames: ["computer_write_file"],
+        requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write"],
+        resolvedToolNames: ["load_skill", "computer_write_file"],
         sourceKinds: ["workspace_file", "generated_artifact"],
         sideEffect: "workspace_write",
         evidenceKinds: ["source_summary"],
@@ -6802,7 +6916,7 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
       1,
       "Generate the editable PPTX from artifacts/outline.json.",
       JSON.stringify(["extract"]),
-      JSON.stringify([skill.id]),
+      JSON.stringify([]),
       JSON.stringify(["skill_instruction_load", "workspace_file_read", "workspace_artifact_write"]),
       JSON.stringify([]),
       executionBindingJson({
@@ -6825,7 +6939,7 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
       2,
       "Render and verify the final PPTX.",
       JSON.stringify(["build"]),
-      JSON.stringify([skill.id]),
+      JSON.stringify([]),
       JSON.stringify(["skill_instruction_load", "workspace_artifact_write", "workspace_file_read"]),
       JSON.stringify([]),
       executionBindingJson({
@@ -6994,6 +7108,8 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
     assert.equal(extractHandoff?.runId, priorRunId);
     assert.equal(extractHandoff?.output, "Created reusable source outline at artifacts/content.md.");
     assert.equal(extractHandoff?.outputTruncated, false);
+    assert.deepEqual(extractHandoff?.skillIds, [skill.id]);
+    assert.equal(extractHandoff?.requiredCapabilities.includes("skill_instruction_load"), true);
     assert.match(executionRuntimeContext, /conversationReuseContext/);
     assert.match(executionRuntimeContext, /completedStepHandoffs/);
     assert.match(executionRuntimeContext, /Created reusable source outline/);
