@@ -80,6 +80,11 @@ test("Web source disables caching so Router and browser protocol changes deploy 
   assert.match(server, /response\.setHeader\("cache-control", "no-store"\)/);
 });
 
+test("Web leaves conversation classification to the Runtime", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /conversationIntent/);
+});
+
 test("Web uses the shared format-aware preview component instead of text-only artifact output", async () => {
   const [html, app, server, overrides] = await Promise.all([
     readFile(new URL("../web/index.html", import.meta.url), "utf8"),
@@ -440,7 +445,7 @@ test("Runtime Host imports resources once and reuses its dispatch key", async ()
     async ensureConversation(ownerUserId, conversationId, input) {
       ensured = { ownerUserId, conversationId, input };
     },
-    async start() {
+    async startConversation() {
       starts += 1;
       return { id: "remote-run-1" } as never;
     },
@@ -580,11 +585,21 @@ test("Skill directory config resolves relative paths from the multi-runtime appl
   }
 });
 
-test("Runtime Host rejects a dispatch carrying visible directory or malformed schema", () => {
+test("Runtime Host rejects a dispatch carrying application-owned intent or visible directory data", () => {
   assert.throws(() => assertRuntimeDispatchEnvelope({
     schema: "agentloop.runtimeDispatch/v1",
     visibleDirectories: ["/Users/test"],
   }), /visibleDirectories/);
+  assert.throws(() => assertRuntimeDispatchEnvelope({
+    schema: "agentloop.runtimeDispatch/v1",
+    assignmentId: "assignment-1",
+    dispatchKey: "dispatch-1",
+    subject: { tenantId: "tenant", userId: "user" },
+    conversationId: "conversation-1",
+    input: "hello",
+    allowDangerousTools: false,
+    conversationIntent: "auto",
+  }), /conversationIntent is Runtime-owned/);
   assert.throws(() => assertRuntimeDispatchEnvelope({ schema: "unexpected" }), /unsupported runtime dispatch schema/);
 });
 
@@ -619,6 +634,7 @@ test("Router converts owned attachment IDs and never accepts browser resource re
     }, undefined, undefined, attachments).allowDangerousTools, false);
     assert.equal(dispatched.resourceRefs?.[0]?.originalName, "brief.txt");
     assert.equal(dispatched.resourceRefs?.[0]?.byteSize, "hello router attachment".length);
+    assert.throws(() => taskFromRequest({ ...task("user", "message-intent"), conversationIntent: "auto" }, undefined, undefined, attachments), /conversationIntent is Runtime-owned/);
     assert.throws(() => taskFromRequest({ ...task("user", "message-2"), resourceRefs: [] }, undefined, undefined, attachments), /resourceRefs are Router-owned/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -998,7 +1014,7 @@ test("Host persists dispatch idempotency across a process restart", async () => 
   let starts = 0;
   const runs = {
     async ensureConversation() {},
-    async start() {
+    async startConversation() {
       starts += 1;
       return { id: "durable-run" } as never;
     },
@@ -1087,7 +1103,7 @@ test("Host capacity gate rejects an over-capacity dispatch before creating a Run
   let starts = 0;
   const host = new AgentLoopRuntimeHost({
     async ensureConversation() {},
-    async start() { starts += 1; return { id: "should-not-start" } as never; },
+    async startConversation() { starts += 1; return { id: "should-not-start" } as never; },
     async get() { return { id: "should-not-start", status: "running" } as never; },
   }, { async importForRun() { return []; } }, {
     maxConcurrentRuns: 1,

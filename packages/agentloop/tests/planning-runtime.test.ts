@@ -7045,10 +7045,9 @@ test("RunService routes follow-up file creation through completed delivery text 
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const run = await runs.execute(owner.user.id, "你倒是生成一个总结文件啊", {
+    const run = await runs.executeConversation(owner.user.id, "你倒是生成一个总结文件啊", {
       conversationId,
       allowDangerousTools: true,
-      conversationIntent: "auto",
     });
 
     assert.equal(run.status, "completed");
@@ -7098,9 +7097,8 @@ test("RunService skips conversation intent classifier for deterministic artifact
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const run = await runs.execute(owner.user.id, "2026 年是中华人民共和国成立 77 年，请你帮我生成一张国庆庆祝海报", {
+    const run = await runs.executeConversation(owner.user.id, "2026 年是中华人民共和国成立 77 年，请你帮我生成一张国庆庆祝海报", {
       allowDangerousTools: true,
-      conversationIntent: "auto",
     });
 
     assert.equal(run.status, "completed");
@@ -7156,9 +7154,8 @@ test("RunService retries malformed conversation intent output and defaults uncer
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const run = await runs.execute(owner.user.id, "这件事怎么处理？", {
+    const run = await runs.executeConversation(owner.user.id, "这件事怎么处理？", {
       allowDangerousTools: true,
-      conversationIntent: "auto",
     });
 
     assert.equal(run.status, "completed");
@@ -7290,10 +7287,9 @@ test("RunService carries completed artifact lineage into qualitative follow-up p
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const run = await runs.execute(owner.user.id, "大哥，你重新生成啊", {
+    const run = await runs.executeConversation(owner.user.id, "大哥，你重新生成啊", {
       conversationId,
       allowDangerousTools: true,
-      conversationIntent: "auto",
     });
 
     assert.equal(run.status, "completed");

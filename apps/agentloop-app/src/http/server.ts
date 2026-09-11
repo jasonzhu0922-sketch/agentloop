@@ -95,7 +95,7 @@ export function createAgentLoopServer(
       }
       if (request.method === "POST" && url.pathname === "/v1/host/runs/async") {
         const body = requireRecord(await readJson(request));
-        const run = await dependencies.runs.start(user.id, body.input, runOptionsFromBody(body));
+        const run = await dependencies.runs.startConversation(user.id, body.input, runOptionsFromBody(body));
         return sendJson(response, 202, {
           schema: "agentloop.hostRunStart/v1",
           run: await dependencies.runs.hostRun(user.id, run.id),
@@ -103,7 +103,7 @@ export function createAgentLoopServer(
       }
       if (request.method === "POST" && url.pathname === "/v1/host/runs") {
         const body = requireRecord(await readJson(request));
-        const run = await dependencies.runs.execute(user.id, body.input, runOptionsFromBody(body));
+        const run = await dependencies.runs.executeConversation(user.id, body.input, runOptionsFromBody(body));
         return sendJson(response, 201, {
           schema: "agentloop.hostRunStart/v1",
           run: await dependencies.runs.hostRun(user.id, run.id),
@@ -183,12 +183,12 @@ export function createAgentLoopServer(
 
       if (request.method === "POST" && url.pathname === "/v1/runs/async") {
         const body = requireRecord(await readJson(request));
-        const run = await dependencies.runs.start(user.id, body.input, runOptionsFromBody(body));
+        const run = await dependencies.runs.startConversation(user.id, body.input, runOptionsFromBody(body));
         return sendJson(response, 202, { run });
       }
       if (request.method === "POST" && url.pathname === "/v1/runs") {
         const body = requireRecord(await readJson(request));
-        const run = await dependencies.runs.execute(user.id, body.input, runOptionsFromBody(body));
+        const run = await dependencies.runs.executeConversation(user.id, body.input, runOptionsFromBody(body));
         return sendJson(response, 201, { run });
       }
       if (request.method === "GET" && url.pathname === "/v1/tools") {
@@ -423,13 +423,15 @@ function hostProtocolDescriptor(): Readonly<Record<string, unknown>> {
 }
 
 function runOptionsFromBody(body: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  if (Object.hasOwn(body, "conversationIntent")) {
+    throw badRequest("conversationIntent is Runtime-owned and cannot be supplied by callers");
+  }
   return {
     allowDangerousTools: body.allowDangerousTools,
     ...(body.modelKey === undefined ? {} : { modelKey: body.modelKey }),
     ...(body.visibleDirectories === undefined ? {} : { visibleDirectories: body.visibleDirectories }),
     ...(body.sourceIds === undefined ? {} : { sourceIds: body.sourceIds }),
     ...(body.conversationId === undefined ? {} : { conversationId: body.conversationId }),
-    ...(body.conversationIntent === undefined ? {} : { conversationIntent: body.conversationIntent }),
   };
 }
 

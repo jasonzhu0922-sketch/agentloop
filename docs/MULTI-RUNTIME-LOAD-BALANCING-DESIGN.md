@@ -370,7 +370,7 @@ Worker 在创建本地 Run 前执行：
 → 调用该 Worker 本地的 Source Intake
 → 在该 Worker 的 sources/source_chunks 中创建本地 sourceId
 → 将本地 sourceId 绑定到本地 Run 的 run_sources
-→ RunService.start/execute
+→ RunService.startConversation/executeConversation
 ```
 
 这正好复用当前 AgentLoop 的 Source Intake 与 `run_sources` 绑定模型：Source 的所有者仍是 Router 断言的 opaque `userId`，Source 只能被绑定到同一会话的本地 Run。文件内容、文本抽取和 chunks 只落在执行该任务的 Runtime Host。

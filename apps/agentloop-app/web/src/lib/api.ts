@@ -205,7 +205,6 @@ export const api = {
       body: {
         input,
         allowDangerousTools: options.allowDangerousTools ?? true,
-        conversationIntent: "auto",
         ...(options.modelKey === undefined ? {} : { modelKey: options.modelKey }),
         ...(options.visibleDirectories === undefined || options.visibleDirectories.length === 0
           ? {}

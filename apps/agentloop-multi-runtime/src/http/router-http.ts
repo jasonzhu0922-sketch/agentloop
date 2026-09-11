@@ -302,6 +302,9 @@ export function taskFromRequest(
   if (Object.hasOwn(value, "visibleDirectories")) {
     throw new TypeError("visibleDirectories are disabled for the cloud multi-runtime application");
   }
+  if (Object.hasOwn(value, "conversationIntent")) {
+    throw new TypeError("conversationIntent is Runtime-owned and cannot be supplied by callers");
+  }
   if (Object.hasOwn(value, "resourceRefs")) throw new TypeError("resourceRefs are Router-owned; submit attachmentIds instead");
   const identity = identityFromRequest(body, tenantHeader, userHeader);
   const attachmentIds = value.attachmentIds === undefined ? [] : stringArray(value.attachmentIds, "attachmentIds");

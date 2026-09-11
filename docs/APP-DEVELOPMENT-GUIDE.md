@@ -509,7 +509,7 @@ toolCatalog(): Array<{ name; dangerous; description }>
 reconcileInterruptedRuns(): Promise<number>
 ```
 
-`execute` 同步等待完成；`start` 持久化 Run 后立即返回，后台继续执行。生产 HTTP API 一般用 `start`。
+`execute` 同步等待完成；`start` 持久化 Run 后立即返回，后台继续执行。这两个是通用执行入口。用户会话必须使用 `executeConversation` / `startConversation`；后者是生产 HTTP API 使用的异步会话入口，并由 Runtime 默认完成 `reply/execute` 分类。
 
 Run options：
 
@@ -517,12 +517,13 @@ Run options：
 {
   allowDangerousTools?: boolean;
   conversationId?: string;
-  conversationIntent?: "auto";
   modelKey?: string;
   visibleDirectories?: string[];
   sourceIds?: string[];
 }
 ```
+
+会话请求的 `reply/execute` 分类由 Runtime 默认执行并持久化为 `conversation.intent.classified` 事件；客户端不能传入或覆盖该决策。
 
 核心类型：
 

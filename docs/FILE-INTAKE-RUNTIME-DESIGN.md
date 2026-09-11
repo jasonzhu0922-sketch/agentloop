@@ -24,7 +24,7 @@
 当前实现仍是纯文本任务入口：
 
 - `src/http/server.ts` 的 `/v1/runs/async` 和 `/v1/runs` 只读取 JSON body，并把 `body.input` 传给 `RunService`。
-- `RunService.start/execute` 只接受字符串 `input`，最大 200,000 字符。
+- `RunService.start/execute` 与会话入口 `startConversation/executeConversation` 都接受字符串 `input`，最大 200,000 字符；HTTP 会话请求使用后者。
 - `web/src/components/Composer.tsx` 只维护 textarea draft，没有附件状态。
 - Planner 只接收 `TaskSpec.input`、conversation history、Skill catalog 和 Tool catalog。
 - 执行阶段的 `buildStepRuntimeContext(...)` 只描述 Plan Step、Skill 和 workspace root。
@@ -277,7 +277,6 @@ MVP 可以同步抽取并返回 `ready/extract_failed`。若文件较大，后�
   "input": "分析这个表格，找出收入异常波动并给出原因假设",
   "sourceIds": ["src_..."],
   "allowDangerousTools": true,
-  "conversationIntent": "auto",
   "conversationId": "..."
 }
 ```
@@ -586,7 +585,7 @@ source.read
 1. 新增 `SourceRepository` 和数据库表。
 2. 新增 `SourceIntakeService`，支持 `txt/md/csv/json`。
 3. 新增 `POST /v1/uploads` 和 `GET /v1/sources/:id`。
-4. `RunService.start/execute` 接收 `sourceIds` 并绑定 `run_sources`。
+4. `RunService.start/execute` 及会话入口接收 `sourceIds` 并绑定 `run_sources`。
 5. Planner runtime context 增加 source summary。
 6. 新增 `read_source` Tool，支持按 chunkIndex 读取。
 7. Composer 增加附件上传和发送绑定。

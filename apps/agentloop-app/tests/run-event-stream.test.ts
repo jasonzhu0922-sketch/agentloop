@@ -509,10 +509,9 @@ test("an informational follow-up does not inherit Skills or execution Tools from
     const first = await runs.execute(owner.user.id, "Create a PowerPoint presentation", {
       allowDangerousTools: true,
     });
-    const second = await runs.execute(owner.user.id, "Which Skill did you use to complete it?", {
+    const second = await runs.executeConversation(owner.user.id, "Which Skill did you use to complete it?", {
       allowDangerousTools: false,
       conversationId: first.conversationId,
-      conversationIntent: "auto",
     });
 
     assert.equal(second.output, "No Skill was loaded; the presentation was produced with generic file and command tools.");
@@ -564,10 +563,10 @@ test("a textual request that needs local file state is execution, not response-o
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const run = await runs.execute(
+    const run = await runs.executeConversation(
       owner.user.id,
       "分析一下 ~/coding/codex-switch.sh 文件，描述一下这个文件的功能",
-      { allowDangerousTools: true, conversationIntent: "auto" },
+      { allowDangerousTools: true },
     );
 
     assert.equal(run.status, "completed");
@@ -612,7 +611,6 @@ test("conversations group multiple turns over HTTP", async () => {
     const second = await postJson(base, "/v1/runs", token, {
       input: "Which Skill did you use?",
       conversationId: firstRun.conversationId,
-      conversationIntent: "auto",
     });
     const secondRun = (second as { run: { id: string; conversationId?: string } }).run;
     assert.equal(secondRun.conversationId, firstRun.conversationId);

@@ -19,14 +19,14 @@ export interface RuntimeCapacityGate {
 export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   private readonly dispatches = new Map<string, Promise<RuntimeDispatchResult>>();
   private readonly ownersByRunId = new Map<string, string>();
-  private readonly runs: Pick<RunService, "start" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "currentHumanLoop" | "respondHumanLoop">>;
+  private readonly runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "currentHumanLoop" | "respondHumanLoop">>;
   private readonly resourceImporter: ResourceImporter;
   private readonly capacity?: RuntimeCapacityGate;
   private readonly dispatchStore?: HostDispatchStore;
   private admissionTail: Promise<void> = Promise.resolve();
 
   constructor(
-    runs: Pick<RunService, "start" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events">>,
+    runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events">>,
     resourceImporter: ResourceImporter,
     capacity?: RuntimeCapacityGate,
     dispatchStore?: HostDispatchStore,
@@ -147,7 +147,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     });
     const run = await this.admit(async () => {
       await this.runs.ensureConversation(envelope.subject.userId, envelope.conversationId, envelope.input);
-      return await this.runs.start(envelope.subject.userId, envelope.input, {
+      return await this.runs.startConversation(envelope.subject.userId, envelope.input, {
           conversationId: envelope.conversationId,
           sourceIds,
           allowDangerousTools: envelope.allowDangerousTools,
@@ -191,6 +191,9 @@ export function assertRuntimeDispatchEnvelope(input: unknown): asserts input is 
   }
   if (value.allowDangerousTools !== true && value.allowDangerousTools !== false) {
     throw new TypeError("allowDangerousTools must be a boolean");
+  }
+  if (Object.hasOwn(value, "conversationIntent")) {
+    throw new TypeError("conversationIntent is Runtime-owned and cannot be supplied by Router dispatch");
   }
   if (!isRecord(value.subject) || nonEmptyString(value.subject.tenantId) === undefined || nonEmptyString(value.subject.userId) === undefined) {
     throw new TypeError("subject must contain tenantId and userId");

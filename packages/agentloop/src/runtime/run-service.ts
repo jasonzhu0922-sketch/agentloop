@@ -253,7 +253,6 @@ export interface StoredRunEvent {
 interface ExecuteOptions {
   readonly allowDangerousTools: boolean;
   readonly conversationId?: string;
-  readonly conversationIntent?: "auto";
   readonly modelKey?: string;
   readonly visibleDirectories: readonly string[];
   readonly sourceIds: readonly string[];
@@ -370,13 +369,45 @@ export class RunService {
   ): Promise<RunRecord> {
     const input = requireString(inputValue, "input", { max: 200_000 });
     const options = parseExecuteOptions(optionsValue);
-    return this.executeInternal(actorUserId, input, options);
+    return this.executeInternal(actorUserId, input, options, false);
+  }
+
+  /**
+   * Execute one user-authored conversational turn. The Runtime, rather than
+   * its callers, owns the reply-versus-execution decision for this entry.
+   */
+  async executeConversation(
+    actorUserId: string,
+    inputValue: unknown,
+    optionsValue?: unknown,
+  ): Promise<RunRecord> {
+    const input = requireString(inputValue, "input", { max: 200_000 });
+    const options = parseExecuteOptions(optionsValue);
+    return this.executeInternal(actorUserId, input, options, true);
   }
 
   async start(
     actorUserId: string,
     inputValue: unknown,
     optionsValue?: unknown,
+  ): Promise<RunRecord> {
+    return this.startInternal(actorUserId, inputValue, optionsValue, false);
+  }
+
+  /** Start one user-authored conversational turn without exposing intent policy to callers. */
+  async startConversation(
+    actorUserId: string,
+    inputValue: unknown,
+    optionsValue?: unknown,
+  ): Promise<RunRecord> {
+    return this.startInternal(actorUserId, inputValue, optionsValue, true);
+  }
+
+  private async startInternal(
+    actorUserId: string,
+    inputValue: unknown,
+    optionsValue: unknown,
+    conversationEntry: boolean,
   ): Promise<RunRecord> {
     const input = requireString(inputValue, "input", { max: 200_000 });
     const options = parseExecuteOptions(optionsValue);
@@ -386,6 +417,7 @@ export class RunService {
         actorUserId,
         input,
         options,
+        conversationEntry,
         (run) => {
           returned = true;
           resolve(run);
@@ -1297,6 +1329,7 @@ export class RunService {
     actorUserId: string,
     input: string,
     executeOptions: ExecuteOptions,
+    conversationEntry: boolean,
     onRunStarted?: (run: RunRecord) => void,
   ): Promise<RunRecord> {
     const runId = randomUUID();
@@ -1379,7 +1412,7 @@ export class RunService {
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
       const requiresExecution = requiresDeterministicConversationExecution(input, conversationWorkingSet);
-      const responseOnly = executeOptions.conversationIntent === "auto"
+      const responseOnly = conversationEntry
         && !requiresExecution
         && await classifyConversationTurn(
           rawModel,
@@ -1393,7 +1426,7 @@ export class RunService {
           runController.signal,
         );
       await throwIfRunCancelled(this.runs, runId, runController.signal);
-      if (executeOptions.conversationIntent === "auto") {
+      if (conversationEntry) {
         await emit({
           type: "conversation.intent.classified",
           data: { kind: responseOnly ? "reply" : "execute" },
@@ -5480,8 +5513,8 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
   const modelKey = record.modelKey === undefined || record.modelKey === null
     ? undefined
     : requireString(record.modelKey, "modelKey", { max: 120 });
-  if (record.conversationIntent !== undefined && record.conversationIntent !== "auto") {
-    throw new AppError("BAD_REQUEST", "conversationIntent must be auto", 400);
+  if (Object.hasOwn(record, "conversationIntent")) {
+    throw new AppError("BAD_REQUEST", "conversationIntent is Runtime-owned and cannot be supplied by callers", 400);
   }
   return {
     allowDangerousTools: record.allowDangerousTools !== false,
@@ -5489,7 +5522,6 @@ function parseExecuteOptions(value: unknown): ExecuteOptions {
     sourceIds,
     ...(conversationId === undefined ? {} : { conversationId }),
     ...(modelKey === undefined ? {} : { modelKey }),
-    ...(record.conversationIntent === "auto" ? { conversationIntent: "auto" as const } : {}),
   };
 }
 

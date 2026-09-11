@@ -135,7 +135,7 @@ test("Conversation visible directories persist across follow-up runs until expli
   }
 });
 
-test("Auto conversation intent uses external context handles instead of resource-presence rules", async () => {
+test("Conversation entry classifies with Runtime-owned external context handles", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-auto-visible-workspace-"));
   const visible = await fs.mkdtemp(join(tmpdir(), "agentloop-auto-visible-materials-"));
   const database = new AppDatabase(":memory:");
@@ -155,14 +155,12 @@ test("Auto conversation intent uses external context handles instead of resource
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const executionRun = await runs.execute(owner.user.id, "帮我分析一下这个绩效评价情况", {
+    const executionRun = await runs.executeConversation(owner.user.id, "帮我分析一下这个绩效评价情况", {
       allowDangerousTools: true,
-      conversationIntent: "auto",
       visibleDirectories: [visible],
     });
-    const replyRun = await runs.execute(owner.user.id, "刚才我问了什么？", {
+    const replyRun = await runs.executeConversation(owner.user.id, "刚才我问了什么？", {
       allowDangerousTools: true,
-      conversationIntent: "auto",
       conversationId: executionRun.conversationId,
     });
 
@@ -182,6 +180,38 @@ test("Auto conversation intent uses external context handles instead of resource
     await database.close();
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(visible, { recursive: true, force: true });
+  }
+});
+
+test("Generic Run execution does not opt into conversation intent classification", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const model = new ContextAwareConversationIntentModel();
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "你好", { conversationIntent: "auto" }),
+      /conversationIntent is Runtime-owned/,
+    );
+    const genericRun = await runs.execute(owner.user.id, "process this generic task");
+    assert.equal(genericRun.status, "completed");
+    assert.equal(model.intentCalls, 0);
+    assert.equal((await runs.events(owner.user.id, genericRun.id)).some((event) => event.type === "conversation.intent.classified"), false);
+
+    const conversationRun = await runs.executeConversation(owner.user.id, "你好");
+    assert.equal(conversationRun.status, "completed");
+    assert.equal(model.intentCalls, 1);
+    assert.deepEqual((await runs.events(owner.user.id, conversationRun.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "reply" });
+  } finally {
+    await database.close();
   }
 });
 
