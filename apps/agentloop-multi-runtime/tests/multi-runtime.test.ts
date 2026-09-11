@@ -19,6 +19,7 @@ import {
 } from "../src/config/config.ts";
 import { assertRuntimeDispatchEnvelope } from "../src/runtime/runtime-host.ts";
 import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, webOriginMatches } from "../src/http/router-http.ts";
+import { cancellationTarget, persistedCancellableAssistant } from "../web/cancellation-target.js";
 import { EventEmitter } from "node:events";
 import { AppDatabase } from "@zhujun/agentloop";
 import { ControlPlaneStore, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
@@ -313,7 +314,7 @@ test("Web tracks active Runs by conversation instead of imposing one global Run 
   const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
   assert.match(app, /const activeRunsByConversation = new Map\(\)/);
   assert.match(app, /activeRunsByConversation\.has\(conversation\.id\)/);
-  assert.match(app, /activeRunsByConversation\.get\(activeId\)/);
+  assert.match(app, /activeRunsByConversation\.get\(conversation\.id\)/);
   assert.match(app, /void reconcilePersistedRuns\(\)/);
   assert.match(app, /function applyRecoveredRunState\(assistant, run\)/);
   assert.match(app, /当前会话仍在发起或执行；请等待或点击停止/);
@@ -323,7 +324,21 @@ test("Web tracks active Runs by conversation instead of imposing one global Run 
   assert.match(app, /SSE 在收到 Run 终态前关闭/);
   assert.match(app, /catch \{ continue; \}/);
   assert.match(app, /activeRun\.assistant\.status = "cancelled"/);
+  assert.match(app, /cancellationTarget\(activeRunsByConversation\.get\(conversation\.id\), conversation\.messages\)/);
+  assert.match(app, /停止失败：/);
   assert.doesNotMatch(app, /let activeAssignmentId|let streamAbort/);
+});
+
+test("Web recovers the Router cancellation target from a persisted running message", () => {
+  const persisted = { role: "assistant", status: "running", assignmentId: "assignment-persisted" };
+  const messages = [{ role: "user", text: "first" }, persisted, { role: "assistant", status: "completed", assignmentId: "assignment-old" }];
+  assert.equal(persistedCancellableAssistant(messages), persisted);
+  assert.deepEqual(cancellationTarget(undefined, messages), {
+    activeRun: undefined,
+    assistant: persisted,
+    assignmentId: "assignment-persisted",
+    canCancel: true,
+  });
 });
 
 test("Web keeps uploaded attachment records removable until send and snapshots them into the user message", async () => {

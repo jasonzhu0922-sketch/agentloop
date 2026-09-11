@@ -3,6 +3,7 @@ import { createCoalescedUpdater } from "./live-update-scheduler.js";
 import { persistJson, persistSessions } from "./session-persistence.js";
 import { openArtifactPreview } from "./artifact-preview.js";
 import { renderMarkdown } from "./markdown-renderer.js";
+import { cancellationTarget } from "./cancellation-target.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -13,6 +14,7 @@ let sessions = loadSessions();
 let activeId = sessions[0]?.id ?? newConversation().id;
 const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
+const cancellingAssignmentIds = new Set();
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
 loadIdentity();
@@ -304,30 +306,40 @@ async function refreshArtifacts(assignmentId, assistant, tenantId, userId) {
 }
 
 async function cancelActive() {
-  const activeRun = activeRunsByConversation.get(activeId);
-  if (!activeRun) return;
-  if (!activeRun.assignmentId) {
-    if (activeRun.assistant) {
-      activeRun.assistant.status = "cancelled";
-      activeRun.assistant.text = "已停止发起会话";
-      activeRun.assistant.reasoning = "";
-      completeAssistantMessage(activeRun.assistant);
+  const conversation = activeConversation();
+  if (!conversation) return;
+  const target = cancellationTarget(activeRunsByConversation.get(conversation.id), conversation.messages);
+  if (!target.canCancel || !target.assistant) return;
+  if (!target.assignmentId) {
+    if (target.activeRun?.assistant) {
+      target.activeRun.assistant.status = "cancelled";
+      target.activeRun.assistant.text = "已停止发起会话";
+      target.activeRun.assistant.reasoning = "";
+      completeAssistantMessage(target.activeRun.assistant);
       saveSessions();
       render();
     }
-    activeRun.submitAbortController?.abort();
+    target.activeRun?.submitAbortController?.abort();
     setStatus("已停止发起会话", "error");
     return;
   }
+  if (cancellingAssignmentIds.has(target.assignmentId)) return;
+  cancellingAssignmentIds.add(target.assignmentId);
+  render();
   try {
-    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(activeRun.assignmentId)}/cancel`, { method: "POST", headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } });
-    const body = await response.json();
-    if (response.ok && activeRun.assistant && applyRecoveredRunState(activeRun.assistant, body?.run)) {
-      activeRun.abortController?.abort();
-      saveSessions();
-      render();
-    }
-  } catch {}
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(target.assignmentId)}/cancel`, { method: "POST", headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } });
+    const body = await response.json().catch(() => undefined);
+    if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+    if (!applyRecoveredRunState(target.assistant, body?.run)) throw new Error("停止请求未返回可确认的终态");
+    target.activeRun?.abortController?.abort();
+    saveSessions();
+    setStatus(body.run.status === "cancelled" ? "已停止" : body.run.status === "completed" ? "已完成" : "执行失败", body.run.status === "completed" ? "ok" : "error");
+  } catch (error) {
+    setStatus(`停止失败：${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally {
+    cancellingAssignmentIds.delete(target.assignmentId);
+    render();
+  }
 }
 
 function render() {
@@ -346,8 +358,9 @@ function render() {
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
   const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
   const activeRun = activeRunsByConversation.get(conversation.id);
+  const cancelTarget = cancellationTarget(activeRun, messages);
   $("submit").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0;
-  $("cancel").disabled = activeRun?.assignmentId === null || activeRun === undefined;
+  $("cancel").disabled = !cancelTarget.canCancel || (cancelTarget.assignmentId !== undefined && cancellingAssignmentIds.has(cancelTarget.assignmentId));
   $("upload-file").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
   renderPendingAttachments(conversation);
   $("details-title").textContent = messages.length > 0 ? "执行详情" : "产物";
