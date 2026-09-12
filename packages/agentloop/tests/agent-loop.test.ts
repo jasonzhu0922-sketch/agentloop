@@ -3621,6 +3621,75 @@ test("a no-tool candidate with internal Runtime evidence markup is repaired befo
   assert.equal(events.some((event) => event.type === "candidate.approved"), true);
 });
 
+test("an invalid final convergence candidate receives bounded repair grace before the Run limit", async () => {
+  let calls = 0;
+  let executions = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "read_evidence",
+    description: "Read the already-authorized evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return { priceRows: 21, tradingDays: 7 };
+    },
+  };
+  const internalMarkup = [
+    '<runtime_evidence_record source="server" kind="tool_call" encoding="json">',
+    '{"schema":"agentloop.runtimeEvidenceRecord/v1","kind":"tool_call","toolCallId":"read-1","toolName":"read_evidence","arguments":{}}',
+    "</runtime_evidence_record>",
+  ].join("\n");
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "read-1", name: "read_evidence", arguments: {} }],
+        };
+      }
+      assert.deepEqual(request.tools, []);
+      if (calls < 4) {
+        return { content: internalMarkup, finishReason: "stop", toolCalls: [] };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /internal Runtime evidence markup/);
+      return {
+        content: "已基于 21 条价格记录和 7 个交易日完成区间走势复核。",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["read_evidence"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Analyze the price evidence.",
+    input: "analyze",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    candidateRepairGraceSteps: 1,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.doesNotMatch(candidate.output, /runtime_evidence_record/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /21 条价格记录/);
+  assert.equal(calls, 4);
+  assert.equal(executions, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
+  assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
 test("streaming turns emit live deltas before the durable assistant checkpoint", async () => {
   const events: RuntimeEvent[] = [];
   const tool: RuntimeTool<unknown> = {

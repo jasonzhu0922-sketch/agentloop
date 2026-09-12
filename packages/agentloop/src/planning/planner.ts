@@ -712,7 +712,7 @@ function planningRuntimeContext(
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
           capabilityCatalogSemantics: "Capabilities are planning semantics only. Runtime Admission resolves them to execution tools after the Plan is submitted.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
-          sourceConstraintPolicy: "Use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Never cross these identity namespaces.",
+          sourceConstraintPolicy: "sourceConstraint is optional. Omit it entirely when a leaf has no concrete ToolSource, uploaded source, or visible-directory binding; never send sourceConstraint: {}. When present, use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Never cross these identity namespaces.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1370,6 +1370,12 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   const evidenceContract = record.evidenceContract === undefined
     ? undefined
     : parseEvidenceContract(record.evidenceContract, index);
+  // Some tool-call providers materialize an omitted optional object as `{}`.
+  // A bare sourceConstraint carries no binding semantics, so canonicalize it
+  // to absence before Admission rather than rejecting an otherwise valid Plan.
+  const sourceConstraint = record.sourceConstraint === undefined
+    ? undefined
+    : parseSourceConstraint(record.sourceConstraint, index);
   return {
     id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
     kind: "leaf",
@@ -1378,7 +1384,7 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     role: parseOutcomeLeafRole(record.role, index),
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
     requiredCapabilities: canonicalStringSet(record.requiredCapabilities, `leaves[${index}].requiredCapabilities`, 100),
-    ...(record.sourceConstraint === undefined ? {} : { sourceConstraint: parseSourceConstraint(record.sourceConstraint, index) }),
+    ...(sourceConstraint === undefined ? {} : { sourceConstraint }),
     ...(evidenceContract === undefined ? {
       successCriteria: [{
         id: "delivered",
@@ -1398,6 +1404,7 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
 
 function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
   const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
+  if (Object.keys(record).length === 0) return undefined;
   const requiredToolSourceIds = record.requiredToolSourceIds === undefined
     ? []
     : canonicalStringSet(record.requiredToolSourceIds, `leaves[${index}].sourceConstraint.requiredToolSourceIds`, 20);

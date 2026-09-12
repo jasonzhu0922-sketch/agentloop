@@ -279,8 +279,10 @@
 }
 
 .reasoning-body {
-  max-height: 240px;
+  /* Keep streaming thoughts inside their own bounded scroll surface. */
+  max-height: min(240px, 36vh);
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding-top: 2px;
 }
 

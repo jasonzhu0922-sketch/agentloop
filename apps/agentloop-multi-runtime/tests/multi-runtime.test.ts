@@ -18,6 +18,7 @@ import {
   parseSkillDirectoriesConfig,
   parseStepExecutionStrategyProfileConfig,
   resolveSkillDirectoriesConfig,
+  webToolsOptionsFromEnvironment,
 } from "../src/config/config.ts";
 import { assertRuntimeDispatchEnvelope } from "../src/runtime/runtime-host.ts";
 import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, webOriginMatches } from "../src/http/router-http.ts";
@@ -33,6 +34,7 @@ import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, 
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
 import { renderMarkdown } from "../web/markdown-renderer.js";
+import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -81,6 +83,17 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "postgres" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
   );
+});
+
+test("Runtime Host forwards deployment search endpoint and credentials to generic web tools", () => {
+  assert.deepEqual(webToolsOptionsFromEnvironment({
+    WEB_SEARCH_ENDPOINT: "https://api.bochaai.com/v1/web-search",
+    WEB_SEARCH_API_KEY: "bocha-test-key",
+  }), {
+    searchEndpoint: "https://api.bochaai.com/v1/web-search",
+    searchApiKey: "bocha-test-key",
+  });
+  assert.deepEqual(webToolsOptionsFromEnvironment({}), {});
 });
 
 test("Router and Runtime Host remain isolated deployment dependency closures", async () => {
@@ -171,6 +184,20 @@ test("execution details reserve the side panel for observable execution evidence
   assert.match(app, /data-plan-toggle/);
   assert.doesNotMatch(app, /class="turn-planner"/);
   assert.doesNotMatch(overrides, /\.turn-planner/);
+});
+
+test("live thought and conversation scroll only follow readers who remain near the bottom", async () => {
+  const [app, overrides] = await Promise.all([
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+  ]);
+  assert.equal(isNearBottom({ scrollTop: 168, clientHeight: 200, scrollHeight: 400 }), true);
+  assert.equal(isNearBottom({ scrollTop: 80, clientHeight: 200, scrollHeight: 400 }), false);
+  assert.equal(nextScrollTop({ scrollHeight: 640, clientHeight: 240 }, true, 80), 400);
+  assert.equal(nextScrollTop({ scrollHeight: 640, clientHeight: 240 }, false, 80), 80);
+  assert.match(app, /const followConversation = renderedConversationId !== conversation\.id \|\| isNearBottom\(conversationScroll\)/);
+  assert.match(app, /const followReasoning = previousReasoning === null \|\| isNearBottom\(previousReasoning\)/);
+  assert.match(overrides, /\.reasoning-body\s*\{[^}]*max-height:\s*min\(240px, 36vh\);[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);
 });
 
 test("execution-details pane owns overflow instead of flex-shrinking long artifact sections", async () => {

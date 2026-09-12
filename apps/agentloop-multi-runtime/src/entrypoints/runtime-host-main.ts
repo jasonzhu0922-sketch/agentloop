@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
-import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories } from "../config/config.ts";
+import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../config/config.ts";
 import { HttpResourceImporter } from "../runtime/http-resource-importer.ts";
 import { HostDispatchStore } from "../runtime/host-dispatch-store.ts";
 import { createRuntimeHostHttpServer } from "../http/runtime-host-http.ts";
@@ -52,7 +52,7 @@ const stepExecutionStrategy = createStepExecutionStrategyProfile(
 // Web research is a generic Host capability. Source-provider Skills consume it
 // through their declared workflow, rather than an incidental shell command or
 // a Router-specific integration.
-const integrationTools = process.env.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools();
+const integrationTools = process.env.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(process.env));
 const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
   environment: process.env,
   appRoot,

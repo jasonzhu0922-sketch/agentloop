@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import type { WebToolsOptions } from "@zhujun/agentloop";
 import type { RuntimeInstance, RuntimeProfile } from "../domain/contracts.ts";
 
 export interface SkillDirectoriesConfig {
@@ -28,6 +29,20 @@ export interface StepExecutionStrategyProfileConfig {
     readonly diagnosticPreviewCharacters?: number;
     readonly terminalProjectionCharacters?: number;
     readonly terminalPreviewCharacters?: number;
+  };
+}
+
+/**
+ * Maps deployment-owned search credentials to the generic Host web tools.
+ * Router requests never participate in this mapping, so the selected search
+ * backend remains an execution-environment concern.
+ */
+export function webToolsOptionsFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): WebToolsOptions {
+  return {
+    ...(environment.WEB_SEARCH_ENDPOINT === undefined ? {} : { searchEndpoint: environment.WEB_SEARCH_ENDPOINT }),
+    ...(environment.WEB_SEARCH_API_KEY === undefined ? {} : { searchApiKey: environment.WEB_SEARCH_API_KEY }),
   };
 }
 

@@ -2075,6 +2075,12 @@ export class RunService {
         requiresFileOutput: fileOutputStep,
         taskProfile: stepTaskProfile,
       });
+      // A delivery leaf may be deliberately tool-free: its direct dependency
+      // already acquired the source facts (including an empty-result receipt).
+      // Keep that receipt in the assessment evidence, rather than requiring
+      // the delivery leaf to re-acquire it or treating an honest no-data report
+      // as an incomplete, recoverable execution.
+      const dependencyToolEvidence = directDependencyToolEvidence(activeStep, plan);
       const result = await runAgentLoop({
         runId: input.runId,
         systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
@@ -2158,7 +2164,7 @@ export class RunService {
           const evidence: StepEvidence = {
             candidateOutput: candidate.output,
             deliveryCandidate: candidate.deliveryCandidate,
-            toolCalls: candidate.toolEvidence,
+            toolCalls: mergeAssessmentToolEvidence(dependencyToolEvidence, candidate.toolEvidence),
             modelSteps: candidate.modelSteps,
           };
           const assessmentProfile = selectAssessmentProfile(activeStep, evidence);
@@ -5145,6 +5151,31 @@ function assessmentEvidenceSignature(evidence: StepEvidence): Record<string, unk
       ].join("\u0000"))),
     ].sort(),
   };
+}
+
+/**
+ * A Plan dependency is an explicit semantic edge: its completed evidence is
+ * authoritative input to the dependent leaf. Assessment needs the canonical
+ * receipt as well as the execution model, especially for a final report whose
+ * correct result is that the bounded query returned no observations.
+ */
+function directDependencyToolEvidence(
+  step: ExecutionPlan["steps"][number],
+  plan: ExecutionPlan,
+): readonly ToolEvidence[] {
+  return step.dependencies.flatMap((dependencyId) => {
+    const dependency = plan.steps.find((candidate) => candidate.id === dependencyId);
+    return dependency?.status === "completed" ? dependency.evidence?.toolCalls ?? [] : [];
+  });
+}
+
+function mergeAssessmentToolEvidence(
+  inherited: readonly ToolEvidence[],
+  current: readonly ToolEvidence[],
+): readonly ToolEvidence[] {
+  const byCallId = new Map<string, ToolEvidence>();
+  for (const item of [...inherited, ...current]) byCallId.set(item.toolCallId, item);
+  return [...byCallId.values()];
 }
 
 function selectAssessmentProfile(

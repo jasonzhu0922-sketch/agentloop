@@ -4,6 +4,7 @@ import { persistJson, persistSessions } from "./session-persistence.js";
 import { openArtifactPreview } from "./artifact-preview.js";
 import { renderMarkdown } from "./markdown-renderer.js";
 import { cancellationTarget } from "./cancellation-target.js";
+import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -12,6 +13,7 @@ const IDENTITY_KEY = "agentloop.multi-runtime.identity.v1";
 const MAX_PENDING_ATTACHMENTS = 20;
 let sessions = loadSessions();
 let activeId = sessions[0]?.id ?? newConversation().id;
+let renderedConversationId;
 const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
@@ -345,6 +347,11 @@ async function cancelActive() {
 
 function render() {
   const conversation = activeConversation(); if (!conversation) return;
+  const conversationScroll = $("conversation-scroll");
+  const followConversation = renderedConversationId !== conversation.id || isNearBottom(conversationScroll);
+  const previousReasoning = document.querySelector(".reasoning-body");
+  const followReasoning = previousReasoning === null || isNearBottom(previousReasoning);
+  const previousReasoningTop = previousReasoning?.scrollTop ?? 0;
   activeId = conversation.id; $("conversation-title").textContent = conversation.title; $("conversation-id").textContent = `conversation: ${conversation.id}`;
   $("sessions").innerHTML = sessions.map((item) => `<div class="session-wrap"><button type="button" class="session ${item.id === activeId ? "active" : ""}" data-session="${item.id}"><span class="session-dot"></span><span class="session-body"><span class="session-title">${escapeHtml(item.title)}</span><span class="session-time">${item.messages.length ? `${Math.ceil(item.messages.length / 2)} 轮` : "空会话"}</span></span></button><button type="button" class="session-delete" data-delete-session="${item.id}" aria-label="删除会话">×</button></div>`).join("");
   document.querySelectorAll("[data-session]").forEach((button) => button.addEventListener("click", () => { activeId = button.dataset.session; render(); }));
@@ -368,8 +375,11 @@ function render() {
   $("details-title").textContent = messages.length > 0 ? "执行详情" : "产物";
   $("plan-section").hidden = !(lastAssistant?.plan?.length);
   $("events-section").hidden = !(lastAssistant?.events?.length);
-  renderPlan(projectPlanStatuses(lastAssistant?.plan || [], lastAssistant?.events || [])); renderEvents(lastAssistant?.events || []); renderDetails(conversation, lastAssistant); const scroll = $("conversation-scroll"); scroll.scrollTop = scroll.scrollHeight;
-  const reasoningBody = document.querySelector(".reasoning-body"); if (reasoningBody) reasoningBody.scrollTop = reasoningBody.scrollHeight;
+  renderPlan(projectPlanStatuses(lastAssistant?.plan || [], lastAssistant?.events || [])); renderEvents(lastAssistant?.events || []); renderDetails(conversation, lastAssistant);
+  conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, conversationScroll.scrollTop);
+  const reasoningBody = document.querySelector(".reasoning-body");
+  if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
+  renderedConversationId = conversation.id;
 }
 
 function renderMessage(message) {

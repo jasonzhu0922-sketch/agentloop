@@ -64,7 +64,7 @@ export interface AgentLoopOptions {
   readonly maxSteps: number;
   /** Additional tool-enabled steps allowed after `maxSteps` when the model is still working. */
   readonly convergenceGraceSteps?: number;
-  /** Additional tool-enabled steps allowed only after an assessor rejects a completion candidate. */
+  /** Additional tool-enabled steps available when a completion candidate needs another Runtime repair turn. */
   readonly candidateRepairGraceSteps?: number;
   /** Rejected assessed candidates allowed before accepting the latest non-empty output with a caveat. */
   readonly candidateRepairAssessmentLimit?: number;
@@ -199,6 +199,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let grantedCandidateRepairGraceSteps = 0;
   let grantedFinalConvergenceGraceSteps = 0;
   let rejectedCandidateAssessments = 0;
+  let pendingCandidateRepairDirective: string | undefined;
   const messages: ModelMessage[] = [
     ...(options.conversationHistory ?? []),
     ...(options.initialMessages === undefined
@@ -248,6 +249,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let requestedConvergenceReason: string | undefined;
   const currentLimit = (): number =>
     currentHardLimit(options.maxSteps, graceSteps, grantedCandidateRepairGraceSteps, grantedFinalConvergenceGraceSteps);
+  const grantCandidateRepairGrace = async (step: number, feedback: string): Promise<void> => {
+    if (candidateRepairGraceSteps <= grantedCandidateRepairGraceSteps) return;
+    grantedCandidateRepairGraceSteps = candidateRepairGraceSteps;
+    await emit({
+      type: "loop.candidate_repair_grace_granted",
+      data: {
+        step,
+        candidateRepairGraceSteps,
+        hardLimit: currentLimit(),
+        feedback,
+      },
+    });
+  };
+  const setCandidateRepairDirective = (directive: string): void => {
+    pendingCandidateRepairDirective = directive;
+    contextAssembler.setRuntimeDirective(directive);
+  };
   const evaluateCandidate = async (
     step: number,
     context: CandidateCompletionContext,
@@ -415,7 +433,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       };
     }
     requestedConvergenceReason = undefined;
-    contextAssembler.setRuntimeDirective(candidateRepairDirective(evaluation, input.rejectionDirective));
+    setCandidateRepairDirective(candidateRepairDirective(evaluation, input.rejectionDirective));
     return undefined;
   };
   for (let step = 1; step <= currentLimit(); step += 1) {
@@ -435,7 +453,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       && (requestedConvergenceReason !== undefined || (step === hardLimit && finalConvergenceAllowed));
     if (convergenceOnly) {
       convergenceRequested = true;
-      contextAssembler.setRuntimeDirective(convergencePrompt);
+      const directive = pendingCandidateRepairDirective ?? convergencePrompt;
+      pendingCandidateRepairDirective = undefined;
+      contextAssembler.setRuntimeDirective(directive);
       await emit({
         type: "loop.convergence_requested",
         data: {
@@ -610,18 +630,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         const feedback = `Completion candidate was not accepted because the model finished with ${response.finishReason}`;
         await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
         removeRejectedAssistantCandidate(messages, assistantMessage);
-        if (candidateRepairGraceSteps > grantedCandidateRepairGraceSteps) {
-          grantedCandidateRepairGraceSteps = candidateRepairGraceSteps;
-          await emit({
-            type: "loop.candidate_repair_grace_granted",
-            data: {
-              step,
-              candidateRepairGraceSteps,
-              hardLimit: currentLimit(),
-              feedback,
-            },
-          });
-        }
+        await grantCandidateRepairGrace(step, feedback);
         contextAssembler.setRuntimeDirective(lengthTruncationRepairDirective({
           feedback,
           convergenceOnly,
@@ -664,7 +673,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           },
         });
         removeRejectedAssistantCandidate(messages, assistantMessage);
-        contextAssembler.setRuntimeDirective(INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT);
+        // This candidate never reaches the assessor, but it is still a
+        // Runtime rejection that needs the same bounded repair path. Without
+        // this transition, an invalid final convergence answer can consume
+        // the last step and bypass the configured repair budget entirely.
+        await grantCandidateRepairGrace(step, feedback);
+        setCandidateRepairDirective(INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT);
         continue;
       }
       const evaluation = await evaluateCandidate(step, {
@@ -801,24 +815,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       requestedConvergenceReason = undefined;
       removeRejectedAssistantCandidate(messages, assistantMessage);
-      if (candidateRepairGraceSteps > grantedCandidateRepairGraceSteps) {
-        grantedCandidateRepairGraceSteps = candidateRepairGraceSteps;
-        await emit({
-          type: "loop.candidate_repair_grace_granted",
-          data: {
-            step,
-            candidateRepairGraceSteps,
-            hardLimit: currentLimit(),
-            feedback: evaluation.feedback,
-          },
-        });
-      }
-      contextAssembler.setRuntimeDirective(
+      await grantCandidateRepairGrace(step, evaluation.feedback);
+      setCandidateRepairDirective(
         candidateRepairDirective(evaluation, "Completion was rejected. Repair this step using the available evidence."),
       );
       continue;
     }
 
+    pendingCandidateRepairDirective = undefined;
     contextAssembler.setRuntimeDirective(undefined);
 
     // Progress evaluation informs the next model turn, but does not turn a

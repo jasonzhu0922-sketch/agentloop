@@ -969,6 +969,41 @@ test("ModelPlanner normalizes a missing fixed OutcomePlan schema discriminator",
   assert.equal(plan.steps[0].id, "produce_report");
 });
 
+test("ModelPlanner canonicalizes an empty optional source constraint to absence", async () => {
+  const planner = new ModelPlanner(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [{
+      id: "empty-source-constraint",
+      name: "submit_outcome_plan",
+      arguments: {
+        schema: "agentloop.outcomePlan/v2",
+        goal: "Analyze the provided market data and report the result.",
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        leaves: [{
+          id: "analyze_market_data",
+          objective: "Analyze the configured market data source and report the result to the user.",
+          dependsOn: [],
+          role: "deliver",
+          skillIds: [],
+          requiredCapabilities: ["conversation_delivery"],
+          sourceConstraint: {},
+        }],
+      },
+    }],
+  }));
+
+  const plan = await planner.plan({
+    runId: "run-empty-optional-source-constraint",
+    input: "Analyze the configured market data.",
+    availableSkills: [],
+    availableToolNames: [],
+  });
+
+  assert.equal(plan.steps[0]?.sourceConstraint, undefined);
+});
+
 test("ModelPlanner still rejects an incorrect OutcomePlan schema discriminator", async () => {
   const planner = new ModelPlanner(new StaticModel({
     content: "",
@@ -5997,6 +6032,113 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
     const boundary = events.find((event) => event.type === "assessment.failed_boundary");
     assert.deepEqual((boundary?.data as { failedBoundary?: unknown } | undefined)?.failedBoundary, failedBoundary);
     assert.equal(events.some((event) => event.type === "run.recovery_required"), true);
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService completes an honest no-observations report after bounded source diagnosis without recovery", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionCalls = 0;
+    const sourceQuery: RuntimeTool<unknown> = {
+      name: "obtain_series",
+      description: "Query a bounded source",
+      inputSchema: { type: "object", additionalProperties: false },
+      executionMode: "serial",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async () => ({
+        schema: "agentloop.sourceSummary/v1",
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          sourceRefs: [{ uri: "mysql://configured/steel-values", title: "Configured steel values" }],
+          caveats: ["No observations matched the confirmed indicator and date range."],
+          evidenceKinds: {
+            satisfied: ["source_summary", "record_counts"],
+            caveated: ["explicit_caveats"],
+            failed: [],
+          },
+        },
+      }),
+    };
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        assert.notEqual(request.phase, "assessment");
+        executionCalls += 1;
+        if (executionCalls === 1) return toolCallResponse("initial-empty-query", "obtain_series", {});
+        if (executionCalls === 2) {
+          return toolCallResponse("alternate-dimension-query", "obtain_series", {});
+        }
+        if (executionCalls === 3) {
+          return {
+            content: "After checking the confirmed indicator and the bounded alternate dimensions, the query returned zero observations for the requested date range.",
+            finishReason: "stop",
+            toolCalls: [],
+          };
+        }
+        return {
+          content: "No observations are available for the confirmed indicator and requested date range, so no first/last value, change, peak, trough, duplicate date, or gap can be calculated. This is a data result, not a request for further user input.",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      },
+    };
+    const evidenceContract = {
+      requiredKinds: ["source_summary", "explicit_caveats"] as const,
+      caveatPolicy: "mark_unverified_facts" as const,
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Report the bounded query result honestly.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "query-series",
+            objective: "Query the confirmed series and preserve an empty result when no observations match.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["external_api_call"],
+            evidenceContract,
+            successCriteria: [
+              { id: "source_summary", description: "The source query result is recorded.", source: "planner" },
+              { id: "explicit_caveats", description: "The result boundary is explicit.", source: "planner" },
+            ],
+          }, {
+            id: "deliver-empty-result",
+            objective: "Report the bounded no-observations result without inventing values or requesting recovery.",
+            dependencies: ["query-series"],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: ["external_api_call"],
+            evidenceContract,
+            successCriteria: [
+              { id: "source_summary", description: "The source query result is cited.", source: "planner" },
+              { id: "explicit_caveats", description: "The no-data limitation is explicit.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+      tools: [sourceQuery],
+      maxSteps: 4,
+    });
+
+    const run = await runs.execute(owner.user.id, "Report this price series for the requested range.");
+
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /No observations are available/);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+    assert.equal(events.some((event) => event.type === "run.waiting_user"), false);
+    assert.equal(events.some((event) => event.type === "candidate.rejected"), false);
+    assert.equal(events.filter((event) => event.type === "tool.completed").length >= 2, true);
   } finally {
     database.close();
   }
