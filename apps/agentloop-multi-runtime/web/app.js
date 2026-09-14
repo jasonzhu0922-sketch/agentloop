@@ -5,15 +5,22 @@ import { openArtifactPreview } from "./artifact-preview.js";
 import { renderMarkdown } from "./markdown-renderer.js";
 import { cancellationTarget } from "./cancellation-target.js";
 import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
+import { conversationMessagesFromTurns } from "./conversation-history.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "agentloop.multi-runtime.sessions.v1";
 const IDENTITY_KEY = "agentloop.multi-runtime.identity.v1";
 const MAX_PENDING_ATTACHMENTS = 20;
-let sessions = loadSessions();
-let activeId = sessions[0]?.id ?? newConversation().id;
+const CONVERSATION_PAGE_SIZE = 30;
+const recoveredSessions = sortSessions(loadSessions());
+let sessions = [];
+let activeId;
 let renderedConversationId;
+let conversationVisibleLimit = CONVERSATION_PAGE_SIZE;
+let conversationsNextOffset = 0;
+let conversationsHasMore = false;
+let conversationsLoadingMore = false;
 const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
@@ -21,9 +28,9 @@ const recoveringAssignmentIds = new Set();
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
 loadIdentity();
+void loadConversationPage(true);
 void loadModels();
 void loadRuntimes();
-void reconcilePersistedRuns();
 render();
 document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; $("input").focus(); }));
 $("theme-toggle")?.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "" : "dark"; });
@@ -36,8 +43,8 @@ $("attachment").addEventListener("change", () => void uploadAttachments($("attac
 $("input").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
 });
-$("user-id").addEventListener("change", saveIdentity);
-$("tenant-id").addEventListener("change", saveIdentity);
+$("user-id").addEventListener("change", reloadConversationsForIdentity);
+$("tenant-id").addEventListener("change", reloadConversationsForIdentity);
 
 function newConversation() {
   const conversation = { id: crypto.randomUUID(), title: "新对话", createdAt: Date.now(), updatedAt: Date.now(), messages: [], pendingAttachments: [] };
@@ -67,6 +74,138 @@ function loadSessions() {
 }
 function loadIdentity() { try { const value = JSON.parse(localStorage.getItem(IDENTITY_KEY) || "{}"); if (value.tenantId) $("tenant-id").value = value.tenantId; if (value.userId) $("user-id").value = value.userId; } catch {} }
 function saveIdentity() { persistJson(localStorage, IDENTITY_KEY, { tenantId: $("tenant-id").value.trim(), userId: $("user-id").value.trim() }); }
+
+function reloadConversationsForIdentity() {
+  saveIdentity();
+  void loadConversationPage(true);
+}
+
+async function loadConversationPage(reset = false) {
+  if (conversationsLoadingMore || (!reset && !conversationsHasMore)) return;
+  const tenantId = $("tenant-id").value.trim();
+  const userId = $("user-id").value.trim();
+  if (!tenantId || !userId) return;
+  const offset = reset ? 0 : conversationsNextOffset;
+  conversationsLoadingMore = true;
+  render();
+  try {
+    const response = await fetch(`${api}/v1/conversations?limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`, {
+      headers: { "x-tenant-id": tenantId, "x-user-id": userId },
+    });
+    const body = await response.json().catch(() => undefined);
+    if (!response.ok || !Array.isArray(body?.conversations)) throw new Error(body?.error || `HTTP ${response.status}`);
+    mergeConversationSummaries(body.conversations, reset);
+    if (reset) conversationVisibleLimit = CONVERSATION_PAGE_SIZE;
+    else conversationVisibleLimit += CONVERSATION_PAGE_SIZE;
+    conversationsHasMore = body.hasMore === true;
+    conversationsNextOffset = Number.isSafeInteger(body.nextOffset) ? body.nextOffset : offset + body.conversations.length;
+    activeId = activeConversation()?.id ?? newConversation().id;
+    if (reset) void reconcilePersistedRuns();
+  } catch (error) {
+    if (reset && sessions.length === 0) {
+      sessions = [...recoveredSessions];
+      activeId = sessions[0]?.id ?? newConversation().id;
+      setStatus("会话列表加载失败，已显示本地恢复缓存", "error");
+    } else if (!reset) {
+      setStatus(`加载更多对话失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  } finally {
+    conversationsLoadingMore = false;
+    render();
+  }
+}
+
+function mergeConversationSummaries(summaries, reset = false) {
+  const byId = new Map([...recoveredSessions, ...sessions].map((conversation) => [conversation.id, conversation]));
+  const nextSessions = reset ? [...sessions] : sessions;
+  for (const summary of summaries) {
+    if (!summary || typeof summary.id !== "string") continue;
+    const existing = byId.get(summary.id);
+    if (existing) {
+      existing.title = existing.title && existing.title !== "新对话" ? existing.title : String(summary.title || "新对话");
+      existing.createdAt = finiteNumber(existing.createdAt, summary.createdAt);
+      existing.updatedAt = Math.max(finiteNumber(existing.updatedAt, 0), finiteNumber(summary.updatedAt, 0));
+      existing.runCount = finiteNumber(summary.runCount, existing.runCount);
+      existing.lastStatus = typeof summary.lastStatus === "string" ? summary.lastStatus : existing.lastStatus;
+      if (!nextSessions.some((conversation) => conversation.id === existing.id)) nextSessions.push(existing);
+      continue;
+    }
+    const conversation = {
+      id: summary.id,
+      title: String(summary.title || "新对话"),
+      createdAt: finiteNumber(summary.createdAt, Date.now()),
+      updatedAt: finiteNumber(summary.updatedAt, 0),
+      runCount: finiteNumber(summary.runCount, 0),
+      lastStatus: typeof summary.lastStatus === "string" ? summary.lastStatus : undefined,
+      messages: [],
+      pendingAttachments: [],
+      historyLoaded: false,
+    };
+    nextSessions.push(conversation);
+    byId.set(conversation.id, conversation);
+  }
+  sessions = sortSessions(nextSessions);
+}
+
+function sortSessions(values) {
+  return [...values].sort((left, right) => finiteNumber(right?.updatedAt, 0) - finiteNumber(left?.updatedAt, 0) || String(right?.id || "").localeCompare(String(left?.id || "")));
+}
+
+function finiteNumber(value, fallback) { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
+
+async function selectConversation(conversationId) {
+  const conversation = sessions.find((item) => item.id === conversationId);
+  if (!conversation) return;
+  activeId = conversation.id;
+  render();
+  if (conversation.historyLoaded === true || conversation.historyLoading === true) return;
+  if (conversation.historyLoaded !== false && conversation.messages.length > 0) return;
+  if (finiteNumber(conversation.runCount, 0) === 0) { conversation.historyLoaded = true; return; }
+  const tenantId = $("tenant-id").value.trim();
+  const userId = $("user-id").value.trim();
+  if (!tenantId || !userId) return;
+  conversation.historyLoading = true;
+  setStatus("正在加载会话内容", "running");
+  render();
+  try {
+    const response = await fetch(`${api}/v1/conversations/${encodeURIComponent(conversation.id)}`, {
+      headers: { "x-tenant-id": tenantId, "x-user-id": userId },
+    });
+    const body = await response.json().catch(() => undefined);
+    if (!response.ok || !Array.isArray(body?.turns)) throw new Error(body?.error || `HTTP ${response.status}`);
+    conversation.messages = conversationMessagesFromTurns(body.turns);
+    render();
+    await Promise.all(conversation.messages
+      .filter((message) => message.role === "assistant" && typeof message.assignmentId === "string" && message.status === "running")
+      .map((assistant) => hydratePersistedAssistant(assistant, tenantId, userId)));
+    conversation.historyLoaded = true;
+    saveSessions();
+    setStatus("会话内容已加载", "ok");
+  } catch (error) {
+    setStatus(`加载会话内容失败：${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally {
+    conversation.historyLoading = false;
+    render();
+  }
+}
+
+async function hydratePersistedAssistant(assistant, tenantId, userId) {
+  let runLoaded = false;
+  try {
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}`, {
+      headers: { "x-tenant-id": tenantId, "x-user-id": userId },
+    });
+    if (response.ok) {
+      const body = await response.json();
+      runLoaded = body?.run !== undefined;
+      applyRecoveredRunState(assistant, body?.run);
+    }
+  } catch {}
+  const eventsLoaded = await replayPersistedRunEvents(assistant, tenantId, userId);
+  if (!runLoaded && !eventsLoaded) throw new Error("无法读取该轮的 Runtime Run");
+  if (assistant.status !== "running") await refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId);
+  if (assistant.status === "running") await refreshHumanLoop(assistant.assignmentId, assistant, tenantId, userId);
+}
 
 async function reconcilePersistedRuns() {
   const tenantId = $("tenant-id").value.trim();
@@ -353,8 +492,15 @@ function render() {
   const followReasoning = previousReasoning === null || isNearBottom(previousReasoning);
   const previousReasoningTop = previousReasoning?.scrollTop ?? 0;
   activeId = conversation.id; $("conversation-title").textContent = conversation.title; $("conversation-id").textContent = `conversation: ${conversation.id}`;
-  $("sessions").innerHTML = sessions.map((item) => `<div class="session-wrap"><button type="button" class="session ${item.id === activeId ? "active" : ""}" data-session="${item.id}"><span class="session-dot"></span><span class="session-body"><span class="session-title">${escapeHtml(item.title)}</span><span class="session-time">${item.messages.length ? `${Math.ceil(item.messages.length / 2)} 轮` : "空会话"}</span></span></button><button type="button" class="session-delete" data-delete-session="${item.id}" aria-label="删除会话">×</button></div>`).join("");
-  document.querySelectorAll("[data-session]").forEach((button) => button.addEventListener("click", () => { activeId = button.dataset.session; render(); }));
+  const orderedSessions = sortSessions(sessions);
+  const visibleSessions = orderedSessions.slice(0, conversationVisibleLimit);
+  const canLoadMoreConversations = conversationsHasMore || orderedSessions.length > visibleSessions.length;
+  $("sessions").innerHTML = visibleSessions.map((item) => `<div class="session-wrap"><button type="button" class="session ${item.id === activeId ? "active" : ""}" data-session="${item.id}"><span class="session-dot"></span><span class="session-body"><span class="session-title">${escapeHtml(item.title)}</span><span class="session-time">${conversationTurnLabel(item)}</span></span></button><button type="button" class="session-delete" data-delete-session="${item.id}" aria-label="删除会话">×</button></div>`).join("") + (canLoadMoreConversations ? `<button id="load-more-conversations" class="sessions-more" type="button" ${conversationsLoadingMore ? "disabled" : ""}>${conversationsLoadingMore ? "加载中…" : "加载更多对话"}</button>` : "");
+  document.querySelectorAll("[data-session]").forEach((button) => button.addEventListener("click", () => void selectConversation(button.dataset.session)));
+  $("load-more-conversations")?.addEventListener("click", () => {
+    if (conversationsHasMore) void loadConversationPage(false);
+    else { conversationVisibleLimit += CONVERSATION_PAGE_SIZE; render(); }
+  });
   document.querySelectorAll("[data-delete-session]").forEach((button) => button.addEventListener("click", () => { sessions = sessions.filter((item) => item.id !== button.dataset.deleteSession); if (activeId === button.dataset.deleteSession) activeId = sessions[0]?.id ?? newConversation().id; saveSessions(); render(); }));
   const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
   document.querySelectorAll("[data-plan-toggle]").forEach((button) => button.addEventListener("click", () => {
@@ -380,6 +526,12 @@ function render() {
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
   renderedConversationId = conversation.id;
+}
+
+function conversationTurnLabel(conversation) {
+  if (conversation.messages?.length) return `${Math.ceil(conversation.messages.length / 2)} 轮`;
+  if (finiteNumber(conversation.runCount, 0) > 0) return `${conversation.runCount} 轮`;
+  return "空会话";
 }
 
 function renderMessage(message) {

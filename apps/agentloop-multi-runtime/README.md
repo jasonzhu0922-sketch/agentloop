@@ -138,7 +138,7 @@ npm run start:runtime-host --workspace agentloop-multi-runtime
 npm run start:web --workspace agentloop-multi-runtime
 ```
 
-访问 [http://127.0.0.1:5174](http://127.0.0.1:5174)。Web 页面提供会话侧栏、对话流、Composer 和详情面板；左侧可以创建和切换会话。每次发送都会复用当前 `conversationId`，模型下拉只提交公开的 `requestedModelKey`，Planner 和 Run 事件通过 Router 的 SSE 代理实时展示。文件会先上传到 Router，再由被选 Host 导入为仅对该 Host 有效的 `sourceId`。
+访问 [http://127.0.0.1:5174](http://127.0.0.1:5174)。Web 页面提供会话侧栏、对话流、Composer 和详情面板；左侧可以创建和切换会话。会话侧栏通过 Router 的 `GET /v1/conversations?limit=30&offset=...` 按最近活动时间倒序加载，首屏 30 条，点击“加载更多对话”后追加下一页 30 条；正常分页结果以 Router 为权威，localStorage 只在首屏接口失败时作为恢复缓存。首次点击分页加载的会话时，再通过 `GET /v1/conversations/:conversationId` 读取持久轮次索引，并按 Assignment 回放 Host 状态与事件形成完整对话流。每次发送都会复用当前 `conversationId`，模型下拉只提交公开的 `requestedModelKey`，Planner 和 Run 事件通过 Router 的 SSE 代理实时展示。文件会先上传到 Router，再由被选 Host 导入为仅对该 Host 有效的 `sourceId`。
 
 ## Docker Compose：一条命令启动
 

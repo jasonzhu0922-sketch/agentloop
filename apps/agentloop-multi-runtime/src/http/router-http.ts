@@ -14,6 +14,35 @@ interface RouterTaskApi {
   submit(task: SubmitConversationTask): Promise<{ readonly id: string; readonly tenantId: string; readonly ownerUserId: string }>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
   runtimes?(): Promise<readonly { id: string; profile: string }[]>;
+  conversations?(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<{
+    readonly conversations: readonly {
+      readonly id: string;
+      readonly title: string;
+      readonly createdAt: number;
+      readonly updatedAt: number;
+      readonly runCount: number;
+      readonly lastStatus: string;
+    }[];
+    readonly hasMore: boolean;
+    readonly nextOffset?: number;
+  }>;
+  conversation?(tenantId: string, ownerUserId: string, conversationId: string): Promise<{
+    readonly turns: readonly {
+      readonly clientMessageId: string;
+      readonly input: string;
+      readonly createdAt: number;
+      readonly updatedAt: number;
+      readonly attachments: readonly { readonly id: string; readonly originalName: string; readonly mediaType: string; readonly byteSize: number }[];
+      readonly assignment?: {
+        readonly id: string;
+        readonly runtimeId: string;
+        readonly status: string;
+        readonly hasRun: boolean;
+        readonly errorCode?: string;
+        readonly errorMessage?: string;
+      };
+    }[];
+  } | undefined>;
   assignment(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run?: RuntimeRunStatus } | undefined>;
   artifacts?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifacts: readonly ProcessArtifact[] } | undefined>;
   readArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifact: ProcessArtifact; readonly content: Uint8Array } | undefined>;
@@ -44,6 +73,21 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       }
       if (request.method === "GET" && url.pathname === "/v1/runtimes") {
         return json(response, 200, { runtimes: await router.runtimes?.() ?? [] });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/conversations") {
+        if (router.conversations === undefined) return json(response, 501, { error: "conversations_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        return json(response, 200, await router.conversations(identity.tenantId, identity.ownerUserId, {
+          limit: pageInteger(url.searchParams.get("limit"), "limit", 30, 1, 100),
+          offset: pageInteger(url.searchParams.get("offset"), "offset", 0, 0, 10_000),
+        }));
+      }
+      const conversationMatch = url.pathname.match(/^\/v1\/conversations\/([^/]+)$/);
+      if (request.method === "GET" && conversationMatch !== null) {
+        if (router.conversation === undefined) return json(response, 501, { error: "conversation_detail_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const detail = await router.conversation(identity.tenantId, identity.ownerUserId, decodeURIComponent(conversationMatch[1]));
+        return detail === undefined ? json(response, 404, { error: "conversation_not_found" }) : json(response, 200, detail);
       }
       if (request.method === "POST" && url.pathname === "/v1/attachments") {
         if (options.attachments === undefined) return json(response, 501, { error: "attachments_not_configured" });
@@ -422,6 +466,15 @@ function nonNegativeInteger(value: unknown, field: string): number {
 function positiveInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new TypeError(`${field} must be a positive integer`);
   return value;
+}
+
+function pageInteger(value: string | null, field: string, fallback: number, minimum: number, maximum: number): number {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new TypeError(`${field} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
 }
 
 function runtimeStatus(value: unknown): "ready" | "draining" | "offline" {

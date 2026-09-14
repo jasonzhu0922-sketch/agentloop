@@ -35,6 +35,7 @@ import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
 import { renderMarkdown } from "../web/markdown-renderer.js";
 import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
+import { conversationMessagesFromTurns } from "../web/conversation-history.js";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -83,6 +84,139 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "postgres" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
   );
+});
+
+test("Router conversation index paginates newest conversations in stable pages of 30", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  const insert = database.prepare(`
+    INSERT INTO mr_tasks(
+      id, tenant_id, owner_user_id, conversation_id, client_message_id, input,
+      requested_runtime_id, requested_profile, required_capabilities_json,
+      requested_model_key, allow_dangerous_tools, resource_refs_json, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, '[]', NULL, 1, '[]', ?, ?, ?)
+  `);
+  for (let index = 0; index < 65; index += 1) {
+    const suffix = String(index).padStart(2, "0");
+    await insert.run(
+      `task-${suffix}`,
+      "tenant",
+      "user",
+      `conversation-${suffix}`,
+      `message-${suffix}`,
+      `Conversation ${suffix}`,
+      "completed",
+      index,
+      index,
+    );
+  }
+  await insert.run("other-task", "tenant", "other-user", "other-conversation", "other-message", "Other", "completed", 1_000, 1_000);
+
+  const first = await store.listConversations("tenant", "user", { limit: 30, offset: 0 });
+  assert.equal(first.conversations.length, 30);
+  assert.equal(first.conversations[0]?.id, "conversation-64");
+  assert.equal(first.conversations[29]?.id, "conversation-35");
+  assert.equal(first.hasMore, true);
+  assert.equal(first.nextOffset, 30);
+
+  const second = await store.listConversations("tenant", "user", { limit: 30, offset: 30 });
+  assert.equal(second.conversations.length, 30);
+  assert.equal(second.conversations[0]?.id, "conversation-34");
+  assert.equal(second.conversations[29]?.id, "conversation-05");
+  assert.equal(second.hasMore, true);
+  assert.equal(second.nextOffset, 60);
+
+  const third = await store.listConversations("tenant", "user", { limit: 30, offset: 60 });
+  assert.deepEqual(third.conversations.map((conversation) => conversation.id), [
+    "conversation-04",
+    "conversation-03",
+    "conversation-02",
+    "conversation-01",
+    "conversation-00",
+  ]);
+  assert.equal(third.hasMore, false);
+  assert.equal(third.nextOffset, undefined);
+
+  await store.seedRuntimes([{ ...runtime("runtime-history"), endpoint: "http://runtime-history" }], 2_000);
+  await database.prepare("UPDATE mr_tasks SET resource_refs_json = ? WHERE id = ?").run(JSON.stringify([{
+    attachmentId: "attachment-64",
+    uri: "http://router/internal/attachment-64",
+    sha256: "a".repeat(64),
+    mediaType: "text/plain",
+    originalName: "history.txt",
+    byteSize: 7,
+  }]), "task-64");
+  await database.prepare(`
+    INSERT INTO mr_assignments(
+      id, task_id, runtime_id, dispatch_key, remote_run_id, status,
+      reservation_expires_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+  `).run("assignment-history", "task-64", "runtime-history", "dispatch-history", "run-history", "completed", 64, 64);
+  const detail = await store.conversation("tenant", "user", "conversation-64");
+  assert.deepEqual(detail?.turns, [{
+    clientMessageId: "message-64",
+    input: "Conversation 64",
+    createdAt: 64,
+    updatedAt: 64,
+    attachments: [{ id: "attachment-64", originalName: "history.txt", mediaType: "text/plain", byteSize: 7 }],
+    assignment: {
+      id: "assignment-history",
+      runtimeId: "runtime-history",
+      status: "completed",
+      hasRun: true,
+    },
+  }]);
+  assert.equal(await store.conversation("tenant", "other-user", "conversation-64"), undefined);
+  await database.close();
+});
+
+test("persisted conversation turns become a replayable conversation stream on click", () => {
+  const messages = conversationMessagesFromTurns([{
+    clientMessageId: "message-history",
+    input: "历史问题",
+    createdAt: 10,
+    attachments: [{ id: "attachment", originalName: "history.txt" }],
+    assignment: { id: "assignment-history", runtimeId: "runtime-history", hasRun: true },
+  }]);
+  assert.equal(messages.length, 2);
+  assert.deepEqual(messages[0], {
+    id: "message-history",
+    role: "user",
+    text: "历史问题",
+    createdAt: 10,
+    attachments: [{ id: "attachment", originalName: "history.txt" }],
+  });
+  const assistant = messages[1] as unknown as { status: string; text: string; reasoning: string; events: unknown[]; plan: unknown[] };
+  assert.equal(assistant.status, "running");
+  assert.equal(messages[1]?.assignmentId, "assignment-history");
+  assert.equal(replayAssistantEvents(assistant, [{
+    seq: 1,
+    type: "run.completed",
+    data: { output: "历史回答" },
+    createdAt: 20,
+  }]), true);
+  assert.equal(assistant.status, "completed");
+  assert.equal(assistant.text, "历史回答");
+});
+
+test("Multi Runtime Web requests and appends conversation pages of 30", async () => {
+  const [app, overrides] = await Promise.all([
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /const CONVERSATION_PAGE_SIZE = 30/);
+  assert.match(app, /const recoveredSessions = sortSessions\(loadSessions\(\)\);\s*let sessions = \[\]/);
+  assert.match(app, /mergeConversationSummaries\(body\.conversations, reset\)/);
+  assert.match(app, /if \(reset && sessions\.length === 0\)/);
+  assert.match(app, /\/v1\/conversations\?limit=\$\{CONVERSATION_PAGE_SIZE\}&offset=\$\{offset\}/);
+  assert.match(app, /conversationVisibleLimit \+= CONVERSATION_PAGE_SIZE/);
+  assert.match(app, /加载更多对话/);
+  assert.match(app, /\/v1\/conversations\/\$\{encodeURIComponent\(conversation\.id\)\}/);
+  assert.match(app, /conversationMessagesFromTurns\(body\.turns\)/);
+  assert.match(app, /hydratePersistedAssistant/);
+  assert.match(overrides, /\.sessions-more/);
 });
 
 test("Runtime Host forwards deployment search endpoint and credentials to generic web tools", () => {

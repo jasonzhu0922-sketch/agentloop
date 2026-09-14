@@ -56,6 +56,18 @@ export class PersistentMultiRuntimeRouter {
     return await this.store.runtimeCatalog();
   }
 
+  async conversations(
+    tenantId: string,
+    ownerUserId: string,
+    page: { readonly limit: number; readonly offset: number },
+  ) {
+    return await this.store.listConversations(tenantId, ownerUserId, page);
+  }
+
+  async conversation(tenantId: string, ownerUserId: string, conversationId: string) {
+    return await this.store.conversation(tenantId, ownerUserId, conversationId);
+  }
+
   async assignment(id: string): Promise<{ readonly assignment: StoredAssignment; readonly run?: RuntimeRunStatus } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined) return undefined;

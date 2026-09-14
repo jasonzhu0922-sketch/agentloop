@@ -32,6 +32,42 @@ export interface RuntimeCatalogEntry {
   readonly profile: RuntimeProfile;
 }
 
+export interface StoredConversationSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly runCount: number;
+  readonly lastStatus: string;
+}
+
+export interface StoredConversationPage {
+  readonly conversations: readonly StoredConversationSummary[];
+  readonly hasMore: boolean;
+  readonly nextOffset?: number;
+}
+
+export interface StoredConversationTurn {
+  readonly clientMessageId: string;
+  readonly input: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly attachments: readonly {
+    readonly id: string;
+    readonly originalName: string;
+    readonly mediaType: string;
+    readonly byteSize: number;
+  }[];
+  readonly assignment?: {
+    readonly id: string;
+    readonly runtimeId: string;
+    readonly status: AssignmentStatus;
+    readonly hasRun: boolean;
+    readonly errorCode?: string;
+    readonly errorMessage?: string;
+  };
+}
+
 interface TaskRow {
   id: string;
   tenant_id: string;
@@ -198,6 +234,136 @@ export class ControlPlaneStore {
   /** Static Hosts registered with this Router; availability remains heartbeat-driven. */
   async runtimeCatalog(): Promise<readonly RuntimeCatalogEntry[]> {
     return await this.database.prepare("SELECT id, profile FROM mr_runtime_nodes ORDER BY id").all() as RuntimeCatalogEntry[];
+  }
+
+  /** Router-owned conversation index, ordered by the latest task activity. */
+  async listConversations(
+    tenantId: string,
+    ownerUserId: string,
+    page: { readonly limit: number; readonly offset: number },
+  ): Promise<StoredConversationPage> {
+    const rows = await this.database.prepare(`
+      SELECT
+        grouped.conversation_id,
+        grouped.created_at,
+        grouped.updated_at,
+        grouped.run_count,
+        (
+          SELECT first_task.input
+          FROM mr_tasks first_task
+          WHERE first_task.tenant_id = grouped.tenant_id
+            AND first_task.owner_user_id = grouped.owner_user_id
+            AND first_task.conversation_id = grouped.conversation_id
+          ORDER BY first_task.created_at ASC, first_task.id ASC
+          LIMIT 1
+        ) AS title,
+        (
+          SELECT latest_task.status
+          FROM mr_tasks latest_task
+          WHERE latest_task.tenant_id = grouped.tenant_id
+            AND latest_task.owner_user_id = grouped.owner_user_id
+            AND latest_task.conversation_id = grouped.conversation_id
+          ORDER BY latest_task.created_at DESC, latest_task.id DESC
+          LIMIT 1
+        ) AS last_status
+      FROM (
+        SELECT tenant_id, owner_user_id, conversation_id,
+          MIN(created_at) AS created_at,
+          MAX(updated_at) AS updated_at,
+          COUNT(*) AS run_count
+        FROM mr_tasks
+        WHERE tenant_id = ? AND owner_user_id = ?
+        GROUP BY tenant_id, owner_user_id, conversation_id
+      ) grouped
+      ORDER BY grouped.updated_at DESC, grouped.conversation_id DESC
+      LIMIT ? OFFSET ?
+    `).all(tenantId, ownerUserId, page.limit + 1, page.offset) as Array<{
+      conversation_id: string;
+      title: string;
+      created_at: number;
+      updated_at: number;
+      run_count: number;
+      last_status: string;
+    }>;
+    const visibleRows = rows.slice(0, page.limit);
+    const conversations = visibleRows.map((row) => ({
+      id: row.conversation_id,
+      title: row.title.slice(0, 36),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      runCount: Number(row.run_count),
+      lastStatus: row.last_status,
+    }));
+    const hasMore = rows.length > page.limit;
+    return {
+      conversations,
+      hasMore,
+      ...(hasMore ? { nextOffset: page.offset + conversations.length } : {}),
+    };
+  }
+
+  /** Chronological turn index; Run output and events remain Host-owned. */
+  async conversation(
+    tenantId: string,
+    ownerUserId: string,
+    conversationId: string,
+  ): Promise<{ readonly turns: readonly StoredConversationTurn[] } | undefined> {
+    const rows = await this.database.prepare(`
+      SELECT
+        t.client_message_id,
+        t.input,
+        t.resource_refs_json,
+        t.created_at,
+        t.updated_at,
+        a.id AS assignment_id,
+        a.runtime_id,
+        a.remote_run_id,
+        a.status AS assignment_status,
+        a.error_code,
+        a.error_message
+      FROM mr_tasks t
+      LEFT JOIN mr_assignments a ON a.id = (
+        SELECT latest_assignment.id
+        FROM mr_assignments latest_assignment
+        WHERE latest_assignment.task_id = t.id
+        ORDER BY latest_assignment.created_at DESC, latest_assignment.id DESC
+        LIMIT 1
+      )
+      WHERE t.tenant_id = ? AND t.owner_user_id = ? AND t.conversation_id = ?
+      ORDER BY t.created_at ASC, t.id ASC
+    `).all(tenantId, ownerUserId, conversationId) as Array<{
+      client_message_id: string;
+      input: string;
+      resource_refs_json: string;
+      created_at: number;
+      updated_at: number;
+      assignment_id: string | null;
+      runtime_id: string | null;
+      remote_run_id: string | null;
+      assignment_status: AssignmentStatus | null;
+      error_code: string | null;
+      error_message: string | null;
+    }>;
+    if (rows.length === 0) return undefined;
+    return {
+      turns: rows.map((row) => ({
+        clientMessageId: row.client_message_id,
+        input: row.input,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        attachments: browserAttachments(row.resource_refs_json),
+        ...(row.assignment_id === null || row.runtime_id === null || row.assignment_status === null ? {} : {
+          assignment: {
+            id: row.assignment_id,
+            runtimeId: row.runtime_id,
+            status: row.assignment_status,
+            hasRun: row.remote_run_id !== null,
+            ...(row.error_code === null ? {} : { errorCode: row.error_code }),
+            ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
+          },
+        }),
+      })),
+    };
   }
 
   async reserve(task: SubmitConversationTask, input: { readonly heartbeatTtlMs: number; readonly reservationTtlMs: number; readonly now?: number }): Promise<StoredAssignment> {
@@ -427,4 +593,24 @@ function toStoredAssignment(row: AssignmentRow): StoredAssignment {
 
 function score(node: { active_run_count: number; queued_run_count: number; pending_admissions: number; max_concurrent_runs: number }): number {
   return (node.active_run_count + Number(node.pending_admissions) + node.queued_run_count * 0.5) / node.max_concurrent_runs;
+}
+
+function browserAttachments(value: string): StoredConversationTurn["attachments"] {
+  try {
+    const refs = JSON.parse(value) as unknown;
+    if (!Array.isArray(refs)) return [];
+    return refs.flatMap((ref) => {
+      if (ref === null || typeof ref !== "object") return [];
+      const item = ref as Partial<PortableResourceRef>;
+      if (typeof item.attachmentId !== "string" || typeof item.originalName !== "string") return [];
+      return [{
+        id: item.attachmentId,
+        originalName: item.originalName,
+        mediaType: typeof item.mediaType === "string" ? item.mediaType : "application/octet-stream",
+        byteSize: typeof item.byteSize === "number" ? item.byteSize : 0,
+      }];
+    });
+  } catch {
+    return [];
+  }
 }
