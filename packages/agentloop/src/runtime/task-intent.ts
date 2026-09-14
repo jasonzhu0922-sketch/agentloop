@@ -193,7 +193,7 @@ function matchedArtifactActions(text: string): string[] {
 
 function matchedArtifactSurfaces(text: string): string[] {
   return matchSignals(text, [
-    ["format", /\.(?:png|pdf|md|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|csv|json|txt)\b|\b(?:png|pdf|markdown|html|svg|jpe?g|webp|gif|docx|pptx|xlsx|excel|csv|json|txt)\b/iu],
+    ["format", /\.(?:png|pdf|md|markdown|html|svg|jpe?g|webp|gif|docx?|pptx|xlsx|csv|json|txt)\b|\b(?:png|pdf|markdown|html|svg|jpe?g|webp|gif|docx?|word|pptx|xlsx|excel|csv|json|txt)\b/iu],
     ["browser_ui", /\b(?:web\s?page|webpage|landing\s?page|site|website|frontend|ui)\b|网页|页面|首页|登录页|落地页|站点|网站|前端|界面/iu],
     ["artifact", /\b(?:artifact|file|dashboard|report|document|presentation|slides?|deck|canvas|poster|artwork|image|visual|app)\b|文件|档案|产物|报告|看板|材料|课件|演示|幻灯片|海报|图片|图像|视觉|画布|应用/iu],
   ]);

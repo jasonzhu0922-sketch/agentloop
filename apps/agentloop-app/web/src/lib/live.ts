@@ -388,7 +388,7 @@ function fileWriteProgressView(path: string | undefined): { readonly title: stri
       detail: "把阶段性结论或说明写成文件，供后续步骤引用。",
     };
   }
-  if (extension === "html" || extension === "pdf" || extension === "pptx" || extension === "docx" || extension === "xlsx") {
+  if (extension === "html" || extension === "pdf" || extension === "pptx" || extension === "doc" || extension === "docx" || extension === "xlsx") {
     return {
       title: "正在生成交付文件",
       detail: "把当前内容写成可打开检查的文件。",

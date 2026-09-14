@@ -1190,6 +1190,65 @@ test("verify_artifact_acceptance validates OpenXML package structure through the
   }
 });
 
+test("verify_artifact_acceptance classifies DOC and DOCX as one Word format family", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-word-family-"));
+  try {
+    const legacyDoc = Buffer.alloc(1_024);
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(legacyDoc, 0);
+    legacyDoc.writeUInt16LE(3, 26);
+    legacyDoc.writeUInt16LE(0xfffe, 28);
+    Buffer.from("WordDocument", "utf16le").copy(legacyDoc, 512);
+    const openXmlDocx = storedZip([
+      ["[Content_Types].xml", "<Types></Types>"],
+      ["word/document.xml", "<w:document><w:body><w:p><w:r><w:t>Word family</w:t></w:r></w:p></w:body></w:document>"],
+    ]);
+    await fs.writeFile(join(root, "legacy.doc"), legacyDoc);
+    await fs.writeFile(join(root, "modern.docx"), openXmlDocx);
+    await fs.writeFile(join(root, "fake.doc"), "plain text with a DOC extension");
+
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["verify_artifact_acceptance"]));
+    const verify = async (artifactPath: string) => {
+      const prepared = allowed.prepare({
+        id: `accept-${artifactPath}`,
+        name: "verify_artifact_acceptance",
+        arguments: { artifactPath, artifactKind: "auto" },
+      });
+      return prepared.tool.execute(grantContext(["verify_artifact_acceptance"]), prepared.input) as Promise<{
+        verdict: string;
+        artifact: { kind: string; profileId: string };
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+        checks: Array<{ id: string; status: string; evidence: Record<string, unknown> }>;
+      }>;
+    };
+
+    const legacy = await verify("legacy.doc");
+    const modern = await verify("modern.docx");
+    const fake = await verify("fake.doc");
+
+    for (const result of [legacy, modern]) {
+      assert.equal(result.artifact.kind, "word");
+      assert.equal(result.artifact.profileId, "word");
+      assert.equal(result.verdict, "caveated");
+      assert.ok(result.evidenceKinds.satisfied.includes("artifact_acceptance"));
+      assert.ok(result.evidenceKinds.satisfied.includes("artifact_openable"));
+      assert.ok(result.evidenceKinds.satisfied.includes("format_matches_request"));
+      assert.equal(check(result, "format_matches_request")?.status, "passed");
+      assert.equal(check(result, "artifact_openable")?.status, "passed");
+      assert.equal(check(result, "rendered_open")?.status, "skipped_unavailable");
+    }
+    assert.equal(check(legacy, "format_matches_request")?.evidence.physicalFormat, "doc_compound_file");
+    assert.equal(check(modern, "artifact_openable")?.evidence.mode, "openxml_package_structure");
+    assert.equal(fake.artifact.kind, "word");
+    assert.equal(fake.verdict, "rejected");
+    assert.ok(fake.evidenceKinds.failed.includes("artifact_acceptance"));
+    assert.ok(fake.evidenceKinds.failed.includes("artifact_openable"));
+    assert.ok(fake.evidenceKinds.failed.includes("format_matches_request"));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verify_artifact_acceptance records PPTX slide sequence as basic navigation evidence", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-pptx-navigation-"));
   try {
@@ -2269,6 +2328,7 @@ test("computer_run_command rejects structured data files as interpreter entry po
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-entrypoint-"));
   try {
     await fs.writeFile(join(root, "payload.json"), "{\"ok\":true}\n");
+    await fs.writeFile(join(root, "legacy.doc"), "legacy word bytes");
     await fs.writeFile(join(root, "script.js"), "process.stdout.write('ok\\n');\n");
     const executor = new ComputerExecutor(root, {
       executableAliases: { "node": process.execPath },
@@ -2283,6 +2343,17 @@ test("computer_run_command rejects structured data files as interpreter entry po
       (error: unknown) => hasCode(error, "BAD_REQUEST")
         && error instanceof Error
         && /cannot use payload\.json as its entry point/i.test(error.message),
+    );
+    await assert.rejects(
+      () => executor.runCommand({
+        command: "node",
+        args: ["legacy.doc"],
+        cwd: ".",
+        timeoutMs: 2_000,
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && error instanceof Error
+        && /cannot use legacy\.doc as its entry point/i.test(error.message),
     );
     const result = await executor.runCommand({
       command: "node",

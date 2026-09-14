@@ -11,7 +11,7 @@ const MAX_PREVIEW_COLUMNS = 24;
 const MAX_PREVIEW_SLIDES = 60;
 const DEFAULT_PPTX_WIDTH = 12_192_000;
 const DEFAULT_PPTX_HEIGHT = 6_858_000;
-const COMMAND_ARTIFACT_EXTENSION_PATTERN = /(?:^|[\s'"(])([^\s'"),:;]+?\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx|pptx|xlsx))(?=$|[\s'"),:;])/giu;
+const COMMAND_ARTIFACT_EXTENSION_PATTERN = /(?:^|[\s'"(])([^\s'"),:;]+?\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx))(?=$|[\s'"),:;])/giu;
 
 export interface ProcessArtifact {
   readonly runId: string;
@@ -375,6 +375,7 @@ function mimeTypeFor(path: string): string {
     pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml",
     html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8", md: "text/markdown; charset=utf-8", txt: "text/plain; charset=utf-8",
     csv: "text/csv; charset=utf-8", json: "application/json; charset=utf-8",
+    doc: "application/msword",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -383,7 +384,7 @@ function mimeTypeFor(path: string): string {
 }
 
 function isPreviewable(path: string): boolean {
-  return /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx|pptx|xlsx)$/i.test(path);
+  return /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx)$/i.test(path);
 }
 
 function extensionFor(path: string): string {

@@ -2100,6 +2100,7 @@ function isPotentialEntrypointPath(value: string): boolean {
 
 const DATA_ARTIFACT_EXTENSIONS = new Set([
   ".csv",
+  ".doc",
   ".docx",
   ".htm",
   ".html",

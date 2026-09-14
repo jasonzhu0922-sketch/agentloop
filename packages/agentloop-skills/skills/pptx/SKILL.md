@@ -8,7 +8,10 @@ agentloop:
   artifactKinds:
     - presentation
   sourceKinds: []
-  qaKinds: []
+  qaKinds:
+    - content
+    - openability
+    - visual
 ---
 
 # PPTX creation, editing, and analysis

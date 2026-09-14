@@ -1,6 +1,7 @@
 import { extname } from "node:path";
 import { Script } from "node:vm";
 import type { ComputerExecutor } from "../computer/computer-executor.ts";
+import { isWordDocumentPath } from "../shared/artifact-format.ts";
 import type {
   ArtifactAcceptanceProvider,
   ArtifactAcceptanceProviderQuery,
@@ -14,6 +15,7 @@ export type ArtifactAcceptanceKind =
   | "generic_file"
   | "html"
   | "html_ppt"
+  | "word"
   | "docx"
   | "xlsx"
   | "pptx"
@@ -218,8 +220,9 @@ function verifyByProfile(
       return verifyHtmlProfile(path, content, truncated, false, requestedChecks);
     case "html_ppt":
       return verifyHtmlProfile(path, content, truncated, true, requestedChecks);
+    case "word":
     case "docx":
-      return verifyOfficePackageProfile(path, content, truncated, "docx", ["[Content_Types].xml", "word/document.xml"]);
+      return verifyWordDocumentProfile(path, content, truncated);
     case "xlsx":
       return verifyOfficePackageProfile(path, content, truncated, "xlsx", ["[Content_Types].xml", "xl/workbook.xml"]);
     case "pptx":
@@ -407,6 +410,71 @@ function verifyOfficePackageProfile(
   return checks;
 }
 
+function verifyWordDocumentProfile(
+  path: string,
+  content: Buffer,
+  truncated: boolean,
+): ArtifactAcceptanceCheck[] {
+  const extension = extname(path).toLowerCase();
+  if (extension === ".docx") {
+    return verifyOfficePackageProfile(path, content, truncated, "docx", ["[Content_Types].xml", "word/document.xml"]);
+  }
+  if (extension !== ".doc") {
+    return [
+      checkStatus("format_matches_request", false, {
+        expected: "word",
+        acceptedExtensions: [".doc", ".docx"],
+        extension,
+      }),
+      checkStatus("artifact_openable", false, {
+        mode: "word_document_structure",
+        reason: "unsupported_extension",
+      }),
+    ];
+  }
+
+  const compoundFileSignature = content.length >= 8
+    && content.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+  const compoundFileHeader = compoundFileSignature
+    && content.length >= 512
+    && content.readUInt16LE(28) === 0xfffe
+    && (content.readUInt16LE(26) === 3 || content.readUInt16LE(26) === 4);
+  const wordDocumentDirectoryEntry = content.indexOf(Buffer.from("WordDocument", "utf16le")) >= 0;
+  const prefix = content.subarray(0, Math.min(content.length, 4_096)).toString("utf8");
+  const wordMlDocument = /<w:wordDocument\b/iu.test(prefix);
+  const richTextDocument = /^\s*\{\\rtf\d?\b/iu.test(prefix);
+  const physicalFormat = compoundFileHeader && wordDocumentDirectoryEntry
+    ? "doc_compound_file"
+    : wordMlDocument
+      ? "doc_wordml"
+      : richTextDocument
+        ? "doc_rtf"
+        : "unknown";
+  const structureValid = !truncated && physicalFormat !== "unknown";
+  return [
+    checkStatus("format_matches_request", isWordDocumentPath(path) && structureValid, {
+      expected: "word",
+      acceptedExtensions: [".doc", ".docx"],
+      physicalFormat,
+      compoundFileSignature,
+      compoundFileHeader,
+      wordDocumentDirectoryEntry,
+      wordMlDocument,
+      richTextDocument,
+      contentTruncated: truncated,
+    }),
+    checkStatus("artifact_openable", structureValid, {
+      mode: "legacy_word_structure",
+      physicalFormat,
+      contentTruncated: truncated,
+    }),
+    skipped("rendered_open", {
+      requiredCapability: "word_renderer",
+      physicalFormat,
+    }, "Word visual/application render acceptance is unavailable in this runtime."),
+  ];
+}
+
 function verifyPdfProfile(path: string, content: Buffer, truncated: boolean): ArtifactAcceptanceCheck[] {
   const text = content.toString("latin1");
   const extensionMatches = /\.pdf$/i.test(path);
@@ -562,7 +630,7 @@ function resolveArtifactKind(
   if (artifactKind !== "auto") return artifactKind;
   const extension = extname(path).toLowerCase();
   if (extension === ".html" || extension === ".htm") return "html";
-  if (extension === ".docx") return "docx";
+  if (extension === ".doc" || extension === ".docx") return "word";
   if (extension === ".xlsx") return "xlsx";
   if (extension === ".pptx") return "pptx";
   if (extension === ".pdf") return "pdf";

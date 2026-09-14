@@ -27,7 +27,7 @@ function artifactPriority(artifact: ProcessArtifact, lowerText: string): number 
   const extension = artifactExtension(artifact.name || artifact.path);
   if (extension === "md" || extension === "markdown") return 3;
   if (extension === "html" || extension === "htm" || extension === "pdf") return 4;
-  if (extension === "docx" || extension === "xlsx" || extension === "pptx") return 5;
+  if (extension === "doc" || extension === "docx" || extension === "xlsx" || extension === "pptx") return 5;
   if (artifact.previewable) return 6;
   return 7;
 }

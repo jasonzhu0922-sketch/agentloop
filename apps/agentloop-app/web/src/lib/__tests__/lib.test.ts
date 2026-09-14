@@ -127,6 +127,7 @@ describe("artifact preview routing", () => {
     expect(artifactPreviewMode(artifact("poster.png", "image/png"))).toBe("image");
     expect(artifactPreviewMode(artifact("report.pdf", "application/pdf"))).toBe("pdf");
     expect(artifactPreviewMode(artifact("notes.md", "text/markdown; charset=utf-8"))).toBe("structured");
+    expect(artifactPreviewMode(artifact("legacy.doc", "application/msword"))).toBe("structured");
     expect(artifactPreviewMode(artifact("weekly.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))).toBe("structured");
     expect(artifactPreviewMode(artifact("plan.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))).toBe("structured");
     expect(artifactPreviewMode(artifact("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"))).toBe("structured");

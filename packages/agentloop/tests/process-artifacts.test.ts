@@ -134,6 +134,39 @@ test("process artifacts include converted outputs from convert_artifact", async 
   }
 });
 
+test("process artifacts collect legacy DOC command outputs as Word artifacts", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-doc-artifacts-"));
+  try {
+    await fs.writeFile(join(root, "legacy-result.doc"), Buffer.from("legacy word bytes"));
+    const runCreatedAt = Date.now() - 1_000;
+    const events: StoredRunEvent[] = [
+      event(1, "tool.completed", {
+        toolName: "computer_run_command",
+        isError: false,
+        result: JSON.stringify({
+          exitCode: 0,
+          stdout: "conversion completed",
+          fileChanges: [{ path: "legacy-result.doc", changeType: "created", bytes: 17 }],
+        }),
+      }),
+    ];
+
+    const artifacts = await collectProcessArtifacts({
+      runId: "run-legacy-doc-artifacts",
+      workspaceRoot: root,
+      runCreatedAt,
+      events,
+    });
+
+    assert.deepEqual(artifacts.map((artifact) => artifact.path), ["legacy-result.doc"]);
+    assert.equal(artifacts[0].mimeType, "application/msword");
+    assert.equal(artifacts[0].previewable, true);
+    assert.equal(artifacts[0].sourceTool, "computer_run_command");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("process artifacts include patched outputs from computer_patch_file", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-patched-artifacts-"));
   try {

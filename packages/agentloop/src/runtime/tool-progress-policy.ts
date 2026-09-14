@@ -1,3 +1,4 @@
+import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 import {
   parseJsonRecord,
@@ -941,7 +942,12 @@ function artifactKindMatchesExpected(actual: string, expected: string): boolean 
   const normalizedActual = normalizeArtifactKind(actual);
   const normalizedExpected = normalizeArtifactKind(expected);
   if (normalizedActual === normalizedExpected) return true;
-  if (normalizedExpected === "document") return normalizedActual === "pdf" || normalizedActual === "markdown" || normalizedActual === "generic_file";
+  if (normalizedExpected === "document") {
+    return normalizedActual === "word"
+      || normalizedActual === "pdf"
+      || normalizedActual === "markdown"
+      || normalizedActual === "generic_file";
+  }
   if (normalizedExpected === "spreadsheet") return normalizedActual === "xlsx" || normalizedActual === "csv";
   if (normalizedExpected === "image") return normalizedActual === "svg";
   return false;
@@ -955,7 +961,13 @@ function artifactPathMatchesExpectedKind(path: string, expected: string): boolea
     case "html":
       return extension === ".html" || extension === ".htm";
     case "document":
-      return extension === ".pdf" || extension === ".docx" || extension === ".md" || extension === ".markdown" || extension === ".txt";
+      return extension === ".pdf"
+        || canonicalArtifactFormatFamily(extension) === "word"
+        || extension === ".md"
+        || extension === ".markdown"
+        || extension === ".txt";
+    case "word":
+      return canonicalArtifactFormatFamily(extension) === "word";
     case "presentation":
       return extension === ".pptx";
     case "spreadsheet":
@@ -970,11 +982,11 @@ function artifactPathMatchesExpectedKind(path: string, expected: string): boolea
 }
 
 function normalizeArtifactKind(kind: string): string {
-  const normalized = kind.trim().toLowerCase();
+  const normalized = canonicalArtifactFormatFamily(kind);
   if (normalized === "htm") return "html";
   if (normalized === "md") return "markdown";
   if (normalized === "jpg" || normalized === "jpeg" || normalized === "png" || normalized === "webp" || normalized === "gif") return "image";
-  if (normalized === "docx" || normalized === "pdf" || normalized === "txt") return normalized;
+  if (normalized === "word" || normalized === "pdf" || normalized === "txt") return normalized;
   if (normalized === "xlsx") return "spreadsheet";
   return normalized;
 }
@@ -1085,7 +1097,7 @@ function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {
     evidence.isError
     || /(?:"exitCode"\s*:\s*[1-9]\d*|Traceback|(?:[A-Z][A-Za-z0-9_]*Error|Exception):|validation failed|validator|preflight|parse|parser|syntax|error_count["']?\s*:\s*[1-9]|\berror\(s\)|failed evidence|artifact_acceptance)/u.test(text);
   if (!hasDiagnostic) return false;
-  return /(?:line\s+\d+|column\s+\d+|position\s+\d+|slide[_\s-]*(?:index)?\s*\d+|rule["']?\s*:|suggested[_\s-]*fix|requires|missing|artifact[_\s-]*path|wrote\s+\S+\.[A-Za-z0-9]+|\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx|pptx|xlsx)\b)/iu
+  return /(?:line\s+\d+|column\s+\d+|position\s+\d+|slide[_\s-]*(?:index)?\s*\d+|rule["']?\s*:|suggested[_\s-]*fix|requires|missing|artifact[_\s-]*path|wrote\s+\S+\.[A-Za-z0-9]+|\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx)\b)/iu
     .test(text);
 }
 
