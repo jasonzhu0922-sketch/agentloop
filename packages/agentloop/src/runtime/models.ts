@@ -182,6 +182,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         name: tool.name,
         description: tool.description,
         parameters: tool.inputSchema,
+        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
       },
     }));
     // This remains an estimate rather than a vendor tokenizer result, but it
@@ -364,6 +365,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         name: tool.name,
         description: tool.description,
         parameters: tool.inputSchema,
+        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
       },
     }));
     const toolChoice = invocation.tools.length === 0
@@ -701,6 +703,7 @@ export class ResponsesModel implements ModelAdapter {
       name: tool.name,
       description: tool.description,
       parameters: tool.inputSchema,
+      ...(tool.strict === undefined ? {} : { strict: tool.strict }),
     }));
     const toolChoice = invocation.tools.length === 0
       ? undefined

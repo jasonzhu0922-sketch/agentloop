@@ -14,6 +14,7 @@ import type {
   ConversationEvidenceLedger,
   ConversationFailedBoundary,
   ConversationOutcomeRelation,
+  ConversationResolvedIntent,
   ConversationReusableArtifact,
   ConversationSourceFact,
   ConversationSourceReference,
@@ -63,6 +64,7 @@ import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
+import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
@@ -688,10 +690,15 @@ export class RunService {
     const recommendedCapabilityIds = new Set<string>();
     const sourceSummaries: ConversationSourceSummary[] = [];
     const outcomeRelations: ConversationOutcomeRelation[] = [];
+    const resolvedIntents: ConversationResolvedIntent[] = [];
     let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
 
     for (const run of consideredRuns) {
       const events = this.eventsFromRows(await this.runs.eventsByRun(run.id));
+      const resolvedIntent = conversationTurnResolutionFromEvents(events);
+      if (resolvedIntent !== undefined) {
+        resolvedIntents.push({ runId: run.id, resolution: resolvedIntent });
+      }
       for (const event of events) {
         if (event.type !== "conversation.outcome.disputed" && event.type !== "conversation.outcome.superseded") continue;
         const targetRunId = stringField(event.data, "targetRunId");
@@ -830,6 +837,7 @@ export class RunService {
       runCount: allRuns.length,
       ...(activeGoal === undefined ? {} : { activeGoal }),
       planCursors,
+      ...(resolvedIntents.length === 0 ? {} : { resolvedIntents }),
       reusableArtifacts: boundedArtifacts,
       failedBoundaries,
       ...(outcomeRelations.length === 0 ? {} : { outcomeRelations }),
@@ -3875,6 +3883,7 @@ export function selectPlanningSkillRoles(
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
+  const requestedFileFormats = requestedPlanningFileFormats(signal, sources);
   const roleEligibleSkills = skills.filter((skill) => {
     const selection = selectFirstRoundSkillRole(
       skill,
@@ -3898,21 +3907,29 @@ export function selectPlanningSkillRoles(
   const scored = roleEligibleSkills.map((skill, index) => ({
     skill,
     index,
-    score: scorePlanningSkill(skill, signal, bound.has(skill.id), sourceKinds),
+    semanticAffinity: scorePlanningSkillSemanticAffinity(skill, signal, bound.has(skill.id), requestedFileFormats),
+    score: scorePlanningSkill(skill, signal, bound.has(skill.id), sourceKinds, requestedFileFormats),
   }));
-  scored.sort((left, right) => right.score - left.score || left.index - right.index);
-  const topScore = scored[0]?.score ?? 0;
+  // Artifact/source metadata establishes compatibility, not task relevance.
+  // When at least one compatible Skill also matches the concrete request,
+  // exclude metadata-only document/report builders so broad declarations do
+  // not outrank the Skill that owns the requested operation or file format.
+  const ranked = scored.some((entry) => entry.semanticAffinity > 0)
+    ? scored.filter((entry) => entry.semanticAffinity > 0)
+    : scored;
+  ranked.sort((left, right) => right.score - left.score || left.index - right.index);
+  const topScore = ranked[0]?.score ?? 0;
   if (topScore < MIN_PLANNING_SKILL_SCORE) {
     if (topScore < LOW_CONFIDENCE_PLANNING_SKILL_SCORE) return [];
-    return expandRequiredPlanningSkills(scored
+    return expandRequiredPlanningSkills(ranked
       .filter((entry) => entry.score === topScore)
       .slice(0, LOW_CONFIDENCE_PLANNING_SKILL_LIMIT)
       .map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! })), skills);
   }
-  const secondScore = scored[1]?.score ?? 0;
+  const secondScore = ranked[1]?.score ?? 0;
   const strongWinner = topScore - secondScore >= STRONG_WINNER_GAP;
-  const candidates = scored.filter((entry) => entry.score >= Math.max(MIN_PLANNING_SKILL_SCORE, topScore - 1));
-  let selected = (strongWinner ? scored.slice(0, 1) : candidates)
+  const candidates = ranked.filter((entry) => entry.score >= Math.max(MIN_PLANNING_SKILL_SCORE, topScore - 1));
+  let selected = (strongWinner ? ranked.slice(0, 1) : candidates)
     .slice(0, MAX_PLANNING_SKILLS);
   if (requestsArtifactBuild(signal) && !explicitStylingRequested(signal)) {
     const hasPrimaryBuilder = selected.some((entry) => {
@@ -4069,31 +4086,10 @@ function scorePlanningSkill(
   signal: string,
   bound: boolean,
   sourceKinds: ReadonlySet<string>,
+  requestedFileFormats: ReadonlySet<string>,
 ): number {
+  let score = scorePlanningSkillSemanticAffinity(skill, signal, bound, requestedFileFormats);
   const text = normalizePlanningSignal(`${skill.name}\n${skill.description}`);
-  const signalTokens = tokenizePlanningSignal(signal);
-  const textTokens = new Set(tokenizePlanningSignal(text));
-  let score = bound ? 5 : 0;
-  for (const alias of planningSkillAliases(skill)) {
-    if (alias.length > 0 && signal.includes(alias)) score += alias.length >= 6 ? 4 : 3;
-  }
-  for (const token of signalTokens) {
-    if (!textTokens.has(token)) continue;
-    score += token.length >= 6 ? 2 : 1;
-  }
-  score += scoreCjkSubphrases(signalTokens, textTokens);
-  if (exactSkillMention(signal, skill)) score += 8;
-  if (signal.includes("海报") && text.includes("poster")) score += 3;
-  if (signal.includes("设计") && text.includes("design")) score += 2;
-  if (signal.includes("演示") && text.includes("presentation")) score += 2;
-  if (signal.includes("pdf") && text.includes("pdf")) score += 2;
-  if (signal.includes("html") && text.includes("html")) score += 2;
-  if (signal.includes("web") && text.includes("web")) score += 2;
-  if (signal.includes("ppt") && text.includes("slide")) score += 2;
-  if (requestsHtmlPresentation(signal)) {
-    if (isHtmlArtifactBuilderSkill(text)) score += 6;
-    if (isPresentationBuilderSkill(text)) score += 3;
-  }
   if (requestsArtifactBuild(signal)) {
     if (matchesRequestedArtifactKind(signal, new Set(skill.agentLoop?.artifactKinds ?? []))) score += 4;
     if (isPrimaryArtifactBuilderSkill(text)) score += 3;
@@ -4108,6 +4104,71 @@ function scorePlanningSkill(
     }
   }
   return score;
+}
+
+function scorePlanningSkillSemanticAffinity(
+  skill: PrivateSkill,
+  signal: string,
+  bound: boolean,
+  requestedFileFormats: ReadonlySet<string>,
+): number {
+  const text = normalizePlanningSignal(`${skill.name}\n${skill.description}`);
+  const signalTokens = tokenizePlanningSignal(signal);
+  const textTokens = new Set(tokenizePlanningSignal(text));
+  let score = bound ? 5 : 0;
+  for (const alias of planningSkillAliases(skill)) {
+    if (alias.length > 0 && signal.includes(alias)) score += alias.length >= 6 ? 4 : 3;
+  }
+  for (const token of signalTokens) {
+    if (!textTokens.has(token)) continue;
+    score += token.length >= 6 ? 2 : 1;
+  }
+  score += scoreCjkSubphrases(signalTokens, textTokens);
+  if (exactSkillMention(signal, skill)) score += 8;
+  for (const format of requestedFileFormats) {
+    score += scorePlanningFileFormatOwnership(skill, text, format);
+  }
+  if (signal.includes("海报") && text.includes("poster")) score += 3;
+  if (signal.includes("设计") && text.includes("design")) score += 2;
+  if (signal.includes("演示") && text.includes("presentation")) score += 2;
+  if (signal.includes("pdf") && text.includes("pdf")) score += 2;
+  if (signal.includes("html") && text.includes("html")) score += 2;
+  if (signal.includes("web") && text.includes("web")) score += 2;
+  if (signal.includes("ppt") && text.includes("slide")) score += 2;
+  if (requestsHtmlPresentation(signal)) {
+    if (isHtmlArtifactBuilderSkill(text)) score += 6;
+    if (isPresentationBuilderSkill(text)) score += 3;
+  }
+  return score;
+}
+
+function requestedPlanningFileFormats(
+  signal: string,
+  sources: readonly UploadedSourceSummary[],
+): Set<string> {
+  const formats = new Set<string>();
+  for (const match of signal.matchAll(/\.([a-z0-9]{2,8})(?=$|[^a-z0-9])/giu)) {
+    formats.add(canonicalArtifactFormatFamily(match[1]));
+  }
+  for (const source of sources) {
+    if (source.status !== "ready") continue;
+    const format = canonicalArtifactFormatFamily(source.extension);
+    if (/^[a-z0-9]{2,8}$/u.test(format)) formats.add(format);
+  }
+  return formats;
+}
+
+function scorePlanningFileFormatOwnership(
+  skill: PrivateSkill,
+  skillText: string,
+  format: string,
+): number {
+  if (canonicalArtifactFormatFamily(skill.name) === format) return 12;
+  if (format === "word") {
+    return /(?:^|[^a-z0-9])(?:\.?docx?|word)(?:$|[^a-z0-9])/iu.test(skillText) ? 6 : 0;
+  }
+  const escaped = format.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^a-z0-9])\\.?${escaped}(?:$|[^a-z0-9])`, "iu").test(skillText) ? 6 : 0;
 }
 
 function skillSourceKindsCompatible(
@@ -4169,8 +4230,8 @@ function isPresentationBuilderSkill(text: string): boolean {
 function isPrimaryArtifactBuilderSkill(text: string): boolean {
   return isHtmlArtifactBuilderSkill(text)
     || isPresentationBuilderSkill(text)
-    || /(?:build-dashboard|dashboard|report|document|pdf|docx|xlsx|canvas|image|visual|poster|artwork|artifact).{0,160}(?:build|create|generate|produce|render|export|write|design|构建|创建|生成|渲染|导出|写入|设计)/iu.test(text)
-    || /(?:build|create|generate|produce|render|export|write|design|构建|创建|生成|渲染|导出|写入|设计).{0,160}(?:canvas|image|visual|poster|artwork|artifact|dashboard|report|document|pdf|docx|xlsx)/iu.test(text);
+    || /(?:build-dashboard|dashboard|report|document|pdf|docx?|word|xlsx|canvas|image|visual|poster|artwork|artifact).{0,160}(?:build|create|generate|produce|render|export|write|design|构建|创建|生成|渲染|导出|写入|设计)/iu.test(text)
+    || /(?:build|create|generate|produce|render|export|write|design|构建|创建|生成|渲染|导出|写入|设计).{0,160}(?:canvas|image|visual|poster|artwork|artifact|dashboard|report|document|pdf|docx?|word|xlsx)/iu.test(text);
 }
 
 function isStylingSupportSkill(text: string): boolean {
@@ -4828,7 +4889,7 @@ function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number])
 }
 
 const ARTIFACT_EXTENSIONS = new Set([
-  "csv", "docx", "gif", "html", "jpeg", "jpg", "json", "md", "pdf", "png",
+  "csv", "doc", "docx", "gif", "html", "jpeg", "jpg", "json", "md", "pdf", "png",
   "pptx", "svg", "txt", "webp", "xlsx",
 ]);
 const ARTIFACT_EXTENSION_PATTERN = /\.([a-z0-9]+)(?=$|[\s'"),.:;])/gi;
@@ -5214,13 +5275,15 @@ function artifactExtensionsFromText(text: string): Set<string> {
 
 function addArtifactExtensions(target: Set<string>, text: string): void {
   for (const match of text.matchAll(ARTIFACT_EXTENSION_PATTERN)) {
-    const extension = typeof match[1] === "string" ? normalizeArtifactExtension(match[1]) : undefined;
-    if (extension !== undefined && ARTIFACT_EXTENSIONS.has(extension)) target.add(extension);
+    const extension = typeof match[1] === "string" ? match[1].toLowerCase() : undefined;
+    if (extension !== undefined && ARTIFACT_EXTENSIONS.has(extension)) {
+      target.add(normalizeArtifactExtension(extension));
+    }
   }
 }
 
 function normalizeArtifactExtension(extension: string): string {
-  return extension.toLowerCase() === "jpeg" ? "jpg" : extension.toLowerCase();
+  return canonicalArtifactFormatFamily(extension);
 }
 
 function parseToolResult(value: string): Record<string, unknown> | unknown[] | undefined {
@@ -5982,11 +6045,57 @@ async function resolveConversationTurn(
     }, signal);
     const resolution = parseConversationTurnResolution(response, context.conversationWorkingSet);
     if (resolution !== undefined) {
-      return applyConversationTurnEvidenceFloor(resolution, input, context.conversationWorkingSet);
+      const inherited = inheritContinuedConversationIntent(resolution, context.conversationWorkingSet);
+      return applyConversationTurnEvidenceFloor(inherited, input, context.conversationWorkingSet);
     }
     repairFeedback = conversationTurnRepairFeedback(response);
   }
   return fallbackConversationTurnResolution(input);
+}
+
+/**
+ * A pure continuation keeps the canonical intent already owned by its target
+ * Run. The resolver may add constraints made explicit in the latest turn, but
+ * it cannot summarize away prior constraints or downgrade their evidence
+ * demand. Corrections and refinements remain model-authored new intent edges.
+ */
+function inheritContinuedConversationIntent(
+  resolution: ConversationTurnResolution,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution {
+  if (resolution.relation !== "continue_prior" || resolution.targetRunId === undefined) return resolution;
+  const target = workset?.resolvedIntents?.find((item) => item.runId === resolution.targetRunId)?.resolution;
+  if (target === undefined) return resolution;
+  const userConstraints = uniqueConversationConstraints([
+    ...target.userConstraints,
+    ...resolution.userConstraints,
+  ]);
+  const evidenceDemand = strongerConversationEvidenceDemand(target.evidenceDemand, resolution.evidenceDemand);
+  const changed = resolution.effectiveGoal !== target.effectiveGoal
+    || evidenceDemand !== resolution.evidenceDemand
+    || userConstraints.length !== resolution.userConstraints.length
+    || userConstraints.some((constraint, index) => constraint !== resolution.userConstraints[index]);
+  if (!changed) return resolution;
+  return {
+    ...resolution,
+    mode: "execute",
+    effectiveGoal: target.effectiveGoal,
+    evidenceDemand,
+    userConstraints,
+    source: "model_guarded",
+  };
+}
+
+function uniqueConversationConstraints(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim();
+    if (normalized.length === 0 || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
 }
 
 function applyConversationTurnEvidenceFloor(
@@ -6044,7 +6153,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
-      "targetRunId must be one of the priorRunGoals IDs in runtimeContext and is required for every relation except new_goal.",
+      "targetRunId must be one of the priorRunGoals or priorRunIntents IDs in runtimeContext and is required for every relation except new_goal.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
@@ -6136,6 +6245,53 @@ function fallbackConversationTurnResolution(input: string): ConversationTurnReso
   };
 }
 
+function conversationTurnResolutionFromEvents(
+  events: readonly RuntimeEvent[],
+): ConversationTurnResolution | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "conversation.turn.resolved") continue;
+    const data = optionalRecord(event.data);
+    const mode = data.mode;
+    const relation = data.relation;
+    const evidenceDemand = data.evidenceDemand;
+    const source = data.source;
+    const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
+    const targetRunId = typeof data.targetRunId === "string" ? data.targetRunId.trim() : undefined;
+    const userConstraints = stringArrayField(data.userConstraints).map((item) => item.trim());
+    if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
+    if (!isConversationTurnMode(mode) || !isConversationTurnRelation(relation)) return undefined;
+    if (!isConversationEvidenceDemand(evidenceDemand) || !isConversationTurnResolutionSource(source)) return undefined;
+    if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return undefined;
+    if (
+      !Array.isArray(data.userConstraints)
+      || userConstraints.length !== data.userConstraints.length
+      || userConstraints.some((item) => item.length > 240)
+    ) return undefined;
+    if (mode !== "execute" && evidenceDemand !== "none") return undefined;
+    if (relation !== "new_goal" && (targetRunId === undefined || targetRunId.length === 0)) return undefined;
+    return {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode,
+      relation,
+      ...(targetRunId === undefined || targetRunId.length === 0 ? {} : { targetRunId }),
+      effectiveGoal,
+      evidenceDemand,
+      userConstraints,
+      source,
+    };
+  }
+  return undefined;
+}
+
+function isConversationTurnMode(value: unknown): value is ConversationTurnResolution["mode"] {
+  return value === "reply" || value === "execute" || value === "clarify";
+}
+
+function isConversationTurnResolutionSource(value: unknown): value is ConversationTurnResolution["source"] {
+  return value === "model" || value === "model_guarded" || value === "deterministic" || value === "fallback";
+}
+
 function isConversationTurnRelation(value: unknown): value is ConversationTurnRelation {
   return value === "new_goal"
     || value === "continue_prior"
@@ -6157,6 +6313,7 @@ function conversationTurnTargetRunIds(workset: ConversationWorkingSet | undefine
   if (workset === undefined) return new Set();
   return new Set([
     ...workset.planCursors.map((cursor) => cursor.runId),
+    ...(workset.resolvedIntents ?? []).map((item) => item.runId),
     ...workset.failedBoundaries.map((boundary) => boundary.runId),
     ...(workset.activeGoal === undefined ? [] : [workset.activeGoal.runId]),
   ]);
@@ -6204,6 +6361,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
           goal: cursor.goal,
           status: cursor.status,
         })),
+        priorRunIntents: context.conversationWorkingSet.resolvedIntents ?? [],
         activeGoal: context.conversationWorkingSet.activeGoal,
         reusableArtifactCount: context.conversationWorkingSet.reusableArtifacts.length,
         failedBoundaryCount: context.conversationWorkingSet.failedBoundaries.length,

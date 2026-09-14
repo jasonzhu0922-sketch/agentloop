@@ -38,6 +38,26 @@ type LegacyPlanStepFixture = Omit<PlanProposal["steps"][number], "successCriteri
   readonly successCriteria?: readonly { readonly id: string; readonly description: string; readonly source?: "task" | "planner" }[];
 };
 
+function assertStrictProviderSchema(value: unknown, path = "schema"): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertStrictProviderSchema(item, `${path}[${index}]`));
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  assert.equal(Object.hasOwn(record, "uniqueItems"), false, `${path} must use the shared strict-schema subset`);
+  if (record.properties !== null && typeof record.properties === "object" && !Array.isArray(record.properties)) {
+    const propertyNames = Object.keys(record.properties as Record<string, unknown>).sort();
+    assert.equal(record.additionalProperties, false, `${path}.additionalProperties`);
+    assert.deepEqual(
+      Array.isArray(record.required) ? [...record.required].sort() : record.required,
+      propertyNames,
+      `${path}.required must include every property`,
+    );
+  }
+  for (const [key, item] of Object.entries(record)) assertStrictProviderSchema(item, `${path}.${key}`);
+}
+
 function submitOutcomePlanToolCall(
   id: string,
   input: {
@@ -165,6 +185,8 @@ test("ModelPlanner retries once when the planning model returns ordinary text", 
     complete: async (request) => {
       calls += 1;
       assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
+      assert.equal(request.tools[0]?.strict, true);
+      assertStrictProviderSchema(request.tools[0]?.inputSchema);
       if (calls === 1) {
         return {
           content: "已经按你的要求改成绘图人物风格了。",
@@ -354,6 +376,241 @@ test("Task intent keeps a referenced uploaded HTML source conversational when fi
   assert.equal(intent.artifactKind, "none");
   assert.equal(intent.deliverySurface, "conversation");
   assert.equal(intent.wantsArtifact, false);
+});
+
+test("Task intent treats uploaded file transforms as workspace artifacts", () => {
+  const intent = classifyTaskIntent({ objective: "帮我合并pdf" });
+
+  assert.equal(intent.artifactKind, "document");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
+  assert.equal(intent.wantsArtifact, true);
+  assert.ok(intent.signals.action.includes("transform"));
+});
+
+test("ModelPlanner binds uploaded originals and mandatory artifact evidence for file transforms", async () => {
+  const sourceIds = [
+    "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "src_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  ];
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"artifactKind":"document"/);
+      assert.match(context, /uploaded_source_materialization/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "submit-pdf-merge",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Merge the uploaded PDF files.",
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "merge-pdfs",
+              objective: "Merge the uploaded PDFs and deliver an openable PDF.",
+              dependsOn: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+            }],
+          },
+        }],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-uploaded-pdf-merge",
+    input: "帮我合并pdf",
+    availableSkills: [],
+    availableToolNames: ["materialize_source_file", "computer_run_command", "verify_artifact_acceptance"],
+    sources: sourceIds.map((id, index) => ({
+      id,
+      originalName: `input-${index + 1}.pdf`,
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100 + index,
+      sha256: String(index + 1).repeat(64),
+      status: "ready" as const,
+      chunkCount: 1,
+      truncated: false,
+    })),
+  });
+
+  const step = plan.steps[0];
+  assert.ok(step?.requiredCapabilities.includes("uploaded_source_materialization"));
+  assert.deepEqual(step?.sourceConstraint?.requiredUploadedSourceIds, sourceIds);
+  assert.deepEqual(step?.evidenceContract?.requiredKinds, [
+    "artifact_path",
+    "artifact_non_empty",
+    "format_matches_request",
+    "delivery_receipt",
+    "artifact_acceptance",
+  ]);
+  const admitted = admitPlan({
+    runId: "run-uploaded-pdf-merge",
+    proposal: plan,
+    availableSkills: [],
+    availableToolNames: new Set(["materialize_source_file", "computer_run_command", "verify_artifact_acceptance"]),
+    availableTools: [
+      { name: "materialize_source_file", description: "Materialize an authorized uploaded original." },
+      { name: "computer_run_command", description: "Run a workspace command." },
+      { name: "verify_artifact_acceptance", description: "Verify a workspace artifact." },
+    ],
+    availableUploadedSourceIds: sourceIds,
+  });
+  assert.ok(admitted.steps[0]?.executionBinding.resolvedToolNames.includes("materialize_source_file"));
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run-uploaded-pdf-merge",
+    planId: "plan-uploaded-pdf-merge",
+    step: { ...admitted.steps[0]!, status: "running" },
+    skills: [],
+    evidence: {
+      candidateOutput: "Please upload the PDF files again.",
+      toolCalls: [{
+        toolCallId: "materialize-input",
+        toolName: "materialize_source_file",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.uploadedSourceMaterialization/v1",
+          path: `inputs/${sourceIds[0]}/input-1.pdf`,
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+  assert.equal(assessment.approved, false);
+  assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("artifact_path"));
+  assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("artifact_acceptance"));
+});
+
+test("ModelPlanner keeps an uploaded PPTX visual transformation in one Skill-owned leaf", async () => {
+  let calls = 0;
+  const sourceId = "src_cccccccccccccccccccccccccccccccc";
+  const pptx = skillFixture({
+    id: "discovered:pptx",
+    name: "pptx",
+    description: "Build, edit, redesign, render, and verify PowerPoint presentations.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["presentation"]),
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"artifactKind":"presentation"/);
+      assert.match(context, /"sourceNeed":"none"/);
+      assert.match(context, /"planShape":"single_leaf"/);
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("split-native-pptx", {
+            goal: "Apply one visual theme to the uploaded PPTX.",
+            shape: "fact_then_produce",
+            selectedSkillRoles: [{
+              skillId: pptx.id,
+              role: "primary_builder",
+              reason: "The PPTX Skill owns the final deck.",
+            }],
+            steps: [{
+              id: "summarize_theme",
+              objective: "Read the presentation and summarize its theme direction as text.",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: [],
+              requiredCapabilities: ["uploaded_source_read"],
+              sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+              evidenceContract: {
+                requiredKinds: ["source_summary"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }, {
+              id: "produce_themed_pptx",
+              objective: "Generate and verify the unified-theme PPTX.",
+              dependencies: ["summarize_theme"],
+              role: "produce",
+              skillIds: [pptx.id],
+              requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
+              evidenceContract: {
+                requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance"],
+                caveatPolicy: "none",
+              },
+            }],
+          })],
+        };
+      }
+      assert.match(context, /uploaded artifact transformation must use one primary-builder leaf/i);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("single-native-pptx", {
+          goal: "Apply one visual theme to the uploaded PPTX.",
+          shape: "single_leaf",
+          selectedSkillRoles: [{
+            skillId: pptx.id,
+            role: "primary_builder",
+            reason: "The PPTX Skill owns native inspection, generation, repair, and acceptance.",
+          }],
+          steps: [{
+            id: "transform_themed_pptx",
+            objective: "Materialize, inspect, restyle, repair, and verify the uploaded PPTX.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [pptx.id],
+            requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-uploaded-pptx-theme",
+    input: "请为这份PPT生成统一视觉主题",
+    availableSkills: [pptx],
+    availableToolNames: [
+      "read_source",
+      "materialize_source_file",
+      "load_skill",
+      "computer_write_file",
+      "computer_run_command",
+      "verify_artifact_acceptance",
+    ],
+    sources: [{
+      id: sourceId,
+      originalName: "Starters Day 3 语法.pptx",
+      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      extension: ".pptx",
+      byteSize: 2_300_000,
+      sha256: "c".repeat(64),
+      status: "ready",
+      summary: "An editable PowerPoint presentation.",
+      chunkCount: 2,
+      truncated: false,
+    }],
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(plan.shape, "single_leaf");
+  assert.deepEqual(plan.steps.map((step) => step.id), ["transform_themed_pptx"]);
+  assert.deepEqual(plan.steps[0]?.skillIds, [pptx.id]);
+  assert.ok(plan.steps[0]?.requiredCapabilities.includes("uploaded_source_materialization"));
+  assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [sourceId]);
 });
 
 test("ModelPlanner admits an uploaded HTML reading plan without inventing a workspace artifact", async () => {
@@ -1163,6 +1420,44 @@ test("ModelPlanner accepts ordinary delivery leaves without an evidence contract
     availableToolNames: [],
   });
 
+  assert.equal(plan.steps[0]?.evidenceContract, undefined);
+  assert.deepEqual(plan.steps[0]?.successCriteria.map((criterion) => criterion.id), ["delivered"]);
+});
+
+test("ModelPlanner accepts null for strict-schema optional leaf objects", async () => {
+  const planner = new ModelPlanner(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [{
+      id: "strict-null-optionals",
+      name: "submit_outcome_plan",
+      arguments: {
+        schema: "agentloop.outcomePlan/v2",
+        goal: "Explain the design trade-off",
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        leaves: [{
+          id: "answer",
+          objective: "Explain the design trade-off directly to the user.",
+          dependsOn: [],
+          role: "deliver",
+          skillIds: [],
+          requiredCapabilities: [],
+          sourceConstraint: null,
+          evidenceContract: null,
+        }],
+      },
+    }],
+  }));
+
+  const plan = await planner.plan({
+    runId: "run-strict-null-optionals",
+    input: "Explain the design trade-off",
+    availableSkills: [],
+    availableToolNames: [],
+  });
+
+  assert.equal(plan.steps[0]?.sourceConstraint, undefined);
   assert.equal(plan.steps[0]?.evidenceContract, undefined);
   assert.deepEqual(plan.steps[0]?.successCriteria.map((criterion) => criterion.id), ["delivered"]);
 });
@@ -2904,6 +3199,69 @@ test("ModelPlanner prefers reusable Markdown artifacts over completed delivery t
   assert.doesNotMatch(observedContext, /"id":"web_research"/);
 });
 
+test("ModelPlanner groups DOC and DOCX when selecting an existing Word artifact for edits", async () => {
+  let observedContext = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("edit-word-family", {
+          goal: "edit the existing Word document",
+          steps: [{
+            id: "edit-word",
+            objective: "Edit the existing Word artifact and verify its acceptance evidence.",
+            dependencies: [],
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  await planner.plan({
+    runId: "run-followup-word-family",
+    input: "把上一轮 Word 文档中的名字改掉，仍输出 doc 文件",
+    availableSkills: [],
+    availableToolNames: ["computer_patch_file", "computer_run_command", "verify_artifact_acceptance"],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-word-family",
+      runCount: 2,
+      planCursors: [],
+      reusableArtifacts: [{
+        runId: "prior-run",
+        path: "deliverables/roster.docx",
+        name: "roster.docx",
+        bytes: 2048,
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        sourceTool: "computer_run_command",
+        sourceToolCallId: "write-roster",
+        sourcePlanStepId: "edit-roster",
+        reusable: true,
+      }],
+      failedBoundaries: [],
+      recommendedCapabilities: {
+        skillIds: [],
+        toolNames: [],
+      },
+    },
+  });
+
+  assert.match(observedContext, /agentloop\.artifactFollowup\/v1/);
+  assert.match(observedContext, /"intent":"edit_existing_artifact"/);
+  assert.match(observedContext, /"requestedOutputFormat":"word"/);
+  assert.match(observedContext, /deliverables\/roster\.docx/);
+  assert.match(observedContext, /requested_existing_artifact_format/);
+});
+
 test("ModelPlanner exposes completed delivery text for follow-up file creation without reusable artifacts", async () => {
   let observedContext = "";
   const planner = new ModelPlanner({
@@ -4422,6 +4780,58 @@ test("selectPlanningSkills recalls the checked-in presentation Skill for PPTX ar
     qaKinds: [],
   });
   assert.deepEqual(selected.map((skill) => skill.name), ["presentation-skill"]);
+});
+
+test("selectPlanningSkills routes legacy Word find-and-replace to the checked-in docx Skill", async () => {
+  const inspected = await inspectSkillPackage(resolve(import.meta.dirname, "..", "..", "agentloop-skills", "skills", "docx"));
+  const docx = skillFixture({
+    id: inspected.name,
+    name: inspected.name,
+    description: inspected.description,
+    instructions: inspected.instructions,
+    contentHash: inspected.packageHash,
+    agentLoop: inspected.agentLoop,
+  });
+  const cityCarbonAssessment = skillFixture({
+    id: "city-carbon-ai-assessment",
+    name: "city-carbon-ai-assessment",
+    description: "用于 City Carbon 城市碳评估、项目碳排放评估、低碳评分、0-10 分制指标打分、优化建议和评估报告；build evaluation workflows from assessment models and uploaded project materials with structured scoring, advice, and reports.",
+    agentLoop: agentLoopMetadata(["primary_builder", "source_provider"], ["document", "none"], ["document", "rubric"]),
+  });
+  const reviewContract = skillFixture({
+    id: "review-contract",
+    name: "review-contract",
+    description: "Reviews a contract in plain English, surfaces red flags with severity ratings, and produces a marked-up docx/PDF with suggested redlines. Accepts optional file path or DocuSign envelope ID.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["none", "document"], ["document"]),
+  });
+  const source = {
+    id: "source-legacy-word",
+    originalName: "疗休养回执2026.doc",
+    mimeType: "application/msword",
+    extension: ".doc",
+    byteSize: 42_000,
+    sha256: "d".repeat(64),
+    status: "ready" as const,
+    summary: "疗休养回执2026.doc is a legacy Microsoft Word document.",
+    chunkCount: 1,
+    truncated: false,
+  };
+
+  const selected = selectPlanningSkills(
+    [cityCarbonAssessment, reviewContract, docx],
+    "在疗休养回执2026.doc文件中，将原文中出现的所有名字朱俊改为朱韵之",
+    [],
+    [source],
+  );
+
+  assert.deepEqual(inspected.agentLoop, {
+    roles: ["primary_builder"],
+    artifactKinds: ["document"],
+    sourceKinds: ["document"],
+    qaKinds: [],
+    executionProfiles: ["local_script"],
+  });
+  assert.deepEqual(selected.map((skill) => skill.name), ["docx"]);
 });
 
 test("selectPlanningSkills keeps explicitly bound Skills ahead of generic task wording", () => {
@@ -8023,6 +8433,123 @@ test("RunService retries malformed conversation intent output and defaults uncer
   }
 });
 
+test("RunService inherits canonical persisted intent for a pure continuation without a prior Plan", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-persisted-intent-continuation";
+    const priorRunId = "prior-failed-word-edit";
+    const priorEffectiveGoal = "将上传文档中的朱俊改为朱韵之，其余内容保持不变。";
+    const priorConstraints = [
+      "只修改指定姓名",
+      "其余内容、结构和格式保持不变",
+    ];
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "Word edit continuation", now - 20_000, now - 1_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'failed', ?, NULL, 'MODEL_ERROR', ?, ?)
+    `).run(
+      priorRunId,
+      owner.user.id,
+      conversationId,
+      "修改上传文档中的姓名",
+      now - 10_000,
+      now - 8_000,
+    );
+    await database.prepare(`
+      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
+      VALUES (?, 1, 'conversation.turn.resolved', ?, ?)
+    `).run(
+      priorRunId,
+      JSON.stringify({
+        schema: "agentloop.conversationTurnResolution/v1",
+        mode: "execute",
+        relation: "new_goal",
+        effectiveGoal: priorEffectiveGoal,
+        evidenceDemand: "source_grounded",
+        userConstraints: priorConstraints,
+        source: "model",
+      }),
+      now - 9_000,
+    );
+
+    let capturedTask: TaskSpec | undefined;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        assert.equal(request.tools[0]?.name, "resolve_conversation_turn");
+        const context = request.runtimeContext?.content ?? "";
+        assert.match(context, /priorRunIntents/);
+        assert.match(context, new RegExp(priorRunId));
+        assert.match(context, /其余内容保持不变/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "resolve-lossy-continuation",
+            name: "resolve_conversation_turn",
+            arguments: {
+              mode: "execute",
+              relation: "continue_prior",
+              targetRunId: priorRunId,
+              effectiveGoal: "继续修改姓名。",
+              evidenceDemand: "none",
+              userConstraints: ["输出一个新文件", "只修改指定姓名"],
+            },
+          }],
+        };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          throw new AppError("PLANNING_ERROR", "Stop after capturing normalized continuation intent", 400);
+        },
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "继续", { conversationId, allowDangerousTools: true }),
+      (error: unknown) => error instanceof AppError && error.code === "PLANNING_ERROR",
+    );
+
+    assert.equal(capturedTask?.turnResolution?.relation, "continue_prior");
+    assert.equal(capturedTask?.turnResolution?.targetRunId, priorRunId);
+    assert.equal(capturedTask?.turnResolution?.effectiveGoal, priorEffectiveGoal);
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "source_grounded");
+    assert.equal(capturedTask?.turnResolution?.source, "model_guarded");
+    assert.deepEqual(capturedTask?.turnResolution?.userConstraints, [
+      ...priorConstraints,
+      "输出一个新文件",
+    ]);
+    assert.deepEqual(capturedTask?.conversationWorkingSet?.resolvedIntents, [{
+      runId: priorRunId,
+      resolution: {
+        schema: "agentloop.conversationTurnResolution/v1",
+        mode: "execute",
+        relation: "new_goal",
+        effectiveGoal: priorEffectiveGoal,
+        evidenceDemand: "source_grounded",
+        userConstraints: priorConstraints,
+        source: "model",
+      },
+    }]);
+  } finally {
+    database.close();
+  }
+});
+
 test("RunService rebinds terse correction feedback to the completed prior goal and persists Outcome lineage", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -10654,6 +11181,51 @@ test("file artifact evidence queues assessment instead of spending all file-outp
   }
 });
 
+test("file artifact convergence treats requested DOC and produced DOCX as one Word family", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-word-family-converge-"));
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const planner: Planner = {
+      plan: async () => ({
+        goal: "update the Word document",
+        selectedSkillIds: [],
+        steps: [{
+          id: "update-word-document",
+          objective: "Update the document and output a DOC file.",
+          dependencies: [],
+          skillIds: [],
+          requiredCapabilities: ["workspace_artifact_write"],
+          successCriteria: [{ id: "word-output", description: "The updated DOC file is generated.", source: "planner" }],
+        }],
+      }),
+    };
+    const model = new WordFamilyArtifactConvergenceModel();
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: workspace,
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      assessorFactory: () => approvingSkillAssessor(),
+    });
+
+    const run = await runs.execute(owner.user.id, "update the Word document", { allowDangerousTools: true });
+
+    assert.equal(run.status, "completed");
+    assert.equal(run.output, "updated.docx is ready");
+    assert.equal(model.calls, 2);
+    const events = await runs.events(owner.user.id, run.id);
+    const requested = events.find((event) => event.type === "loop.convergence_requested");
+    assert.match(String(requested?.data.reason), /required_file_artifacts_observed:word/);
+    assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+  } finally {
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a rejected artifact acceptance receipt keeps file repair tools available", async () => {
   const database = new AppDatabase(":memory:");
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-file-rejected-acceptance-"));
@@ -12565,6 +13137,29 @@ class FileArtifactConvergenceModel implements ModelAdapter {
     assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
     return {
       content: "poster.png and poster.pdf are ready",
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class WordFamilyArtifactConvergenceModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+      return toolCallResponse("write-word", "computer_write_file", {
+        path: "updated.docx",
+        content: "word-family-test-bytes",
+      });
+    }
+    assert.deepEqual(request.tools, []);
+    assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
+    return {
+      content: "updated.docx is ready",
       finishReason: "stop",
       toolCalls: [],
     };

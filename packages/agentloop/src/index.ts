@@ -119,6 +119,7 @@ export type {
 export { RunService } from "./runtime/run-service.ts";
 export type {
   AssessorFactory,
+  CommandOutputContent,
   HostRunProjection,
   ModelFactory,
   PlannerFactory,
@@ -127,6 +128,7 @@ export type {
   RecoveryPlannerFactory,
   RunRecord,
   StoredRunEvent,
+  ToolArgumentsContent,
 } from "./runtime/run-service.ts";
 export { ModelPlanRevisionAssessor, ModelRecoveryPlanner } from "./runtime/recovery-planning.ts";
 export type { RecoveryDecisionKind, RecoveryDecisionProposal, RecoveryPlanner } from "./runtime/recovery-planning.ts";

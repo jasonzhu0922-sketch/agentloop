@@ -194,6 +194,8 @@ export interface ConversationWorkingSet {
   readonly runCount: number;
   readonly activeGoal?: ConversationActiveGoal;
   readonly planCursors: readonly ConversationPlanCursor[];
+  /** Canonical turn intents persisted by prior Runs, keyed by their owning Run. */
+  readonly resolvedIntents?: readonly ConversationResolvedIntent[];
   /**
    * Bounded, accepted step outputs retained independently of a Run's terminal
    * output.  A failed Run can have useful completed predecessors even though
@@ -207,6 +209,11 @@ export interface ConversationWorkingSet {
   readonly recommendedCapabilities: ConversationRecommendedCapabilities;
   readonly evidenceLedger?: ConversationEvidenceLedger;
   readonly resumeSuggestion?: string;
+}
+
+export interface ConversationResolvedIntent {
+  readonly runId: string;
+  readonly resolution: ConversationTurnResolution;
 }
 
 export interface ConversationOutcomeRelation {

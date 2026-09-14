@@ -585,6 +585,15 @@ test("ContextAssembler projects generic written artifact receipts before file sa
       artifact: { path: string; sha256: string };
       inspection: { sampleRangeCount: number };
     };
+    actionContinuity: {
+      scope: string;
+      state: string;
+      relationship: string;
+      sourceTool: string;
+      artifactPath: string;
+      contentState: string;
+    };
+    instruction: string;
   };
 
   assert.equal(projection.schema, "agentloop.contextArtifactProjection/v1");
@@ -592,10 +601,20 @@ test("ContextAssembler projects generic written artifact receipts before file sa
   assert.equal(projection.artifactReceipt.artifact.path, "deliverables/report.md");
   assert.equal(projection.artifactReceipt.artifact.sha256, "written-artifact-hash");
   assert.equal(projection.artifactReceipt.inspection.sampleRangeCount, 1);
+  assert.deepEqual(projection.actionContinuity, {
+    scope: "current_run",
+    state: "committed",
+    relationship: "result_of_matching_tool_call",
+    sourceTool: "computer_write_file",
+    artifactPath: "deliverables/report.md",
+    contentState: "omitted_from_model_context",
+  });
+  assert.match(projection.instruction, /not a replay or an unknown pre-existing file/);
+  assert.match(projection.instruction, /execute or verify it as appropriate/);
   assert.doesNotMatch(projected, /raw written file sample/);
 });
 
-test("ContextAssembler projects successful artifact write arguments out of model context", async () => {
+test("ContextAssembler preserves current-Run write ownership while projecting successful artifact arguments", async () => {
   const generatedMarkdown = "# Report\n\n" + "analysis paragraph ".repeat(2_500);
   const toolResult = JSON.stringify({
     path: "deliverables/report.md",
@@ -643,7 +662,7 @@ test("ContextAssembler projects successful artifact write arguments out of model
       toolCalls: [{
         id: "write",
         name: "computer_write_file",
-        arguments: { path: "deliverables/report.md", content: generatedMarkdown, overwrite: false },
+        arguments: { path: "deliverables/report.md", content: generatedMarkdown, mode: "create" },
       }],
     },
     { role: "tool" as const, toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
@@ -664,8 +683,11 @@ test("ContextAssembler projects successful artifact write arguments out of model
 
   assert.equal(projectedArguments.schema, undefined);
   assert.equal(projectedArguments.path, "deliverables/report.md");
-  assert.match(projectedArguments.content ?? "", /Historical successful artifact write content omitted/);
-  assert.equal(projectedArguments.mode, undefined);
+  assert.equal(projectedArguments.mode, "create");
+  assert.match(projectedArguments.content ?? "", /succeeded in the current Run/);
+  assert.match(projectedArguments.content ?? "", /committed result of this call/);
+  assert.match(projectedArguments.content ?? "", /not a replay or an unknown pre-existing file/);
+  assert.doesNotMatch(projectedArguments.content ?? "", /Historical/);
   assert.equal(projectedArguments.overwrite, undefined);
   assert.doesNotMatch(JSON.stringify(assembly.messages), /analysis paragraph analysis paragraph analysis paragraph/);
   assert.doesNotMatch(JSON.stringify(projectedAssistant.toolCalls), /agentloop\.contextArtifactToolCallArguments/);

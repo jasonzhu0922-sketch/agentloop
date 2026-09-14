@@ -65,6 +65,9 @@ export interface LoopStepFrame {
     readonly toolCallCount: number;
     readonly successfulToolCallCount: number;
     readonly failedToolCallCount: number;
+    readonly succeededOperationCount?: number;
+    readonly failedOperationCount?: number;
+    readonly unknownOperationCount?: number;
     readonly recentToolNames: readonly string[];
   };
   readonly currentEvidenceState?: CompactLoopEvidenceState;
@@ -209,6 +212,9 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
   buildFrame(input: LoopStepFrameInput): LoopStepFrame {
     const priorSuccess = input.priorToolEvidence.filter((item) => !item.isError);
     const priorFailures = input.priorToolEvidence.filter((item) => item.isError);
+    const operationStatuses = input.priorToolEvidence.map((item) =>
+      item.operationStatus ?? (item.isError ? "failed" : "succeeded")
+    );
     const mode = input.convergenceOnly || input.toolCatalog.mode === "none"
       ? "terminal_candidate"
       : "current_to_next";
@@ -232,6 +238,9 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
         toolCallCount: input.priorToolEvidence.length,
         successfulToolCallCount: priorSuccess.length,
         failedToolCallCount: priorFailures.length,
+        succeededOperationCount: operationStatuses.filter((status) => status === "succeeded").length,
+        failedOperationCount: operationStatuses.filter((status) => status === "failed").length,
+        unknownOperationCount: operationStatuses.filter((status) => status === "unknown").length,
         recentToolNames: [...new Set(input.priorToolEvidence.slice(-6).map((item) => item.toolName))],
       },
       currentEvidenceState: input.stepEvidenceState === undefined

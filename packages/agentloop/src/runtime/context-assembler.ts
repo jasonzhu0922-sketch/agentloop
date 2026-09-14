@@ -1141,7 +1141,7 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   }
   const artifactReceipt = recordValue(value.artifactReceipt);
   if (artifactReceipt !== undefined) {
-    return artifactReceiptProjection(artifactReceipt, stringValue(value.schema));
+    return artifactReceiptProjection(artifactReceipt, stringValue(value.schema), toolName);
   }
   if (recordValue(value.evidenceReceipt) !== undefined) return undefined;
   const schema = stringValue(value.schema);
@@ -1236,7 +1236,7 @@ function artifactToolCallArgumentsProjection(
   return omitUndefinedDeep({
     path: stringValue(originalRecord?.path) ?? stringValue(artifact?.path),
     mode: stringValue(originalRecord?.mode),
-    content: "[Historical successful artifact write content omitted from model context. Use the following tool result artifact receipt as evidence; do not reuse this historical tool call as new input.]",
+    content: "[Content omitted after this computer_write_file call succeeded in the current Run. The matching tool result is the committed result of this call, not a replay or an unknown pre-existing file. Continue from its artifact receipt; do not recreate, rename, reread, or probe this path solely because the content is omitted.]",
   }) as Record<string, unknown>;
 }
 
@@ -1279,24 +1279,36 @@ function hasUnprunedLoadedSkillResult(
   return false;
 }
 
-function artifactReceiptProjection(receipt: Record<string, unknown>, sourceSchema: string | undefined): string | undefined {
+function artifactReceiptProjection(
+  receipt: Record<string, unknown>,
+  sourceSchema: string | undefined,
+  resultToolName: string,
+): string | undefined {
   if (stringValue(receipt.schema) !== ARTIFACT_RECEIPT_SCHEMA) return undefined;
   const artifact = recordValue(receipt.artifact);
   if (artifact === undefined) return undefined;
   const inspection = recordValue(receipt.inspection);
+  const sourceTool = stringValue(receipt.sourceTool) ?? resultToolName;
+  const artifactPath = stringValue(artifact.path);
+  const writeContinuity = sourceTool === "computer_write_file" && artifactPath !== undefined
+    ? committedWriteContinuity(sourceTool, artifactPath)
+    : undefined;
   const projection = {
     schema: CONTEXT_ARTIFACT_PROJECTION_SCHEMA,
     sourceSchema,
     artifactReceipt: {
       schema: stringValue(receipt.schema),
       receiptId: stringValue(receipt.receiptId),
-      sourceTool: stringValue(receipt.sourceTool),
+      sourceTool,
       artifact: compactArtifactReceiptArtifact(artifact),
       inspection: inspection === undefined ? undefined : compactArtifactReceiptInspection(inspection),
       evidenceKinds: recordValue(receipt.evidenceKinds),
       canonicalEvidence: recordValue(receipt.canonicalEvidence),
     },
-    instruction: "Use this artifact receipt for generated file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead.",
+    actionContinuity: writeContinuity,
+    instruction: writeContinuity === undefined
+      ? "Use this artifact receipt for generated file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead."
+      : committedWriteInstruction,
   };
   return JSON.stringify(omitUndefinedDeep(projection));
 }
@@ -1325,6 +1337,19 @@ function compactArtifactReceiptInspection(inspection: Record<string, unknown>): 
     outlineTruncated: booleanValue(inspection.outlineTruncated),
     sampleRangeCount: numberValue(inspection.sampleRangeCount),
   });
+}
+
+const committedWriteInstruction = "This receipt is the committed result of the matching computer_write_file call in the current Run. The file was created or updated by that call; it is not a replay or an unknown pre-existing file. Original content is omitted only to control model-context size. Continue from this committed write and execute or verify it as appropriate; do not recreate, rename, reread, or probe the path solely because content is omitted.";
+
+function committedWriteContinuity(sourceTool: string, artifactPath: string): Record<string, unknown> {
+  return {
+    scope: "current_run",
+    state: "committed",
+    relationship: "result_of_matching_tool_call",
+    sourceTool,
+    artifactPath,
+    contentState: "omitted_from_model_context",
+  };
 }
 
 function paginatedHtmlMaterializationProjection(value: Record<string, unknown>): string | undefined {
@@ -1382,7 +1407,8 @@ function writtenArtifactProjection(value: Record<string, unknown>, toolName: str
       outlineTruncated: booleanValue(inspection.outlineTruncated),
       sampleRangeCount: Array.isArray(inspection.sampleRanges) ? inspection.sampleRanges.length : undefined,
     },
-    instruction: "Use this artifact receipt for written file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead.",
+    actionContinuity: committedWriteContinuity(toolName, path),
+    instruction: committedWriteInstruction,
   };
   return JSON.stringify(omitUndefinedDeep(projection));
 }

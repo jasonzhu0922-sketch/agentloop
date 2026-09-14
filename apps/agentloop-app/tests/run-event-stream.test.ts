@@ -497,6 +497,7 @@ test("an informational follow-up does not inherit Skills or execution Tools from
               objective: "Answer the latest user message",
               dependencies: [],
               skillIds: [],
+              requiredCapabilities: ["conversation_delivery"],
               recommendedToolNames: [],
               successCriteria: [{ id: "answered", description: "Return a direct answer", source: "task" }],
             }],
@@ -554,6 +555,7 @@ test("a textual request that needs local file state is execution, not response-o
               objective: "Inspect the referenced local file and describe its behavior.",
               dependencies: [],
               skillIds: [],
+              requiredCapabilities: ["workspace_file_read", "conversation_delivery"],
               recommendedToolNames: [],
               successCriteria: [{ id: "classified-for-execution", description: "The planner received the execution tool catalog", source: "task" }],
             }],
@@ -814,7 +816,7 @@ class ConversationIntentModel implements ModelAdapter {
   classifierCalls = 0;
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
-    if (request.tools[0]?.name === "classify_conversation_intent") {
+    if (request.tools[0]?.name === "resolve_conversation_turn") {
       this.classifierCalls += 1;
       this.classifierSawSkillCatalog = /pptx|presentation workflow/i.test(request.systemPrompt);
       return {
@@ -822,8 +824,14 @@ class ConversationIntentModel implements ModelAdapter {
         finishReason: "tool_calls",
         toolCalls: [{
           id: "intent",
-          name: "classify_conversation_intent",
-          arguments: { kind: "reply" },
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "reply",
+            relation: "new_goal",
+            effectiveGoal: "Answer the latest conversational turn.",
+            evidenceDemand: "none",
+            userConstraints: [],
+          },
         }],
       };
     }

@@ -67,6 +67,8 @@ export interface ModelToolDefinition {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: JsonSchema;
+  /** Ask Providers with Structured Outputs support to enforce inputSchema while generating arguments. */
+  readonly strict?: boolean;
 }
 
 /**
@@ -273,8 +275,13 @@ export interface AgentLoopToolEvidence {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly result: string;
+  /** Invocation transport/dispatch status; distinct from the returned operation result. */
+  readonly invocationStatus?: "completed" | "failed" | "rejected";
+  /** Semantic result of the invoked operation, including a returned nonzero exitCode. */
+  readonly operationStatus?: "succeeded" | "failed" | "unknown";
+  readonly exitCode?: number | null;
   readonly isError: boolean;
-  readonly failurePhase?: "prepare" | "execute" | "runtime";
+  readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
 }
 
 export interface CandidateCompletionContext {

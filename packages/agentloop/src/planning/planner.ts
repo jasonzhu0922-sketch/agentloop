@@ -1,4 +1,5 @@
 import { AppError, badRequest } from "../shared/errors.ts";
+import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
@@ -60,26 +61,35 @@ const CAVEAT_POLICY_VALUES = [
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["id", "objective", "dependsOn", "role", "skillIds", "requiredCapabilities"],
+  required: [
+    "id",
+    "objective",
+    "dependsOn",
+    "role",
+    "skillIds",
+    "requiredCapabilities",
+    "sourceConstraint",
+    "evidenceContract",
+  ],
   properties: {
     id: { type: "string" },
     objective: { type: "string" },
     dependsOn: { type: "array", items: { type: "string" } },
     role: { type: "string", enum: ["fact_acquisition", "produce", "deliver", "repair"] },
     skillIds: { type: "array", items: { type: "string" } },
-    requiredCapabilities: { type: "array", uniqueItems: true, items: { type: "string" } },
+    requiredCapabilities: { type: "array", items: { type: "string" } },
     sourceConstraint: {
-      type: "object",
+      type: ["object", "null"],
       additionalProperties: false,
-      minProperties: 1,
+      required: ["requiredToolSourceIds", "requiredUploadedSourceIds", "requiredVisibleDirectoryIds"],
       properties: {
-        requiredToolSourceIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
-        requiredUploadedSourceIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
-        requiredVisibleDirectoryIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        requiredToolSourceIds: { type: ["array", "null"], minItems: 1, items: { type: "string" } },
+        requiredUploadedSourceIds: { type: ["array", "null"], minItems: 1, items: { type: "string" } },
+        requiredVisibleDirectoryIds: { type: ["array", "null"], minItems: 1, items: { type: "string" } },
       },
     },
     evidenceContract: {
-      type: "object",
+      type: ["object", "null"],
       additionalProperties: false,
       required: ["requiredKinds", "caveatPolicy"],
       properties: {
@@ -98,6 +108,7 @@ const OUTCOME_LEAF_SCHEMA = {
 const SUBMIT_OUTCOME_PLAN_TOOL = {
   name: "submit_outcome_plan",
   description: "Submit the minimal OutcomePlan. This is the only valid first-round planning response.",
+  strict: true,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -797,7 +808,7 @@ function planningRuntimeContext(
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
           capabilityCatalogSemantics: "Capabilities are planning semantics only. Runtime Admission resolves them to execution tools after the Plan is submitted.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
-          sourceConstraintPolicy: "sourceConstraint is optional. Omit it entirely when a leaf has no concrete ToolSource, uploaded source, or visible-directory binding; never send sourceConstraint: {}. When present, use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Never cross these identity namespaces.",
+          sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete ToolSource, uploaded source, or visible-directory binding; never send sourceConstraint: {}. When present, use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Set unused sourceConstraint ID arrays to null. Never cross these identity namespaces.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -949,11 +960,11 @@ function buildArtifactFollowupContext(task: TaskSpec): {
   if (workset === undefined) return undefined;
   const text = normalizePlannerText(planningIntentObjective(task)).toLowerCase();
   const requestedOutputFormat = requestedOutputFormatFromText(text);
-  const artifactMentioned = /(?:\b(?:artifact|file|pdf|markdown|md|html|docx|txt)\b|文件|产物|这个|该|上(?:一|个)轮|刚才)/iu.test(text);
+  const artifactMentioned = /(?:\b(?:artifact|file|pdf|markdown|md|html|docx?|word|txt)\b|文件|产物|这个|该|上(?:一|个)轮|刚才)/iu.test(text);
   const conversionRequested = requestedOutputFormat !== undefined
     && /(?:\b(?:convert|export|render|generate|create|save|produce|make)\b|转|转换|导出|生成|创建|保存|输出|产出|制作)/iu.test(text);
   const editRequested = artifactMentioned
-    && /(?:\b(?:edit|update|modify|change|correct|rename|title)\b|修改|更改|改为|改成|标题|重命名|修正)/iu.test(text);
+    && /(?:\b(?:edit|update|modify|change|correct|replace|rename|title)\b|编辑|修改|更改|改为|改成|改掉|替换|标题|重命名|修正)/iu.test(text);
   const taskIntent = classifyTaskIntent({
     objective: planningIntentObjective(task),
     toolNames: task.availableToolNames,
@@ -1017,13 +1028,13 @@ function artifactFollowupReason(
   const name = artifact.name.toLowerCase();
   if (path.length > 0 && text.includes(path)) return "explicit_path_match";
   if (name.length > 0 && text.includes(name)) return "explicit_name_match";
-  if (editRequested && requestedOutputFormat !== undefined && artifactExtension(path) === requestedOutputFormat) {
+  if (editRequested && requestedOutputFormat !== undefined && artifactFormatFamily(path) === requestedOutputFormat) {
     return "requested_existing_artifact_format";
   }
   if (requestedOutputFormat !== undefined && isConvertibleArtifact(artifact.path, artifact.mimeType, requestedOutputFormat)) {
     return "preferred_artifact_conversion_source";
   }
-  if (requestedOutputFormat !== undefined && artifactExtension(path) === requestedOutputFormat) {
+  if (requestedOutputFormat !== undefined && artifactFormatFamily(path) === requestedOutputFormat) {
     return "requested_output_format_artifact";
   }
   return undefined;
@@ -1046,23 +1057,27 @@ function truncatePlannerContextText(value: string, maximum: number): string {
 
 function requestedOutputFormatFromText(text: string): string | undefined {
   const targetMatch = text.match(
-    /(?:\b(?:convert|export|render|save|generate|create|produce|make)(?:\s+to|\s+as)?\b|转\s*(?:成|为)?|转换\s*(?:成|为)?|导出\s*(?:成|为)?|输出\s*(?:成|为)?|生成\s*(?:一份|一个)?|创建\s*(?:一份|一个)?|保存\s*(?:成|为)?).{0,24}\b(pdf|markdown|md|html|docx|txt)\b/iu,
+    /(?:\b(?:convert|export|render|save|generate|create|produce|make)(?:\s+to|\s+as)?\b|转\s*(?:成|为)?|转换\s*(?:成|为)?|导出\s*(?:成|为)?|输出\s*(?:成|为)?|生成\s*(?:一份|一个)?|创建\s*(?:一份|一个)?|保存\s*(?:成|为)?).{0,24}\b(pdf|markdown|md|html|docx?|word|txt)\b/iu,
   );
-  const value = targetMatch?.[1] ?? [...text.matchAll(/\b(pdf|markdown|md|html|docx|txt)\b/giu)].at(-1)?.[1];
+  const value = targetMatch?.[1] ?? [...text.matchAll(/\b(pdf|markdown|md|html|docx?|word|txt)\b/giu)].at(-1)?.[1];
   if (value === undefined) return undefined;
-  return value.toLowerCase() === "md" ? "markdown" : value.toLowerCase();
+  return canonicalArtifactFormatFamily(value);
 }
 
 function isConvertibleArtifact(path: string, mimeType: string, requestedOutputFormat: string): boolean {
-  const extension = artifactExtension(path);
-  const target = requestedOutputFormat === "md" ? "markdown" : requestedOutputFormat;
-  const source = extension === "md" ? "markdown" : extension === "htm" ? "html" : extension;
+  const source = artifactFormatFamily(path);
+  const target = canonicalArtifactFormatFamily(requestedOutputFormat);
   if (source === target) return false;
-  if (source === "markdown" || source === "html" || source === "txt" || source === "docx") {
+  if (source === "markdown" || source === "html" || source === "txt" || source === "word") {
     return true;
   }
-  if (!["docx", "pdf", "html", "markdown", "txt"].includes(target)) return false;
+  if (!["word", "pdf", "html", "markdown", "txt"].includes(target)) return false;
   return /(?:markdown|html|plain|wordprocessingml|msword)/iu.test(mimeType);
+}
+
+function artifactFormatFamily(path: string): string | undefined {
+  const extension = artifactExtension(path);
+  return extension === undefined ? undefined : canonicalArtifactFormatFamily(extension);
 }
 
 function artifactExtension(path: string): string | undefined {
@@ -1076,10 +1091,12 @@ function summarizePlanningError(message: string): string {
 
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
   const taskIntent = classifyTaskIntent({
-    objective: task.input,
+    objective: planningIntentObjective(task),
     toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
+    evidenceDemand: task.turnResolution?.evidenceDemand,
+    userConstraints: task.turnResolution?.userConstraints,
   });
   if (
     taskIntent.deliverySurface === "workspace_artifact"
@@ -1626,13 +1643,13 @@ function parseSkillRole(value: unknown, index: number): SelectedSkillRole["role"
 
 function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   const record = requireRecord(value, `leaves[${index}]`);
-  const evidenceContract = record.evidenceContract === undefined
+  const evidenceContract = record.evidenceContract === undefined || record.evidenceContract === null
     ? undefined
     : parseEvidenceContract(record.evidenceContract, index);
   // Some tool-call providers materialize an omitted optional object as `{}`.
   // A bare sourceConstraint carries no binding semantics, so canonicalize it
   // to absence before Admission rather than rejecting an otherwise valid Plan.
-  const sourceConstraint = record.sourceConstraint === undefined
+  const sourceConstraint = record.sourceConstraint === undefined || record.sourceConstraint === null
     ? undefined
     : parseSourceConstraint(record.sourceConstraint, index);
   return {
@@ -1664,13 +1681,13 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
 function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
   const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
   if (Object.keys(record).length === 0) return undefined;
-  const requiredToolSourceIds = record.requiredToolSourceIds === undefined
+  const requiredToolSourceIds = record.requiredToolSourceIds === undefined || record.requiredToolSourceIds === null
     ? []
     : canonicalStringSet(record.requiredToolSourceIds, `leaves[${index}].sourceConstraint.requiredToolSourceIds`, 20);
-  const requiredUploadedSourceIds = record.requiredUploadedSourceIds === undefined
+  const requiredUploadedSourceIds = record.requiredUploadedSourceIds === undefined || record.requiredUploadedSourceIds === null
     ? []
     : canonicalStringSet(record.requiredUploadedSourceIds, `leaves[${index}].sourceConstraint.requiredUploadedSourceIds`, 20);
-  const requiredVisibleDirectoryIds = record.requiredVisibleDirectoryIds === undefined
+  const requiredVisibleDirectoryIds = record.requiredVisibleDirectoryIds === undefined || record.requiredVisibleDirectoryIds === null
     ? []
     : canonicalStringSet(record.requiredVisibleDirectoryIds, `leaves[${index}].sourceConstraint.requiredVisibleDirectoryIds`, 20);
   if (requiredToolSourceIds.length === 0 && requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) {

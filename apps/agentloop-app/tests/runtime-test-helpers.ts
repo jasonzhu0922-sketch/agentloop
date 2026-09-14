@@ -28,6 +28,7 @@ export function singleStepTestPlanner(): Planner {
         dependencies: [],
         role: "deliver",
         skillIds: task.availableSkills.map((skill) => skill.id),
+        requiredCapabilities: ["conversation_delivery"],
         recommendedToolNames: [...task.availableToolNames],
         evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
         successCriteria: [{

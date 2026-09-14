@@ -40,6 +40,7 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
         name: "lookup",
         description: "Lookup status",
         inputSchema: { type: "object" },
+        strict: true,
       }],
       toolChoice: { name: "lookup" },
     });
@@ -48,6 +49,15 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
       type: "function",
       function: { name: "lookup" },
     });
+    assert.deepEqual(capturedBody?.tools, [{
+      type: "function",
+      function: {
+        name: "lookup",
+        description: "Lookup status",
+        parameters: { type: "object" },
+        strict: true,
+      },
+    }]);
     assert.equal(capturedBody?.max_tokens, 8_192);
     assert.deepEqual(result.toolCalls[0].arguments, { query: "status" });
     assert.equal(result.finishReason, "tool_calls");
@@ -1126,7 +1136,7 @@ test("Responses adapter maps input items and emits per-item tool_call_ready befo
       systemPrompt: "System instructions",
       phase: "execution",
       messages: [{ role: "user", content: "Check" }],
-      tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
+      tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" }, strict: true }],
       toolChoice: { name: "lookup" },
     }, async (event) => {
       if (event.type === "tool_call_ready") {
@@ -1142,6 +1152,13 @@ test("Responses adapter maps input items and emits per-item tool_call_ready befo
       { type: "message", role: "user", content: [{ type: "input_text", text: "Check" }] },
     ]);
     assert.deepEqual(capturedBody?.tool_choice, { type: "function", name: "lookup" });
+    assert.deepEqual(capturedBody?.tools, [{
+      type: "function",
+      name: "lookup",
+      description: "Lookup",
+      parameters: { type: "object" },
+      strict: true,
+    }]);
     assert.equal(result.content, "Hello");
     assert.equal(result.finishReason, "tool_calls");
     assert.deepEqual(result.toolCalls[0], { id: "call-1", name: "lookup", arguments: { q: "status" } });
