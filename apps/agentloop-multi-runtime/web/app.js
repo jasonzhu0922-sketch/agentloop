@@ -7,6 +7,7 @@ import { renderMarkdown } from "./markdown-renderer.js";
 import { cancellationTarget } from "./cancellation-target.js";
 import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 import { conversationMessagesFromTurns } from "./conversation-history.js";
+import { commandToolCallIds, executionActivities } from "./execution-detail-projection.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -26,6 +27,7 @@ const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
 const recoveringAssignmentIds = new Set();
+const hydratedDetailAssignmentIds = new Set();
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
 loadIdentity();
@@ -179,6 +181,12 @@ async function selectConversation(conversationId) {
     await Promise.all(conversation.messages
       .filter((message) => message.role === "assistant" && typeof message.assignmentId === "string" && message.status === "running")
       .map((assistant) => hydratePersistedAssistant(assistant, tenantId, userId)));
+    const selected = selectedAssistantMessage(conversation);
+    if (selected?.assignmentId) {
+      conversation.selectedAssistantId = selected.id;
+      await hydrateCommandEvidence(selected, tenantId, userId);
+      hydratedDetailAssignmentIds.add(selected.assignmentId);
+    }
     conversation.historyLoaded = true;
     saveSessions();
     setStatus("会话内容已加载", "ok");
@@ -190,7 +198,7 @@ async function selectConversation(conversationId) {
   }
 }
 
-async function hydratePersistedAssistant(assistant, tenantId, userId) {
+async function hydratePersistedAssistant(assistant, tenantId, userId, includeCommandEvidence = false) {
   let runLoaded = false;
   try {
     const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}`, {
@@ -206,6 +214,7 @@ async function hydratePersistedAssistant(assistant, tenantId, userId) {
   if (!runLoaded && !eventsLoaded) throw new Error("无法读取该轮的 Runtime Run");
   if (assistant.status !== "running") await refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId);
   if (assistant.status === "running") await refreshHumanLoop(assistant.assignmentId, assistant, tenantId, userId);
+  if (includeCommandEvidence) await hydrateCommandEvidence(assistant, tenantId, userId);
 }
 
 async function reconcilePersistedRuns() {
@@ -258,12 +267,52 @@ async function replayPersistedRunEvents(assistant, tenantId, userId) {
     const body = await response.json();
     const events = Array.isArray(body?.events) ? body.events : [];
     if (events.length === 0) return false;
+    setVolatile(assistant, "detailEvents", events);
     const terminal = replayAssistantEvents(assistant, events);
     if (terminal) completeAssistantMessage(assistant, events.at(-1));
     return true;
   } catch {
     return false;
   }
+}
+
+async function hydrateCommandEvidence(assistant, tenantId, userId) {
+  if (!assistant?.assignmentId) return;
+  const events = assistant.detailEvents || assistant.events || [];
+  const evidence = {};
+  await Promise.all(commandToolCallIds(events).map(async (toolCallId) => {
+    const base = `${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}`;
+    const headers = { "x-tenant-id": tenantId, "x-user-id": userId };
+    const [argumentsResult, stdoutResult, stderrResult] = await Promise.allSettled([
+      fetch(`${base}/tool-arguments/${encodeURIComponent(toolCallId)}`, { headers }).then(readJsonResponse),
+      fetch(`${base}/commands/${encodeURIComponent(toolCallId)}/stdout`, { headers }).then(readJsonResponse),
+      fetch(`${base}/commands/${encodeURIComponent(toolCallId)}/stderr`, { headers }).then(readJsonResponse),
+    ]);
+    evidence[toolCallId] = {
+      ...(argumentsResult.status === "fulfilled" && recordValue(argumentsResult.value?.arguments?.arguments) ? { arguments: argumentsResult.value.arguments.arguments } : {}),
+      ...(stdoutResult.status === "fulfilled" && typeof stdoutResult.value?.output?.content === "string" ? { stdout: stdoutResult.value.output.content } : {}),
+      ...(stderrResult.status === "fulfilled" && typeof stderrResult.value?.output?.content === "string" ? { stderr: stderrResult.value.output.content } : {}),
+    };
+  }));
+  setVolatile(assistant, "commandEvidence", evidence);
+}
+
+async function readJsonResponse(response) {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+  return body;
+}
+
+function setVolatile(target, key, value) {
+  Object.defineProperty(target, key, { value, writable: true, configurable: true, enumerable: false });
+}
+
+function mergeDetailEvents(currentEvents, incomingEvents) {
+  const bySequence = new Map();
+  for (const event of [...(currentEvents || []), ...(incomingEvents || [])]) {
+    if (event && Number.isSafeInteger(event.seq)) bySequence.set(event.seq, event);
+  }
+  return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
 }
 
 async function loadModels() {
@@ -304,7 +353,9 @@ async function submit() {
   const submittedAt = Date.now();
   const userMessage = { id: crypto.randomUUID(), role: "user", text: input, attachments, createdAt: submittedAt };
   const assistantMessage = { id: crypto.randomUUID(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt };
+  setVolatile(assistantMessage, "detailEvents", []);
   conversation.messages.push(userMessage, assistantMessage);
+  conversation.selectedAssistantId = assistantMessage.id;
   activeRun.assistant = assistantMessage;
   conversation.title = conversation.title === "新对话" ? input.slice(0, 36) : conversation.title;
   conversation.updatedAt = Date.now();
@@ -413,7 +464,12 @@ async function streamAssignment(assignmentId, conversation, assistant, tenantId,
           payload = typeof raw.type === "string" || !eventLine ? raw : { type: eventLine.slice(7), data: raw };
         } catch { continue; }
         if (onEvent(payload, conversation, assistant)) {
-          if (["run.completed", "run.failed", "run.cancelled"].includes(payload.type)) await refreshArtifacts(assignmentId, assistant, tenantId, userId);
+          if (["run.completed", "run.failed", "run.cancelled"].includes(payload.type)) {
+            await Promise.all([
+              refreshArtifacts(assignmentId, assistant, tenantId, userId),
+              hydrateCommandEvidence(assistant, tenantId, userId),
+            ]);
+          }
           try { await reader.cancel(); } catch {}
           return;
         }
@@ -428,6 +484,7 @@ function onEvent(event, conversation, assistant) {
   if (event.type === "error") { assistant.status = "failed"; assistant.text = event.data?.error || "SSE 连接失败"; assistant.reasoning = ""; completeAssistantMessage(assistant, event); liveUpdates.flush(); setStatus("事件流失败", "error"); return true; }
   const terminal = projectAssistantEvent(assistant, event);
   assistant.events = mergeRuntimeEvents(assistant.events, [event]);
+  setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, [event]));
   if (terminal) completeAssistantMessage(assistant, event);
   conversation.updatedAt = Date.now();
   if (event.type === "run.waiting_user" && assistant.assignmentId) {
@@ -506,6 +563,11 @@ function render() {
   });
   document.querySelectorAll("[data-delete-session]").forEach((button) => button.addEventListener("click", () => { sessions = sessions.filter((item) => item.id !== button.dataset.deleteSession); if (activeId === button.dataset.deleteSession) activeId = sessions[0]?.id ?? newConversation().id; saveSessions(); render(); }));
   const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
+  document.querySelectorAll("[data-assistant-message]").forEach((card) => {
+    const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
+    card.addEventListener("click", (event) => { if (!event.target.closest("button, input, label, a")) select(); });
+    card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !event.target.closest("button, input, label, a")) { event.preventDefault(); select(); } });
+  });
   document.querySelectorAll("[data-plan-toggle]").forEach((button) => button.addEventListener("click", () => {
     const assistant = messages.find((message) => message.id === button.dataset.planToggle);
     if (!assistant) return;
@@ -514,21 +576,54 @@ function render() {
   }));
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
   document.querySelectorAll("[data-recovery-advance]").forEach((button) => button.addEventListener("click", () => void advanceRecovery(button.dataset.recoveryAdvance)));
-  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  const selectedAssistant = selectedAssistantMessage(conversation, messages);
   const activeRun = activeRunsByConversation.get(conversation.id);
   const cancelTarget = cancellationTarget(activeRun, messages);
   $("submit").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0;
   $("cancel").disabled = !cancelTarget.canCancel || (cancelTarget.assignmentId !== undefined && cancellingAssignmentIds.has(cancelTarget.assignmentId));
   $("upload-file").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
   renderPendingAttachments(conversation);
-  $("details-title").textContent = messages.length > 0 ? "执行详情" : "产物";
-  $("plan-section").hidden = !(lastAssistant?.plan?.length);
-  $("events-section").hidden = !(lastAssistant?.events?.length);
-  renderPlan(projectPlanStatuses(lastAssistant?.plan || [], lastAssistant?.events || [], lastAssistant?.status)); renderEvents(lastAssistant?.events || []); renderDetails(conversation, lastAssistant);
+  const detailEvents = selectedAssistant?.detailEvents || selectedAssistant?.events || [];
+  const turnNumber = assistantTurnNumber(messages, selectedAssistant);
+  $("details-title").textContent = selectedAssistant ? `执行详情 · 第 ${turnNumber} 轮` : "执行详情";
+  $("plan-section").hidden = !(selectedAssistant?.plan?.length);
+  $("events-section").hidden = !detailEvents.length;
+  renderPlan(projectPlanStatuses(selectedAssistant?.plan || [], detailEvents, selectedAssistant?.status)); renderEvents(detailEvents); renderDetails(conversation, selectedAssistant);
   conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, conversationScroll.scrollTop);
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
   renderedConversationId = conversation.id;
+}
+
+function selectedAssistantMessage(conversation, messages = conversation?.messages || []) {
+  const selected = messages.find((message) => message.role === "assistant" && message.id === conversation?.selectedAssistantId);
+  return selected || [...messages].reverse().find((message) => message.role === "assistant");
+}
+
+function assistantTurnNumber(messages, assistant) {
+  if (!assistant) return 0;
+  return messages.filter((message) => message.role === "assistant").findIndex((message) => message.id === assistant.id) + 1;
+}
+
+async function selectAssistantTurn(conversation, messageId) {
+  const assistant = (conversation?.messages || []).find((message) => message.role === "assistant" && message.id === messageId);
+  if (!assistant) return;
+  conversation.selectedAssistantId = assistant.id;
+  saveSessions();
+  render();
+  if (!assistant.assignmentId || hydratedDetailAssignmentIds.has(assistant.assignmentId)) return;
+  assistant.detailsLoading = true;
+  render();
+  try {
+    await hydratePersistedAssistant(assistant, $("tenant-id").value.trim(), $("user-id").value.trim(), true);
+    hydratedDetailAssignmentIds.add(assistant.assignmentId);
+  } catch (error) {
+    assistant.detailsError = error instanceof Error ? error.message : String(error);
+  } finally {
+    assistant.detailsLoading = false;
+    saveSessions();
+    render();
+  }
 }
 
 function conversationTurnLabel(conversation) {
@@ -544,6 +639,7 @@ function renderMessage(message) {
     return `<article class="msg user"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${attachments.length ? `<div class="msg-source-row" aria-label="本轮上传文件">${attachments.map(renderAttachmentChip).join("")}</div>` : ""}<div class="msg-text">${escapeHtml(message.text)}</div>${askedAt ? `<div class="message-timing user-timing">提问于 ${askedAt}</div>` : ""}</div></div></article>`;
   }
   const presentation = assistantMessagePresentation(message.status);
+  const isSelected = selectedAssistantMessage(activeConversation())?.id === message.id;
   const isLive = presentation.isLive;
   const plan = projectPlanStatuses(message.plan || [], message.events || [], message.status);
   const runtime = message.runtimeId ? ` · ${message.runtimeId}` : "";
@@ -566,7 +662,7 @@ function renderMessage(message) {
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
-  return `<article class="msg assistant ${isLive ? "live" : "final"}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text">${output}</div>${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text">${output}</div>${responseTiming}</div></div></article>`;
 }
 
 async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
@@ -687,17 +783,27 @@ function renderAttachmentChip(attachment, removable = false) {
   return `<span class="source-chip ${removable ? "" : "msg-source-chip"}" title="${escapeHtml(name)}"><span class="file-icon" aria-hidden="true"><span></span></span><span>${escapeHtml(name)}</span>${size}${remove}</span>`;
 }
 function renderPlan(steps) { if (!steps.length) { $("plan").className = "details-empty"; $("plan").textContent = "提交任务后显示 Planner。"; return; } $("plan").className = "plan-card"; $("plan").innerHTML = `<div class="plan-head"><span class="plan-title">Planner</span><span class="plan-goal">当前执行计划</span></div><ol class="plan-steps">${steps.map((step, index) => `<li class="plan-step"><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><div class="step-main"><span class="step-obj">${escapeHtml(step.objective || step.id || `步骤 ${index + 1}`)}</span><span class="step-meta">${step.dependencies?.length ? `依赖：${step.dependencies.map(escapeHtml).join("、")}` : "无前置依赖"}</span></div><span class="step-state">${planStepLabel(step.status)}</span></li>`).join("")}</ol>`; }
-function renderEvents(events) { $("event-count").textContent = `${events.length} events`; $("events").innerHTML = `<div class="event-list">${events.slice(-80).reverse().map((event) => `<div class="event"><span class="event-seq">#${event.seq}</span><span class="event-type">${escapeHtml(event.type)}</span></div>`).join("")}</div>`; }
+function renderEvents(events) { $("event-count").textContent = `${events.length} events`; $("events").innerHTML = `<div class="event-list">${[...events].reverse().map((event) => `<div class="event"><span class="event-seq">#${event.seq}</span><span class="event-type">${escapeHtml(event.type)}</span></div>`).join("")}</div>`; }
 function renderDetails(conversation, assistant) {
   const hasMessage = Boolean(assistant);
-  $("details-task").textContent = hasMessage ? conversation.title : "选择或启动一个对话";
+  $("details-task").textContent = hasMessage ? assistantTaskText(conversation, assistant) : "选择或启动一个对话";
   $("details-runtime").textContent = assistant?.runtimeId || "自动分配";
-  const events = assistant?.events || [];
-  const activities = executionActivities(events);
+  const events = assistant?.detailEvents || assistant?.events || [];
+  const activities = executionActivities(events, assistant?.commandEvidence);
+  $("details-skills").innerHTML = activities.skills.length ? activities.skills.map(renderSkillActivity).join("") : `<span class="muted">本轮尚未加载 Skill。</span>`;
   $("details-tools").innerHTML = activities.tools.length ? activities.tools.map(renderToolActivity).join("") : `<span class="muted">本轮尚未调用工具。</span>`;
-  $("details-commands").innerHTML = activities.commands.length ? activities.commands.slice(-8).reverse().map(renderCommandActivity).join("") : `<span class="muted">本轮尚未执行命令。</span>`;
+  $("details-commands").innerHTML = activities.commands.length ? activities.commands.map(renderCommandActivity).join("") : `<span class="muted">本轮尚未执行命令。</span>`;
   $("details-output").innerHTML = assistant?.text ? (assistant.status === "completed" ? renderMarkdown(assistant.text) : formatText(assistant.text)) : `<span class="muted">暂无最终回复。</span>`;
+  $("details-loading").hidden = !assistant?.detailsLoading && !assistant?.detailsError;
+  $("details-loading").textContent = assistant?.detailsLoading ? "正在加载该轮完整执行证据…" : assistant?.detailsError ? `详情加载失败：${assistant.detailsError}` : "";
   renderArtifacts(assistant);
+}
+
+function assistantTaskText(conversation, assistant) {
+  const messages = conversation?.messages || [];
+  const index = messages.findIndex((message) => message.id === assistant?.id);
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) if (messages[cursor]?.role === "user") return messages[cursor].text || conversation.title;
+  return conversation.title;
 }
 
 function renderArtifacts(assistant) {
@@ -710,7 +816,7 @@ function renderArtifacts(assistant) {
 }
 
 async function downloadArtifact(artifactId) {
-  const assistant = [...(activeConversation()?.messages || [])].reverse().find((message) => message.role === "assistant");
+  const assistant = selectedAssistantMessage(activeConversation());
   if (!assistant?.assignmentId) return;
   const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifactId)}`, { headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } });
   if (!response.ok) return;
@@ -718,7 +824,7 @@ async function downloadArtifact(artifactId) {
 }
 
 async function previewArtifact(artifactId) {
-  const assistant = [...(activeConversation()?.messages || [])].reverse().find((message) => message.role === "assistant");
+  const assistant = selectedAssistantMessage(activeConversation());
   if (!assistant?.assignmentId) return;
   const artifact = (assistant.artifacts || []).find((item) => item.id === artifactId);
   if (!artifact) return;
@@ -740,93 +846,20 @@ async function previewArtifact(artifactId) {
   });
 }
 
-function executionActivities(events) {
-  const tools = new Map();
-  const commands = new Map();
-  for (const event of events) {
-    const data = event.data || {};
-    const toolCallId = stringValue(data.toolCallId);
-    const toolName = stringValue(data.toolName) || stringValue(data.name);
-    if (!toolCallId || !toolName) continue;
-    if (["tool.planned", "assistant.tool_call.committed", "tool.dispatched", "tool.completed", "tool.failed", "tool.rejected"].includes(event.type)) {
-      const current = tools.get(toolCallId) || { id: toolCallId, name: toolName, status: "queued", seq: event.seq || 0 };
-      current.name = toolName;
-      current.seq = Math.max(current.seq, event.seq || 0);
-      current.status = toolStatus(event.type, current.status);
-      tools.set(toolCallId, current);
-    }
-    if (toolName !== "computer_run_command") continue;
-    const current = commands.get(toolCallId) || { id: toolCallId, command: "", args: [], status: "queued", seq: event.seq || 0 };
-    current.seq = Math.max(current.seq, event.seq || 0);
-    if (event.type === "tool.planned" || event.type === "assistant.tool_call.committed") current.submittedAt = current.submittedAt ?? event.createdAt;
-    if (event.type === "tool.dispatched") current.dispatchedAt = event.createdAt;
-    if (["tool.completed", "tool.failed", "tool.rejected"].includes(event.type)) {
-      current.completedAt = event.createdAt;
-      const startedAt = current.dispatchedAt ?? current.submittedAt;
-      current.durationMs = typeof startedAt === "number" && typeof current.completedAt === "number" ? Math.max(0, current.completedAt - startedAt) : undefined;
-    }
-    current.step = numberValue(data.step) ?? current.step;
-    const args = recordValue(data.arguments);
-    if (args) {
-      current.command = stringValue(args.command) || current.command;
-      current.args = Array.isArray(args.args) ? args.args.map((item) => String(item)) : current.args;
-      current.cwd = stringValue(args.cwd) || current.cwd;
-      current.timeoutMs = numberValue(args.timeoutMs) ?? current.timeoutMs;
-    }
-    current.status = toolStatus(event.type, current.status);
-    if (event.type === "tool.completed") {
-      current.result = parseResult(data.result);
-      current.exitCode = numberValue(current.result?.exitCode);
-      current.stdout = stringValue(current.result?.stdout);
-      current.stderr = stringValue(current.result?.stderr);
-    }
-    if (event.type === "tool.failed") current.error = stringValue(data.error);
-    if (event.type === "tool.rejected") current.error = stringValue(data.reason);
-    commands.set(toolCallId, current);
-  }
-  const toolTotals = new Map();
-  for (const tool of tools.values()) {
-    const current = toolTotals.get(tool.name) || { name: tool.name, calls: 0, status: tool.status, seq: tool.seq, completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0 };
-    current.calls += 1;
-    if (tool.status === "completed") current.completedCalls += 1;
-    else if (tool.status === "rejected") current.rejectedCalls += 1;
-    else if (tool.status === "failed") current.failedCalls += 1;
-    else if (tool.status === "running") current.runningCalls += 1;
-    current.status = aggregateToolStatus(current);
-    current.seq = Math.max(current.seq, tool.seq);
-    toolTotals.set(tool.name, current);
-  }
-  return {
-    tools: [...toolTotals.values()].sort((left, right) => left.seq - right.seq),
-    commands: [...commands.values()].sort((left, right) => left.seq - right.seq),
-  };
-}
-
 function renderToolActivity(tool) {
   return `<span class="detail-tag tool-tag ${tool.status}"><span class="tool-status-dot"></span>${escapeHtml(tool.name)}<small>${toolOutcomeLabel(tool)}</small></span>`;
 }
 
-function renderCommandActivity(command) {
-  const label = command.status === "running" ? "执行中" : command.status === "completed" ? "已完成" : command.status === "failed" ? "失败" : command.status === "rejected" ? "被拒绝" : "已提交";
-  const title = [command.command || "?", ...summarizeCommandArgs(command.args || [])].join(" ").trim();
-  const summary = command.status === "running" ? "已派发，等待命令返回" : command.status === "failed" || command.status === "rejected" ? (command.error || "命令未执行") : command.status === "completed" ? [command.exitCode === undefined ? "" : `退出码 ${command.exitCode}`, command.stdout ? "stdout 已返回" : "", command.stderr ? "stderr 已返回" : ""].filter(Boolean).join(" · ") || "命令执行完成" : "等待执行";
-  const output = command.stdout || command.stderr || "";
-  return `<details class="command-card ${command.status}" ${command.status === "running" ? "open" : ""}><summary><span class="command-state ${command.status}">${label}</span><span class="command-title">${escapeHtml(title)}</span></summary><dl class="command-meta"><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>cwd</dt><dd>${escapeHtml(command.cwd || ".")}</dd><dt>timeout</dt><dd>${formatDuration(command.timeoutMs) || "-"}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl><div class="command-summary">${escapeHtml(summary)}</div>${output ? `<pre class="command-output ${command.stderr ? "error" : ""}">${escapeHtml(output)}</pre>` : ""}</details>`;
+function renderSkillActivity(skill) {
+  return `<span class="detail-tag tool-tag ${skill.status}"><span class="tool-status-dot"></span>${escapeHtml(skill.name)}<small>${skill.status === "completed" ? "已加载" : skill.status === "bound" ? "已绑定" : skill.status === "selected" ? "已选择" : skill.status === "failed" ? "加载失败" : skill.status === "rejected" ? "被拒绝" : "加载中"}</small></span>`;
 }
 
-function toolStatus(type, previous) {
-  if (type === "tool.dispatched") return "running";
-  if (type === "tool.completed") return "completed";
-  if (type === "tool.failed") return "failed";
-  if (type === "tool.rejected") return "rejected";
-  return previous;
-}
-function aggregateToolStatus(tool) {
-  if (tool.failedCalls > 0) return tool.failedCalls === tool.calls ? "failed" : "partial";
-  if (tool.rejectedCalls > 0) return tool.rejectedCalls === tool.calls ? "rejected" : "partial";
-  if (tool.runningCalls > 0) return "running";
-  if (tool.completedCalls > 0) return "completed";
-  return "queued";
+function renderCommandActivity(command) {
+  const label = command.status === "running" ? "执行中" : command.status === "completed" ? "已完成" : command.status === "failed" ? "失败" : command.status === "rejected" ? "被拒绝" : "已提交";
+  const title = stringValue(command.arguments?.command) || "computer_run_command";
+  const summary = command.status === "running" ? "已派发，等待命令返回" : command.status === "failed" || command.status === "rejected" ? (command.error || "命令未执行") : command.status === "completed" ? [command.exitCode === undefined ? "" : `退出码 ${command.exitCode}`, command.stdout ? "stdout 已返回" : "", command.stderr ? "stderr 已返回" : ""].filter(Boolean).join(" · ") || "命令执行完成" : "等待执行";
+  const argumentsText = JSON.stringify(command.arguments || {}, null, 2);
+  return `<details class="command-card ${command.status}" ${command.status === "running" ? "open" : ""}><summary><span class="command-state ${command.status}">${label}</span><span class="command-title">${escapeHtml(title)}</span></summary><dl class="command-meta"><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl><div class="command-summary">${escapeHtml(summary)}</div><h4 class="command-block-title">详细参数</h4><pre class="command-arguments">${escapeHtml(argumentsText)}</pre>${command.stdout ? `<h4 class="command-block-title">stdout</h4><pre class="command-output">${escapeHtml(command.stdout)}</pre>` : ""}${command.stderr ? `<h4 class="command-block-title">stderr</h4><pre class="command-output error">${escapeHtml(command.stderr)}</pre>` : ""}</details>`;
 }
 function toolOutcomeLabel(tool) {
   const parts = [];
@@ -837,8 +870,6 @@ function toolOutcomeLabel(tool) {
   return parts.length ? parts.join(" · ") : "已提交";
 }
 function planStepLabel(status) { return status === "completed" ? "已完成" : status === "running" ? "执行中" : status === "failed" ? "失败" : status === "cancelled" ? "已取消" : "等待执行"; }
-function summarizeCommandArgs(args) { const result = []; for (let index = 0; index < args.length; index += 1) { result.push(args[index] === "-c" && index + 1 < args.length ? "-c [inline script]" : args[index]); if (args[index] === "-c") index += 1; } return result; }
-function parseResult(value) { if (value && typeof value === "object" && !Array.isArray(value)) return value; if (typeof value !== "string") return {}; try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; } }
 function recordValue(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : undefined; }
 function stringValue(value) { return typeof value === "string" && value.trim() ? value : undefined; }
 function numberValue(value) { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }

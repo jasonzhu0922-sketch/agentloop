@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
-import type { HumanLoopRequest, HumanLoopResponse, RecoveryDetail } from "@zhujun/agentloop";
+import type { CommandOutputContent, HumanLoopRequest, HumanLoopResponse, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 
@@ -50,6 +50,8 @@ interface RouterTaskApi {
   heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
   cancel?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus }>;
   events?(id: string, afterSeq: number): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>;
+  commandOutput?(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly output: CommandOutputContent } | undefined>;
+  toolArguments?(id: string, toolCallId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly arguments: ToolArgumentsContent } | undefined>;
   advanceRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly recovery: RecoveryDetail } | undefined>;
   resumeRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus } | undefined>;
   currentHumanLoop?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly request: HumanLoopRequest | undefined } | undefined>;
@@ -228,6 +230,22 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       }
       const eventsMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events$/);
       const eventsStreamMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/events\/stream$/);
+      const commandOutputMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/commands\/([^/]+)\/(stdout|stderr)$/);
+      if (request.method === "GET" && commandOutputMatch !== null) {
+        if (router.commandOutput === undefined) return json(response, 501, { error: "command_output_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.commandOutput(decodeURIComponent(commandOutputMatch[1]), decodeURIComponent(commandOutputMatch[2]), commandOutputMatch[3] as "stdout" | "stderr");
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
+        return json(response, 200, { output: projection.output });
+      }
+      const toolArgumentsMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/tool-arguments\/([^/]+)$/);
+      if (request.method === "GET" && toolArgumentsMatch !== null) {
+        if (router.toolArguments === undefined) return json(response, 501, { error: "tool_arguments_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.toolArguments(decodeURIComponent(toolArgumentsMatch[1]), decodeURIComponent(toolArgumentsMatch[2]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) return json(response, 404, { error: "assignment_not_found" });
+        return json(response, 200, { arguments: projection.arguments });
+      }
       if (request.method === "GET" && eventsStreamMatch !== null) {
         if (router.events === undefined) return json(response, 501, { error: "events_not_configured" });
         const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
@@ -337,6 +355,24 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     const body = await response.json() as { events?: RuntimeRunEvent[]; error?: string };
     if (!response.ok || !Array.isArray(body.events)) throw new Error(body.error ?? `runtime events failed with HTTP ${response.status}`);
     return body.events;
+  }
+
+  async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<CommandOutputContent> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/commands/${encodeURIComponent(toolCallId)}/${stream}`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { output?: CommandOutputContent; error?: string };
+    if (!response.ok || body.output === undefined) throw new Error(body.error ?? `runtime command output failed with HTTP ${response.status}`);
+    return body.output;
+  }
+
+  async toolArguments(remoteRunId: string, toolCallId: string): Promise<ToolArgumentsContent> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/tool-arguments/${encodeURIComponent(toolCallId)}`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { arguments?: ToolArgumentsContent; error?: string };
+    if (!response.ok || body.arguments === undefined) throw new Error(body.error ?? `runtime tool arguments failed with HTTP ${response.status}`);
+    return body.arguments;
   }
 
   async advanceRecovery(remoteRunId: string): Promise<RecoveryDetail> {

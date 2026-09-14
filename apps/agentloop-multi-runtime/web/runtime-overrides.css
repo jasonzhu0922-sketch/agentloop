@@ -306,6 +306,11 @@
   word-break: break-word;
 }
 
+.detail-loading { padding: 8px 16px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; }
+.msg.assistant[data-assistant-message] { cursor: pointer; border-radius: 14px; outline: none; }
+.msg.assistant[data-assistant-message]:focus-visible .live-card,
+.msg.assistant.selected .live-card { border-color: color-mix(in srgb, var(--brand) 55%, var(--border)); box-shadow: 0 0 0 2px var(--brand-soft); }
+
 .artifact-list { display: grid; gap: 8px; }
 .artifact-card { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 9px 10px; }
 .artifact-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -368,6 +373,8 @@
 .tool-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
 .tool-tag.running .tool-status-dot { background: var(--brand); }
 .tool-tag.completed .tool-status-dot { background: var(--ok); }
+.tool-tag.bound .tool-status-dot { background: var(--brand); }
+.tool-tag.selected .tool-status-dot { background: #8b5cf6; }
 .tool-tag.partial .tool-status-dot { background: #f59e0b; }
 .tool-tag.failed .tool-status-dot, .tool-tag.rejected .tool-status-dot { background: var(--bad); }
 .command-list { display: grid; gap: 8px; }
@@ -385,7 +392,8 @@
 .command-meta dt { color: var(--text-3); }
 .command-meta dd { min-width: 0; margin: 0; overflow: hidden; color: var(--text-2); font-family: var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .command-summary { margin-top: 8px; color: var(--text-2); font-size: 11px; line-height: 1.45; word-break: break-word; }
-.command-output { max-height: 140px; overflow: auto; margin: 8px 0 0; padding: 8px; border-radius: 7px; background: var(--bg-3); color: var(--text-2); font-family: var(--mono); font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.command-block-title { margin: 10px 0 5px; color: var(--text-3); font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.command-arguments,.command-output { max-height: 320px; overflow: auto; margin: 0; padding: 8px; border-radius: 7px; background: var(--bg-3); color: var(--text-2); font-family: var(--mono); font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .command-output.error { color: var(--bad); }
 
 .sessions-more {

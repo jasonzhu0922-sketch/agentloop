@@ -1,4 +1,4 @@
-import type { HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RecoveryDetail } from "@zhujun/agentloop";
+import type { CommandOutputContent, HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
 
 export type RuntimeProfile = "general" | "artifact";
 export type RuntimeStatus = "ready" | "draining" | "offline";
@@ -72,6 +72,8 @@ export interface RuntimeEndpoint {
   previewArtifact?(remoteRunId: string, artifactId: string): Promise<ProcessArtifactPreview>;
   cancelRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
   events?(remoteRunId: string, afterSeq: number): Promise<readonly RuntimeRunEvent[]>;
+  commandOutput?(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<CommandOutputContent>;
+  toolArguments?(remoteRunId: string, toolCallId: string): Promise<ToolArgumentsContent>;
   /** Advances the Host-owned recovery planner for a paused Run. */
   advanceRecovery?(remoteRunId: string): Promise<RecoveryDetail>;
   /** Resumes a Host-admitted, replay-safe recovery action. */

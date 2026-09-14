@@ -37,6 +37,7 @@ import { renderMarkdown } from "../web/markdown-renderer.js";
 import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
 import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
+import { commandToolCallIds, executionActivities } from "../web/execution-detail-projection.js";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -313,12 +314,74 @@ test("execution details reserve the side panel for observable execution evidence
   ]);
   assert.doesNotMatch(html, /details-reasoning|<h3>模型思考<\/h3>/);
   assert.doesNotMatch(app, /details-reasoning/);
+  assert.match(html, /id="details-skills"/);
   assert.match(app, /const reasoning = isLive && message\.reasoning/);
   assert.match(app, /assistant\.reasoning = ""/);
   assert.match(app, /class="live-step-toggle"/);
   assert.match(app, /data-plan-toggle/);
   assert.doesNotMatch(app, /class="turn-planner"/);
   assert.doesNotMatch(overrides, /\.turn-planner/);
+});
+
+test("execution details preserve loaded Skills and complete command evidence per tool call", () => {
+  const events = [
+    { seq: 0, type: "planning.skills.selected", createdAt: 5, data: { skills: [{ id: "discovered:docx", name: "docx" }, { id: "discovered:review-contract", name: "review-contract" }] } },
+    { seq: 1, type: "assistant.tool_call.committed", createdAt: 10, data: { step: 1, toolCallId: "skill-call", name: "load_skill", arguments: { name: "discovered:docx" } } },
+    { seq: 2, type: "tool.completed", createdAt: 12, data: { step: 1, toolCallId: "skill-call", toolName: "load_skill", result: "skill content" } },
+    { seq: 3, type: "tool.planned", createdAt: 20, data: { step: 2, toolCallId: "command-call", toolName: "computer_run_command", arguments: { command: "python3", args: ["-c", "print('full inline script')"], cwd: "@skills/docx", timeoutMs: 30_000 } } },
+    { seq: 4, type: "tool.dispatched", createdAt: 21, data: { step: 2, toolCallId: "command-call", toolName: "computer_run_command" } },
+    { seq: 5, type: "tool.completed", createdAt: 25, data: { step: 2, toolCallId: "command-call", toolName: "computer_run_command", result: JSON.stringify({ exitCode: 0, stdout: "preview", stderr: "" }) } },
+  ];
+  const activities = executionActivities(events, {
+    "command-call": {
+      arguments: { command: "python3", args: ["-c", "print('full inline script')"], cwd: "@skills/docx", timeoutMs: 30_000 },
+      stdout: "complete stdout",
+      stderr: "complete stderr",
+    },
+  });
+  assert.deepEqual(activities.skills.map((skill) => ({ name: skill.name, status: skill.status })), [
+    { name: "discovered:docx", status: "completed" },
+    { name: "discovered:review-contract", status: "selected" },
+  ]);
+  assert.deepEqual(commandToolCallIds(events), ["command-call"]);
+  assert.deepEqual(activities.commands[0]?.arguments, { command: "python3", args: ["-c", "print('full inline script')"], cwd: "@skills/docx", timeoutMs: 30_000 });
+  assert.equal(activities.commands[0]?.stdout, "complete stdout");
+  assert.equal(activities.commands[0]?.stderr, "complete stderr");
+});
+
+test("conversation Agent replies select their own Run execution detail", async () => {
+  const [app, styles] = await Promise.all([
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /data-assistant-message/);
+  assert.match(app, /function selectAssistantTurn\(conversation, messageId\)/);
+  assert.match(app, /conversation\.selectedAssistantId = assistant\.id/);
+  assert.match(app, /selectedAssistantMessage\(conversation, messages\)/);
+  assert.match(app, /selectedAssistantMessage\(activeConversation\(\)\)/);
+  assert.match(app, /assistant\.detailEvents \|\| assistant\.events/);
+  assert.doesNotMatch(app, /events\.slice\(-80\)/);
+  assert.match(styles, /\.msg\.assistant\.selected \.live-card/);
+});
+
+test("Multi Runtime proxies full tool arguments and command output from the owning Host Run", async () => {
+  const [routerHttp, hostHttp, persistentRouter, runtimeHost, app] = await Promise.all([
+    readFile(new URL("../src/http/router-http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/http/runtime-host-http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/control-plane/persistent-router.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime/runtime-host.ts", import.meta.url), "utf8"),
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+  ]);
+  for (const source of [routerHttp, hostHttp]) {
+    assert.match(source, /commandOutputMatch/);
+    assert.match(source, /tool-arguments/);
+  }
+  assert.match(persistentRouter, /async commandOutput\(/);
+  assert.match(persistentRouter, /async toolArguments\(/);
+  assert.match(runtimeHost, /this\.runs\.readCommandOutput/);
+  assert.match(runtimeHost, /this\.runs\.readToolArguments/);
+  assert.match(app, /hydrateCommandEvidence/);
+  assert.match(app, /Promise\.allSettled/);
 });
 
 test("live thought and conversation scroll only follow readers who remain near the bottom", async () => {
@@ -348,9 +411,10 @@ test("execution-details pane owns overflow instead of flex-shrinking long artifa
 });
 
 test("Web projects durable Plan transitions, formats final Markdown, and preserves mixed tool outcomes", async () => {
-  const [app, overrides] = await Promise.all([
+  const [app, overrides, detailProjection] = await Promise.all([
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+    readFile(new URL("../web/execution-detail-projection.js", import.meta.url), "utf8"),
   ]);
   assert.match(app, /replayPersistedRunEvents/);
   assert.match(app, /function projectPlanStatuses\(plan, events, runStatus\)/);
@@ -362,7 +426,7 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /recovery\/resume/);
   assert.match(app, /import \{ renderMarkdown \} from "\.\/markdown-renderer\.js"/);
   assert.match(app, /function toolOutcomeLabel\(tool\)/);
-  assert.match(app, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
+  assert.match(detailProjection, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
   assert.match(app, /\$\{tool\.rejectedCalls\} 次被拒绝/);
   assert.match(overrides, /\.tool-tag\.partial \.tool-status-dot/);
 });
@@ -700,6 +764,14 @@ test("Runtime Host imports resources once and reuses its dispatch key", async ()
     async get() {
       return { id: "remote-run-1", status: "completed", output: "done" } as never;
     },
+    async readCommandOutput(ownerUserId, runId, toolCallId, stream) {
+      assert.deepEqual({ ownerUserId, runId, toolCallId, stream }, { ownerUserId: "user", runId: "remote-run-1", toolCallId: "command-1", stream: "stdout" });
+      return { toolCallId, stream, content: "complete stdout" };
+    },
+    async readToolArguments(ownerUserId, runId, toolCallId) {
+      assert.deepEqual({ ownerUserId, runId, toolCallId }, { ownerUserId: "user", runId: "remote-run-1", toolCallId: "command-1" });
+      return { toolCallId, arguments: { command: "python3" }, content: '{"command":"python3"}' };
+    },
   }, {
     async importForRun() {
       imports += 1;
@@ -726,6 +798,12 @@ test("Runtime Host imports resources once and reuses its dispatch key", async ()
     remoteRunId: "remote-run-1",
     status: "completed",
     output: "done",
+  });
+  assert.deepEqual(await host.commandOutput("remote-run-1", "command-1", "stdout"), {
+    toolCallId: "command-1", stream: "stdout", content: "complete stdout",
+  });
+  assert.deepEqual(await host.toolArguments("remote-run-1", "command-1"), {
+    toolCallId: "command-1", arguments: { command: "python3" }, content: '{"command":"python3"}',
   });
 });
 

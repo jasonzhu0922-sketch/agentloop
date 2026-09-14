@@ -1,5 +1,5 @@
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
-import type { ProcessArtifact, RecoveryDetail } from "@zhujun/agentloop";
+import type { CommandOutputContent, ProcessArtifact, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
 import { ControlPlaneStore, RuntimeCapacityError, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
 
 export class PersistentMultiRuntimeRouter {
@@ -131,6 +131,20 @@ export class PersistentMultiRuntimeRouter {
     // status read to repair it later.
     await this.store.observeRun(id, terminalRun, this.now());
     return { assignment: (await this.store.assignment(id)) ?? assignment, events };
+  }
+
+  async commandOutput(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: StoredAssignment; readonly output: CommandOutputContent } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const output = await this.endpointFactory(assignment.runtimeEndpoint).commandOutput?.(assignment.remoteRunId, toolCallId, stream);
+    return output === undefined ? undefined : { assignment, output };
+  }
+
+  async toolArguments(id: string, toolCallId: string): Promise<{ readonly assignment: StoredAssignment; readonly arguments: ToolArgumentsContent } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const argumentsContent = await this.endpointFactory(assignment.runtimeEndpoint).toolArguments?.(assignment.remoteRunId, toolCallId);
+    return argumentsContent === undefined ? undefined : { assignment, arguments: argumentsContent };
   }
 
   async advanceRecovery(id: string): Promise<{ readonly assignment: StoredAssignment; readonly recovery: RecoveryDetail } | undefined> {

@@ -68,6 +68,16 @@ export function createRuntimeHostHttpServer(host: AgentLoopRuntimeHost, options:
         }
         return json(response, 200, { events: await host.events(decodeURIComponent(eventsMatch[1]), Number(eventsMatch[2] ?? 0)) });
       }
+      const commandOutputMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/commands\/([^/]+)\/(stdout|stderr)$/);
+      if (request.method === "GET" && commandOutputMatch !== undefined && commandOutputMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        return json(response, 200, { output: await host.commandOutput(decodeURIComponent(commandOutputMatch[1]), decodeURIComponent(commandOutputMatch[2]), commandOutputMatch[3] as "stdout" | "stderr") });
+      }
+      const toolArgumentsMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/tool-arguments\/([^/]+)$/);
+      if (request.method === "GET" && toolArgumentsMatch !== undefined && toolArgumentsMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        return json(response, 200, { arguments: await host.toolArguments(decodeURIComponent(toolArgumentsMatch[1]), decodeURIComponent(toolArgumentsMatch[2])) });
+      }
       const recoveryAdvanceMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/recovery\/advance$/);
       if (request.method === "POST" && recoveryAdvanceMatch !== undefined && recoveryAdvanceMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
