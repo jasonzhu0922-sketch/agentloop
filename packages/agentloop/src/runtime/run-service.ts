@@ -5448,6 +5448,7 @@ function buildStepSystemPrompt(
     contractLines: [
       "Work only on the current admitted Plan step.",
       "The runtime owns authorization, persistence, assessment, Plan progression, and terminal completion.",
+      "Unless the user explicitly requests another language, all user-facing natural-language output must be in Simplified Chinese. Preserve code, commands, paths, API fields, and proper nouns in their original form.",
       "Use loopStepFrame for model-step continuity and planStepHandoffFrame for Plan-step continuity when present; preserve reusable evidence without executing a future stage unless it is explicitly part of the current boundary.",
       "Do not perform work reserved for a pending downstream Plan step unless the current step objective or success criteria explicitly require that same artifact.",
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
