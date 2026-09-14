@@ -141,7 +141,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           ? {
             researchPolicy: input.taskProfile.researchPolicy,
             researchDiscipline:
-              "Apply researchPolicy only to the current Plan step. Use complete intent-level queries, prefer high-tier sources, classify low-value pages as caveats, and stop when the policy budget or source-summary boundary is reached.",
+              "Apply researchPolicy only to the current Plan step. Use complete intent-level queries, rank sources by relevance, traceability, and reliability, and classify low-value pages as caveats. Search results establish discovery references, not source-content evidence: when the current evidence contract requires source_summary, read the strongest relevant accessible source with an exposed source-content Tool before proposing completion. Official or first-party sources are preferred when useful and accessible, but are a completion gate only when researchPolicy.authorityNeed is official_required. Stop when the policy budget or source-summary boundary is reached.",
           }
           : {}),
         ...(usesVisibleDirectoryTools

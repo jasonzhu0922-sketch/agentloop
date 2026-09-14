@@ -226,9 +226,10 @@ export function runtimeStepToolProgressPolicy(
   );
   return {
     schema: "agentloop.runtimeToolProgressPolicy/v1",
-    // Source/extraction semantics instruct the model, but must not hold the
-    // loop open until a Tool signs an interpretation of those semantics.
-    // Progress policy tracks only observable delivery effects.
+    // Track only evidence kinds that a canonical Runtime receipt can observe.
+    // This includes source acquisition effects such as source_summary, but it
+    // never treats the receipt as proof that the model interpreted the source
+    // correctly.
     requiredEvidenceKinds: observableRequiredEvidenceKinds,
     ...(options.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: options.expectedArtifactKind }),
     autoCompleteFromEvidence: observableRequiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
@@ -306,6 +307,13 @@ const AUTO_COMPLETABLE_EVIDENCE_KINDS = new Set([
 ]);
 
 const OBSERVABLE_COMPLETION_EVIDENCE_KINDS = new Set([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { admitPlan } from "../src/planning/admission.ts";
+import { admitPlan, reusableSourceEvidenceKindsForTurn } from "../src/planning/admission.ts";
 import type { ConversationWorkingSet, PlanProposal, Planner, TaskSpec } from "../src/planning/contracts.ts";
 import { ModelStepAssessor, ProfiledRuleStepAssessor, RuleBasedStepAssessor } from "../src/planning/assessor.ts";
 import { ModelPlanner } from "../src/planning/planner.ts";
@@ -333,6 +333,18 @@ test("Task intent treats Chinese summary files as workspace document artifacts",
   assert.equal(intent.wantsArtifact, true);
 });
 
+test("Task intent preserves file delivery verbs from resolved user constraints", () => {
+  const intent = classifyTaskIntent({
+    objective: "基于已核实的公开来源信息，以可读的 Markdown 文件形式呈现给用户。",
+    userConstraints: ["不要编造", "生成可读的 markdown 文件"],
+    evidenceDemand: "source_grounded",
+  });
+
+  assert.equal(intent.artifactKind, "document");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
+  assert.equal(intent.sourceNeed, "source_grounded");
+});
+
 test("Task intent keeps a referenced uploaded HTML source conversational when file writers are available", () => {
   const intent = classifyTaskIntent({
     objective: "阅读这个 html",
@@ -428,7 +440,24 @@ test("Task intent requires source grounding for a specific external fact without
 
   assert.equal(intent.sourceNeed, "source_grounded");
   assert.equal(intent.researchPolicy?.depth, "bounded");
-  assert.equal(intent.researchPolicy?.authorityNeed, "official_preferred");
+  assert.equal(intent.researchPolicy?.authorityNeed, "quality_weighted");
+});
+
+test("Task intent does not upgrade Runtime-resolved grounding from model-authored authority wording", () => {
+  const grounded = classifyTaskIntent({
+    objective: "基于可验证的权威或可靠公开来源核实外部项目，并说明正式定义。",
+    evidenceDemand: "source_grounded",
+  });
+  const strict = classifyTaskIntent({
+    objective: "核实外部项目。",
+    evidenceDemand: "strict_user_source",
+  });
+
+  assert.equal(grounded.sourceNeed, "source_grounded");
+  assert.equal(grounded.researchPolicy?.depth, "bounded");
+  assert.equal(grounded.researchPolicy?.authorityNeed, "quality_weighted");
+  assert.equal(strict.sourceNeed, "strict_user_source");
+  assert.equal(strict.researchPolicy?.authorityNeed, "official_required");
 });
 
 test("Task intent keeps research policy conditional and graded", () => {
@@ -2288,8 +2317,8 @@ test("ModelPlanner enforces Resolver-declared source grounding for a first-round
               skillIds: [],
               requiredCapabilities: ["web_research", "conversation_delivery"],
               evidenceContract: {
-                requiredKinds: ["source_summary", "source_urls"],
-                caveatPolicy: "mark_unverified_facts",
+                requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+                caveatPolicy: "strict_fail_on_missing_source",
               },
               successCriteria: [{ id: "grounded", description: "说明由来源证据支撑。" }],
             }],
@@ -2305,7 +2334,7 @@ test("ModelPlanner enforces Resolver-declared source grounding for a first-round
       schema: "agentloop.conversationTurnResolution/v1",
       mode: "execute",
       relation: "new_goal",
-      effectiveGoal: "准确解释宝武集团 2526 工程是什么，并以可核验来源支撑关键事实。",
+      effectiveGoal: "基于可验证的权威或可靠公开来源准确解释宝武集团 2526 工程，并说明正式定义。",
       evidenceDemand: "source_grounded",
       userConstraints: [],
       source: "model",
@@ -2316,11 +2345,183 @@ test("ModelPlanner enforces Resolver-declared source grounding for a first-round
 
   assert.equal(calls, 2);
   assert.match(observedContext, /"sourceNeed":"source_grounded"/);
+  assert.doesNotMatch(observedContext, /"sourceNeed":"strict_user_source"/);
+  assert.match(observedContext, /"authorityNeed":"quality_weighted"/);
+  assert.match(observedContext, /not a completion gate/);
   assert.match(observedContext, /agentloop\.conversationTurnResolution\/v1/);
   assert.match(observedContext, /web_research/);
   assert.match(observedRepairContext, /must bind a capability that produces required source-grounding evidence/i);
   assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["web_research", "conversation_delivery"]);
-  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "source_urls"]);
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "source_urls", "explicit_caveats"]);
+  assert.equal(plan.steps[0]?.evidenceContract?.caveatPolicy, "mark_unverified_facts");
+});
+
+test("ModelPlanner admits a grounded artifact continuation from target-bound prior evidence", async () => {
+  let calls = 0;
+  const priorRunId = "prior-grounded-baowu-summary";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"artifactKind":"document"/);
+      assert.match(context, /"deliverySurface":"workspace_artifact"/);
+      assert.match(context, /evidenceReusePolicy/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("write-grounded-markdown", {
+          goal: "基于上一轮已核实来源生成可读的 Markdown 文件。",
+          shape: "single_leaf",
+          selectedSkillRoles: [],
+          steps: [{
+            id: "write-grounded-markdown",
+            objective: "复用上一轮已验收的来源事实，生成可读的 Markdown 文件。",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-grounded-markdown-continuation",
+    input: "你把内容生成一份可读的 markdown 文件",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "continue_prior",
+      targetRunId: priorRunId,
+      effectiveGoal: "基于已核实的公开来源信息，以可读的 Markdown 文件形式呈现给用户。",
+      evidenceDemand: "source_grounded",
+      userConstraints: ["不要编造", "生成可读的 markdown 文件"],
+      source: "model",
+    },
+    availableSkills: [],
+    availableToolNames: ["websearch", "webfetch", "computer_write_file"],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-grounded-markdown",
+      runCount: 1,
+      planCursors: [],
+      reusableArtifacts: [],
+      failedBoundaries: [],
+      recommendedCapabilities: { skillIds: [], capabilityIds: ["web_research"] },
+      evidenceLedger: {
+        schema: "conversation.evidenceLedger/v1",
+        sourceSummaries: [{
+          runId: priorRunId,
+          planId: "prior-grounded-plan",
+          stepId: "research-baowu-2526",
+          schema: "agentloop.sourceSummaryCandidate/v1",
+          coveredTopics: ["宝武 2526 工程"],
+          facts: [{
+            claim: "宝武 2526 工程的公开来源事实已核实。",
+            sourceRefs: [{ sourceRefId: "web:baowu", url: "https://source.test/baowu-2526" }],
+            confidence: "verified",
+          }],
+          missingOrUnverified: ["未公开的量化目标不得推断。"],
+        }],
+      },
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["workspace_artifact_write"]);
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, [
+    "artifact_path",
+    "artifact_non_empty",
+    "format_matches_request",
+    "explicit_caveats",
+  ]);
+});
+
+test("Admission reusable evidence remains scoped to the resolved prior Run and relation", () => {
+  const workset: ConversationWorkingSet = {
+    schema: "conversation.workset/v1",
+    conversationId: "conversation-admission-evidence-scope",
+    runCount: 2,
+    planCursors: [],
+    reusableArtifacts: [],
+    failedBoundaries: [],
+    recommendedCapabilities: { skillIds: [], capabilityIds: [] },
+    evidenceLedger: {
+      schema: "conversation.evidenceLedger/v1",
+      sourceSummaries: [{
+        runId: "target-grounded-run",
+        planId: "target-grounded-plan",
+        stepId: "research",
+        schema: "agentloop.sourceSummaryCandidate/v1",
+        coveredTopics: ["target facts"],
+        facts: [{
+          claim: "A target-bound fact.",
+          sourceRefs: [{ sourceRefId: "web:target", url: "https://source.test/target" }],
+        }],
+        missingOrUnverified: ["One boundary remains explicit."],
+      }],
+    },
+  };
+  const resolution = {
+    schema: "agentloop.conversationTurnResolution/v1" as const,
+    mode: "execute" as const,
+    relation: "continue_prior" as const,
+    targetRunId: "target-grounded-run",
+    effectiveGoal: "Continue the grounded work.",
+    evidenceDemand: "source_grounded" as const,
+    userConstraints: [],
+    source: "model" as const,
+  };
+
+  assert.deepEqual(reusableSourceEvidenceKindsForTurn(workset, resolution), [
+    "source_summary",
+    "source_urls",
+    "explicit_caveats",
+  ]);
+  assert.deepEqual(reusableSourceEvidenceKindsForTurn(workset, {
+    ...resolution,
+    targetRunId: "unrelated-run",
+  }), []);
+  assert.deepEqual(reusableSourceEvidenceKindsForTurn(workset, {
+    ...resolution,
+    relation: "challenge_prior",
+  }), []);
+  assert.deepEqual(reusableSourceEvidenceKindsForTurn(workset, {
+    ...resolution,
+    evidenceDemand: "strict_user_source",
+  }), []);
+
+  assert.throws(() => admitPlan({
+    runId: "run-new-source-acquisition",
+    proposal: {
+      goal: "Acquire additional source evidence.",
+      selectedSkillIds: [],
+      steps: [{
+        id: "acquire-additional-source",
+        objective: "Acquire additional source evidence instead of reusing the prior summary as completion proof.",
+        dependencies: [],
+        role: "fact_acquisition",
+        skillIds: [],
+        requiredCapabilities: [],
+        evidenceContract: {
+          requiredKinds: ["source_summary"],
+          caveatPolicy: "mark_unverified_facts",
+        },
+        successCriteria: [{ id: "source_summary", description: "Additional source evidence is acquired." }],
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(),
+    reusableEvidenceKinds: ["source_summary"],
+    taskIntent: { evidenceDemand: "source_grounded" },
+  }), (error: unknown) => error instanceof AppError
+    && /must bind a capability that produces required source-grounding evidence/.test(error.message));
 });
 
 test("ModelPlanner does not merge an unrelated active goal into a resolved new goal", async () => {
@@ -7990,6 +8191,244 @@ test("RunService rebinds terse correction feedback to the completed prior goal a
   }
 });
 
+test("RunService binds the resolved prior Run's accepted source evidence into a delivery assessment", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-source-evidence-reuse";
+    const priorRunId = "prior-grounded-summary-run";
+    const priorPlanId = "prior-grounded-summary-plan";
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "Grounded summary", now - 20_000, now - 1_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
+    `).run(
+      priorRunId,
+      owner.user.id,
+      conversationId,
+      "Search and summarize the initiative.",
+      "The accessible reports connect the initiative to AI-enabled manufacturing; its numeric definition remains unverified.",
+      now - 10_000,
+      now - 8_000,
+    );
+    await database.prepare(`
+      INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, status, created_at, updated_at)
+      VALUES (?, ?, 1, ?, '[]', 'completed', ?, ?)
+    `).run(priorPlanId, priorRunId, "Ground the initiative summary", now - 9_500, now - 8_000);
+    const priorReceipt = webFixtureReceipt({
+      sourceType: "web_page",
+      sourceRefs: [{ sourceRefId: "web:initiative", url: "https://source.test/initiative" }],
+      facts: [{ kind: "source_summary", claim: "The report connects the initiative to AI-enabled manufacturing." }],
+      satisfied: ["source_summary", "source_urls"],
+      caveats: ["The official numeric definition was not available."],
+    });
+    await database.prepare(`
+      INSERT INTO plan_steps(
+        plan_id, step_id, position, objective, dependencies_json, role, skill_ids_json,
+        required_capabilities_json, recommended_tool_names_json, execution_binding_json,
+        evidence_contract_json, success_criteria_json, status, output, evidence_json, error,
+        started_at, finished_at
+      ) VALUES (?, 'research', 0, ?, '[]', 'fact_acquisition', '[]', '["web_research"]', '[]', ?, ?, ?,
+        'completed', ?, ?, NULL, ?, ?)
+    `).run(
+      priorPlanId,
+      "Read public reports and preserve a bounded source summary.",
+      executionBindingJson({
+        requiredCapabilities: ["web_research"],
+        resolvedToolNames: ["websearch", "webfetch"],
+        sourceKinds: ["web"],
+        sideEffect: "external_read",
+        evidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+      }),
+      JSON.stringify({
+        requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      }),
+      JSON.stringify([
+        { id: "source_summary", description: "A bounded source summary is available.", source: "planner" },
+        { id: "source_urls", description: "Source URLs are available.", source: "planner" },
+        { id: "explicit_caveats", description: "Unverified facts are caveated.", source: "planner" },
+      ]),
+      "Grounded summary with an explicit source boundary.",
+      JSON.stringify({
+        candidateOutput: "Grounded summary with an explicit source boundary.",
+        toolCalls: [{
+          toolCallId: "prior-webfetch",
+          toolName: "webfetch",
+          isError: false,
+          result: JSON.stringify({
+            schema: "agentloop.webFetch/v1",
+            url: "https://source.test/initiative",
+            content: "Source content",
+            evidenceReceipt: priorReceipt,
+          }),
+        }],
+        modelSteps: 2,
+      }),
+      now - 9_000,
+      now - 8_000,
+    );
+    await database.prepare(`
+      INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
+      VALUES (?, ?, 'completed', ?, 'plan_assessed_and_completed', ?)
+    `).run(priorRunId, priorPlanId, "Grounded summary with an explicit source boundary.", now - 8_000);
+
+    let executionCalls = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if (request.tools[0]?.name === "resolve_conversation_turn") {
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "resolve-grounded-refinement",
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "execute",
+                relation: "refine_prior",
+                targetRunId: priorRunId,
+                effectiveGoal: "Deliver the already grounded cautious conclusion without reacquiring the same sources.",
+                evidenceDemand: "source_grounded",
+                userConstraints: ["Do not invent the numeric definition."],
+              },
+            }],
+          };
+        }
+        executionCalls += 1;
+        return {
+          content: "现有公开报道只能确认该工程与 AI 赋能制造有关；官方数字定义仍未核验，因此不作推断。来源：https://source.test/initiative",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Deliver the grounded refinement.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "deliver-grounded-refinement",
+            objective: "Deliver the cautious source-bounded conclusion from accepted prior evidence.",
+            dependencies: [],
+            role: "deliver",
+            skillIds: [],
+            // The prior Run owns the accepted source evidence. This delivery
+            // leaf needs no new source-producing capability declaration.
+            requiredCapabilities: ["conversation_delivery"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "The prior grounded summary is preserved.", source: "planner" },
+              { id: "source_urls", description: "The prior source URL remains traceable.", source: "planner" },
+              { id: "explicit_caveats", description: "The unavailable official definition remains explicit.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+      tools: [
+        webSearchFixtureTool(["https://source.test/initiative"]),
+        webFetchFixtureTool(),
+      ],
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "只保留能确认的结论，说明哪些还没核验。", {
+      conversationId,
+      allowDangerousTools: true,
+    });
+
+    assert.equal(run.status, "completed");
+    assert.equal(executionCalls, 1);
+    const detail = await runs.plan(owner.user.id, run.id);
+    assert.equal(detail.assessments.length, 1);
+    assert.equal(detail.assessments[0]?.approved, true);
+    assert.equal(detail.assessments[0]?.assessmentProfile, "evidence_gate");
+    assert.equal(detail.plan.steps[0]?.evidence?.toolCalls.some((item) =>
+      item.toolName === "conversation_evidence_reuse"
+    ), true);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.filter((event) => event.type === "conversation.evidence.reused").length, 1);
+    assert.equal(events.some((event) => event.type === "candidate.rejected"), false);
+  } finally {
+    database.close();
+  }
+});
+
+test("conversation-only delivery with no acquisition path completes once at an explicit evidence boundary", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionCalls = 0;
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async () => {
+          executionCalls += 1;
+          return {
+            content: "根据当前可掌握的信息，只能给出有限概括；原始来源尚未取得，具体事实无法核验，因此不作进一步推断。",
+            finishReason: "stop",
+            toolCalls: [],
+          };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Deliver the bounded information currently available.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "deliver-bounded-current-information",
+            objective: "Deliver only the currently available information and explicitly mark the unavailable source boundary.",
+            dependencies: [],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: [],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "The currently available bounded summary is delivered.", source: "planner" },
+              { id: "explicit_caveats", description: "Unavailable source facts are explicit.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+    });
+
+    const run = await runs.execute(owner.user.id, "基于当前能掌握的信息交付，并明确说明无法核验的部分。");
+
+    assert.equal(run.status, "completed");
+    assert.equal(executionCalls, 1);
+    const detail = await runs.plan(owner.user.id, run.id);
+    assert.equal(detail.assessments.length, 1);
+    assert.equal(detail.assessments[0]?.approved, false);
+    assert.equal(detail.plan.steps[0]?.evidence?.completionCaveat?.reason, "evidence_boundary");
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+    assert.equal(events.filter((event) => event.type === "candidate.evidence_boundary_accepted").length, 1);
+    assert.equal(events.some((event) => event.type === "candidate.repair_limit_blocked"), false);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+  } finally {
+    database.close();
+  }
+});
+
 test("RunService carries completed artifact lineage into qualitative follow-up planning", async () => {
   const database = new AppDatabase(":memory:");
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-lineage-"));
@@ -8442,7 +8881,7 @@ test("required validation that remains locally unavailable completes with deferr
   }
 });
 
-test("external source gaps can complete with an evidence-boundary caveat", async () => {
+test("risk-sensitive external source gaps can complete with an evidence-boundary caveat", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -8474,11 +8913,11 @@ test("external source gaps can complete with an evidence-boundary caveat", async
     };
     const planner: Planner = {
       plan: async () => ({
-        goal: "research source facts with a clear boundary",
+        goal: "research production safety source facts with a clear boundary",
         selectedSkillIds: [],
         steps: [{
           id: "research-sources",
-          objective: "Research external source facts for a training artifact and preserve any evidence boundary.",
+          objective: "Research external production safety facts for a training artifact and preserve any evidence boundary.",
           dependencies: [],
           skillIds: [],
           requiredCapabilities: ["web_research"],
@@ -9942,6 +10381,62 @@ test("web source-summary steps do not converge from search metadata alone", asyn
       event.type === "loop.convergence_requested"
       && (event.data as { priorToolResultCount?: number }).priorToolResultCount === 1
     ), false);
+  } finally {
+    database.close();
+  }
+});
+
+test("Runtime source evidence gate advances risk-worded research from discovery to source reading", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const model = new RiskWordedSearchThenFetchModel();
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "summarize current safety information without fabrication",
+          selectedSkillIds: [],
+          steps: [{
+            ...step("collect-safety-source"),
+            role: "fact_acquisition",
+            objective: "Read current safety information and do not fabricate or infer unsupported facts.",
+            requiredCapabilities: ["web_research"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "A source summary receipt is present; do not fabricate facts.", source: "planner" },
+              { id: "source_urls", description: "Traceable source URLs are recorded.", source: "planner" },
+              { id: "explicit_caveats", description: "Unsupported safety claims are not inferred.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+      tools: [
+        webSearchFixtureTool(["https://source.test/one"]),
+        webFetchFixtureTool(),
+      ],
+      maxSteps: 6,
+    });
+
+    const run = await runs.execute(owner.user.id, "总结当前安全信息，不要编造或推断未核实事实");
+
+    assert.equal(run.status, "completed");
+    assert.equal(model.assessmentCalls, 0);
+    assert.match(model.thirdContext, /"nextAction":"acquire_source_evidence"/);
+    assert.equal(model.sawProgressiveSourceDirection, true);
+    assert.equal(model.fetchCalls, 1);
+    const detail = await runs.plan(owner.user.id, run.id);
+    assert.equal(detail.assessments[0]?.approved, false);
+    assert.equal(detail.assessments[0]?.assessmentProfile, "evidence_gate");
+    assert.deepEqual(detail.assessments[0]?.failedBoundary?.missingEvidenceKinds, ["source_summary", "source_urls", "explicit_caveats"]);
+    assert.equal(detail.assessments.at(-1)?.approved, true);
+    assert.equal(detail.assessments.at(-1)?.assessmentProfile, "evidence_gate");
   } finally {
     database.close();
   }
@@ -11858,6 +12353,74 @@ class WebSearchThenFetchSourceSummaryModel implements ModelAdapter {
         facts: [{
           claim: "A fetched web source provided the source summary evidence.",
           sourceRefs: ["fetch-market"],
+          confidence: "source_supported",
+        }],
+        missingOrUnverified: [],
+        recommendedNextStep: "answer_user",
+      }),
+      finishReason: "stop",
+      toolCalls: [],
+    };
+  }
+}
+
+class RiskWordedSearchThenFetchModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  executionCalls = 0;
+  assessmentCalls = 0;
+  fetchCalls = 0;
+  sawProgressiveSourceDirection = false;
+  thirdContext = "";
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.phase === "assessment") {
+      this.assessmentCalls += 1;
+      return {
+        content: JSON.stringify({ criteria: [], skills: [], feedback: "" }),
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    }
+    this.executionCalls += 1;
+    const toolNames = request.tools.map((tool) => tool.name);
+    if (this.executionCalls === 1) {
+      assert.match(request.runtimeContext?.content ?? "", /Search results establish discovery references, not source-content evidence/);
+      assert.match(request.runtimeContext?.content ?? "", /completion gate only when researchPolicy\.authorityNeed is official_required/);
+      return {
+        content: "A current safety update appears to exist, but no source has been acquired yet.",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    }
+    if (this.executionCalls === 2) {
+      assert.match(request.runtimeContext?.content ?? "", /runtime_candidate_repair/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "search-safety", name: "websearch", arguments: { query: "current safety information" } }],
+      };
+    }
+    if (this.executionCalls === 3) {
+      this.thirdContext = request.runtimeContext?.content ?? "";
+      this.sawProgressiveSourceDirection = request.toolChoice === "auto"
+        && /"nextAction":"acquire_source_evidence"/.test(this.thirdContext)
+        && /"missingToolEvidenceKinds":\["source_summary"\]/.test(this.thirdContext);
+      assert.equal(toolNames.includes("webfetch"), true);
+      this.fetchCalls += 1;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "fetch-safety", name: "webfetch", arguments: { url: "https://source.test/one" } }],
+      };
+    }
+    assert.equal(request.tools.length, 0);
+    return {
+      content: JSON.stringify({
+        schema: "agentloop.sourceSummaryCandidate/v1",
+        coveredTopics: ["current safety information"],
+        facts: [{
+          claim: "The selected source was read before the safety summary was completed.",
+          sourceRefs: ["fetch-safety"],
           confidence: "source_supported",
         }],
         missingOrUnverified: [],

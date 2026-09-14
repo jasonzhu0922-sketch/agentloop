@@ -13,7 +13,7 @@ export type ArtifactKind = "html" | "document" | "presentation" | "spreadsheet" 
 export type SourceNeed = "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
 export type DeliverySurface = "conversation" | "workspace_artifact";
 export type ResearchDepth = "opportunistic" | "bounded" | "strict";
-export type ResearchAuthorityNeed = "none" | "official_preferred" | "official_required";
+export type ResearchAuthorityNeed = "none" | "quality_weighted" | "official_required";
 export type ResearchFreshnessNeed = "none" | "current";
 
 export interface ResearchPolicy {

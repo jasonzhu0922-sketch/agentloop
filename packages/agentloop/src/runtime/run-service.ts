@@ -6,7 +6,7 @@ import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
 import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptance-provider.ts";
-import { admitPlan } from "../planning/admission.ts";
+import { admitPlan, reusableSourceEvidenceKindsForTurn } from "../planning/admission.ts";
 import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import type {
   AssessmentProfileId,
@@ -1541,7 +1541,11 @@ export class RunService {
         );
       const effectiveGoal = turnResolution?.effectiveGoal ?? input;
       const taskIntent = classifyTaskIntent({
-        objective: effectiveGoal,
+        // The resolver supplies a self-contained goal, while the immutable
+        // latest user input preserves delivery verbs that a paraphrase may
+        // weaken (for example, "generate a Markdown file" -> "present as Markdown").
+        objective: effectiveGoal === input ? effectiveGoal : `${effectiveGoal}\n${input}`,
+        userConstraints: turnResolution?.userConstraints,
         toolNames: allowedToolNames,
         skillNames: privateSkills.map((skill) => skill.name),
         responseOnly,
@@ -1668,6 +1672,7 @@ export class RunService {
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
+          reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           taskIntent: admissionTaskIntent,
         });
       } catch (error) {
@@ -1706,6 +1711,7 @@ export class RunService {
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
+          reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           taskIntent: admissionTaskIntent,
         });
       }
@@ -1745,6 +1751,7 @@ export class RunService {
         sources: availableSources,
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
+        ...(turnResolution === undefined ? {} : { turnResolution }),
         signal: runController.signal,
         onStepChanged: (stepId) => {
           runningStepId = stepId;
@@ -2041,6 +2048,7 @@ export class RunService {
     sources: readonly UploadedSourceSummary[];
     conversationHistory?: readonly ModelMessage[];
     conversationWorkingSet?: ConversationWorkingSet;
+    turnResolution?: ConversationTurnResolution;
     initialRecovery?: Readonly<{
       stepId: string;
       messages: readonly ModelMessage[];
@@ -2151,6 +2159,30 @@ export class RunService {
       // the delivery leaf to re-acquire it or treating an honest no-data report
       // as an incomplete, recoverable execution.
       const dependencyToolEvidence = directDependencyToolEvidence(activeStep, plan);
+      const conversationToolEvidence = conversationEvidenceToolEvidence(
+        input.conversationWorkingSet,
+        input.turnResolution,
+        activeStep,
+      );
+      const inheritedAssessmentToolEvidence = mergeAssessmentToolEvidence(
+        dependencyToolEvidence,
+        conversationToolEvidence,
+      );
+      if (conversationToolEvidence.length > 0) {
+        await input.emit({
+          type: "conversation.evidence.reused",
+          data: {
+            planId: plan.id,
+            stepId: activeStep.id,
+            targetRunId: input.turnResolution?.targetRunId,
+            evidenceRefs: conversationToolEvidence.map((item) => item.toolCallId),
+          },
+        });
+      }
+      const initialToolEvidence = mergeAssessmentToolEvidence(
+        recovery?.toolEvidence ?? [],
+        conversationToolEvidence,
+      );
       const result = await runAgentLoop({
         runId: input.runId,
         systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
@@ -2183,8 +2215,8 @@ export class RunService {
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
         ...(recovery === undefined ? {} : {
           initialMessages: recovery.messages,
-          initialToolEvidence: recovery.toolEvidence,
         }),
+        ...(initialToolEvidence.length === 0 ? {} : { initialToolEvidence }),
         model: input.model,
         tools: input.registry,
         grant: stepGrant,
@@ -2234,7 +2266,7 @@ export class RunService {
           const evidence: StepEvidence = {
             candidateOutput: candidate.output,
             deliveryCandidate: candidate.deliveryCandidate,
-            toolCalls: mergeAssessmentToolEvidence(dependencyToolEvidence, candidate.toolEvidence),
+            toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
             modelSteps: candidate.modelSteps,
           };
           const assessmentProfile = selectAssessmentProfile(activeStep, evidence);
@@ -3818,7 +3850,7 @@ export function selectPlanningSkillRoles(
   taskInput: string,
   boundSkillIds: readonly string[],
   sources: readonly UploadedSourceSummary[] = [],
-  evidenceDemand: ConversationTurnResolution["evidenceDemand"] = "none",
+  evidenceDemand?: ConversationTurnResolution["evidenceDemand"],
 ): PlanningSkillRoleSelection[] {
   if (skills.length === 0) return [];
   // The latest turn still drives ordinary relevance, but a Skill canonically
@@ -3830,7 +3862,10 @@ export function selectPlanningSkillRoles(
   // A current-news request is source work even when it does not literally say
   // "source", "research", or "lookup".
   const sourceWorkRequested = requestsSourceWork(signal)
-    || classifyTaskIntent({ objective: taskInput, evidenceDemand }).sourceNeed !== "none";
+    || classifyTaskIntent({
+      objective: taskInput,
+      ...(evidenceDemand === undefined ? {} : { evidenceDemand }),
+    }).sourceNeed !== "none";
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
@@ -4463,12 +4498,10 @@ function shouldCompleteWithEvidenceBoundary(input: {
   evidence: StepEvidence;
 }): boolean {
   if (input.assessment.approved) return false;
-  if (input.assessmentAttempt < 2) return false;
-  if (!stepUsesExternalSourceTools(input.step)) return false;
+  if (!stepNeedsReusableSourceEvidence(input.step) && !stepUsesExternalSourceTools(input.step)) return false;
   if (stepRequiresFileOutput(input.step) && artifactExtensionsProducedByEvidence(input.evidence.toolCalls).size === 0) {
     return false;
   }
-  if (!hasSuccessfulExternalSourceEvidence(input.evidence.toolCalls)) return false;
   const boundaryText = [
     input.step.objective,
     ...input.step.successCriteria.map((criterion) => criterion.description),
@@ -4476,11 +4509,43 @@ function shouldCompleteWithEvidenceBoundary(input: {
     input.assessment.feedback,
     ...input.assessment.criteria.map((criterion) => criterion.rationale),
   ].join("\n");
-  if (matchesRiskSensitiveAssessment(boundaryText)) return false;
-  if (requiresStrictExternalSourceCompletion(boundaryText)) return false;
+  if (
+    input.step.evidenceContract?.caveatPolicy === "strict_fail_on_missing_source"
+    || requiresStrictExternalSourceCompletion(boundaryText)
+  ) return false;
   if (!acknowledgesEvidenceBoundary(boundaryText)) return false;
+  // A pure delivery leaf with no source-acquisition capability cannot change
+  // the evidence state on another model turn. Accept its honest bounded result
+  // immediately instead of manufacturing an unresolvable rejection loop.
+  if (deliveryStepHasNoSourceAcquisitionPath(input.step)) return true;
+  if (input.assessmentAttempt < 2) return false;
+  if (!stepUsesExternalSourceTools(input.step)) return false;
+  if (!hasSuccessfulExternalSourceEvidence(input.evidence.toolCalls)) return false;
   return hasUnavailableExternalSourceEvidence(input.evidence.toolCalls)
     || acknowledgesMissingSourceFacts(boundaryText);
+}
+
+function deliveryStepHasNoSourceAcquisitionPath(step: ExecutionPlan["steps"][number]): boolean {
+  if (step.role !== "deliver") return false;
+  const sourceTools = stepResolvedToolNames(step).filter((name) =>
+    /(?:search|fetch|query|read|list|find|inspect|source|browser|http)/iu.test(name)
+  );
+  return sourceTools.length === 0
+    && step.executionBinding.sourceKinds.every((kind) => kind === "conversation_workset");
+}
+
+function stepNeedsReusableSourceEvidence(step: ExecutionPlan["steps"][number]): boolean {
+  const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+  return requiredKinds.some((kind) =>
+    kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "table_coverage"
+    || kind === "structured_extraction_artifact"
+    || kind === "derived_aggregation"
+    || kind === "explicit_caveats"
+  );
 }
 
 function stepUsesExternalSourceTools(step: ExecutionPlan["steps"][number]): boolean {
@@ -5240,6 +5305,67 @@ function directDependencyToolEvidence(
   });
 }
 
+/**
+ * A resolved continuation edge is the semantic authorization to reuse source
+ * evidence from a prior Run.  Bind only summaries owned by that target Run;
+ * never let unrelated conversation history satisfy a new goal's evidence
+ * contract.  The compact receipt is derived from an accepted completed step
+ * and retains its Run/Plan/Step provenance, so this is evidence transport
+ * rather than treating prior assistant prose as a source.
+ */
+function conversationEvidenceToolEvidence(
+  workset: ConversationWorkingSet | undefined,
+  turnResolution: ConversationTurnResolution | undefined,
+  step: ExecutionPlan["steps"][number],
+): readonly AgentLoopToolEvidence[] {
+  const reusableEvidenceKinds = reusableSourceEvidenceKindsForTurn(workset, turnResolution);
+  if (
+    workset?.evidenceLedger === undefined
+    || turnResolution?.targetRunId === undefined
+    || reusableEvidenceKinds.length === 0
+    || step.role === "fact_acquisition"
+  ) return [];
+  return workset.evidenceLedger.sourceSummaries
+    .filter((summary) => summary.runId === turnResolution.targetRunId)
+    .map((summary) => {
+      const sourceRefs = dedupeConversationSourceReferences(
+        summary.facts.flatMap((fact) => fact.sourceRefs),
+      ).slice(0, 12);
+      const satisfied = new Set<string>();
+      if (
+        summary.facts.length > 0
+        || summary.coveredTopics.length > 0
+        || summary.missingOrUnverified.length > 0
+      ) satisfied.add("source_summary");
+      if (sourceRefs.some((ref) => ref.url !== undefined)) satisfied.add("source_urls");
+      const evidenceRef = `conversation:${createHash("sha256")
+        .update([summary.runId, summary.planId, summary.stepId].join("\n"))
+        .digest("hex")}`;
+      return {
+        toolCallId: evidenceRef,
+        toolName: "conversation_evidence_reuse",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.sourceSummary/v1",
+          provenance: {
+            runId: summary.runId,
+            planId: summary.planId,
+            stepId: summary.stepId,
+          },
+          coveredTopics: summary.coveredTopics,
+          facts: summary.facts,
+          sourceRefs,
+          missingOrUnverified: summary.missingOrUnverified,
+          evidenceKinds: {
+            satisfied: [...satisfied],
+            caveated: summary.missingOrUnverified.length === 0 ? [] : ["explicit_caveats"],
+            failed: [],
+          },
+        }),
+      };
+    });
+}
+
 function mergeAssessmentToolEvidence(
   inherited: readonly ToolEvidence[],
   current: readonly ToolEvidence[],
@@ -5259,10 +5385,14 @@ function selectAssessmentProfile(
   ].join("\n");
   const artifactDeliveryEvidenceGate = stepUsesArtifactDeliveryEvidenceGate(step);
   if (artifactDeliveryEvidenceGate) return "evidence_gate";
-  if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
-  if (stepUsesOnlyDirectDelivery(step)) return "deterministic";
+  // Runtime-owned observable evidence is a prerequisite, not a semantic
+  // opinion. Check it before keyword-selected model profiles so wording such
+  // as "do not fabricate" cannot approve a candidate that never acquired the
+  // source material required by the admitted Plan.
   if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
   if (stepEvidenceSupportsRuntimeEvidenceGate(step, evidence)) return "evidence_gate";
+  if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
+  if (stepUsesOnlyDirectDelivery(step)) return "deterministic";
   if (stepHasSourceKind(step, "web")) {
     return "lookup_lite";
   }
@@ -5862,14 +5992,18 @@ function applyConversationTurnEvidenceFloor(
   const targetInput = resolution.targetRunId === undefined
     ? undefined
     : workset?.planCursors.find((cursor) => cursor.runId === resolution.targetRunId)?.input;
-  const guardedSourceNeed = classifyTaskIntent({
+  const userAuthoredSourceNeed = classifyTaskIntent({
     // The evidence floor may use only user-authored text. A model-generated
     // effectiveGoal can preserve semantics, but it
     // must not silently escalate an ordinary source request into a stricter
     // contract by adding words such as "official" on its own.
     objective: [input, targetInput ?? ""].filter((value) => value.trim().length > 0).join("\n"),
-    evidenceDemand: resolution.evidenceDemand,
   }).sourceNeed;
+  const modelSourceNeed = resolution.evidenceDemand === "strict_user_source"
+    && userAuthoredSourceNeed !== "strict_user_source"
+    ? "source_grounded"
+    : resolution.evidenceDemand;
+  const guardedSourceNeed = strongerConversationEvidenceDemand(modelSourceNeed, userAuthoredSourceNeed);
   if (guardedSourceNeed === resolution.evidenceDemand && resolution.mode === "execute") return resolution;
   if (guardedSourceNeed === "none") return resolution;
   return {
@@ -5878,6 +6012,19 @@ function applyConversationTurnEvidenceFloor(
     evidenceDemand: guardedSourceNeed,
     source: "model_guarded",
   };
+}
+
+function strongerConversationEvidenceDemand(
+  left: ConversationTurnResolution["evidenceDemand"],
+  right: ConversationTurnResolution["evidenceDemand"],
+): ConversationTurnResolution["evidenceDemand"] {
+  const rank: Record<ConversationTurnResolution["evidenceDemand"], number> = {
+    none: 0,
+    lookup_lite: 1,
+    source_grounded: 2,
+    strict_user_source: 3,
+  };
+  return rank[right] > rank[left] ? right : left;
 }
 
 function conversationTurnResolverPrompt(repairFeedback: string | undefined): string {

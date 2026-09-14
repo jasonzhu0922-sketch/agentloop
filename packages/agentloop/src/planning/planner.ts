@@ -19,7 +19,7 @@ import type {
   SelectedSkillRole,
   TaskSpec,
 } from "./contracts.ts";
-import { admitPlan } from "./admission.ts";
+import { admitPlan, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools } from "./step-execution-binding.ts";
 
 const EVIDENCE_KIND_VALUES = [
@@ -325,6 +325,10 @@ export class ModelPlanner implements Planner {
           ...(task.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: task.requiredToolSourceIds }),
           ...(task.sources === undefined ? {} : { availableUploadedSourceIds: task.sources.map((source) => source.id) }),
           ...(task.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: task.visibleDirectories.map((directory) => directory.id) }),
+          reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(
+            task.conversationWorkingSet,
+            task.turnResolution,
+          ),
           taskIntent: {
             deliverySurface: taskProfile.deliverySurface,
             artifactKind: taskProfile.artifactKind,
@@ -543,6 +547,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
     evidenceDemand: task.turnResolution?.evidenceDemand,
+    userConstraints: task.turnResolution?.userConstraints,
   });
   const operationProfiles = relevantOperationProfiles(task);
   const operationProfileIds = new Set(operationProfiles.map((profile) => profile.id));
@@ -629,11 +634,13 @@ function planningIntentObjective(task: TaskSpec): string {
   // goal to a resolved new_goal would reintroduce exactly the cross-turn
   // semantic contamination the Resolver boundary is meant to remove.
   const inheritsActiveGoal = task.turnResolution === undefined;
-  return [
+  return [...new Set([
     effectiveGoal,
+    ...(task.turnResolution?.userConstraints ?? []),
+    task.input,
     inheritsActiveGoal ? task.conversationWorkingSet?.activeGoal?.goal ?? "" : "",
     inheritsActiveGoal ? task.conversationWorkingSet?.resumeSuggestion ?? "" : "",
-  ].filter((value) => value.trim().length > 0).join("\n");
+  ].map((value) => value.trim()).filter((value) => value.length > 0))].join("\n");
 }
 
 function selectInitialSkillRoles(
@@ -705,6 +712,9 @@ function planningRuntimeContext(
               schema: taskProfile.researchPolicy.schema,
               instruction:
                 "Use this policy only to shape source/research leaves and their evidence contracts; do not add research work to unrelated artifact or direct-answer leaves.",
+              authorityRule: taskProfile.researchPolicy.authorityNeed === "official_required"
+                ? "The user explicitly requires official or exact-source verification. Missing required official evidence may block claims that depend on it."
+                : "Rank sources by relevance, traceability, and reliability. Official or first-party sources are useful when accessible, but are not a completion gate. After bounded attempts, use credible independent or industry sources and deliver the supported summary with explicit caveats.",
               depth: taskProfile.researchPolicy.depth,
               maxSearches: taskProfile.researchPolicy.maxSearches,
               maxFetches: taskProfile.researchPolicy.maxFetches,
@@ -758,9 +768,15 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
   const producibleSourceKinds = new Set(capabilities.flatMap((capability) => capability.produces));
   const sourceKinds = (["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
     .filter((kind) => producibleSourceKinds.has(kind));
-  const requiredSourceKinds = sourceKinds.includes("source_summary")
+  const strictSourceKinds = sourceKinds.includes("source_summary")
     ? (["source_summary", ...(sourceKinds.includes("source_urls") ? ["source_urls" as const] : [])] as const)
     : sourceKinds.filter((kind) => kind !== "explicit_caveats").slice(0, 1);
+  const progressiveSourceKinds = sourceKinds.includes("source_urls")
+    ? (["source_urls", ...(sourceKinds.includes("explicit_caveats") ? ["explicit_caveats" as const] : [])] as const)
+    : strictSourceKinds;
+  const requiredSourceKinds = taskProfile.sourceNeed === "lookup_lite"
+    ? progressiveSourceKinds
+    : strictSourceKinds;
   if (taskProfile.deliverySurface === "conversation" && taskProfile.artifactKind === "none") {
     const requiresSourceEvidence = taskProfile.sourceNeed !== undefined && taskProfile.sourceNeed !== "none";
     return {
@@ -1058,7 +1074,8 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
   const taskProfile = planningTaskProfile(task);
   const terminalStepIds = terminalLeafStepIds(proposal.steps);
   const normalizedSteps: PlanStepProposal[] = proposal.steps.map((step) => {
-    const deliveryNormalized = normalizeConversationOnlyTerminalStep(step, terminalStepIds, taskProfile, task);
+    const sourcePolicyNormalized = normalizeProgressiveSourceContract(step, taskProfile);
+    const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
     if (deliveryNormalized.evidenceContract !== undefined) return deliveryNormalized;
     const coreCriteria = deliveryNormalized.successCriteria.filter((criterion) =>
       !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
@@ -1076,6 +1093,39 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
   return {
     ...proposal,
     steps: normalizedSteps.map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task)),
+  };
+}
+
+/**
+ * Lookup-lite web research is progressively deliverable from traceable
+ * discovery metadata plus explicit caveats. Source-grounded work still reads
+ * source content, but an inaccessible official source never becomes blocking;
+ * only Runtime-owned strict_user_source may require official evidence.
+ */
+function normalizeProgressiveSourceContract(
+  step: PlanStepProposal,
+  taskProfile: TaskProfile,
+): PlanStepProposal {
+  const contract = step.evidenceContract;
+  if (contract === undefined || taskProfile.sourceNeed === "strict_user_source") return step;
+  const discoveryCanSupportBoundedDelivery = taskProfile.sourceNeed === "lookup_lite"
+    && taskProfile.deliverySurface === "conversation"
+    && taskProfile.operations.some((operation) => operation.id === "web_research")
+    && contract.requiredKinds.includes("source_urls");
+  const requiredKinds = discoveryCanSupportBoundedDelivery
+    ? contract.requiredKinds.filter((kind) => kind !== "source_summary")
+    : contract.requiredKinds;
+  const caveatPolicy = contract.caveatPolicy === "strict_fail_on_missing_source"
+    ? "mark_unverified_facts"
+    : contract.caveatPolicy;
+  if (requiredKinds.length === contract.requiredKinds.length && caveatPolicy === contract.caveatPolicy) return step;
+  return {
+    ...step,
+    evidenceContract: {
+      ...contract,
+      requiredKinds,
+      caveatPolicy,
+    },
   };
 }
 

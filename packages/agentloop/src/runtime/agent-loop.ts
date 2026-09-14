@@ -1820,6 +1820,12 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
     const { missingEvidenceKinds, violatedSkillRequirements, reusableEvidenceRefs, suggestedRepairShape } = evaluation.failedBoundary;
     if (missingEvidenceKinds.length > 0) {
       lines.push(`Required completion evidence still missing: ${missingEvidenceKinds.join(", ")}.`);
+      if (missingEvidenceKinds.includes("source_summary") && !missingEvidenceKinds.includes("source_urls")) {
+        lines.push(
+          "Source discovery already produced traceable references. Advance the task by reading one or more of the highest-relevance available sources with a current source-content Tool (for example webfetch); do not resubmit another discovery-only summary.",
+          "Official or first-party sources are not required unless the admitted Plan explicitly uses strict_fail_on_missing_source. Prefer the strongest accessible relevant source and preserve caveats for anything still unverified.",
+        );
+      }
     }
     if (violatedSkillRequirements.length > 0) {
       lines.push(`Unmet Skill requirements: ${violatedSkillRequirements.join(", ")}.`);

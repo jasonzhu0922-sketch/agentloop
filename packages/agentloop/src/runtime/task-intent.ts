@@ -19,17 +19,24 @@ export interface TaskIntentClassification {
 
 export interface TaskIntentInput {
   readonly objective: string;
+  /** Structured constraints retained by the conversation turn resolver. */
+  readonly userConstraints?: readonly string[];
   readonly successCriteria?: readonly { readonly id: string; readonly description: string }[];
   readonly toolNames?: readonly string[];
   readonly skillNames?: readonly string[];
   readonly responseOnly?: boolean;
-  /** Runtime-owned semantic evidence demand resolved from the full conversation. */
+  /**
+   * Runtime-owned semantic evidence demand resolved from user-authored text and
+   * the full conversation. When present, this is authoritative: downstream
+   * consumers must not upgrade it by re-reading model-authored objectives.
+   */
   readonly evidenceDemand?: SourceNeed;
 }
 
 export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassification {
   const text = normalize([
     input.objective,
+    ...(input.userConstraints ?? []),
     ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
     ...(input.skillNames ?? []),
   ].join("\n"));
@@ -40,7 +47,7 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     source: matchedSourceSignals(text),
   };
   const artifactKind = detectArtifactKindSignal(text);
-  const sourceNeed = strongestSourceNeed(inferSourceNeedFromIntent(text), input.evidenceDemand ?? "none");
+  const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
   const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
   const wantsArtifact = artifactKind !== "none"
     // Tool availability authorizes a possible workspace write, but it never
@@ -62,21 +69,12 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
 export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy | undefined {
   const text = normalize([
     input.objective,
+    ...(input.userConstraints ?? []),
     ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
     ...(input.skillNames ?? []),
   ].join("\n"));
-  const sourceNeed = strongestSourceNeed(inferSourceNeedFromIntent(text), input.evidenceDemand ?? "none");
+  const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
   return researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
-}
-
-function strongestSourceNeed(left: SourceNeed, right: SourceNeed): SourceNeed {
-  const rank: Record<SourceNeed, number> = {
-    none: 0,
-    lookup_lite: 1,
-    source_grounded: 2,
-    strict_user_source: 3,
-  };
-  return rank[right] > rank[left] ? right : left;
 }
 
 export function requestedArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
@@ -138,15 +136,15 @@ function researchPolicyForIntentText(
     return researchPolicy("strict", 2, 5, "official_required", freshnessNeed);
   }
   if (sourceNeed === "lookup_lite") {
-    return researchPolicy("opportunistic", 1, 2, "official_preferred", "current");
+    return researchPolicy("opportunistic", 1, 2, "quality_weighted", "current");
   }
   if (
     /(?:if available|when available|otherwise use|可用则用|能找到.{0,12}就用|找不到.{0,12}(?:靠|用|基于).{0,12}(?:知识|经验)|允许使用|可以使用|可参考|互联网能找到)/iu
       .test(text)
   ) {
-    return researchPolicy("opportunistic", 1, 3, "official_preferred", freshnessNeed);
+    return researchPolicy("opportunistic", 1, 3, "quality_weighted", freshnessNeed);
   }
-  return researchPolicy("bounded", 2, 5, "official_preferred", freshnessNeed);
+  return researchPolicy("bounded", 2, 5, "quality_weighted", freshnessNeed);
 }
 
 function researchPolicy(
@@ -164,10 +162,10 @@ function researchPolicy(
     authorityNeed,
     freshnessNeed,
     sourcePreference: [
-      "official_or_primary_sources",
-      "standards_or_regulators",
-      "industry_association_or_public_service_platform",
-      "vendor_media_blog_training_sources_only_as_secondary_context",
+      "direct_or_primary_sources_when_relevant_and_accessible",
+      "reputable_independent_or_industry_sources",
+      "cross_checked_secondary_sources",
+      "low_quality_or_unattributed_sources_only_as_discovery_leads",
     ],
     lowValueSourceSignals: [
       "empty_or_tiny_body",
@@ -178,7 +176,7 @@ function researchPolicy(
     stopWhen: [
       "source_summary_and_source_urls_are_recorded",
       "verified_partial_unverified_claims_are_separated",
-      "missing_or_unavailable_authoritative_facts_are_explicit_caveats",
+      "missing_or_unverified_facts_are_explicit_caveats",
       "bounded_search_and_fetch_budget_is_spent",
     ],
   };
@@ -188,6 +186,7 @@ function matchedArtifactActions(text: string): string[] {
   return matchSignals(text, [
     ["make", /\b(?:make|create|build|generate|produce|deliver|write|export|convert|design|implement|materialize)\b/iu],
     ["repair", /\b(?:fix|repair|edit|update|correct|regenerate|rebuild|open|inspect|check)\b|修复|修改|更正|重新生成|重做|打开|检查|查看|乱码|不可读|打不开/iu],
+    ["transform", /\b(?:merge|combine|concatenate|join|split|rotate|encrypt|decrypt|watermark|compress|resize|transcode)\b|合并|拼接|拆分|分割|旋转|加密|解密|加水印|压缩|缩放|转码/iu],
     ["make_zh", /做|制作|创建|生成|产出|输出|交付|写|设计|实现|搭建|构建|导出|转换|转成|转为|转/iu],
   ]);
 }

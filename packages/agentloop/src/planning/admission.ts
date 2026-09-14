@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import type { ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 import {
   createStepExecutionBinding,
   unknownUploadedSourceIds,
@@ -72,6 +72,8 @@ export function admitPlan(input: {
   requiredToolSourceIds?: readonly string[];
   availableUploadedSourceIds?: readonly string[];
   availableVisibleDirectoryIds?: readonly string[];
+  /** Accepted evidence canonically bound to the resolved prior Run. */
+  reusableEvidenceKinds?: readonly EvidenceKind[];
   taskIntent?: {
     readonly deliverySurface?: "conversation" | "workspace_artifact";
     readonly artifactKind?: string;
@@ -254,7 +256,12 @@ export function admitPlan(input: {
     ?? (input.availableTools === undefined
       ? planningCapabilitiesFromToolNames([...input.availableToolNames])
       : planningCapabilitiesFromTools(input.availableTools));
-  assertRequiredSourceGrounding(admittedSteps, input.taskIntent, availableCapabilities);
+  assertRequiredSourceGrounding(
+    admittedSteps,
+    input.taskIntent,
+    availableCapabilities,
+    input.reusableEvidenceKinds ?? [],
+  );
   for (const step of admittedSteps) {
     assertEvidenceContractIsProducible({
       stepId: step.id,
@@ -305,8 +312,14 @@ function assertRequiredSourceGrounding(
     readonly evidenceDemand?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
   } | undefined,
   availableCapabilities: readonly PlanningCapability[],
+  reusableEvidenceKinds: readonly EvidenceKind[],
 ): void {
   if (taskIntent?.evidenceDemand === undefined || taskIntent.evidenceDemand === "none") return;
+  const planDeclaresSourceAcquisition = steps.some((step) => step.role === "fact_acquisition");
+  if (
+    !planDeclaresSourceAcquisition
+    && reusableEvidenceKinds.some((kind) => SOURCE_GROUNDING_EVIDENCE_KINDS.has(kind))
+  ) return;
   const capabilityById = new Map(availableCapabilities.map((capability) => [capability.id, capability]));
   const grounded = steps.some((step) => {
     const requiredKinds = step.evidenceContract?.requiredKinds.filter((kind) => SOURCE_GROUNDING_EVIDENCE_KINDS.has(kind)) ?? [];
@@ -317,6 +330,33 @@ function assertRequiredSourceGrounding(
   if (!grounded) {
     reject(`Plan for ${taskIntent.evidenceDemand} work must bind a capability that produces required source-grounding evidence`);
   }
+}
+
+/**
+ * Cross-Run evidence reuse is admitted only through the resolver's explicit
+ * semantic edge to a prior Run. Completed evidence from unrelated conversation
+ * history must never satisfy a new, corrected, or challenged goal.
+ */
+export function reusableSourceEvidenceKindsForTurn(
+  workset: ConversationWorkingSet | undefined,
+  turnResolution: ConversationTurnResolution | undefined,
+): EvidenceKind[] {
+  if (
+    workset?.evidenceLedger === undefined
+    || turnResolution?.targetRunId === undefined
+    || turnResolution.evidenceDemand !== "source_grounded"
+    || (turnResolution.relation !== "continue_prior" && turnResolution.relation !== "refine_prior")
+  ) return [];
+  const kinds = new Set<EvidenceKind>();
+  for (const summary of workset.evidenceLedger.sourceSummaries) {
+    if (summary.runId !== turnResolution.targetRunId) continue;
+    if (summary.facts.length > 0 || summary.coveredTopics.length > 0) kinds.add("source_summary");
+    if (summary.facts.some((fact) => fact.sourceRefs.some((reference) => reference.url !== undefined))) {
+      kinds.add("source_urls");
+    }
+    if (summary.missingOrUnverified.length > 0) kinds.add("explicit_caveats");
+  }
+  return [...kinds];
 }
 
 /**
