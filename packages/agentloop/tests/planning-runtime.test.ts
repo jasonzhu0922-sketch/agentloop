@@ -411,6 +411,16 @@ test("Task intent treats Chinese market price queries as fresh lookup", () => {
   assert.equal(intent.researchPolicy?.freshnessNeed, "current");
 });
 
+test("Task intent treats a bounded recent Chinese news period as a fresh lookup", () => {
+  const intent = classifyTaskIntent({
+    objective: "近一周有哪些 AI 热点新闻",
+  });
+
+  assert.equal(intent.sourceNeed, "lookup_lite");
+  assert.deepEqual(intent.signals.source, ["fresh"]);
+  assert.equal(intent.researchPolicy?.freshnessNeed, "current");
+});
+
 test("Task intent keeps research policy conditional and graded", () => {
   const plainArtifact = classifyTaskIntent({
     objective: "生成一份项目周报案例，html 格式",
@@ -3948,9 +3958,10 @@ test("selectPlanningSkills selects a source-provider for current Chinese news wi
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
   });
 
-  const selected = selectPlanningSkills([aihot], "今天有什么 AI 热点新闻", []);
-
-  assert.deepEqual(selected.map((skill) => skill.name), ["aihot"]);
+  for (const request of ["今天有什么 AI 热点新闻", "近一周有哪些 AI 热点新闻"]) {
+    const selected = selectPlanningSkills([aihot], request, []);
+    assert.deepEqual(selected.map((skill) => skill.name), ["aihot"]);
+  }
 });
 
 test("selectPlanningSkills recalls the checked-in presentation Skill for PPTX artifact requests", async () => {

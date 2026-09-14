@@ -100,7 +100,7 @@ function inferSourceNeedFromIntent(text: string): SourceNeed {
   if (/(?:source[- ]grounded|source[_ -]summary|source[_ -]urls?|source\s+evidence|research|lookup|cite|citation|standard|policy|regulation|rating|certification|public\s+sources?|web\s+sources?|internet|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处|互联网|联网|网上|公开资料|公开材料|公开信息)/iu.test(text)) {
     return "source_grounded";
   }
-  if (/(?:latest|current|today|recent|最新|当前|今天|近期|市场价格|价格|报价|行情|多少钱)/iu.test(text)) return "lookup_lite";
+  if (FRESH_LOOKUP_PATTERN.test(text)) return "lookup_lite";
   return "none";
 }
 
@@ -110,7 +110,7 @@ function researchPolicyForIntentText(
   _toolNames: readonly string[],
 ): ResearchPolicy | undefined {
   if (sourceNeed === "none") return undefined;
-  const freshnessNeed = /(?:latest|current|today|recent|最新|当前|今天|近期|市场价格|价格|报价|行情|多少钱)/iu.test(text)
+  const freshnessNeed = FRESH_LOOKUP_PATTERN.test(text)
     ? "current"
     : "none";
   if (sourceNeed === "strict_user_source") {
@@ -190,9 +190,14 @@ function matchedSourceSignals(text: string): string[] {
   return matchSignals(text, [
     ["strict", /strict source|official source|authoritative|标准全文|官方|权威|严格来源|精确条款|逐条核验/iu],
     ["source_grounded", /source[- ]grounded|source[_ -]summary|source[_ -]urls?|source\s+evidence|research|lookup|cite|citation|standard|policy|regulation|rating|certification|public\s+sources?|web\s+sources?|internet|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处|互联网|联网|网上|公开资料|公开材料|公开信息/iu],
-    ["fresh", /latest|current|today|recent|最新|当前|今天|近期|市场价格|价格|报价|行情|多少钱/iu],
+    ["fresh", FRESH_LOOKUP_PATTERN],
   ]);
 }
+
+// Keep the temporal vocabulary used for source need, research policy, and
+// diagnostic signals in one place.  A bounded recent period still needs a
+// live source even when the user does not explicitly say "search" or "web".
+const FRESH_LOOKUP_PATTERN = /(?:latest|current|today|recent|最新|当前|今天|最近|近期|近\s*(?:一)?周|过去\s*(?:一)?周|近\s*七天|过去\s*七天|市场价格|价格|报价|行情|多少钱)/iu;
 
 function matchSignals(text: string, patterns: readonly [string, RegExp][]): string[] {
   return patterns.flatMap(([id, pattern]) => pattern.test(text) ? [id] : []);
