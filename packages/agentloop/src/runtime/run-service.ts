@@ -13,10 +13,13 @@ import type {
   ConversationCompletedStepHandoff,
   ConversationEvidenceLedger,
   ConversationFailedBoundary,
+  ConversationOutcomeRelation,
   ConversationReusableArtifact,
   ConversationSourceFact,
   ConversationSourceReference,
   ConversationSourceSummary,
+  ConversationTurnRelation,
+  ConversationTurnResolution,
   ConversationWorkingSet,
   ExecutionPlan,
   FailedBoundary,
@@ -683,10 +686,27 @@ export class RunService {
     const requiredSkillIds = new Set<string>();
     const recommendedCapabilityIds = new Set<string>();
     const sourceSummaries: ConversationSourceSummary[] = [];
+    const outcomeRelations: ConversationOutcomeRelation[] = [];
     let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
 
     for (const run of consideredRuns) {
       const events = this.eventsFromRows(await this.runs.eventsByRun(run.id));
+      for (const event of events) {
+        if (event.type !== "conversation.outcome.disputed" && event.type !== "conversation.outcome.superseded") continue;
+        const targetRunId = stringField(event.data, "targetRunId");
+        const relation = stringField(event.data, "relation");
+        if (
+          targetRunId !== undefined
+          && (relation === "correct_prior" || relation === "refine_prior" || relation === "challenge_prior")
+        ) {
+          outcomeRelations.push({
+            runId: run.id,
+            targetRunId,
+            relation,
+            state: event.type === "conversation.outcome.superseded" ? "superseded" : "disputed",
+          });
+        }
+      }
       const outcome = await this.outcomeForRun(run.id);
       const failure = failureBoundaryForRun(run, outcome, events);
       if (failure !== undefined) failedBoundaries.push(failure);
@@ -707,6 +727,7 @@ export class RunService {
         const cursor = {
           runId: run.id,
           planId: plan.id,
+          input: run.input,
           goal: plan.goal,
           status: plan.status,
           selectedSkillIds: plan.selectedSkillIds,
@@ -810,6 +831,7 @@ export class RunService {
       planCursors,
       reusableArtifacts: boundedArtifacts,
       failedBoundaries,
+      ...(outcomeRelations.length === 0 ? {} : { outcomeRelations }),
       recommendedCapabilities: {
         skillIds: [...requiredSkillIds],
         capabilityIds: [...recommendedCapabilityIds],
@@ -1417,25 +1439,48 @@ export class RunService {
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
       const requiresExecution = requiresDeterministicConversationExecution(input, conversationWorkingSet);
-      const responseOnly = conversationEntry
-        && !requiresExecution
-        && await classifyConversationTurn(
-          rawModel,
-          input,
-          conversationHistory,
-          {
-            visibleDirectories,
-            sources: availableSources,
-            conversationWorkingSet,
-          },
-          runController.signal,
-        );
+      const turnResolution = !conversationEntry
+        ? undefined
+        : requiresExecution && (conversationHistory?.length ?? 0) === 0
+          ? deterministicConversationTurnResolution(input)
+          : await resolveConversationTurn(
+            rawModel,
+            input,
+            conversationHistory,
+            {
+              visibleDirectories,
+              sources: availableSources,
+              conversationWorkingSet,
+            },
+            runController.signal,
+          );
+      const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
         await emit({
-          type: "conversation.intent.classified",
-          data: { kind: responseOnly ? "reply" : "execute" },
+          type: "conversation.turn.resolved",
+          data: turnResolution as unknown as Readonly<Record<string, unknown>>,
         });
+        await emit({
+          type: "conversation.intent.classified",
+          data: {
+            kind: responseOnly ? "reply" : "execute",
+            ...(turnResolution?.mode === "clarify" ? { resolutionMode: "clarify" } : {}),
+          },
+        });
+        if (
+          turnResolution?.targetRunId !== undefined
+          && (turnResolution.relation === "correct_prior" || turnResolution.relation === "challenge_prior")
+        ) {
+          await emit({
+            type: "conversation.outcome.disputed",
+            data: {
+              runId,
+              targetRunId: turnResolution.targetRunId,
+              relation: turnResolution.relation,
+            },
+          });
+        }
       }
       if (!responseOnly && this.skills.skillDirectories.length > 0) {
         await this.skills.refreshSkillDirectory();
@@ -1494,14 +1539,20 @@ export class RunService {
         : [...allTools.map((tool) => tool.name)].filter((name) =>
           executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)
         );
+      const effectiveGoal = turnResolution?.effectiveGoal ?? input;
       const taskIntent = classifyTaskIntent({
-        objective: input,
+        objective: effectiveGoal,
         toolNames: allowedToolNames,
         skillNames: privateSkills.map((skill) => skill.name),
         responseOnly,
+        evidenceDemand: turnResolution?.evidenceDemand,
       });
+      const admissionTaskIntent = {
+        ...taskIntent,
+        ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
+      };
       const allowedToolSummaries = toolSummaries(allTools, new Set(allowedToolNames));
-      const requiredToolSourceIds = requiredToolSourceIdsFromInput(input, allowedToolSummaries);
+      const requiredToolSourceIds = requiredToolSourceIdsFromInput(`${input}\n${effectiveGoal}`, allowedToolSummaries);
       const rootGrant = createCapabilityGrant({
         actorUserId,
         runId,
@@ -1518,9 +1569,10 @@ export class RunService {
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
       const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
-        input,
+        effectiveGoal,
         conversationWorkingSet?.recommendedCapabilities.skillIds ?? [],
         availableSources,
+        turnResolution?.evidenceDemand,
       );
       const planningSkills = planningSkillRoles.map((item) => item.skill);
       const continuationSkillIds = planningSkills
@@ -1551,6 +1603,7 @@ export class RunService {
       const planningTask: TaskSpec = {
         runId,
         input,
+        ...(turnResolution === undefined ? {} : { turnResolution }),
         availableSkills: planningSkills,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
@@ -1615,7 +1668,7 @@ export class RunService {
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
-          taskIntent,
+          taskIntent: admissionTaskIntent,
         });
       } catch (error) {
         await this.notifyPlanningExtensionsAfterAdmission({
@@ -1653,7 +1706,7 @@ export class RunService {
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
-          taskIntent,
+          taskIntent: admissionTaskIntent,
         });
       }
       plan = await this.plans.create(plan);
@@ -1714,6 +1767,23 @@ export class RunService {
         type: "terminal.delivery_committed",
         data: { runId, planId: plan.id, output, reasonCode },
       });
+      if (
+        turnResolution?.targetRunId !== undefined
+        && (
+          turnResolution.relation === "correct_prior"
+          || turnResolution.relation === "refine_prior"
+          || turnResolution.relation === "challenge_prior"
+        )
+      ) {
+        await emit({
+          type: "conversation.outcome.superseded",
+          data: {
+            runId,
+            targetRunId: turnResolution.targetRunId,
+            relation: turnResolution.relation,
+          },
+        });
+      }
       await emit({ type: "run.completed", data: { runId, planId: plan.id, output } });
       return this.get(actorUserId, runId);
     } catch (error) {
@@ -3748,6 +3818,7 @@ export function selectPlanningSkillRoles(
   taskInput: string,
   boundSkillIds: readonly string[],
   sources: readonly UploadedSourceSummary[] = [],
+  evidenceDemand: ConversationTurnResolution["evidenceDemand"] = "none",
 ): PlanningSkillRoleSelection[] {
   if (skills.length === 0) return [];
   // The latest turn still drives ordinary relevance, but a Skill canonically
@@ -3759,7 +3830,7 @@ export function selectPlanningSkillRoles(
   // A current-news request is source work even when it does not literally say
   // "source", "research", or "lookup".
   const sourceWorkRequested = requestsSourceWork(signal)
-    || classifyTaskIntent({ objective: taskInput }).sourceNeed !== "none";
+    || classifyTaskIntent({ objective: taskInput, evidenceDemand }).sourceNeed !== "none";
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
@@ -5717,98 +5788,225 @@ async function resolveVisibleDirectories(paths: readonly string[]): Promise<Visi
   return grants;
 }
 
-const CONVERSATION_INTENT_TOOL = {
-  name: "classify_conversation_intent",
-  description: "Classify whether the latest conversational turn asks for a textual reply or for task execution.",
+const CONVERSATION_TURN_TOOL = {
+  name: "resolve_conversation_turn",
+  description: "Bind the latest conversational turn to its effective goal and evidence demand using prior canonical conversation state.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["kind"],
-    properties: { kind: { type: "string", enum: ["reply", "execute"] } },
+    required: ["mode", "relation", "effectiveGoal", "evidenceDemand", "userConstraints"],
+    properties: {
+      mode: { type: "string", enum: ["reply", "execute", "clarify"] },
+      relation: {
+        type: "string",
+        enum: ["new_goal", "continue_prior", "correct_prior", "refine_prior", "challenge_prior"],
+      },
+      targetRunId: { type: "string" },
+      effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
+      evidenceDemand: {
+        type: "string",
+        enum: ["none", "lookup_lite", "source_grounded", "strict_user_source"],
+      },
+      userConstraints: {
+        type: "array",
+        maxItems: 8,
+        items: { type: "string", minLength: 1, maxLength: 240 },
+      },
+    },
   },
 } as const;
 
-const CONVERSATION_INTENT_CLASSIFIER_ATTEMPTS = 2;
+const CONVERSATION_TURN_RESOLUTION_ATTEMPTS = 2;
 
-async function classifyConversationTurn(
+async function resolveConversationTurn(
   model: ModelAdapter,
   input: string,
   conversationHistory: readonly ModelMessage[] | undefined,
   context: ConversationIntentExternalContext,
   signal?: AbortSignal,
-): Promise<boolean> {
-  if (requiresExternalState(input)) return false;
-  const runtimeContextId = `conversation-intent-context:${randomUUID()}`;
+): Promise<ConversationTurnResolution> {
+  const runtimeContextId = `conversation-turn-context:${randomUUID()}`;
   let repairFeedback: string | undefined;
-  for (let attempt = 1; attempt <= CONVERSATION_INTENT_CLASSIFIER_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
     const response = await model.complete({
-      runId: `conversation-intent:${randomUUID()}`,
-      systemPrompt: conversationIntentClassifierPrompt(repairFeedback),
+      runId: `conversation-turn:${randomUUID()}`,
+      systemPrompt: conversationTurnResolverPrompt(repairFeedback),
       phase: "planning",
       runtimeContext: {
         id: runtimeContextId,
         phase: "planning",
-        content: formatConversationIntentContext(context),
+        content: formatConversationTurnContext(context),
       },
       messages: [
         ...(conversationHistory ?? []),
         { role: "user", content: input },
       ],
-      tools: [CONVERSATION_INTENT_TOOL],
-      toolChoice: { name: CONVERSATION_INTENT_TOOL.name },
+      tools: [CONVERSATION_TURN_TOOL],
+      toolChoice: { name: CONVERSATION_TURN_TOOL.name },
     }, signal);
-    const decision = parseConversationIntentDecision(response);
-    if (decision === "reply") return true;
-    if (decision === "execute") return false;
-    repairFeedback = conversationIntentRepairFeedback(response);
+    const resolution = parseConversationTurnResolution(response, context.conversationWorkingSet);
+    if (resolution !== undefined) {
+      return applyConversationTurnEvidenceFloor(resolution, input, context.conversationWorkingSet);
+    }
+    repairFeedback = conversationTurnRepairFeedback(response);
   }
-  return false;
+  return fallbackConversationTurnResolution(input);
 }
 
-function conversationIntentClassifierPrompt(repairFeedback: string | undefined): string {
+function applyConversationTurnEvidenceFloor(
+  resolution: ConversationTurnResolution,
+  input: string,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution {
+  if (resolution.mode === "clarify") return resolution;
+  const targetInput = resolution.targetRunId === undefined
+    ? undefined
+    : workset?.planCursors.find((cursor) => cursor.runId === resolution.targetRunId)?.input;
+  const guardedSourceNeed = classifyTaskIntent({
+    // The evidence floor may use only user-authored text. A model-generated
+    // effectiveGoal can preserve semantics, but it
+    // must not silently escalate an ordinary source request into a stricter
+    // contract by adding words such as "official" on its own.
+    objective: [input, targetInput ?? ""].filter((value) => value.trim().length > 0).join("\n"),
+    evidenceDemand: resolution.evidenceDemand,
+  }).sourceNeed;
+  if (guardedSourceNeed === resolution.evidenceDemand && resolution.mode === "execute") return resolution;
+  if (guardedSourceNeed === "none") return resolution;
+  return {
+    ...resolution,
+    mode: "execute",
+    evidenceDemand: guardedSourceNeed,
+    source: "model_guarded",
+  };
+}
+
+function conversationTurnResolverPrompt(repairFeedback: string | undefined): string {
   return [
-      "Classify the latest user turn in a conversation.",
-      "Use runtimeContext as server-authored context handles and metadata, not as source content.",
-      "Return reply only when the answer can be produced solely from the existing conversation transcript plus metadata already present in runtimeContext.",
-      "Questions about prior messages, prior outputs, status already present in the transcript, clarification, discussion, or visible resource bindings themselves are reply.",
-      "Return execute when the latest turn requires external state acquisition or capability use, even if the final deliverable is only a textual explanation.",
-      "External state includes reading or inspecting local files, directories, logs, repositories, terminals, commands, webpages, browsers, databases, or current machine/application state.",
-      "If the latest turn refers deictically to listed external context handles, such as this file, this directory, this material, the uploaded source, or the bound resource, return execute because the resource contents must be inspected by the Plan-first runtime.",
-      "Return execute when it asks to perform work, use a capability, create/change/delete something, or otherwise take an action.",
-      "The latest user turn decides intent. Conversation history is factual context only and never turns an informational question into an execution request.",
-      "You have no Skills and no execution Tools. Return exactly one classify_conversation_intent tool call and no prose.",
+      "Resolve the latest user turn against the full conversation transcript and canonical prior-Run metadata.",
+      "Do not interpret an elliptical follow-up in isolation. Rebind corrections, challenges, refinements, and continuations to the concrete prior goal they modify.",
+      "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
+      "Return reply only when the effective goal can be satisfied solely from the existing transcript and supplied metadata.",
+      "Return execute when faithful completion requires external state acquisition or capability use, even when the user only rejects, questions, or refines a prior answer.",
+      "A request for specific externally verifiable facts that are not grounded in the transcript needs lookup_lite or source_grounded evidence even when the user did not explicitly say search or browse.",
+      "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
+      "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
+      "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
+      "targetRunId must be one of the priorRunGoals IDs in runtimeContext and is required for every relation except new_goal.",
+      "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
+      "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
         ? []
         : [
-          "The previous classifier response was invalid.",
+          "The previous turn-resolution response was invalid.",
           repairFeedback,
-          "Repair by returning exactly one classify_conversation_intent tool call now.",
+          "Repair by returning exactly one resolve_conversation_turn tool call now.",
         ]),
     ].join("\n");
 }
 
-function parseConversationIntentDecision(response: ModelResponse): "reply" | "execute" | undefined {
-  const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_INTENT_TOOL.name);
+function parseConversationTurnResolution(
+  response: ModelResponse,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution | undefined {
+  const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL.name);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
     return undefined;
   }
   const argumentsRecord = optionalRecord(calls[0].arguments);
-  if (argumentsRecord.kind === "reply") return "reply";
-  if (argumentsRecord.kind === "execute") return "execute";
-  return undefined;
+  const mode = argumentsRecord.mode;
+  const relation = argumentsRecord.relation;
+  const evidenceDemand = argumentsRecord.evidenceDemand;
+  const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
+    ? argumentsRecord.effectiveGoal.trim()
+    : "";
+  const targetRunId = typeof argumentsRecord.targetRunId === "string"
+    ? argumentsRecord.targetRunId.trim()
+    : undefined;
+  const userConstraints = Array.isArray(argumentsRecord.userConstraints)
+    && argumentsRecord.userConstraints.length <= 8
+    && argumentsRecord.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
+    ? argumentsRecord.userConstraints.map((item) => (item as string).trim())
+    : undefined;
+  if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return undefined;
+  if (!isConversationTurnRelation(relation)) return undefined;
+  if (!isConversationEvidenceDemand(evidenceDemand)) return undefined;
+  if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000 || userConstraints === undefined) return undefined;
+  if (mode !== "execute" && evidenceDemand !== "none") return undefined;
+
+  const priorRunIds = conversationTurnTargetRunIds(workset);
+  if (relation === "new_goal") {
+    if (targetRunId !== undefined && !priorRunIds.has(targetRunId)) return undefined;
+  } else if (targetRunId === undefined || !priorRunIds.has(targetRunId)) {
+    return undefined;
+  }
+  return {
+    schema: "agentloop.conversationTurnResolution/v1",
+    mode,
+    relation,
+    ...(targetRunId === undefined ? {} : { targetRunId }),
+    effectiveGoal,
+    evidenceDemand,
+    userConstraints,
+    source: "model",
+  };
 }
 
-function conversationIntentRepairFeedback(response: ModelResponse): string {
+function conversationTurnRepairFeedback(response: ModelResponse): string {
   if (response.toolCalls.length === 0 && response.content.trim().length === 0) {
-    return "The previous response was empty and contained no structured decision.";
+    return "The previous response was empty and contained no structured resolution.";
   }
   if (response.toolCalls.length !== 1) {
     return `The previous response returned ${response.toolCalls.length} tool calls; exactly one is required.`;
   }
-  if (response.toolCalls[0]?.name !== CONVERSATION_INTENT_TOOL.name) {
-    return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_INTENT_TOOL.name}.`;
+  if (response.toolCalls[0]?.name !== CONVERSATION_TURN_TOOL.name) {
+    return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_TURN_TOOL.name}.`;
   }
-  return "The previous response did not provide arguments with kind equal to reply or execute.";
+  return "The previous response did not provide a valid mode, relation, target Run, effective goal, evidence demand, and constraint list.";
+}
+
+function deterministicConversationTurnResolution(input: string): ConversationTurnResolution {
+  return {
+    schema: "agentloop.conversationTurnResolution/v1",
+    mode: "execute",
+    relation: "new_goal",
+    effectiveGoal: input.trim() || "Complete the latest user request",
+    evidenceDemand: classifyTaskIntent({ objective: input }).sourceNeed,
+    userConstraints: [],
+    source: "deterministic",
+  };
+}
+
+function fallbackConversationTurnResolution(input: string): ConversationTurnResolution {
+  return {
+    ...deterministicConversationTurnResolution(input),
+    source: "fallback",
+  };
+}
+
+function isConversationTurnRelation(value: unknown): value is ConversationTurnRelation {
+  return value === "new_goal"
+    || value === "continue_prior"
+    || value === "correct_prior"
+    || value === "refine_prior"
+    || value === "challenge_prior";
+}
+
+function isConversationEvidenceDemand(
+  value: unknown,
+): value is ConversationTurnResolution["evidenceDemand"] {
+  return value === "none"
+    || value === "lookup_lite"
+    || value === "source_grounded"
+    || value === "strict_user_source";
+}
+
+function conversationTurnTargetRunIds(workset: ConversationWorkingSet | undefined): Set<string> {
+  if (workset === undefined) return new Set();
+  return new Set([
+    ...workset.planCursors.map((cursor) => cursor.runId),
+    ...workset.failedBoundaries.map((boundary) => boundary.runId),
+    ...(workset.activeGoal === undefined ? [] : [workset.activeGoal.runId]),
+  ]);
 }
 
 function optionalRecord(value: unknown): Record<string, unknown> {
@@ -5821,13 +6019,14 @@ interface ConversationIntentExternalContext {
   readonly conversationWorkingSet?: ConversationWorkingSet;
 }
 
-function formatConversationIntentContext(context: ConversationIntentExternalContext): string {
+function formatConversationTurnContext(context: ConversationIntentExternalContext): string {
   const payload = {
-    schema: "agentloop.conversationIntentContext/v1",
+    schema: "agentloop.conversationTurnContext/v1",
     externalContextPolicy: {
       purpose: "intent_classification_only",
       contentAccess: "metadata_only",
-      replyBoundary: "Reply may use transcript and this metadata only; execute is required to inspect resource contents or perform capability work.",
+      replyBoundary: "Reply may use transcript and this metadata only; execute is required to inspect resources, verify external facts, or perform capability work.",
+      sideEffectBoundary: "This resolution expresses semantic need only and cannot authorize destructive or external side effects.",
     },
     visibleDirectories: context.visibleDirectories.map((directory) => ({
       id: directory.id,
@@ -5845,16 +6044,26 @@ function formatConversationIntentContext(context: ConversationIntentExternalCont
     conversationWorkingSet: context.conversationWorkingSet === undefined
       ? undefined
       : {
+        priorRunGoals: context.conversationWorkingSet.planCursors.map((cursor) => ({
+          runId: cursor.runId,
+          planId: cursor.planId,
+          ...(cursor.input === undefined ? {} : { input: cursor.input }),
+          goal: cursor.goal,
+          status: cursor.status,
+        })),
+        activeGoal: context.conversationWorkingSet.activeGoal,
         reusableArtifactCount: context.conversationWorkingSet.reusableArtifacts.length,
         failedBoundaryCount: context.conversationWorkingSet.failedBoundaries.length,
+        failedBoundaries: context.conversationWorkingSet.failedBoundaries,
+        outcomeRelations: context.conversationWorkingSet.outcomeRelations ?? [],
         recommendedCapabilities: context.conversationWorkingSet.recommendedCapabilities,
         resumeSuggestion: context.conversationWorkingSet.resumeSuggestion,
       },
   };
   return [
-    "<conversation_intent_context source=\"server\">",
+    "<conversation_turn_context source=\"server\">",
     JSON.stringify(payload),
-    "</conversation_intent_context>",
+    "</conversation_turn_context>",
   ].join("\n");
 }
 

@@ -1,5 +1,6 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
+import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
@@ -102,7 +103,14 @@ export interface StepExecutionBinding {
 
 export interface TaskSpec {
   readonly runId: string;
+  /** The immutable user-authored text stored on the Run for audit and transcript projection. */
   readonly input: string;
+  /**
+   * Runtime-owned semantic binding of the latest turn to prior canonical
+   * conversation state. Downstream planning consumes effectiveGoal instead of
+   * independently reinterpreting an elliptical follow-up.
+   */
+  readonly turnResolution?: ConversationTurnResolution;
   readonly availableSkills: readonly PrivateSkill[];
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   /**
@@ -142,6 +150,25 @@ export interface TaskSpec {
   readonly planningExtensionContexts?: readonly PlanningExtensionContext[];
 }
 
+export type ConversationTurnMode = "reply" | "execute" | "clarify";
+export type ConversationTurnRelation =
+  | "new_goal"
+  | "continue_prior"
+  | "correct_prior"
+  | "refine_prior"
+  | "challenge_prior";
+
+export interface ConversationTurnResolution {
+  readonly schema: "agentloop.conversationTurnResolution/v1";
+  readonly mode: ConversationTurnMode;
+  readonly relation: ConversationTurnRelation;
+  readonly targetRunId?: string;
+  readonly effectiveGoal: string;
+  readonly evidenceDemand: SourceNeed;
+  readonly userConstraints: readonly string[];
+  readonly source: "model" | "model_guarded" | "deterministic" | "fallback";
+}
+
 export interface PlanningExtensionContext {
   readonly schema: "agentloop.planningExtensionContext/v1";
   readonly extensionName: string;
@@ -175,9 +202,18 @@ export interface ConversationWorkingSet {
   readonly completedStepHandoffs?: readonly ConversationCompletedStepHandoff[];
   readonly reusableArtifacts: readonly ConversationReusableArtifact[];
   readonly failedBoundaries: readonly ConversationFailedBoundary[];
+  /** Append-only semantic links; historical terminal records remain immutable. */
+  readonly outcomeRelations?: readonly ConversationOutcomeRelation[];
   readonly recommendedCapabilities: ConversationRecommendedCapabilities;
   readonly evidenceLedger?: ConversationEvidenceLedger;
   readonly resumeSuggestion?: string;
+}
+
+export interface ConversationOutcomeRelation {
+  readonly runId: string;
+  readonly targetRunId: string;
+  readonly relation: "correct_prior" | "refine_prior" | "challenge_prior";
+  readonly state: "disputed" | "superseded";
 }
 
 export interface ConversationEvidenceLedger {
@@ -221,6 +257,8 @@ export interface ConversationActiveGoal {
 export interface ConversationPlanCursor {
   readonly runId: string;
   readonly planId: string;
+  /** Immutable user-authored Run input; older serialized fixtures may omit it. */
+  readonly input?: string;
   readonly goal: string;
   readonly status: PlanStatus;
   readonly selectedSkillIds: readonly string[];

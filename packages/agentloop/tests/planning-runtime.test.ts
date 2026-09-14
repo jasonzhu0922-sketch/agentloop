@@ -421,6 +421,16 @@ test("Task intent treats a bounded recent Chinese news period as a fresh lookup"
   assert.equal(intent.researchPolicy?.freshnessNeed, "current");
 });
 
+test("Task intent requires source grounding for a specific external fact without lookup keywords", () => {
+  const intent = classifyTaskIntent({
+    objective: "宝武集团 2526 工程是什么？",
+  });
+
+  assert.equal(intent.sourceNeed, "source_grounded");
+  assert.equal(intent.researchPolicy?.depth, "bounded");
+  assert.equal(intent.researchPolicy?.authorityNeed, "official_preferred");
+});
+
 test("Task intent keeps research policy conditional and graded", () => {
   const plainArtifact = classifyTaskIntent({
     objective: "生成一份项目周报案例，html 格式",
@@ -2237,6 +2247,148 @@ test("ModelPlanner injects research policy only for source-grounded planning", a
   assert.match(observedSystemPrompt, /"research":\{"depth":"bounded"/);
 });
 
+test("ModelPlanner enforces Resolver-declared source grounding for a first-round external fact question", async () => {
+  let calls = 0;
+  let observedContext = "";
+  let observedRepairContext = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      observedContext ||= request.runtimeContext?.content ?? "";
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("unsupported-direct-answer", {
+              goal: "解释宝武集团 2526 工程",
+              selectedSkillIds: [],
+              steps: [{
+                id: "answer-without-sources",
+                objective: "直接回答宝武集团 2526 工程是什么。",
+                dependencies: [],
+                skillIds: [],
+                requiredCapabilities: ["conversation_delivery"],
+                successCriteria: [{ id: "answered", description: "返回文字说明。" }],
+              }],
+          })],
+        };
+      }
+      observedRepairContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("grounded-external-fact-answer", {
+            goal: "基于可核验来源解释宝武集团 2526 工程",
+            selectedSkillIds: [],
+            steps: [{
+              id: "research-and-answer",
+              objective: "检索可核验来源，说明宝武集团 2526 工程的含义并给出来源链接。",
+              dependencies: [],
+              skillIds: [],
+              requiredCapabilities: ["web_research", "conversation_delivery"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "source_urls"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+              successCriteria: [{ id: "grounded", description: "说明由来源证据支撑。" }],
+            }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "first-round-external-fact-resolution",
+    input: "宝武集团 2526 工程是什么？",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "准确解释宝武集团 2526 工程是什么，并以可核验来源支撑关键事实。",
+      evidenceDemand: "source_grounded",
+      userConstraints: [],
+      source: "model",
+    },
+    availableSkills: [],
+    availableToolNames: ["websearch", "webfetch"],
+  });
+
+  assert.equal(calls, 2);
+  assert.match(observedContext, /"sourceNeed":"source_grounded"/);
+  assert.match(observedContext, /agentloop\.conversationTurnResolution\/v1/);
+  assert.match(observedContext, /web_research/);
+  assert.match(observedRepairContext, /must bind a capability that produces required source-grounding evidence/i);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["web_research", "conversation_delivery"]);
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "source_urls"]);
+});
+
+test("ModelPlanner does not merge an unrelated active goal into a resolved new goal", async () => {
+  let observedSystemPrompt = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedSystemPrompt = request.systemPrompt;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("independent-new-goal", {
+            goal: "基于公开来源解释外部项目",
+            selectedSkillRoles: [],
+            steps: [{
+              id: "research-and-answer",
+              objective: "查找来源并回答新的外部事实问题。",
+              dependencies: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["web_research", "conversation_delivery"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "source_urls"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+        })],
+      };
+    },
+  });
+
+  await planner.plan({
+    runId: "resolved-independent-new-goal",
+    input: "这个外部项目是什么？",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "基于可核验来源解释这个外部项目。",
+      evidenceDemand: "source_grounded",
+      userConstraints: [],
+      source: "model",
+    },
+    availableSkills: [],
+    availableToolNames: ["websearch", "webfetch"],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-with-unrelated-active-artifact",
+      runCount: 1,
+      activeGoal: {
+        runId: "old-run",
+        goal: "制作一个仍未完成的 PPTX 演示文稿",
+        status: "running",
+        unfinished: true,
+      },
+      planCursors: [],
+      reusableArtifacts: [],
+      failedBoundaries: [],
+      recommendedCapabilities: { skillIds: [], capabilityIds: ["workspace_artifact_write"] },
+      resumeSuggestion: "继续制作之前的 PPTX",
+    },
+  });
+
+  assert.match(observedSystemPrompt, /"artifactKind":"none"/);
+  assert.match(observedSystemPrompt, /"deliverySurface":"conversation"/);
+  assert.match(observedSystemPrompt, /"sourceNeed":"source_grounded"/);
+});
+
 test("ModelPlanner classifies designed pages as observable artifact delivery intent", async () => {
   let observedContext = "";
   const planner = new ModelPlanner({
@@ -3962,6 +4114,81 @@ test("selectPlanningSkills selects a source-provider for current Chinese news wi
     const selected = selectPlanningSkills([aihot], request, []);
     assert.deepEqual(selected.map((skill) => skill.name), ["aihot"]);
   }
+});
+
+test("ModelPlanner treats unrelated source-provider prefilter results as candidates rather than Plan selections", async () => {
+  const apiQuery = skillFixture({
+    id: "api-query",
+    name: "api-query",
+    description: "查询集团（宝武数据中台）API 目录信息，包括接口用途、入参、出参和涉及的数据表。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+  const enterpriseInfo = skillFixture({
+    id: "enterprise-info",
+    name: "enterprise-info",
+    description: "查询中国大陆企业工商注册信息、统一社会信用代码、法人、注册资本和经营范围。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+  const pdfOcr = skillFixture({
+    id: "pdf-image-text-extractor",
+    name: "pdf-image-text-extractor",
+    description: "从图片或 PDF 文档中识别并提取文字内容。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["document"], ["document"]),
+  });
+  const candidateRoles = [apiQuery, enterpriseInfo, pdfOcr].map((skill) => ({
+    skillId: skill.id,
+    role: "source_provider" as const,
+    reason: "Source-provider relevance candidate.",
+  }));
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"candidateSkillRoles":/);
+      assert.doesNotMatch(context, /"selectedSkillRoles":\[\{"skillId":"api-query"/);
+      assert.match(context, /relevance candidates, not selected Plan dependencies/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("generic-web-grounding", {
+            goal: "基于公开来源查证宝武集团 2526 工程",
+            selectedSkillRoles: [],
+            steps: [{
+              id: "research-and-answer",
+              objective: "使用通用网页研究能力查证事实并回答。",
+              dependencies: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["web_research", "conversation_delivery"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "source_urls"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "generic-web-source-candidates",
+    input: "查证宝武集团 2526 工程的真实含义、背景和内容，基于可靠公开来源提供准确信息。",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "基于公开来源查证宝武集团 2526 工程。",
+      evidenceDemand: "source_grounded",
+      userConstraints: [],
+      source: "model",
+    },
+    availableSkills: [apiQuery, enterpriseInfo, pdfOcr],
+    selectedSkillRoles: candidateRoles,
+    availableToolNames: ["load_skill", "websearch", "webfetch"],
+  });
+
+  assert.deepEqual(plan.selectedSkillIds, []);
+  assert.deepEqual(plan.steps[0]?.skillIds, []);
 });
 
 test("selectPlanningSkills recalls the checked-in presentation Skill for PPTX artifact requests", async () => {
@@ -7497,7 +7724,7 @@ test("RunService skips conversation intent classifier for deterministic artifact
     const model: ModelAdapter = {
       limits: TEST_MODEL_LIMITS,
       complete: async (request) => {
-        assert.equal(request.runId.startsWith("conversation-intent:"), false);
+        assert.equal(request.runId.startsWith("conversation-turn:"), false);
         return { content: "poster execution reached", finishReason: "stop", toolCalls: [] };
       },
     };
@@ -7547,12 +7774,12 @@ test("RunService retries malformed conversation intent output and defaults uncer
     const model: ModelAdapter = {
       limits: TEST_MODEL_LIMITS,
       complete: async (request) => {
-        if (request.runId.startsWith("conversation-intent:")) {
+        if (request.runId.startsWith("conversation-turn:")) {
           classifierCalls += 1;
           if (classifierCalls === 1) {
             return { content: "", finishReason: "stop", toolCalls: [] };
           }
-          assert.match(request.systemPrompt, /previous classifier response was invalid/i);
+          assert.match(request.systemPrompt, /previous turn-resolution response was invalid/i);
           return { content: "execute", finishReason: "stop", toolCalls: [] };
         }
         return { content: "execution fallback reached", finishReason: "stop", toolCalls: [] };
@@ -7590,6 +7817,174 @@ test("RunService retries malformed conversation intent output and defaults uncer
     assert.equal(classifierCalls, 2);
     assert.equal(capturedTask?.responseOnly, undefined);
     assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService rebinds terse correction feedback to the completed prior goal and persists Outcome lineage", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-correct-prior-facts";
+    const priorRunId = "prior-unsupported-answer";
+    const priorPlanId = "prior-unsupported-plan";
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "External fact question", now - 20_000, now - 1_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
+    `).run(
+      priorRunId,
+      owner.user.id,
+      conversationId,
+      "What does the external initiative mean?",
+      "It means an unsupported expansion invented by the model.",
+      now - 10_000,
+      now - 8_000,
+    );
+    await database.prepare(`
+      INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, status, created_at, updated_at)
+      VALUES (?, ?, 1, ?, '[]', 'completed', ?, ?)
+    `).run(priorPlanId, priorRunId, "What is the external initiative?", now - 9_500, now - 8_000);
+    await database.prepare(`
+      INSERT INTO plan_steps(
+        plan_id, step_id, position, objective, dependencies_json, skill_ids_json,
+        required_capabilities_json, recommended_tool_names_json, execution_binding_json,
+        success_criteria_json, status, output, evidence_json, error, started_at, finished_at
+      ) VALUES (?, 'answer', 0, ?, '[]', '[]', '["conversation_delivery"]', '[]', ?, ?, 'completed', ?, NULL, NULL, ?, ?)
+    `).run(
+      priorPlanId,
+      "Answer the external fact question without source acquisition.",
+      executionBindingJson({
+        requiredCapabilities: ["conversation_delivery"],
+        resolvedToolNames: [],
+        sourceKinds: ["conversation_workset"],
+        sideEffect: "none",
+        evidenceKinds: [],
+      }),
+      JSON.stringify([{ id: "answered", description: "An answer was returned.", source: "planner" }]),
+      "It means an unsupported expansion invented by the model.",
+      now - 9_000,
+      now - 8_000,
+    );
+    await database.prepare(`
+      INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
+      VALUES (?, ?, 'completed', ?, 'plan_assessed_and_completed', ?)
+    `).run(priorRunId, priorPlanId, "It means an unsupported expansion invented by the model.", now - 8_000);
+
+    let capturedTask: TaskSpec | undefined;
+    let executionCalls = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if (request.tools[0]?.name === "resolve_conversation_turn") {
+          assert.match(request.runtimeContext?.content ?? "", new RegExp(priorRunId));
+          assert.equal(request.messages.some((message) => message.content.includes("unsupported expansion")), true);
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "resolve-correction",
+              name: "resolve_conversation_turn",
+              arguments: {
+                // Deliberately under-classify evidence need. Runtime must retain
+                // the semantic relation while raising the read-only evidence
+                // floor for the specific external fact.
+                mode: "reply",
+                relation: "correct_prior",
+                targetRunId: priorRunId,
+                effectiveGoal: "What is the external initiative? Replace the prior unsupported answer.",
+                evidenceDemand: "none",
+                userConstraints: ["Do not invent unsupported facts."],
+              },
+            }],
+          };
+        }
+        executionCalls += 1;
+        if (executionCalls === 1) {
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{ id: "lookup-facts", name: "fact_lookup", arguments: { topic: "external initiative" } }],
+          };
+        }
+        return { content: "Grounded correction from the retrieved source.", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const factSource = {
+      id: "fact-source",
+      aliases: ["facts"],
+      transport: "fixture",
+      capabilities: [{ id: "external_fact.lookup", category: "information_retrieval" }],
+    } as const;
+    const factLookup: RuntimeTool<unknown> = {
+      name: "fact_lookup",
+      description: "Retrieve a grounded external fact.",
+      source: factSource,
+      inputSchema: { type: "object", additionalProperties: false, properties: { topic: { type: "string" } } },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async () => ({
+        fact: "Grounded source fact",
+        evidenceReceipt: webFixtureReceipt({
+          sourceType: "web_page",
+          sourceRefs: [{ sourceRefId: "fact:1", url: "https://source.test/fact" }],
+          facts: [{ kind: "source_summary", claim: "Grounded source fact" }],
+          satisfied: ["source_summary"],
+          caveats: [],
+        }),
+      }),
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          return {
+            goal: task.turnResolution?.effectiveGoal ?? task.input,
+            selectedSkillIds: [],
+            steps: [{
+              id: "correct-grounded-answer",
+              objective: task.turnResolution?.effectiveGoal ?? task.input,
+              dependencies: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["external_fact.lookup", "conversation_delivery"],
+              evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+              successCriteria: [{ id: "corrected", description: "A grounded correction replaces the unsupported answer.", source: "planner" }],
+            }],
+          };
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+      tools: [factLookup],
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "That answer was made up and is not acceptable.", {
+      conversationId,
+      allowDangerousTools: true,
+    });
+
+    assert.equal(run.status, "completed");
+    assert.equal(capturedTask?.turnResolution?.relation, "correct_prior");
+    assert.equal(capturedTask?.turnResolution?.targetRunId, priorRunId);
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "source_grounded");
+    assert.equal(capturedTask?.turnResolution?.source, "model_guarded");
+    assert.match(capturedTask?.turnResolution?.effectiveGoal ?? "", /replace the prior unsupported answer/i);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) => event.type === "conversation.outcome.disputed" && event.data.targetRunId === priorRunId), true);
+    assert.equal(events.some((event) => event.type === "conversation.outcome.superseded" && event.data.targetRunId === priorRunId), true);
+    assert.equal(events.some((event) => event.type === "terminal.delivery_committed"), true);
   } finally {
     database.close();
   }

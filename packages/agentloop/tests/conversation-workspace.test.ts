@@ -167,7 +167,7 @@ test("Conversation entry classifies with Runtime-owned external context handles"
     assert.equal(executionRun.status, "completed");
     assert.equal(replyRun.status, "completed");
     assert.equal(model.intentCalls, 2);
-    assert.match(model.intentContexts[0] ?? "", /agentloop\.conversationIntentContext\/v1/);
+    assert.match(model.intentContexts[0] ?? "", /agentloop\.conversationTurnContext\/v1/);
     assert.match(model.intentContexts[0] ?? "", /"visibleDirectories":\[/);
     assert.deepEqual(planner.visibleDirectoryCounts, [1, 1]);
     assert.deepEqual(planner.responseOnlyFlags, [false, true]);
@@ -605,20 +605,26 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
   readonly intentContexts: string[] = [];
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
-    if (request.runId.startsWith("conversation-intent:")) {
+    if (request.runId.startsWith("conversation-turn:")) {
       this.intentCalls += 1;
       const context = request.runtimeContext?.content ?? "";
       this.intentContexts.push(context);
-      assert.match(context, /agentloop\.conversationIntentContext\/v1/);
+      assert.match(context, /agentloop\.conversationTurnContext\/v1/);
       const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
-      const kind = latest.includes("分析") ? "execute" : "reply";
+      const mode = latest.includes("分析") ? "execute" : "reply";
       return {
         content: "",
         finishReason: "tool_calls",
         toolCalls: [{
           id: `intent-${this.intentCalls}`,
-          name: "classify_conversation_intent",
-          arguments: { kind },
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode,
+            relation: "new_goal",
+            effectiveGoal: latest,
+            evidenceDemand: "none",
+            userConstraints: [],
+          },
         }],
       };
     }

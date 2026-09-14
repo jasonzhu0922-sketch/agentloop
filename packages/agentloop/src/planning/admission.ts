@@ -53,6 +53,14 @@ const REUSABLE_SOURCE_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "derived_aggregation",
   "explicit_caveats",
 ]);
+const SOURCE_GROUNDING_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+]);
 
 export function admitPlan(input: {
   runId: string;
@@ -67,6 +75,8 @@ export function admitPlan(input: {
   taskIntent?: {
     readonly deliverySurface?: "conversation" | "workspace_artifact";
     readonly artifactKind?: string;
+    readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
+    readonly evidenceDemand?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
   };
   now?: number;
 }): ExecutionPlan {
@@ -244,6 +254,7 @@ export function admitPlan(input: {
     ?? (input.availableTools === undefined
       ? planningCapabilitiesFromToolNames([...input.availableToolNames])
       : planningCapabilitiesFromTools(input.availableTools));
+  assertRequiredSourceGrounding(admittedSteps, input.taskIntent, availableCapabilities);
   for (const step of admittedSteps) {
     assertEvidenceContractIsProducible({
       stepId: step.id,
@@ -286,6 +297,26 @@ export function admitPlan(input: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function assertRequiredSourceGrounding(
+  steps: readonly PlanStep[],
+  taskIntent: {
+    readonly evidenceDemand?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
+  } | undefined,
+  availableCapabilities: readonly PlanningCapability[],
+): void {
+  if (taskIntent?.evidenceDemand === undefined || taskIntent.evidenceDemand === "none") return;
+  const capabilityById = new Map(availableCapabilities.map((capability) => [capability.id, capability]));
+  const grounded = steps.some((step) => {
+    const requiredKinds = step.evidenceContract?.requiredKinds.filter((kind) => SOURCE_GROUNDING_EVIDENCE_KINDS.has(kind)) ?? [];
+    if (requiredKinds.length === 0) return false;
+    const producedKinds = new Set(step.requiredCapabilities.flatMap((id) => capabilityById.get(id)?.produces ?? []));
+    return requiredKinds.some((kind) => producedKinds.has(kind));
+  });
+  if (!grounded) {
+    reject(`Plan for ${taskIntent.evidenceDemand} work must bind a capability that produces required source-grounding evidence`);
+  }
 }
 
 /**

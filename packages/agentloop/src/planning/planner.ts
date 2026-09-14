@@ -207,7 +207,7 @@ export class ModelPlanner implements Planner {
           deterministic: true,
         },
       });
-      return responseOnlyPlan(task.input);
+      return responseOnlyPlan(planningIntentObjective(task));
     }
     const messages: ModelInvocation["messages"] = [
       ...(task.conversationHistory ?? []),
@@ -328,6 +328,8 @@ export class ModelPlanner implements Planner {
           taskIntent: {
             deliverySurface: taskProfile.deliverySurface,
             artifactKind: taskProfile.artifactKind,
+            sourceNeed: taskProfile.sourceNeed,
+            evidenceDemand: task.turnResolution?.evidenceDemand,
           },
         });
         await emit?.({
@@ -506,6 +508,7 @@ function plannerOutcomePlanAdmissionDirective(planningError: AppError): string {
     "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
     "For initial execution plans, selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only.",
     "selectedSkillRoles[].skillId and leaves[].skillIds may contain only IDs in planning_context.availableSkillIds. Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds in either Skill field; use leaves[].requiredCapabilities for capabilities. If availableSkillIds is empty, both Skill fields must be empty arrays.",
+    "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
@@ -539,6 +542,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
+    evidenceDemand: task.turnResolution?.evidenceDemand,
   });
   const operationProfiles = relevantOperationProfiles(task);
   const operationProfileIds = new Set(operationProfiles.map((profile) => profile.id));
@@ -620,10 +624,15 @@ function inferRiskProfile(toolNames: readonly string[]): NonNullable<TaskProfile
 }
 
 function planningIntentObjective(task: TaskSpec): string {
+  const effectiveGoal = task.turnResolution?.effectiveGoal ?? task.input;
+  // Every resolved effectiveGoal is self-contained. Appending the prior active
+  // goal to a resolved new_goal would reintroduce exactly the cross-turn
+  // semantic contamination the Resolver boundary is meant to remove.
+  const inheritsActiveGoal = task.turnResolution === undefined;
   return [
-    task.input,
-    task.conversationWorkingSet?.activeGoal?.goal ?? "",
-    task.conversationWorkingSet?.resumeSuggestion ?? "",
+    effectiveGoal,
+    inheritsActiveGoal ? task.conversationWorkingSet?.activeGoal?.goal ?? "" : "",
+    inheritsActiveGoal ? task.conversationWorkingSet?.resumeSuggestion ?? "" : "",
   ].filter((value) => value.trim().length > 0).join("\n");
 }
 
@@ -673,6 +682,7 @@ function planningRuntimeContext(
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
+        ...(task.turnResolution === undefined ? {} : { turnResolution: task.turnResolution }),
         ...((task.planningExtensionContexts?.length ?? 0) === 0 ? {} : {
           planningExtensionContexts: task.planningExtensionContexts,
         }),
@@ -680,7 +690,8 @@ function planningRuntimeContext(
         stepGranularity: STEP_GRANULARITY_GUIDANCE,
         operationProfiles: taskProfile.operations,
         taskProfile,
-        selectedSkillRoles,
+        candidateSkillRoles: selectedSkillRoles,
+        candidateSkillRolePolicy: "These are relevance candidates, not selected Plan dependencies. Include a Skill in submit_outcome_plan.selectedSkillRoles only when a concrete leaf binds and executes that Skill; otherwise omit it.",
         ...(task.continuationSkillIds === undefined || task.continuationSkillIds.length === 0
           ? {}
           : {
@@ -721,6 +732,7 @@ function planningRuntimeContext(
             "submit exactly one OutcomePlan",
             "do not submit plan patches",
             "do not create QA or repair leaves unless TaskProfile.planShape is recovery_patch",
+            "candidateSkillRoles are suggestions only; do not copy them into selectedSkillRoles unless a concrete leaf binds and executes that Skill",
             "initial selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only",
             "every initially selected primary_builder Skill must be bound to a concrete leaf that uses it",
           ],
@@ -744,9 +756,13 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
       ? planningCapabilitiesFromToolNames(task.availableToolNames)
       : planningCapabilitiesFromTools(task.availableTools, task.sources));
   const producibleSourceKinds = new Set(capabilities.flatMap((capability) => capability.produces));
-  const sourceKinds = (["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
+  const sourceKinds = (["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
     .filter((kind) => producibleSourceKinds.has(kind));
+  const requiredSourceKinds = sourceKinds.includes("source_summary")
+    ? (["source_summary", ...(sourceKinds.includes("source_urls") ? ["source_urls" as const] : [])] as const)
+    : sourceKinds.filter((kind) => kind !== "explicit_caveats").slice(0, 1);
   if (taskProfile.deliverySurface === "conversation" && taskProfile.artifactKind === "none") {
+    const requiresSourceEvidence = taskProfile.sourceNeed !== undefined && taskProfile.sourceNeed !== "none";
     return {
       schema: "agentloop.evidenceContractPolicy/v1",
       principle: "Evidence contracts follow the semantic delivery surface. Source evidence, final conversation delivery, and workspace artifact delivery are separate evidence families.",
@@ -754,6 +770,7 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
       sourceFactAcquisition: {
         useWhen: "the task has visible directories, uploaded files, bulk data, or source-grounded analysis requirements",
         recommendedRequiredKinds: sourceKinds,
+        ...(requiresSourceEvidence ? { requiredKinds: requiredSourceKinds } : {}),
         note: "Use structured extraction artifacts for reusable data evidence, but do not treat that source artifact as the final user deliverable.",
       },
       finalProduceOrDeliverLeaf: {
@@ -791,23 +808,17 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
 function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationProfileCatalogForPlanning> {
   const catalog = operationProfileCatalogForPlanning();
   const artifactFollowup = buildArtifactFollowupContext(task);
+  const objective = planningIntentObjective(task);
   const taskIntent = classifyTaskIntent({
-    objective: [
-      task.input,
-      task.conversationWorkingSet?.activeGoal?.goal ?? "",
-      task.conversationWorkingSet?.resumeSuggestion ?? "",
-    ].join("\n"),
+    objective,
     successCriteria: [],
     toolNames: [],
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
+    evidenceDemand: task.turnResolution?.evidenceDemand,
   });
   const selected = inferOperationProfile({
-    objective: [
-      task.input,
-      task.conversationWorkingSet?.activeGoal?.goal ?? "",
-      task.conversationWorkingSet?.resumeSuggestion ?? "",
-    ].join("\n"),
+    objective,
     successCriteria: [],
     toolNames: [],
     skillNames: task.availableSkills.map((skill) => skill.name),
@@ -856,7 +867,7 @@ function buildArtifactFollowupContext(task: TaskSpec): {
 } | undefined {
   const workset = task.conversationWorkingSet;
   if (workset === undefined) return undefined;
-  const text = normalizePlannerText(task.input).toLowerCase();
+  const text = normalizePlannerText(planningIntentObjective(task)).toLowerCase();
   const requestedOutputFormat = requestedOutputFormatFromText(text);
   const artifactMentioned = /(?:\b(?:artifact|file|pdf|markdown|md|html|docx|txt)\b|文件|产物|这个|该|上(?:一|个)轮|刚才)/iu.test(text);
   const conversionRequested = requestedOutputFormat !== undefined
@@ -864,10 +875,11 @@ function buildArtifactFollowupContext(task: TaskSpec): {
   const editRequested = artifactMentioned
     && /(?:\b(?:edit|update|modify|change|correct|rename|title)\b|修改|更改|改为|改成|标题|重命名|修正)/iu.test(text);
   const taskIntent = classifyTaskIntent({
-    objective: task.input,
+    objective: planningIntentObjective(task),
     toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
     responseOnly: task.responseOnly,
+    evidenceDemand: task.turnResolution?.evidenceDemand,
   });
   const deliveryTextFileRequested = taskIntent.deliverySurface === "workspace_artifact"
     && artifactMentioned

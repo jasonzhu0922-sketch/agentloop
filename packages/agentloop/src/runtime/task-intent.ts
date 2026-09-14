@@ -23,6 +23,8 @@ export interface TaskIntentInput {
   readonly toolNames?: readonly string[];
   readonly skillNames?: readonly string[];
   readonly responseOnly?: boolean;
+  /** Runtime-owned semantic evidence demand resolved from the full conversation. */
+  readonly evidenceDemand?: SourceNeed;
 }
 
 export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassification {
@@ -38,7 +40,7 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     source: matchedSourceSignals(text),
   };
   const artifactKind = detectArtifactKindSignal(text);
-  const sourceNeed = inferSourceNeedFromIntent(text);
+  const sourceNeed = strongestSourceNeed(inferSourceNeedFromIntent(text), input.evidenceDemand ?? "none");
   const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
   const wantsArtifact = artifactKind !== "none"
     // Tool availability authorizes a possible workspace write, but it never
@@ -63,7 +65,18 @@ export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy 
     ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
     ...(input.skillNames ?? []),
   ].join("\n"));
-  return researchPolicyForIntentText(text, inferSourceNeedFromIntent(text), input.toolNames ?? []);
+  const sourceNeed = strongestSourceNeed(inferSourceNeedFromIntent(text), input.evidenceDemand ?? "none");
+  return researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
+}
+
+function strongestSourceNeed(left: SourceNeed, right: SourceNeed): SourceNeed {
+  const rank: Record<SourceNeed, number> = {
+    none: 0,
+    lookup_lite: 1,
+    source_grounded: 2,
+    strict_user_source: 3,
+  };
+  return rank[right] > rank[left] ? right : left;
 }
 
 export function requestedArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
@@ -101,6 +114,14 @@ function inferSourceNeedFromIntent(text: string): SourceNeed {
     return "source_grounded";
   }
   if (FRESH_LOOKUP_PATTERN.test(text)) return "lookup_lite";
+  // A specific named external fact does not become safe to answer from model
+  // memory merely because the user omitted words such as "search" or
+  // "source". Keep this category deliberately structural: a factual question
+  // plus an external-entity signal, never a product-, provider-, or phrase-
+  // specific allowlist.
+  if (SPECIFIC_EXTERNAL_FACT_QUESTION_PATTERN.test(text) && EXTERNAL_ENTITY_SIGNAL_PATTERN.test(text)) {
+    return "source_grounded";
+  }
   return "none";
 }
 
@@ -198,6 +219,8 @@ function matchedSourceSignals(text: string): string[] {
 // diagnostic signals in one place.  A bounded recent period still needs a
 // live source even when the user does not explicitly say "search" or "web".
 const FRESH_LOOKUP_PATTERN = /(?:latest|current|today|recent|最新|当前|今天|最近|近期|近\s*(?:一)?周|过去\s*(?:一)?周|近\s*七天|过去\s*七天|市场价格|价格|报价|行情|多少钱)/iu;
+const SPECIFIC_EXTERNAL_FACT_QUESTION_PATTERN = /(?:\b(?:what|who|where|when|which)\s+(?:is|are|was|were|does|did)\b|是什么|指什么|什么意思|谁是|何时|什么时候|哪(?:个|些|家|项)|介绍一下|说明一下)/iu;
+const EXTERNAL_ENTITY_SIGNAL_PATTERN = /(?:\d{2,}|["“”'][^"“”']{2,}["“”']|\b(?:company|corporation|group|organization|institution|agency|project|program|initiative|policy|standard|product|model)\b|集团|公司|机构|组织|部门|协会|学校|医院|项目|工程|计划|行动|政策|标准|产品|型号)/iu;
 
 function matchSignals(text: string, patterns: readonly [string, RegExp][]): string[] {
   return patterns.flatMap(([id, pattern]) => pattern.test(text) ? [id] : []);
