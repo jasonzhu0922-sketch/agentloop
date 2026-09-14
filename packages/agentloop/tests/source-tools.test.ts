@@ -1,5 +1,6 @@
 import { testOwner } from "./runtime-test-helpers.ts";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -110,6 +111,81 @@ test("read_source returns uploaded chunk content with receipt coverage and expli
     assert.ok(missing.evidenceReceipt.evidenceKinds.caveated.includes("explicit_caveats"));
   } finally {
     await database.close();
+  }
+});
+
+test("materialize_source_file exposes authorized original bytes through an integrity-checked workspace path", async () => {
+  const database = new AppDatabase(":memory:");
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-source-materialization-"));
+  const workspace = join(root, "workspace");
+  const storage = join(root, "server-store", "original");
+  try {
+    await fs.mkdir(join(root, "server-store"), { recursive: true });
+    await fs.mkdir(workspace, { recursive: true });
+    const content = Buffer.from("%PDF-1.4\nimmutable uploaded bytes\n%%EOF\n");
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    await fs.writeFile(storage, content);
+    const owner = testOwner();
+    const repository = new SourceRepository(database);
+    const source = await repository.insertSource({
+      id: "src_12121212121212121212121212121212",
+      ownerUserId: owner.user.id,
+      originalName: "uploaded report.pdf",
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: content.byteLength,
+      sha256,
+      storagePath: storage,
+      status: "ready",
+      summary: "Uploaded PDF is ready.",
+      tokenEstimate: 4,
+      characterCount: 16,
+      truncated: false,
+      createdAt: Date.now(),
+    });
+    const tool = createSourceTools(repository).find((item) => item.name === "materialize_source_file");
+    if (tool === undefined) throw new Error("materialize_source_file is missing");
+    const grant = createCapabilityGrant({
+      actorUserId: owner.user.id,
+      runId: "run-materialize-source",
+      depth: 0,
+      workspaceRoot: workspace,
+      uploadedSources: [{
+        id: source.id,
+        originalName: source.original_name,
+        mimeType: source.mime_type,
+        extension: source.extension,
+        byteSize: source.byte_size,
+        sha256: source.sha256,
+        status: source.status,
+        summary: source.summary ?? undefined,
+        chunkCount: 1,
+        truncated: false,
+      }],
+      allowedToolNames: ["materialize_source_file"],
+      allowedSkillIds: [],
+    });
+
+    const first = await tool.execute({ grant }, tool.parse({ sourceId: source.id })) as {
+      schema: string;
+      path: string;
+      bytes: number;
+      sha256: string;
+      evidenceReceipt: { sourceRefs: Array<{ path: string; sha256: string }> };
+    };
+    const second = await tool.execute({ grant }, tool.parse({ sourceId: source.id })) as typeof first;
+
+    assert.equal(first.schema, "agentloop.uploadedSourceMaterialization/v1");
+    assert.equal(first.path, `inputs/${source.id}/uploaded report.pdf`);
+    assert.equal(first.bytes, content.byteLength);
+    assert.equal(first.sha256, sha256);
+    assert.deepEqual(await fs.readFile(join(workspace, first.path)), content);
+    assert.equal(first.evidenceReceipt.sourceRefs[0]?.path, first.path);
+    assert.equal(first.evidenceReceipt.sourceRefs[0]?.sha256, sha256);
+    assert.deepEqual(second, first);
+  } finally {
+    await database.close();
+    await fs.rm(root, { recursive: true, force: true });
   }
 });
 

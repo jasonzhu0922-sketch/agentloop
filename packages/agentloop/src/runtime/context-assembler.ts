@@ -1068,7 +1068,7 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
       : analysisResultRef !== undefined
       ? "This is a durable deterministic analysis result. Use its resultPointer or groupsPointer with computer_read_json and an offset/limit window whenever exact values are needed; do not infer omitted groups from the receipt."
       : sourceType === "uploaded_source"
-      ? "Use read_source with sourceId, chunkIndex, and maxChunks for uploaded source content; chunkIndex plus maxChunks reads a consecutive window starting at chunkIndex. Uploaded sources are not filesystem paths; do not search upload storage roots or other conversation directories to recover them."
+      ? "Use read_source with sourceId, chunkIndex, and maxChunks for extracted uploaded-source content; chunkIndex plus maxChunks reads a consecutive window starting at chunkIndex. When original file bytes are required, use materialize_source_file if it is available and then operate only on its returned relative workspace path. Uploaded sources are not filesystem paths; do not search upload storage roots or other conversation directories to recover them."
       : "Use these structured facts and sourceRefs. Reread explicit paths/ranges only when exact omitted text is required.",
   };
   return JSON.stringify(omitUndefinedDeep(projection));

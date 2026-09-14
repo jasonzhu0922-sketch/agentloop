@@ -552,7 +552,11 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
   const operationProfiles = relevantOperationProfiles(task);
   const operationProfileIds = new Set(operationProfiles.map((profile) => profile.id));
   const artifactKind = taskIntent.artifactKind;
-  const sourceNeed = taskIntent.sourceNeed === "none" && (task.sources?.length ?? 0) > 0 && task.responseOnly !== true
+  const uploadedArtifactTransformation = isUploadedArtifactTransformationTask(task, taskIntent);
+  const sourceNeed = taskIntent.sourceNeed === "none"
+    && (task.sources?.length ?? 0) > 0
+    && task.responseOnly !== true
+    && !uploadedArtifactTransformation
     ? "source_grounded"
     : taskIntent.sourceNeed;
   const recovery = task.conversationWorkingSet?.failedBoundaries.length
@@ -612,6 +616,66 @@ function taskHasUploadedDataSource(task: TaskSpec): boolean {
       source.extension,
     ].join(" "))
   );
+}
+
+/**
+ * An uploaded artifact can be either evidence for a new deliverable or the
+ * native work product being transformed. Only the first case needs a durable
+ * fact-acquisition boundary. The latter stays under the format Skill that can
+ * inspect and modify the original bytes without reducing them to prose first.
+ */
+function isUploadedArtifactTransformationTask(
+  task: TaskSpec,
+  taskIntent: ReturnType<typeof classifyTaskIntent>,
+): boolean {
+  if (
+    taskIntent.deliverySurface !== "workspace_artifact"
+    || taskIntent.artifactKind === "none"
+    || taskIntent.sourceNeed !== "none"
+    || !task.availableToolNames.includes("materialize_source_file")
+  ) return false;
+  const objective = planningIntentObjective(task);
+  const genericArtifactReference = taskIntent.signals.action.includes("transform")
+    || referencesProvidedArtifact(objective);
+  const normalizedObjective = objective.toLowerCase();
+  return (task.sources ?? []).some((source) =>
+    source.status === "ready"
+    && uploadedSourceArtifactKind(source) === taskIntent.artifactKind
+    && (
+      genericArtifactReference
+      || (source.originalName.trim().length > 0 && normalizedObjective.includes(source.originalName.toLowerCase()))
+    )
+  );
+}
+
+function referencesProvidedArtifact(value: string): boolean {
+  return /(?:\b(?:this|that|the|attached|uploaded|provided|source|original|existing|current)\s+(?:file|artifact|document|presentation|slides?|deck|spreadsheet|workbook|image)\b|(?:这(?:份|个|张)|该(?:份|个|张)?|上传的|提供的|原始|原有|现有|当前).{0,16}(?:文件|文档|报告|演示文稿|幻灯片|课件|pptx?|表格|工作簿|xlsx?|图片|图像|海报))/iu.test(value);
+}
+
+function uploadedSourceArtifactKind(
+  source: NonNullable<TaskSpec["sources"]>[number],
+): NonNullable<TaskProfile["artifactKind"]> {
+  const signal = [source.originalName, source.mimeType, source.extension].join(" ").toLowerCase();
+  if (/(?:\.pptx?\b|powerpoint|presentationml)/u.test(signal)) return "presentation";
+  if (/(?:\.xlsx?\b|\.xlsm\b|spreadsheetml|\bexcel\b|\bcsv\b)/u.test(signal)) return "spreadsheet";
+  if (/(?:\.html?\b|text\/html)/u.test(signal)) return "html";
+  if (/(?:\.png\b|\.jpe?g\b|\.webp\b|\.gif\b|\.svg\b|image\/)/u.test(signal)) return "image";
+  if (/(?:\.pdf\b|\.docx?\b|\.md\b|\.markdown\b|\.txt\b|wordprocessingml|msword|application\/pdf|text\/plain|text\/markdown)/u.test(signal)) return "document";
+  if (/(?:\.json\b|\.ts\b|\.tsx\b|\.js\b|\.jsx\b|\.py\b|application\/json|text\/javascript)/u.test(signal)) return "code";
+  return "none";
+}
+
+function nativePrimaryBuilderSkillIds(
+  task: TaskSpec,
+  artifactKind: NonNullable<TaskProfile["artifactKind"]>,
+): string[] {
+  if (artifactKind === "none") return [];
+  return task.availableSkills
+    .filter((skill) =>
+      skill.agentLoop?.roles.includes("primary_builder") === true
+      && skill.agentLoop.artifactKinds.includes(artifactKind)
+    )
+    .map((skill) => skill.id);
 }
 
 function inferRiskProfile(toolNames: readonly string[]): NonNullable<TaskProfile["riskProfile"]> {
@@ -1028,6 +1092,32 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
       { artifactKind: taskIntent.artifactKind, deliverySurface: taskIntent.deliverySurface },
     );
   }
+  if (
+    isUploadedArtifactTransformationTask(task, taskIntent)
+  ) {
+    const primaryBuilderSkillIds = nativePrimaryBuilderSkillIds(task, taskIntent.artifactKind);
+    const onlyStep = proposal.steps[0];
+    const ownsNativeTransformation = primaryBuilderSkillIds.length === 0
+      || primaryBuilderSkillIds.some((skillId) =>
+        onlyStep?.skillIds.includes(skillId) === true
+        && proposal.selectedSkillRoles?.some((selection) =>
+          selection.skillId === skillId && selection.role === "primary_builder"
+        ) === true
+      );
+    if (
+      proposal.shape !== "single_leaf"
+      || proposal.steps.length !== 1
+      || onlyStep?.role === "fact_acquisition"
+      || !ownsNativeTransformation
+    ) {
+      throw new AppError(
+        "PLANNING_ERROR",
+        "An uploaded artifact transformation must use one primary-builder leaf that owns original-file materialization, native-format work, and final acceptance; do not create a generic fact-acquisition/source-summary leaf",
+        422,
+        { artifactKind: taskIntent.artifactKind, deliverySurface: taskIntent.deliverySurface },
+      );
+    }
+  }
   if (isEmptyConversationWorkspace(task) && !explicitWorkspaceInspectionRequested(task.input)) {
     const inspectionStep = proposal.steps.find((step) => isWorkspaceInspectionStep(step));
     if (inspectionStep !== undefined) {
@@ -1074,18 +1164,25 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
   const taskProfile = planningTaskProfile(task);
   const terminalStepIds = terminalLeafStepIds(proposal.steps);
   const normalizedSteps: PlanStepProposal[] = proposal.steps.map((step) => {
-    const sourcePolicyNormalized = normalizeProgressiveSourceContract(step, taskProfile);
+    const sourceMaterializationNormalized = normalizeUploadedSourceTransformationStep(
+      step,
+      terminalStepIds,
+      taskProfile,
+      task,
+    );
+    const sourcePolicyNormalized = normalizeProgressiveSourceContract(sourceMaterializationNormalized, taskProfile);
     const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
-    if (deliveryNormalized.evidenceContract !== undefined) return deliveryNormalized;
-    const coreCriteria = deliveryNormalized.successCriteria.filter((criterion) =>
+    const artifactNormalized = normalizeWorkspaceArtifactTerminalStep(deliveryNormalized, terminalStepIds, taskProfile, task);
+    if (artifactNormalized.evidenceContract !== undefined) return artifactNormalized;
+    const coreCriteria = artifactNormalized.successCriteria.filter((criterion) =>
       !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
     );
-    if (coreCriteria.length > 0) return { ...deliveryNormalized, successCriteria: coreCriteria };
+    if (coreCriteria.length > 0) return { ...artifactNormalized, successCriteria: coreCriteria };
     return {
-      ...deliveryNormalized,
+      ...artifactNormalized,
       successCriteria: [{
         id: `${step.id}-core-delivery`,
-        description: coreSuccessCriterionDescription(deliveryNormalized),
+        description: coreSuccessCriterionDescription(artifactNormalized),
         source: "planner" as const,
       }],
     };
@@ -1093,6 +1190,102 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
   return {
     ...proposal,
     steps: normalizedSteps.map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task)),
+  };
+}
+
+/**
+ * Uploaded-source summaries preserve content semantics, but file transforms
+ * need the immutable original bytes. Bind the generic materialization
+ * capability to the terminal producer instead of exposing server storage
+ * paths or relying on the model to rediscover an inaccessible upload root.
+ */
+function normalizeUploadedSourceTransformationStep(
+  step: PlanStepProposal,
+  terminalStepIds: ReadonlySet<string>,
+  taskProfile: TaskProfile,
+  task: TaskSpec,
+): PlanStepProposal {
+  if (
+    taskProfile.deliverySurface !== "workspace_artifact"
+    || !terminalStepIds.has(step.id)
+    || step.role === "fact_acquisition"
+    || !task.availableToolNames.includes("materialize_source_file")
+  ) return step;
+  const taskIntent = classifyTaskIntent({
+    objective: planningIntentObjective(task),
+    toolNames: task.availableToolNames,
+    skillNames: task.availableSkills.map((skill) => skill.name),
+    responseOnly: task.responseOnly,
+    evidenceDemand: task.turnResolution?.evidenceDemand,
+  });
+  if (!isUploadedArtifactTransformationTask(task, taskIntent)) return step;
+  const readySourceIds = (task.sources ?? [])
+    .filter((source) => source.status === "ready")
+    .map((source) => source.id);
+  const boundSourceIds = step.sourceConstraint?.requiredUploadedSourceIds ?? readySourceIds;
+  if (boundSourceIds.length === 0) return step;
+  return {
+    ...step,
+    requiredCapabilities: uniquePlannerStrings([
+      ...step.requiredCapabilities,
+      "uploaded_source_materialization",
+    ]),
+    sourceConstraint: {
+      ...step.sourceConstraint,
+      requiredUploadedSourceIds: uniquePlannerStrings(boundSourceIds),
+    },
+  };
+}
+
+/**
+ * A user-requested file cannot converge through prose. Runtime-owned artifact
+ * evidence is mandatory when the planning model omits the evidence contract
+ * on the terminal producer. An explicit Planner-authored contract remains
+ * authoritative, including when it is intentionally weak.
+ */
+function normalizeWorkspaceArtifactTerminalStep(
+  step: PlanStepProposal,
+  terminalStepIds: ReadonlySet<string>,
+  taskProfile: TaskProfile,
+  task: TaskSpec,
+): PlanStepProposal {
+  if (
+    taskProfile.deliverySurface !== "workspace_artifact"
+    || taskProfile.artifactKind === undefined
+    || taskProfile.artifactKind === "none"
+    || !terminalStepIds.has(step.id)
+    || step.role === "fact_acquisition"
+    || step.evidenceContract !== undefined
+  ) return step;
+  const runtimeRequiredKinds: EvidenceKind[] = [
+    "artifact_path",
+    "artifact_non_empty",
+    "format_matches_request",
+    "delivery_receipt",
+    ...(task.availableToolNames.includes("verify_artifact_acceptance")
+      ? ["artifact_acceptance" as const]
+      : []),
+  ];
+  const requiredKinds = uniqueEvidenceKinds([
+    ...runtimeRequiredKinds,
+  ]);
+  const existingCriteria = new Map(step.successCriteria.map((criterion) => [criterion.id, criterion]));
+  for (const kind of runtimeRequiredKinds) {
+    if (!existingCriteria.has(kind)) {
+      existingCriteria.set(kind, {
+        id: kind,
+        description: evidenceCriterionDescription(kind, "none"),
+        source: "planner",
+      });
+    }
+  }
+  return {
+    ...step,
+    evidenceContract: {
+      requiredKinds,
+      caveatPolicy: "none",
+    },
+    successCriteria: [...existingCriteria.values()],
   };
 }
 
@@ -1197,6 +1390,10 @@ function aggregationRequested(value: string): boolean {
 
 function uniqueEvidenceKinds(values: readonly EvidenceKind[]): EvidenceKind[] {
   return [...new Set(values)];
+}
+
+function uniquePlannerStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
 }
 
 function terminalLeafStepIds(steps: readonly PlanStepProposal[]): ReadonlySet<string> {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { basename, join } from "node:path";
 import { badRequest, forbidden } from "../shared/errors.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { SourceRepository } from "../storage/repositories/source-repository.ts";
@@ -180,6 +181,90 @@ export function createSourceTools(repository: SourceRepository): RuntimeTool<unk
       return {
         ...result,
         evidenceReceipt: uploadedTableExtractionReceipt(result),
+      };
+    },
+  }, {
+    name: "materialize_source_file",
+    description: [
+      "Materialize the immutable original bytes of one uploaded source into the current Runtime workspace.",
+      "Use this when a file operation such as merge, split, rotate, convert, archive, or media processing needs the original binary rather than extracted read_source text.",
+      "The sourceId must be authorized for the current Run. The tool verifies byte size and SHA-256, writes an idempotent copy under inputs/<sourceId>/, and returns a relative workspace path for computer_run_command or other workspace tools.",
+      "Never search for or expose the server-owned upload storage path.",
+    ].join(" "),
+    inputSchema: objectSchema(["sourceId"], {
+      sourceId: { type: "string" },
+    }),
+    executionMode: "parallel",
+    replaySafe: true,
+    maxResultCharacters: 4_000,
+    parse: (value) => {
+      const record = requireRecord(value, "materialize_source_file arguments");
+      return {
+        sourceId: requireString(record.sourceId, "sourceId", { max: 80, pattern: /^src_[a-f0-9]{32}$/ }),
+      };
+    },
+    execute: async (context, value) => {
+      const input = value as { sourceId: string };
+      const source = (context.grant.uploadedSources ?? []).find((item) => item.id === input.sourceId);
+      if (source === undefined) throw forbidden("Source is not authorized for this run");
+      if (source.status !== "ready") throw badRequest(`Source is not ready: ${source.status}`);
+      if (context.grant.workspaceRoot === undefined) {
+        throw badRequest("materialize_source_file requires a Runtime workspaceRoot");
+      }
+      const row = await repository.requireByOwner(context.grant.actorUserId, input.sourceId);
+      const original = await fs.readFile(row.storage_path).catch(() => undefined);
+      if (original === undefined) throw badRequest("Authorized source original is unavailable for materialization");
+      const sha256 = createHash("sha256").update(original).digest("hex");
+      if (original.byteLength !== source.byteSize || sha256 !== source.sha256) {
+        throw badRequest("Authorized source original failed integrity verification");
+      }
+      const originalName = basename(source.originalName);
+      const path = `inputs/${source.id}/${originalName}`;
+      const target = join(context.grant.workspaceRoot, "inputs", source.id, originalName);
+      await fs.mkdir(join(context.grant.workspaceRoot, "inputs", source.id), { recursive: true });
+      try {
+        await fs.writeFile(target, original, { flag: "wx" });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existing = await fs.readFile(target);
+        const existingSha256 = createHash("sha256").update(existing).digest("hex");
+        if (existing.byteLength !== source.byteSize || existingSha256 !== source.sha256) {
+          throw badRequest("Materialized source destination conflicts with the authorized original");
+        }
+      }
+      return {
+        schema: "agentloop.uploadedSourceMaterialization/v1",
+        sourceId: source.id,
+        originalName: source.originalName,
+        path,
+        bytes: source.byteSize,
+        sha256: source.sha256,
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          sourceType: "uploaded_source_file",
+          receiptId: createHash("sha256").update([source.id, source.sha256, path].join("\n")).digest("hex"),
+          sourceRefs: [{
+            sourceId: source.id,
+            originalName: source.originalName,
+            path,
+            bytes: source.byteSize,
+            sha256: source.sha256,
+          }],
+          facts: [{
+            kind: "uploaded_source_file",
+            sourceId: source.id,
+            originalName: source.originalName,
+            path,
+            bytes: source.byteSize,
+            sha256: source.sha256,
+          }],
+          caveats: [],
+          evidenceKinds: {
+            satisfied: ["source_summary", "source_refs"],
+            caveated: [],
+            failed: [],
+          },
+        },
       };
     },
   }];

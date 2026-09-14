@@ -311,7 +311,11 @@ function inferSourceKinds(capabilities: readonly string[], evidenceKinds: readon
     const match = capability.match(/^skill_source_provider\.([a-z]+)\./u);
     if (match !== null && isSkillSourceKind(match[1])) kinds.add(match[1]);
   }
-  if (capabilities.includes("uploaded_source_read") || capabilities.includes("uploaded_table_extraction")) kinds.add("uploaded_source");
+  if (
+    capabilities.includes("uploaded_source_read")
+    || capabilities.includes("uploaded_source_materialization")
+    || capabilities.includes("uploaded_table_extraction")
+  ) kinds.add("uploaded_source");
   if (capabilities.includes("visible_directory_read") || capabilities.includes("visible_table_extraction")) kinds.add("visible_directory");
   if (capabilities.includes("web_research")) kinds.add("web");
   if (capabilities.includes("external_api_call")) kinds.add("web");
@@ -334,7 +338,11 @@ function isSkillSourceKind(value: string): value is SourceKind {
 
 function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect {
   if (capabilities.includes("external_side_effect")) return "external_write";
-  if (capabilities.includes("workspace_artifact_write") || capabilities.includes("artifact_acceptance")) return "workspace_write";
+  if (
+    capabilities.includes("workspace_artifact_write")
+    || capabilities.includes("uploaded_source_materialization")
+    || capabilities.includes("artifact_acceptance")
+  ) return "workspace_write";
   if (capabilities.includes("web_research")) return "external_read";
   if (capabilities.includes("external_api_call")) return "external_read";
   if (capabilities.includes("custom_tool_call")) return "workspace_write";
@@ -369,6 +377,7 @@ function normalizeSourceMatchText(value: string): string {
 
 const CORE_WORKSPACE_TOOL_NAMES = new Set([
   "read_source",
+  "materialize_source_file",
   "visible_index_directory",
   "visible_find_files",
   "visible_read_file",
@@ -395,7 +404,11 @@ function capabilityIsAvailableForSources(
   capability: string,
   sources: readonly UploadedSourceSummary[] | undefined,
 ): boolean {
-  if (capability !== "uploaded_table_extraction" || sources === undefined) return true;
+  if (sources === undefined) return true;
+  if (capability === "uploaded_source_materialization") {
+    return sources.some((source) => source.status === "ready");
+  }
+  if (capability !== "uploaded_table_extraction") return true;
   return sources.some((source) => source.status === "ready" && isTabularUpload(source.extension));
 }
 
@@ -405,6 +418,7 @@ function isTabularUpload(extension: string): boolean {
 
 const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
   uploaded_source_read: ["read_source"],
+  uploaded_source_materialization: ["materialize_source_file"],
   uploaded_table_extraction: ["extract_source_tables"],
   visible_directory_read: [
     "visible_index_directory",
@@ -451,6 +465,17 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     sideEffect: "none",
     risk: "low",
     constraints: ["requires uploaded source grant"],
+  },
+  {
+    id: "uploaded_source_materialization",
+    category: "source_materialization",
+    label: "Materialize uploaded source original",
+    description: "Copy authorized immutable uploaded-source bytes into the current Runtime workspace for file-level processing.",
+    produces: ["source_summary"],
+    sourceKinds: ["uploaded_source", "workspace_file"],
+    sideEffect: "workspace_write",
+    risk: "low",
+    constraints: ["requires a ready uploaded source grant and Runtime workspace"],
   },
   {
     id: "uploaded_table_extraction",
