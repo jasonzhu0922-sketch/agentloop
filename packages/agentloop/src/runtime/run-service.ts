@@ -116,6 +116,7 @@ import {
   type RunRecoveryState,
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
+import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
   artifactPathsFromCommandFileChanges,
@@ -2258,6 +2259,7 @@ export class RunService {
               toolName: toolAction.toolName,
               modelStep: toolAction.step,
             },
+            resultFailureCode: toolOperationFailureCode,
           }, operation),
         },
         evaluateCandidate: async (candidate) => {
@@ -2932,6 +2934,10 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   addString(details, "tool", data.name);
   addString(details, "finish", data.finishReason);
   addString(details, "code", data.code);
+  addString(details, "invocation", data.invocationStatus);
+  addString(details, "operation", data.operationStatus);
+  addNumber(details, "exitCode", data.exitCode);
+  addBoolean(details, "isError", data.isError);
   addString(details, "assessmentProfile", data.assessmentProfile);
   addString(details, "assessmentMethod", data.assessmentMethod);
   addBoolean(details, "approved", data.approved);

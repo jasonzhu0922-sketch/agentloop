@@ -33,6 +33,52 @@ test("recovery reconstructs early-dispatched tool calls whose turn never committ
   assert.deepEqual(transcript.facts.unfinishedToolCalls, []);
 });
 
+test("recovery preserves returned command operation failure separately from invocation completion", () => {
+  const result = JSON.stringify({ exitCode: 2, stdout: "", stderr: "syntax error", fileChanges: [] });
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "build the artifact",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["assistant.committed", {
+        step: 1,
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-1", name: "computer_run_command", arguments: { command: "node" } }],
+      }],
+      ["tool.completed", {
+        step: 1,
+        toolCallId: "call-1",
+        toolName: "computer_run_command",
+        result,
+        invocationStatus: "completed",
+        operationStatus: "failed",
+        exitCode: 2,
+        isError: true,
+        failurePhase: "operation",
+      }],
+    ),
+  });
+
+  assert.deepEqual(transcript.messages.at(-1), {
+    role: "tool",
+    toolCallId: "call-1",
+    name: "computer_run_command",
+    content: result,
+    isError: true,
+  });
+  assert.deepEqual(transcript.toolEvidence, [{
+    toolCallId: "call-1",
+    toolName: "computer_run_command",
+    result,
+    invocationStatus: "completed",
+    operationStatus: "failed",
+    exitCode: 2,
+    isError: true,
+    failurePhase: "operation",
+  }]);
+});
+
 test("recovery marks orphan early-dispatched tool calls without an outcome as unfinished", () => {
   const transcript = reconstructRecoveryTranscript({
     userInput: "do the thing",
@@ -113,8 +159,24 @@ test("recovery preserves tool failure phase for prepare and execute failures", (
   });
 
   assert.deepEqual(transcript.toolEvidence, [
-    { toolCallId: "call-prepare", toolName: "write_file", result: "invalid args", isError: true, failurePhase: "prepare" },
-    { toolCallId: "call-execute", toolName: "run_step", result: "spawn . EACCES", isError: true, failurePhase: "execute" },
+    {
+      toolCallId: "call-prepare",
+      toolName: "write_file",
+      result: "invalid args",
+      invocationStatus: "rejected",
+      operationStatus: "unknown",
+      isError: true,
+      failurePhase: "prepare",
+    },
+    {
+      toolCallId: "call-execute",
+      toolName: "run_step",
+      result: "spawn . EACCES",
+      invocationStatus: "failed",
+      operationStatus: "unknown",
+      isError: true,
+      failurePhase: "execute",
+    },
   ]);
 });
 
@@ -146,6 +208,8 @@ test("recovery keeps truncated or malformed tool calls out of the provider trans
     toolCallId: "call-partial",
     toolName: "write_file",
     result: "Tool call was not executed because the model response hit its output limit",
+    invocationStatus: "rejected",
+    operationStatus: "unknown",
     isError: true,
     failurePhase: "runtime",
   }]);

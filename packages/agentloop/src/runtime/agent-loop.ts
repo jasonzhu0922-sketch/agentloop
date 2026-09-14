@@ -27,6 +27,11 @@ import { HUMAN_LOOP_TOOL_NAME } from "../tools/human-loop-tool.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
 import {
+  classifyToolOperationOutcome,
+  type ToolInvocationStatus,
+  type ToolOperationStatus,
+} from "./tool-operation-outcome.ts";
+import {
   DefaultStepExecutionStrategy,
   type StepExecutionDecision,
   type StepExecutionStrategy,
@@ -118,8 +123,11 @@ type PreparedEntry =
 interface ToolOutcome {
   readonly call: ModelToolCall;
   readonly content: string;
+  readonly invocationStatus: ToolInvocationStatus;
+  readonly operationStatus: ToolOperationStatus;
+  readonly exitCode?: number | null;
   readonly isError: boolean;
-  readonly failurePhase?: "prepare" | "execute" | "runtime";
+  readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
 }
 
 interface StructuredToolCandidate {
@@ -850,13 +858,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       outcomes = response.toolCalls.map((call) => ({
         call,
         content: "Tool call was not executed because the Runtime reserved this final step for convergence",
+        invocationStatus: "rejected",
+        operationStatus: "unknown",
         isError: true,
         failurePhase: "runtime",
       }));
       for (const outcome of outcomes) {
         await emit({
           type: "tool.rejected",
-          data: { step, toolCallId: outcome.call.id, toolName: outcome.call.name, reason: outcome.content },
+          data: {
+            step,
+            toolCallId: outcome.call.id,
+            toolName: outcome.call.name,
+            reason: outcome.content,
+            invocationStatus: "rejected",
+            operationStatus: "unknown",
+            isError: true,
+            failurePhase: "runtime",
+          },
         });
       }
     } else if (response.finishReason === "length") {
@@ -870,6 +889,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         return {
           call,
           content: "Tool call was not executed because the model response hit its output limit",
+          invocationStatus: "rejected",
+          operationStatus: "unknown",
           isError: true,
           failurePhase: "runtime",
         };
@@ -883,6 +904,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             toolCallId: outcome.call.id,
             toolName: outcome.call.name,
             reason: outcome.content,
+            invocationStatus: "rejected",
+            operationStatus: "unknown",
+            isError: true,
             failurePhase: "runtime",
           },
         });
@@ -910,7 +934,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           const message = publicErrorMessage(error);
           await emit({
             type: "tool.rejected",
-            data: { step, toolCallId: call.id, toolName: call.name, reason: message, failurePhase: "prepare" },
+            data: {
+              step,
+              toolCallId: call.id,
+              toolName: call.name,
+              reason: message,
+              invocationStatus: "rejected",
+              operationStatus: "unknown",
+              isError: true,
+              failurePhase: "prepare",
+            },
           });
           prepared.push({ kind: "rejected", call, message });
         }
@@ -945,6 +978,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         toolCallId: outcome.call.id,
         toolName: outcome.call.name,
         result: outcome.content,
+        invocationStatus: outcome.invocationStatus,
+        operationStatus: outcome.operationStatus,
+        ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
         isError: outcome.isError,
         ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
       };
@@ -979,7 +1015,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     await emit({
       type: "step.completed",
-      data: { step, toolResults: outcomes.map((item) => ({ toolCallId: item.call.id, isError: item.isError })) },
+      data: {
+        step,
+        toolResults: outcomes.map((item) => ({
+          toolCallId: item.call.id,
+          invocationStatus: item.invocationStatus,
+          operationStatus: item.operationStatus,
+          ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }),
+          isError: item.isError,
+        })),
+      },
     });
 
     const humanLoop = humanLoopRequirementFromEvidence(latestToolEvidence);
@@ -1579,7 +1624,16 @@ async function completeWithStreamingAndDispatch(
           const message = publicErrorMessage(error);
           await context.emit({
             type: "tool.rejected",
-            data: { step: context.step, toolCallId: call.id, toolName: call.name, reason: message },
+            data: {
+              step: context.step,
+              toolCallId: call.id,
+              toolName: call.name,
+              reason: message,
+              invocationStatus: "rejected",
+              operationStatus: "unknown",
+              isError: true,
+              failurePhase: "prepare",
+            },
           });
           entry = { kind: "rejected", call, message };
         }
@@ -1680,7 +1734,14 @@ async function executePrepared(
   actionTracker: AgentLoopOptions["actionTracker"],
 ): Promise<ToolOutcome> {
   if (entry.kind === "rejected") {
-    return { call: entry.call, content: entry.message, isError: true, failurePhase: "prepare" };
+    return {
+      call: entry.call,
+      content: entry.message,
+      invocationStatus: "rejected",
+      operationStatus: "unknown",
+      isError: true,
+      failurePhase: "prepare",
+    };
   }
   const { call, tool, input } = entry.value;
   try {
@@ -1707,24 +1768,72 @@ async function executePrepared(
         replaySafe: tool.replaySafe,
         timeoutMs: tool.timeoutMs,
       }, execute);
+    const operationOutcome = classifyToolOperationOutcome(value);
     const content = serializeToolResult(value, tool.maxResultCharacters ?? maxCharacters);
+    const operationFailed = operationOutcome.status === "failed";
     const metrics = toolEvidenceMetrics(call.name, content);
     await emit({
       type: "tool.result_committed",
-      data: { step, toolCallId: call.id, toolName: call.name, ...toolResultCommitSummary(content), ...metrics },
+      data: {
+        step,
+        toolCallId: call.id,
+        toolName: call.name,
+        invocationStatus: "completed",
+        operationStatus: operationOutcome.status,
+        ...(operationOutcome.exitCode === undefined ? {} : { exitCode: operationOutcome.exitCode }),
+        isError: operationFailed,
+        ...(operationFailed ? { failurePhase: "operation" } : {}),
+        ...toolResultCommitSummary(content),
+        ...metrics,
+      },
     });
     await emit({
       type: "tool.completed",
-      data: { step, toolCallId: call.id, toolName: call.name, result: content, ...metrics },
+      data: {
+        step,
+        toolCallId: call.id,
+        toolName: call.name,
+        result: content,
+        invocationStatus: "completed",
+        operationStatus: operationOutcome.status,
+        ...(operationOutcome.exitCode === undefined ? {} : { exitCode: operationOutcome.exitCode }),
+        isError: operationFailed,
+        ...(operationFailed ? { failurePhase: "operation" } : {}),
+        ...metrics,
+      },
     });
-    return { call, content, isError: false };
+    return {
+      call,
+      content,
+      invocationStatus: "completed",
+      operationStatus: operationOutcome.status,
+      ...(operationOutcome.exitCode === undefined ? {} : { exitCode: operationOutcome.exitCode }),
+      isError: operationFailed,
+      ...(operationFailed ? { failurePhase: "operation" as const } : {}),
+    };
   } catch (error) {
     const content = publicErrorMessage(error);
     await emit({
       type: "tool.failed",
-      data: { step, toolCallId: call.id, toolName: call.name, error: content },
+      data: {
+        step,
+        toolCallId: call.id,
+        toolName: call.name,
+        error: content,
+        invocationStatus: "failed",
+        operationStatus: "unknown",
+        isError: true,
+        failurePhase: "execute",
+      },
     });
-    return { call, content, isError: true, failurePhase: "execute" };
+    return {
+      call,
+      content,
+      invocationStatus: "failed",
+      operationStatus: "unknown",
+      isError: true,
+      failurePhase: "execute",
+    };
   }
 }
 

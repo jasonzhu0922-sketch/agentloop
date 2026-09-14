@@ -1,4 +1,9 @@
 import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall } from "./contracts.ts";
+import {
+  classifyToolOperationOutcome,
+  type ToolInvocationStatus,
+  type ToolOperationStatus,
+} from "./tool-operation-outcome.ts";
 
 export interface RecoveryEvent {
   readonly seq: number;
@@ -28,8 +33,11 @@ interface AssistantCheckpoint {
 
 interface ToolOutcome {
   readonly content: string;
+  readonly invocationStatus?: ToolInvocationStatus;
+  readonly operationStatus?: ToolOperationStatus;
+  readonly exitCode?: number | null;
   readonly isError: boolean;
-  readonly failurePhase?: "prepare" | "execute" | "runtime";
+  readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
 }
 
 interface HumanLoopResponseEvent {
@@ -110,19 +118,36 @@ export function reconstructRecoveryTranscript(input: {
     const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
     if (toolCallId === undefined) continue;
     if (event.type === "tool.completed" && typeof event.data.result === "string") {
-      outcomes.set(toolCallId, { content: event.data.result, isError: false });
+      const classifiedOperation = classifyToolOperationOutcome(event.data.result);
+      const operationStatus = operationStatusFromEvent(event.data.operationStatus)
+        ?? (classifiedOperation.exitCode === undefined ? undefined : classifiedOperation.status);
+      const operationFailed = operationStatus === "failed" || event.data.isError === true;
+      outcomes.set(toolCallId, {
+        content: event.data.result,
+        invocationStatus: event.data.invocationStatus === "completed" ? "completed" : undefined,
+        operationStatus,
+        ...(typeof event.data.exitCode === "number" || event.data.exitCode === null
+          ? { exitCode: event.data.exitCode }
+          : classifiedOperation.exitCode === undefined ? {} : { exitCode: classifiedOperation.exitCode }),
+        isError: operationFailed,
+        ...(operationFailed ? { failurePhase: "operation" } : {}),
+      });
     } else if (event.type === "tool.failed" && typeof event.data.error === "string") {
       outcomes.set(toolCallId, {
         content: event.data.error,
+        invocationStatus: "failed",
+        operationStatus: "unknown",
         isError: true,
         failurePhase: "execute",
       });
     } else if (event.type === "tool.rejected" && typeof event.data.reason === "string") {
       outcomes.set(toolCallId, {
         content: event.data.reason,
+        invocationStatus: "rejected",
+        operationStatus: "unknown",
         isError: true,
         failurePhase: typeof event.data.failurePhase === "string"
-          ? event.data.failurePhase as "prepare" | "execute" | "runtime"
+          ? event.data.failurePhase as "prepare" | "execute" | "operation" | "runtime"
           : "prepare",
       });
     }
@@ -324,7 +349,14 @@ function toolEvidenceFromOutcome(call: ModelToolCall, outcome: ToolOutcome): Age
     toolCallId: call.id,
     toolName: call.name,
     result: outcome.content,
+    ...(outcome.invocationStatus === undefined ? {} : { invocationStatus: outcome.invocationStatus }),
+    ...(outcome.operationStatus === undefined ? {} : { operationStatus: outcome.operationStatus }),
+    ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
     isError: outcome.isError,
     ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
   };
+}
+
+function operationStatusFromEvent(value: unknown): ToolOperationStatus | undefined {
+  return value === "succeeded" || value === "failed" || value === "unknown" ? value : undefined;
 }

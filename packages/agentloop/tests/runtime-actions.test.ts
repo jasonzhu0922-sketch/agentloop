@@ -2,6 +2,7 @@ import { testOwner } from "./runtime-test-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import { toolOperationFailureCode } from "../src/runtime/tool-operation-outcome.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 
@@ -41,6 +42,53 @@ test("an expired dispatched Action becomes recovery_required without terminalizi
     const event = (await database.prepare("SELECT type FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
       .get(runId)) as { type: string };
     assert.equal(event.type, "action.recovery_required");
+  } finally {
+    await database.close();
+  }
+});
+
+test("a resolved tool Action records a returned nonzero exit as operation failure", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "operation-failure-action-run";
+    database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+        status, input, created_at
+      ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, "test operation failure", Date.now());
+    const actions = new RuntimeActionRepository(database);
+
+    const value = await actions.execute({
+      runId,
+      kind: "tool_call",
+      replayPolicy: "safe",
+      deadlineMs: 1_000,
+      resultFailureCode: toolOperationFailureCode,
+    }, async () => ({ exitCode: 2, stdout: "", stderr: "syntax error" }));
+
+    assert.equal(value.exitCode, 2);
+    const action = (await actions.list(runId))[0];
+    assert.equal(action.state, "failed");
+    assert.equal(action.errorCode, "TOOL_OPERATION_FAILED");
+    const event = await database.prepare(`
+      SELECT type, payload_json FROM run_events
+      WHERE run_id = ? AND type = 'action.failed'
+      ORDER BY seq DESC LIMIT 1
+    `).get(runId) as { type: string; payload_json: string };
+    assert.equal(event.type, "action.failed");
+    assert.equal(JSON.parse(event.payload_json).code, "TOOL_OPERATION_FAILED");
+
+    const successValue = await actions.execute({
+      runId,
+      kind: "tool_call",
+      replayPolicy: "safe",
+      deadlineMs: 1_000,
+      resultFailureCode: toolOperationFailureCode,
+    }, async () => ({ exitCode: 0, stdout: "ok", stderr: "" }));
+    assert.equal(successValue.exitCode, 0);
+    assert.deepEqual((await actions.list(runId)).map((item) => item.state), ["failed", "succeeded"]);
   } finally {
     await database.close();
   }

@@ -86,11 +86,18 @@ export class RuntimeActionRepository {
     replayPolicy: ReplayPolicy;
     deadlineMs: number;
     metadata?: Readonly<Record<string, unknown>>;
+    /** A resolved operation may still report a semantic failure, such as a nonzero command exit. */
+    resultFailureCode?: (value: unknown) => string | undefined;
   }, operation: () => Promise<T>): Promise<T> {
     const action = await this.dispatch(input);
     try {
       const value = await operation();
-      await this.succeed(action.id, action.fence);
+      const resultFailureCode = input.resultFailureCode?.(value);
+      if (resultFailureCode === undefined) {
+        await this.succeed(action.id, action.fence);
+      } else {
+        await this.fail(action.id, action.fence, resultFailureCode);
+      }
       return value;
     } catch (error) {
       await this.fail(action.id, action.fence, errorCode(error));

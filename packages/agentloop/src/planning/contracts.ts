@@ -413,7 +413,11 @@ export interface ExecutionPlan {
 export interface ToolEvidence {
   readonly toolCallId: string;
   readonly toolName: string;
+  readonly invocationStatus?: "completed" | "failed" | "rejected";
+  readonly operationStatus?: "succeeded" | "failed" | "unknown";
+  readonly exitCode?: number | null;
   readonly isError: boolean;
+  readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
   readonly result: string;
 }
 

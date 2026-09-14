@@ -3,7 +3,11 @@ import test from "node:test";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
-import { artifactStepToolProgressPolicy, runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
+import {
+  artifactStepToolProgressPolicy,
+  deriveRuntimeStepEvidenceState,
+  runtimeStepToolProgressPolicy,
+} from "../src/runtime/tool-progress-policy.ts";
 import type {
   CapabilityGrant,
   ModelAdapter,
@@ -2510,6 +2514,47 @@ test("artifact progress policy treats mismatched typed intermediates as source u
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
+test("artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family", () => {
+  const evidenceFor = (path: string, artifactKind?: string) => [{
+    toolCallId: `write-${path}`,
+    toolName: "computer_write_file",
+    isError: false,
+    result: JSON.stringify({
+      path,
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path, bytes: 512, sha256: `${path}-hash`, ...(artifactKind === undefined ? {} : { artifactKind }) },
+        evidenceKinds: {
+          satisfied: ["artifact_path", "artifact_non_empty"],
+          caveated: [],
+          failed: [],
+        },
+      },
+    }),
+  }];
+
+  const wordPolicy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+    { expectedArtifactKind: "word" },
+  );
+  const documentPolicy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+    { expectedArtifactKind: "document" },
+  );
+
+  const legacyAsWord = deriveRuntimeStepEvidenceState({ policy: wordPolicy, evidence: evidenceFor("legacy.doc") });
+  const modernAsWord = deriveRuntimeStepEvidenceState({ policy: wordPolicy, evidence: evidenceFor("modern.docx") });
+  const legacyAsDocument = deriveRuntimeStepEvidenceState({ policy: documentPolicy, evidence: evidenceFor("legacy.doc", "doc") });
+  const modernAsDocument = deriveRuntimeStepEvidenceState({ policy: documentPolicy, evidence: evidenceFor("modern.docx", "docx") });
+
+  for (const state of [legacyAsWord, modernAsWord, legacyAsDocument, modernAsDocument]) {
+    assert.equal(state?.workProduct.status, "deliverable_available");
+    assert.equal(state?.nextAction, "verify_existing_artifact");
+    assert.equal(state?.workProduct.deliverableArtifacts.length, 1);
+    assert.equal(state?.workProduct.processArtifacts.length, 0);
+  }
+});
+
 test("artifact progress policy allows diagnostic-driven intermediate source repair before rerender", async () => {
   const executions: string[] = [];
   let renderAttempts = 0;
@@ -3241,6 +3286,7 @@ test("tool evidence can queue an early convergence turn before the hard limit", 
 
 test("next model turn receives explicit execution feedback for failures and file changes", async () => {
   let calls = 0;
+  const events: RuntimeEvent[] = [];
   const tool: RuntimeTool<unknown> = {
     name: "run_step",
     description: "Run one scripted step",
@@ -3282,6 +3328,7 @@ test("next model turn receives explicit execution feedback for failures and file
         assert.match(runtimeContext, /runtime_execution_feedback/);
         assert.match(runtimeContext, /failed toolCallId=run-fail tool=run_step/);
         assert.match(runtimeContext, /No such file or directory/);
+        assert.match(runtimeContext, /"failedOperationCount":1/);
         return {
           content: "",
           finishReason: "tool_calls",
@@ -3305,10 +3352,24 @@ test("next model turn receives explicit execution feedback for failures and file
     tools: new ToolRegistry([tool]),
     grant,
     maxSteps: 4,
+    emit: (event) => { events.push(event); },
   });
 
   assert.equal(result.output, "output.xlsx is ready");
   assert.equal(calls, 3);
+  const failedEvidence = result.toolEvidence.find((item) => item.toolCallId === "run-fail");
+  assert.equal(failedEvidence?.invocationStatus, "completed");
+  assert.equal(failedEvidence?.operationStatus, "failed");
+  assert.equal(failedEvidence?.exitCode, 2);
+  assert.equal(failedEvidence?.isError, true);
+  assert.equal(failedEvidence?.failurePhase, "operation");
+  const failedCompletion = events.find((event) =>
+    event.type === "tool.completed" && event.data.toolCallId === "run-fail"
+  );
+  assert.equal(failedCompletion?.data.invocationStatus, "completed");
+  assert.equal(failedCompletion?.data.operationStatus, "failed");
+  assert.equal(failedCompletion?.data.exitCode, 2);
+  assert.equal(failedCompletion?.data.isError, true);
 });
 
 test("repeated execution failures surface failure phases and a strategy switch directive", async () => {
