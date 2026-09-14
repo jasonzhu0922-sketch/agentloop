@@ -41,20 +41,19 @@ export function projectAssistantEvent(assistant, event) {
   if (event.type === "run.completed") {
     if (typeof data.output === "string") assistant.text = data.output;
     assistant.status = "completed";
-    assistant.reasoning = "";
-    assistant.recovery = undefined;
   }
   if (event.type === "run.failed") {
     assistant.status = "failed";
     assistant.error = failureMessage(data);
     assistant.text = assistant.error;
-    assistant.reasoning = "";
-    assistant.recovery = undefined;
   }
   if (event.type === "run.cancelled") {
     assistant.status = "cancelled";
+  }
+  if (TERMINAL_EVENT_TYPES.has(event.type)) {
     assistant.reasoning = "";
     assistant.recovery = undefined;
+    assistant.humanLoop = undefined;
   }
   return TERMINAL_EVENT_TYPES.has(event.type);
 }

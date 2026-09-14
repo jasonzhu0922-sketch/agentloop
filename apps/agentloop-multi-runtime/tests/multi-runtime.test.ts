@@ -36,6 +36,7 @@ import { persistSessions } from "../web/session-persistence.js";
 import { renderMarkdown } from "../web/markdown-renderer.js";
 import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
+import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -352,7 +353,7 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
   assert.match(app, /replayPersistedRunEvents/);
-  assert.match(app, /function projectPlanStatuses\(plan, events\)/);
+  assert.match(app, /function projectPlanStatuses\(plan, events, runStatus\)/);
   assert.match(app, /projectAssistantEvent\(assistant, event\)/);
   assert.match(app, /mergeRuntimeEvents\(assistant\.events, \[event\]\)/);
   assert.match(app, /message\.status === "completed" \? renderMarkdown\(message\.text\) : formatText\(message\.text\)/);
@@ -418,6 +419,32 @@ test("Web projects the persisted Human-in-the-Loop request from its waiting even
     seq: 7, type: "run.waiting_user", data: { runId: "run-choice", requestId: request.id, kind: request.kind, request }, createdAt: 7,
   }), false);
   assert.deepEqual(assistant.humanLoop, request);
+});
+
+test("Web renders a cancelled Run as a stable terminal state instead of live progress", () => {
+  const assistant = {
+    status: "running",
+    text: "",
+    reasoning: "still working",
+    recovery: { status: "required" },
+    humanLoop: { id: "request", status: "open" },
+  };
+  assert.equal(projectAssistantEvent(assistant, {
+    seq: 68, type: "run.cancelled", data: {}, createdAt: 68,
+  }), true);
+  assert.deepEqual(assistantMessagePresentation(assistant.status), {
+    isLive: false,
+    label: "已取消",
+    icon: "×",
+    cardClass: "cancelled",
+    emptyText: "任务已取消",
+  });
+  assert.equal(assistant.reasoning, "");
+  assert.equal(assistant.recovery, undefined);
+  assert.equal(assistant.humanLoop, undefined);
+  assert.equal(terminalAwarePlanStepStatus("running", assistant.status), "cancelled");
+  assert.equal(terminalAwarePlanStepStatus("pending", assistant.status), "cancelled");
+  assert.equal(terminalAwarePlanStepStatus("completed", assistant.status), "completed");
 });
 
 test("Web projects a durable recovery boundary without treating it as a terminal failure", () => {

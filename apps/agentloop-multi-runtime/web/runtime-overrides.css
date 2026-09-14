@@ -129,12 +129,20 @@
   color: var(--bad);
 }
 
+.assistant-state.cancelled {
+  color: var(--text-3);
+}
+
 .live-card.completed {
   border-color: color-mix(in srgb, var(--ok) 22%, var(--border));
 }
 
 .live-card.failed {
   border-color: color-mix(in srgb, var(--bad) 28%, var(--border));
+}
+
+.live-card.cancelled {
+  border-color: color-mix(in srgb, var(--text-3) 28%, var(--border));
 }
 
 .live-card.failed .live-head {
@@ -162,6 +170,11 @@
   font-size: 15px;
   line-height: 1.45;
   word-break: break-word;
+}
+
+.terminal-empty {
+  color: var(--text-2);
+  font-size: 13px;
 }
 
 .inline-plan-steps {

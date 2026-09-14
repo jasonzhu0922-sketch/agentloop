@@ -1,4 +1,5 @@
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./assistant-event-projection.js";
+import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "./assistant-message-presentation.js";
 import { createCoalescedUpdater } from "./live-update-scheduler.js";
 import { persistJson, persistSessions } from "./session-persistence.js";
 import { openArtifactPreview } from "./artifact-preview.js";
@@ -235,6 +236,8 @@ function applyRecoveredRunState(assistant, run) {
     assistant.text = assistant.error;
   }
   assistant.reasoning = "";
+  assistant.recovery = undefined;
+  assistant.humanLoop = undefined;
   completeAssistantMessage(assistant, { createdAt: run.finishedAt });
   return true;
 }
@@ -521,7 +524,7 @@ function render() {
   $("details-title").textContent = messages.length > 0 ? "执行详情" : "产物";
   $("plan-section").hidden = !(lastAssistant?.plan?.length);
   $("events-section").hidden = !(lastAssistant?.events?.length);
-  renderPlan(projectPlanStatuses(lastAssistant?.plan || [], lastAssistant?.events || [])); renderEvents(lastAssistant?.events || []); renderDetails(conversation, lastAssistant);
+  renderPlan(projectPlanStatuses(lastAssistant?.plan || [], lastAssistant?.events || [], lastAssistant?.status)); renderEvents(lastAssistant?.events || []); renderDetails(conversation, lastAssistant);
   conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, conversationScroll.scrollTop);
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
@@ -540,8 +543,9 @@ function renderMessage(message) {
     const askedAt = formatMessageTime(message.createdAt);
     return `<article class="msg user"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${attachments.length ? `<div class="msg-source-row" aria-label="本轮上传文件">${attachments.map(renderAttachmentChip).join("")}</div>` : ""}<div class="msg-text">${escapeHtml(message.text)}</div>${askedAt ? `<div class="message-timing user-timing">提问于 ${askedAt}</div>` : ""}</div></div></article>`;
   }
-  const isLive = message.status === "running";
-  const plan = projectPlanStatuses(message.plan || [], message.events || []);
+  const presentation = assistantMessagePresentation(message.status);
+  const isLive = presentation.isLive;
+  const plan = projectPlanStatuses(message.plan || [], message.events || [], message.status);
   const runtime = message.runtimeId ? ` · ${message.runtimeId}` : "";
   const reasoning = isLive && message.reasoning ? `<details class="live-reasoning" open><summary>模型思考</summary><div class="reasoning-body">${formatText(message.reasoning)}</div></details>` : "";
   const humanLoop = renderHumanLoop(message);
@@ -550,9 +554,11 @@ function renderMessage(message) {
   // A pending Human-in-the-Loop request is the current actionable state. Keep
   // any useful interim model text, but never let it displace the response
   // controls the user needs in order to continue the Run.
-  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || "Run 失败")}</div>` : `${interimOutput}${humanLoop}${recovery}` || `<span class="thinking"><i></i><i></i><i></i></span>`;
-  const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : message.status === "running" ? "执行中" : message.status === "completed" ? "已完成" : message.status === "failed" ? "未完成" : message.status || "";
-  const stateIcon = message.status === "completed" ? "✓" : message.status === "failed" ? "!" : "";
+  const projectedOutput = `${interimOutput}${humanLoop}${recovery}`;
+  const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(presentation.emptyText)}</span>`;
+  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || presentation.emptyText)}</div>` : projectedOutput || emptyOutput;
+  const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : presentation.label;
+  const stateIcon = presentation.icon;
   const completedAt = formatMessageTime(message.completedAt);
   const duration = formatConversationDuration(message.createdAt, message.completedAt);
   const responseTiming = completedAt ? `<div class="message-timing assistant-timing">回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}</div>` : "";
@@ -560,7 +566,7 @@ function renderMessage(message) {
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
-  return `<article class="msg assistant ${isLive ? "live" : "final"}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${message.status === "completed" ? "completed" : message.status === "failed" ? "failed" : ""}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text">${output}</div>${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text">${output}</div>${responseTiming}</div></div></article>`;
 }
 
 async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
@@ -651,7 +657,7 @@ function completeAssistantMessage(assistant, event) {
   assistant.completedAt = numberValue(event?.createdAt) ?? Date.now();
 }
 
-function projectPlanStatuses(plan, events) {
+function projectPlanStatuses(plan, events, runStatus) {
   if (!Array.isArray(plan) || plan.length === 0) return [];
   const statuses = new Map();
   for (const event of events || []) {
@@ -659,7 +665,10 @@ function projectPlanStatuses(plan, events) {
     const status = event?.type === "plan.step.started" ? "running" : event?.type === "plan.step.completed" ? "completed" : event?.type === "plan.step.failed" ? "failed" : undefined;
     if (stepId && status) statuses.set(stepId, status);
   }
-  return plan.map((step) => statuses.has(step?.id) ? { ...step, status: statuses.get(step.id) } : step);
+  return plan.map((step) => {
+    const observedStatus = statuses.has(step?.id) ? statuses.get(step.id) : step?.status;
+    return { ...step, status: terminalAwarePlanStepStatus(observedStatus, runStatus) };
+  });
 }
 
 function renderPendingAttachments(conversation) {
@@ -827,7 +836,7 @@ function toolOutcomeLabel(tool) {
   if (tool.runningCalls) parts.push(`${tool.runningCalls} 次执行中`);
   return parts.length ? parts.join(" · ") : "已提交";
 }
-function planStepLabel(status) { return status === "completed" ? "已完成" : status === "running" ? "执行中" : status === "failed" ? "失败" : "等待执行"; }
+function planStepLabel(status) { return status === "completed" ? "已完成" : status === "running" ? "执行中" : status === "failed" ? "失败" : status === "cancelled" ? "已取消" : "等待执行"; }
 function summarizeCommandArgs(args) { const result = []; for (let index = 0; index < args.length; index += 1) { result.push(args[index] === "-c" && index + 1 < args.length ? "-c [inline script]" : args[index]); if (args[index] === "-c") index += 1; } return result; }
 function parseResult(value) { if (value && typeof value === "object" && !Array.isArray(value)) return value; if (typeof value !== "string") return {}; try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; } }
 function recordValue(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : undefined; }
