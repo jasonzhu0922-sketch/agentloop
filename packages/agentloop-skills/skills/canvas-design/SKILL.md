@@ -1,6 +1,6 @@
 ---
 name: canvas-design
-description: Create beautiful visual art in .png and .pdf documents using design philosophy. You should use this skill when the user asks to create a poster, piece of art, design, or other static piece. Create original visual designs, never copying existing artists' work to avoid copyright violations.
+description: Create original single-page posters and static visual art as PNG or PDF, with a subject-specific design philosophy and a render direction that materially changes composition, typography, color, and surface language.
 license: Complete terms in LICENSE.txt
 agentloop:
   roles:
@@ -14,190 +14,161 @@ agentloop:
   qaKinds: []
 ---
 
-These are instructions for creating design philosophies - aesthetic movements that are then EXPRESSED VISUALLY. Output only .md files, .pdf files, and .png files.
+# Canvas Design
 
-Complete this in two steps:
-1. Design Philosophy Creation (.md file)
-2. Express by creating it on a canvas (.pdf file or .png file)
+Create two artifacts:
 
-First, undertake this task:
+1. A concise, subject-specific design philosophy in Markdown.
+2. A single-page PNG or PDF that visibly realizes that philosophy.
 
-## DESIGN PHILOSOPHY CREATION
+The philosophy is a design decision, not decorative prose. Its choices must survive into the render spec and the finished image.
 
-To begin, create a VISUAL PHILOSOPHY (not layouts or templates) that will be interpreted through:
-- Form, space, color, composition
-- Images, graphics, shapes, patterns
-- Minimal text as visual accent
+## Load the render contract first
 
-### THE CRITICAL UNDERSTANDING
-- What is received: Some subtle input or instructions by the user that should be taken into account, but used as a foundation; it should not constrain creative freedom.
-- What is created: A design philosophy/aesthetic movement.
-- What happens next: Then, the same version receives the philosophy and EXPRESSES IT VISUALLY - creating artifacts that are 90% visual design, 10% essential text.
+Before proposing directions, writing the philosophy, or creating a render spec, load the current packaged-renderer schema:
 
-Consider this approach:
-- Write a manifesto for an art movement
-- The next phase involves making the artwork
+`python3 -c "import os,runpy;runpy.run_path(os.path.join(os.environ['AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN'],'scripts','render_static_canvas.py'), run_name='__main__')" --schema`
 
-The philosophy must emphasize: Visual expression. Spatial communication. Artistic interpretation. Minimal words.
+Treat the returned art-direction values, layout families, composition variants, motif kinds, and topology mappings as the current executable contract. Do not invent enum values and repair them after rendering fails. Use the schema to understand renderer capability, not to choose the aesthetic direction. If a concept cannot be represented by the returned grammar or motifs, choose a custom renderer before writing the spec.
 
-### HOW TO GENERATE A VISUAL PHILOSOPHY
+## Find a distinct direction
 
-**Name the movement** (1-2 words): "Brutalist Joy" / "Chromatic Silence" / "Metabolist Dreams"
+Read the brief for its purpose, audience, emotional stakes, mandatory copy, recognizable subjects, and delivery constraints. A topic category such as technology, enterprise, culture, or commemoration does not imply a visual style.
 
-**Articulate the philosophy** (4-6 paragraphs - concise but complete):
+Before choosing a direction, form three coherent candidates that differ on at least four of these axes:
 
-To capture the VISUAL essence, express how the philosophy manifests through:
-- Space and form
-- Color and material
-- Scale and rhythm
-- Composition and balance
-- Visual hierarchy
+- emotional register
+- material language
+- composition topology
+- typographic voice
+- color strategy
+- image mode
+- central visual metaphor
 
-**CRITICAL GUIDELINES:**
-- **Avoid redundancy**: Each design aspect should be mentioned once. Avoid repeating points about color theory, spatial relationships, or typographic principles unless adding new depth.
-- **Emphasize craftsmanship REPEATEDLY**: The philosophy MUST stress multiple times that the final work should appear as though it took countless hours to create, was labored over with care, and comes from someone at the absolute top of their field. This framing is essential - repeat phrases like "meticulously crafted," "the product of deep expertise," "painstaking attention," "master-level execution."
-- **Leave creative space**: Remain specific about the aesthetic direction, but concise enough that the next Claude has room to make interpretive choices also at a extremely high level of craftmanship.
+Changing only the movement name, palette, seed, or arrangement of the same lines and nodes does not create a new direction. If earlier posters or reusable artifacts are available, compare their thumbnail silhouettes. Reject a candidate that repeats the same dominant mass, title zone, material treatment, and metaphor without a brief-specific reason.
 
-The philosophy must guide the next version to express ideas VISUALLY, not through text. Information lives in design, not paragraphs.
+The candidate set itself must be diverse. Every pair must differ on at least four axes, including composition topology or central metaphor. When the brief does not fix them, use three different topologies, at least two color strategies, and at least two material languages and image modes. Include one counter-default direction that expresses the subject without the category's familiar palette, glow, geometry, or iconography while preserving the requested tone. A set of three dark technological scenes, three centered monuments, or three variants of the same luminous structure fails this gate.
 
-### PHILOSOPHY EXAMPLES
+For each candidate, keep a compact decision record containing its concept, seven axis values exactly as returned by the schema, thumbnail silhouette, supported rendering path, brief evidence, and main tradeoff. Do not write the philosophy or spec until this comparison has produced either an evidence-backed selection or a HIL request. Mentioning three possibilities only in hidden reasoning does not satisfy this gate; preserve the comparison in the HIL options or in the philosophy's design-decision section.
 
-**"Concrete Poetry"**
-Philosophy: Communication through monumental form and bold geometry.
-Visual expression: Massive color blocks, sculptural typography (huge single words, tiny labels), Brutalist spatial divisions, Polish poster energy meets Le Corbusier. Ideas expressed through visual weight and spatial tension, not explanation. Text as rare, powerful gesture - never paragraphs, only essential words integrated into the visual architecture. Every element placed with the precision of a master craftsman.
+## Resolve material style ambiguity with HIL
 
-**"Chromatic Language"**
-Philosophy: Color as the primary information system.
-Visual expression: Geometric precision where color zones create meaning. Typography minimal - small sans-serif labels letting chromatic fields communicate. Think Josef Albers' interaction meets data visualization. Information encoded spatially and chromatically. Words only to anchor what color already shows. The result of painstaking chromatic calibration.
+After consulting the schema and forming the candidate directions, decide whether the brief contains enough visual evidence to select one. Mood, quality, sector, and topic words constrain purpose or emotional register; they do not by themselves determine material, topology, typography, color, image mode, or metaphor through familiar genre associations.
 
-**"Analog Meditation"**
-Philosophy: Quiet visual contemplation through texture and breathing room.
-Visual expression: Paper grain, ink bleeds, vast negative space. Photography and illustration dominate. Typography whispered (small, restrained, serving the visual). Japanese photobook aesthetic. Images breathe across pages. Text appears sparingly - short phrases, never explanatory blocks. Each composition balanced with the care of a meditation practice.
+Use `request_human_loop` before writing the philosophy, spec, or artwork when a critical style characteristic cannot be inferred and different answers would produce materially different work. Critical characteristics include the emotional register, material language, composition topology, typographic voice, color strategy, image mode, and central metaphor. Choose the rendering implementation from the confirmed direction and the loaded schema; that implementation choice does not require user input.
 
-**"Organic Systems"**
-Philosophy: Natural clustering and modular growth patterns.
-Visual expression: Rounded forms, organic arrangements, color from nature through architecture. Information shown through visual diagrams, spatial relationships, iconography. Text only for key labels floating in space. The composition tells the story through expert spatial orchestration.
+A direction may bypass HIL only when at least one of these supplies a clear selection basis:
 
-**"Geometric Silence"**
-Philosophy: Pure order and restraint.
-Visual expression: Grid-based precision, bold photography or stark graphics, dramatic negative space. Typography precise but minimal - small essential text, large quiet zones. Swiss formalism meets Brutalist material honesty. Structure communicates, not words. Every alignment the work of countless refinements.
+- the user names or describes the visual form, metaphor, material, image treatment, or composition;
+- supplied brand assets or visual references materially constrain those choices;
+- the user explicitly delegates the unresolved visual direction, such as asking to be surprised or to use the designer's judgment.
 
-*These are condensed examples. The actual design philosophy should be 4-6 substantial paragraphs.*
+Sector, audience, purpose, topic, event type, and mood adjectives never satisfy this bypass by themselves. Do not treat technology, enterprise, governance, industrial, launch, formal, premium, grand, energetic, friendly, restrained, or similar category signals as evidence for a particular topology, material, palette, image mode, or metaphor. A candidate being familiar or conventional for the category is not stronger evidence.
 
-### ESSENTIAL PRINCIPLES
-- **VISUAL PHILOSOPHY**: Create an aesthetic worldview to be expressed through design
-- **MINIMAL TEXT**: Always emphasize that text is sparse, essential-only, integrated as visual element - never lengthy
-- **SPATIAL EXPRESSION**: Ideas communicate through space, form, color, composition - not paragraphs
-- **ARTISTIC FREEDOM**: The next Claude interprets the philosophy visually - provide creative room
-- **PURE DESIGN**: This is about making ART OBJECTS, not documents with decoration
-- **EXPERT CRAFTSMANSHIP**: Repeatedly emphasize the final work must look meticulously crafted, labored over with care, the product of countless hours by someone at the top of their field
+When none of the three explicit bypass conditions applies and two or more candidates remain viable, HIL is required. This is a stop gate: do not write the philosophy, create the spec, render the artwork, or call an artifact-writing tool before the HIL response. For example, a brief that only names an enterprise technology launch and asks for a solemn, grand, technological tone must present three directions through HIL because it still leaves the visual form and metaphor open.
 
-**The design philosophy should be concise: 3-5 focused paragraphs or short sections.** Fill it with poetic design philosophy that brings together the core vision without becoming a long deliverable in itself. Avoid repeating the same points. Keep the design philosophy generic without mentioning the intention of the art, as if it can be used wherever. Output the design philosophy as a .md file.
+Prefer a single-choice `selection` request containing three coherent directions. Each option must state its metaphor, thumbnail silhouette, material and color character, practical tradeoff, and all seven schema axis values. Validate the option set against the diversity gate before calling HIL. When HIL is required because the brief does not favor a direction, present the options neutrally: do not mark a familiar or genre-default candidate as recommended, preferred, or preselected. Use a `confirmation` request only when there is one evidence-backed interpretation and the user needs to approve or reject it. State exactly which preference is missing, cite the brief and schema result in `evidenceRefs`, and resume with `continue_step`. Once answered, treat the response as authoritative design input and continue the same step without asking again.
 
----
+Do not use HIL to recover from an invalid spec, unsupported enum, unsupported motif, or render failure. Correct those implementation errors from the loaded schema or use a custom renderer. Do not ask the user to decide every axis independently or to approve a direction already specified by the brief. Do not silently select a genre-default direction merely to avoid HIL.
 
-## DEDUCING THE SUBTLE REFERENCE
+Select the direction that makes the subject most legible and memorable. Preserve it as an `artDirection` object:
 
-**CRITICAL STEP**: Before creating the canvas, identify the subtle conceptual thread from the original request.
+```json
+{
+  "concept": "A civic service is revealed as a living public noticeboard",
+  "emotionalRegister": "humanist",
+  "materialLanguage": "ink-paper",
+  "compositionTopology": "modular-editorial",
+  "typographicVoice": "editorial-contrast",
+  "colorStrategy": "warm-editorial",
+  "imageMode": "collaged-fragments",
+  "avoid": ["dark network field", "glowing central orb", "technical dashboard labels"]
+}
+```
 
-**THE ESSENTIAL PRINCIPLE**:
-The topic is a **subtle, niche reference embedded within the art itself** - not always literal, always sophisticated. Someone familiar with the subject should feel it intuitively, while others simply experience a masterful abstract composition. The design philosophy provides the aesthetic language. The deduced topic provides the soul - the quiet conceptual DNA woven invisibly into form, color, and composition.
+Allowed values are listed by `scripts/render_static_canvas.py --schema`. `concept` and `avoid` remain specific to the brief; the other fields form a stable renderer contract.
 
-This is **VERY IMPORTANT**: The reference must be refined so it enhances the work's depth without announcing itself. Think like a jazz musician quoting another song - only those who know will catch it, but everyone appreciates the music.
+## Write the philosophy
 
----
+Write three to five focused paragraphs. Name the movement, then explain how this subject becomes visible through the selected metaphor, space, material, color, type, scale, and rhythm. State what the direction deliberately excludes when that protects its identity.
 
-## CANVAS CREATION
+Ground the philosophy in the brief. Do not write a reusable manifesto that could accompany any poster. Avoid automatic claims about museum quality, countless hours, sophistication, restraint, minimal text, dark fields, glowing cores, grids, or geometric precision. Use those qualities only when this direction actually calls for them.
 
-With both the philosophy and the conceptual framework established, express it on a canvas. Take a moment to gather thoughts and clear the mind. Use the design philosophy created and the instructions below to craft a masterpiece, embodying all aspects of the philosophy with expert craftsmanship.
+Text can be quiet, loud, dense, fragmented, monumental, or image-like. Its role follows the brief and the selected typographic voice. Preserve every piece of mandatory copy and keep it legible within the canvas.
 
-**IMPORTANT**: For any type of content, even if the user requests something for a movie/game/book, the approach should still be sophisticated. Never lose sight of the idea that this should be art, not something that's cartoony or amateur.
+## Choose the rendering path
 
-To create museum or magazine quality work, use the design philosophy as the foundation. Create one single page, highly visual, design-forward PDF or PNG output (unless asked for more pages). Before writing the render spec, choose a visual grammar that belongs to the subject: ceremonial axis, editorial block system, kinetic campaign motion, emblem/grid identity, signal topology, or another clearly named family. Repeating patterns, analytical marks, and systematic reference labels are useful only when they fit the chosen grammar; they are not the default answer for every poster. Anchor the piece with simple phrase(s) or details positioned deliberately, using a limited color palette that feels intentional and cohesive. The result should feel like an authored art object whose composition, typography, scale, and symbolic language are specific to the request.
+For posters, key art, announcements, and other single-page work, use the packaged renderer when one of its visual grammars can express the selected direction. Use a compact custom renderer when the concept requires photography, detailed illustration, hand lettering, a narrative scene, or another grammar the package cannot honestly represent.
 
-**Text as a contextual element**: Text is always minimal and visual-first, but let context guide whether that means whisper-quiet labels or bold typographic gestures. A punk venue poster might have larger, more aggressive type than a minimalist ceramics studio identity. Most of the time, font should be thin. All use of fonts must be design-forward and prioritize visual communication. Regardless of text scale, nothing falls off the page and nothing overlaps. Every element must be contained within the canvas boundaries with proper margins. Check carefully that all text, graphics, and visual elements have breathing room and clear separation. This is non-negotiable for professional execution. **IMPORTANT: Use different fonts if writing text. Search the `./canvas-fonts` directory, but only use a font for text when it covers every visible character being rendered. Regardless of approach, sophistication is non-negotiable.**
+Do not force a direction through the packaged renderer merely because it is faster. `layoutFamily` describes form; `designIntent` describes subject purpose. They are independent.
 
-**Font coverage is part of canvas construction**: Before rendering any visible text into a PNG or PDF, confirm that the selected font has glyph coverage for the exact text. The packaged `./canvas-fonts` are primarily display fonts and may not cover non-Latin scripts; do not use them for Chinese, Japanese, Korean, or other text they cannot render. When the requested copy contains CJK or another non-Latin script, choose an installed system font with the needed coverage (for example through `fc-match :lang=zh-cn` on fontconfig systems or platform CJK fonts on macOS/Windows) or use an appropriately licensed downloaded font. Keep Latin display fonts for Latin labels when they fit the design. In code-based renderers such as PIL, canvas, SVG-to-PNG, or PDF generators, add a small glyph smoke check before final export and fail fast with a clear message if no compatible font is available. Never deliver rasterized tofu, replacement squares, or missing-glyph boxes as finished typography.
-
-Download and use whatever fonts are needed to make this a reality. Get creative by making the typography actually part of the art itself -- if the art is abstract, bring the font onto the canvas, not typeset digitally.
-
-## BOUNDED EXECUTION PATH
-
-For poster, key-art, announcement, and single-page static image requests, prefer the packaged renderer over writing a full custom drawing program from scratch when its supported visual grammars can express the request. The fast path is:
-1. Write the concise design philosophy `.md`.
-2. First classify a `designIntent`, then use its compatible `layoutFamily` and a `compositionVariant`; identify the 2–6 requested subject elements as `visualMotifs` before writing the compact JSON spec.
-3. Run the packaged renderer from this Skill package to create the PNG.
-4. Inspect or verify the generated artifact once.
-
-The packaged renderer lives at `scripts/render_static_canvas.py`. Because Skill packages are read-only command roots, do not pass `@skills/...` or absolute Skill paths as command arguments. From the workspace, run it through the injected environment variable:
+The packaged renderer lives at `scripts/render_static_canvas.py`. From a writable workspace, run it through the injected Skill root:
 
 `python3 -c "import os,runpy;runpy.run_path(os.path.join(os.environ['AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN'],'scripts','render_static_canvas.py'), run_name='__main__')" spec.json`
 
-The JSON spec should be small and design-oriented, not a dumped drawing program. Do not copy domain text from the example. Do not reuse the same `layoutFamily` or `compositionVariant` by habit across unrelated poster topics. A `layoutFamily` is only a grammar; it is not a complete composition. Treat user-requested objects (people, plants, buildings, flight, symbols, and so on) as visible `visualMotifs`, never as footer labels standing in for an illustration.
+Do not pass `@skills/...` or absolute Skill paths as command arguments.
 
-Classify `designIntent` before choosing a layout: `technology-system` → `signal-field`; `campaign-launch` → `kinetic-ribbons`; `commemoration` → `monument-axis`; `editorial-publication` → `editorial-blocks`; `identity-recognition` → `emblem-grid`. Enterprise, institutional, “沉稳”, “大气”, or “高端” alone are **not** commemoration. Use `monument-axis` only when the brief itself calls for remembrance, anniversary, history, ceremony, solemn tribute, or comparable symbolic commemoration. A technology/platform/AI release remains `technology-system` unless the user explicitly asks for a commemorative treatment. The renderer rejects an explicit `designIntent` whose `layoutFamily` conflicts with this mapping, so do not use a mismatched pair. Do not read the renderer source just to discover fields; the supported contract is below, and the renderer can also print it with `--schema`.
+## Packaged render contract
+
+Write a compact JSON spec. Copy the selected `artDirection` exactly from the philosophy decision into the spec. New specs with a `designIntent` require `artDirection`.
 
 ```json
 {
   "output": "poster.png",
-  "title": "城市更新论坛",
-  "subtitle": "连接空间 · 技术 · 公共生活",
-  "movement": "Civic Pulse",
-  "designIntent": "editorial-publication",
+  "title": "城市智能服务周",
+  "subtitle": "技术回到街道与日常",
+  "movement": "Public Patchwork",
+  "designIntent": "technology-system",
+  "artDirection": {
+    "concept": "Digital services behave like layered notices gathered across a city",
+    "emotionalRegister": "humanist",
+    "materialLanguage": "ink-paper",
+    "compositionTopology": "modular-editorial",
+    "typographicVoice": "editorial-contrast",
+    "colorStrategy": "warm-editorial",
+    "imageMode": "collaged-fragments",
+    "avoid": ["dark network field", "glowing central orb"]
+  },
   "layoutFamily": "editorial-blocks",
   "compositionVariant": "split-spread",
-  "palette": {
-    "backgroundTop": "#f2eee6",
-    "backgroundBottom": "#d8e4df",
-    "primary": "#1d3557",
-    "secondary": "#e76f51",
-    "tertiary": "#2a9d8f",
-    "text": "#172026",
-    "mutedText": "#5f6f73"
-  },
-  "labels": ["主旨演讲", "城市实验", "公共数据", "设计工作坊", "治理创新", "开放展陈"],
+  "labels": ["公共服务", "社区共创", "开放数据", "街区实验"],
   "visualMotifs": [
-    {"kind": "building", "label": "公共空间"},
-    {"kind": "orb", "label": "数据流"}
+    {"kind": "building", "label": "街区"},
+    {"kind": "figure", "label": "市民"}
   ],
-  "texture": 0.18,
-  "density": 0.62,
+  "texture": 0.28,
+  "density": 0.58,
   "seed": 311,
-  "canvas": { "width": 1800, "height": 2700 }
+  "canvas": {"width": 1800, "height": 2700}
 }
 ```
 
-Supported fields are `output`, `title`, `subtitle`, `movement`, `designIntent`, `layoutFamily`, `compositionVariant`, `palette`, `labels`, `visualMotifs`, `texture`, `density`, `seed`, and `canvas`. For new work `designIntent` is required and must be one returned by `--schema`; the paired `layoutFamily` must match its mapping. `compositionVariant` must be a variant returned by `--schema` for that family (or `auto`); write it explicitly when an art direction calls for a particular spatial treatment. `visualMotifs` contains up to six `{kind, label?}` objects; supported kinds are `star`, `banner`, `figure`, `building`, `leaf`, `orb`, `peak`, and `flight`.
+The renderer derives a default palette, texture, density, family, and variant from `artDirection`. Explicit values may refine that direction but must not contradict it. Unsupported family and variant names fail instead of silently falling back.
 
-Supported `layoutFamily` values are:
-- `signal-field`: networked signals, data flow, systems, technology, maps of invisible relations.
-- `monument-axis`: ceremonial, commemorative, institutional, historical, solemn, or symbolic subjects.
-- `editorial-blocks`: magazine, forum, exhibition, cultural, civic, report-like, or design-led publicity.
-- `kinetic-ribbons`: campaigns, launches, festivals, events, sport, movement, performance, or high-energy announcements.
-- `emblem-grid`: identity, brand, awards, badges, memberships, achievements, or logo-like symbolic posters.
+Composition topology maps to the packaged grammar:
 
-Use CJK title/subtitle text directly in the spec when needed; the renderer performs font selection and glyph smoke checks internally. The render receipt returns the chosen `compositionVariant` and the accepted visual motifs: use that receipt when reviewing whether the required subjects were represented. If the request needs a specific visual grammar or an illustrated subject outside these families and generic motifs, write a compact custom renderer instead of forcing it through an unsuitable packaged family.
+- `networked-field` → `signal-field`
+- `axial-monument` → `monument-axis`
+- `modular-editorial` → `editorial-blocks`
+- `directional-flow` → `kinetic-ribbons`
+- `symbolic-grid` → `emblem-grid`
 
-After `verify_artifact_acceptance` passes for the final PNG, use that acceptance receipt plus the `computer_write_file` receipts as completion evidence. Do not reread the philosophy or JSON spec merely to restate what the receipts already prove.
+These mappings describe geometry, not subject matter. A technology poster can be modular, kinetic, symbolic, axial, or networked when the concept justifies it.
 
-Only write a custom render script when the user request truly needs a visual grammar the packaged renderer cannot express. If writing custom code, keep the script compact, use loops and data structures instead of verbose repeated drawing statements, resolve Skill assets through `AGENTLOOP_SKILL_ROOT_*` inside the script, and do not spend separate model turns enumerating font indexes. Font probing must be a small block inside the render script or packaged renderer, followed immediately by export.
+`visualMotifs` contains up to six visible subject elements. Supported kinds are returned by `--schema`. Motifs must act as graphic subjects, not as footer labels standing in for an illustration. If the requested subject cannot be represented by these motifs, use a custom renderer.
 
-To push boundaries, follow design instinct/intuition while using the philosophy as a guiding principle. Embrace ultimate design freedom and choice. Push aesthetics and design to the frontier. 
+Use CJK text directly. Before export, verify that the chosen font covers every visible character. The packaged renderer performs font selection and glyph smoke checks. A custom renderer must fail clearly when it cannot find compatible glyphs; never deliver tofu or replacement boxes.
 
-**CRITICAL**: To achieve human-crafted quality (not AI-generated), create work that looks like it took countless hours. Make it appear as though someone at the absolute top of their field labored over every detail with painstaking care. Ensure the composition, spacing, color choices, typography - everything screams expert-level craftsmanship. Double-check that nothing overlaps, formatting is flawless, every detail perfect. Create something that could be shown to people to prove expertise and rank as undeniably impressive.
+## Inspect the result
 
-Output the final result as a single, downloadable .pdf or .png file, alongside the design philosophy used as a .md file.
+Inspect the actual image once at full view and once as a small thumbnail. Confirm:
 
----
+- the thumbnail silhouette matches the selected composition topology;
+- material, color, type, and image treatment match `artDirection`;
+- the central metaphor is visible rather than described only in labels;
+- required copy is legible, contained, and free of collisions;
+- the result is meaningfully distinct from relevant earlier posters when those are available.
 
-## FINAL STEP
+Technical artifact acceptance proves that the file exists and decodes. It does not prove design quality or diversity. If refinement is needed, change the weak design decision or composition instead of merely adding decoration.
 
-**IMPORTANT**: The user ALREADY said "It isn't perfect enough. It must be pristine, a masterpiece if craftsmanship, as if it were about to be displayed in a museum."
-
-**CRITICAL**: To refine the work, avoid adding more graphics; instead refine what has been created and make it extremely crisp, respecting the design philosophy and the principles of minimalism entirely. Rather than adding a fun filter or refactoring a font, consider how to make the existing composition more cohesive with the art. If the instinct is to call a new function or draw a new shape, STOP and instead ask: "How can I make what's already here more of a piece of art?"
-
-Take a second pass. Go back to the code and refine/polish further to make this a philosophically designed masterpiece.
-
-## MULTI-PAGE OPTION
-
-To create additional pages when requested, create more creative pages along the same lines as the design philosophy but distinctly different as well. Bundle those pages in the same .pdf or many .pngs. Treat the first page as just a single page in a whole coffee table book waiting to be filled. Make the next pages unique twists and memories of the original. Have them almost tell a story in a very tasteful way. Exercise full creative freedom.
+Output the final PNG or PDF alongside the Markdown philosophy. For multiple requested pages, keep one coherent philosophy while varying composition and pacing across pages.

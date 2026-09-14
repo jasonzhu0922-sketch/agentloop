@@ -53,24 +53,104 @@ LAYOUT_VARIANTS = {
 
 MOTIF_KINDS = {"star", "banner", "figure", "building", "leaf", "orb", "peak", "flight"}
 
-# This is a visual-design contract, not a subject-specific template. It keeps
-# the model from using institutional scale as a proxy for a commemorative axis.
-DESIGN_INTENT_FAMILIES = {
-    "technology-system": "signal-field",
-    "campaign-launch": "kinetic-ribbons",
-    "commemoration": "monument-axis",
-    "editorial-publication": "editorial-blocks",
-    "identity-recognition": "emblem-grid",
+DESIGN_INTENTS = [
+    "technology-system",
+    "campaign-launch",
+    "commemoration",
+    "editorial-publication",
+    "identity-recognition",
+]
+
+# Subject purpose and visual form are independent. The topology selected in the
+# art direction owns layout selection; a technology brief can therefore become
+# editorial, kinetic, symbolic, axial, or networked.
+COMPOSITION_TOPOLOGY_FAMILIES = {
+    "networked-field": "signal-field",
+    "axial-monument": "monument-axis",
+    "modular-editorial": "editorial-blocks",
+    "directional-flow": "kinetic-ribbons",
+    "symbolic-grid": "emblem-grid",
+}
+
+ART_DIRECTION_VALUES = {
+    "emotionalRegister": ["restrained", "solemn", "exuberant", "humanist", "playful"],
+    "materialLanguage": ["luminous-glass", "ink-paper", "cut-paper", "raw-print", "polished-metal"],
+    "compositionTopology": list(COMPOSITION_TOPOLOGY_FAMILIES),
+    "typographicVoice": ["quiet-technical", "monumental-display", "editorial-contrast", "compressed-impact", "humanist-poetic"],
+    "colorStrategy": ["nocturne-electric", "warm-editorial", "monochrome-accent", "saturated-pop", "earth-paper"],
+    "imageMode": ["abstract-system", "symbolic-object", "narrative-scene", "type-as-image", "collaged-fragments"],
+}
+
+COLOR_STRATEGY_PALETTES = {
+    "nocturne-electric": DEFAULT_PALETTE,
+    "warm-editorial": {
+        "backgroundTop": "#f3ead8", "backgroundBottom": "#d9c8aa", "primary": "#c84a32",
+        "secondary": "#1d4f5f", "tertiary": "#e2a93b", "text": "#202522", "mutedText": "#645f55",
+    },
+    "monochrome-accent": {
+        "backgroundTop": "#eeeeea", "backgroundBottom": "#c9cbc7", "primary": "#171918",
+        "secondary": "#e13b2c", "tertiary": "#696d69", "text": "#111211", "mutedText": "#5a5d59",
+    },
+    "saturated-pop": {
+        "backgroundTop": "#f7d83d", "backgroundBottom": "#f05a7e", "primary": "#2446e8",
+        "secondary": "#f23324", "tertiary": "#28b87a", "text": "#171238", "mutedText": "#543f5f",
+    },
+    "earth-paper": {
+        "backgroundTop": "#e5d3ad", "backgroundBottom": "#b88f68", "primary": "#345b3e",
+        "secondary": "#9b3f2d", "tertiary": "#d29d3d", "text": "#2c241d", "mutedText": "#6f5948",
+    },
+}
+
+MATERIAL_TEXTURE_DEFAULTS = {
+    "luminous-glass": 0.12,
+    "ink-paper": 0.34,
+    "cut-paper": 0.18,
+    "raw-print": 0.48,
+    "polished-metal": 0.16,
+}
+
+EMOTIONAL_DENSITY_FACTORS = {
+    "restrained": 0.78,
+    "solemn": 0.90,
+    "exuberant": 1.24,
+    "humanist": 1.0,
+    "playful": 1.14,
+}
+
+TYPOGRAPHIC_SCALE_FACTORS = {
+    "quiet-technical": 0.80,
+    "monumental-display": 1.24,
+    "editorial-contrast": 1.04,
+    "compressed-impact": 1.16,
+    "humanist-poetic": 0.92,
+}
+
+IMAGE_MODE_TITLE_FACTORS = {
+    "abstract-system": 0.94,
+    "symbolic-object": 1.0,
+    "narrative-scene": 0.88,
+    "type-as-image": 1.30,
+    "collaged-fragments": 1.04,
 }
 
 SPEC_SCHEMA = {
-    "schema": "agentloop.canvasDesignSpec/v1",
+    "schema": "agentloop.canvasDesignSpec/v2",
+    # Keep executable choices before prose and examples. Runtime tool-result
+    # previews preserve the beginning of large schema output, so contract
+    # values must survive even when later descriptive content is compacted.
+    "artDirectionValues": ART_DIRECTION_VALUES,
+    "compositionTopologyFamilies": COMPOSITION_TOPOLOGY_FAMILIES,
+    "layoutVariants": LAYOUT_VARIANTS,
+    "motifKinds": sorted(MOTIF_KINDS),
+    "designIntents": DESIGN_INTENTS,
+    "layoutFamilies": LAYOUT_FAMILIES,
     "fields": {
         "output": "Relative PNG output path under the workspace.",
         "title": "Visible primary title, CJK-safe.",
         "subtitle": "Visible secondary phrase, CJK-safe.",
         "movement": "Short Latin style marker for the upper-left label.",
-        "designIntent": "Required for new specs: technology-system, campaign-launch, commemoration, editorial-publication, or identity-recognition. It determines the compatible layout family.",
+        "designIntent": "Subject purpose: technology-system, campaign-launch, commemoration, editorial-publication, or identity-recognition. It does not determine visual form.",
+        "artDirection": "Required when designIntent is present. Contains concept, emotionalRegister, materialLanguage, compositionTopology, typographicVoice, colorStrategy, imageMode, and optional avoid.",
         "layoutFamily": "Optional composition grammar: signal-field, monument-axis, editorial-blocks, kinetic-ribbons, or emblem-grid.",
         "compositionVariant": "Optional named composition within the chosen grammar. Use one returned by --schema; omit or use auto only when the subject has no specific spatial direction.",
         "palette": {
@@ -89,16 +169,22 @@ SPEC_SCHEMA = {
         "seed": "Integer deterministic composition seed.",
         "canvas": {"width": "900-3600", "height": "1200-5400"},
     },
-    "layoutFamilies": LAYOUT_FAMILIES,
-    "layoutVariants": LAYOUT_VARIANTS,
-    "motifKinds": sorted(MOTIF_KINDS),
-    "designIntentFamilies": DESIGN_INTENT_FAMILIES,
     "example": {
         "output": "poster.png",
         "title": "城市更新论坛",
         "subtitle": "连接空间 · 技术 · 公共生活",
         "movement": "Civic Pulse",
-        "designIntent": "editorial-publication",
+        "designIntent": "technology-system",
+        "artDirection": {
+            "concept": "Digital services behave like layered notices gathered across a city",
+            "emotionalRegister": "humanist",
+            "materialLanguage": "ink-paper",
+            "compositionTopology": "modular-editorial",
+            "typographicVoice": "editorial-contrast",
+            "colorStrategy": "warm-editorial",
+            "imageMode": "collaged-fragments",
+            "avoid": ["dark network field", "glowing central orb"],
+        },
         "layoutFamily": "editorial-blocks",
         "compositionVariant": "split-spread",
         "palette": {
@@ -135,10 +221,10 @@ def main() -> int:
         raise ValueError("output must be a relative workspace path")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    image, layout_family, composition_variant, visual_motifs, design_intent = render(spec)
+    image, layout_family, composition_variant, visual_motifs, design_intent, art_direction = render(spec)
     image.save(output, "PNG", optimize=True)
     print(json.dumps({
-        "schema": "agentloop.canvasDesignRender/v1",
+        "schema": "agentloop.canvasDesignRender/v2",
         "artifactPath": str(output),
         "width": image.width,
         "height": image.height,
@@ -146,11 +232,13 @@ def main() -> int:
         "compositionVariant": composition_variant,
         "visualMotifs": visual_motifs,
         "designIntent": design_intent,
+        "artDirection": art_direction,
+        "artDirectionFingerprint": art_direction_fingerprint(art_direction),
     }, ensure_ascii=False))
     return 0
 
 
-def render(spec: dict[str, Any]) -> tuple[Image.Image, str, str, list[dict[str, str]], str | None]:
+def render(spec: dict[str, Any]) -> tuple[Image.Image, str, str, list[dict[str, str]], str | None, dict[str, Any] | None]:
     seed = int(spec.get("seed", 42))
     rng = random.Random(seed)
     canvas = spec.get("canvas") if isinstance(spec.get("canvas"), dict) else {}
@@ -159,28 +247,42 @@ def render(spec: dict[str, Any]) -> tuple[Image.Image, str, str, list[dict[str, 
     width = max(900, min(width, 3600))
     height = max(1200, min(height, 5400))
 
-    palette = dict(DEFAULT_PALETTE)
+    raw_design_intent = spec.get("designIntent") or spec.get("design_intent")
+    design_intent = normalize_design_intent(raw_design_intent)
+    if raw_design_intent and design_intent is None:
+        raise ValueError(f"unsupported designIntent={raw_design_intent}")
+    art_direction = normalize_art_direction(spec.get("artDirection") or spec.get("art_direction"))
+    if design_intent and art_direction is None:
+        raise ValueError("artDirection is required when designIntent is present")
+
+    color_strategy = art_direction.get("colorStrategy") if art_direction else "nocturne-electric"
+    palette = dict(COLOR_STRATEGY_PALETTES[color_strategy])
     if isinstance(spec.get("palette"), dict):
         palette.update({k: v for k, v in spec["palette"].items() if isinstance(v, str)})
 
-    design_intent = normalize_design_intent(spec.get("designIntent") or spec.get("design_intent"))
-    layout_family = resolve_layout_family(spec, design_intent)
-    composition_variant = resolve_composition_variant(spec, layout_family)
+    layout_family = resolve_layout_family(spec, art_direction)
+    composition_variant = resolve_composition_variant(spec, layout_family, art_direction)
     visual_motifs = normalize_visual_motifs(spec.get("visualMotifs") or spec.get("visual_motifs"))
 
     img = Image.new("RGB", (width, height), hex_color(palette["backgroundTop"]))
     draw_gradient(img, hex_color(palette["backgroundTop"]), hex_color(palette["backgroundBottom"]))
     draw = ImageDraw.Draw(img, "RGBA")
 
-    texture = float(spec.get("texture", 0.35))
-    density = float(spec.get("density", 0.72))
+    material_language = art_direction.get("materialLanguage") if art_direction else "luminous-glass"
+    emotional_register = art_direction.get("emotionalRegister") if art_direction else "restrained"
+    typographic_voice = art_direction.get("typographicVoice") if art_direction else "quiet-technical"
+    image_mode = art_direction.get("imageMode") if art_direction else "abstract-system"
+    texture = float(spec.get("texture", MATERIAL_TEXTURE_DEFAULTS[material_language]))
+    density = float(spec.get("density", 0.66)) * EMOTIONAL_DENSITY_FACTORS[emotional_register]
+    density = max(0.1, min(density, 1.0))
 
     title = clean_text(spec.get("title", "Untitled"))
     subtitle = clean_text(spec.get("subtitle", ""))
     movement = clean_text(spec.get("movement", "Visual System"))
     labels = [clean_text(item) for item in spec.get("labels", []) if clean_text(item)][:8]
 
-    title_font = fit_font_for_text(title, int(width * 0.86), max(58, width // 15), prefer_cjk=True)
+    title_scale = TYPOGRAPHIC_SCALE_FACTORS[typographic_voice] * IMAGE_MODE_TITLE_FACTORS[image_mode]
+    title_font = fit_font_for_text(title, int(width * 0.86), max(58, int(width // 15 * title_scale)), prefer_cjk=True)
     subtitle_font = fit_font_for_text(subtitle or title, int(width * 0.72), max(24, width // 38), prefer_cjk=contains_cjk(subtitle))
     latin_font = packaged_font("Jura-Light.ttf", max(22, width // 70))
     mono_font = packaged_font("GeistMono-Regular.ttf", max(16, width // 110))
@@ -189,21 +291,22 @@ def render(spec: dict[str, Any]) -> tuple[Image.Image, str, str, list[dict[str, 
     if layout_family == "monument-axis":
         draw_monument_axis(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font, composition_variant)
     elif layout_family == "editorial-blocks":
-        draw_editorial_blocks(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        draw_editorial_blocks(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font, composition_variant)
     elif layout_family == "kinetic-ribbons":
-        draw_kinetic_ribbons(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        draw_kinetic_ribbons(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font, composition_variant)
     elif layout_family == "emblem-grid":
-        draw_emblem_grid(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        draw_emblem_grid(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font, composition_variant)
     else:
-        draw_signal_field(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font)
+        draw_signal_field(draw, width, height, palette, rng, density, title, subtitle, movement, labels, title_font, subtitle_font, label_font, latin_font, mono_font, composition_variant)
 
-    draw_visual_motifs(draw, width, height, palette, visual_motifs, composition_variant)
+    draw_visual_motifs(draw, width, height, palette, visual_motifs, composition_variant, image_mode)
+    apply_material_finish(draw, width, height, palette, rng, material_language, texture)
     add_grain(img, rng, texture)
-    draw_variant_frame(draw, width, height, palette, composition_variant)
-    return img, layout_family, composition_variant, visual_motifs, design_intent
+    draw_variant_frame(draw, width, height, palette, composition_variant, material_language)
+    return img, layout_family, composition_variant, visual_motifs, design_intent, art_direction
 
 
-def normalize_layout_family(value: Any) -> str:
+def normalize_layout_family(value: Any) -> str | None:
     raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
     aliases = {
         "field": "signal-field",
@@ -219,7 +322,7 @@ def normalize_layout_family(value: Any) -> str:
         "grid": "emblem-grid",
     }
     candidate = aliases.get(raw, raw)
-    return candidate if candidate in LAYOUT_FAMILIES else "signal-field"
+    return candidate if candidate in LAYOUT_FAMILIES else None
 
 
 def normalize_design_intent(value: Any) -> str | None:
@@ -238,23 +341,61 @@ def normalize_design_intent(value: Any) -> str | None:
         "recognition": "identity-recognition",
     }
     candidate = aliases.get(raw, raw)
-    return candidate if candidate in DESIGN_INTENT_FAMILIES else None
+    return candidate if candidate in DESIGN_INTENTS else None
 
 
-def resolve_layout_family(spec: dict[str, Any], design_intent: str | None) -> str:
+def normalize_art_direction(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("artDirection must be an object")
+
+    concept = clean_text(value.get("concept", ""))
+    if not concept:
+        raise ValueError("artDirection.concept is required")
+
+    normalized: dict[str, Any] = {"concept": concept}
+    for field, allowed in ART_DIRECTION_VALUES.items():
+        raw = value.get(field)
+        candidate = str(raw or "").strip().lower().replace("_", "-").replace(" ", "-")
+        if candidate not in allowed:
+            raise ValueError(f"artDirection.{field} must be one of: {', '.join(allowed)}")
+        normalized[field] = candidate
+
+    avoid = value.get("avoid", [])
+    if avoid is not None and not isinstance(avoid, list):
+        raise ValueError("artDirection.avoid must be an array")
+    normalized["avoid"] = [clean_text(item)[:80] for item in (avoid or []) if clean_text(item)][:6]
+    return normalized
+
+
+def art_direction_fingerprint(art_direction: dict[str, Any] | None) -> str | None:
+    if art_direction is None:
+        return None
+    canonical = json.dumps(art_direction, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_layout_family(spec: dict[str, Any], art_direction: dict[str, Any] | None) -> str:
     requested = spec.get("layoutFamily") or spec.get("layout_family")
-    if design_intent:
-        expected = DESIGN_INTENT_FAMILIES[design_intent]
-        if requested and normalize_layout_family(requested) != expected:
-            raise ValueError(f"designIntent={design_intent} requires layoutFamily={expected}")
+    normalized_requested = normalize_layout_family(requested) if requested else None
+    if requested and normalized_requested is None:
+        raise ValueError(f"unsupported layoutFamily={requested}")
+    if art_direction:
+        topology = art_direction["compositionTopology"]
+        expected = COMPOSITION_TOPOLOGY_FAMILIES[topology]
+        if normalized_requested and normalized_requested != expected:
+            raise ValueError(f"artDirection.compositionTopology={topology} requires layoutFamily={expected}")
         return expected
-    return normalize_layout_family(requested or auto_layout_family(spec))
+    return normalized_requested or auto_layout_family(spec)
 
 
-def resolve_composition_variant(spec: dict[str, Any], layout_family: str) -> str:
+def resolve_composition_variant(spec: dict[str, Any], layout_family: str, art_direction: dict[str, Any] | None) -> str:
     variants = LAYOUT_VARIANTS[layout_family]
     requested = str(spec.get("compositionVariant") or spec.get("composition_variant") or "").strip().lower().replace("_", "-")
-    if requested and requested != "auto" and requested in variants:
+    if requested and requested != "auto":
+        if requested not in variants:
+            raise ValueError(f"unsupported compositionVariant={requested} for layoutFamily={layout_family}")
         return requested
 
     # Use all authored direction, not just a generic family or a fixed default
@@ -267,6 +408,7 @@ def resolve_composition_variant(spec: dict[str, Any], layout_family: str) -> str
         "movement": clean_text(spec.get("movement", "")),
         "labels": [clean_text(item) for item in spec.get("labels", []) if clean_text(item)],
         "motifs": spec.get("visualMotifs") or spec.get("visual_motifs") or [],
+        "artDirection": art_direction or {},
         "seed": spec.get("seed", 42),
     }, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha256(signature.encode("utf-8")).digest()
@@ -332,16 +474,57 @@ def draw_signal_field(
     label_font: ImageFont.ImageFont,
     latin_font: ImageFont.ImageFont,
     mono_font: ImageFont.ImageFont,
+    composition_variant: str,
 ) -> None:
+    primary, secondary, tertiary = (hex_color(palette[key]) for key in ("primary", "secondary", "tertiary"))
+    text, muted = hex_color(palette["text"]), hex_color(palette["mutedText"])
+    if composition_variant == "cartographic":
+        draw_metadata(draw, width, height, palette, movement, "CARTOGRAPHIC SIGNAL", latin_font, mono_font)
+        for x in range(int(width * 0.10), int(width * 0.94), max(36, width // 12)):
+            draw.line((x, int(height * 0.22), x, int(height * 0.86)), fill=muted + (42,), width=1)
+        for y in range(int(height * 0.22), int(height * 0.87), max(44, height // 18)):
+            draw.line((int(width * 0.10), y, int(width * 0.94), y), fill=muted + (36,), width=1)
+        for index in range(int(8 + density * 14)):
+            x0 = int(width * (0.12 + rng.random() * 0.48))
+            y0 = int(height * (0.31 + rng.random() * 0.42))
+            points = [(x0, y0)]
+            for step in range(1, 5):
+                points.append((x0 + int(width * 0.08 * step), y0 + rng.randint(-height // 14, height // 14)))
+            draw.line(points, fill=[primary, secondary, tertiary][index % 3] + (115,), width=max(2, width // 620))
+            draw.ellipse((x0 - 7, y0 - 7, x0 + 7, y0 + 7), fill=secondary + (175,))
+        draw.text((int(width * 0.10), int(height * 0.13)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.105), int(height * 0.13) + font_height(title_font) + int(height * 0.016)), subtitle, font=subtitle_font, fill=muted + (225,))
+        draw_label_column(draw, int(width * 0.68), int(height * 0.68), palette, labels, label_font, 0)
+        return
+
+    if composition_variant == "orbital":
+        draw_metadata(draw, width, height, palette, movement, "ORBITAL SYSTEM", latin_font, mono_font)
+        cx, cy = int(width * 0.60), int(height * 0.52)
+        for index in range(7):
+            rx = int(width * (0.09 + index * 0.040))
+            ry = int(height * (0.07 + index * 0.035))
+            color = [primary, tertiary, secondary][index % 3]
+            draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), outline=color + (125 - index * 8,), width=max(2, width // 700))
+        for index in range(int(16 + density * 24)):
+            angle = rng.random() * math.tau
+            radius = width * (0.11 + rng.random() * 0.30)
+            x, y = cx + math.cos(angle) * radius, cy + math.sin(angle) * radius * 1.25
+            size = max(3, int(width * (0.003 + rng.random() * 0.006)))
+            draw.ellipse((x - size, y - size, x + size, y + size), fill=[primary, secondary, tertiary][index % 3] + (170,))
+        draw.text((int(width * 0.09), int(height * 0.15)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.095), int(height * 0.15) + font_height(title_font) + int(height * 0.016)), subtitle, font=subtitle_font, fill=muted + (225,))
+        draw_label_column(draw, int(width * 0.10), int(height * 0.66), palette, labels, label_font, 0)
+        return
+
     draw_field(draw, width, height, palette, rng, density)
     draw_meridians(draw, width, height, palette, rng, density)
-    draw_metadata(draw, width, height, palette, movement, "SIGNAL FIELD MAP", latin_font, mono_font)
-
+    draw_metadata(draw, width, height, palette, movement, "CONSTELLATION FIELD", latin_font, mono_font)
     title_y = int(height * 0.125)
-    draw_centered(draw, (width // 2, title_y), title, title_font, hex_color(palette["text"]) + (245,))
+    draw_centered(draw, (width // 2, title_y), title, title_font, text + (245,))
     if subtitle:
-        draw_centered(draw, (width // 2, title_y + int(width * 0.07)), subtitle, subtitle_font, hex_color(palette["mutedText"]) + (220,))
-
+        draw_centered(draw, (width // 2, title_y + int(width * 0.07)), subtitle, subtitle_font, muted + (220,))
     draw_label_grid(draw, width, height, palette, labels, label_font, int(height * 0.72), 3)
 
 
@@ -512,13 +695,42 @@ def draw_editorial_blocks(
     label_font: ImageFont.ImageFont,
     latin_font: ImageFont.ImageFont,
     mono_font: ImageFont.ImageFont,
+    composition_variant: str,
 ) -> None:
     primary = hex_color(palette["primary"])
     secondary = hex_color(palette["secondary"])
     tertiary = hex_color(palette["tertiary"])
     text = hex_color(palette["text"])
     muted = hex_color(palette["mutedText"])
-    draw_metadata(draw, width, height, palette, movement, "EDITORIAL BLOCK STUDY", latin_font, mono_font)
+    if composition_variant == "index":
+        draw_metadata(draw, width, height, palette, movement, "EDITORIAL INDEX", latin_font, mono_font)
+        rail_x = int(width * 0.28)
+        draw.rectangle((int(width * 0.08), int(height * 0.16), rail_x, int(height * 0.90)), fill=primary + (205,))
+        for index in range(7):
+            y = int(height * (0.22 + index * 0.085))
+            draw.text((int(width * 0.11), y), f"{index + 1:02d}", font=mono_font, fill=text + (210,))
+            draw.line((rail_x + int(width * 0.04), y + 12, int(width * (0.90 - index * 0.035)), y + 12), fill=[secondary, tertiary][index % 2] + (130,), width=max(2, width // 500))
+        index_title_font = fit_font_for_text(title, int(width * 0.54), getattr(title_font, "size", max(58, width // 15)), prefer_cjk=contains_cjk(title))
+        draw.text((int(width * 0.36), int(height * 0.18)), title, font=index_title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.365), int(height * 0.18) + font_height(index_title_font) + int(height * 0.02)), subtitle, font=subtitle_font, fill=muted + (225,))
+        draw_label_column(draw, int(width * 0.56), int(height * 0.66), palette, labels, label_font, 0)
+        return
+
+    if composition_variant == "split-spread":
+        draw_metadata(draw, width, height, palette, movement, "SPLIT SPREAD", latin_font, mono_font)
+        gutter = width // 2
+        draw.rectangle((int(width * 0.07), int(height * 0.19), gutter - int(width * 0.025), int(height * 0.78)), fill=primary + (205,))
+        draw.rectangle((gutter + int(width * 0.025), int(height * 0.29), int(width * 0.93), int(height * 0.88)), fill=secondary + (175,))
+        draw.rectangle((gutter + int(width * 0.025), int(height * 0.19), int(width * 0.74), int(height * 0.27)), fill=tertiary + (190,))
+        draw.line((gutter, int(height * 0.13), gutter, int(height * 0.91)), fill=text + (70,), width=max(2, width // 700))
+        draw.text((int(width * 0.10), int(height * 0.12)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.54), int(height * 0.34)), subtitle, font=subtitle_font, fill=text + (225,))
+        draw_label_column(draw, int(width * 0.55), int(height * 0.62), palette, labels, label_font, 0)
+        return
+
+    draw_metadata(draw, width, height, palette, movement, "OVERLAP STUDY", latin_font, mono_font)
 
     blocks = [
         (0.10, 0.18, 0.55, 0.43, primary, 215),
@@ -562,13 +774,42 @@ def draw_kinetic_ribbons(
     label_font: ImageFont.ImageFont,
     latin_font: ImageFont.ImageFont,
     mono_font: ImageFont.ImageFont,
+    composition_variant: str,
 ) -> None:
     primary = hex_color(palette["primary"])
     secondary = hex_color(palette["secondary"])
     tertiary = hex_color(palette["tertiary"])
     text = hex_color(palette["text"])
     muted = hex_color(palette["mutedText"])
-    draw_metadata(draw, width, height, palette, movement, "KINETIC RIBBON FIELD", latin_font, mono_font)
+    if composition_variant == "streamers":
+        draw_metadata(draw, width, height, palette, movement, "VERTICAL STREAMERS", latin_font, mono_font)
+        for index in range(int(10 + density * 12)):
+            x = int(width * (0.08 + index / max(1, int(10 + density * 12) - 1) * 0.84))
+            points = []
+            for step in range(34):
+                y = int(height * (0.16 + step / 33 * 0.68))
+                wave = math.sin(step * 0.32 + index * 0.65) * width * (0.018 + 0.015 * density)
+                points.append((x + wave, y))
+            draw.line(points, fill=[primary, secondary, tertiary][index % 3] + (145,), width=max(4, width // 170))
+        draw.text((int(width * 0.10), int(height * 0.13)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.58), int(height * 0.73)), subtitle, font=subtitle_font, fill=muted + (230,))
+        draw_label_column(draw, int(width * 0.10), int(height * 0.72), palette, labels, label_font, 0)
+        return
+
+    if composition_variant == "cross-current":
+        draw_metadata(draw, width, height, palette, movement, "CROSS CURRENT", latin_font, mono_font)
+        for index in range(int(8 + density * 10)):
+            offset = index * int(height * 0.025)
+            draw.line((-width * 0.08, height * 0.26 + offset, width * 1.08, height * 0.72 - offset * 0.25), fill=[primary, secondary, tertiary][index % 3] + (100 + index % 4 * 18,), width=max(5, width // 145))
+            draw.line((-width * 0.08, height * 0.70 - offset * 0.3, width * 1.08, height * 0.30 + offset), fill=[tertiary, primary, secondary][index % 3] + (75 + index % 3 * 22,), width=max(3, width // 210))
+        draw.text((int(width * 0.09), int(height * 0.12)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.095), int(height * 0.12) + font_height(title_font) + int(height * 0.018)), subtitle, font=subtitle_font, fill=muted + (225,))
+        draw_label_grid(draw, width, height, palette, labels, label_font, int(height * 0.79), 4)
+        return
+
+    draw_metadata(draw, width, height, palette, movement, "KINETIC SWEEP", latin_font, mono_font)
 
     for i in range(int(9 + 12 * density)):
         y = int(height * (0.18 + rng.random() * 0.56))
@@ -611,13 +852,50 @@ def draw_emblem_grid(
     label_font: ImageFont.ImageFont,
     latin_font: ImageFont.ImageFont,
     mono_font: ImageFont.ImageFont,
+    composition_variant: str,
 ) -> None:
     primary = hex_color(palette["primary"])
     secondary = hex_color(palette["secondary"])
     tertiary = hex_color(palette["tertiary"])
     text = hex_color(palette["text"])
     muted = hex_color(palette["mutedText"])
-    draw_metadata(draw, width, height, palette, movement, "EMBLEM GRID", latin_font, mono_font)
+    if composition_variant == "totem":
+        draw_metadata(draw, width, height, palette, movement, "VERTICAL TOTEM", latin_font, mono_font)
+        cx = width // 2
+        for index, scale in enumerate((0.28, 0.21, 0.15, 0.10)):
+            size = int(width * scale)
+            cy = int(height * (0.34 + index * 0.12))
+            color = [primary, secondary, tertiary, text][index]
+            if index % 2:
+                draw.polygon([(cx, cy - size), (cx + size, cy), (cx, cy + size), (cx - size, cy)], fill=color + (65,), outline=color + (190,))
+            else:
+                draw.ellipse((cx - size, cy - size, cx + size, cy + size), outline=color + (190,), width=max(3, width // 330))
+        draw.text((int(width * 0.09), int(height * 0.13)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.095), int(height * 0.13) + font_height(title_font) + int(height * 0.018)), subtitle, font=subtitle_font, fill=muted + (225,))
+        draw_label_column(draw, int(width * 0.10), int(height * 0.70), palette, labels, label_font, 0)
+        return
+
+    if composition_variant == "stamp-sheet":
+        draw_metadata(draw, width, height, palette, movement, "STAMP SHEET", latin_font, mono_font)
+        cols, rows = 3, 3
+        cell_w, cell_h = width * 0.24, height * 0.14
+        start_x, start_y = width * 0.10, height * 0.29
+        for row in range(rows):
+            for col in range(cols):
+                x0 = start_x + col * cell_w * 1.18
+                y0 = start_y + row * cell_h * 1.12
+                color = [primary, secondary, tertiary][(row + col) % 3]
+                draw.rectangle((x0, y0, x0 + cell_w, y0 + cell_h), fill=color + (40 + (row + col) % 2 * 45,), outline=color + (175,), width=max(2, width // 650))
+                inset = min(cell_w, cell_h) * 0.22
+                draw.ellipse((x0 + inset, y0 + inset, x0 + cell_w - inset, y0 + cell_h - inset), outline=text + (115,), width=max(1, width // 850))
+        draw.text((int(width * 0.10), int(height * 0.12)), title, font=title_font, fill=text + (248,))
+        if subtitle:
+            draw.text((int(width * 0.105), int(height * 0.12) + font_height(title_font) + int(height * 0.016)), subtitle, font=subtitle_font, fill=muted + (225,))
+        draw_label_grid(draw, width, height, palette, labels, label_font, int(height * 0.80), 3)
+        return
+
+    draw_metadata(draw, width, height, palette, movement, "RADIAL EMBLEM", latin_font, mono_font)
 
     cell = max(54, width // 18)
     for x in range(int(width * 0.08), int(width * 0.92), cell):
@@ -758,6 +1036,7 @@ def draw_visual_motifs(
     palette: dict[str, str],
     motifs: list[dict[str, str]],
     composition_variant: str,
+    image_mode: str,
 ) -> None:
     """Draw brief-owned visual subjects as marks, separate from footer labels."""
     if not motifs:
@@ -765,19 +1044,73 @@ def draw_visual_motifs(
     primary, secondary, tertiary = (hex_color(palette[key]) for key in ("primary", "secondary", "tertiary"))
     text = hex_color(palette["text"])
     positions = {
+        "constellation": [(0.18, 0.52), (0.82, 0.50), (0.28, 0.66), (0.72, 0.65)],
+        "cartographic": [(0.18, 0.52), (0.48, 0.43), (0.80, 0.58), (0.38, 0.70)],
+        "orbital": [(0.64, 0.48), (0.80, 0.37), (0.55, 0.61), (0.25, 0.56)],
         "radiant-spire": [(0.16, 0.49), (0.84, 0.48), (0.20, 0.62), (0.80, 0.63)],
         "procession": [(0.16, 0.61), (0.83, 0.59), (0.23, 0.48), (0.75, 0.43)],
         "archive-seal": [(0.32, 0.66), (0.70, 0.72), (0.82, 0.31), (0.47, 0.54)],
+        "overlap": [(0.23, 0.48), (0.72, 0.54), (0.35, 0.68), (0.79, 0.70)],
+        "index": [(0.45, 0.42), (0.76, 0.50), (0.48, 0.62), (0.80, 0.70)],
+        "split-spread": [(0.27, 0.48), (0.72, 0.48), (0.29, 0.67), (0.73, 0.68)],
+        "sweep": [(0.18, 0.52), (0.82, 0.55), (0.34, 0.66), (0.68, 0.65)],
+        "streamers": [(0.22, 0.45), (0.45, 0.55), (0.70, 0.44), (0.82, 0.65)],
+        "cross-current": [(0.22, 0.38), (0.76, 0.40), (0.36, 0.65), (0.66, 0.68)],
+        "radial": [(0.50, 0.46), (0.22, 0.55), (0.78, 0.55), (0.50, 0.66)],
+        "totem": [(0.50, 0.35), (0.50, 0.49), (0.50, 0.63), (0.75, 0.55)],
+        "stamp-sheet": [(0.20, 0.33), (0.50, 0.33), (0.80, 0.33), (0.20, 0.55)],
     }.get(composition_variant, [(0.16, 0.56), (0.84, 0.55), (0.23, 0.67), (0.77, 0.68)])
+    size_factors = {
+        "abstract-system": 0.78,
+        "symbolic-object": 1.55,
+        "narrative-scene": 1.05,
+        "type-as-image": 0.68,
+        "collaged-fragments": 1.18,
+    }
     for index, motif in enumerate(motifs):
         x_ratio, y_ratio = positions[index % len(positions)]
         x, y = int(width * x_ratio), int(height * y_ratio)
-        size = max(24, width // 34)
+        size = max(24, int(width // 34 * size_factors[image_mode]))
         color = [primary, secondary, tertiary][index % 3]
         draw_motif_symbol(draw, motif["kind"], x, y, size, color, text)
         if motif["label"]:
             font = fit_font_for_text(motif["label"], int(width * 0.18), max(16, width // 72), prefer_cjk=contains_cjk(motif["label"]))
             draw_centered(draw, (x, y + int(size * 1.65)), motif["label"], font, text + (205,))
+
+
+def apply_material_finish(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    palette: dict[str, str],
+    rng: random.Random,
+    material_language: str,
+    amount: float,
+) -> None:
+    primary, secondary = hex_color(palette["primary"]), hex_color(palette["secondary"])
+    muted = hex_color(palette["mutedText"])
+    if material_language == "ink-paper":
+        for _ in range(int(18 + amount * 42)):
+            y = rng.randint(0, height - 1)
+            draw.line((0, y, width, y + rng.randint(-3, 3)), fill=muted + (18,), width=1)
+    elif material_language == "cut-paper":
+        for index in range(5):
+            inset = int(width * (0.018 + index * 0.012))
+            draw.rectangle((inset, inset, width - inset, height - inset), outline=[primary, secondary][index % 2] + (28 + index * 7,), width=max(2, width // 650))
+    elif material_language == "raw-print":
+        for _ in range(int(35 + amount * 90)):
+            x = rng.randint(0, width - 1)
+            y = rng.randint(0, height - 1)
+            radius = rng.randint(1, max(2, width // 260))
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=[primary, secondary][rng.randint(0, 1)] + (28,))
+    elif material_language == "polished-metal":
+        for index in range(8):
+            y = int(height * (0.10 + index * 0.105))
+            draw.line((0, y, width, y + int(height * 0.012)), fill=muted + (20 + index * 2,), width=max(2, height // 520))
+    else:  # luminous-glass
+        for index in range(4):
+            inset = int(width * (0.09 + index * 0.045))
+            draw.arc((inset, int(height * 0.18), width - inset, int(height * 0.78)), 195, 345, fill=[primary, secondary][index % 2] + (36,), width=max(1, width // 850))
 
 
 def draw_motif_symbol(
@@ -835,9 +1168,18 @@ def draw_variant_frame(
     height: int,
     palette: dict[str, str],
     composition_variant: str,
+    material_language: str,
 ) -> None:
     primary, secondary = hex_color(palette["primary"]), hex_color(palette["secondary"])
     frame = int(width * 0.04)
+    if material_language == "raw-print":
+        mark = int(width * 0.055)
+        for x, y, dx, dy in ((frame, frame, mark, 0), (frame, frame, 0, mark), (width - frame, height - frame, -mark, 0), (width - frame, height - frame, 0, -mark)):
+            draw.line((x, y, x + dx, y + dy), fill=secondary + (155,), width=max(3, width // 520))
+        return
+    if material_language == "ink-paper":
+        draw.rectangle((frame, frame, width - frame, height - frame), outline=secondary + (78,), width=max(1, width // 1000))
+        return
     if composition_variant in {"procession", "streamers", "cross-current"}:
         draw.line((frame, int(height * 0.11), width - frame, int(height * 0.11)), fill=primary + (120,), width=max(2, width // 700))
         draw.line((frame, int(height * 0.89), width - frame, int(height * 0.89)), fill=secondary + (120,), width=max(2, width // 700))
