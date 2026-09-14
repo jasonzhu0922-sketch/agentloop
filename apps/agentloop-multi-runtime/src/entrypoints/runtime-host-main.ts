@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
+import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../config/config.ts";
 import { HttpResourceImporter } from "../runtime/http-resource-importer.ts";
@@ -39,6 +39,8 @@ const runtimeDispatchToken = requiredEnv("RUNTIME_DISPATCH_TOKEN");
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
 const maxConcurrentRuns = positiveInteger(process.env.MAX_CONCURRENT_RUNS, 2);
 const heartbeatIntervalMs = positiveInteger(process.env.HEARTBEAT_INTERVAL_MS, 5_000);
+const logColorOptions = terminalLogColorOptions();
+const runtimeLogLabel = colorizeTerminalLogLabel(`[${runtimeId}]`, runtimeId, logColorOptions);
 // Skill roots are application configuration, not a Router or task input. Load
 // them before creating runtime state so a bad deployment fails without a
 // partially initialized Host database.
@@ -80,7 +82,7 @@ const runs = new RunService({
     ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
     STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
   },
-  runEventLogSink: (line) => process.stdout.write(`[${runtimeId}] ${line}\n`),
+  runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
 await runs.reconcileInterruptedRuns();
 const runtimeHost = new AgentLoopRuntimeHost(runs, new HttpResourceImporter(runs, routerAttachmentToken), {
@@ -125,6 +127,14 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 3_600_000) throw new Error("value must be a positive integer");
   return parsed;
+}
+
+function terminalLogColorOptions(): { readonly colorMode: string | undefined; readonly isTTY: boolean | undefined; readonly noColor: string | undefined } {
+  return {
+    colorMode: process.env.AGENTLOOP_LOG_COLOR,
+    isTTY: process.stdout.isTTY,
+    noColor: process.env.NO_COLOR,
+  };
 }
 
 async function activeRunCount(): Promise<number> {

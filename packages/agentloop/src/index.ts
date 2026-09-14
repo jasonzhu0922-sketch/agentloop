@@ -89,6 +89,8 @@ export { LlmProviderRegistry } from "./runtime/provider-registry.ts";
 export type { LlmModelSummary, LlmProviderSummary } from "./runtime/provider-registry.ts";
 export { RunEventHub } from "./runtime/run-event-hub.ts";
 export type { LiveRunEvent } from "./runtime/run-event-hub.ts";
+export { colorizeTerminalLogLabel, colorizeTerminalLogLine, shouldUseTerminalLogColor } from "./runtime/terminal-log.ts";
+export type { TerminalLogColorMode, TerminalLogColorOptions } from "./runtime/terminal-log.ts";
 export { collectProcessArtifacts, artifactId, previewProcessArtifact } from "./runtime/process-artifacts.ts";
 export type {
   ProcessArtifact,

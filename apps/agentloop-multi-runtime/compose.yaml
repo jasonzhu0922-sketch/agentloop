@@ -11,6 +11,10 @@ x-runtime-environment: &runtime_environment
   MAX_CONCURRENT_RUNS: 20
   # Keep the local demo control plane responsive after a Router restart.
   HEARTBEAT_INTERVAL_MS: 1000
+  # Containers write through a pipe, so auto-detection would see no TTY.
+  # Keep interactive `docker compose up` event logs colored; set `never`,
+  # `NO_COLOR=1`, or `auto` when a plain-text collector requires it.
+  AGENTLOOP_LOG_COLOR: ${AGENTLOOP_LOG_COLOR:-always}
 
 # All four services run the same application image. Build it once through the
 # Router service; the Runtime Hosts and Web service reuse its local tag.

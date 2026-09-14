@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync } from "node:fs";
+import { colorizeTerminalLogLabel } from "@zhujun/agentloop";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeCount = parseRuntimeCount(process.argv.slice(2));
@@ -77,6 +78,11 @@ const common = {
   ...process.env,
   RUNTIME_DISPATCH_TOKEN: dispatchToken,
   RUNTIME_ATTACHMENT_TOKEN: attachmentToken,
+  // Child stdout is piped so this launcher can add a Runtime prefix.  The
+  // Host therefore cannot see the user's TTY and needs an explicit default.
+  AGENTLOOP_LOG_COLOR: process.env.NO_COLOR === undefined
+    ? (process.env.AGENTLOOP_LOG_COLOR ?? "always")
+    : "never",
 };
 const defaultWebOrigins = [...new Set([
   `http://${routerHost}:${webPort}`,
@@ -148,8 +154,14 @@ function start(label, entrypoint, environment, envFiles = []) {
     env: childEnvironment,
     stdio: ["inherit", "pipe", "pipe"],
   });
-  child.stdout.on("data", (chunk) => process.stdout.write(`[${label}] ${chunk}`));
-  child.stderr.on("data", (chunk) => process.stderr.write(`[${label}] ${chunk}`));
+  const logColorOptions = {
+    colorMode: childEnvironment.AGENTLOOP_LOG_COLOR,
+    isTTY: process.stdout.isTTY,
+    noColor: childEnvironment.NO_COLOR,
+  };
+  const childLogLabel = colorizeTerminalLogLabel(`[${label}]`, label, logColorOptions);
+  child.stdout.on("data", (chunk) => process.stdout.write(`${childLogLabel} ${chunk}`));
+  child.stderr.on("data", (chunk) => process.stderr.write(`${childLogLabel} ${chunk}`));
   child.on("exit", (code, signal) => {
     if (!closing && code !== 0) {
       process.stderr.write(`[${label}] exited with ${signal ?? `code ${code}`}\n`);

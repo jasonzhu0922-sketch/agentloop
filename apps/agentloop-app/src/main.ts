@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
   AppDatabase,
   BatchService,
+  colorizeTerminalLogLine,
   createPlaywrightArtifactAcceptanceProvider,
   createWebTools,
   LlmProviderRegistry,
@@ -95,7 +96,13 @@ const runs = new RunService({
   ],
   ...(process.env.AGENTLOOP_RUN_EVENT_LOGS === "0"
     ? {}
-    : { runEventLogSink: (line) => process.stdout.write(`${line}\n`) }),
+    : {
+      runEventLogSink: (line) => process.stdout.write(`${colorizeTerminalLogLine(line, {
+        colorMode: process.env.AGENTLOOP_LOG_COLOR,
+        isTTY: process.stdout.isTTY,
+        noColor: process.env.NO_COLOR,
+      })}\n`),
+    }),
   planningExtensions: planningExtensionPlugins.extensions,
 });
 const reconciledRunCount = await runs.reconcileInterruptedRuns();
