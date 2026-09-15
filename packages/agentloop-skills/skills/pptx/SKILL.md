@@ -31,6 +31,7 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 | Script | What it does |
 |---|---|
 | `scripts/thumbnail.py deck.pptx [prefix]` | Labeled grid of every slide, for picking template layouts. `.pptx` only. Pass `prefix` — it defaults to `thumbnails`, which overwrites the grids of any other deck done in the same directory |
+| `scripts/apply_unified_theme.py inventory/apply` | One safe primitive for a colour/font-only theme transformation. It inventories actual colours/fonts and applies a supplied declarative mapping without regex-editing OOXML. |
 | `scripts/add_slide.py unpacked/ slide2.xml [--after slideN.xml]` | Duplicate a slide (or a `slideLayoutN.xml`) with all the package bookkeeping. Also takes a `.pptx` directly with `-o out.pptx` |
 | `scripts/clean.py unpacked/` | Delete slides, media, and rels no longer referenced. Run **after** `<p:sldIdLst>` is final |
 | `scripts/office/validate.py deck.pptx [--original src.pptx]` | Schema, relationship, content-type, chart and slide checks; each failure names its fix. Pass `--original` for any template-derived deck — it baselines the schema checks against the template, so the template's own XSD errors don't read as yours |
@@ -60,6 +61,31 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 - **Icons:** render `react-icons` to SVG (`ReactDOMServer.renderToStaticMarkup`), rasterize with `sharp` at ≥256px, and insert via `addImage({ data: "image/png;base64," + buf.toString("base64") })` — the `image/png;base64,` prefix is required (`react-icons`, `react`, `react-dom`, and `sharp` are preinstalled — `npm install react-icons react react-dom sharp` only if a require fails).
 
 ## Editing existing decks and templates
+
+### Methodology: generate a new PPTX under one unified visual theme
+
+When the user asks to preserve teaching/business content but deliver a newly themed deck, treat it as a design-and-preservation problem, not a fixed “replace colours” procedure. First establish what must remain invariant (facts, language, slide order, editable diagrams, source artwork) and what may change (palette, typography, master/layout, image treatment, hierarchy). Render and inspect the entire source deck, including masters and repeated elements, before choosing a design.
+
+Form a short design direction for this particular deck: audience and use setting, a dominant/supporting/accent palette, type pairing that works for the deck’s languages, contrast rules, and a small set of slide families. Map each source slide to a family such as cover, section break, explanation, comparison, exercise, data, or conclusion. A unified theme means those families share visual rules while retaining enough variation for their different purposes; it does not mean applying one fixed palette or one layout to every deck.
+
+Choose the least invasive technique that can realize that direction:
+
+- **Colour/font-only restyle:** retain the layouts and artwork; use `scripts/apply_unified_theme.py` with a deck-specific `theme.json`. Inventory explicit colours first, map every visible source colour deliberately, write a new output file, and pass `--require-complete-color-map`. This helper is safe for OOXML colour/font nodes only. Do not write ad-hoc regex transforms for `<a:rPr>`, `<a:srgbClr>`, or theme XML.
+- **Hierarchy or layout refresh:** keep the content and useful source objects, but make focused DOM-safe edits to the relevant slide families. Work from a copy, preserve semantic text runs and relationships, and use existing masters/layouts where they fit.
+- **Full visual redesign or a new template:** build a new editable PPTX, transferring verified source content, data, and required artwork into the new design. Do not pretend that a theme-map script can perform this level of redesign.
+
+For the colour/font-only branch, the safe helper has this contract:
+
+```bash
+python scripts/apply_unified_theme.py inventory /absolute/source.pptx --report /absolute/theme-inventory.json
+python scripts/apply_unified_theme.py apply /absolute/source.pptx /absolute/themed.pptx \
+  --theme /absolute/theme.json --report /absolute/theme-receipt.json \
+  --require-complete-color-map
+```
+
+The supplied `theme.json` contains this deck’s name, all 12 theme colour roles, a source-colour to target-colour map, and Latin/EA fonts. The helper changes declared theme colour/font schemes and explicit mapped `a:srgbClr` values. It preserves slide text, slide count, all meaningful package parts, and non-XML parts; it removes only known unreferenced `[trash]/` staging parts, records that removal in the receipt, and rejects malformed XML.
+
+Whichever branch is chosen, acceptance is evidence-based rather than a frozen checklist: validate the new PPTX against the original when it derives from one, then render and inspect every slide for readability, contrast, overflow, overlap, and unwanted changes to source artwork. A transform receipt proves only its own preservation contract, never that the visual design is suitable for delivery.
 
 Pick layouts first: `python scripts/thumbnail.py template.pptx template-thumbs` writes a labeled grid of every slide and prints the file(s) it created — `template-thumbs.jpg`, split into `template-thumbs-N.jpg` past 12 slides. **Always pass that second argument, named after the deck.** It defaults to `thumbnails`, so two decks thumbnailed in one directory silently overwrite each other's grids — the first deck's are simply gone (template analysis only — visual QA needs the full-resolution renders from [Converting to Images](#converting-to-images); it only accepts `.pptx`, so copy a `.potx` to a `.pptx` name first). Use it with `markitdown` to map each content section onto a template slide, and vary the layouts — don't put every section on the same title-and-bullets slide.
 
