@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { AppError, badRequest } from "../shared/errors.ts";
+import { AppError, badRequest, forbidden } from "../shared/errors.ts";
+import { ComputerExecutor } from "../computer/computer-executor.ts";
+import { contentStructure, type ContentReference } from "../runtime/content-reference.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 
@@ -38,6 +40,8 @@ interface WebFetchResult {
   readonly url: string;
   readonly title: string | undefined;
   readonly content: string;
+  readonly contentLocation?: ContentReference;
+  readonly contentSummary?: Record<string, unknown>;
   readonly bytes: number;
   readonly contentType?: string;
   readonly binary?: boolean;
@@ -111,6 +115,7 @@ function createFetchTool(
       "Fetch a web page by URL and return readable content plus a canonical evidenceReceipt.",
       "Follows redirects including JavaScript and meta-refresh redirects; returns { schema, url, title, content, bytes, truncated, evidenceReceipt }.",
       "Prefer this over computer_run_command + curl for reading articles, documentation, or search result pages.",
+      "Readable content is saved as an immutable contentLocation with sha256 and a structural summary; read that reference for omitted details instead of fetching again.",
     ].join(" "),
     inputSchema: objectSchema(["url"], {
       url: { type: "string" },
@@ -130,7 +135,14 @@ function createFetchTool(
       }
       return { url, format };
     },
-    execute: async (_context, value) => fetchWebPage(value.url, value.format, options, timeoutMs),
+    execute: async (context, value) => {
+      const root = context.grant.workspaceRoot;
+      if (root === undefined) throw forbidden("webfetch requires a Run workspace for durable content references");
+      const result = await fetchWebPage(value.url, value.format, options, timeoutMs);
+      if (result.binary) return result;
+      const contentLocation = await new ComputerExecutor(root).storeContentReference(result.content);
+      return { ...result, contentLocation, contentSummary: contentStructure(result.content) };
+    },
   };
 }
 
@@ -196,12 +208,17 @@ async function fetchWebPage(
       };
       return { ...result, evidenceReceipt: webFetchReceipt(result) };
     }
-    const redirectTarget = extractRedirectTarget(fetched.html);
+    const isHtml = /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(fetched.contentType ?? "");
+    const redirectTarget = isHtml ? extractRedirectTarget(fetched.html) : undefined;
     if (redirectTarget !== undefined) {
       current = new URL(redirectTarget, fetched.url).toString();
       continue;
     }
-    const content = format === "markdown" ? htmlToMarkdown(fetched.html) : htmlToText(fetched.html);
+    // JSON and plain text are already readable. HTML conversion would corrupt
+    // literal tags/entities inside structured values before snapshotting them.
+    const content = isHtml
+      ? format === "markdown" ? htmlToMarkdown(fetched.html) : htmlToText(fetched.html)
+      : fetched.html;
     const result = {
       schema: "agentloop.webFetch/v1" as const,
       url: fetched.url,

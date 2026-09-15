@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { ARTIFACT_RECEIPT_SCHEMA, CONTEXT_ARTIFACT_PROJECTION_SCHEMA } from "./artifact-receipt.ts";
+import { CONTENT_REFERENCE_READ_INSTRUCTION, CONTENT_REFERENCE_WINDOW_CHARACTERS } from "./content-reference.ts";
 import type {
   AgentLoopToolEvidence,
   ModelAdapter,
   ModelInvocation,
   ModelMessage,
+  ModelToolCall,
   ModelToolDefinition,
   RuntimeContextSnapshot,
   RuntimeEvent,
@@ -252,8 +254,8 @@ export class ContextAssembler {
         type: "context.tool_outputs_projected",
         data: {
           contextEpoch: this.contextEpoch,
-          thresholdCharacters: this.policy.largeToolResultProjectionCharacters,
-          previewCharacters: this.policy.largeToolResultPreviewCharacters,
+          thresholdCharacters: this.largeToolResultProjectionCharacters(),
+          previewCharacters: this.largeToolResultPreviewCharacters(),
           toolResults: newlyProjected,
         },
       });
@@ -408,16 +410,24 @@ export class ContextAssembler {
   }
 
   private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
-    const artifactArgumentProjections = artifactToolCallArgumentProjections(canonicalMessages, startIndex);
-    const tail = canonicalMessages.slice(startIndex).map((message) => {
+    const committedWriteProjections = committedWriteToolCallProjections(canonicalMessages, startIndex);
+    const tail: ModelMessage[] = [];
+    for (const message of canonicalMessages.slice(startIndex)) {
       if (message.role === "assistant") {
-        return projectAssistantToolCallArguments(message, artifactArgumentProjections);
+        tail.push(projectAssistantToolCallArguments(message, committedWriteProjections));
+        continue;
       }
-      if (message.role !== "tool") return message;
+      // A successfully completed write is represented above as a neutral server
+      // evidence record. Keeping its paired tool result would violate the native
+      // function-call protocol after removing the executable historical call.
+      if (message.role === "tool" && committedWriteProjections.has(message.toolCallId)) continue;
+      if (message.role !== "tool") {
+        tail.push(message);
+        continue;
+      }
       const pruned = this.prunedToolResults.get(message.toolCallId);
-      if (pruned === undefined) return message;
-      return { ...message, content: prunedToolMarker(pruned) };
-    });
+      tail.push(pruned === undefined ? message : { ...message, content: prunedToolMarker(pruned) });
+    }
     return tail;
   }
 
@@ -444,6 +454,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
+        || isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const record: PrunedToolResult = {
@@ -475,6 +486,7 @@ export class ContextAssembler {
         || message.name === "load_skill"
         || message.isError
         || message.content.length <= this.largeToolResultProjectionCharacters()
+        || isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const structuredEvidence = structuredToolResultProjection(message.name, message.content);
@@ -515,6 +527,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
+        || isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const structuredEvidence = structuredToolResultProjection(message.name, message.content);
@@ -633,8 +646,14 @@ export class ContextAssembler {
       Math.min(this.policy.preserveRecentTokens, Math.floor((usable - anchorTokens) * 0.8)),
     );
     if (tailBudget <= 0) return undefined;
+    const firstCurrentRead = canonicalMessages.findIndex((_, index) => isCurrentReferenceWindow(canonicalMessages, index));
+    let lastTailStart = canonicalMessages.length;
+    if (firstCurrentRead >= 0) {
+      lastTailStart = firstCurrentRead;
+      while (lastTailStart > 0 && canonicalMessages[lastTailStart].role === "tool") lastTailStart -= 1;
+    }
     const candidates: number[] = [];
-    for (let index = this.firstKeptMessageIndex + 1; index < canonicalMessages.length; index += 1) {
+    for (let index = this.firstKeptMessageIndex + 1; index < canonicalMessages.length && index <= lastTailStart; index += 1) {
       if (canonicalMessages[index].role !== "tool") candidates.push(index);
     }
     // A completion candidate can itself be larger than the entire retained
@@ -643,7 +662,7 @@ export class ContextAssembler {
     // retaining an over-budget synthetic tail. The canonical transcript and
     // assessment evidence retain the original candidate; this only selects an
     // empty provider-transcript tail after it has been summarized.
-    candidates.push(canonicalMessages.length);
+    if (firstCurrentRead < 0) candidates.push(canonicalMessages.length);
     for (const index of candidates) {
       const tail = this.buildProjectionFrom(canonicalMessages, index);
       const tailTokens = this.estimateInvocationTokens(tools, runtimeContext, tail) - baseInputTokens;
@@ -983,6 +1002,10 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
   if (structuredEvidence !== undefined) {
     return `[Tool evidence receipt ${message.name} id=${message.toolCallId}]: ${structuredToolEvidenceLedger(message.content) ?? structuredEvidence}`;
   }
+  const structuredResult = structuredToolResultProjection(message.name, message.content);
+  if (structuredResult !== undefined) {
+    return `[Tool result ${message.name} id=${message.toolCallId}]: ${structuredResult}`;
+  }
   return `[Tool ${message.isError ? "error" : "result"} ${message.name} id=${message.toolCallId}]: ${truncateForSummary(message.content, toolResultLimit)}`;
 }
 
@@ -1052,6 +1075,8 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
     uploadedSource,
     analysisResultRef,
     contentLocation,
+    contentSummary: recordValue(value.contentSummary),
+    outputReferences: commandOutputReferences(value),
     evidenceReceipt: {
       schema: stringValue(receipt.schema),
       sourceType,
@@ -1064,7 +1089,7 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
       evidenceKinds: recordValue(receipt.evidenceKinds),
     },
     instruction: contentLocation !== undefined
-      ? "Use the structured evidence first. If exact omitted command output is required, read only the contentLocation path and verify its sha256; do not rerun the same command solely to recover prior output."
+      ? CONTENT_REFERENCE_READ_INSTRUCTION
       : analysisResultRef !== undefined
       ? "This is a durable deterministic analysis result. Use its resultPointer or groupsPointer with computer_read_json and an offset/limit window whenever exact values are needed; do not infer omitted groups from the receipt."
       : sourceType === "uploaded_source"
@@ -1091,7 +1116,30 @@ function commandOutputContentLocationProjection(value: Record<string, unknown>):
     bytes: numberValue(source.bytes),
     characters: numberValue(source.characters),
     previewCharacters: numberValue(source.previewCharacters),
+    format: stringValue(source.format),
   });
+}
+
+function commandOutputReferences(value: Record<string, unknown>): unknown {
+  return omitUndefinedDeep({
+    stdout: commandOutputContentLocationProjection({ contentLocation: value.stdoutRef }),
+    stderr: commandOutputContentLocationProjection({ contentLocation: value.stderrRef }),
+  });
+}
+
+function isCurrentReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
+  // Only the last tool batch is an unconsumed working set. Older reads return
+  // to a ref/summary, including after recovery reconstructs the transcript.
+  if (messages.slice(index + 1).some((message) => message.role !== "tool")) return false;
+  const message = messages[index];
+  if (message.role !== "tool" || message.isError) return false;
+  const value = parseJsonRecord(message.content);
+  if (message.name === "computer_read_file" && value?.schema === "agentloop.contentReferenceRead/v1") {
+    return typeof value.content === "string" && value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+  }
+  return message.name === "computer_read_json" && value?.schema === "agentloop.jsonRead/v1"
+    && Array.isArray(value.queries) && value.queries.length > 0
+    && message.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
 }
 
 const UPLOADED_SOURCE_CONTENT_PROJECTION_LIMIT = 12_000;
@@ -1145,6 +1193,43 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   }
   if (recordValue(value.evidenceReceipt) !== undefined) return undefined;
   const schema = stringValue(value.schema);
+  const contentLocation = commandOutputContentLocationProjection(value);
+  if (contentLocation !== undefined) {
+    return JSON.stringify(omitUndefinedDeep({
+      schema: "agentloop.contextContentReference/v1",
+      sourceSchema: schema,
+      contentLocation,
+      outputReferences: commandOutputReferences(value),
+      exitCode: value.exitCode,
+      signal: value.signal,
+      timedOut: value.timedOut,
+      truncated: value.truncated,
+      fileChanges: value.fileChanges,
+      fileChangesTruncated: value.fileChangesTruncated,
+      contentSummary: value.contentSummary,
+      characterOffset: value.characterOffset,
+      returnedCharacters: value.returnedCharacters,
+      nextCharacterOffset: value.nextCharacterOffset,
+      complete: value.complete,
+      preview: typeof value.content === "string" ? value.content.slice(0, 800) : undefined,
+      stdout: typeof value.stdout === "string" ? value.stdout.slice(0, 800) : undefined,
+      stderr: typeof value.stderr === "string" ? value.stderr.slice(0, 800) : undefined,
+      instruction: CONTENT_REFERENCE_READ_INSTRUCTION,
+    }));
+  }
+  if (toolName === "computer_read_json" && schema === "agentloop.jsonRead/v1") {
+    return JSON.stringify(omitUndefinedDeep({
+      schema: "agentloop.contextJsonRead/v1",
+      path: value.path, sha256: value.sha256, bytes: value.bytes, root: value.root,
+      queries: Array.isArray(value.queries) ? value.queries.map((query) => {
+        const record = recordValue(query);
+        return record === undefined ? undefined : { ...record, value: undefined, values: undefined };
+      }) : undefined,
+      caveats: value.caveats,
+      valuesOmitted: true,
+      instruction: "JSON values omitted from this projection. Reuse already established facts; for missing details read this path with computer_read_json and a smaller pointer/offset/limit window (at most 12000 serialized characters), or a verified character window with computer_read_file.",
+    }));
+  }
   if (schema === "agentloop.paginatedHtmlMaterialization/v1") {
     return paginatedHtmlMaterializationProjection(value);
   }
@@ -1158,7 +1243,7 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   return undefined;
 }
 
-function artifactToolCallArgumentProjections(
+function committedWriteToolCallProjections(
   canonicalMessages: readonly ModelMessage[],
   startIndex: number,
 ): ReadonlyMap<string, Record<string, unknown>> {
@@ -1166,7 +1251,7 @@ function artifactToolCallArgumentProjections(
   for (let index = startIndex; index < canonicalMessages.length; index += 1) {
     const message = canonicalMessages[index];
     if (message.role !== "tool" || message.isError) continue;
-    const projection = artifactToolCallArgumentProjection(message.name, message.content);
+    const projection = committedWriteToolCallProjection(message.name, message.content);
     if (projection !== undefined) projections.set(message.toolCallId, projection);
   }
   return projections;
@@ -1177,20 +1262,27 @@ function projectAssistantToolCallArguments(
   projections: ReadonlyMap<string, Record<string, unknown>>,
 ): ModelMessage {
   if (message.toolCalls === undefined || message.toolCalls.length === 0) return message;
-  let changed = false;
-  const toolCalls = message.toolCalls.map((call) => {
+  const retainedToolCalls: ModelToolCall[] = [];
+  const committedWriteRecords: string[] = [];
+  for (const call of message.toolCalls) {
     const projection = projections.get(call.id);
-    if (projection === undefined) return call;
-    changed = true;
-    return {
-      ...call,
-      arguments: artifactToolCallArgumentsProjection(call.name, projection, call.arguments),
-    };
-  });
-  return changed ? { ...message, toolCalls } : message;
+    if (projection === undefined) {
+      retainedToolCalls.push(call);
+      continue;
+    }
+    committedWriteRecords.push(committedWriteTranscript(call.name, projection, call.arguments));
+  }
+  if (committedWriteRecords.length === 0) return message;
+  return {
+    role: "assistant",
+    content: [message.content, ...committedWriteRecords].filter((content) => content.length > 0).join("\n"),
+    ...(retainedToolCalls.length === 0 ? {} : { toolCalls: retainedToolCalls }),
+    ...(message.reasoningContent === undefined ? {} : { reasoningContent: message.reasoningContent }),
+  };
 }
 
-function artifactToolCallArgumentProjection(toolName: string, content: string): Record<string, unknown> | undefined {
+function committedWriteToolCallProjection(toolName: string, content: string): Record<string, unknown> | undefined {
+  if (toolName !== "computer_write_file") return undefined;
   const value = parseJsonRecord(content);
   if (value === undefined) return undefined;
   const receipt = recordValue(value.artifactReceipt);
@@ -1212,32 +1304,29 @@ function artifactToolCallArgumentProjection(toolName: string, content: string): 
   return recordValue(projection);
 }
 
-function artifactToolCallArgumentsProjection(
+function committedWriteTranscript(
   toolName: string,
   projection: Record<string, unknown>,
   originalArguments: unknown,
-): Record<string, unknown> {
-  const serializedArguments = JSON.stringify(originalArguments ?? null);
+): string {
   const originalRecord = recordValue(originalArguments);
-  const originalContent = stringValue(originalRecord?.content);
-  const projectedMetadata = omitUndefinedDeep({
-    ...projection,
+  const artifact = recordValue(projection.artifact);
+  const content = JSON.stringify(omitUndefinedDeep({
+    schema: "agentloop.committedToolHistory/v1",
+    toolName,
+    state: "completed",
+    artifact: compactArtifactReceiptArtifact(artifact ?? {}),
     originalArguments: {
-      sha256: digest(serializedArguments),
-      characters: serializedArguments.length,
-      contentCharacters: originalContent?.length,
-      contentSha256: originalContent === undefined ? undefined : digest(originalContent),
-      omittedFields: originalContent === undefined ? undefined : ["content"],
+      sha256: digest(JSON.stringify(originalArguments ?? null)),
+      characters: JSON.stringify(originalArguments ?? null).length,
+      contentCharacters: stringValue(originalRecord?.content)?.length,
+      contentSha256: typeof originalRecord?.content === "string" ? digest(originalRecord.content) : undefined,
+      omittedFields: typeof originalRecord?.content === "string" ? ["content"] : undefined,
       canonicalArgumentsPersisted: true,
     },
-  }) as Record<string, unknown>;
-  if (toolName !== "computer_write_file") return projectedMetadata;
-  const artifact = recordValue(projection.artifact);
-  return omitUndefinedDeep({
-    path: stringValue(originalRecord?.path) ?? stringValue(artifact?.path),
-    mode: stringValue(originalRecord?.mode),
-    content: "[Content omitted after this computer_write_file call succeeded in the current Run. The matching tool result is the committed result of this call, not a replay or an unknown pre-existing file. Continue from its artifact receipt; do not recreate, rename, reread, or probe this path solely because the content is omitted.]",
-  }) as Record<string, unknown>;
+    instruction: "This is a completed historical tool result supplied by the server, not an executable tool call. Original write content is omitted only from model context. Continue from the committed artifact receipt; never use an omission marker as file content.",
+  })).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
+  return `<runtime_evidence_record source="server" kind="committed_tool_history" encoding="json">\n${content}\n</runtime_evidence_record>`;
 }
 
 function hasArtifactEvidenceBoundary(
@@ -1598,6 +1687,9 @@ function structuredToolEvidenceLedger(content: string): string | undefined {
   const sourceRefLimit = sourceRefLedgerLimit(sourceType, stringValue(value.schema));
   const ledger = {
     schema: "agentloop.contextEvidenceLedger/v1",
+    contentLocation: commandOutputContentLocationProjection(value),
+    contentSummary: recordValue(value.contentSummary),
+    outputReferences: commandOutputReferences(value),
     sourceSchema: stringValue(value.schema),
     requested: numberValue(value.requested),
     returned: numberValue(value.returned),

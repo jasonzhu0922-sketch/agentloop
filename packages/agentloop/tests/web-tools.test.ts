@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import {
@@ -14,6 +17,9 @@ import {
   parseBaiduResults,
   parseRssItems,
 } from "../src/tools/web-tools.ts";
+
+const workspaceRoot = mkdtempSync(join(tmpdir(), "web-tools-refs-"));
+after(() => rmSync(workspaceRoot, { recursive: true, force: true }));
 
 test("web tools are registered and materialized as parallel replay-safe tools", () => {
   const registry = new ToolRegistry(createWebTools());
@@ -350,6 +356,7 @@ function close(server: ReturnType<typeof createServer>): Promise<void> {
 function grant(toolNames: readonly string[]) {
   return createCapabilityGrant({
     actorUserId: "user", runId: "run", depth: 0,
+    workspaceRoot,
     allowedToolNames: toolNames, allowedSkillIds: [],
   });
 }

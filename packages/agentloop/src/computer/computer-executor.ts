@@ -16,6 +16,7 @@ import {
   type SpreadsheetExtractionPayload,
 } from "./spreadsheet-inspector.ts";
 import { mapWithConcurrencyLimit } from "../shared/concurrency.ts";
+import { CONTENT_REFERENCE_WINDOW_CHARACTERS, type ContentReference } from "../runtime/content-reference.ts";
 
 const DEFAULT_OUTPUT_LIMIT = 100_000;
 const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
@@ -348,6 +349,42 @@ export class ComputerExecutor {
     } finally {
       await handle.close();
     }
+  }
+
+  async storeContentReference(content: string): Promise<ContentReference> {
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    let format: "json" | "text" = "text";
+    try { JSON.parse(content); format = "json"; } catch { /* Plain text snapshot. */ }
+    const path = `.agentloop/content-refs/${sha256.slice(0, 2)}/${sha256}.${format === "json" ? "json" : "txt"}`;
+    const target = await this.resolveWritable(path);
+    await fs.writeFile(target, content, { encoding: "utf8", flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+    if (await sha256File(target) !== sha256) throw badRequest("Content reference hash mismatch");
+    return { kind: "content_addressed", path, sha256, bytes: Buffer.byteLength(content), characters: content.length, format };
+  }
+
+  async readContentReference(path: string, expectedSha256: string, characterOffset: number, characterLimit: number) {
+    if (!Number.isSafeInteger(characterOffset) || characterOffset < 0
+      || !Number.isSafeInteger(characterLimit) || characterLimit < 1 || characterLimit > CONTENT_REFERENCE_WINDOW_CHARACTERS) {
+      throw badRequest("Invalid content reference character window");
+    }
+    const file = await this.readFile(path, 8_000_000);
+    if (file.truncated) throw badRequest("Content reference exceeds the 8000000 byte read limit");
+    const sha256 = createHash("sha256").update(file.content).digest("hex");
+    if (sha256 !== expectedSha256) throw badRequest("Content reference hash mismatch; the file changed since acquisition");
+    if (characterOffset > file.content.length) throw badRequest("characterOffset exceeds content length");
+    const content = file.content.slice(characterOffset, characterOffset + characterLimit);
+    const end = characterOffset + content.length;
+    return {
+      schema: "agentloop.contentReferenceRead/v1" as const,
+      contentLocation: { kind: "content_addressed", path: file.resolvedPath ?? path, sha256, bytes: file.bytes, characters: file.content.length },
+      characterOffset,
+      returnedCharacters: content.length,
+      nextCharacterOffset: end < file.content.length ? end : null,
+      complete: characterOffset === 0 && end === file.content.length,
+      content,
+    };
   }
 
   async inspectFile(path: string): Promise<{
@@ -1320,7 +1357,7 @@ export class ComputerExecutor {
     content: string;
     reference?: CommandOutputReference;
   }> {
-    if (content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD && structuredCommandOutput(content, kind, options) === undefined) {
+    if (content.length === 0) {
       return { content };
     }
     const sha256 = createHash("sha256").update(content).digest("hex");
@@ -1337,7 +1374,8 @@ export class ComputerExecutor {
     const path = relative(this.workspaceRoot, target);
     const bytes = Buffer.byteLength(content);
     return {
-      content: projectReferencedCommandOutput(kind, content, {
+      content: content.length <= COMMAND_OUTPUT_REFERENCE_THRESHOLD && structuredCommandOutput(content, kind, options) === undefined
+        ? content : projectReferencedCommandOutput(kind, content, {
         path,
         sha256,
         bytes,

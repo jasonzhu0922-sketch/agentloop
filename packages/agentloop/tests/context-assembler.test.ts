@@ -577,44 +577,28 @@ test("ContextAssembler projects generic written artifact receipts before file sa
     { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "deliverables/report.md" } }] },
     { role: "tool", toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
   ], []);
-  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
-  const projection = JSON.parse(projected.split("\n\n")[0]) as {
+  const projected = assembly.messages.find((message) => message.role === "assistant")?.content ?? "";
+  const serializedRecord = projected.match(/<runtime_evidence_record[^>]*>\n([\s\S]+)\n<\/runtime_evidence_record>/)?.[1];
+  assert.ok(serializedRecord);
+  const projection = JSON.parse(serializedRecord) as {
     schema: string;
-    artifactReceipt: {
-      sourceTool: string;
-      artifact: { path: string; sha256: string };
-      inspection: { sampleRangeCount: number };
-    };
-    actionContinuity: {
-      scope: string;
-      state: string;
-      relationship: string;
-      sourceTool: string;
-      artifactPath: string;
-      contentState: string;
-    };
+    toolName: string;
+    state: string;
+    artifact: { path: string; sha256: string };
     instruction: string;
   };
 
-  assert.equal(projection.schema, "agentloop.contextArtifactProjection/v1");
-  assert.equal(projection.artifactReceipt.sourceTool, "computer_write_file");
-  assert.equal(projection.artifactReceipt.artifact.path, "deliverables/report.md");
-  assert.equal(projection.artifactReceipt.artifact.sha256, "written-artifact-hash");
-  assert.equal(projection.artifactReceipt.inspection.sampleRangeCount, 1);
-  assert.deepEqual(projection.actionContinuity, {
-    scope: "current_run",
-    state: "committed",
-    relationship: "result_of_matching_tool_call",
-    sourceTool: "computer_write_file",
-    artifactPath: "deliverables/report.md",
-    contentState: "omitted_from_model_context",
-  });
-  assert.match(projection.instruction, /not a replay or an unknown pre-existing file/);
-  assert.match(projection.instruction, /execute or verify it as appropriate/);
+  assert.equal(projection.schema, "agentloop.committedToolHistory/v1");
+  assert.equal(projection.toolName, "computer_write_file");
+  assert.equal(projection.state, "completed");
+  assert.equal(projection.artifact.path, "deliverables/report.md");
+  assert.equal(projection.artifact.sha256, "written-artifact-hash");
+  assert.match(projection.instruction, /not an executable tool call/);
+  assert.equal(assembly.messages.some((message) => message.role === "tool" && message.toolCallId === "write"), false);
   assert.doesNotMatch(projected, /raw written file sample/);
 });
 
-test("ContextAssembler preserves current-Run write ownership while projecting successful artifact arguments", async () => {
+test("ContextAssembler preserves current-Run write ownership without projecting an executable write payload", async () => {
   const generatedMarkdown = "# Report\n\n" + "analysis paragraph ".repeat(2_500);
   const toolResult = JSON.stringify({
     path: "deliverables/report.md",
@@ -673,25 +657,15 @@ test("ContextAssembler preserves current-Run write ownership while projecting su
     (message): message is Extract<ModelMessage, { role: "assistant" }> => message.role === "assistant",
   );
   if (projectedAssistant === undefined) assert.fail("Projected assistant message is missing");
-  const projectedArguments = projectedAssistant.toolCalls?.[0]?.arguments as {
-    path?: string;
-    content?: string;
-    mode?: string;
-    overwrite?: boolean;
-    schema?: string;
-  };
-
-  assert.equal(projectedArguments.schema, undefined);
-  assert.equal(projectedArguments.path, "deliverables/report.md");
-  assert.equal(projectedArguments.mode, "create");
-  assert.match(projectedArguments.content ?? "", /succeeded in the current Run/);
-  assert.match(projectedArguments.content ?? "", /committed result of this call/);
-  assert.match(projectedArguments.content ?? "", /not a replay or an unknown pre-existing file/);
-  assert.doesNotMatch(projectedArguments.content ?? "", /Historical/);
-  assert.equal(projectedArguments.overwrite, undefined);
+  assert.equal(projectedAssistant.toolCalls, undefined);
+  assert.match(projectedAssistant.content, /runtime_evidence_record source="server" kind="committed_tool_history"/);
+  assert.match(projectedAssistant.content, /agentloop\.committedToolHistory\/v1/);
+  assert.match(projectedAssistant.content, /deliverables\/report\.md/);
+  assert.match(projectedAssistant.content, /completed historical tool result/);
+  assert.match(projectedAssistant.content, /never use an omission marker as file content/);
+  assert.equal(assembly.messages.some((message) => message.role === "tool" && message.toolCallId === "write"), false);
   assert.doesNotMatch(JSON.stringify(assembly.messages), /analysis paragraph analysis paragraph analysis paragraph/);
-  assert.doesNotMatch(JSON.stringify(projectedAssistant.toolCalls), /agentloop\.contextArtifactToolCallArguments/);
-  assert.doesNotMatch(JSON.stringify(projectedAssistant.toolCalls), /written-artifact-hash|42000|# Report/);
+  assert.doesNotMatch(projectedAssistant.content, /# Report/);
   assert.equal((canonical[0] as unknown as { toolCalls: [{ arguments: { content: string } }] }).toolCalls[0].arguments.content, generatedMarkdown);
 });
 

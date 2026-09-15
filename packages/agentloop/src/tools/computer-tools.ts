@@ -8,6 +8,7 @@ import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
 import type { PatchFileInput, WriteFileMode } from "../computer/computer-executor.ts";
 import { parsePaginatedHtmlMaterializeInput, renderPaginatedHtml } from "./paginated-html-materializer.ts";
+import { CONTENT_REFERENCE_WINDOW_CHARACTERS } from "../runtime/content-reference.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
 const MAX_COMMAND_ARGUMENT_CHARACTERS = 4_096;
@@ -54,15 +55,22 @@ export function createComputerTools(
     },
     {
       name: "computer_read_file",
+      // A verified 12000-character window can expand sixfold in JSON escaping.
+      // Keep serialization from corrupting a window already bounded by the reader.
+      maxResultCharacters: CONTENT_REFERENCE_WINDOW_CHARACTERS * 6 + 32_000,
       description: [
         "Read a UTF-8 file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "path must be relative to an authorized root; absolute paths are rejected.",
         "For loaded Skill reference files, use @skills/<skill-name>/... paths with this tool instead of shell cat/sed loops.",
         "If a bare filename is missing at the workspace root, the tool searches authorized subdirectories by basename; unique ranked matches are read and ambiguous matches return candidate paths.",
         "Use optional 1-indexed offset and limit for one line window, or ranges for multiple line windows; do not combine ranges with offset or limit.",
+        "For contentLocation/stdoutRef/stderrRef, supply expectedSha256 plus characterOffset (0-based, default 0) and characterLimit (default/max 12000) for a verified content window; follow nextCharacterOffset. Do not mix character windows with line windows.",
       ].join(" "),
       inputSchema: readFileInputSchema(["path"], {
         path: { type: "string" },
+        expectedSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        characterOffset: { type: "integer", minimum: 0 },
+        characterLimit: { type: "integer", minimum: 1, maximum: CONTENT_REFERENCE_WINDOW_CHARACTERS },
         offset: { type: "integer", minimum: 1 },
         limit: { type: "integer", minimum: 1 },
         ranges: {
@@ -84,6 +92,19 @@ export function createComputerTools(
       replaySafe: true,
       parse: (value) => {
         const record = requireRecord(value, "computer_read_file arguments");
+        if (record.expectedSha256 !== undefined || record.characterOffset !== undefined || record.characterLimit !== undefined) {
+          const expectedSha256 = requireString(record.expectedSha256, "expectedSha256", { max: 64 });
+          if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw badRequest("expectedSha256 must be a SHA-256 hex digest");
+          if (record.ranges !== undefined || record.offset !== undefined || record.limit !== undefined) {
+            throw badRequest("character windows cannot be combined with line windows");
+          }
+          return {
+            path: requireString(record.path, "path", { max: 4_000 }),
+            expectedSha256,
+            characterOffset: requireBoundedInteger(record.characterOffset ?? 0, "characterOffset", 0, Number.MAX_SAFE_INTEGER),
+            characterLimit: requireBoundedInteger(record.characterLimit ?? CONTENT_REFERENCE_WINDOW_CHARACTERS, "characterLimit", 1, CONTENT_REFERENCE_WINDOW_CHARACTERS),
+          };
+        }
         if (record.ranges !== undefined && (record.offset !== undefined || record.limit !== undefined)) {
           throw badRequest("ranges cannot be combined with offset or limit");
         }
@@ -95,7 +116,11 @@ export function createComputerTools(
         };
       },
       execute: async (context, value) => {
-        const input = value as { path: string; offset?: number; limit?: number; ranges?: Array<{ offset: number; limit?: number }> };
+        const input = value as { path: string; expectedSha256?: string; characterOffset?: number; characterLimit?: number; offset?: number; limit?: number; ranges?: Array<{ offset: number; limit?: number }> };
+        if (input.expectedSha256 !== undefined) {
+          return executorForContext(executor, context).readContentReference(input.path, input.expectedSha256,
+            input.characterOffset ?? 0, input.characterLimit ?? CONTENT_REFERENCE_WINDOW_CHARACTERS);
+        }
         return executorForContext(executor, context).readFile(input.path, undefined, {
           offset: input.offset,
           limit: input.limit,
@@ -217,6 +242,7 @@ export function createComputerTools(
       ].join(" "),
       inputSchema: objectSchema(["path"], {
         path: { type: "string" },
+        expectedSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         queries: {
           type: "array",
           minItems: 1,
@@ -240,17 +266,22 @@ export function createComputerTools(
       replaySafe: true,
       parse: (value) => {
         const record = requireRecord(value, "computer_read_json arguments");
+        const expectedSha256 = record.expectedSha256 === undefined ? undefined : requireString(record.expectedSha256, "expectedSha256", { max: 64 });
+        if (expectedSha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedSha256)) throw badRequest("expectedSha256 must be a SHA-256 hex digest");
         return {
           path: requireString(record.path, "path", { max: 4_000 }),
           queries: parseJsonReadQueries(record.queries),
+          ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
         };
       },
       execute: async (context, value) => {
-        const input = value as { path: string; queries?: JsonReadQuery[] };
+        const input = value as { path: string; queries?: JsonReadQuery[]; expectedSha256?: string };
         const file = await executorForContext(executor, context).readFile(input.path, JSON_READ_MAX_BYTES);
         if (file.truncated) {
           throw badRequest(`JSON file exceeds the ${JSON_READ_MAX_BYTES} byte structured read limit; use narrower source tooling or a purpose-built parser`);
         }
+        const sha256 = createHash("sha256").update(file.content).digest("hex");
+        if (input.expectedSha256 !== undefined && input.expectedSha256 !== sha256) throw badRequest("Content reference hash mismatch; the file changed since acquisition");
         let document: unknown;
         try {
           document = JSON.parse(file.content);
@@ -265,7 +296,7 @@ export function createComputerTools(
           path: file.resolvedPath ?? input.path,
           ...(file.requestedPath === undefined ? {} : { requestedPath: file.requestedPath }),
           bytes: file.bytes,
-          sha256: createHash("sha256").update(file.content).digest("hex"),
+          sha256,
           root: summarizeJsonValue(document),
           queries: results,
           caveats,

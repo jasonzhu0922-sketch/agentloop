@@ -2186,6 +2186,10 @@ function compactOversizedStructuredToolResult(value: unknown, serialized: string
     caveats: Array.isArray(value.caveats) ? value.caveats : undefined,
     evidenceReceipt,
     artifactReceipt,
+    contentLocation: value.contentLocation,
+    contentSummary: value.contentSummary,
+    stdoutRef: value.stdoutRef,
+    stderrRef: value.stderrRef,
     omittedToolResult: {
       reason: "large_tool_result_receipt_preserved",
       originalCharacters: serialized.length,
