@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync } from "node:fs";
 import { colorizeTerminalLogLabel } from "@zhujun/agentloop";
+import { ensureLocalRuntimeTools, localRuntimeHostEnvironment } from "./local-runtime-tools.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeCount = parseRuntimeCount(process.argv.slice(2));
@@ -42,6 +43,9 @@ if (providerEnvFileSetting !== undefined && !existsSync(providerEnvFile)) {
 }
 const providerEnvFiles = existsSync(providerEnvFile) ? [providerEnvFile] : [];
 const localEnvFiles = existsSync(join(appRoot, ".env")) ? [join(appRoot, ".env")] : [];
+// Local development has no container image to own execution dependencies.
+// Provision them before launching Hosts, then make the venv the first PATH entry.
+const runtimeToolsBin = await ensureLocalRuntimeTools({ appRoot });
 try {
   await assertPortsAvailable([
     { label: "Router", host: routerHost, port: routerPort },
@@ -74,7 +78,7 @@ const config = {
 await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
 const children = [];
-const common = {
+const common = localRuntimeHostEnvironment({
   ...process.env,
   RUNTIME_DISPATCH_TOKEN: dispatchToken,
   RUNTIME_ATTACHMENT_TOKEN: attachmentToken,
@@ -83,7 +87,7 @@ const common = {
   AGENTLOOP_LOG_COLOR: process.env.NO_COLOR === undefined
     ? (process.env.AGENTLOOP_LOG_COLOR ?? "always")
     : "never",
-};
+}, runtimeToolsBin);
 const defaultWebOrigins = [...new Set([
   `http://${routerHost}:${webPort}`,
   `http://${publicRouterHost}:${webPort}`,

@@ -34,7 +34,24 @@ WORKDIR /app/apps/agentloop-multi-runtime
 FROM application AS router
 CMD ["npm", "run", "start:router"]
 
-FROM application AS runtime-host
+# Runtime execution dependencies belong only to the Host image. They are
+# installed while the image is built, never after a Host has accepted work.
+# Keep the package version explicit so an image can be rebuilt from the same
+# local Node base without silently changing the document-processing runtime.
+FROM application AS runtime-host-tools
+ARG MARKITDOWN_VERSION=0.1.7
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-venv \
+  && rm -rf /var/lib/apt/lists/* \
+  && python3 -m venv /opt/agentloop-runtime-tools \
+  && /opt/agentloop-runtime-tools/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" "markitdown==${MARKITDOWN_VERSION}" \
+  && /opt/agentloop-runtime-tools/bin/markitdown --version
+
+ENV PATH="/opt/agentloop-runtime-tools/bin:${PATH}"
+
+FROM runtime-host-tools AS runtime-host
+ENV RUNTIME_REQUIRED_COMMANDS=markitdown
 CMD ["npm", "run", "start:runtime-host"]
 
 FROM application AS web

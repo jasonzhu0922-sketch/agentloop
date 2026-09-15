@@ -29,7 +29,10 @@ x-app-build: &app_build
     # Alibaba Cloud public npm mirror; replace with the enterprise mirror when required.
     NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
 
-x-app-image: &app_image agentloop-multi-runtime:local
+# Keep the existing local image as the Compose default, while allowing an
+# already-built Runtime Host image to be selected without rebuilding or
+# retagging it. The Docker launcher defaults this to :markitdown-local.
+x-app-image: &app_image ${MULTI_RUNTIME_IMAGE:-agentloop-multi-runtime:local}
 
 services:
   router:

@@ -9,6 +9,7 @@ import { FileAttachmentBroker } from "../src/attachments/attachment-broker.ts";
 import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
 import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/control-plane/router.ts";
 import { AgentLoopRuntimeHost } from "../src/runtime/runtime-host.ts";
+import { assertRequiredRuntimeCommands, requiredRuntimeCommands } from "../src/runtime/runtime-command-preflight.ts";
 import { HttpResourceImporter } from "../src/runtime/http-resource-importer.ts";
 import {
   mergeSkillDirectories,
@@ -38,6 +39,7 @@ import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
 import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
 import { commandToolCallIds, executionActivities } from "../web/execution-detail-projection.js";
+import { LOCAL_MARKITDOWN_VERSION, localRuntimeHostEnvironment, localRuntimeToolsBin, localRuntimeToolsRoot } from "../scripts/local-runtime-tools.mjs";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -86,6 +88,26 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "postgres" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
   );
+});
+
+test("Runtime Host validates deployment-required commands before accepting Runs", () => {
+  assert.deepEqual(requiredRuntimeCommands(undefined), []);
+  assert.deepEqual(requiredRuntimeCommands(" markitdown, markitdown , python3 "), ["markitdown", "python3"]);
+  assert.throws(() => requiredRuntimeCommands("markitdown;curl"), /Invalid required Runtime command/);
+  assert.doesNotThrow(() => assertRequiredRuntimeCommands([process.execPath]));
+  assert.throws(() => assertRequiredRuntimeCommands(["agentloop-command-that-does-not-exist"]), /Required Runtime command is unavailable/);
+});
+
+test("local launcher provisions a fixed MarkItDown contract and exposes it to Runtime Hosts", () => {
+  const toolsRoot = localRuntimeToolsRoot("/application", { RUNTIME_TOOLS_ROOT: "./data/dev-tools" });
+  const toolsBin = localRuntimeToolsBin(toolsRoot);
+  assert.equal(toolsRoot, "/application/data/dev-tools");
+  assert.equal(LOCAL_MARKITDOWN_VERSION, "0.1.7");
+  assert.deepEqual(localRuntimeHostEnvironment({ PATH: "/usr/bin" }, toolsBin), {
+    PATH: `${toolsBin}:/usr/bin`,
+    RUNTIME_REQUIRED_COMMANDS: "markitdown",
+  });
+  assert.equal(localRuntimeHostEnvironment({ PATH: "/usr/bin", RUNTIME_REQUIRED_COMMANDS: "markitdown,soffice" }, toolsBin).RUNTIME_REQUIRED_COMMANDS, "markitdown,soffice");
 });
 
 test("Router conversation index paginates newest conversations in stable pages of 30", async () => {

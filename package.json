@@ -23,6 +23,7 @@
     "build:web": "npm run build --prefix apps/agentloop-app/web",
     "build": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run build:web",
     "start:multi-runtime": "npm run build:kernel && npm run build:artifact-preview && npm run build:skills && npm run build:plan-template && npm run start:local --workspace agentloop-multi-runtime --",
+    "start:multi-runtime:docker": "MULTI_RUNTIME_IMAGE=${MULTI_RUNTIME_IMAGE:-agentloop-multi-runtime:markitdown-local} docker compose --env-file apps/agentloop-multi-runtime/.env.docker -f apps/agentloop-multi-runtime/compose.yaml up --no-build",
     "dev": "npm run build:kernel && npm run build:skills && npm run build:plan-template && node apps/agentloop-app/scripts/dev.mjs",
     "start": "npm run build:kernel && npm run build:skills && npm run build:plan-template && npm run start --workspace agentloop-app",
     "test": "npm run test --workspaces --if-present",

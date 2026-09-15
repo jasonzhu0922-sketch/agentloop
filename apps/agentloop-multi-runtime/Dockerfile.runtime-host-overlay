@@ -1,0 +1,34 @@
+# Local incremental Runtime Host build. It deliberately extends a previously
+# built Host image so source-only iterations do not have to fetch the Node base
+# image or reinstall npm workspaces.
+ARG RUNTIME_HOST_BASE_IMAGE=agentloop-multi-runtime:local
+FROM ${RUNTIME_HOST_BASE_IMAGE}
+
+ARG MARKITDOWN_VERSION=0.1.7
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+
+# Keep the deployment toolchain ahead of source copies. A Host source-only
+# rebuild can then reuse this layer without downloading Python packages again.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-venv \
+  && rm -rf /var/lib/apt/lists/* \
+  && python3 -m venv /opt/agentloop-runtime-tools \
+  && /opt/agentloop-runtime-tools/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" "markitdown==${MARKITDOWN_VERSION}" \
+  && /opt/agentloop-runtime-tools/bin/markitdown --version
+
+ENV PATH="/opt/agentloop-runtime-tools/bin:${PATH}"
+ENV RUNTIME_REQUIRED_COMMANDS=markitdown
+
+WORKDIR /app
+# npm workspaces in the base image link this package from /app/node_modules;
+# rebuilding it updates the linked Kernel dist without another npm install.
+# Keep the Host manifest and entrypoint together: a base image can have a
+# different start script, so copying only a new source file can leave the old
+# entrypoint active.
+COPY packages/agentloop ./packages/agentloop
+COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
+RUN npm run build --workspace @zhujun/agentloop
+# Do not inherit the base image's default workdir: the Runtime Host package
+# script lives here, while some older local images use /app as their default.
+WORKDIR /app/apps/agentloop-multi-runtime
+CMD ["npm", "run", "start:runtime-host"]
