@@ -89,6 +89,7 @@ Run Event / Plan / Evidence / 完整 Tool Result
 - Provider 的真实 context overflow 会归一化为 `CONTEXT_WINDOW_EXCEEDED`。Runtime 只有在 projection revision 增长且估算 token 下降时才在同一个逻辑 Model Action 内重试一次；若流式回合已产生 Tool effect，则禁止重试。
 - 启动 reconciliation 只接管 lease/deadline 已失效并通过 fence/revision CAS 取得所有权的 Tool Action；有效租约保持归原 Worker。reconciled outcome 与 `recovery_review` 在同一 SQL 事务提交；失去 fence 的旧 Worker 不得再写 Step、Plan、Run、Outcome 或矛盾的 `tool.failed`。`TOOL_RESULT_SERIALIZATION_FAILED`、`RUNTIME_ACTION_LEASE_LOST` 与 durable outcome 后的持续投影故障都先走恢复控制分支，不进入通用 `run.failed`。内核及 Multi Runtime PostgreSQL schema 的全部毫秒时间、lease 与 deadline 字段使用 `BIGINT` 并升级既有列；OID 20 的 number/string/bigint 返回值都必须通过安全整数检查。
 - 模型可见的完整结果引用使用结构化 JSON marker，opaque locator 中的分号、方括号、百分号等字符可以无损贯穿 projection/checkpoint/recovery；marker 中的完整内容 hash 与预览 hash 分属不同语义。
+- `PgConnection.create()` 接受 PostgreSQL 连接字符串或 `pg.Pool` 配置对象；字符串会规范化为 `{ connectionString }` 再创建连接池。生产连接串必须由部署环境注入，不能写入仓库配置。
 - 公开低层 `runAgentLoop` 在存在可执行 Tool 时默认要求 `ToolResultStore`，并在 effect 前拒绝缺失 store 的调用；旧嵌入方只能显式选择 `toolResultPersistence: "legacy"`，该模式不保证结果可恢复。
 - 摘要和 locator 都不能替代 Evidence、Capability Grant、HIL、精确 Skill 正文、Assessment 或 Terminal Commit。生产大对象仍建议由宿主提供共享对象存储 `ToolResultStore` adapter；默认 SQL store 是可移植基线，不代表生产对象存储治理已完成。
 

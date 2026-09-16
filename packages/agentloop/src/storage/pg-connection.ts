@@ -22,7 +22,7 @@ interface PgQueryResult {
   readonly fields?: readonly { readonly name: string; readonly dataTypeID: number }[];
 }
 
-type PgPoolFactory = new (config: string | Record<string, unknown>) => PgPoolLike;
+type PgPoolFactory = new (config: Record<string, unknown>) => PgPoolLike;
 
 /**
  * PostgreSQL adapter implementing {@link SqlConnection} on top of a `pg` pool.
@@ -62,7 +62,7 @@ export class PgConnection implements SqlConnection {
     if (typeof Pool !== "function") {
       throw new Error("The installed \"pg\" package did not expose a usable Pool export");
     }
-    return new PgConnection(new Pool(config));
+    return new PgConnection(new Pool(typeof config === "string" ? { connectionString: config } : config));
   }
 
   async exec(sql: string): Promise<void> {

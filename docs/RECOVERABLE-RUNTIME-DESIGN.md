@@ -262,7 +262,7 @@ durable outcome 之后的 `tool.result_committed` / `tool.completed` 属于模�
 
 Provider 真正返回 context overflow 时，Adapter 使用 `CONTEXT_WINDOW_EXCEEDED`，不走普通 HTTP 400 重试。执行回合只有在新 projection revision 已持久化且估算 token 严格下降后，才在同一个逻辑 Model Action 内重试一次；若 streaming 已经触发 Tool effect、压缩没有进展或第二次仍溢出，则保留原错误并停止。
 
-尚未完成的边界包括：生产对象存储默认实现、真实 PostgreSQL 集成/旧库迁移验证，以及进程级 kill Worker 压测。当前只有 PostgreSQL DDL recording 与 SQLite 行为测试；不能把它描述为真实 PostgreSQL 已通过。这些缺口也意味着当前机制不能被描述为执行中 Run 的跨 Host 无损接管。
+本地已在 PostgreSQL 17.11 上验证 fresh init、`Date.now()` 写入、80K ToolResult put/read/hash/range、Action success、`tool_outcomes/result_ref`、内核与 Multi Runtime 的 56 个 BIGINT 字段，以及把这 56 列模拟降级为旧 INTEGER 后重新迁移。该验证证明本地 schema 与事务链可运行，但不等于生产多副本、真实数据量锁时长、故障切换或对象存储治理已完成。尚未完成的边界包括：生产对象存储默认实现、生产数据迁移演练、真实多 Worker 竞争，以及进程级 kill Worker 压测；因此当前机制仍不能被描述为执行中 Run 的跨 Host 无损接管。
 
 ## 9. Plan Revision 与目标覆盖
 

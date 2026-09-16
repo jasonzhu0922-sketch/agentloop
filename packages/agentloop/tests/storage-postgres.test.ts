@@ -103,6 +103,11 @@ test("PgConnection translates placeholders, uses simple query for empty params, 
   assert.equal(pool.released, 1);
 });
 
+test("PgConnection accepts a PostgreSQL connection string without passing a primitive to pg.Pool", async () => {
+  const connection = await PgConnection.create("postgresql://agentloop@127.0.0.1:1/constructor-only");
+  await connection.close();
+});
+
 test("PgConnection converts pg int8 fields to safe JavaScript integers", async () => {
   const timestamp = Date.now();
   const pool: PgPoolLike = {
