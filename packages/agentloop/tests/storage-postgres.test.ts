@@ -10,9 +10,12 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
   const database = await AppDatabase.open({ connection });
   try {
     assert.equal(database.dialect, "postgres");
-    assert.equal(connection.execSql.length, 2);
+    assert.equal(connection.execSql.length, 3);
     const schema = connection.execSql[0] ?? "";
     assert.ok(schema.includes("CREATE TABLE IF NOT EXISTS discovered_skills"));
+    assert.match(schema, /tool_result_blobs[\s\S]*characters BIGINT NOT NULL[\s\S]*created_at BIGINT NOT NULL/u);
+    assert.match(schema, /tool_outcomes[\s\S]*result_characters BIGINT[\s\S]*created_at BIGINT NOT NULL/u);
+    assert.match(connection.execSql[1] ?? "", /ALTER TABLE tool_result_blobs ALTER COLUMN created_at TYPE BIGINT/u);
     assert.ok(
       schema.indexOf("CREATE TABLE IF NOT EXISTS plans") < schema.indexOf("CREATE TABLE IF NOT EXISTS runtime_actions"),
       "plans must exist before runtime_actions references it on PostgreSQL",
@@ -28,7 +31,7 @@ test("AppDatabase operations wait for injected connection migration", async () =
   const database = new AppDatabase({ connection });
   try {
     await database.prepare("SELECT ? AS value").get("ready");
-    assert.deepEqual(connection.calls.map((call) => call.kind), ["exec", "exec", "get"]);
+    assert.deepEqual(connection.calls.map((call) => call.kind), ["exec", "exec", "exec", "get"]);
   } finally {
     await database.close();
   }

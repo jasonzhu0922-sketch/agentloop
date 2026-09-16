@@ -59,6 +59,7 @@ import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
+import { SqlToolResultStore, type ToolResultStore } from "../storage/repositories/tool-result-store.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
@@ -113,6 +114,7 @@ import {
   type RunRecoveryState,
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
+import type { ContextProjectionCheckpoint } from "./context-assembler.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
   artifactPathsFromCommandFileChanges,
@@ -296,6 +298,7 @@ export class RunService {
   private readonly activeRunControllers = new Map<string, AbortController>();
   private readonly planningExtensions: readonly PlanningExtension[];
   private readonly stepExecutionStrategy?: StepExecutionStrategy;
+  private readonly toolResultStore: ToolResultStore;
 
   constructor(options: {
     database: SqlConnection;
@@ -318,6 +321,7 @@ export class RunService {
     runEventLogSink?: RunEventLogSink;
     planningExtensions?: readonly PlanningExtension[];
     stepExecutionStrategy?: StepExecutionStrategy;
+    toolResultStore?: ToolResultStore;
   }) {
     this.database = options.database;
     this.skills = options.skills;
@@ -344,11 +348,13 @@ export class RunService {
     const acceptanceService = new ArtifactAcceptanceService({
       providers: options.acceptanceProviders,
     });
+    this.toolResultStore = options.toolResultStore ?? new SqlToolResultStore(options.database);
     this.coreTools = createCoreTools({
       executor: computerExecutor,
       driver: options.computerDriver,
       acceptanceService,
       pluginTools: options.tools,
+      toolResultStore: this.toolResultStore,
     });
     this.runs = new RunRepository(options.database);
     this.plans = new PlanRepository(options.database);
@@ -641,6 +647,7 @@ export class RunService {
   }
 
   async deleteConversation(actorUserId: string, conversationId: string): Promise<void> {
+    await this.actions.reconcileStoredToolOutcomes(this.toolResultStore);
     await this.actions.reconcileRunningRuns();
     await this.runs.deleteConversation(actorUserId, conversationId);
   }
@@ -1289,6 +1296,9 @@ export class RunService {
           messages: transcript.messages,
           toolEvidence: transcript.toolEvidence,
           facts: transcript.facts,
+          ...(transcript.contextProjection === undefined ? {} : {
+            contextProjection: transcript.contextProjection,
+          }),
         },
         onStepChanged: (stepId) => { actionScope.stepId = stepId; },
       });
@@ -1318,7 +1328,8 @@ export class RunService {
   }
 
   async reconcileInterruptedRuns(): Promise<number> {
-    return this.actions.reconcileRunningRuns();
+    const committed = await this.actions.reconcileStoredToolOutcomes(this.toolResultStore);
+    return committed + await this.actions.reconcileRunningRuns();
   }
 
   private resolveRunModelKey(requestedModelKey: string | undefined): string | undefined {
@@ -1976,6 +1987,7 @@ export class RunService {
       messages: readonly ModelMessage[];
       toolEvidence: readonly AgentLoopToolEvidence[];
       facts: unknown;
+      contextProjection?: ContextProjectionCheckpoint;
     }>;
     onStepChanged: (stepId: string | undefined) => void;
     signal?: AbortSignal;
@@ -2114,8 +2126,12 @@ export class RunService {
         ...(recovery === undefined ? {} : {
           initialMessages: recovery.messages,
           initialToolEvidence: recovery.toolEvidence,
+          ...(recovery.contextProjection === undefined ? {} : {
+            initialContextProjection: recovery.contextProjection,
+          }),
         }),
         model: input.model,
+        toolResultStore: this.toolResultStore,
         tools: input.registry,
         grant: stepGrant,
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
@@ -2155,7 +2171,10 @@ export class RunService {
               toolCallId: toolAction.toolCallId,
               toolName: toolAction.toolName,
               modelStep: toolAction.step,
+              maxResultCharacters: toolAction.maxResultCharacters,
             },
+            resultRef: toolAction.resultRef,
+            toolOutcome: toolAction.toolOutcome,
           }, operation),
         },
         evaluateCandidate: async (candidate) => {
@@ -2599,9 +2618,19 @@ export class RunService {
 
   private async appendRunEvent(runId: string, event: RuntimeEvent): Promise<void> {
     const createdAt = Date.now();
-    const data = this.projectRunEventDataForStorage(event);
+    let data: Readonly<Record<string, unknown>> = event.data;
+    const seq = await this.runs.appendEvent(runId, {
+      type: event.type,
+      data: (sourceEventSeq) => {
+        const projected = this.projectRunEventDataForStorage(event);
+        data = event.type === "context.projection.committed"
+          ? bindContextProjectionSourceEvent(projected, sourceEventSeq)
+          : projected;
+        return data;
+      },
+      createdAt,
+    });
     const projectedEvent: RuntimeEvent = { type: event.type, data };
-    const seq = await this.runs.appendEvent(runId, { type: event.type, data, createdAt });
     this.eventHub.publish(runId, publicRunEvent({
       seq,
       type: event.type,
@@ -2759,6 +2788,9 @@ const TERMINAL_EVENT_TYPES = new Set([
   "context.compaction.started",
   "context.compaction.skipped",
   "context.compacted",
+  "context.projection.committed",
+  "context.overflow_recovery.compacted",
+  "context.overflow_recovery.retrying",
   "context.tool_outputs_pruned",
   "skill.activation.expired",
   "plan.proposed",
@@ -2807,6 +2839,15 @@ function shouldLogRunEvent(type: string): boolean {
 /** The run event API intentionally exposes provider reasoning content to its owner. */
 function publicRunEvent(event: StoredRunEvent): StoredRunEvent {
   return event;
+}
+
+function bindContextProjectionSourceEvent(
+  data: Readonly<Record<string, unknown>>,
+  sourceEventSeq: number,
+): Readonly<Record<string, unknown>> {
+  const checkpoint = asRecord(data.checkpoint);
+  if (checkpoint === undefined) return data;
+  return { ...data, checkpoint: { ...checkpoint, sourceEventSeq } };
 }
 
 function formatRunEventLogLine(runId: string, seq: number, event: RuntimeEvent, createdAt: number): string {
@@ -4201,6 +4242,7 @@ class ActionTrackedModel implements ModelAdapter {
   private readonly actions: RuntimeActionRepository;
   private readonly runId: string;
   private readonly scope: () => { planId?: string; stepId?: string };
+  private logicalActionDepth = 0;
 
   constructor(
     model: ModelAdapter,
@@ -4224,7 +4266,32 @@ class ActionTrackedModel implements ModelAdapter {
     return this.model.requestLogContext?.(invocation, stream);
   }
 
+  runInModelAction<T>(input: {
+    readonly phase: RuntimeContextSnapshot["phase"];
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }, operation: () => Promise<T>): Promise<T> {
+    if (this.logicalActionDepth > 0) return operation();
+    const scope = this.scope();
+    return this.actions.execute({
+      runId: this.runId,
+      planId: scope.planId,
+      stepId: scope.stepId,
+      kind: actionKindForPhase(input.phase),
+      replayPolicy: "safe",
+      deadlineMs: Math.min(3_600_000, this.operationTimeoutMs * 3 + 30_000),
+      metadata: { phase: input.phase, ...(input.metadata ?? {}) },
+    }, async () => {
+      this.logicalActionDepth += 1;
+      try {
+        return await operation();
+      } finally {
+        this.logicalActionDepth -= 1;
+      }
+    });
+  }
+
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse> {
+    if (this.logicalActionDepth > 0) return this.model.complete(invocation, signal);
     const scope = this.scope();
     return this.actions.execute({
       runId: this.runId,
@@ -4248,6 +4315,11 @@ class ActionTrackedModel implements ModelAdapter {
   ): Promise<ModelResponse> {
     const scope = this.scope();
     const stream = this.model.streamComplete;
+    if (this.logicalActionDepth > 0) {
+      return stream === undefined
+        ? this.model.complete(invocation, signal)
+        : stream.call(this.model, invocation, sink, signal);
+    }
     return this.actions.execute({
       runId: this.runId,
       planId: scope.planId,

@@ -82,6 +82,7 @@ export class AppDatabase implements SqlConnection {
   }
 
   private async migrate(): Promise<void> {
+    const wideInteger = this.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.connection.exec(`
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
@@ -195,6 +196,21 @@ export class AppDatabase implements SqlConnection {
         PRIMARY KEY(run_id, seq)
       );
 
+      CREATE TABLE IF NOT EXISTS tool_result_blobs (
+        locator TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        tool_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        characters ${wideInteger} NOT NULL,
+        created_at ${wideInteger} NOT NULL,
+        UNIQUE(run_id, tool_call_id)
+      );
+      CREATE INDEX IF NOT EXISTS tool_result_blobs_owner_idx
+        ON tool_result_blobs(owner_user_id, run_id, created_at);
+
       CREATE TABLE IF NOT EXISTS runtime_actions (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -218,6 +234,23 @@ export class AppDatabase implements SqlConnection {
       );
       CREATE INDEX IF NOT EXISTS runtime_actions_run_idx ON runtime_actions(run_id, created_at);
       CREATE INDEX IF NOT EXISTS runtime_actions_recovery_idx ON runtime_actions(state, lease_until, deadline_at);
+
+      CREATE TABLE IF NOT EXISTS tool_outcomes (
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        tool_call_id TEXT NOT NULL,
+        action_id TEXT NOT NULL UNIQUE REFERENCES runtime_actions(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        is_error INTEGER NOT NULL CHECK(is_error IN (0, 1)),
+        failure_phase TEXT CHECK(failure_phase IN ('prepare', 'execute', 'runtime')),
+        result_locator TEXT,
+        result_sha256 TEXT,
+        result_characters ${wideInteger},
+        created_at ${wideInteger} NOT NULL,
+        PRIMARY KEY(run_id, tool_call_id)
+      );
+      CREATE INDEX IF NOT EXISTS tool_outcomes_run_idx
+        ON tool_outcomes(run_id, created_at);
 
       CREATE TABLE IF NOT EXISTS human_loop_requests (
         id TEXT PRIMARY KEY,
@@ -456,6 +489,17 @@ export class AppDatabase implements SqlConnection {
       );
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_events(actor_user_id, created_at DESC);
     `);
+
+    if (this.dialect === "postgres") {
+      // Databases initialized by the first context-management prototype used
+      // PostgreSQL INTEGER here, which cannot hold Date.now() milliseconds.
+      await this.connection.exec(`
+        ALTER TABLE tool_result_blobs ALTER COLUMN characters TYPE BIGINT USING characters::BIGINT;
+        ALTER TABLE tool_result_blobs ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+        ALTER TABLE tool_outcomes ALTER COLUMN result_characters TYPE BIGINT USING result_characters::BIGINT;
+        ALTER TABLE tool_outcomes ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+      `);
+    }
 
     // Kernel boundary: business rows are owned by opaque host-provided user
     // ids, so business tables must not enforce foreign keys into any

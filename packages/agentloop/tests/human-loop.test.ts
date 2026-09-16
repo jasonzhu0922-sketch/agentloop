@@ -34,6 +34,7 @@ test("HumanLoopRepository persists a typed request and accepts exactly one schem
 test("generic request_human_loop Tool stops the loop before a completion candidate", async () => {
   const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-hil-tool", depth: 0, allowedToolNames: [HUMAN_LOOP_TOOL_NAME], allowedSkillIds: [] });
   await assert.rejects(() => runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId, systemPrompt: "test", input: "need a choice", grant, maxSteps: 2,
     tools: new ToolRegistry([createHumanLoopTool()]),
     model: { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "", finishReason: "tool_calls", toolCalls: [{
@@ -67,6 +68,7 @@ test("a malformed request_human_loop call fails closed instead of continuing wit
   const events: RuntimeEvent[] = [];
   let modelCalls = 0;
   await assert.rejects(() => runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId, systemPrompt: "test", input: "confirm before proceeding", grant, maxSteps: 2,
     tools: new ToolRegistry([createHumanLoopTool()]),
     emit: async (event) => { events.push(event); },
@@ -120,6 +122,7 @@ test("a projected Skill command HIL signal pauses before the next model call", a
   const events: RuntimeEvent[] = [];
   let modelCalls = 0;
   await assert.rejects(() => runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId, systemPrompt: "test", input: "need a choice", grant, maxSteps: 2,
     tools: new ToolRegistry([command]),
     emit: async (event) => { events.push(event); },
@@ -155,6 +158,7 @@ test("a copied HIL object in computer_read_file content is not a Runtime control
   const events: RuntimeEvent[] = [];
   let modelCalls = 0;
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId, systemPrompt: "test", input: "read a file", grant, maxSteps: 2,
     tools: new ToolRegistry([file]),
     emit: async (event) => { events.push(event); },

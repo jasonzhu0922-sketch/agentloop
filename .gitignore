@@ -1,5 +1,7 @@
 .env
 .env.before-*
+/AGENTS.md
+/reference/
 apps/agentloop-app/.env
 apps/agentloop-multi-runtime/.env.docker
 apps/*/.env.before-*

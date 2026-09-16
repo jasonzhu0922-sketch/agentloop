@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
-import { ContextAssembler, estimateTextTokens } from "../src/runtime/context-assembler.ts";
+import {
+  ContextAssembler,
+  estimateTextTokens,
+  type ContextProjectionCheckpoint,
+} from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelMessage, ModelResponse, RuntimeEvent } from "../src/runtime/contracts.ts";
 import { ToolRegistry, type RuntimeTool } from "../src/tools/tool-registry.ts";
 
@@ -1147,6 +1151,191 @@ test("ContextAssembler projects large ToolResults before they pollute the next m
   assert.ok(events.some((event) => event.type === "context.tool_outputs_projected"));
 });
 
+test("ContextAssembler keeps both the head and tail of an unknown large ToolResult", async () => {
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-large-tool-head-tail",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+    policy: {
+      largeToolResultProjectionCharacters: 64,
+      largeToolResultPreviewCharacters: 20,
+    },
+    emit: (event) => { events.push(event); },
+  });
+  const largeResult = `BEGIN:${"x".repeat(100)}:FATAL-END`;
+
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "large-call", name: "unknown_tool", arguments: {} }] },
+    { role: "tool", toolCallId: "large-call", name: "unknown_tool", content: largeResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const projectionEvent = events.find((event) => event.type === "context.tool_outputs_projected");
+  const result = Array.isArray(projectionEvent?.data.toolResults)
+    ? projectionEvent.data.toolResults[0] as Record<string, unknown>
+    : undefined;
+
+  assert.match(projected, /BEGIN:/);
+  assert.match(projected, /:FATAL-END/);
+  assert.doesNotMatch(projected, /xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/);
+  assert.equal(result?.previewCharacters, 20);
+  assert.equal(result?.previewHeadCharacters, 10);
+  assert.equal(result?.previewTailCharacters, 10);
+});
+
+test("ContextAssembler preserves the complete-result locator and hash through budget projection", async () => {
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const locator = "tool-result://11111111-1111-1111-1111-111111111111";
+  const fullHash = "a".repeat(64);
+  const content = [
+    `BEGIN:${"x".repeat(200)}:FATAL-END`,
+    `[Complete Tool result: locator=${locator}; sha256=${fullHash}; characters=220. Use read_tool_result with this locator and hash for bounded retrieval.]`,
+  ].join("\n");
+  const assembler = new ContextAssembler({
+    runId: "run-ref-preservation",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+    policy: { largeToolResultProjectionCharacters: 64, largeToolResultPreviewCharacters: 20 },
+    emit: (event) => { events.push(event); },
+  });
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "large-call", name: "unknown_tool", arguments: {} }] },
+    { role: "tool", toolCallId: "large-call", name: "unknown_tool", content, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const checkpoint = events.find((event) => event.type === "context.projection.committed")
+    ?.data.checkpoint as ContextProjectionCheckpoint;
+  const record = checkpoint.projectedToolResults[0];
+
+  assert.match(projected, new RegExp(locator.replaceAll("/", "\\/")));
+  assert.match(projected, new RegExp(fullHash));
+  assert.deepEqual(record.fullResultRef, { locator, sha256: fullHash, characters: 220 });
+  assert.notEqual(record.modelViewSha256, fullHash);
+});
+
+test("ContextAssembler commits and exactly restores a durable projection checkpoint", async () => {
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const canonical: ModelMessage[] = [
+    { role: "user", content: "inspect" },
+    { role: "assistant", content: "", toolCalls: [{ id: "large-call", name: "unknown_tool", arguments: {} }] },
+    { role: "tool", toolCallId: "large-call", name: "unknown_tool", content: `BEGIN:${"x".repeat(100)}:FATAL-END`, isError: false },
+  ];
+  const options = {
+    runId: "run-projection-restore",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution" as const, content: "server runtime state" },
+    model,
+    policy: { largeToolResultProjectionCharacters: 64, largeToolResultPreviewCharacters: 20 },
+  };
+  const first = new ContextAssembler({ ...options, emit: (event) => { events.push(event); } });
+  const firstAssembly = await first.assemble(canonical, []);
+  const committed = events.find((event) => event.type === "context.projection.committed");
+  const checkpoint = committed?.data.checkpoint as ContextProjectionCheckpoint | undefined;
+
+  assert.equal(checkpoint?.schema, "agentloop.contextProjection/v1");
+  assert.equal(checkpoint?.revision, 1);
+  assert.equal(checkpoint?.projectedToolResults.length, 1);
+
+  const restoredEvents: RuntimeEvent[] = [];
+  const restored = new ContextAssembler({
+    ...options,
+    checkpoint: checkpoint!,
+    emit: (event) => { restoredEvents.push(event); },
+  });
+  const restoredAssembly = await restored.assemble(canonical, []);
+
+  assert.deepEqual(restoredAssembly.messages, firstAssembly.messages);
+  assert.equal(restored.projectionRevision, 2);
+  assert.equal(
+    (restoredEvents.find((event) => event.type === "context.projection.committed")?.data.checkpoint as ContextProjectionCheckpoint).revision,
+    2,
+  );
+
+  const mismatched = new ContextAssembler({ ...options, checkpoint: checkpoint! });
+  await assert.rejects(
+    () => mismatched.assemble([{ ...canonical[0], content: "tampered" }, ...canonical.slice(1)] as ModelMessage[], []),
+    /does not match its Context Projection checkpoint/,
+  );
+
+  const projected = checkpoint!.projectedToolResults[0];
+  const tamperedProjection: ContextProjectionCheckpoint = {
+    ...checkpoint!,
+    projectedToolResults: [{ ...projected, preview: "tampered projection" }],
+  };
+  const projectionMismatch = new ContextAssembler({ ...options, checkpoint: tamperedProjection });
+  await assert.rejects(
+    () => projectionMismatch.assemble(canonical, []),
+    /Restored model projection failed its integrity check/,
+  );
+});
+
+test("ContextAssembler proactively compacts at 80 percent of the usable input budget by default", async () => {
+  const requests: ModelInvocation[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 20_000, maxOutputTokens: 1_024 },
+    complete: async (request) => {
+      requests.push(request);
+      return { content: structuredSummary("soft threshold reached"), toolCalls: [], finishReason: "stop" };
+    },
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-default-soft-threshold",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+
+  const assembly = await assembler.assemble([
+    { role: "user", content: "x".repeat(26_000) },
+    { role: "assistant", content: "recent tail" },
+  ], []);
+
+  assert.equal(assembly.usableInputTokens, 8_000);
+  assert.equal(assembly.contextEpoch, 1);
+  assert.equal(requests.length, 1);
+  assert.match(assembly.runtimeContext.content, /soft threshold reached/);
+});
+
+test("ContextAssembler honors an explicit proactive compaction token threshold", async () => {
+  let summaryCalls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 20_000, maxOutputTokens: 1_024 },
+    complete: async () => {
+      summaryCalls += 1;
+      return { content: structuredSummary("unexpected"), toolCalls: [], finishReason: "stop" };
+    },
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-explicit-soft-threshold",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+    policy: { proactiveCompactionTokens: 7_900 },
+  });
+
+  const assembly = await assembler.assemble([
+    { role: "user", content: "x".repeat(26_000) },
+    { role: "assistant", content: "recent tail" },
+  ], []);
+
+  assert.equal(assembly.contextEpoch, 0);
+  assert.equal(summaryCalls, 0);
+});
+
 test("ContextAssembler applies step prompt projection thresholds to large ToolResult previews", async () => {
   const model: ModelAdapter = {
     limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
@@ -1185,7 +1374,8 @@ test("ContextAssembler applies step prompt projection thresholds to large ToolRe
 
   assert.match(assembly.runtimeContext.content, /test\.smallPreviewProjection\/v1/);
   assert.match(projectedTool?.content ?? "", /previewCharacters=12/);
-  assert.match(projectedTool?.content ?? "", /abcdef012345/);
+  assert.match(projectedTool?.content ?? "", /abcdef/);
+  assert.match(projectedTool?.content ?? "", /xxxxxx/);
   assert.doesNotMatch(projectedTool?.content ?? "", /abcdef0123456789/);
 });
 
@@ -1202,6 +1392,7 @@ test("the Loop prunes old Tool output, compacts complete exchanges, and reloads 
     stringTool("inspect_renderer", () => largeEvidence),
   ]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: "run-compaction",
     systemPrompt: [
       "Follow the current Plan step.",

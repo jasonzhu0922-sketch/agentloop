@@ -16,6 +16,341 @@ import { AppError } from "../src/shared/errors.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+import type { ToolResultStore } from "../src/storage/repositories/tool-result-store.ts";
+
+test("oversized Tool results are durably spilled before completion is committed", async () => {
+  let modelCalls = 0;
+  let persisted = false;
+  const events: RuntimeEvent[] = [];
+  const completeResult = `HEAD:${"x".repeat(200)}:TAIL`;
+  const store: ToolResultStore = {
+    async put(input) {
+      assert.equal(input.content, completeResult);
+      assert.equal(input.ownerUserId, "user-1");
+      assert.equal(input.runId, "run-1");
+      assert.equal(input.toolCallId, "large-call");
+      persisted = true;
+      return { locator: "tool-result://11111111-1111-1111-1111-111111111111", sha256: "a".repeat(64), characters: input.content.length };
+    },
+    async read() {
+      throw new Error("unused");
+    },
+    async findByToolCall() {
+      return undefined;
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(request) {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          toolCalls: [{ id: "large-call", name: "large_tool", arguments: {} }],
+          finishReason: "tool_calls",
+        };
+      }
+      const result = request.messages.find((message) => message.role === "tool");
+      assert.equal(result?.role, "tool");
+      assert.match(result?.content ?? "", /tool-result:\/\/11111111-1111-1111-1111-111111111111/);
+      assert.match(result?.content ?? "", /Use read_tool_result/);
+      return { content: "done", toolCalls: [], finishReason: "stop" };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "large_tool",
+    description: "Return an oversized result",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => completeResult,
+  };
+
+  const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
+    runId: "run-1",
+    systemPrompt: "Test agent",
+    input: "use the large tool",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant: makeGrant(["large_tool"]),
+    maxSteps: 2,
+    maxToolResultCharacters: 40,
+    toolResultStore: store,
+    actionTracker: {
+      async executeToolCall(_input, operation) {
+        const value = await operation();
+        assert.equal(persisted, true, "the tracked Action must not succeed before the spill is durable");
+        return value;
+      },
+    },
+    emit: (event) => {
+      if (event.type === "tool.completed") assert.equal(persisted, true);
+      events.push(event);
+    },
+  });
+
+  assert.equal(result.output, "done");
+  const completed = events.find((event) => event.type === "tool.completed");
+  assert.equal((completed?.data.resultRef as Record<string, unknown>)?.locator, "tool-result://11111111-1111-1111-1111-111111111111");
+});
+
+test("a spill failure fails the tracked Tool Action and never commits Tool completion", async () => {
+  const events: RuntimeEvent[] = [];
+  let actionFailed = false;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete() {
+      return {
+        content: "",
+        toolCalls: [{ id: "large-call", name: "large_tool", arguments: {} }],
+        finishReason: "tool_calls",
+      };
+    },
+  };
+  const store: ToolResultStore = {
+    async put() {
+      throw new AppError("INTERNAL_ERROR", "spill unavailable", 500);
+    },
+    async read() {
+      throw new Error("unused");
+    },
+    async findByToolCall() {
+      return undefined;
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "large_tool",
+    description: "Return an oversized result",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => "x".repeat(200),
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+    toolResultPersistence: "legacy",
+      runId: "run-1",
+      systemPrompt: "Test agent",
+      input: "use the large tool",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant: makeGrant(["large_tool"]),
+      maxSteps: 1,
+      maxToolResultCharacters: 40,
+      toolResultStore: store,
+      actionTracker: {
+        async executeToolCall(_input, operation) {
+          try {
+            return await operation();
+          } catch (error) {
+            actionFailed = true;
+            throw error;
+          }
+        },
+      },
+      emit: (event) => events.push(event),
+    }),
+    /Run exceeded its 1-step limit/,
+  );
+
+  assert.equal(actionFailed, true);
+  assert.equal(events.some((event) => event.type === "tool.completed"), false);
+  assert.equal(events.some((event) => event.type === "tool.result_committed"), false);
+  assert.equal(events.some((event) => event.type === "tool.failed"), true);
+});
+
+test("runAgentLoop rejects Tool execution without a result store unless legacy mode is explicit", async () => {
+  let effects = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "effect_tool",
+    description: "observable effect",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      effects += 1;
+      return "effect result";
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      toolCalls: [{ id: "effect-call", name: "effect_tool", arguments: {} }],
+      finishReason: "tool_calls",
+    }),
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: "strict-result-store",
+      systemPrompt: "Test agent",
+      input: "perform effect",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant: makeGrant(["effect_tool"]),
+      maxSteps: 1,
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "TOOL_RESULT_STORE_REQUIRED");
+      return true;
+    },
+  );
+  assert.equal(effects, 0, "admission fails before the external Tool effect");
+});
+
+test("a projection-event failure after durable Tool outcome commit does not turn the effect into failure", async () => {
+  let modelCalls = 0;
+  let effects = 0;
+  let actionCommitted = false;
+  const ref = {
+    locator: "tool-result://22222222-2222-2222-2222-222222222222",
+    sha256: "b".repeat(64),
+    characters: 13,
+  };
+  const store: ToolResultStore = {
+    async put() {
+      return ref;
+    },
+    async read() {
+      throw new Error("unused");
+    },
+    async findByToolCall() {
+      return undefined;
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(request) {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return { content: "", toolCalls: [{ id: "once", name: "unsafe_once", arguments: {} }], finishReason: "tool_calls" };
+      }
+      assert.match(request.messages.find((message) => message.role === "tool")?.content ?? "", /effect result/);
+      return { content: "done", toolCalls: [], finishReason: "stop" };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "unsafe_once",
+    description: "perform once",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      effects += 1;
+      return "effect result";
+    },
+  };
+
+  const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
+    runId: "post-commit-event-fault",
+    systemPrompt: "Test agent",
+    input: "perform once",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant: makeGrant(["unsafe_once"]),
+    maxSteps: 2,
+    toolResultStore: store,
+    actionTracker: {
+      async executeToolCall(input, operation) {
+        const value = await operation();
+        assert.ok(input.toolOutcome?.(value));
+        actionCommitted = true;
+        return value;
+      },
+    },
+    emit: (event) => {
+      if (event.type === "tool.result_committed") {
+        assert.equal(actionCommitted, true);
+        throw new Error("injected after Action success");
+      }
+    },
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(effects, 1);
+});
+
+test("a tool.completed failure after tool.result_committed does not replay or fail a committed effect", async () => {
+  let modelCalls = 0;
+  let effects = 0;
+  let resultCommitted = false;
+  const ref = {
+    locator: "tool-result://33333333-3333-3333-3333-333333333333",
+    sha256: "c".repeat(64),
+    characters: 13,
+  };
+  const store: ToolResultStore = {
+    async put() {
+      return ref;
+    },
+    async read() {
+      throw new Error("unused");
+    },
+    async findByToolCall() {
+      return undefined;
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(request) {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return { content: "", toolCalls: [{ id: "once", name: "unsafe_once", arguments: {} }], finishReason: "tool_calls" };
+      }
+      assert.match(request.messages.find((message) => message.role === "tool")?.content ?? "", /effect result/);
+      return { content: "done", toolCalls: [], finishReason: "stop" };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "unsafe_once",
+    description: "perform once",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      effects += 1;
+      return "effect result";
+    },
+  };
+
+  const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
+    runId: "post-result-event-fault",
+    systemPrompt: "Test agent",
+    input: "perform once",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant: makeGrant(["unsafe_once"]),
+    maxSteps: 2,
+    toolResultStore: store,
+    actionTracker: {
+      async executeToolCall(_input, operation) {
+        return operation();
+      },
+    },
+    emit: (event) => {
+      if (event.type === "tool.result_committed") resultCommitted = true;
+      if (event.type === "tool.completed") {
+        assert.equal(resultCommitted, true);
+        throw new Error("injected after tool.result_committed");
+      }
+      assert.notEqual(event.type, "tool.failed");
+    },
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(resultCommitted, true);
+  assert.equal(effects, 1);
+});
 
 test("parallel tools settle into model source order while completion events stay truthful", async () => {
   const model = new ParallelScenarioModel();
@@ -27,6 +362,7 @@ test("parallel tools settle into model source order while completion events stay
   const grant = makeGrant(["slow_double", "fast_square"]);
 
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Test agent",
     input: "calculate",
@@ -59,6 +395,7 @@ test("execution turns use the model-declared output budget", async () => {
   const grant = makeGrant([]);
 
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Test agent",
     input: "finish",
@@ -125,6 +462,7 @@ test("single leaf execution carries loop step handoff across model steps", async
   };
 
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: "run-loop-step-frame",
     systemPrompt: "Complete the current Plan step.",
     input: "look up route and answer",
@@ -264,6 +602,7 @@ test("custom step execution strategy keeps deprioritized Run-authorized tools ca
   };
 
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: "run-custom-step-execution-strategy",
     systemPrompt: "Complete the current Plan step.",
     input: "use custom strategy",
@@ -346,6 +685,7 @@ test("batch source reads are observed as one tool action with many source receip
   }]);
 
   await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: "run-batch-source-observed",
     systemPrompt: "Test agent",
     input: "read sources",
@@ -386,6 +726,7 @@ test("tool calls from a length-truncated model response are never dispatched", a
   const grant = makeGrant(["unsafe_write"]);
   const events: RuntimeEvent[] = [];
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Test agent",
     input: "write",
@@ -419,6 +760,7 @@ test("the runtime, not model prose, enforces the step budget", async () => {
   const events: RuntimeEvent[] = [];
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: grant.runId,
       systemPrompt: "Never stop",
       input: "loop",
@@ -456,6 +798,7 @@ test("the final budgeted turn converges without tools and submits existing evide
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["collect_evidence"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Complete the admitted step.",
     input: "produce and verify the artifact",
@@ -513,6 +856,7 @@ test("the final budgeted turn can execute missing required evidence before conve
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["produce_artifact", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify the artifact.",
     input: "make poster",
@@ -621,6 +965,7 @@ test("artifact receipts that satisfy required evidence complete without a final 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "生成并验收产物。",
     input: "生成一个报告页面",
@@ -703,6 +1048,7 @@ test("source-only evidence receipts do not replace a produce step delivery candi
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["read_source"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Interpret the uploaded report in Chinese.",
     input: "解读一下这个文件",
@@ -741,6 +1087,7 @@ test("conversation produce candidates carry explicit caveats as structured deliv
   const events: RuntimeEvent[] = [];
   const grant = makeGrant([]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Summarize the analysis.",
     input: "给我一个汇总分析",
@@ -831,6 +1178,7 @@ test("conversation delivery does not turn a helper script into an artifact-accep
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Summarize the already extracted performance evidence.",
     input: "汇总研发组绩效，并说明数据限制。",
@@ -906,6 +1254,7 @@ test("structured tool candidates go directly to assessment without a final model
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["lookup_api"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Complete the admitted step.",
     input: "query contract filing API",
@@ -975,6 +1324,7 @@ test("structured stdout candidates from command-style tools go directly to asses
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["lookup_api"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Complete the admitted step.",
     input: "query employee profile API",
@@ -1055,6 +1405,7 @@ test("oversized structured stdout candidates from command projections go directl
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["lookup_api"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Complete the admitted step.",
     input: "query contract API",
@@ -1105,6 +1456,7 @@ test("an empty completion candidate is repaired within the same budgeted step", 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["collect_evidence"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Complete the admitted step.",
     input: "produce and verify the artifact",
@@ -1131,6 +1483,7 @@ test("a length-truncated completion candidate receives bounded repair grace", as
     numberTool("collect_evidence", 1, (value) => value),
   ]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Complete concisely",
     input: "collect then summarize",
@@ -1182,6 +1535,7 @@ test("a length-truncated execution turn with tools receives a forward-action rep
   };
 
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Collect evidence.",
     input: "collect then summarize",
@@ -1252,6 +1606,7 @@ test("prepare-stage argument rejection receives a schema repair directive", asyn
   };
   const grant = makeGrant(["computer_write_file"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Write the report.",
     input: "write report",
@@ -1310,6 +1665,7 @@ test("repeated prepare-stage argument rejection stops before burning the step bu
   const grant = makeGrant(["computer_write_file"]);
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: grant.runId,
       systemPrompt: "Write the report.",
       input: "write report",
@@ -1350,6 +1706,7 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["read_evidence"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Verify the report.",
     input: "verify",
@@ -1398,6 +1755,7 @@ test("rejected completion candidates are not projected as prior assistant answer
   const events: RuntimeEvent[] = [];
   const grant = makeGrant([]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Summarize the uploaded source.",
     input: "分析总结外事业务在十五五 AI 领域的工作计划",
@@ -1441,6 +1799,7 @@ test("deferred validation candidate stops repair loop with a caveat", async () =
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["render_probe"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Build and validate.",
     input: "build deck",
@@ -1486,6 +1845,7 @@ test("evidence-boundary candidate stops repair loop with a caveat", async () => 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant([]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Research public sources.",
     input: "research",
@@ -1521,6 +1881,7 @@ test("candidate repair assessment limit accepts the latest output with a caveat"
   const events: RuntimeEvent[] = [];
   const grant = makeGrant([]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce the candidate.",
     input: "produce",
@@ -1558,6 +1919,7 @@ test("candidate repair assessment limit does not turn a rejected completion into
 
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: grant.runId,
       systemPrompt: "Produce the candidate.",
       input: "produce",
@@ -1592,6 +1954,7 @@ test("candidate repair assessment limit can be blocked for unmet prerequisite cr
 
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: grant.runId,
       systemPrompt: "Read the required source file.",
       input: "read missing source",
@@ -1632,6 +1995,7 @@ test("a mid-work model is granted convergence grace steps to reach real completi
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["render"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Render until done.",
     input: "render",
@@ -1667,6 +2031,7 @@ test("distinct tool calls keep extending grace while the model makes progress", 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["work"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Work until done.",
     input: "work",
@@ -1772,6 +2137,7 @@ test("artifact grace records excessive read-only exploration as advice without v
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_read_file", "computer_search_text", "computer_write_file"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce an artifact.",
     input: "make deck",
@@ -1879,6 +2245,7 @@ test("artifact progress policy advises after excessive read-only exploration bef
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_read_file", "computer_write_file", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce an artifact.",
     input: "make deck",
@@ -2022,6 +2389,7 @@ test("artifact progress policy advises verification after artifact evidence with
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "computer_read_file", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an artifact.",
     input: "make report",
@@ -2114,6 +2482,7 @@ test("artifact execution keeps multi-tool provider choice auto while Runtime evi
   };
   const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an image artifact.",
     input: "create poster",
@@ -2282,6 +2651,7 @@ test("artifact progress policy treats generated build scripts as source until a 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "computer_read_file", "computer_run_command", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an HTML artifact.",
     input: "convert markdown to html",
@@ -2471,6 +2841,7 @@ test("artifact progress policy treats mismatched typed intermediates as source u
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "computer_read_json", "computer_run_command", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an image artifact.",
     input: "create a poster image",
@@ -2644,6 +3015,7 @@ test("artifact progress policy allows diagnostic-driven intermediate source repa
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "computer_run_command", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an image artifact.",
     input: "create a poster image",
@@ -2800,6 +3172,7 @@ test("artifact progress policy does not require a semantic source receipt after 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "read_source", "computer_run_command", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Use source evidence, then produce and verify an HTML artifact.",
     input: "read the source and create a report",
@@ -2971,6 +3344,7 @@ test("artifact progress policy allows a targeted rebase read after patch precond
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_write_file", "computer_patch_file", "computer_read_file", "computer_run_command", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an image artifact.",
     input: "create a poster image",
@@ -3078,6 +3452,7 @@ test("artifact diagnostics advise source repair without vetoing a targeted rerea
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_run_command", "computer_read_file", "computer_write_file"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Repair artifact source.",
     input: "fix outline",
@@ -3177,6 +3552,7 @@ test("artifact diagnostics retain a read-only grace turn as advice after a concr
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["computer_run_command", "computer_read_json", "computer_write_file"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Repair artifact source.",
     input: "fix outline",
@@ -3215,6 +3591,7 @@ test("tool evidence can queue an early convergence turn before the hard limit", 
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["render"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Render then submit a candidate.",
     input: "render",
@@ -3298,6 +3675,7 @@ test("next model turn receives explicit execution feedback for failures and file
   };
   const grant = makeGrant(["run_step"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Run until the artifact is ready.",
     input: "export",
@@ -3367,6 +3745,7 @@ test("repeated execution failures surface failure phases and a strategy switch d
   };
   const grant = makeGrant(["run_step"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Run until the artifact is ready.",
     input: "export",
@@ -3418,6 +3797,7 @@ test("next model turn receives actionable feedback for Skill package mutation", 
   };
   const grant = makeGrant(["run_package_script"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Run package workflow.",
     input: "build a deck",
@@ -3450,6 +3830,7 @@ test("a looping model reaches the real hard limit when it repeats authorized too
   const grant = makeGrant(["render"]);
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: grant.runId,
       systemPrompt: "Render the artifact.",
       input: "render",
@@ -3497,6 +3878,7 @@ test("a converged turn that emits an unexecuted tool invocation gets one no-tool
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["render"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Render the artifact.",
     input: "render",
@@ -3542,6 +3924,7 @@ test("a converged Kimi-style text tool invocation gets one no-tool repair before
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["render"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Verify the artifact.",
     input: "verify",
@@ -3570,6 +3953,7 @@ test("a no-tool candidate with embedded provider tool protocol is rejected befor
   const grant = makeGrant([]);
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: grant.runId,
       systemPrompt: "Answer directly.",
       input: "regenerate the artifact",
@@ -3600,6 +3984,7 @@ test("a no-tool candidate with internal Runtime evidence markup is repaired befo
   const events: RuntimeEvent[] = [];
   const grant = makeGrant([]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Answer directly.",
     input: "answer from evidence",
@@ -3667,6 +4052,7 @@ test("an invalid final convergence candidate receives bounded repair grace befor
   const events: RuntimeEvent[] = [];
   const grant = makeGrant(["read_evidence"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Analyze the price evidence.",
     input: "analyze",
@@ -3704,6 +4090,7 @@ test("streaming turns emit live deltas before the durable assistant checkpoint",
   const model = new StreamingScenarioModel();
   const grant = makeGrant(["echo"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Stream",
     input: "echo",
@@ -3754,6 +4141,7 @@ test("assistant checkpoints persist provider reasoning continuation", async () =
   };
 
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: "run-reasoning-checkpoint",
     systemPrompt: "Reasoning checkpoint",
     input: "finish",
@@ -3787,6 +4175,7 @@ test("tool_call_ready dispatches the tool before the full assistant checkpoint",
   const model = new EarlyDispatchModel();
   const grant = makeGrant(["echo"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Early dispatch",
     input: "echo 7",
@@ -3834,6 +4223,7 @@ test("model request failures are emitted before the run fails", async () => {
 
   await assert.rejects(
     () => runAgentLoop({
+    toolResultPersistence: "legacy",
       runId: "run-model-failed-event",
       systemPrompt: "Fail",
       input: "fail",
@@ -3855,6 +4245,162 @@ test("model request failures are emitted before the run fails", async () => {
   assert.equal(failedIdx > startedIdx, true);
   assert.equal(events[failedIdx].data.code, "MODEL_ERROR");
   assert.match(String(events[failedIdx].data.message), /provider timeout/);
+});
+
+test("provider context overflow retries once only after a durable projection becomes smaller", async () => {
+  const events: RuntimeEvent[] = [];
+  let executionCalls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 32_000, maxOutputTokens: 2_048 },
+    async complete(request) {
+      if (request.phase === "compaction") {
+        return {
+          content: "## Goal\nContinue the Run.\n\n## Next Steps\n1. Retry the model turn.",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+      executionCalls += 1;
+      if (executionCalls === 1) {
+        throw new AppError("CONTEXT_WINDOW_EXCEEDED", "provider context is too long", 502);
+      }
+      return { content: "done", toolCalls: [], finishReason: "stop" };
+    },
+  };
+
+  const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
+    runId: "run-overflow-retry",
+    systemPrompt: "Retry safely",
+    input: `Keep this goal: ${"context ".repeat(1_000)}`,
+    model,
+    tools: new ToolRegistry([]),
+    grant: makeGrant([]),
+    maxSteps: 1,
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(executionCalls, 2);
+  const retry = events.find((event) => event.type === "context.overflow_recovery.retrying");
+  assert.ok(retry);
+  assert.ok(Number(retry.data.revisionAfter) > Number(retry.data.revisionBefore));
+  assert.ok(Number(retry.data.estimatedTokensAfter) < Number(retry.data.estimatedTokensBefore));
+  assert.equal(events.filter((event) => event.type === "context.overflow_recovery.retrying").length, 1);
+});
+
+test("provider context overflow is not retried when compaction cannot prove token progress", async () => {
+  let executionCalls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 32_000, maxOutputTokens: 2_048 },
+    estimateInputTokens: () => 1_000,
+    async complete(request) {
+      if (request.phase === "compaction") {
+        return { content: "## Goal\nNo smaller estimate", toolCalls: [], finishReason: "stop" };
+      }
+      executionCalls += 1;
+      throw new AppError("CONTEXT_WINDOW_EXCEEDED", "original overflow", 502);
+    },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+    toolResultPersistence: "legacy",
+      runId: "run-overflow-no-progress",
+      systemPrompt: "Retry safely",
+      input: "short input",
+      model,
+      tools: new ToolRegistry([]),
+      grant: makeGrant([]),
+      maxSteps: 1,
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "CONTEXT_WINDOW_EXCEEDED");
+      assert.equal((error as { message?: string }).message, "original overflow");
+      return true;
+    },
+  );
+  assert.equal(executionCalls, 1);
+});
+
+test("provider context overflow never retries more than once", async () => {
+  const events: RuntimeEvent[] = [];
+  let executionCalls = 0;
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 32_000, maxOutputTokens: 2_048 },
+    async complete(request) {
+      if (request.phase === "compaction") {
+        return { content: "## Goal\nRetry once", toolCalls: [], finishReason: "stop" };
+      }
+      executionCalls += 1;
+      throw new AppError("CONTEXT_WINDOW_EXCEEDED", `overflow ${executionCalls}`, 502);
+    },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+    toolResultPersistence: "legacy",
+      runId: "run-overflow-limit",
+      systemPrompt: "Retry safely",
+      input: `Keep this goal: ${"context ".repeat(1_000)}`,
+      model,
+      tools: new ToolRegistry([]),
+      grant: makeGrant([]),
+      maxSteps: 1,
+      emit: (event) => { events.push(event); },
+    }),
+    /overflow 2/,
+  );
+  assert.equal(executionCalls, 2);
+  assert.equal(events.filter((event) => event.type === "context.overflow_recovery.retrying").length, 1);
+});
+
+test("stream overflow after an early Tool effect is never retried", async () => {
+  const events: RuntimeEvent[] = [];
+  let modelCalls = 0;
+  let toolExecutions = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete() {
+      throw new Error("streaming path expected");
+    },
+    async streamComplete(_request, sink) {
+      modelCalls += 1;
+      await sink({ type: "tool_call_ready", index: 0, id: "effect-call", name: "effect_tool", arguments: {} });
+      throw new AppError("CONTEXT_WINDOW_EXCEEDED", "late stream overflow", 502);
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "effect_tool",
+    description: "Perform one observable effect",
+    inputSchema: { type: "object" },
+    executionMode: "sequential",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      toolExecutions += 1;
+      return "effect committed";
+    },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+    toolResultPersistence: "legacy",
+      runId: "run-stream-overflow-effect",
+      systemPrompt: "Do not duplicate effects",
+      input: "perform effect",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant: makeGrant(["effect_tool"]),
+      maxSteps: 1,
+      emit: (event) => { events.push(event); },
+    }),
+    /late stream overflow/,
+  );
+  assert.equal(modelCalls, 1);
+  assert.equal(toolExecutions, 1);
+  assert.equal(events.some((event) => event.type === "tool.completed"), true);
+  assert.equal(events.some((event) => event.type === "context.overflow_recovery.retrying"), false);
 });
 
 test("progress policy advises after an intermediate artifact read without vetoing the authorized call", async () => {
@@ -3977,6 +4523,7 @@ test("progress policy advises after an intermediate artifact read without vetoin
   };
   const grant = makeGrant(["computer_write_file", "computer_read_json", "computer_run_command", "verify_artifact_acceptance"]);
   const result = await runAgentLoop({
+    toolResultPersistence: "legacy",
     runId: grant.runId,
     systemPrompt: "Produce and verify an image artifact.",
     input: "create a poster image",

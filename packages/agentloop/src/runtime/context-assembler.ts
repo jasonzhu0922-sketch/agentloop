@@ -49,15 +49,46 @@ interface ResolvedContextPolicy {
   readonly largeToolResultPreviewCharacters: number;
 }
 
-interface PrunedToolResult {
+export interface ContextProjectedToolResult {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly originalCharacters: number;
-  readonly sha256: string;
+  /** Hash of the canonical model-message content, not the complete spilled bytes. */
+  readonly modelViewSha256: string;
+  /** Locator and hash of the immutable complete Tool result, when available. */
+  readonly fullResultRef?: Readonly<{
+    locator: string;
+    sha256: string;
+    characters: number;
+  }>;
   readonly reason: "budget" | "large_tool_result" | "structured_evidence" | "structured_tool_result";
   readonly preview?: string;
   readonly previewCharacters?: number;
+  readonly previewHeadCharacters?: number;
+  readonly previewTailCharacters?: number;
   readonly structuredEvidence?: string;
+}
+
+export interface ContextProjectionCheckpoint {
+  readonly schema: "agentloop.contextProjection/v1";
+  readonly runId: string;
+  /** run_events.seq assigned when this checkpoint is durably appended. */
+  readonly sourceEventSeq?: number;
+  readonly revision: number;
+  readonly contextEpoch: number;
+  readonly firstKeptMessageIndex: number;
+  readonly canonicalMessageCount: number;
+  readonly canonicalPrefixSha256: string;
+  readonly projectionSha256: string;
+  readonly systemPromptSha256: string;
+  readonly runtimeContextSha256: string;
+  readonly toolCatalogSha256: string;
+  readonly estimatedInputTokens: number;
+  readonly summary?: string;
+  readonly summarySha256?: string;
+  readonly projectedToolResults: readonly ContextProjectedToolResult[];
+  readonly activeSkillNames: readonly string[];
+  readonly expiredSkillNames: readonly string[];
 }
 
 const SUMMARY_SYSTEM_PROMPT = [
@@ -118,7 +149,7 @@ export class ContextAssembler {
   private readonly model: ModelAdapter;
   private readonly emit?: RuntimeEventSink;
   private readonly policy: ResolvedContextPolicy;
-  private readonly prunedToolResults = new Map<string, PrunedToolResult>();
+  private readonly prunedToolResults = new Map<string, ContextProjectedToolResult>();
   private firstKeptMessageIndex = 0;
   private contextEpoch = 0;
   private contextRevision = 0;
@@ -128,6 +159,9 @@ export class ContextAssembler {
   private snapshot?: RuntimeContextSnapshot;
   private previousSnapshotId?: string;
   private summary?: string;
+  private contextProjectionRevision = 0;
+  private restoredCheckpoint?: ContextProjectionCheckpoint;
+  private readonly expiredSkillNames = new Set<string>();
 
   constructor(options: {
     runId: string;
@@ -135,6 +169,7 @@ export class ContextAssembler {
     runtimeContext: Omit<RuntimeContextSnapshot, "id" | "supersedesId">;
     model: ModelAdapter;
     policy?: ContextPolicy;
+    checkpoint?: ContextProjectionCheckpoint;
     emit?: RuntimeEventSink;
   }) {
     this.runId = options.runId;
@@ -143,10 +178,15 @@ export class ContextAssembler {
     this.model = options.model;
     this.emit = options.emit;
     this.policy = resolvePolicy(options.model, options.policy);
+    if (options.checkpoint !== undefined) this.restoreCheckpoint(options.checkpoint);
   }
 
   get contextSummary(): string | undefined {
     return this.summary;
+  }
+
+  get projectionRevision(): number {
+    return this.contextProjectionRevision;
   }
 
   /**
@@ -210,6 +250,7 @@ export class ContextAssembler {
     signal?: AbortSignal,
   ): Promise<ContextAssembly> {
     assertClosedToolProtocol(canonicalMessages);
+    this.validateRestoredCheckpoint(canonicalMessages, tools);
     const usableInputTokens = this.policy.contextWindowTokens
       - this.policy.outputReserveTokens
       - this.policy.safetyMarginTokens;
@@ -350,6 +391,19 @@ export class ContextAssembler {
       });
     }
 
+    const checkpoint = this.createCheckpoint(
+      canonicalMessages,
+      tools,
+      runtimeContext,
+      projection,
+      estimatedInputTokens,
+    );
+    await this.emitEvent({
+      type: "context.projection.committed",
+      data: { checkpoint },
+    });
+    this.contextProjectionRevision = checkpoint.revision;
+    this.restoredCheckpoint = undefined;
     await this.emitEvent({
       type: "context.assembled",
       data: {
@@ -371,6 +425,148 @@ export class ContextAssembler {
     };
   }
 
+  /**
+   * Apply one stronger, durable projection after the Provider—not the local
+   * estimator—reports a context overflow. Callers may retry only when this
+   * returns a strictly smaller projection with a newer revision.
+   */
+  async compactAfterProviderOverflow(
+    canonicalMessages: readonly ModelMessage[],
+    tools: readonly ModelToolDefinition[],
+    previousEstimatedInputTokens: number,
+    signal?: AbortSignal,
+  ): Promise<ContextAssembly | undefined> {
+    assertClosedToolProtocol(canonicalMessages);
+    const runtimeContextBefore = this.currentRuntimeContext();
+    const pruneTarget = Math.max(1, previousEstimatedInputTokens - Math.max(1_000, Math.floor(previousEstimatedInputTokens * 0.1)));
+    const newlyPruned = this.pruneOldToolOutputs(canonicalMessages, tools, runtimeContextBefore, pruneTarget);
+    let projection = this.buildProjection(canonicalMessages);
+    let runtimeContext = this.currentRuntimeContext();
+    let estimatedInputTokens = this.estimateInvocationTokens(tools, runtimeContext, projection);
+    if (estimatedInputTokens >= previousEstimatedInputTokens) {
+      const compacted = await this.compact(
+        canonicalMessages,
+        tools,
+        runtimeContext,
+        previousEstimatedInputTokens,
+        signal,
+      );
+      if (!compacted) return undefined;
+      projection = this.buildProjection(canonicalMessages);
+      runtimeContext = this.currentRuntimeContext();
+      estimatedInputTokens = this.estimateInvocationTokens(tools, runtimeContext, projection);
+    }
+    if (estimatedInputTokens >= previousEstimatedInputTokens) return undefined;
+    const usableInputTokens = this.policy.contextWindowTokens
+      - this.policy.outputReserveTokens
+      - this.policy.safetyMarginTokens;
+    const checkpoint = this.createCheckpoint(
+      canonicalMessages,
+      tools,
+      runtimeContext,
+      projection,
+      estimatedInputTokens,
+    );
+    await this.emitEvent({
+      type: "context.overflow_recovery.compacted",
+      data: {
+        revisionBefore: this.contextProjectionRevision,
+        revisionAfter: checkpoint.revision,
+        estimatedTokensBefore: previousEstimatedInputTokens,
+        estimatedTokensAfter: estimatedInputTokens,
+        newlyPrunedToolResultCount: newlyPruned.length,
+      },
+    });
+    await this.emitEvent({ type: "context.projection.committed", data: { checkpoint } });
+    this.contextProjectionRevision = checkpoint.revision;
+    this.restoredCheckpoint = undefined;
+    return {
+      messages: projection,
+      runtimeContext,
+      estimatedInputTokens,
+      usableInputTokens,
+      contextEpoch: this.contextEpoch,
+    };
+  }
+
+  private restoreCheckpoint(checkpoint: ContextProjectionCheckpoint): void {
+    if (checkpoint.schema !== "agentloop.contextProjection/v1" || checkpoint.runId !== this.runId) {
+      throw new AppError("CONFLICT", "Context Projection checkpoint belongs to a different Run", 409);
+    }
+    if (
+      !Number.isSafeInteger(checkpoint.revision) || checkpoint.revision < 1
+      || !Number.isSafeInteger(checkpoint.contextEpoch) || checkpoint.contextEpoch < 0
+      || !Number.isSafeInteger(checkpoint.firstKeptMessageIndex) || checkpoint.firstKeptMessageIndex < 0
+      || checkpoint.firstKeptMessageIndex > checkpoint.canonicalMessageCount
+    ) throw new AppError("CONFLICT", "Context Projection checkpoint is invalid", 409);
+    if (checkpoint.summary !== undefined && digest(checkpoint.summary) !== checkpoint.summarySha256) {
+      throw new AppError("CONFLICT", "Context Projection summary failed its integrity check", 409);
+    }
+    this.contextProjectionRevision = checkpoint.revision;
+    this.contextEpoch = checkpoint.contextEpoch;
+    this.firstKeptMessageIndex = checkpoint.firstKeptMessageIndex;
+    this.summary = checkpoint.summary;
+    for (const item of checkpoint.projectedToolResults) this.prunedToolResults.set(item.toolCallId, item);
+    for (const name of checkpoint.expiredSkillNames) this.expiredSkillNames.add(name);
+    this.restoredCheckpoint = checkpoint;
+    this.invalidateSnapshot();
+  }
+
+  private validateRestoredCheckpoint(
+    canonicalMessages: readonly ModelMessage[],
+    tools: readonly ModelToolDefinition[],
+  ): void {
+    const checkpoint = this.restoredCheckpoint;
+    if (checkpoint === undefined) return;
+    if (canonicalMessages.length < checkpoint.canonicalMessageCount) {
+      throw new AppError("CONFLICT", "Recovery transcript is shorter than its Context Projection checkpoint", 409);
+    }
+    const prefix = canonicalMessages.slice(0, checkpoint.canonicalMessageCount);
+    if (digest(JSON.stringify(prefix)) !== checkpoint.canonicalPrefixSha256) {
+      throw new AppError("CONFLICT", "Recovery transcript does not match its Context Projection checkpoint", 409);
+    }
+    if (digest(this.systemPrompt) !== checkpoint.systemPromptSha256) {
+      throw new AppError("CONFLICT", "System prompt does not match its Context Projection checkpoint", 409);
+    }
+    if (digest(JSON.stringify(tools)) !== checkpoint.toolCatalogSha256) {
+      throw new AppError("CONFLICT", "Tool catalog does not match its Context Projection checkpoint", 409);
+    }
+    const restoredProjection = this.buildProjection(prefix);
+    if (digest(JSON.stringify(restoredProjection)) !== checkpoint.projectionSha256) {
+      throw new AppError("CONFLICT", "Restored model projection failed its integrity check", 409);
+    }
+  }
+
+  private createCheckpoint(
+    canonicalMessages: readonly ModelMessage[],
+    tools: readonly ModelToolDefinition[],
+    runtimeContext: RuntimeContextSnapshot,
+    projection: readonly ModelMessage[],
+    estimatedInputTokens: number,
+  ): ContextProjectionCheckpoint {
+    return {
+      schema: "agentloop.contextProjection/v1",
+      runId: this.runId,
+      revision: this.contextProjectionRevision + 1,
+      contextEpoch: this.contextEpoch,
+      firstKeptMessageIndex: this.firstKeptMessageIndex,
+      canonicalMessageCount: canonicalMessages.length,
+      canonicalPrefixSha256: digest(JSON.stringify(canonicalMessages)),
+      projectionSha256: digest(JSON.stringify(projection)),
+      systemPromptSha256: digest(this.systemPrompt),
+      runtimeContextSha256: digest(runtimeContext.content),
+      toolCatalogSha256: digest(JSON.stringify(tools)),
+      estimatedInputTokens,
+      ...(this.summary === undefined ? {} : {
+        summary: this.summary,
+        summarySha256: digest(this.summary),
+      }),
+      projectedToolResults: [...this.prunedToolResults.values()],
+      activeSkillNames: [...this.activeSkillNames(canonicalMessages)].sort(),
+      expiredSkillNames: [...this.expiredSkillNames].sort(),
+    };
+  }
+
   projectToolEvidence(
     canonicalMessages: readonly ModelMessage[],
     evidence: readonly AgentLoopToolEvidence[],
@@ -384,7 +580,7 @@ export class ContextAssembler {
       const compacted = (resultIndex.get(item.toolCallId) ?? Number.POSITIVE_INFINITY) < this.firstKeptMessageIndex;
       const pruned = this.prunedToolResults.get(item.toolCallId);
       if (!compacted && pruned === undefined) return item;
-      const sha256 = pruned?.sha256 ?? digest(item.result);
+      const sha256 = pruned?.modelViewSha256 ?? digest(item.result);
       const originalCharacters = pruned?.originalCharacters ?? item.result.length;
       if (pruned?.structuredEvidence !== undefined) {
         return {
@@ -396,9 +592,10 @@ export class ContextAssembler {
         ...item,
         result: [
           `[Tool result omitted from assessment projection; toolCallId=${item.toolCallId};`,
-          `sha256=${sha256}; originalCharacters=${originalCharacters};`,
+          `modelViewSha256=${sha256}; originalCharacters=${originalCharacters};`,
+          pruned?.fullResultRef === undefined ? "" : completeResultRefMarker(pruned.fullResultRef),
           `canonical evidence remains persisted${compacted ? `; contextEpoch=${this.contextEpoch}` : ""}]`,
-        ].join(" "),
+        ].filter(Boolean).join(" "),
       };
     });
   }
@@ -415,7 +612,7 @@ export class ContextAssembler {
       }
       if (message.role !== "tool") return message;
       const pruned = this.prunedToolResults.get(message.toolCallId);
-      if (pruned === undefined) return message;
+      if (pruned === undefined) return projectToolResultRefForModel(message);
       return { ...message, content: prunedToolMarker(pruned) };
     });
     return tail;
@@ -426,14 +623,14 @@ export class ContextAssembler {
     tools: readonly ModelToolDefinition[],
     runtimeContext: RuntimeContextSnapshot,
     usableInputTokens: number,
-  ): PrunedToolResult[] {
+  ): ContextProjectedToolResult[] {
     const protectedStart = recentProtectionStart(
       canonicalMessages,
       this.firstKeptMessageIndex,
       this.policy.pruneProtectTokens,
     );
     let current = this.estimateInvocationTokens(tools, runtimeContext, this.buildProjection(canonicalMessages));
-    const newlyPruned: PrunedToolResult[] = [];
+    const newlyPruned: ContextProjectedToolResult[] = [];
     for (
       let index = this.firstKeptMessageIndex;
       index < protectedStart && current > usableInputTokens;
@@ -446,11 +643,12 @@ export class ContextAssembler {
         || message.isError
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
-      const record: PrunedToolResult = {
+      const record: ContextProjectedToolResult = {
         toolCallId: message.toolCallId,
         toolName: message.name,
         originalCharacters: message.content.length,
-        sha256: digest(message.content),
+        modelViewSha256: digest(message.content),
+        ...fullResultRefFields(message),
         reason: "budget",
       };
       this.prunedToolResults.set(message.toolCallId, record);
@@ -466,8 +664,8 @@ export class ContextAssembler {
     return newlyPruned;
   }
 
-  private projectLargeToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
-    const newlyProjected: PrunedToolResult[] = [];
+  private projectLargeToolResults(canonicalMessages: readonly ModelMessage[]): ContextProjectedToolResult[] {
+    const newlyProjected: ContextProjectedToolResult[] = [];
     for (let index = this.firstKeptMessageIndex; index < canonicalMessages.length; index += 1) {
       const message = canonicalMessages[index];
       if (
@@ -479,11 +677,12 @@ export class ContextAssembler {
       ) continue;
       const structuredEvidence = structuredToolResultProjection(message.name, message.content);
       if (structuredEvidence !== undefined) {
-        const record: PrunedToolResult = {
+        const record: ContextProjectedToolResult = {
           toolCallId: message.toolCallId,
           toolName: message.name,
           originalCharacters: message.content.length,
-          sha256: digest(message.content),
+          modelViewSha256: digest(message.content),
+          ...fullResultRefFields(message),
           reason: "structured_tool_result",
           structuredEvidence,
         };
@@ -491,15 +690,18 @@ export class ContextAssembler {
         newlyProjected.push(record);
         continue;
       }
-      const preview = message.content.slice(0, this.largeToolResultPreviewCharacters());
-      const record: PrunedToolResult = {
+      const preview = headTailPreview(message.content, this.largeToolResultPreviewCharacters());
+      const record: ContextProjectedToolResult = {
         toolCallId: message.toolCallId,
         toolName: message.name,
         originalCharacters: message.content.length,
-        sha256: digest(message.content),
+        modelViewSha256: digest(message.content),
+        ...fullResultRefFields(message),
         reason: "large_tool_result",
-        preview,
-        previewCharacters: preview.length,
+        preview: preview.content,
+        previewCharacters: preview.headCharacters + preview.tailCharacters,
+        previewHeadCharacters: preview.headCharacters,
+        previewTailCharacters: preview.tailCharacters,
       };
       this.prunedToolResults.set(message.toolCallId, record);
       newlyProjected.push(record);
@@ -507,8 +709,8 @@ export class ContextAssembler {
     return newlyProjected;
   }
 
-  private projectStructuredToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
-    const newlyProjected: PrunedToolResult[] = [];
+  private projectStructuredToolResults(canonicalMessages: readonly ModelMessage[]): ContextProjectedToolResult[] {
+    const newlyProjected: ContextProjectedToolResult[] = [];
     for (let index = this.firstKeptMessageIndex; index < canonicalMessages.length; index += 1) {
       const message = canonicalMessages[index];
       if (
@@ -519,11 +721,12 @@ export class ContextAssembler {
       ) continue;
       const structuredEvidence = structuredToolResultProjection(message.name, message.content);
       if (structuredEvidence === undefined) continue;
-      const record: PrunedToolResult = {
+      const record: ContextProjectedToolResult = {
         toolCallId: message.toolCallId,
         toolName: message.name,
         originalCharacters: message.content.length,
-        sha256: digest(message.content),
+        modelViewSha256: digest(message.content),
+        ...fullResultRefFields(message),
         reason: "structured_tool_result",
         structuredEvidence,
       };
@@ -533,8 +736,8 @@ export class ContextAssembler {
     return newlyProjected;
   }
 
-  private projectStructuredEvidenceToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
-    const newlyProjected: PrunedToolResult[] = [];
+  private projectStructuredEvidenceToolResults(canonicalMessages: readonly ModelMessage[]): ContextProjectedToolResult[] {
+    const newlyProjected: ContextProjectedToolResult[] = [];
     for (let index = this.firstKeptMessageIndex; index < canonicalMessages.length; index += 1) {
       const message = canonicalMessages[index];
       if (
@@ -545,11 +748,12 @@ export class ContextAssembler {
       ) continue;
       const structuredEvidence = structuredToolEvidenceProjection(message.content);
       if (structuredEvidence === undefined) continue;
-      const record: PrunedToolResult = {
+      const record: ContextProjectedToolResult = {
         toolCallId: message.toolCallId,
         toolName: message.name,
         originalCharacters: message.content.length,
-        sha256: digest(message.content),
+        modelViewSha256: digest(message.content),
+        ...fullResultRefFields(message),
         reason: "structured_evidence",
         structuredEvidence,
       };
@@ -589,6 +793,7 @@ export class ContextAssembler {
     const activeAfter = this.activeSkillNames(canonicalMessages);
     const expiredSkillNames = [...activeBefore].filter((name) => !activeAfter.has(name));
     for (const name of expiredSkillNames) {
+      this.expiredSkillNames.add(name);
       await this.emitEvent({
         type: "skill.activation.expired",
         data: { name, contextEpoch: this.contextEpoch, reason: "load_skill_result_compacted" },
@@ -884,7 +1089,10 @@ function resolvePolicy(model: ModelAdapter, input: ContextPolicy | undefined): R
   const safetyMarginTokens = input?.safetyMarginTokens ?? Math.min(4_096, Math.floor(contextWindowTokens * 0.1));
   const usable = contextWindowTokens - outputReserveTokens - safetyMarginTokens;
   if (usable < 2_000) throw new TypeError("Model limits leave fewer than 2000 usable input tokens");
-  const proactiveCompactionTokens = Math.min(input?.proactiveCompactionTokens ?? usable, usable);
+  const proactiveCompactionTokens = Math.min(
+    input?.proactiveCompactionTokens ?? Math.floor(usable * 0.8),
+    usable,
+  );
   const deferProactiveCompactionForArtifactEvidence = input?.deferProactiveCompactionForArtifactEvidence ?? true;
   const preserveRecentTokens = input?.preserveRecentTokens
     ?? Math.min(20_000, Math.max(2_000, Math.floor(usable * 0.25)));
@@ -981,9 +1189,17 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
   }
   const structuredEvidence = structuredToolEvidenceProjection(message.content);
   if (structuredEvidence !== undefined) {
-    return `[Tool evidence receipt ${message.name} id=${message.toolCallId}]: ${structuredToolEvidenceLedger(message.content) ?? structuredEvidence}`;
+    const ref = message.resultRef ?? extractCompleteToolResultRef(message.content);
+    return [
+      `[Tool evidence receipt ${message.name} id=${message.toolCallId}]: ${structuredToolEvidenceLedger(message.content) ?? structuredEvidence}`,
+      ref === undefined ? "" : completeResultRefMarker(ref),
+    ].filter(Boolean).join("\n");
   }
-  return `[Tool ${message.isError ? "error" : "result"} ${message.name} id=${message.toolCallId}]: ${truncateForSummary(message.content, toolResultLimit)}`;
+  const ref = message.resultRef ?? extractCompleteToolResultRef(message.content);
+  return [
+    `[Tool ${message.isError ? "error" : "result"} ${message.name} id=${message.toolCallId}]: ${truncateForSummary(message.content, toolResultLimit)}`,
+    ref === undefined ? "" : completeResultRefMarker(ref),
+  ].filter(Boolean).join("\n");
 }
 
 function chunkSerializedGroups(groups: readonly string[], maxTokens: number): string[] {
@@ -1013,20 +1229,68 @@ function truncateForSummary(value: string, maximum: number): string {
   return `${value.slice(0, maximum)}\n[truncated ${value.length - maximum} characters; sha256=${digest(value)}]`;
 }
 
-function prunedToolMarker(record: PrunedToolResult): string {
+function headTailPreview(value: string, maximum: number): {
+  readonly content: string;
+  readonly headCharacters: number;
+  readonly tailCharacters: number;
+} {
+  if (value.length <= maximum) {
+    return { content: value, headCharacters: value.length, tailCharacters: 0 };
+  }
+  const headCharacters = Math.ceil(maximum / 2);
+  const tailCharacters = Math.floor(maximum / 2);
+  const omittedCharacters = value.length - headCharacters - tailCharacters;
+  const head = value.slice(0, headCharacters);
+  const tail = tailCharacters === 0 ? "" : value.slice(-tailCharacters);
+  return {
+    content: [head, `[... omitted ${omittedCharacters} characters ...]`, tail].filter(Boolean).join("\n"),
+    headCharacters,
+    tailCharacters,
+  };
+}
+
+function prunedToolMarker(record: ContextProjectedToolResult): string {
+  const fullResultMarker = record.fullResultRef === undefined ? "" : completeResultRefMarker(record.fullResultRef);
   if (record.structuredEvidence !== undefined) {
     const label = record.reason === "structured_tool_result"
       ? "structured projection"
       : "structured evidence";
     return [
       record.structuredEvidence,
-      `[Tool result projected as ${label}; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; sha256=${record.sha256}; canonical event retained]`,
-    ].join("\n\n");
+      `[Tool result projected as ${label}; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; modelViewSha256=${record.modelViewSha256}; canonical event retained]`,
+      fullResultMarker,
+    ].filter(Boolean).join("\n\n");
   }
   const marker = record.reason === "large_tool_result"
-    ? `[Large tool result projected for model context; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; previewCharacters=${record.previewCharacters ?? 0}; sha256=${record.sha256}; canonical event retained]`
-    : `[Old tool result removed from model projection; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; sha256=${record.sha256}; canonical event retained]`;
-  return record.preview === undefined ? marker : `${record.preview}\n\n${marker}`;
+    ? `[Large tool result projected for model context; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; previewCharacters=${record.previewCharacters ?? 0}; previewHeadCharacters=${record.previewHeadCharacters ?? 0}; previewTailCharacters=${record.previewTailCharacters ?? 0}; modelViewSha256=${record.modelViewSha256}; canonical event retained]`
+    : `[Old tool result removed from model projection; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; modelViewSha256=${record.modelViewSha256}; canonical event retained]`;
+  return [record.preview ?? "", marker, fullResultMarker].filter(Boolean).join("\n\n");
+}
+
+function fullResultRefFields(
+  message: Extract<ModelMessage, { role: "tool" }>,
+): Pick<ContextProjectedToolResult, "fullResultRef"> | Record<string, never> {
+  const fullResultRef = message.resultRef ?? extractCompleteToolResultRef(message.content);
+  return fullResultRef === undefined ? {} : { fullResultRef };
+}
+
+function projectToolResultRefForModel(
+  message: Extract<ModelMessage, { role: "tool" }>,
+): Extract<ModelMessage, { role: "tool" }> {
+  if (message.resultRef === undefined || message.content.includes(message.resultRef.locator)) return message;
+  return { ...message, content: `${message.content}\n\n${completeResultRefMarker(message.resultRef)}` };
+}
+
+function extractCompleteToolResultRef(content: string): ContextProjectedToolResult["fullResultRef"] {
+  const match = content.match(/\[Complete Tool result: locator=(tool-result:\/\/[0-9a-f-]+); sha256=([0-9a-f]{64}); characters=(\d+)\./u);
+  if (match === null) return undefined;
+  const characters = Number(match[3]);
+  if (!Number.isSafeInteger(characters) || characters < 0) return undefined;
+  return { locator: match[1], sha256: match[2], characters };
+}
+
+function completeResultRefMarker(ref: NonNullable<ContextProjectedToolResult["fullResultRef"]>): string {
+  return `[Complete Tool result: locator=${ref.locator}; sha256=${ref.sha256}; characters=${ref.characters}. Use read_tool_result with this locator and hash for bounded retrieval.]`;
 }
 
 function structuredToolEvidenceProjection(content: string): string | undefined {
@@ -1268,7 +1532,7 @@ function hasArtifactEvidenceBoundary(
 function hasUnprunedLoadedSkillResult(
   canonicalMessages: readonly ModelMessage[],
   firstKeptMessageIndex: number,
-  prunedToolResults: ReadonlyMap<string, PrunedToolResult>,
+  prunedToolResults: ReadonlyMap<string, ContextProjectedToolResult>,
 ): boolean {
   for (let index = canonicalMessages.length - 1; index >= firstKeptMessageIndex; index -= 1) {
     const message = canonicalMessages[index];
@@ -1899,7 +2163,8 @@ function truncateSingleLine(value: string, maximum: number): string {
 function parseJsonRecord(content: unknown): Record<string, unknown> | undefined {
   if (typeof content !== "string") return recordValue(content);
   try {
-    return recordValue(JSON.parse(content));
+    const markerIndex = content.indexOf("\n[Complete Tool result: locator=");
+    return recordValue(JSON.parse(markerIndex === -1 ? content : content.slice(0, markerIndex)));
   } catch {
     return undefined;
   }

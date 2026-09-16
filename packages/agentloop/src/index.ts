@@ -61,6 +61,11 @@ export type {
   WebToolsOptions,
 } from "./tools/index.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
+export type {
+  ContextPolicy,
+  ContextProjectedToolResult,
+  ContextProjectionCheckpoint,
+} from "./runtime/context-assembler.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";
 export type * from "./runtime/contracts.ts";
 export {
@@ -105,6 +110,7 @@ export type {
   RuntimeActionKind,
   RuntimeActionRecord,
   RuntimeActionState,
+  RuntimeToolOutcomeCommit,
 } from "./runtime/runtime-action-repository.ts";
 export { HumanLoopRepository } from "./runtime/human-loop.ts";
 export type {
@@ -183,6 +189,8 @@ export { SqliteSkillStore } from "./storage/stores/sqlite-skill-store.ts";
 export { BatchRepository } from "./storage/repositories/batch-repository.ts";
 export { RunOutcomeRepository } from "./storage/repositories/outcome-repository.ts";
 export { RunRepository } from "./storage/repositories/run-repository.ts";
+export { SqlToolResultStore } from "./storage/repositories/tool-result-store.ts";
+export type { StoredToolResult, ToolResultRef, ToolResultStore, ToolResultWindow } from "./storage/repositories/tool-result-store.ts";
 export { SkillRepository } from "./storage/repositories/skill-repository.ts";
 export { sourceSummary, SourceRepository } from "./storage/repositories/source-repository.ts";
 export type { SourceChunkRow, SourceRow } from "./storage/repositories/source-repository.ts";

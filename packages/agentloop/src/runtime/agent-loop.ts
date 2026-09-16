@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { createConcurrencyLimiter, mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
-import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
+import {
+  ContextAssembler,
+  type ContextPolicy,
+  type ContextProjectionCheckpoint,
+} from "./context-assembler.ts";
 import { appendDeliveryCandidateCaveats, buildRuntimeDeliveryCandidate, normalizeDeliveryCandidate } from "./delivery-candidate.ts";
 import type {
   AgentLoopResult,
@@ -24,6 +28,8 @@ import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import type { PreparedToolCall } from "../tools/tool-registry.ts";
 import { ToolRegistry } from "../tools/tool-registry.ts";
 import { HUMAN_LOOP_TOOL_NAME } from "../tools/human-loop-tool.ts";
+import type { ToolResultRef, ToolResultStore } from "../storage/repositories/tool-result-store.ts";
+import type { RuntimeToolOutcomeCommit } from "./runtime-action-repository.ts";
 import { completeWithStreaming } from "./model-streaming.ts";
 import { isTextToolInvocation } from "./text-tool-invocation.ts";
 import {
@@ -53,6 +59,8 @@ export interface AgentLoopOptions {
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
+  /** Last durable model-visible projection restored from Runtime events. */
+  readonly initialContextProjection?: ContextProjectionCheckpoint;
   readonly model: ModelAdapter;
   readonly tools: ToolRegistry;
   readonly grant: CapabilityGrant;
@@ -69,6 +77,10 @@ export interface AgentLoopOptions {
   /** Rejected assessed candidates allowed before accepting the latest non-empty output with a caveat. */
   readonly candidateRepairAssessmentLimit?: number;
   readonly maxToolResultCharacters?: number;
+  /** Durable store for complete oversized Tool results before model projection. */
+  readonly toolResultStore?: ToolResultStore;
+  /** Explicit escape hatch for old embedders that accept non-recoverable Tool results. */
+  readonly toolResultPersistence?: "required" | "legacy";
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
@@ -91,6 +103,9 @@ export interface AgentLoopOptions {
       toolName: string;
       replaySafe: boolean;
       timeoutMs?: number;
+      maxResultCharacters: number;
+      resultRef?: (value: T) => string | undefined;
+      toolOutcome?: (value: T) => RuntimeToolOutcomeCommit | undefined;
     }, operation: () => Promise<T>): Promise<T>;
   };
   readonly evaluateCandidate?: (
@@ -119,6 +134,7 @@ interface ToolOutcome {
   readonly call: ModelToolCall;
   readonly content: string;
   readonly isError: boolean;
+  readonly resultRef?: ToolResultRef;
   readonly failurePhase?: "prepare" | "execute" | "runtime";
 }
 
@@ -186,6 +202,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     await options.emit?.(event);
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
+  const toolResultPersistence = options.toolResultPersistence ?? "required";
+  const hasExecutableTools = options.tools.materialize(options.grant).definitions.length > 0;
+  if (hasExecutableTools && options.toolResultStore === undefined && toolResultPersistence !== "legacy") {
+    throw new AppError(
+      "TOOL_RESULT_STORE_REQUIRED",
+      "A Tool result store is required before Tool execution; set toolResultPersistence to legacy only for explicit non-recoverable compatibility",
+      500,
+    );
+  }
   const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
   const graceSteps = Math.max(0, options.convergenceGraceSteps ?? DEFAULT_CONVERGENCE_GRACE_STEPS);
   const candidateRepairGraceSteps = Math.max(0, options.candidateRepairGraceSteps ?? 0);
@@ -221,6 +246,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     },
     model: options.model,
     policy: options.contextPolicy,
+    checkpoint: options.initialContextProjection,
     emit,
   });
 
@@ -517,34 +543,81 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
     for (let candidateAttempt = 1; candidateAttempt <= EMPTY_CANDIDATE_REPAIR_ATTEMPTS; candidateAttempt += 1) {
-      const invocation: ModelInvocation = {
-        runId: options.runId,
-        systemPrompt: options.systemPrompt,
-        phase: "execution",
-        runtimeContext: assembly.runtimeContext,
-        messages: assembly.messages,
-        tools: convergenceOnly ? [] : executionDefinitions,
-        ...(convergenceOnly || executionDefinitions.length === 0
-          ? {}
-          : { toolChoice: "auto" as const }),
-        maxOutputTokens: convergenceOnly
-          ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
-          : options.model.limits.maxOutputTokens,
+      let overflowRecoveryAttempted = false;
+      const completeLogicalTurn = async (): Promise<ModelResponse> => {
+        while (true) {
+          const invocation: ModelInvocation = {
+          runId: options.runId,
+          systemPrompt: options.systemPrompt,
+          phase: "execution",
+          runtimeContext: assembly.runtimeContext,
+          messages: assembly.messages,
+          tools: convergenceOnly ? [] : executionDefinitions,
+          ...(convergenceOnly || executionDefinitions.length === 0
+            ? {}
+            : { toolChoice: "auto" as const }),
+          maxOutputTokens: convergenceOnly
+            ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
+            : options.model.limits.maxOutputTokens,
+          };
+          earlyOutcomes = new Map<string, ToolOutcome>();
+          try {
+            return await completeWithStreamingAndDispatch({
+            model: options.model,
+            invocation,
+            emit,
+            step,
+            signal: options.signal,
+            grant: options.grant,
+            prepare: (call) => grantedMaterialized.prepare(call),
+            maxToolResultCharacters,
+            maxParallelToolCalls,
+            actionTracker: options.actionTracker,
+            toolResultStore: options.toolResultStore,
+            allowEarlyDispatch: options.progressPolicy === undefined,
+            }, earlyOutcomes);
+          } catch (error) {
+            if (
+              overflowRecoveryAttempted
+              || !isContextWindowExceeded(error)
+              || earlyOutcomes.size > 0
+            ) throw error;
+            const revisionBefore = contextAssembler.projectionRevision;
+            const forced = await contextAssembler.compactAfterProviderOverflow(
+              messages,
+              convergenceOnly ? [] : executionDefinitions,
+              assembly.estimatedInputTokens,
+              options.signal,
+            );
+            if (
+              forced === undefined
+              || contextAssembler.projectionRevision <= revisionBefore
+              || forced.estimatedInputTokens >= assembly.estimatedInputTokens
+            ) throw error;
+            overflowRecoveryAttempted = true;
+            await emit({
+              type: "context.overflow_recovery.retrying",
+              data: {
+                step,
+                revisionBefore,
+                revisionAfter: contextAssembler.projectionRevision,
+                estimatedTokensBefore: assembly.estimatedInputTokens,
+                estimatedTokensAfter: forced.estimatedInputTokens,
+              },
+            });
+            assembly = forced;
+          }
+        }
       };
-      earlyOutcomes = new Map<string, ToolOutcome>();
-      response = await completeWithStreamingAndDispatch({
-        model: options.model,
-        invocation,
-        emit,
-        step,
-        signal: options.signal,
-        grant: options.grant,
-        prepare: (call) => grantedMaterialized.prepare(call),
-        maxToolResultCharacters,
-        maxParallelToolCalls,
-        actionTracker: options.actionTracker,
-        allowEarlyDispatch: options.progressPolicy === undefined,
-      }, earlyOutcomes);
+      response = options.model.runInModelAction === undefined
+        ? await completeLogicalTurn()
+        : await options.model.runInModelAction({
+          phase: "execution",
+          metadata: {
+            modelStep: step,
+            contextProjectionRevision: contextAssembler.projectionRevision,
+          },
+        }, completeLogicalTurn);
       if (
         response.toolCalls.length === 0
         && response.finishReason === "stop"
@@ -928,6 +1001,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         maxToolResultCharacters,
         maxParallelToolCalls,
         options.actionTracker,
+        options.toolResultStore,
       );
       let lateIndex = 0;
       outcomes = response.toolCalls.map((call) => {
@@ -946,6 +1020,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         toolName: outcome.call.name,
         result: outcome.content,
         isError: outcome.isError,
+        ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
         ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
       };
       toolEvidence.push(evidence);
@@ -957,6 +1032,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           name: outcome.call.name,
           content: outcome.content,
           isError: outcome.isError,
+          ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
         });
       }
       if (!outcome.isError && outcome.call.name === "load_skill") {
@@ -1516,7 +1592,8 @@ function truncateForDirective(value: string, maxCharacters: number): string {
 
 function parseJsonRecord(value: string): Record<string, unknown> | undefined {
   try {
-    const parsed = JSON.parse(value);
+    const markerIndex = value.indexOf("\n[Complete Tool result: locator=");
+    const parsed = JSON.parse(markerIndex === -1 ? value : value.slice(0, markerIndex));
     return isPlainRecord(parsed) ? parsed : undefined;
   } catch {
     return undefined;
@@ -1538,6 +1615,7 @@ interface StreamingDispatchContext {
   readonly maxToolResultCharacters: number;
   readonly maxParallelToolCalls: number;
   readonly actionTracker: AgentLoopOptions["actionTracker"];
+  readonly toolResultStore: ToolResultStore | undefined;
   readonly allowEarlyDispatch: boolean;
 }
 
@@ -1591,6 +1669,7 @@ async function completeWithStreamingAndDispatch(
           context.signal,
           context.maxToolResultCharacters,
           context.actionTracker,
+          context.toolResultStore,
         );
         earlyOutcomes.set(call.id, outcome);
       } finally {
@@ -1599,41 +1678,44 @@ async function completeWithStreamingAndDispatch(
     })());
   };
 
-  const response = await completeWithStreaming({
-    model: context.model,
-    invocation: context.invocation,
-    emit: context.emit,
-    signal: context.signal,
-    base: { phase: "execution", step: context.step },
-    onToolCallReady: async (call) => {
-      // When the turn was dispatched without tools (convergence) any tool call is
-      // model misbehaviour and is never executed, so skip both commit and dispatch.
-      if (context.invocation.tools.length === 0) return;
-      await context.emit({
-        type: "assistant.tool_call.committed",
-        data: {
-          step: context.step,
-          toolCallId: call.id,
-          name: call.name,
-          arguments: call.arguments,
-        },
-      });
-      await context.emit({
-        type: "model.stream.awaiting_completion",
-        data: {
-          phase: "execution",
-          step: context.step,
-          toolCallId: call.id,
-          toolName: call.name,
-        },
-      });
-      if (!context.allowEarlyDispatch) return;
-      dispatchEarly(call);
-    },
-  });
-
-  await Promise.all(dispatches);
-  return response;
+  try {
+    return await completeWithStreaming({
+      model: context.model,
+      invocation: context.invocation,
+      emit: context.emit,
+      signal: context.signal,
+      base: { phase: "execution", step: context.step },
+      onToolCallReady: async (call) => {
+        // When the turn was dispatched without tools (convergence) any tool call is
+        // model misbehaviour and is never executed, so skip both commit and dispatch.
+        if (context.invocation.tools.length === 0) return;
+        await context.emit({
+          type: "assistant.tool_call.committed",
+          data: {
+            step: context.step,
+            toolCallId: call.id,
+            name: call.name,
+            arguments: call.arguments,
+          },
+        });
+        await context.emit({
+          type: "model.stream.awaiting_completion",
+          data: {
+            phase: "execution",
+            step: context.step,
+            toolCallId: call.id,
+            toolName: call.name,
+          },
+        });
+        if (!context.allowEarlyDispatch) return;
+        dispatchEarly(call);
+      },
+    });
+  } finally {
+    // A stream can fail after yielding tool_call_ready. Settle every early
+    // effect before the caller decides whether an overflow retry is safe.
+    await Promise.all(dispatches);
+  }
 }
 
 async function executePreparedSchedule(
@@ -1645,13 +1727,14 @@ async function executePreparedSchedule(
   maxCharacters: number,
   concurrency: number,
   actionTracker: AgentLoopOptions["actionTracker"],
+  toolResultStore: ToolResultStore | undefined,
 ): Promise<ToolOutcome[]> {
   const outcomes: ToolOutcome[] = [];
   let next = 0;
   while (next < entries.length) {
     const first = entries[next];
     if (first.kind === "ready" && first.value.tool.executionMode === "exclusive") {
-      outcomes.push(await executePrepared(first, grant, step, emit, signal, maxCharacters, actionTracker));
+      outcomes.push(await executePrepared(first, grant, step, emit, signal, maxCharacters, actionTracker, toolResultStore));
       next += 1;
       continue;
     }
@@ -1664,7 +1747,7 @@ async function executePreparedSchedule(
       next += 1;
     }
     outcomes.push(...await mapWithConcurrencyLimit(group, concurrency, (entry) =>
-      executePrepared(entry, grant, step, emit, signal, maxCharacters, actionTracker)
+      executePrepared(entry, grant, step, emit, signal, maxCharacters, actionTracker, toolResultStore)
     ));
   }
   return outcomes;
@@ -1678,11 +1761,13 @@ async function executePrepared(
   signal: AbortSignal | undefined,
   maxCharacters: number,
   actionTracker: AgentLoopOptions["actionTracker"],
+  toolResultStore: ToolResultStore | undefined,
 ): Promise<ToolOutcome> {
   if (entry.kind === "rejected") {
     return { call: entry.call, content: entry.message, isError: true, failurePhase: "prepare" };
   }
   const { call, tool, input } = entry.value;
+  let committedOutcome: ToolOutcome | undefined;
   try {
     throwIfAborted(signal);
     // This is the observable side-effect boundary. The Tool still only
@@ -1695,30 +1780,83 @@ async function executePrepared(
       type: "tool.dispatched",
       data: { step, toolCallId: call.id, toolName: call.name, replaySafe: tool.replaySafe },
     });
-    const execute = async (): Promise<unknown> => {
-      return tool.execute({ grant, signal }, input);
+    const maximum = tool.maxResultCharacters ?? maxCharacters;
+    const executeAndPersist = async (): Promise<{
+      readonly value: unknown;
+      readonly serialized: string;
+      readonly resultRef?: ToolResultRef;
+    }> => {
+      const value = await tool.execute({ grant, signal }, input);
+      const serialized = serializeCompleteToolResult(value);
+      const resultRef = toolResultStore !== undefined
+        ? await toolResultStore.put({
+          ownerUserId: grant.actorUserId,
+          runId: grant.runId,
+          toolCallId: call.id,
+          toolName: call.name,
+          content: serialized,
+          createdAt: Date.now(),
+        })
+        : undefined;
+      return { value, serialized, ...(resultRef === undefined ? {} : { resultRef }) };
     };
-    const value = actionTracker === undefined
-      ? await execute()
+    // The tracked Tool Action remains dispatched until any oversized result
+    // has been durably persisted. A spill failure therefore closes the Action
+    // as failed instead of recording a successful side effect with no
+    // recoverable result.
+    const execution = actionTracker === undefined
+      ? await executeAndPersist()
       : await actionTracker.executeToolCall({
         step,
         toolCallId: call.id,
         toolName: call.name,
         replaySafe: tool.replaySafe,
         timeoutMs: tool.timeoutMs,
-      }, execute);
-    const content = serializeToolResult(value, tool.maxResultCharacters ?? maxCharacters);
+        maxResultCharacters: maximum,
+        resultRef: (result) => result.resultRef?.locator,
+        toolOutcome: (result) => {
+          if (result.resultRef === undefined) return undefined;
+          return {
+            toolCallId: call.id,
+            toolName: call.name,
+            content: projectToolResult(result.value, result.serialized, maximum),
+            isError: false,
+            resultRef: result.resultRef,
+          };
+        },
+      }, executeAndPersist);
+    const { value, serialized, resultRef } = execution;
+    const content = projectToolResult(value, serialized, maximum);
+    committedOutcome = { call, content, isError: false, ...(resultRef === undefined ? {} : { resultRef }) };
     const metrics = toolEvidenceMetrics(call.name, content);
     await emit({
       type: "tool.result_committed",
-      data: { step, toolCallId: call.id, toolName: call.name, ...toolResultCommitSummary(content), ...metrics },
+      data: {
+        step,
+        toolCallId: call.id,
+        toolName: call.name,
+        ...toolResultCommitSummary(content),
+        ...(resultRef === undefined ? {} : { resultRef }),
+        ...metrics,
+      },
     });
     await emit({
       type: "tool.completed",
-      data: { step, toolCallId: call.id, toolName: call.name, result: content, ...metrics },
+      data: {
+        step,
+        toolCallId: call.id,
+        toolName: call.name,
+        result: content,
+        ...(resultRef === undefined ? {} : { resultRef }),
+        ...metrics,
+      },
     });
-    return { call, content, isError: false };
+    return committedOutcome;
   } catch (error) {
+    // The durable Action/outcome commit is the success boundary. Projection
+    // event failures after it must not be rewritten as Tool failure or cause
+    // an unsafe external effect to be executed again during recovery.
+    if (committedOutcome !== undefined) return committedOutcome;
     const content = publicErrorMessage(error);
     await emit({
       type: "tool.failed",
@@ -2034,7 +2172,7 @@ function integerValue(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
 }
 
-function serializeToolResult(value: unknown, maximum: number): string {
+function serializeCompleteToolResult(value: unknown): string {
   let serialized: string;
   try {
     serialized = typeof value === "string" ? value : JSON.stringify(value);
@@ -2042,12 +2180,35 @@ function serializeToolResult(value: unknown, maximum: number): string {
     serialized = "Tool returned a value that could not be serialized";
   }
   if (serialized === undefined) serialized = "null";
+  return serialized;
+}
+
+function projectToolResult(
+  value: unknown,
+  serialized: string,
+  maximum: number,
+): string {
   if (serialized.length <= maximum) return serialized;
   const compact = compactOversizedStructuredToolResult(value, serialized);
   if (compact !== undefined && compact.length <= maximum) return compact;
-  const omitted = serialized.length - maximum;
+  const preview = headTailToolResultPreview(serialized, maximum);
+  const omitted = serialized.length - preview.characters;
   const digest = createHash("sha256").update(serialized).digest("hex");
-  return `${serialized.slice(0, maximum)}\n[truncated ${omitted} characters; sha256=${digest}]`;
+  return `${preview.content}\n[truncated ${omitted} characters; fullContentSha256=${digest}]`;
+}
+
+function headTailToolResultPreview(content: string, maximum: number): {
+  readonly content: string;
+  readonly characters: number;
+} {
+  if (content.length <= maximum) return { content, characters: content.length };
+  const separator = "\n...[middle omitted from model view]...\n";
+  const head = Math.ceil(maximum / 2);
+  const tail = Math.floor(maximum / 2);
+  return {
+    content: `${content.slice(0, head)}${separator}${content.slice(content.length - tail)}`,
+    characters: head + tail,
+  };
 }
 
 function compactOversizedStructuredToolResult(value: unknown, serialized: string): string | undefined {
@@ -2088,6 +2249,10 @@ function publicErrorMessage(error: unknown): string {
   if (error instanceof AppError) return `${error.code}: ${error.message}`;
   if (error instanceof Error && error.name === "AbortError") return "CANCELLED: Operation was cancelled";
   return "INTERNAL_ERROR: Tool execution failed";
+}
+
+function isContextWindowExceeded(error: unknown): boolean {
+  return error instanceof AppError && error.code === "CONTEXT_WINDOW_EXCEEDED";
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

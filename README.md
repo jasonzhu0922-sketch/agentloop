@@ -71,6 +71,24 @@ AgentLoop 的执行链路是：
 7. **Assessment** 对完成候选核对 Success Criteria、证据契约、产物收据和已激活 Skill 的合规性；通过后才完成 Step。
 8. **Repair / Recovery** 评估不通过时，把失败边界和反馈注入当前 Step 做有界修复；仍无法满足时进入 Recovery 或 Plan Revision，而不是以模型文本或文件存在冒充成功。
 
+### 长上下文与大 Tool Result
+
+模型上下文只是权威运行事实的一份有界投影，不是另一套状态：
+
+```text
+Run Event / Plan / Evidence / 完整 Tool Result
+→ 版本化 Context Projection
+→ 预算内 Model Invocation
+```
+
+- 默认在可用输入预算约 80% 时主动整理；先投影/裁剪旧 Tool Result，再摘要闭合的旧协议前缀，并保留近期原文。
+- 每个成功 Tool Result（包括小结果）都先完整进入 `ToolResultStore`，再由同一 SQL 事务提交 Action success、`tool.outcome.committed` 和 `result_ref`。默认 SQL adapter 返回 owner/run/toolCall 绑定的 opaque locator；模型通过 `read_tool_result` 按 hash 和范围受控取回，locator 不暴露本机路径。
+- 未知大文本的首轮模型视图直接从完整序列化结果生成 head + tail；后续预算裁剪、结构化投影和摘要输入继续保留完整结果 locator/hash，并把它与模型视图 hash 明确区分。
+- 每次执行模型调用前写入 `agentloop.contextProjection/v1` checkpoint，并绑定实际 Run Event seq；恢复时按事件顺序重建 no-tool candidate、Tool exchange 与 HIL response，校验 canonical transcript 前缀、system prompt、Tool catalog 与模型消息投影 hash，再 hydrate 已持久化投影。只要 checkpoint 事件存在但损坏或版本不支持就拒绝恢复，只有从未产生 checkpoint 的历史 Run 才走 legacy 路径。
+- Provider 的真实 context overflow 会归一化为 `CONTEXT_WINDOW_EXCEEDED`。Runtime 只有在 projection revision 增长且估算 token 下降时才在同一个逻辑 Model Action 内重试一次；若流式回合已产生 Tool effect，则禁止重试。
+- 公开低层 `runAgentLoop` 在存在可执行 Tool 时默认要求 `ToolResultStore`，并在 effect 前拒绝缺失 store 的调用；旧嵌入方只能显式选择 `toolResultPersistence: "legacy"`，该模式不保证结果可恢复。
+- 摘要和 locator 都不能替代 Evidence、Capability Grant、HIL、精确 Skill 正文、Assessment 或 Terminal Commit。生产大对象仍建议由宿主提供共享对象存储 `ToolResultStore` adapter；默认 SQL store 是可移植基线，不代表生产对象存储治理已完成。
+
 ### Step Agent Loop 的两阶段推进
 
 这里的“两阶段”发生在**同一个已准入的 Plan Step 内**，不是把任务强制拆成两个 Plan Step，也不是让当前 Step 提前执行下游 Step。Runtime 在每个模型回合生成一个紧凑的 `loopStepFrame`，把该回合组织为：
@@ -111,41 +129,41 @@ AgentLoop 的执行链路是：
 
 要求 Node.js 26 或更高版本。
 
-1. 安装根依赖：
+1. 从仓库根目录按统一 lockfile 安装所有 workspace（包括 Web）依赖：
+
+```bash
+npm ci
+```
+
+只有在新增或升级依赖、需要更新根 `package-lock.json` 时才使用：
 
 ```bash
 npm install
 ```
 
-2. 安装 Web 前端依赖：
+不要在子 workspace 单独运行安装或生成第二份 lockfile。
 
-```bash
-cd apps/agentloop-app/web
-npm install
-cd ../../..
-```
-
-3. 创建本地配置文件：
+2. 创建本地配置文件：
 
 ```bash
 cp apps/agentloop-app/.env.example apps/agentloop-app/.env
 cp apps/agentloop-app/config/llm-providers.example.json apps/agentloop-app/config/llm-providers.json
 ```
 
-4. 编辑本地配置：
+3. 编辑本地配置：
 
 - 在 `apps/agentloop-app/config/llm-providers.json` 中配置 Provider、Base URL、默认模型和公开的 `modelKey`。
 - 在 `apps/agentloop-app/.env` 中填写对应的环境变量值，例如 `MY_LLM_API_KEY` 或 `OPENAI_API_KEY`。
 - `LLM_PROVIDER_CONFIG_PATH` 默认指向 `./config/llm-providers.json`。
 - 可选 MCP 来源在 `apps/agentloop-app/config/mcp-servers.json` 中注册；认证信息通过 `secretEnv` 引用 `.env` 或部署环境变量，不能写入注册文件。
 
-5. 初始化空 SQLite 数据库：
+4. 初始化空 SQLite 数据库：
 
 ```bash
 npm run init-db
 ```
 
-6. 启动开发模式：
+5. 启动开发模式：
 
 ```bash
 npm run dev
@@ -161,7 +179,7 @@ npm start
 
 ## 快速启动：agentloop-multi-runtime（多 Runtime）
 
-要求 Node.js 26 或更高版本，且根目录已执行过 `npm install`。本地启动器会启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Host，不会传给 Router 或 Web。
+要求 Node.js 26 或更高版本，且根目录已执行过 `npm ci`。本地启动器会启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Host，不会传给 Router 或 Web。
 
 1. 创建多 Runtime 自有的 Provider 配置和本地密钥文件：
 

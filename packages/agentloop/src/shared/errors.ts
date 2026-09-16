@@ -16,7 +16,9 @@ export type ErrorCode =
   | "SKILL_PACKAGE_MUTATED"
   | "TOOL_POLICY_DENIED"
   | "TOOL_EXECUTION_ERROR"
+  | "TOOL_RESULT_STORE_REQUIRED"
   | "MODEL_ERROR"
+  | "CONTEXT_WINDOW_EXCEEDED"
   | "INTERNAL_ERROR";
 
 export class AppError extends Error {

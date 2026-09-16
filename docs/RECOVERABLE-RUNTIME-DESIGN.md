@@ -234,6 +234,30 @@ Tool 的 `replaySafe` 现有布尔字段应演进为上述三态协议，避免�
 
 沿用现有的投影式 Context Assembler：压缩只改变下一轮模型视图，不改写原始 ToolResult。若 Skill 原文已离开保留尾部，恢复时失效对应 Skill activation lease，先重新执行 `load_skill`，再恢复其他执行 Tool。
 
+当前实现进一步把模型可见面持久化为 `agentloop.contextProjection/v1` checkpoint。checkpoint 记录 revision、source event seq、context epoch、canonical prefix hash、summary/hash、保留边界、Tool 投影、active/expired Skill 名称、system/runtime/tool catalog hash 和 token 估算。每次执行模型调用前先提交 checkpoint；恢复按真实事件顺序重建 no-tool candidate、Tool exchange 与 HIL response，再校验 canonical 前缀、system prompt、Tool catalog 与模型消息投影 hash。存在但损坏、字段非法、修订倒退或版本不支持的 checkpoint 会 fail closed；只有完全没有 checkpoint 事件的历史 Run 才走 legacy transcript 重建。
+
+Tool Result 的提交边界是：
+
+```text
+Tool effect
+-> 完整序列化
+-> ToolResultStore.put(owner/run/toolCall/hash)
+-> 同一 SQL 事务提交 Runtime Action success
+   + tool_outcomes
+   + tool.outcome.committed
+   + action.result_committed/result_ref
+-> tool.result_committed / tool.completed（模型与 UI 投影）
+-> 有界 head/tail 或结构化模型投影
+```
+
+成功结果无论大小都具有 durable outcome。若 Worker 在 blob put 后、Action SQL commit 前退出，启动 reconciliation 可按 owner/run/toolCall 查到不可变 blob 并补交 outcome，而不会重放已经完成的不安全 Tool；若 outcome 已提交，则恢复直接消费 `tool.outcome.committed`，不依赖较晚的 `tool.completed`。这只是确认已持久化结果，不把“没有 blob”推断为外部 effect 没发生，也不笼统承诺 exactly-once。
+
+默认 `SqlToolResultStore` 同时使用 SQLite/PostgreSQL 表；PostgreSQL 的字符数和毫秒时间字段使用 BIGINT，读取时对 pg int8 的 string/bigint 表示做安全整数校验。生产大对象可由宿主注入共享对象存储 adapter。`read_tool_result` 接受 opaque locator 与 hash，并重新校验当前 Run Grant、owner、Run、完整性和读取范围。
+
+Provider 真正返回 context overflow 时，Adapter 使用 `CONTEXT_WINDOW_EXCEEDED`，不走普通 HTTP 400 重试。执行回合只有在新 projection revision 已持久化且估算 token 严格下降后，才在同一个逻辑 Model Action 内重试一次；若 streaming 已经触发 Tool effect、压缩没有进展或第二次仍溢出，则保留原错误并停止。
+
+尚未完成的边界包括：生产对象存储默认实现、真实 PostgreSQL 集成验证，以及进程级 kill Worker 压测。这些缺口也意味着当前机制不能被描述为执行中 Run 的跨 Host 无损接管。
+
 ## 9. Plan Revision 与目标覆盖
 
 恢复时的 Plan Revision 解决“Plan 自身扩展了用户未请求的终态工作”问题，但不能成为任意跳步接口。
@@ -304,7 +328,8 @@ UI 必须区分：
 | 模型响应返回、`assistant.committed` 前 kill Worker | 不把未持久化响应当事实；从上一个完整动作恢复 |
 | `tool.effect_pending` 前 kill Worker | Tool 未开始；按 replay policy 恢复 |
 | `tool.effect_pending` 后、ToolResult 前 kill Worker | `unsafe` 不自动重跑；进入 `ask_user` 或 receipt reconciliation |
-| ToolResult 已持久化、下一模型回合前 kill Worker | 从完整 ToolResult 重建 Context，不能重复 Tool |
+| ToolResult blob 已持久化、Action outcome commit 前 kill Worker | 按 owner/run/toolCall reconcile 已存 blob，提交 outcome；不得重复 unsafe Tool |
+| Action/outcome 已提交、`tool.completed` 前 kill Worker | 从 `tool.outcome.committed` 重建 Context，不能重复 Tool |
 | Assessment 请求中断 | 评估可安全重试；没有批准 Assessment 不得完成 Step |
 | Planner Recovery 决策超时 | 有限重试；耗尽后 `waiting_user` 或 `fail`，不能无限循环 |
 | 两个 Worker 同时恢复同一 Run | 只有 fence 最新者能写结果；迟到结果不能改变 Run |

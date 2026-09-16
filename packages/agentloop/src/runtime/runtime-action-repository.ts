@@ -1,6 +1,7 @@
 import type { SqlConnection } from "../storage/connection.ts";
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import type { ToolResultRef, ToolResultStore } from "../storage/repositories/tool-result-store.ts";
 
 export type RuntimeActionKind =
   | "planning"
@@ -40,6 +41,15 @@ export interface RuntimeActionRecord {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly closedAt?: number;
+}
+
+export interface RuntimeToolOutcomeCommit {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly content: string;
+  readonly isError: boolean;
+  readonly failurePhase?: "prepare" | "execute" | "runtime";
+  readonly resultRef: ToolResultRef;
 }
 
 interface RuntimeActionRow {
@@ -86,16 +96,22 @@ export class RuntimeActionRepository {
     replayPolicy: ReplayPolicy;
     deadlineMs: number;
     metadata?: Readonly<Record<string, unknown>>;
+    resultRef?: (value: T) => string | undefined;
+    toolOutcome?: (value: T) => RuntimeToolOutcomeCommit | undefined;
   }, operation: () => Promise<T>): Promise<T> {
     const action = await this.dispatch(input);
+    let value: T;
     try {
-      const value = await operation();
-      await this.succeed(action.id, action.fence);
-      return value;
+      value = await operation();
     } catch (error) {
       await this.fail(action.id, action.fence, errorCode(error));
       throw error;
     }
+    // A commit failure after operation() may follow a real external effect and
+    // a durable blob write. Keep the Action dispatched for reconciliation;
+    // never rewrite this uncertainty as action.failed/effect-not-observed.
+    await this.succeed(action.id, action.fence, input.resultRef?.(value), input.toolOutcome?.(value));
+    return value;
   }
 
   async dispatch(input: {
@@ -186,7 +202,7 @@ export class RuntimeActionRepository {
           SET state = 'recovery_required', lease_until = NULL, revision = revision + 1, updated_at = ?
           WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
         `).run(now, action.id, action.fence, action.revision) as { changes: number };
-        if (result.changes !== 1) continue;
+        if (!oneRowChanged(result.changes)) continue;
         await this.appendEvent(action.run_id, "action.recovery_required", {
           actionId: action.id,
           fence: action.fence,
@@ -196,6 +212,49 @@ export class RuntimeActionRepository {
         reconciled += 1;
       }
     });
+    return reconciled;
+  }
+
+  /**
+   * Finish the narrow crash window where immutable Tool bytes were stored but
+   * the Action/outcome SQL transaction did not commit. This proves only that
+   * the result bytes exist; it never infers that a missing blob means an
+   * external effect did not happen.
+   */
+  async reconcileStoredToolOutcomes(store: ToolResultStore): Promise<number> {
+    const rows = await this.database.prepare(`
+      SELECT actions.id, actions.run_id, actions.fence, actions.metadata_json,
+             runs.owner_user_id
+      FROM runtime_actions AS actions
+      JOIN runs ON runs.id = actions.run_id
+      WHERE actions.kind = 'tool_call' AND actions.state = 'dispatched'
+      ORDER BY actions.created_at, actions.id
+    `).all() as unknown as Array<{
+      id: string; run_id: string; fence: number; metadata_json: string; owner_user_id: string;
+    }>;
+    let reconciled = 0;
+    for (const row of rows) {
+      const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+      const toolCallId = typeof metadata.toolCallId === "string" ? metadata.toolCallId : undefined;
+      const toolName = typeof metadata.toolName === "string" ? metadata.toolName : undefined;
+      if (toolCallId === undefined || toolName === undefined) continue;
+      const stored = await store.findByToolCall({
+        ownerUserId: row.owner_user_id,
+        runId: row.run_id,
+        toolCallId,
+      });
+      if (stored === undefined || stored.toolName !== toolName) continue;
+      const maximum = safePreviewLimit(metadata.maxResultCharacters);
+      const content = projectStoredResult(stored.content, maximum);
+      await this.succeed(row.id, row.fence, stored.locator, {
+        toolCallId,
+        toolName,
+        content,
+        isError: false,
+        resultRef: stored,
+      });
+      reconciled += 1;
+    }
     return reconciled;
   }
 
@@ -215,7 +274,7 @@ export class RuntimeActionRepository {
               updated_at = ?, closed_at = ?
           WHERE id = ? AND state = 'dispatched' AND revision = ?
         `).run(code, now, now, action.id, action.revision) as { changes: number };
-        if (result.changes !== 1) continue;
+        if (!oneRowChanged(result.changes)) continue;
         await this.appendEvent(runId, "action.failed", { actionId: action.id, fence: action.fence, code }, now);
         cancelled += 1;
       }
@@ -275,18 +334,57 @@ export class RuntimeActionRepository {
     return await this.require(actionId);
   }
 
-  private async succeed(actionId: string, fence: number): Promise<void> {
+  private async succeed(
+    actionId: string,
+    fence: number,
+    resultRef?: string,
+    toolOutcome?: RuntimeToolOutcomeCommit,
+  ): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
       const row = await this.requireRow(actionId);
       const result = await this.database.prepare(`
         UPDATE runtime_actions
         SET state = 'succeeded', lease_until = NULL, revision = revision + 1,
-            updated_at = ?, closed_at = ?
+            result_ref = ?, updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-      `).run(now, now, actionId, fence, row.revision) as { changes: number };
-      if (result.changes !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
-      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence }, now);
+      `).run(resultRef ?? null, now, now, actionId, fence, row.revision) as { changes: number };
+      if (!oneRowChanged(result.changes)) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
+      if (toolOutcome !== undefined) {
+        if (row.kind !== "tool_call") throw new AppError("CONFLICT", "Only Tool Actions can commit Tool outcomes", 409);
+        await this.database.prepare(`
+          INSERT INTO tool_outcomes(
+            run_id, tool_call_id, action_id, tool_name, content, is_error,
+            failure_phase, result_locator, result_sha256, result_characters, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          row.run_id,
+          toolOutcome.toolCallId,
+          actionId,
+          toolOutcome.toolName,
+          toolOutcome.content,
+          toolOutcome.isError ? 1 : 0,
+          toolOutcome.failurePhase ?? null,
+          toolOutcome.resultRef.locator,
+          toolOutcome.resultRef.sha256,
+          toolOutcome.resultRef.characters,
+          now,
+        );
+        await this.appendEvent(row.run_id, "tool.outcome.committed", {
+          actionId,
+          toolCallId: toolOutcome.toolCallId,
+          toolName: toolOutcome.toolName,
+          content: toolOutcome.content,
+          isError: toolOutcome.isError,
+          ...(toolOutcome.failurePhase === undefined ? {} : { failurePhase: toolOutcome.failurePhase }),
+          resultRef: toolOutcome.resultRef,
+        }, now);
+      }
+      await this.appendEvent(row.run_id, "action.result_committed", {
+        actionId,
+        fence,
+        ...(resultRef === undefined ? {} : { resultRef }),
+      }, now);
     });
   }
 
@@ -300,7 +398,7 @@ export class RuntimeActionRepository {
             updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
       `).run(code, now, now, actionId, fence, row.revision) as { changes: number };
-      if (result.changes !== 1) return;
+      if (!oneRowChanged(result.changes)) return;
       await this.appendEvent(row.run_id, "action.failed", { actionId, fence, code }, now);
     });
   }
@@ -387,6 +485,22 @@ export class RuntimeActionRepository {
       VALUES (?, ?, ?, ?, ?)
     `).run(runId, sequence.seq, type, JSON.stringify(data), createdAt);
   }
+}
+
+function oneRowChanged(value: number | bigint): boolean {
+  return value === 1 || value === 1n;
+}
+
+function safePreviewLimit(value: unknown): number {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : 50_000;
+}
+
+function projectStoredResult(content: string, maximum: number): string {
+  if (content.length <= maximum) return content;
+  const separator = "\n...[middle omitted from model view]...\n";
+  const head = Math.ceil(maximum / 2);
+  const tail = Math.floor(maximum / 2);
+  return `${content.slice(0, head)}${separator}${content.slice(content.length - tail)}`;
 }
 
 function toRuntimeActionRecord(row: RuntimeActionRow): RuntimeActionRecord {

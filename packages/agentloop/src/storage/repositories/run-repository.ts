@@ -300,16 +300,21 @@ export class RunRepository {
 
   async appendEvent(
     runId: string,
-    input: { type: string; data: Readonly<Record<string, unknown>>; createdAt: number },
+    input: {
+      type: string;
+      data: Readonly<Record<string, unknown>> | ((sequence: number) => Readonly<Record<string, unknown>>);
+      createdAt: number;
+    },
   ): Promise<number> {
     return await this.connection.transaction(async () => {
       const sequence = await this.connection.prepare(
         "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?",
       ).get(runId) as { seq: number };
+      const data = typeof input.data === "function" ? input.data(sequence.seq) : input.data;
       await this.connection.prepare(`
         INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
         VALUES (?, ?, ?, ?, ?)
-      `).run(runId, sequence.seq, input.type, JSON.stringify(input.data), input.createdAt);
+      `).run(runId, sequence.seq, input.type, JSON.stringify(data), input.createdAt);
       return sequence.seq;
     });
   }

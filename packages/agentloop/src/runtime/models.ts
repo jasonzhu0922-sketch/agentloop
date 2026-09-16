@@ -226,12 +226,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
       }
 
       if (!response.ok) {
+        const providerError = await providerHttpError(response, request.logContext);
+        if (providerError.code === "CONTEXT_WINDOW_EXCEEDED") throw providerError;
         if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-          await response.body?.cancel().catch(() => undefined);
           await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, response.status, request.logContext);
           continue;
         }
-        throw await providerHttpError(response, request.logContext);
+        throw providerError;
       }
 
       let payload: CompatibleResponse;
@@ -322,12 +323,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
         }
 
         if (!response.ok) {
+          const providerError = await providerHttpError(response, request.logContext);
+          if (providerError.code === "CONTEXT_WINDOW_EXCEEDED") throw providerError;
           if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-            await response.body?.cancel().catch(() => undefined);
             await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext);
             continue;
           }
-          throw await providerHttpError(response, request.logContext);
+          throw providerError;
         }
 
         try {
@@ -651,12 +653,13 @@ export class ResponsesModel implements ModelAdapter {
         }
 
         if (!response.ok) {
+          const providerError = await providerHttpError(response, request.logContext);
+          if (providerError.code === "CONTEXT_WINDOW_EXCEEDED") throw providerError;
           if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
-            await response.body?.cancel().catch(() => undefined);
             await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext);
             continue;
           }
-          throw await providerHttpError(response, request.logContext);
+          throw providerError;
         }
 
         try {
@@ -1203,12 +1206,60 @@ function isJsonResponse(response: Response): boolean {
 
 async function providerHttpError(response: Response, request: ModelRequestLogContext): Promise<AppError> {
   const bodyText = await safeResponseBodyPreview(response);
-  return new AppError("MODEL_ERROR", `Model provider returned HTTP ${response.status}`, 502, {
+  const details = {
     status: response.status,
     providerRequestId: response.headers.get("x-request-id") ?? undefined,
     request,
     ...(bodyText === undefined ? {} : { providerErrorBody: bodyText }),
-  });
+  };
+  if (isProviderContextWindowError(response.status, bodyText)) {
+    return new AppError(
+      "CONTEXT_WINDOW_EXCEEDED",
+      "Model provider rejected the request because its context window was exceeded",
+      502,
+      details,
+    );
+  }
+  return new AppError("MODEL_ERROR", `Model provider returned HTTP ${response.status}`, 502, details);
+}
+
+function isProviderContextWindowError(status: number, bodyText: string | undefined): boolean {
+  if (status !== 400 && status !== 413 && status !== 422) return false;
+  if (bodyText === undefined) return false;
+  const fields = providerErrorFields(bodyText);
+  const codeOrType = [fields.code, fields.type].filter(Boolean).join(" ").toLowerCase();
+  if (/\b(?:context_length_exceeded|context_window_exceeded|prompt_too_long|input_too_long)\b/u.test(codeOrType)) {
+    return true;
+  }
+  const semantic = (fields.message ?? bodyText).toLowerCase();
+  if (
+    /(?:unsupported|unknown|invalid) (?:parameter|argument).{0,40}context[_ -]?window/u.test(semantic)
+    || /(?:max(?:imum)?[_ -]?(?:output|completion)[_ -]?tokens?|output token limit)/u.test(semantic)
+    || /(?:rate limit|quota|tokens per minute|tpm|insufficient_quota)/u.test(semantic)
+  ) return false;
+  return /(?:maximum context (?:length|window).{0,80}(?:exceed|too (?:large|long)|tokens)|context (?:length|window).{0,80}(?:exceed|too (?:large|long))|prompt (?:is )?too long|too many input tokens)/u.test(semantic);
+}
+
+function providerErrorFields(bodyText: string): {
+  readonly code?: string;
+  readonly type?: string;
+  readonly message?: string;
+} {
+  try {
+    const parsed = JSON.parse(bodyText) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const root = parsed as Record<string, unknown>;
+    const nested = root.error !== null && typeof root.error === "object" && !Array.isArray(root.error)
+      ? root.error as Record<string, unknown>
+      : root;
+    return {
+      ...(typeof nested.code === "string" ? { code: nested.code } : {}),
+      ...(typeof nested.type === "string" ? { type: nested.type } : {}),
+      ...(typeof nested.message === "string" ? { message: nested.message } : {}),
+    };
+  } catch {
+    return {};
+  }
 }
 
 function unreadableStreamingResponse(error: unknown, attempts: number, request: ModelRequestLogContext): AppError {

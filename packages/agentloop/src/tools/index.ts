@@ -17,4 +17,5 @@ export { createSourceTools } from "./source-tools.ts";
 export { SKILL_LOADER_TOOL_NAME, createSkillLoader, skillExecutionCwd, skillExecutionRootEnvName } from "./skill-loader.ts";
 export { assertNoDuplicateTools, composeRunTools, createCoreTools } from "./compose.ts";
 export { HUMAN_LOOP_TOOL_NAME, createHumanLoopTool } from "./human-loop-tool.ts";
+export { TOOL_RESULT_READER_NAME, createToolResultReader } from "./tool-result-reader.ts";
 export type { ComposeRunToolsOptions, CoreToolsOptions } from "./compose.ts";

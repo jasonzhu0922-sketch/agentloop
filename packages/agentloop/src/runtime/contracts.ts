@@ -46,6 +46,12 @@ export interface ModelToolCall {
   readonly arguments: unknown;
 }
 
+export interface ModelToolResultRef {
+  readonly locator: string;
+  readonly sha256: string;
+  readonly characters: number;
+}
+
 export type ModelMessage =
   | { readonly role: "user"; readonly content: string }
   | {
@@ -61,6 +67,7 @@ export type ModelMessage =
       readonly name: string;
       readonly content: string;
       readonly isError: boolean;
+      readonly resultRef?: ModelToolResultRef;
     };
 
 export interface ModelToolDefinition {
@@ -183,6 +190,15 @@ export interface ModelAdapter {
   estimateInputTokens?(invocation: ModelInvocation): number | undefined;
   /** Sanitized provider-bound request shape for Runtime observability. */
   requestLogContext?(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext | undefined;
+  /**
+   * Optional Runtime Action boundary for one logical model turn. The callback
+   * may make a bounded recovery retry; adapters that implement this must keep
+   * those Provider calls inside one durable Action.
+   */
+  runInModelAction?<T>(input: {
+    readonly phase: RuntimeContextSnapshot["phase"];
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }, operation: () => Promise<T>): Promise<T>;
   complete(invocation: ModelInvocation, signal?: AbortSignal): Promise<ModelResponse>;
   /**
    * Streaming variant of complete(). Emits incremental text and tool-call
@@ -274,6 +290,7 @@ export interface AgentLoopToolEvidence {
   readonly toolName: string;
   readonly result: string;
   readonly isError: boolean;
+  readonly resultRef?: ModelToolResultRef;
   readonly failurePhase?: "prepare" | "execute" | "runtime";
 }
 

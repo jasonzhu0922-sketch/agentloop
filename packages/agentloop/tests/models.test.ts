@@ -2,6 +2,108 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
 
+test("OpenAI-compatible adapter normalizes Provider context overflow", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  let retries = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    return new Response(JSON.stringify({
+    error: {
+      message: "This model's maximum context length is 128000 tokens",
+      type: "invalid_request_error",
+      code: "context_length_exceeded",
+    },
+    }), { status: 400, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 3,
+      retryDelayMs: 0,
+      onRetry: () => { retries += 1; },
+    });
+    await assert.rejects(
+      () => model.complete({
+        runId: "run-context-overflow",
+        systemPrompt: "System",
+        phase: "execution",
+        messages: [{ role: "user", content: "Check" }],
+        tools: [],
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "CONTEXT_WINDOW_EXCEEDED");
+        assert.match(String((error as { details?: Record<string, unknown> }).details?.providerErrorBody), /context_length_exceeded/);
+        return true;
+      },
+    );
+    assert.equal(attempts, 1);
+    assert.equal(retries, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+for (const falsePositive of [
+  {
+    name: "unsupported context_window parameter",
+    status: 400,
+    body: { error: { code: "invalid_request_error", message: "Unsupported parameter: context_window" } },
+  },
+  {
+    name: "maximum output token limit",
+    status: 400,
+    body: { error: { type: "invalid_request_error", message: "max_output_tokens exceeds the output token limit" } },
+  },
+  {
+    name: "token rate quota",
+    status: 429,
+    body: { error: { code: "rate_limit_exceeded", message: "Token quota and TPM rate limit exceeded" } },
+  },
+  {
+    name: "server error mentioning context length",
+    status: 500,
+    body: { error: { message: "Internal context length accounting failed" } },
+  },
+] as const) {
+  test(`OpenAI-compatible adapter does not classify ${falsePositive.name} as context overflow`, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify(falsePositive.body), {
+      status: falsePositive.status,
+      headers: { "content-type": "application/json" },
+    });
+    try {
+      const model = new OpenAICompatibleModel({
+        baseUrl: "https://models.example.test/v1",
+        apiKey: "server-secret",
+        model: "example-model",
+        contextWindowTokens: 128_000,
+        maxOutputTokens: 8_192,
+        maxAttempts: 1,
+      });
+      await assert.rejects(
+        () => model.complete({
+          runId: "run-not-context-overflow",
+          systemPrompt: "System",
+          phase: "execution",
+          messages: [{ role: "user", content: "Check" }],
+          tools: [],
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
 test("OpenAI-compatible adapter maps server-configured requests and tool calls", async () => {
   const originalFetch = globalThis.fetch;
   let capturedBody: Record<string, unknown> | undefined;
