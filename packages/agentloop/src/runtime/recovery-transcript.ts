@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall } from "./contracts.ts";
 import type { ContextProjectionCheckpoint } from "./context-assembler.ts";
 import { AppError } from "../shared/errors.ts";
+import { isToolResultLocator } from "../storage/repositories/tool-result-store.ts";
 
 export interface RecoveryEvent {
   readonly seq: number;
@@ -519,8 +520,7 @@ function toolEvidenceFromOutcome(call: ModelToolCall, outcome: ToolOutcome): Age
 function asToolResultRef(value: unknown): ToolOutcome["resultRef"] {
   if (!isRecord(value)) return undefined;
   if (
-    typeof value.locator !== "string"
-    || !/^tool-result:\/\/[0-9a-f-]+$/.test(value.locator)
+    !isToolResultLocator(value.locator)
     || typeof value.sha256 !== "string"
     || !/^[0-9a-f]{64}$/.test(value.sha256)
     || typeof value.characters !== "number"

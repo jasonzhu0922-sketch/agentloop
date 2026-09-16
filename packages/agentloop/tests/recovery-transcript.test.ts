@@ -70,7 +70,7 @@ test("recovery keeps the committed assistant path unchanged when the full checkp
 });
 
 test("recovery preserves an oversized Tool result locator without rehydrating its full content", () => {
-  const locator = "tool-result://11111111-1111-1111-1111-111111111111";
+  const locator = "object-store:v1:abc123";
   const sha256 = "a".repeat(64);
   const transcript = reconstructRecoveryTranscript({
     userInput: "inspect the large result",

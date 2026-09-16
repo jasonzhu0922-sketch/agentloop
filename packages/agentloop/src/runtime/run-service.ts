@@ -647,8 +647,6 @@ export class RunService {
   }
 
   async deleteConversation(actorUserId: string, conversationId: string): Promise<void> {
-    await this.actions.reconcileStoredToolOutcomes(this.toolResultStore);
-    await this.actions.reconcileRunningRuns();
     await this.runs.deleteConversation(actorUserId, conversationId);
   }
 
@@ -1760,6 +1758,49 @@ export class RunService {
           await emit({ type: "run.waiting_user", data: { runId, planId, stepId: runningStepId, requestId: request.id, kind: request.kind, request } });
           return this.get(actorUserId, runId);
         }
+        if (appError.code === "RUNTIME_ACTION_LEASE_LOST") {
+          // This Worker no longer owns the Action fence. The reconciler/new
+          // owner is solely responsible for recovery state; a stale Worker
+          // must not fail the Step, Plan or Run, nor overwrite its outcome.
+          return this.get(actorUserId, runId);
+        }
+        if (
+          appError.code === "TOOL_RESULT_SERIALIZATION_FAILED"
+          || appError.code === "TOOL_PROJECTION_RECOVERY_REQUIRED"
+        ) {
+          let recoveryState = await this.recovery.state(runId);
+          if (recoveryState === undefined) {
+            const action = await this.actions.requireRecoveryReview({
+              runId,
+              ...(planId === undefined ? {} : { planId }),
+              ...(runningStepId === undefined ? {} : { stepId: runningStepId }),
+              reason: appError.code === "TOOL_RESULT_SERIALIZATION_FAILED"
+                ? "tool_result_serialization_uncertain"
+                : "tool_projection_persistence_failed",
+              metadata: {
+                errorCode: appError.code,
+                ...(appError.details === undefined ? {} : { errorDetails: appError.details }),
+              },
+            });
+            recoveryState = await this.recovery.state(runId) ?? {
+              runId,
+              state: "waiting_recovery",
+              actionId: action.id,
+              updatedAt: Date.now(),
+            };
+          }
+          await emit({
+            type: "run.recovery_required",
+            data: {
+              runId,
+              planId,
+              stepId: runningStepId,
+              actionId: recoveryState.actionId,
+              code: appError.code,
+            },
+          });
+          return this.get(actorUserId, runId);
+        }
         const failedBoundary = failedBoundaryFromErrorDetails(appError.details);
         if (
           appError.code === "STEP_NOT_COMPLETED"
@@ -2816,6 +2857,7 @@ const TERMINAL_EVENT_TYPES = new Set([
   "tool.dispatched",
   "tool.result_committed",
   "tool.completed",
+  "tool.projection_failed",
   "tool.failed",
   "tool.rejected",
   "candidate.approved",

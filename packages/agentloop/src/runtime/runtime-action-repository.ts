@@ -20,6 +20,7 @@ export type RuntimeActionState =
 export type ReplayPolicy = "safe" | "idempotent" | "unsafe";
 
 const LEGACY_ACTIONLESS_RUN_GRACE_MS = 60_000;
+const TOOL_OUTCOME_RECONCILIATION_LEASE_MS = 60_000;
 
 export interface RuntimeActionRecord {
   readonly id: string;
@@ -104,7 +105,11 @@ export class RuntimeActionRepository {
     try {
       value = await operation();
     } catch (error) {
-      await this.fail(action.id, action.fence, errorCode(error));
+      if (error instanceof AppError && error.code === "TOOL_RESULT_SERIALIZATION_FAILED") {
+        await this.markRecoveryRequired(action.id, action.fence, error.code);
+      } else {
+        await this.fail(action.id, action.fence, errorCode(error));
+      }
       throw error;
     }
     // A commit failure after operation() may follow a real external effect and
@@ -223,14 +228,15 @@ export class RuntimeActionRepository {
    */
   async reconcileStoredToolOutcomes(store: ToolResultStore): Promise<number> {
     const rows = await this.database.prepare(`
-      SELECT actions.id, actions.run_id, actions.fence, actions.metadata_json,
+      SELECT actions.id, actions.run_id, actions.fence, actions.revision, actions.metadata_json,
              runs.owner_user_id
       FROM runtime_actions AS actions
       JOIN runs ON runs.id = actions.run_id
       WHERE actions.kind = 'tool_call' AND actions.state = 'dispatched'
+        AND (actions.deadline_at <= ? OR actions.lease_until <= ?)
       ORDER BY actions.created_at, actions.id
-    `).all() as unknown as Array<{
-      id: string; run_id: string; fence: number; metadata_json: string; owner_user_id: string;
+    `).all(Date.now(), Date.now()) as unknown as Array<{
+      id: string; run_id: string; fence: number; revision: number; metadata_json: string; owner_user_id: string;
     }>;
     let reconciled = 0;
     for (const row of rows) {
@@ -244,18 +250,46 @@ export class RuntimeActionRepository {
         toolCallId,
       });
       if (stored === undefined || stored.toolName !== toolName) continue;
+      const claimedFence = await this.claimExpiredToolAction(row.id, row.fence, row.revision);
+      if (claimedFence === undefined) continue;
       const maximum = safePreviewLimit(metadata.maxResultCharacters);
       const content = projectStoredResult(stored.content, maximum);
-      await this.succeed(row.id, row.fence, stored.locator, {
+      await this.succeed(row.id, claimedFence, stored.locator, {
         toolCallId,
         toolName,
         content,
         isError: false,
         resultRef: stored,
-      });
+      }, "tool_outcome_reconciled");
       reconciled += 1;
     }
     return reconciled;
+  }
+
+  private async claimExpiredToolAction(
+    actionId: string,
+    fence: number,
+    revision: number,
+  ): Promise<number | undefined> {
+    const now = Date.now();
+    const claimedFence = fence + 1;
+    const result = await this.database.prepare(`
+      UPDATE runtime_actions
+      SET fence = ?, lease_until = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND kind = 'tool_call' AND state = 'dispatched'
+        AND fence = ? AND revision = ?
+        AND (deadline_at <= ? OR lease_until <= ?)
+    `).run(
+      claimedFence,
+      now + TOOL_OUTCOME_RECONCILIATION_LEASE_MS,
+      now,
+      actionId,
+      fence,
+      revision,
+      now,
+      now,
+    ) as { changes: number };
+    return oneRowChanged(result.changes) ? claimedFence : undefined;
   }
 
   async cancelDispatchedForRun(runId: string, code = "CANCELLED"): Promise<number> {
@@ -339,6 +373,7 @@ export class RuntimeActionRepository {
     fence: number,
     resultRef?: string,
     toolOutcome?: RuntimeToolOutcomeCommit,
+    recoveryReason?: string,
   ): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
@@ -349,7 +384,14 @@ export class RuntimeActionRepository {
             result_ref = ?, updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
       `).run(resultRef ?? null, now, now, actionId, fence, row.revision) as { changes: number };
-      if (!oneRowChanged(result.changes)) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
+      if (!oneRowChanged(result.changes)) {
+        throw new AppError(
+          "RUNTIME_ACTION_LEASE_LOST",
+          "Runtime Action lease was lost before result commit",
+          409,
+          { actionId, fence },
+        );
+      }
       if (toolOutcome !== undefined) {
         if (row.kind !== "tool_call") throw new AppError("CONFLICT", "Only Tool Actions can commit Tool outcomes", 409);
         await this.database.prepare(`
@@ -385,6 +427,21 @@ export class RuntimeActionRepository {
         fence,
         ...(resultRef === undefined ? {} : { resultRef }),
       }, now);
+      if (recoveryReason !== undefined) {
+        await this.createRecoveryReview({
+          runId: row.run_id,
+          planId: row.plan_id ?? undefined,
+          stepId: row.step_id ?? undefined,
+          reason: recoveryReason,
+          metadata: {
+            reconciledActionId: actionId,
+            reconciledFence: fence,
+            ...(resultRef === undefined ? {} : { resultRef }),
+          },
+          replayPolicy: "unsafe",
+          createdAt: now,
+        });
+      }
     });
   }
 
@@ -400,6 +457,22 @@ export class RuntimeActionRepository {
       `).run(code, now, now, actionId, fence, row.revision) as { changes: number };
       if (!oneRowChanged(result.changes)) return;
       await this.appendEvent(row.run_id, "action.failed", { actionId, fence, code }, now);
+    });
+  }
+
+  private async markRecoveryRequired(actionId: string, fence: number, reason: string): Promise<void> {
+    const now = Date.now();
+    await this.database.transaction(async () => {
+      const row = await this.requireRow(actionId);
+      const result = await this.database.prepare(`
+        UPDATE runtime_actions
+        SET state = 'recovery_required', lease_until = NULL, error_code = ?,
+            revision = revision + 1, updated_at = ?
+        WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
+      `).run(reason, now, actionId, fence, row.revision) as { changes: number };
+      if (!oneRowChanged(result.changes)) return;
+      await this.appendEvent(row.run_id, "action.recovery_required", { actionId, fence, reason }, now);
+      await this.upsertRecoveryState(row.run_id, actionId, "waiting_recovery", undefined, now);
     });
   }
 

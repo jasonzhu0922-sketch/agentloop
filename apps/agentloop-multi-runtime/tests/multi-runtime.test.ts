@@ -85,6 +85,28 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
   );
 });
 
+test("PostgreSQL Multi Runtime schemas use and migrate every millisecond field as BIGINT", async () => {
+  const statements: string[] = [];
+  const database = {
+    dialect: "postgres",
+    async exec(sql: string) { statements.push(sql); },
+  } as unknown as AppDatabase;
+
+  await new ControlPlaneStore(database).ready();
+  await new SharedFilesystemAttachmentBroker(database, "/unused", "http://router.test").ready();
+  await new HostDispatchStore(database).ready();
+
+  const sql = statements.join("\n");
+  for (const field of [
+    "last_heartbeat_at", "updated_at", "created_at", "reservation_expires_at",
+    "last_observed_at", "lease_expires_at", "accepted_at",
+  ]) {
+    assert.match(sql, new RegExp(`${field} BIGINT`), `${field} must be BIGINT in fresh PostgreSQL DDL`);
+    assert.match(sql, new RegExp(`ALTER COLUMN ${field} TYPE BIGINT`), `${field} must be upgraded in existing PostgreSQL schemas`);
+  }
+  assert.doesNotMatch(sql, /(?:last_heartbeat_at|updated_at|created_at|reservation_expires_at|last_observed_at|lease_expires_at|accepted_at) INTEGER/u);
+});
+
 test("Runtime Host forwards deployment search endpoint and credentials to generic web tools", () => {
   assert.deepEqual(webToolsOptionsFromEnvironment({
     WEB_SEARCH_ENDPOINT: "https://api.bochaai.com/v1/web-search",

@@ -65,6 +65,15 @@ interface ToolResultRow {
 
 const LOCATOR_PREFIX = "tool-result://";
 const MAX_READ_CHARACTERS = 50_000;
+const MAX_LOCATOR_CHARACTERS = 512;
+
+/** Provider-neutral opaque locator grammar shared by stores, projections and recovery. */
+export function isToolResultLocator(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 2
+    && value.length <= MAX_LOCATOR_CHARACTERS
+    && /^[A-Za-z][A-Za-z0-9+.-]*:\S+$/u.test(value);
+}
 
 /** Portable SQL-backed store used until a host provides an object-store adapter. */
 export class SqlToolResultStore implements ToolResultStore {

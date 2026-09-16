@@ -34,6 +34,7 @@ export class SharedFilesystemAttachmentBroker {
   }
 
   async ready(): Promise<void> {
+    const wideInteger = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_attachments (
         id TEXT PRIMARY KEY,
@@ -45,11 +46,16 @@ export class SharedFilesystemAttachmentBroker {
         byte_size INTEGER NOT NULL,
         sha256 TEXT NOT NULL,
         storage_name TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_attachments_subject_idx
         ON mr_attachments(tenant_id, owner_user_id, conversation_id, created_at DESC);
     `);
+    if (this.database.dialect === "postgres") {
+      await this.database.exec(`
+        ALTER TABLE mr_attachments ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+      `);
+    }
   }
 
   async upload(input: Omit<ConversationAttachment, "id" | "byteSize" | "sha256"> & { readonly content: Buffer }): Promise<ConversationAttachment> {

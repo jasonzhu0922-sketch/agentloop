@@ -1,4 +1,4 @@
-import type { ToolResultStore } from "../storage/repositories/tool-result-store.ts";
+import { isToolResultLocator, type ToolResultStore } from "../storage/repositories/tool-result-store.ts";
 import { badRequest } from "../shared/errors.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
@@ -26,7 +26,7 @@ export function createToolResultReader(store: ToolResultStore): RuntimeTool<Read
       additionalProperties: false,
       required: ["locator", "sha256"],
       properties: {
-        locator: { type: "string", pattern: "^tool-result://" },
+        locator: { type: "string", minLength: 3, maxLength: 512, pattern: "^[A-Za-z][A-Za-z0-9+.-]*:\\S+$" },
         sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
         offset: { type: "integer", minimum: 0 },
         limit: { type: "integer", minimum: 1, maximum: MAX_LIMIT },
@@ -39,8 +39,10 @@ export function createToolResultReader(store: ToolResultStore): RuntimeTool<Read
       const record = requireRecord(value, `${TOOL_RESULT_READER_NAME} arguments`);
       const limit = optionalPositiveInteger(record.limit, "limit", DEFAULT_LIMIT, MAX_LIMIT);
       if (limit < 1) throw badRequest(`limit must be an integer between 1 and ${MAX_LIMIT}`);
+      const locator = requireString(record.locator, "locator", { max: 512 });
+      if (!isToolResultLocator(locator)) throw badRequest("locator must be an opaque Tool result locator");
       return {
-        locator: requireString(record.locator, "locator", { max: 200, pattern: /^tool-result:\/\/[0-9a-f-]+$/ }),
+        locator,
         sha256: requireString(record.sha256, "sha256", { max: 64, pattern: /^[0-9a-f]{64}$/ }),
         offset: optionalPositiveInteger(record.offset, "offset", 0, Number.MAX_SAFE_INTEGER),
         limit,

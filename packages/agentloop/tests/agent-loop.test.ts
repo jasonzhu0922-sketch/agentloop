@@ -208,6 +208,7 @@ test("a projection-event failure after durable Tool outcome commit does not turn
   let modelCalls = 0;
   let effects = 0;
   let actionCommitted = false;
+  const emittedTypes: string[] = [];
   const ref = {
     locator: "tool-result://22222222-2222-2222-2222-222222222222",
     sha256: "b".repeat(64),
@@ -267,6 +268,7 @@ test("a projection-event failure after durable Tool outcome commit does not turn
       },
     },
     emit: (event) => {
+      emittedTypes.push(event.type);
       if (event.type === "tool.result_committed") {
         assert.equal(actionCommitted, true);
         throw new Error("injected after Action success");
@@ -276,7 +278,174 @@ test("a projection-event failure after durable Tool outcome commit does not turn
 
   assert.equal(result.output, "done");
   assert.equal(effects, 1);
+  assert.ok(emittedTypes.includes("tool.projection_failed"));
+  assert.ok(!emittedTypes.includes("tool.failed"));
 });
+
+test("persistent projection-event failure is surfaced after the durable Tool outcome commit", async () => {
+  let effects = 0;
+  const store: ToolResultStore = {
+    async put(input) {
+      return { locator: "object-store:v1:persistent-fault", sha256: "d".repeat(64), characters: input.content.length };
+    },
+    async read() { throw new Error("unused"); },
+    async findByToolCall() { return undefined; },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete() {
+      return { content: "", toolCalls: [{ id: "once", name: "unsafe_once", arguments: {} }], finishReason: "tool_calls" };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "unsafe_once",
+    description: "perform once",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => { effects += 1; return "effect result"; },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+      toolResultPersistence: "legacy",
+      runId: "persistent-projection-fault",
+      systemPrompt: "Test agent",
+      input: "perform once",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant: makeGrant(["unsafe_once"]),
+      maxSteps: 1,
+      toolResultStore: store,
+      actionTracker: { async executeToolCall(_input, operation) { return await operation(); } },
+      emit: (event) => {
+        if (event.type === "tool.result_committed" || event.type === "tool.projection_failed") {
+          throw new Error(`persistent event failure: ${event.type}`);
+        }
+      },
+    }),
+    (error: unknown) => (error as { code?: string }).code === "TOOL_PROJECTION_RECOVERY_REQUIRED",
+  );
+  assert.equal(effects, 1);
+});
+
+test("a Tool Action lease loss after the effect never becomes a model-visible Tool failure", async () => {
+  let effects = 0;
+  let puts = 0;
+  const events: RuntimeEvent[] = [];
+  const store: ToolResultStore = {
+    async put(input) {
+      puts += 1;
+      return { locator: "object-store:v1:lease-lost", sha256: "e".repeat(64), characters: input.content.length };
+    },
+    async read() { throw new Error("unused"); },
+    async findByToolCall() { return undefined; },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete() {
+      return { content: "", toolCalls: [{ id: "once", name: "unsafe_once", arguments: {} }], finishReason: "tool_calls" };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "unsafe_once",
+    description: "perform once",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => { effects += 1; return "effect result"; },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+      toolResultPersistence: "legacy",
+      runId: "lease-lost-after-effect",
+      systemPrompt: "Test agent",
+      input: "perform once",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant: makeGrant(["unsafe_once"]),
+      maxSteps: 1,
+      toolResultStore: store,
+      actionTracker: {
+        async executeToolCall(_input, operation) {
+          await operation();
+          throw new AppError("RUNTIME_ACTION_LEASE_LOST", "lease lost", 409);
+        },
+      },
+      emit: (event) => { events.push(event); },
+    }),
+    (error: unknown) => (error as { code?: string }).code === "RUNTIME_ACTION_LEASE_LOST",
+  );
+  assert.equal(effects, 1);
+  assert.equal(puts, 1);
+  assert.ok(!events.some((event) => event.type === "tool.failed" || event.type === "tool.completed"));
+});
+
+for (const [label, value] of [
+  ["cyclic", (() => { const item: Record<string, unknown> = {}; item.self = item; return item; })()],
+  ["BigInt", { count: 1n }],
+  ["undefined", undefined],
+  ["function", () => undefined],
+  ["nested undefined", { ok: true, nested: { missing: undefined } }],
+  ["nested function", { ok: true, callback: () => undefined }],
+  ["nested symbol", { ok: true, marker: Symbol("marker") }],
+  ["symbol key", (() => { const value = { ok: true }; Object.assign(value, { [Symbol("hidden")]: "lost" }); return value; })()],
+  ["array undefined", ["ok", undefined]],
+  ["sparse array", (() => { const value = ["ok"]; value.length = 2; return value; })()],
+  ["NaN", { value: Number.NaN }],
+  ["positive infinity", { value: Number.POSITIVE_INFINITY }],
+  ["negative infinity", { value: Number.NEGATIVE_INFINITY }],
+  ["custom toJSON", { ok: true, toJSON() { return { ok: false }; } }],
+  ["throwing getter", Object.defineProperty({}, "value", { enumerable: true, get() { throw new Error("getter failed"); } })],
+] as const) {
+  test(`a ${label} Tool result is never committed as complete`, async () => {
+    let puts = 0;
+    let effects = 0;
+    const events: RuntimeEvent[] = [];
+    const store: ToolResultStore = {
+      async put() { puts += 1; throw new Error("must not store an invalid result"); },
+      async read() { throw new Error("unused"); },
+      async findByToolCall() { return undefined; },
+    };
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      async complete() {
+        return { content: "", toolCalls: [{ id: `invalid-${label}`, name: "invalid_result", arguments: {} }], finishReason: "tool_calls" };
+      },
+    };
+    const tool: RuntimeTool<unknown> = {
+      name: "invalid_result",
+      description: "return invalid data",
+      inputSchema: { type: "object" },
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: (input) => input,
+      execute: async () => { effects += 1; return value; },
+    };
+
+    await assert.rejects(
+      () => runAgentLoop({
+        toolResultPersistence: "legacy",
+        runId: `invalid-${label}`,
+        systemPrompt: "Test agent",
+        input: "call tool",
+        model,
+        tools: new ToolRegistry([tool]),
+        grant: makeGrant(["invalid_result"]),
+        maxSteps: 1,
+        toolResultStore: store,
+        emit: (event) => { events.push(event); },
+      }),
+      (error: unknown) => (error as { code?: string }).code === "TOOL_RESULT_SERIALIZATION_FAILED",
+    );
+    assert.equal(effects, 1);
+    assert.equal(puts, 0);
+    assert.ok(!events.some((event) => event.type === "tool.result_committed" || event.type === "tool.completed"));
+  });
+}
 
 test("a tool.completed failure after tool.result_committed does not replay or fail a committed effect", async () => {
   let modelCalls = 0;

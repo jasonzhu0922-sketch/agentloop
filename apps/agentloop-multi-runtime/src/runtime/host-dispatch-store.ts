@@ -16,6 +16,7 @@ export class HostDispatchStore {
   }
 
   async ready(): Promise<void> {
+    const wideInteger = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_host_dispatches (
         dispatch_key TEXT PRIMARY KEY,
@@ -23,9 +24,9 @@ export class HostDispatchStore {
         owner_user_id TEXT NOT NULL,
         remote_run_id TEXT,
         state TEXT NOT NULL,
-        lease_expires_at INTEGER,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        lease_expires_at ${wideInteger},
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS mr_host_dispatches_run_idx ON mr_host_dispatches(remote_run_id) WHERE remote_run_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS mr_run_executors (
@@ -33,10 +34,18 @@ export class HostDispatchStore {
         runtime_id TEXT NOT NULL,
         dispatch_key TEXT NOT NULL UNIQUE,
         owner_user_id TEXT NOT NULL,
-        accepted_at INTEGER NOT NULL
+        accepted_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_run_executors_runtime_idx ON mr_run_executors(runtime_id, accepted_at DESC);
     `);
+    if (this.database.dialect === "postgres") {
+      await this.database.exec(`
+        ALTER TABLE mr_host_dispatches ALTER COLUMN lease_expires_at TYPE BIGINT USING lease_expires_at::BIGINT;
+        ALTER TABLE mr_host_dispatches ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+        ALTER TABLE mr_host_dispatches ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
+        ALTER TABLE mr_run_executors ALTER COLUMN accepted_at TYPE BIGINT USING accepted_at::BIGINT;
+      `);
+    }
   }
 
   async claim(input: { readonly dispatchKey: string; readonly assignmentId: string; readonly ownerUserId: string; readonly now: number; readonly leaseMs: number }): Promise<DispatchClaim> {

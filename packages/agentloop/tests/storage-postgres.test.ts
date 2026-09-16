@@ -15,7 +15,46 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
     assert.ok(schema.includes("CREATE TABLE IF NOT EXISTS discovered_skills"));
     assert.match(schema, /tool_result_blobs[\s\S]*characters BIGINT NOT NULL[\s\S]*created_at BIGINT NOT NULL/u);
     assert.match(schema, /tool_outcomes[\s\S]*result_characters BIGINT[\s\S]*created_at BIGINT NOT NULL/u);
-    assert.match(connection.execSql[1] ?? "", /ALTER TABLE tool_result_blobs ALTER COLUMN created_at TYPE BIGINT/u);
+    const timestampColumns = new Map<string, readonly string[]>([
+      ["skills", ["created_at", "updated_at"]],
+      ["discovered_skills", ["synced_at"]],
+      ["conversations", ["created_at", "updated_at"]],
+      ["runs", ["created_at", "finished_at"]],
+      ["plans", ["created_at", "updated_at"]],
+      ["plan_steps", ["started_at", "finished_at"]],
+      ["run_events", ["created_at"]],
+      ["tool_result_blobs", ["created_at"]],
+      ["runtime_actions", ["deadline_at", "lease_until", "created_at", "updated_at", "closed_at"]],
+      ["tool_outcomes", ["created_at"]],
+      ["human_loop_requests", ["created_at", "resolved_at"]],
+      ["human_loop_responses", ["created_at"]],
+      ["run_recovery_states", ["updated_at"]],
+      ["recovery_decisions", ["created_at", "resolved_at"]],
+      ["recovery_user_responses", ["created_at"]],
+      ["plan_revision_snapshots", ["created_at"]],
+      ["plan_step_retirements", ["retired_at"]],
+      ["plan_revision_assessments", ["created_at"]],
+      ["skill_compliance_assessments", ["created_at"]],
+      ["run_outcomes", ["committed_at"]],
+      ["sources", ["created_at", "updated_at"]],
+      ["source_chunks", ["created_at"]],
+      ["run_sources", ["created_at"]],
+      ["batches", ["created_at", "finished_at"]],
+      ["batch_items", ["started_at", "finished_at"]],
+      ["audit_events", ["created_at"]],
+    ]);
+    const migration = connection.execSql[1] ?? "";
+    for (const [table, columns] of timestampColumns) {
+      const tableDefinition = schema.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n      \\);`, "u"))?.[1];
+      assert.ok(tableDefinition, `missing canonical PostgreSQL table ${table}`);
+      for (const column of columns) {
+        assert.match(tableDefinition, new RegExp(`\\b${column} BIGINT(?: NOT NULL)?\\b`, "u"));
+        assert.match(
+          migration,
+          new RegExp(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE BIGINT USING ${column}::BIGINT`, "u"),
+        );
+      }
+    }
     assert.ok(
       schema.indexOf("CREATE TABLE IF NOT EXISTS plans") < schema.indexOf("CREATE TABLE IF NOT EXISTS runtime_actions"),
       "plans must exist before runtime_actions references it on PostgreSQL",
@@ -62,6 +101,71 @@ test("PgConnection translates placeholders, uses simple query for empty params, 
   assert.deepEqual(pool.clientQueries.map((query) => query.text), ["BEGIN", "SELECT $1 AS in_tx", "COMMIT"]);
   assert.deepEqual(pool.clientQueries[1]?.values, ["tx"]);
   assert.equal(pool.released, 1);
+});
+
+test("PgConnection converts pg int8 fields to safe JavaScript integers", async () => {
+  const timestamp = Date.now();
+  const pool: PgPoolLike = {
+    async connect() { throw new Error("unused"); },
+    async query() {
+      return {
+        rows: [{ created_at: String(timestamp), label: "1790000000000" }],
+        rowCount: 1,
+        fields: [
+          { name: "created_at", dataTypeID: 20 },
+          { name: "label", dataTypeID: 25 },
+        ],
+      };
+    },
+    async end() {},
+  };
+  const connection = PgConnection.fromPool(pool);
+  const row = await connection.prepare("SELECT created_at, label FROM demo").get() as {
+    created_at: number;
+    label: string;
+  };
+
+  assert.equal(row.created_at, timestamp);
+  assert.equal(typeof row.created_at, "number");
+  assert.equal(row.label, "1790000000000", "numeric-looking TEXT must not be converted");
+});
+
+test("PgConnection rejects pg int8 values outside the JavaScript safe integer range", async () => {
+  const pool: PgPoolLike = {
+    async connect() { throw new Error("unused"); },
+    async query() {
+      return {
+        rows: [{ created_at: "9007199254740992" }],
+        rowCount: 1,
+        fields: [{ name: "created_at", dataTypeID: 20 }],
+      };
+    },
+    async end() {},
+  };
+  const connection = PgConnection.fromPool(pool);
+  await assert.rejects(
+    () => connection.prepare("SELECT created_at FROM demo").get(),
+    /outside the JavaScript safe integer range/,
+  );
+});
+
+test("PgConnection rejects an unsafe number returned by a custom pg int8 parser", async () => {
+  const pool: PgPoolLike = {
+    async connect() { throw new Error("unused"); },
+    async query() {
+      return {
+        rows: [{ created_at: Number.MAX_SAFE_INTEGER + 1 }],
+        rowCount: 1,
+        fields: [{ name: "created_at", dataTypeID: 20 }],
+      };
+    },
+    async end() {},
+  };
+  const connection = PgConnection.fromPool(pool);
+  await assert.rejects(
+    () => connection.prepare("SELECT created_at FROM demo").get(),
+    /outside the JavaScript safe integer range/,
+  );
 });
 
 test("translatePlaceholders skips quoted literals and identifiers", () => {

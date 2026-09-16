@@ -189,7 +189,7 @@ export { SqliteSkillStore } from "./storage/stores/sqlite-skill-store.ts";
 export { BatchRepository } from "./storage/repositories/batch-repository.ts";
 export { RunOutcomeRepository } from "./storage/repositories/outcome-repository.ts";
 export { RunRepository } from "./storage/repositories/run-repository.ts";
-export { SqlToolResultStore } from "./storage/repositories/tool-result-store.ts";
+export { isToolResultLocator, SqlToolResultStore } from "./storage/repositories/tool-result-store.ts";
 export type { StoredToolResult, ToolResultRef, ToolResultStore, ToolResultWindow } from "./storage/repositories/tool-result-store.ts";
 export { SkillRepository } from "./storage/repositories/skill-repository.ts";
 export { sourceSummary, SourceRepository } from "./storage/repositories/source-repository.ts";

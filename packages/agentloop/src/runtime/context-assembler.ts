@@ -12,6 +12,7 @@ import type {
   RuntimeEventSink,
 } from "./contracts.ts";
 import type { PromptProjectionDecision } from "./step-execution-strategy.ts";
+import { isToolResultLocator } from "../storage/repositories/tool-result-store.ts";
 
 export interface ContextPolicy {
   readonly outputReserveTokens?: number;
@@ -1282,15 +1283,59 @@ function projectToolResultRefForModel(
 }
 
 function extractCompleteToolResultRef(content: string): ContextProjectedToolResult["fullResultRef"] {
-  const match = content.match(/\[Complete Tool result: locator=(tool-result:\/\/[0-9a-f-]+); sha256=([0-9a-f]{64}); characters=(\d+)\./u);
-  if (match === null) return undefined;
-  const characters = Number(match[3]);
+  const structuredPrefix = "[Complete Tool result: ref=";
+  const structuredStart = content.lastIndexOf(structuredPrefix);
+  if (structuredStart !== -1) {
+    const ref = parseJsonObjectAt(content, structuredStart + structuredPrefix.length);
+    if (ref !== undefined) return validCompleteToolResultRef(ref);
+  }
+  const legacy = content.match(/\[Complete Tool result: locator=([^;\s]+); sha256=([0-9a-f]{64}); characters=(\d+)\./u);
+  if (legacy === null || !isToolResultLocator(legacy[1])) return undefined;
+  const characters = Number(legacy[3]);
   if (!Number.isSafeInteger(characters) || characters < 0) return undefined;
-  return { locator: match[1], sha256: match[2], characters };
+  return { locator: legacy[1], sha256: legacy[2], characters };
 }
 
 function completeResultRefMarker(ref: NonNullable<ContextProjectedToolResult["fullResultRef"]>): string {
-  return `[Complete Tool result: locator=${ref.locator}; sha256=${ref.sha256}; characters=${ref.characters}. Use read_tool_result with this locator and hash for bounded retrieval.]`;
+  return `[Complete Tool result: ref=${JSON.stringify(ref)}. Use read_tool_result with the exact locator and hash for bounded retrieval.]`;
+}
+
+function parseJsonObjectAt(content: string, start: number): Record<string, unknown> | undefined {
+  if (content[start] !== "{") return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < content.length; index += 1) {
+    const character = content[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return recordValue(JSON.parse(content.slice(start, index + 1)));
+        } catch {
+          return undefined;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function validCompleteToolResultRef(value: Record<string, unknown>): ContextProjectedToolResult["fullResultRef"] {
+  const locator = value.locator;
+  const sha256 = value.sha256;
+  const characters = value.characters;
+  if (!isToolResultLocator(locator) || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(sha256)) return undefined;
+  if (!Number.isSafeInteger(characters) || (characters as number) < 0) return undefined;
+  return { locator, sha256, characters: characters as number };
 }
 
 function structuredToolEvidenceProjection(content: string): string | undefined {
@@ -2163,7 +2208,7 @@ function truncateSingleLine(value: string, maximum: number): string {
 function parseJsonRecord(content: unknown): Record<string, unknown> | undefined {
   if (typeof content !== "string") return recordValue(content);
   try {
-    const markerIndex = content.indexOf("\n[Complete Tool result: locator=");
+    const markerIndex = content.lastIndexOf("\n[Complete Tool result:");
     return recordValue(JSON.parse(markerIndex === -1 ? content : content.slice(0, markerIndex)));
   } catch {
     return undefined;

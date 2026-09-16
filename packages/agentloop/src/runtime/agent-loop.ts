@@ -198,7 +198,11 @@ const INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT = [
 const DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT = 2;
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
+  let activatedSkillNames = new Set<string>();
   const emit = async (event: RuntimeEvent): Promise<void> => {
+    if (event.type === "skill.activation.expired" && typeof event.data.name === "string") {
+      activatedSkillNames.delete(event.data.name);
+    }
     await options.emit?.(event);
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
@@ -234,9 +238,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const toolEvidence: AgentLoopToolEvidence[] = [...(options.initialToolEvidence ?? [])];
   const availableSkillList = options.availableSkills ?? [];
   const availableSkills = buildSkillReferenceMap(availableSkillList);
-  const activatedSkillNames = new Set(
-    collectActivatedSkillNames(options.initialMessages ?? [], availableSkills),
-  );
   const contextAssembler = new ContextAssembler({
     runId: options.runId,
     systemPrompt: options.systemPrompt,
@@ -249,6 +250,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     checkpoint: options.initialContextProjection,
     emit,
   });
+  activatedSkillNames = new Set(contextAssembler.activeSkillNames(messages));
 
   await emit({
     type: "loop.started",
@@ -1592,7 +1594,7 @@ function truncateForDirective(value: string, maxCharacters: number): string {
 
 function parseJsonRecord(value: string): Record<string, unknown> | undefined {
   try {
-    const markerIndex = value.indexOf("\n[Complete Tool result: locator=");
+    const markerIndex = value.lastIndexOf("\n[Complete Tool result:");
     const parsed = JSON.parse(markerIndex === -1 ? value : value.slice(0, markerIndex));
     return isPlainRecord(parsed) ? parsed : undefined;
   } catch {
@@ -1856,7 +1858,38 @@ async function executePrepared(
     // The durable Action/outcome commit is the success boundary. Projection
     // event failures after it must not be rewritten as Tool failure or cause
     // an unsafe external effect to be executed again during recovery.
-    if (committedOutcome !== undefined) return committedOutcome;
+    if (committedOutcome !== undefined) {
+      try {
+        await emit({
+          type: "tool.projection_failed",
+          data: {
+            step,
+            toolCallId: call.id,
+            toolName: call.name,
+            code: errorCodeForEvent(error),
+            outcomeCommitted: true,
+          },
+        });
+      } catch (diagnosticError) {
+        throw new AppError(
+          "TOOL_PROJECTION_RECOVERY_REQUIRED",
+          "The Tool outcome was committed but its model projection could not be persisted",
+          500,
+          {
+            toolCallId: call.id,
+            toolName: call.name,
+            outcomeCommitted: true,
+            projectionErrorCode: errorCodeForEvent(error),
+            diagnosticErrorCode: errorCodeForEvent(diagnosticError),
+          },
+        );
+      }
+      return committedOutcome;
+    }
+    if (
+      error instanceof AppError
+      && (error.code === "TOOL_RESULT_SERIALIZATION_FAILED" || error.code === "RUNTIME_ACTION_LEASE_LOST")
+    ) throw error;
     const content = publicErrorMessage(error);
     await emit({
       type: "tool.failed",
@@ -2173,14 +2206,87 @@ function integerValue(value: unknown): number | undefined {
 }
 
 function serializeCompleteToolResult(value: unknown): string {
-  let serialized: string;
+  if (typeof value === "string") return value;
+  let serialized: string | undefined;
   try {
-    serialized = typeof value === "string" ? value : JSON.stringify(value);
-  } catch {
-    serialized = "Tool returned a value that could not be serialized";
+    assertLosslessJsonValue(value, "$", new Set<object>());
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "TOOL_RESULT_SERIALIZATION_FAILED") throw error;
+    throw new AppError(
+      "TOOL_RESULT_SERIALIZATION_FAILED",
+      "Tool returned a value outside the supported JSON result contract",
+      500,
+      { cause: error instanceof Error ? error.name : "unknown" },
+    );
   }
-  if (serialized === undefined) serialized = "null";
+  if (serialized === undefined) {
+    throw new AppError(
+      "TOOL_RESULT_SERIALIZATION_FAILED",
+      "Tool returned undefined or a non-JSON result",
+      500,
+    );
+  }
   return serialized;
+}
+
+function assertLosslessJsonValue(value: unknown, path: string, ancestors: Set<object>): void {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return;
+  if (typeof value === "number") {
+    if (Number.isFinite(value) && !Object.is(value, -0)) return;
+    throw unsupportedToolResult(path, "number must be finite and must not be negative zero");
+  }
+  if (typeof value !== "object") {
+    throw unsupportedToolResult(path, `${typeof value} is outside the JSON value contract`);
+  }
+  if (ancestors.has(value)) throw unsupportedToolResult(path, "cyclic reference");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (const key of Reflect.ownKeys(value)) {
+        if (key === "length") continue;
+        if (typeof key !== "string" || !/^(0|[1-9]\d*)$/u.test(key)) {
+          throw unsupportedToolResult(path, "arrays may contain only indexed JSON values");
+        }
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) throw unsupportedToolResult(`${path}[${index}]`, "sparse array item");
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+          throw unsupportedToolResult(`${path}[${index}]`, "array item must be an enumerable data property");
+        }
+        assertLosslessJsonValue(descriptor.value, `${path}[${index}]`, ancestors);
+      }
+      return;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw unsupportedToolResult(path, "only plain JSON objects are supported");
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") throw unsupportedToolResult(path, "symbol-keyed properties are not JSON");
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+        throw unsupportedToolResult(`${path}.${key}`, "object fields must be enumerable data properties");
+      }
+      assertLosslessJsonValue(descriptor.value, `${path}.${key}`, ancestors);
+    }
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function unsupportedToolResult(path: string, reason: string): AppError {
+  return new AppError(
+    "TOOL_RESULT_SERIALIZATION_FAILED",
+    "Tool returned a value outside the supported lossless JSON result contract",
+    500,
+    { path, reason },
+  );
+}
+
+function errorCodeForEvent(error: unknown): string {
+  return error instanceof AppError ? error.code : "INTERNAL_ERROR";
 }
 
 function projectToolResult(

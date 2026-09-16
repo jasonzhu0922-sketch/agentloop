@@ -1,6 +1,36 @@
 import type { SqlConnection, SqlDialect, SqlStatement } from "./connection.ts";
 import { SqliteConnection } from "./sqlite-connection.ts";
 
+const POSTGRES_WIDE_INTEGER_COLUMNS = [
+  ["skills", "created_at"], ["skills", "updated_at"],
+  ["discovered_skills", "synced_at"],
+  ["conversations", "created_at"], ["conversations", "updated_at"],
+  ["runs", "created_at"], ["runs", "finished_at"],
+  ["plans", "created_at"], ["plans", "updated_at"],
+  ["plan_steps", "started_at"], ["plan_steps", "finished_at"],
+  ["run_events", "created_at"],
+  ["tool_result_blobs", "characters"], ["tool_result_blobs", "created_at"],
+  ["runtime_actions", "deadline_at"], ["runtime_actions", "lease_until"],
+  ["runtime_actions", "created_at"], ["runtime_actions", "updated_at"], ["runtime_actions", "closed_at"],
+  ["tool_outcomes", "result_characters"], ["tool_outcomes", "created_at"],
+  ["human_loop_requests", "created_at"], ["human_loop_requests", "resolved_at"],
+  ["human_loop_responses", "created_at"],
+  ["run_recovery_states", "updated_at"],
+  ["recovery_decisions", "created_at"], ["recovery_decisions", "resolved_at"],
+  ["recovery_user_responses", "created_at"],
+  ["plan_revision_snapshots", "created_at"],
+  ["plan_step_retirements", "retired_at"],
+  ["plan_revision_assessments", "created_at"],
+  ["skill_compliance_assessments", "created_at"],
+  ["run_outcomes", "committed_at"],
+  ["sources", "created_at"], ["sources", "updated_at"],
+  ["source_chunks", "created_at"],
+  ["run_sources", "created_at"],
+  ["batches", "created_at"], ["batches", "finished_at"],
+  ["batch_items", "started_at"], ["batch_items", "finished_at"],
+  ["audit_events", "created_at"],
+] as const;
+
 /**
  * Schema owner and connection facade. Wraps any `SqlConnection`; the default
  * constructor keeps using the built-in SQLite adapter, embedded hosts and the
@@ -100,8 +130,8 @@ export class AppDatabase implements SqlConnection {
         package_total_bytes INTEGER,
         content_hash TEXT NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL,
         UNIQUE(owner_user_id, name)
       );
       CREATE INDEX IF NOT EXISTS skills_owner_idx ON skills(owner_user_id);
@@ -115,7 +145,7 @@ export class AppDatabase implements SqlConnection {
         total_bytes INTEGER NOT NULL,
         agent_loop_json TEXT,
         version INTEGER NOT NULL DEFAULT 1,
-        synced_at INTEGER NOT NULL
+        synced_at ${wideInteger} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS conversations (
@@ -123,8 +153,8 @@ export class AppDatabase implements SqlConnection {
         owner_user_id TEXT NOT NULL,
         title TEXT NOT NULL,
         visible_directories_json TEXT NOT NULL DEFAULT '[]',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS conversations_owner_idx
         ON conversations(owner_user_id, updated_at DESC);
@@ -141,8 +171,8 @@ export class AppDatabase implements SqlConnection {
         input TEXT NOT NULL,
         output TEXT,
         error_code TEXT,
-        created_at INTEGER NOT NULL,
-        finished_at INTEGER
+        created_at ${wideInteger} NOT NULL,
+        finished_at ${wideInteger}
       );
       CREATE INDEX IF NOT EXISTS runs_owner_idx ON runs(owner_user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS runs_parent_idx ON runs(parent_run_id);
@@ -154,8 +184,8 @@ export class AppDatabase implements SqlConnection {
         goal TEXT NOT NULL,
         selected_skill_ids_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('admitted', 'running', 'completed', 'failed')),
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS plan_steps (
@@ -180,8 +210,8 @@ export class AppDatabase implements SqlConnection {
         output TEXT,
         evidence_json TEXT,
         error TEXT,
-        started_at INTEGER,
-        finished_at INTEGER,
+        started_at ${wideInteger},
+        finished_at ${wideInteger},
         PRIMARY KEY(plan_id, step_id),
         UNIQUE(plan_id, position)
       );
@@ -192,7 +222,7 @@ export class AppDatabase implements SqlConnection {
         seq INTEGER NOT NULL,
         type TEXT NOT NULL,
         payload_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
         PRIMARY KEY(run_id, seq)
       );
 
@@ -221,16 +251,16 @@ export class AppDatabase implements SqlConnection {
         attempt INTEGER NOT NULL,
         max_attempts INTEGER NOT NULL,
         replay_policy TEXT NOT NULL CHECK(replay_policy IN ('safe', 'idempotent', 'unsafe')),
-        deadline_at INTEGER,
-        lease_until INTEGER,
+        deadline_at ${wideInteger},
+        lease_until ${wideInteger},
         fence INTEGER NOT NULL,
         revision INTEGER NOT NULL,
         metadata_json TEXT NOT NULL,
         result_ref TEXT,
         error_code TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        closed_at INTEGER
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL,
+        closed_at ${wideInteger}
       );
       CREATE INDEX IF NOT EXISTS runtime_actions_run_idx ON runtime_actions(run_id, created_at);
       CREATE INDEX IF NOT EXISTS runtime_actions_recovery_idx ON runtime_actions(state, lease_until, deadline_at);
@@ -268,8 +298,8 @@ export class AppDatabase implements SqlConnection {
         resume_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('open', 'answered', 'superseded', 'cancelled', 'expired')),
         revision INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        resolved_at INTEGER
+        created_at ${wideInteger} NOT NULL,
+        resolved_at ${wideInteger}
       );
       CREATE INDEX IF NOT EXISTS human_loop_requests_run_idx ON human_loop_requests(run_id, status, created_at);
       CREATE TABLE IF NOT EXISTS human_loop_responses (
@@ -279,7 +309,7 @@ export class AppDatabase implements SqlConnection {
         request_revision INTEGER NOT NULL,
         response_json TEXT NOT NULL,
         actor_user_id TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS human_loop_responses_run_idx ON human_loop_responses(run_id, created_at);
 
@@ -288,7 +318,7 @@ export class AppDatabase implements SqlConnection {
         state TEXT NOT NULL CHECK(state IN ('waiting_recovery', 'waiting_user', 'ready_to_resume')),
         action_id TEXT NOT NULL REFERENCES runtime_actions(id) ON DELETE RESTRICT,
         question TEXT,
-        updated_at INTEGER NOT NULL
+        updated_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS run_recovery_states_action_idx ON run_recovery_states(action_id);
 
@@ -304,8 +334,8 @@ export class AppDatabase implements SqlConnection {
         question TEXT,
         state TEXT NOT NULL CHECK(state IN ('submitted', 'admitted', 'rejected')),
         rejection_code TEXT,
-        created_at INTEGER NOT NULL,
-        resolved_at INTEGER
+        created_at ${wideInteger} NOT NULL,
+        resolved_at ${wideInteger}
       );
       CREATE INDEX IF NOT EXISTS recovery_decisions_run_idx ON recovery_decisions(run_id, created_at);
       CREATE INDEX IF NOT EXISTS recovery_decisions_action_idx ON recovery_decisions(action_id, created_at);
@@ -315,7 +345,7 @@ export class AppDatabase implements SqlConnection {
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
         action_id TEXT NOT NULL REFERENCES runtime_actions(id) ON DELETE CASCADE,
         response TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS recovery_user_responses_run_idx
         ON recovery_user_responses(run_id, created_at);
@@ -326,7 +356,7 @@ export class AppDatabase implements SqlConnection {
         proposal_json TEXT NOT NULL,
         reason TEXT NOT NULL,
         action_id TEXT REFERENCES runtime_actions(id) ON DELETE SET NULL,
-        created_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
         PRIMARY KEY(plan_id, version)
       );
 
@@ -335,7 +365,7 @@ export class AppDatabase implements SqlConnection {
         step_id TEXT NOT NULL,
         action_id TEXT REFERENCES runtime_actions(id) ON DELETE SET NULL,
         reason TEXT NOT NULL,
-        retired_at INTEGER NOT NULL,
+        retired_at ${wideInteger} NOT NULL,
         PRIMARY KEY(plan_id, step_id),
         FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
       );
@@ -347,7 +377,7 @@ export class AppDatabase implements SqlConnection {
         approved INTEGER NOT NULL CHECK(approved IN (0, 1)),
         feedback TEXT NOT NULL,
         evidence_refs_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS plan_revision_assessments_plan_idx
         ON plan_revision_assessments(plan_id, created_at DESC);
@@ -367,7 +397,7 @@ export class AppDatabase implements SqlConnection {
         evidence_digest TEXT NOT NULL,
         feedback TEXT NOT NULL,
         failed_boundary_json TEXT,
-        created_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
         UNIQUE(plan_id, step_id, attempt),
         FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
       );
@@ -380,7 +410,7 @@ export class AppDatabase implements SqlConnection {
         status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'cancelled')),
         output TEXT,
         reason_code TEXT NOT NULL,
-        committed_at INTEGER NOT NULL
+        committed_at ${wideInteger} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS sources (
@@ -408,8 +438,8 @@ export class AppDatabase implements SqlConnection {
         truncated INTEGER NOT NULL DEFAULT 0 CHECK(truncated IN (0, 1)),
         error_code TEXT,
         error_message TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS sources_owner_conversation_idx
         ON sources(owner_user_id, conversation_id, created_at DESC);
@@ -423,7 +453,7 @@ export class AppDatabase implements SqlConnection {
         content TEXT NOT NULL,
         token_estimate INTEGER NOT NULL,
         sha256 TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
         PRIMARY KEY(source_id, chunk_index)
       );
 
@@ -432,7 +462,7 @@ export class AppDatabase implements SqlConnection {
         source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
         position INTEGER NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('user_supplied', 'derived')),
-        created_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
         PRIMARY KEY(run_id, source_id),
         UNIQUE(run_id, position)
       );
@@ -455,8 +485,8 @@ export class AppDatabase implements SqlConnection {
         concurrency INTEGER NOT NULL,
         failure_policy TEXT NOT NULL CHECK(failure_policy IN ('continue', 'fail-fast')),
         allow_dangerous_tools INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        finished_at INTEGER,
+        created_at ${wideInteger} NOT NULL,
+        finished_at ${wideInteger},
         UNIQUE(owner_user_id, idempotency_key)
       );
       CREATE INDEX IF NOT EXISTS batches_owner_idx ON batches(owner_user_id, created_at DESC);
@@ -471,8 +501,8 @@ export class AppDatabase implements SqlConnection {
         run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
         output TEXT,
         error_code TEXT,
-        started_at INTEGER,
-        finished_at INTEGER,
+        started_at ${wideInteger},
+        finished_at ${wideInteger},
         UNIQUE(batch_id, item_key),
         UNIQUE(batch_id, position)
       );
@@ -485,20 +515,19 @@ export class AppDatabase implements SqlConnection {
         resource_type TEXT NOT NULL,
         resource_id TEXT,
         outcome TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_events(actor_user_id, created_at DESC);
     `);
 
     if (this.dialect === "postgres") {
-      // Databases initialized by the first context-management prototype used
-      // PostgreSQL INTEGER here, which cannot hold Date.now() milliseconds.
-      await this.connection.exec(`
-        ALTER TABLE tool_result_blobs ALTER COLUMN characters TYPE BIGINT USING characters::BIGINT;
-        ALTER TABLE tool_result_blobs ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-        ALTER TABLE tool_outcomes ALTER COLUMN result_characters TYPE BIGINT USING result_characters::BIGINT;
-        ALTER TABLE tool_outcomes ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-      `);
+      // Canonical timestamps use Date.now() milliseconds, which exceed the
+      // signed 32-bit range. Upgrade every historical PostgreSQL time column,
+      // plus Tool result character counts, instead of fixing only new tables.
+      await this.connection.exec(POSTGRES_WIDE_INTEGER_COLUMNS
+        .map(([table, column]) =>
+          `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE BIGINT USING ${column}::BIGINT;`)
+        .join("\n"));
     }
 
     // Kernel boundary: business rows are owned by opaque host-provided user

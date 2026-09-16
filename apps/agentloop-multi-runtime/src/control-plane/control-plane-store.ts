@@ -72,6 +72,7 @@ export class ControlPlaneStore {
   }
 
   async ready(): Promise<void> {
+    const wideInteger = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_runtime_nodes (
         id TEXT PRIMARY KEY,
@@ -82,8 +83,8 @@ export class ControlPlaneStore {
         status TEXT NOT NULL DEFAULT 'offline',
         active_run_count INTEGER NOT NULL DEFAULT 0,
         queued_run_count INTEGER NOT NULL DEFAULT 0,
-        last_heartbeat_at INTEGER,
-        updated_at INTEGER NOT NULL
+        last_heartbeat_at ${wideInteger},
+        updated_at ${wideInteger} NOT NULL
       );
       CREATE TABLE IF NOT EXISTS mr_tasks (
         id TEXT PRIMARY KEY,
@@ -99,8 +100,8 @@ export class ControlPlaneStore {
         allow_dangerous_tools INTEGER NOT NULL,
         resource_refs_json TEXT NOT NULL,
         status TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL,
         UNIQUE(tenant_id, owner_user_id, conversation_id, client_message_id)
       );
       CREATE TABLE IF NOT EXISTS mr_assignments (
@@ -110,12 +111,12 @@ export class ControlPlaneStore {
         dispatch_key TEXT NOT NULL UNIQUE,
         remote_run_id TEXT,
         status TEXT NOT NULL,
-        reservation_expires_at INTEGER,
+        reservation_expires_at ${wideInteger},
         error_code TEXT,
         error_message TEXT,
-        last_observed_at INTEGER,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        last_observed_at ${wideInteger},
+        created_at ${wideInteger} NOT NULL,
+        updated_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_assignments_task_idx ON mr_assignments(task_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS mr_assignments_runtime_state_idx ON mr_assignments(runtime_id, status, reservation_expires_at);
@@ -128,11 +129,24 @@ export class ControlPlaneStore {
         previous_runtime_id TEXT NOT NULL REFERENCES mr_runtime_nodes(id),
         selected_runtime_id TEXT NOT NULL REFERENCES mr_runtime_nodes(id),
         reason TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_conversation_runtime_migrations_conversation_idx
         ON mr_conversation_runtime_migrations(tenant_id, owner_user_id, conversation_id, created_at DESC);
     `);
+    if (this.database.dialect === "postgres") {
+      await this.database.exec(`
+        ALTER TABLE mr_runtime_nodes ALTER COLUMN last_heartbeat_at TYPE BIGINT USING last_heartbeat_at::BIGINT;
+        ALTER TABLE mr_runtime_nodes ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
+        ALTER TABLE mr_tasks ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+        ALTER TABLE mr_tasks ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
+        ALTER TABLE mr_assignments ALTER COLUMN reservation_expires_at TYPE BIGINT USING reservation_expires_at::BIGINT;
+        ALTER TABLE mr_assignments ALTER COLUMN last_observed_at TYPE BIGINT USING last_observed_at::BIGINT;
+        ALTER TABLE mr_assignments ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+        ALTER TABLE mr_assignments ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
+        ALTER TABLE mr_conversation_runtime_migrations ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
+      `);
+    }
     // PostgreSQL deployments always start from the canonical schema above.
     // PRAGMA is exclusively a SQLite legacy-schema inspection mechanism.
     if (this.database.dialect === "sqlite") {

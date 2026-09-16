@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { RunRepository } from "../src/storage/repositories/run-repository.ts";
 import { SqlToolResultStore } from "../src/storage/repositories/tool-result-store.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { createToolResultReader } from "../src/tools/tool-result-reader.ts";
+import type { ToolResultStore } from "../src/storage/repositories/tool-result-store.ts";
 
 test("SqlToolResultStore persists complete content behind an opaque bounded locator", async () => {
   const database = new AppDatabase(":memory:");
@@ -173,6 +175,50 @@ test("read_tool_result revalidates the current Run grant and returns a bounded w
   } finally {
     await database.close();
   }
+});
+
+test("read_tool_result accepts a host object-store locator without assuming the SQL locator format", async () => {
+  const content = "complete object storage result";
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  const locator = "object-store:v1:abc123";
+  const store: ToolResultStore = {
+    async put() {
+      return { locator, sha256, characters: content.length };
+    },
+    async findByToolCall() {
+      return undefined;
+    },
+    async read(input) {
+      assert.equal(input.locator, locator);
+      assert.equal(input.ownerUserId, "user-1");
+      assert.equal(input.runId, "run-1");
+      assert.equal(input.expectedSha256, sha256);
+      return {
+        locator,
+        sha256,
+        characters: content.length,
+        toolCallId: "object-call",
+        toolName: "object_tool",
+        offset: input.offset,
+        content: content.slice(input.offset, input.offset + input.limit),
+        truncated: false,
+      };
+    },
+  };
+  const tool = createToolResultReader(store);
+  const input = tool.parse({ locator, sha256, offset: 0, limit: 100 });
+  const result = await tool.execute({
+    grant: createCapabilityGrant({
+      actorUserId: "user-1",
+      runId: "run-1",
+      depth: 0,
+      allowedToolNames: [tool.name],
+      allowedSkillIds: [],
+    }),
+  }, input) as Record<string, unknown>;
+
+  assert.equal(result.locator, locator);
+  assert.equal(result.content, content);
 });
 
 async function insertRun(database: AppDatabase, runId: string, ownerUserId: string): Promise<void> {

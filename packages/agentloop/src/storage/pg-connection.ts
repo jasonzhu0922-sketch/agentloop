@@ -6,14 +6,20 @@ import type { SqlConnection, SqlDialect, SqlRunResult, SqlStatement, SqlValue } 
  * loaded lazily so hosts that stay on SQLite do not need `pg` installed.
  */
 export interface PgClientLike {
-  query(text: string, values?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
+  query(text: string, values?: unknown[]): Promise<PgQueryResult>;
   release?: () => void;
 }
 
 export interface PgPoolLike {
   connect(): Promise<PgClientLike>;
-  query(text: string, values?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
+  query(text: string, values?: unknown[]): Promise<PgQueryResult>;
   end(): Promise<void>;
+}
+
+interface PgQueryResult {
+  readonly rows: unknown[];
+  readonly rowCount: number | null;
+  readonly fields?: readonly { readonly name: string; readonly dataTypeID: number }[];
 }
 
 type PgPoolFactory = new (config: string | Record<string, unknown>) => PgPoolLike;
@@ -108,16 +114,45 @@ export class PgConnection implements SqlConnection {
     await this.pool.end();
   }
 
-  private queryText(sql: string, params: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }> {
+  private async queryText(sql: string, params: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }> {
     const client = this.transactionClient.getStore();
+    let result: PgQueryResult;
     if (params.length === 0) {
-      if (client !== undefined) return client.query(sql);
-      return this.pool.query(sql);
+      result = client !== undefined ? await client.query(sql) : await this.pool.query(sql);
+    } else {
+      const values = params.map(toPgValue);
+      result = client !== undefined ? await client.query(sql, values) : await this.pool.query(sql, values);
     }
-    const values = params.map(toPgValue);
-    if (client !== undefined) return client.query(sql, values);
-    return this.pool.query(sql, values);
+    return normalizePgWideIntegers(result);
   }
+}
+
+const POSTGRES_INT8_OID = 20;
+
+function normalizePgWideIntegers(result: PgQueryResult): { rows: unknown[]; rowCount: number | null } {
+  const fields = result.fields?.filter((field) => field.dataTypeID === POSTGRES_INT8_OID) ?? [];
+  if (fields.length === 0) return { rows: result.rows, rowCount: result.rowCount };
+  const rows = result.rows.map((row) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+    const normalized = { ...(row as Record<string, unknown>) };
+    for (const field of fields) {
+      const value = normalized[field.name];
+      if (typeof value === "number") {
+        if (!Number.isSafeInteger(value)) {
+          throw new RangeError(`PostgreSQL BIGINT column ${field.name} is outside the JavaScript safe integer range`);
+        }
+        continue;
+      }
+      if (typeof value !== "string" && typeof value !== "bigint") continue;
+      const numeric = Number(value);
+      if (!Number.isSafeInteger(numeric)) {
+        throw new RangeError(`PostgreSQL BIGINT column ${field.name} is outside the JavaScript safe integer range`);
+      }
+      normalized[field.name] = numeric;
+    }
+    return normalized;
+  });
+  return { rows, rowCount: result.rowCount };
 }
 
 /**

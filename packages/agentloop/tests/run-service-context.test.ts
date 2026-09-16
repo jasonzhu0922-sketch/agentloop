@@ -7,6 +7,9 @@ import { AppDatabase } from "../src/storage/database.ts";
 import { SqlToolResultStore } from "../src/storage/repositories/tool-result-store.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { AppError } from "../src/shared/errors.ts";
+import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import type { ToolResultStore } from "../src/storage/repositories/tool-result-store.ts";
+import type { SqlConnection, SqlStatement } from "../src/storage/connection.ts";
 import {
   approvingTestAssessor,
   singleStepTestPlanner,
@@ -53,8 +56,8 @@ test("RunService spills, grants bounded retrieval, and preserves owner isolation
           assert.equal(projected?.role, "tool");
           assert.match(projected?.role === "tool" ? projected.content : "", /HEAD:/);
           assert.match(projected?.role === "tool" ? projected.content : "", /SECRET-TAIL/);
-          locator = /locator=(tool-result:\/\/[0-9a-f-]+)/.exec(projected?.role === "tool" ? projected.content : "")?.[1] ?? "";
-          sha256 = /sha256=([0-9a-f]{64})/.exec(projected?.role === "tool" ? projected.content : "")?.[1] ?? "";
+          locator = /"locator":"(tool-result:\/\/[0-9a-f-]+)"/.exec(projected?.role === "tool" ? projected.content : "")?.[1] ?? "";
+          sha256 = /"sha256":"([0-9a-f]{64})"/.exec(projected?.role === "tool" ? projected.content : "")?.[1] ?? "";
           assert.match(locator, /^tool-result:\/\//);
           return {
             content: "",
@@ -173,3 +176,146 @@ test("RunService keeps a Provider overflow retry inside one logical Model Action
     await database.close();
   }
 });
+
+test("RunService preserves recovery when a Tool result cannot be serialized losslessly", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const tool = fixtureTool("invalid_json", () => ({ ok: true, nested: { missing: undefined } }));
+    const runs = fixtureRunService(database, tool);
+
+    const run = await runs.execute(owner.user.id, "return invalid JSON");
+    assert.equal(run.status, "running");
+    const plan = await database.prepare("SELECT status FROM plans WHERE run_id = ?").get(run.id) as { status: string };
+    const step = await database.prepare("SELECT status FROM plan_steps WHERE plan_id = (SELECT id FROM plans WHERE run_id = ?)")
+      .get(run.id) as { status: string };
+    const action = await database.prepare("SELECT state, error_code FROM runtime_actions WHERE run_id = ? AND kind = 'tool_call'")
+      .get(run.id) as { state: string; error_code: string };
+    const recovery = await database.prepare("SELECT state, action_id FROM run_recovery_states WHERE run_id = ?")
+      .get(run.id) as { state: string; action_id: string } | undefined;
+    assert.equal(plan.status, "running");
+    assert.equal(step.status, "running");
+    assert.equal(action.state, "recovery_required");
+    assert.equal(action.error_code, "TOOL_RESULT_SERIALIZATION_FAILED");
+    assert.equal(recovery?.state, "waiting_recovery");
+    assert.equal(recovery?.action_id, (await database.prepare("SELECT id FROM runtime_actions WHERE run_id = ? AND kind = 'tool_call'").get(run.id) as { id: string }).id);
+    assert.equal(Number((await database.prepare("SELECT COUNT(*) AS count FROM tool_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count), 0);
+    assert.equal(Number((await database.prepare("SELECT COUNT(*) AS count FROM run_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count), 0);
+  } finally {
+    await database.close();
+  }
+});
+
+test("a reconciler-owned outcome prevents the stale RunService worker from failing the Run", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const sqlStore = new SqlToolResultStore(database);
+    const reconcilingStore: ToolResultStore = {
+      async put(input) {
+        const ref = await sqlStore.put(input);
+        await database.prepare(`
+          UPDATE runtime_actions SET deadline_at = 0, lease_until = 0
+          WHERE run_id = ? AND kind = 'tool_call' AND state = 'dispatched'
+        `).run(input.runId);
+        assert.equal(await new RuntimeActionRepository(database).reconcileStoredToolOutcomes(reconcilingStore), 1);
+        return ref;
+      },
+      read: (input) => sqlStore.read(input),
+      findByToolCall: (input) => sqlStore.findByToolCall(input),
+    };
+    const tool = fixtureTool("unsafe_once", () => "effect completed", false);
+    const runs = fixtureRunService(database, tool, { toolResultStore: reconcilingStore });
+
+    const run = await runs.execute(owner.user.id, "perform once");
+    assert.equal(run.status, "running");
+    assert.equal(Number((await database.prepare("SELECT COUNT(*) AS count FROM tool_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count), 1);
+    assert.equal(Number((await database.prepare("SELECT COUNT(*) AS count FROM run_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count), 0);
+    assert.equal((await database.prepare("SELECT status FROM plans WHERE run_id = ?").get(run.id) as { status: string }).status, "running");
+    assert.equal((await database.prepare("SELECT state FROM run_recovery_states WHERE run_id = ?").get(run.id) as { state: string }).state, "waiting_recovery");
+  } finally {
+    await database.close();
+  }
+});
+
+test("persistent post-outcome projection failure leaves a recoverable Run instead of a failed business outcome", async () => {
+  const database = new AppDatabase(":memory:");
+  const connection = new ProjectionFailingConnection(database);
+  try {
+    const owner = testOwner();
+    const tool = fixtureTool("unsafe_once", () => "effect completed", false);
+    const runs = fixtureRunService(connection, tool);
+
+    const run = await runs.execute(owner.user.id, "perform once");
+    assert.equal(run.status, "running");
+    assert.equal(Number((await database.prepare("SELECT COUNT(*) AS count FROM tool_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count), 1);
+    assert.equal(Number((await database.prepare("SELECT COUNT(*) AS count FROM run_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count), 0);
+    assert.equal((await database.prepare("SELECT status FROM plans WHERE run_id = ?").get(run.id) as { status: string }).status, "running");
+    assert.equal((await database.prepare("SELECT state FROM run_recovery_states WHERE run_id = ?").get(run.id) as { state: string }).state, "waiting_recovery");
+  } finally {
+    await database.close();
+  }
+});
+
+function fixtureTool(name: string, execute: () => unknown, replaySafe = true): RuntimeTool<unknown> {
+  return {
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe,
+    parse: (value) => value,
+    execute: async () => execute(),
+  };
+}
+
+function fixtureRunService(
+  database: SqlConnection,
+  tool: RuntimeTool<unknown>,
+  options: { toolResultStore?: ToolResultStore } = {},
+): RunService {
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete() {
+      calls += 1;
+      if (calls === 1) {
+        return { content: "", toolCalls: [{ id: "fixture-call", name: tool.name, arguments: {} }], finishReason: "tool_calls" };
+      }
+      return { content: "complete", toolCalls: [], finishReason: "stop" };
+    },
+  };
+  return new RunService({
+    database,
+    skills: new SkillService(database),
+    modelFactory: () => model,
+    plannerFactory: () => singleStepTestPlanner(),
+    assessorFactory: () => approvingTestAssessor(),
+    tools: [tool],
+    ...options,
+  });
+}
+
+class ProjectionFailingConnection implements SqlConnection {
+  readonly dialect = "sqlite" as const;
+  private readonly inner: SqlConnection;
+  constructor(inner: SqlConnection) { this.inner = inner; }
+  exec(sql: string): Promise<void> { return this.inner.exec(sql); }
+  prepare(sql: string): SqlStatement {
+    const statement = this.inner.prepare(sql);
+    if (!sql.includes("INSERT INTO run_events")) return statement;
+    return {
+      run: async (...params) => {
+        const type = params[2];
+        if (type === "tool.result_committed" || type === "tool.projection_failed") {
+          throw new Error(`injected event append failure: ${type}`);
+        }
+        return statement.run(...params);
+      },
+      get: (...params) => statement.get(...params),
+      all: (...params) => statement.all(...params),
+    };
+  }
+  transaction<T>(operation: () => T | Promise<T>): Promise<T> { return this.inner.transaction(operation); }
+  close(): Promise<void> { return Promise.resolve(); }
+}
