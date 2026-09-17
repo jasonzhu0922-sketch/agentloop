@@ -167,6 +167,14 @@ export function translateRunEvent(
   if (event.type === "candidate.rejected") {
     return { ...base, tone: "bad", title: "候选结果被驳回", detail: clip(d.feedback ?? d.output, 140) };
   }
+  if (event.type === "candidate.structured_tool_synthesis_required") {
+    return {
+      ...base,
+      tone: "warn",
+      title: "结构化结果待归并",
+      detail: "检测到 " + String(d.observationCount ?? 0) + " 份结构化结果，正在按统一范围生成答复。",
+    };
+  }
   if (event.type === "assessment.turn.completed") {
     return { ...base, title: "完成质量评估", detail: "检查步骤成功标准和 Skill 合规性" + (d.finishReason ? " · " + String(d.finishReason) : "") };
   }
@@ -238,6 +246,7 @@ const VISIBLE_EVENT_TYPES: Record<string, boolean> = {
   "tool.rejected": true,
   "candidate.approved": true,
   "candidate.rejected": true,
+  "candidate.structured_tool_synthesis_required": true,
   "assessment.turn.completed": true,
   "skill.activation.available": true,
   "skill.activated": true,

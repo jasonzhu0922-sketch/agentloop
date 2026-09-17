@@ -1006,6 +1006,162 @@ test("structured stdout candidates from command-style tools go directly to asses
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
+test("conflicting structured tool observations require one synthesis turn instead of last-result delivery", async () => {
+  let executions = 0;
+  let modelCalls = 0;
+  const tool: RuntimeTool<{ readonly query: string }> = {
+    name: "lookup_api",
+    description: "Return structured API lookup evidence",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value as { readonly query: string },
+    execute: async (_context, { query }) => {
+      executions += 1;
+      const matchCount = query === "差旅用车" ? 9 : 0;
+      return {
+        schema: "api_catalog_result/v1",
+        deliveryCandidate: {
+          output: matchCount === 0
+            ? "关键词“差旅出行用车”命中 0 个接口。"
+            : "关键词“差旅用车”命中 9 个接口，其中包括差旅用车分析地址详情-新增。",
+        },
+        assessmentProjection: { query, match_count: matchCount },
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          sourceType: "api_catalog",
+          receiptId: `receipt-${query}`,
+          facts: [{ kind: "source_summary", query, match_count: matchCount }],
+          evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+        },
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["lookup_api"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete the admitted step.",
+    input: "查询宝武数据中台中关于差旅用车的 API。",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [
+              { id: "travel-car", name: "lookup_api", arguments: { query: "差旅用车" } },
+              { id: "travel-car-alias", name: "lookup_api", arguments: { query: "差旅出行用车" } },
+            ],
+          };
+        }
+        assert.deepEqual(request.tools, []);
+        assert.match(request.runtimeContext?.content ?? "", /runtime_structured_observation_synthesis/);
+        assert.match(request.runtimeContext?.content ?? "", /\"match_count\":9/);
+        assert.match(request.runtimeContext?.content ?? "", /\"match_count\":0/);
+        return {
+          content: "以“差旅用车”检索命中 9 个接口；“差旅出行用车”这个更长的关键词未命中，不能据此否定前者结果。",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      },
+    },
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 1,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.match(candidate.output, /命中 9 个接口/);
+      assert.equal(candidate.toolEvidence.filter((item) => item.toolName === "lookup_api").length, 2);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /命中 9 个接口/);
+  assert.equal(executions, 2);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_synthesis_required").length, 1);
+  assert.equal(events.filter((event) => event.type === "loop.final_convergence_grace_granted").length, 1);
+});
+
+test("declared appendable structured candidate partitions merge without a synthesis turn", async () => {
+  let modelCalls = 0;
+  const tool: RuntimeTool<{ readonly page: number }> = {
+    name: "lookup_page",
+    description: "Return one declared API catalog page",
+    inputSchema: {
+      type: "object",
+      properties: { page: { type: "number" } },
+      required: ["page"],
+    },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value as { readonly page: number },
+    execute: async (_context, { page }) => ({
+      schema: "api_catalog_result/v1",
+      deliveryCandidate: {
+        output: page === 1 ? "## 第 1 页\n\nAPI A" : "## 第 2 页\n\nAPI B",
+        aggregation: {
+          groupId: "travel-car-catalog-pages",
+          partIndex: page,
+          partCount: 2,
+          mergeStrategy: "append_markdown",
+        },
+      },
+      assessmentProjection: { page },
+      evidenceReceipt: {
+        schema: "agentloop.toolEvidenceReceipt/v1",
+        sourceType: "api_catalog",
+        receiptId: `page-${page}`,
+        evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["lookup_page"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete the admitted step.",
+    input: "List all API catalog pages.",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async () => {
+        modelCalls += 1;
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            { id: "page-1", name: "lookup_page", arguments: { page: 1 } },
+            { id: "page-2", name: "lookup_page", arguments: { page: 2 } },
+          ],
+        };
+      },
+    },
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 1,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.match(candidate.output, /API A/);
+      assert.match(candidate.output, /API B/);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /API A/);
+  assert.match(result.output, /API B/);
+  assert.equal(modelCalls, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_synthesis_required").length, 0);
+});
+
 test("oversized structured stdout candidates from command projections go directly to assessment", async () => {
   let executions = 0;
   let assessmentCalls = 0;
@@ -1368,6 +1524,7 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
       return {
         approved: candidate.output.includes("evidence consistent"),
         feedback: "Need direct evidence comparison before approval.",
+        requiresEvidenceProgress: !candidate.output.includes("evidence consistent"),
       };
     },
   });
@@ -1376,7 +1533,65 @@ test("a rejected assessed candidate grants bounded tool repair grace", async () 
   assert.equal(executions, 2);
   assert.equal(assessments, 2);
   assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
+  assert.equal(events.some((event) => event.type === "candidate.repair_limit_blocked"), false);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a holistic assessment rejection cannot be repaired by rewriting without new evidence", async () => {
+  let calls = 0;
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["read_evidence"]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Answer from the catalog evidence.",
+      input: "query catalog",
+      model: {
+        limits: TEST_MODEL_LIMITS,
+        complete: async () => {
+          calls += 1;
+          return {
+            content: calls === 1 ? "目录已整理，但仍缺少请求参数。" : "目录已经整理完成，仍缺少请求参数。",
+            finishReason: "stop",
+            toolCalls: [],
+          };
+        },
+      },
+      tools: new ToolRegistry([{
+        name: "read_evidence",
+        description: "Read catalog detail",
+        inputSchema: { type: "object" },
+        executionMode: "parallel",
+        replaySafe: true,
+        parse: (value) => value,
+        execute: async () => ({ detail: "unused" }),
+      }]),
+      grant,
+      maxSteps: 3,
+      deferFailureReport: true,
+      emit: (event) => { events.push(event); },
+      evaluateCandidate: async () => ({
+        approved: false,
+        feedback: "The catalog detail needed for the requested parameters is still missing.",
+        requiresEvidenceProgress: true,
+        failedBoundary: {
+          stepId: "catalog",
+          missingEvidenceKinds: ["source_summary"],
+          violatedSkillRequirements: [],
+          reusableEvidenceRefs: [],
+          suggestedRepairShape: "repair_leaf",
+        },
+      }),
+    }),
+    (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED",
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
+  assert.equal(events.some((event) =>
+    event.type === "candidate.repair_limit_blocked"
+    && (event.data as { reason?: string }).reason === "holistic_assessment_requires_new_evidence"
+  ), true);
 });
 
 test("rejected completion candidates are not projected as prior assistant answers during repair", async () => {

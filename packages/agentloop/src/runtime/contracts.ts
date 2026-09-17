@@ -306,6 +306,10 @@ export interface CandidateCompletionEvaluation {
   readonly deferredValidation?: boolean;
   readonly evidenceBoundary?: boolean;
   readonly allowRepairLimitCompletion?: boolean;
+  /** A holistic assessor rejected the candidate for a substantive gap. */
+  readonly requiresEvidenceProgress?: boolean;
+  /** Runtime blocked this candidate because that substantive gap has no new evidence. */
+  readonly evidenceProgressBlocked?: boolean;
   readonly failedBoundary?: Readonly<{
     readonly stepId: string;
     readonly missingEvidenceKinds: readonly string[];

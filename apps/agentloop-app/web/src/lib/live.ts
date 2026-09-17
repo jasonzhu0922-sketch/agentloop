@@ -150,6 +150,7 @@ const FEED_THINKING_TYPES: Record<string, boolean> = {
   "context.tool_outputs_projected": true,
   "candidate.approved": true,
   "candidate.rejected": true,
+  "candidate.structured_tool_synthesis_required": true,
   "assessment.turn.completed": true,
   "skill.activation.available": true,
   "skill.activated": true,
@@ -729,6 +730,7 @@ const ACTIVITY_TYPES: Record<string, boolean> = {
   "tool.rejected": true,
   "candidate.approved": true,
   "candidate.rejected": true,
+  "candidate.structured_tool_synthesis_required": true,
   "assessment.turn.completed": true,
   "skill.activation.available": true,
   "skill.activated": true,
@@ -884,6 +886,15 @@ function insightForEvent(event: RunEvent, planned: Map<string, RunEvent>): Execu
   }
   if (event.type === "candidate.approved") return { key, title: "候选结果通过", detail: "进入步骤完成提交。", tone: "good", seq: event.seq };
   if (event.type === "candidate.rejected") return { key, title: "候选结果被驳回", detail: clip(d.feedback ?? d.output, 120), tone: "bad", seq: event.seq };
+  if (event.type === "candidate.structured_tool_synthesis_required") {
+    return {
+      key,
+      title: "结构化结果待归并",
+      detail: `检测到 ${String(d.observationCount ?? 0)} 份结构化结果，正在按统一范围生成答复。`,
+      tone: "warn",
+      seq: event.seq,
+    };
+  }
   if (event.type === "assessment.turn.completed") {
     return {
       key,

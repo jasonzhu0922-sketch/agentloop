@@ -20,6 +20,8 @@
 
 每个执行 Step 还会由 Runtime 派生一份 `StepSemanticFrame`，作为执行上下文中的统一语义帧。它不改变 Plan schema，也不是 Admission 硬门槛；它把 Step 的阶段角色、证据来源、第一动作、完成边界和 QA 所有权投影给模型，避免模型在“获取证据、复用上游证据、生产产物、验收产物”之间反复猜测。详见 [Step Semantic Frame 设计标准](./STEP-SEMANTIC-FRAME.md)。
 
+结构化 Tool 输出先作为当前 Step 的 observation，而不是天然的最终答复。只有一个 observation 时，Runtime 才可将其 `deliveryCandidate` 直接送评估；多个 observation 默认进入一次无工具 synthesis，使模型对原始用户目标归并不同 query、范围和空/非空结果。若 Skill 明确声明各片段可机械拼接，可在 `deliveryCandidate.aggregation` 中给出同一 `groupId`、完整的 1-based `partIndex`/`partCount` 和 `mergeStrategy: "append_markdown"`；Runtime 仅在整组完整且无重复时按序拼接，仍不解释业务语义。未声明、缺片或相互矛盾的 observation 一律不得由最后完成的 Tool result 覆盖。
+
 ## 2. 范围与非目标
 
 ### 2.1 v1 必须具备

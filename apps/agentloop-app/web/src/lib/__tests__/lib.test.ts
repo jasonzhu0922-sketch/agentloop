@@ -365,6 +365,20 @@ describe("live projection", () => {
     expect(latestProviderReasoning(events)).toBe("模型已确认文件范围，准备生成交付物。");
   });
 
+  it("shows structured observation synthesis before a unified candidate is delivered", () => {
+    const feed = liveEventFeed([{
+      seq: 1,
+      type: "candidate.structured_tool_synthesis_required",
+      createdAt: 0,
+      data: { observationCount: 2 },
+    }]);
+
+    expect(feed).toHaveLength(1);
+    expect(feed[0]?.kind).toBe("thinking");
+    expect(feed[0]?.title).toBe("结构化结果待归并");
+    expect(feed[0]?.detail).toContain("2 份结构化结果");
+  });
+
   it("projects run-limit failures into a friendly stopped summary", () => {
     const events: RunEvent[] = [
       {

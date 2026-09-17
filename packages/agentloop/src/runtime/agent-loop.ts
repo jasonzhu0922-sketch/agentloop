@@ -146,8 +146,24 @@ interface ToolOutcome {
 interface StructuredToolCandidate {
   readonly deliveryCandidate: RuntimeDeliveryCandidate;
   readonly projection: string;
+  /** Bounded, machine-readable observation for a later synthesis turn. */
+  readonly observation: string;
   readonly sourceToolCallId: string;
+  readonly sourceToolCallIds: readonly string[];
   readonly schema?: string;
+  readonly aggregation?: StructuredCandidateAggregation;
+}
+
+interface StructuredCandidateAggregation {
+  readonly groupId: string;
+  readonly partIndex: number;
+  readonly partCount: number;
+  readonly mergeStrategy: "append_markdown";
+}
+
+interface StructuredToolCandidateSelection {
+  readonly directCandidate?: StructuredToolCandidate;
+  readonly observations: readonly StructuredToolCandidate[];
 }
 
 // Execution turns need the model's declared room because reasoning-heavy
@@ -224,7 +240,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let grantedFinalConvergenceGraceSteps = 0;
   let rejectedCandidateAssessments = 0;
   let rejectedUnassessableCandidates = 0;
+  let evidenceProgressBaseline: number | undefined;
+  let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
   let pendingCandidateRepairDirective: string | undefined;
+  let pendingStructuredObservationSynthesisDirective: string | undefined;
   const messages: ModelMessage[] = [
     ...(options.conversationHistory ?? []),
     ...(options.initialMessages === undefined
@@ -297,6 +316,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     step: number,
     context: CandidateCompletionContext,
   ): Promise<CandidateCompletionEvaluation> => {
+    if (evidenceProgressBaseline !== undefined && context.toolEvidence.length <= evidenceProgressBaseline) {
+      return {
+        approved: false,
+        feedback: "The holistic assessment identified a substantive gap. No new tool evidence was produced, so another rewritten completion candidate cannot resolve it.",
+        requiresEvidenceProgress: true,
+        evidenceProgressBlocked: true,
+        ...(evidenceProgressBoundary === undefined ? {} : { failedBoundary: evidenceProgressBoundary }),
+      };
+    }
     if (options.evaluateCandidate === undefined) return { approved: true, feedback: "" };
     const evaluation = await options.evaluateCandidate(context);
     if (evaluation.assessmentReused === true) {
@@ -309,6 +337,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           feedback: evaluation.feedback,
         },
       });
+    }
+    if (!evaluation.approved && evaluation.requiresEvidenceProgress === true) {
+      evidenceProgressBaseline = context.toolEvidence.length;
+      evidenceProgressBoundary = evaluation.failedBoundary;
+    } else if (evaluation.approved || context.toolEvidence.length > (evidenceProgressBaseline ?? -1)) {
+      evidenceProgressBaseline = undefined;
+      evidenceProgressBoundary = undefined;
     }
     return evaluation;
   };
@@ -383,19 +418,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     readonly output: string;
     readonly evaluation: CandidateCompletionEvaluation;
   }): Promise<void> => {
-    if (input.evaluation.assessmentReused !== true || input.evaluation.approved) return;
+    if (
+      (input.evaluation.assessmentReused !== true && input.evaluation.evidenceProgressBlocked !== true)
+      || input.evaluation.approved
+    ) return;
     await emit({
       type: "candidate.repair_limit_blocked",
       data: {
         step: input.step,
         output: input.output,
         feedback: input.evaluation.feedback,
-        reason: "assessment_reused_without_new_evidence",
+        reason: input.evaluation.evidenceProgressBlocked === true
+          ? "holistic_assessment_requires_new_evidence"
+          : "assessment_reused_without_new_evidence",
       },
     });
     throw await completionFailure(new AppError(
       "STEP_NOT_COMPLETED",
-      "The exact completion candidate was already rejected against the same evidence; resubmitting it has no material benefit.",
+      input.evaluation.evidenceProgressBlocked === true
+        ? "The holistic assessment identified a substantive gap, but no new tool evidence was produced to repair it."
+        : "The exact completion candidate was already rejected against the same evidence; resubmitting it has no material benefit.",
       422,
       {
         feedback: input.evaluation.feedback,
@@ -601,8 +643,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       && (requestedConvergenceReason !== undefined || (step === hardLimit && finalConvergenceAllowed));
     if (convergenceOnly) {
       convergenceRequested = true;
-      const directive = pendingCandidateRepairDirective ?? convergencePrompt;
+      const directive = pendingCandidateRepairDirective
+        ?? pendingStructuredObservationSynthesisDirective
+        ?? convergencePrompt;
       pendingCandidateRepairDirective = undefined;
+      pendingStructuredObservationSynthesisDirective = undefined;
       contextAssembler.setRuntimeDirective(directive);
       await emit({
         type: "loop.convergence_requested",
@@ -1327,10 +1372,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     previousPrepareRejectionSignature = undefined;
     consecutivePrepareRejectionSteps = 0;
 
-    const structuredCandidate = options.evaluateCandidate === undefined
+    const structuredCandidates = options.evaluateCandidate === undefined
       ? undefined
-      : extractStructuredToolCandidate(latestToolEvidence);
-    if (structuredCandidate !== undefined) {
+      : selectStructuredToolCandidate(toolEvidence);
+    if (structuredCandidates?.directCandidate !== undefined) {
+      const structuredCandidate = structuredCandidates.directCandidate;
       await emit({
         type: "candidate.structured_tool_detected",
         data: {
@@ -1347,6 +1393,36 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         rejectionDirective: "Structured tool candidate was rejected. Repair this step using the available evidence.",
       });
       if (completion !== undefined) return completion;
+      continue;
+    }
+    if (structuredCandidates !== undefined && structuredCandidates.observations.length > 1) {
+      pendingStructuredObservationSynthesisDirective = structuredObservationSynthesisDirective(
+        structuredCandidates.observations,
+      );
+      requestedConvergenceReason = "structured_tool_observations_require_synthesis";
+      await emit({
+        type: "candidate.structured_tool_synthesis_required",
+        data: {
+          step,
+          observationCount: structuredCandidates.observations.length,
+          sourceToolCallIds: structuredCandidates.observations.map((candidate) => candidate.sourceToolCallId),
+          schemas: [...new Set(structuredCandidates.observations
+            .map((candidate) => candidate.schema)
+            .filter((schema): schema is string => schema !== undefined))],
+        },
+      });
+      if (step === hardLimit && grantedFinalConvergenceGraceSteps === 0) {
+        grantedFinalConvergenceGraceSteps = 1;
+        await emit({
+          type: "loop.final_convergence_grace_granted",
+          data: {
+            step,
+            reason: requestedConvergenceReason,
+            finalConvergenceGraceSteps: grantedFinalConvergenceGraceSteps,
+            hardLimit: currentLimit(),
+          },
+        });
+      }
       continue;
     }
 
@@ -1607,18 +1683,29 @@ async function evaluateToolStepConvergence(
   return decision;
 }
 
-function extractStructuredToolCandidate(
+function selectStructuredToolCandidate(
   evidence: readonly AgentLoopToolEvidence[],
-): StructuredToolCandidate | undefined {
-  for (let index = evidence.length - 1; index >= 0; index -= 1) {
-    const item = evidence[index];
+): StructuredToolCandidateSelection | undefined {
+  const observations: StructuredToolCandidate[] = [];
+  for (const item of evidence) {
     if (item.isError) continue;
     for (const record of candidateRecordsFromToolResult(item.result)) {
       const candidate = structuredCandidateFromRecord(record, item.toolCallId);
-      if (candidate !== undefined) return candidate;
+      if (candidate !== undefined) {
+        // Command wrappers may expose the same structured stdout both nested
+        // and top-level. One Tool call still represents one observation.
+        observations.push(candidate);
+        break;
+      }
     }
   }
-  return undefined;
+  if (observations.length === 0) return undefined;
+  const mergedCandidate = mergeAppendableStructuredCandidates(observations);
+  return {
+    ...(observations.length === 1 ? { directCandidate: observations[0] }
+      : mergedCandidate === undefined ? {} : { directCandidate: mergedCandidate }),
+    observations,
+  };
 }
 
 function candidateRecordsFromToolResult(result: string): ReadonlyArray<Record<string, unknown>> {
@@ -1651,6 +1738,7 @@ function structuredCandidateFromRecord(
     ? deliveryCandidate.output
     : (typeof record.delivery_markdown === "string" ? record.delivery_markdown : undefined);
   if (output === undefined || output.trim().length === 0) return undefined;
+  const aggregation = structuredCandidateAggregation(deliveryCandidate?.aggregation);
   const userVisibleOutput = appendDeliveryCandidateCaveats(normalizeDeliveryCandidate({
     output,
     evidenceKinds: {
@@ -1678,9 +1766,93 @@ function structuredCandidateFromRecord(
       ...(wrapperSchema === undefined || wrapperSchema === schema ? {} : { wrapperSchema }),
       deliveryCandidate: userVisibleOutput,
     }),
+    observation: JSON.stringify({
+      sourceToolCallId,
+      ...(schema === undefined ? {} : { schema }),
+      structuredObservation: projectionSource,
+      deliveryCharacters: userVisibleOutput.output.length,
+    }),
     sourceToolCallId,
+    sourceToolCallIds: [sourceToolCallId],
+    ...(schema === undefined ? {} : { schema }),
+    ...(aggregation === undefined ? {} : { aggregation }),
+  };
+}
+
+function structuredCandidateAggregation(value: unknown): StructuredCandidateAggregation | undefined {
+  if (!isPlainRecord(value)) return undefined;
+  if (value.mergeStrategy !== "append_markdown") return undefined;
+  const groupId = typeof value.groupId === "string" ? value.groupId.trim() : "";
+  const partIndex = value.partIndex;
+  const partCount = value.partCount;
+  if (
+    groupId.length === 0
+    || typeof partIndex !== "number"
+    || typeof partCount !== "number"
+    || !Number.isSafeInteger(partIndex)
+    || !Number.isSafeInteger(partCount)
+    || partIndex < 1
+    || partCount < 2
+    || partIndex > partCount
+  ) return undefined;
+  return { groupId, partIndex, partCount, mergeStrategy: "append_markdown" };
+}
+
+function mergeAppendableStructuredCandidates(
+  candidates: readonly StructuredToolCandidate[],
+): StructuredToolCandidate | undefined {
+  const aggregation = candidates[0]?.aggregation;
+  if (aggregation === undefined || candidates.length !== aggregation.partCount) return undefined;
+  if (!candidates.every((candidate) =>
+    candidate.aggregation?.mergeStrategy === aggregation.mergeStrategy
+    && candidate.aggregation.groupId === aggregation.groupId
+    && candidate.aggregation.partCount === aggregation.partCount
+  )) return undefined;
+  const ordered = [...candidates].sort((left, right) =>
+    (left.aggregation?.partIndex ?? 0) - (right.aggregation?.partIndex ?? 0),
+  );
+  if (!ordered.every((candidate, index) => candidate.aggregation?.partIndex === index + 1)) return undefined;
+  const sourceToolCallIds = ordered.flatMap((candidate) => candidate.sourceToolCallIds);
+  const schema = ordered.every((candidate) => candidate.schema === ordered[0]?.schema)
+    ? ordered[0]?.schema
+    : undefined;
+  const deliveryCandidate = normalizeDeliveryCandidate({
+    output: ordered.map((candidate) => candidate.deliveryCandidate.output).join("\n\n"),
+    evidenceKinds: {
+      satisfied: ordered.flatMap((candidate) => candidate.deliveryCandidate.evidenceKinds.satisfied),
+      caveated: ordered.flatMap((candidate) => candidate.deliveryCandidate.evidenceKinds.caveated),
+      failed: ordered.flatMap((candidate) => candidate.deliveryCandidate.evidenceKinds.failed),
+    },
+    caveats: ordered.flatMap((candidate) => candidate.deliveryCandidate.caveats),
+    sourceToolCallIds,
+  });
+  return {
+    deliveryCandidate,
+    projection: JSON.stringify({
+      structuredToolCandidates: ordered.map((candidate) => JSON.parse(candidate.projection)),
+      aggregation,
+      deliveryCandidate,
+    }),
+    observation: JSON.stringify({ aggregation, sourceToolCallIds, deliveryCharacters: deliveryCandidate.output.length }),
+    sourceToolCallId: sourceToolCallIds[0]!,
+    sourceToolCallIds,
     ...(schema === undefined ? {} : { schema }),
   };
+}
+
+function structuredObservationSynthesisDirective(
+  observations: readonly StructuredToolCandidate[],
+): string {
+  return [
+    "<runtime_structured_observation_synthesis>",
+    "Multiple structured tool observations were produced for this same Plan step. They are evidence, not independent final answers.",
+    "Synthesize one answer for the original user goal using every observation. Do not select the last tool result merely because it completed last.",
+    "A zero-result observation applies only to its own query or scope. It cannot justify a global no-result conclusion while another observation has matching results.",
+    "State differing query scopes and any unresolved conflict explicitly. Use the canonical tool results for exact fields; do not invent facts or emit tool calls on this synthesis turn.",
+    "Observation summaries:",
+    JSON.stringify(observations.map((candidate) => JSON.parse(candidate.observation))),
+    "</runtime_structured_observation_synthesis>",
+  ].join("\n");
 }
 
 function evidenceReceiptKinds(record: Record<string, unknown>, kind: "satisfied" | "caveated" | "failed"): string[] {
@@ -1701,7 +1873,7 @@ function projectStructuredCandidateEvidence(
   candidate: StructuredToolCandidate,
 ): readonly AgentLoopToolEvidence[] {
   return evidence.map((item) => {
-    if (item.toolCallId !== candidate.sourceToolCallId) return item;
+    if (!candidate.sourceToolCallIds.includes(item.toolCallId)) return item;
     return {
       ...item,
       result: candidate.projection,
@@ -2220,6 +2392,11 @@ function candidateRepairDirective(evaluation: CandidateCompletionEvaluation, fal
   if (evaluation.assessmentReused === true) {
     lines.push(
       "The exact completion candidate was already assessed against the same evidence. Do not resubmit it; gather new evidence with current-step tools or provide a materially changed candidate.",
+    );
+  }
+  if (evaluation.requiresEvidenceProgress === true) {
+    lines.push(
+      "The holistic assessment found a substantive gap. Before submitting another candidate, take one current-step tool action that can add material evidence; rewriting the answer alone will be rejected.",
     );
   }
   if (evaluation.failedBoundary !== undefined) {
