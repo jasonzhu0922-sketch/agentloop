@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ensurePostgresBigIntMigration, type AppDatabase } from "@zhujun/agentloop";
+import { initializePostgresSchema, type AppDatabase } from "@zhujun/agentloop";
 import type { PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
@@ -73,7 +73,7 @@ export class ControlPlaneStore {
 
   async ready(): Promise<void> {
     const wideInteger = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_runtime_nodes (
         id TEXT PRIMARY KEY,
         endpoint TEXT NOT NULL,
@@ -133,15 +133,17 @@ export class ControlPlaneStore {
       );
       CREATE INDEX IF NOT EXISTS mr_conversation_runtime_migrations_conversation_idx
         ON mr_conversation_runtime_migrations(tenant_id, owner_user_id, conversation_id, created_at DESC);
-    `);
+    `;
     if (this.database.dialect === "postgres") {
-      await ensurePostgresBigIntMigration(this.database, "multi_runtime_control_plane_wide_integers_v1", [
+      await initializePostgresSchema(this.database, canonicalSchema, "multi_runtime_control_plane_wide_integers_v1", [
         ["mr_runtime_nodes", "last_heartbeat_at"], ["mr_runtime_nodes", "updated_at"],
         ["mr_tasks", "created_at"], ["mr_tasks", "updated_at"],
         ["mr_assignments", "reservation_expires_at"], ["mr_assignments", "last_observed_at"],
         ["mr_assignments", "created_at"], ["mr_assignments", "updated_at"],
         ["mr_conversation_runtime_migrations", "created_at"],
       ]);
+    } else {
+      await this.database.exec(canonicalSchema);
     }
     // PostgreSQL deployments always start from the canonical schema above.
     // PRAGMA is exclusively a SQLite legacy-schema inspection mechanism.

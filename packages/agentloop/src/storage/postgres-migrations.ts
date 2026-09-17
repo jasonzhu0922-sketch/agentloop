@@ -6,6 +6,25 @@ export async function ensurePostgresBigIntMigration(
   version: string,
   columns: readonly (readonly [string, string])[],
 ): Promise<void> {
+  await runPostgresBigIntMigration(connection, version, columns);
+}
+
+/** Creates a component schema and records its migration under one lock/transaction. */
+export async function initializePostgresSchema(
+  connection: SqlConnection,
+  canonicalDdl: string,
+  version: string,
+  columns: readonly (readonly [string, string])[],
+): Promise<void> {
+  await runPostgresBigIntMigration(connection, version, columns, canonicalDdl);
+}
+
+async function runPostgresBigIntMigration(
+  connection: SqlConnection,
+  version: string,
+  columns: readonly (readonly [string, string])[],
+  canonicalDdl?: string,
+): Promise<void> {
   if (connection.dialect !== "postgres") return;
   for (const identifier of [version, ...columns.flat()]) {
     if (!/^[a-z][a-z0-9_]*$/u.test(identifier)) throw new TypeError(`Invalid schema identifier: ${identifier}`);
@@ -14,6 +33,7 @@ export async function ensurePostgresBigIntMigration(
     await connection.exec("SET LOCAL lock_timeout = '5s'");
     await connection.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")
       .get("agentloop:postgres-schema-migrations:v1");
+    if (canonicalDdl !== undefined) await connection.exec(canonicalDdl);
     await connection.exec(`CREATE TABLE IF NOT EXISTS agentloop_schema_migrations (
       version TEXT PRIMARY KEY, completed_at BIGINT NOT NULL
     )`);

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ensurePostgresBigIntMigration, type AppDatabase } from "@zhujun/agentloop";
+import { initializePostgresSchema, type AppDatabase } from "@zhujun/agentloop";
 import type { PortableResourceRef } from "../domain/contracts.ts";
 import type { ConversationAttachment } from "./attachment-broker.ts";
 
@@ -35,7 +35,7 @@ export class SharedFilesystemAttachmentBroker {
 
   async ready(): Promise<void> {
     const wideInteger = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_attachments (
         id TEXT PRIMARY KEY,
         tenant_id TEXT NOT NULL,
@@ -50,11 +50,13 @@ export class SharedFilesystemAttachmentBroker {
       );
       CREATE INDEX IF NOT EXISTS mr_attachments_subject_idx
         ON mr_attachments(tenant_id, owner_user_id, conversation_id, created_at DESC);
-    `);
+    `;
     if (this.database.dialect === "postgres") {
-      await ensurePostgresBigIntMigration(this.database, "multi_runtime_attachments_wide_integers_v1", [
+      await initializePostgresSchema(this.database, canonicalSchema, "multi_runtime_attachments_wide_integers_v1", [
         ["mr_attachments", "created_at"],
       ]);
+    } else {
+      await this.database.exec(canonicalSchema);
     }
   }
 

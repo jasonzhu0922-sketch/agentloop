@@ -1,6 +1,6 @@
 import type { SqlConnection, SqlDialect, SqlStatement } from "./connection.ts";
 import { SqliteConnection } from "./sqlite-connection.ts";
-import { ensurePostgresBigIntMigration } from "./postgres-migrations.ts";
+import { initializePostgresSchema } from "./postgres-migrations.ts";
 
 const POSTGRES_WIDE_INTEGER_COLUMNS = [
   ["skills", "created_at"], ["skills", "updated_at"],
@@ -114,7 +114,7 @@ export class AppDatabase implements SqlConnection {
 
   private async migrate(): Promise<void> {
     const wideInteger = this.dialect === "postgres" ? "BIGINT" : "INTEGER";
-    await this.connection.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL,
@@ -519,13 +519,20 @@ export class AppDatabase implements SqlConnection {
         created_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_events(actor_user_id, created_at DESC);
-    `);
+    `;
 
     if (this.dialect === "postgres") {
       // Canonical timestamps use Date.now() milliseconds, which exceed the
       // signed 32-bit range. Upgrade every historical PostgreSQL time column,
       // plus Tool result character counts, instead of fixing only new tables.
-      await ensurePostgresBigIntMigration(this.connection, "kernel_wide_integers_v1", POSTGRES_WIDE_INTEGER_COLUMNS);
+      await initializePostgresSchema(
+        this.connection,
+        canonicalSchema,
+        "kernel_wide_integers_v1",
+        POSTGRES_WIDE_INTEGER_COLUMNS,
+      );
+    } else {
+      await this.connection.exec(canonicalSchema);
     }
 
     // Kernel boundary: business rows are owned by opaque host-provided user

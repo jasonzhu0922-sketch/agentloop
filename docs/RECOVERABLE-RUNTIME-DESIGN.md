@@ -260,7 +260,7 @@ reconciliation 只扫描 lease/deadline 已失效的 Tool Action，并在提交 
 
 默认 `SqlToolResultStore` 同时使用 SQLite/PostgreSQL 表；内核以及 Multi Runtime Router/Host/附件 schema 中所有毫秒时间、lease、deadline 与 Tool 字符数字段使用 BIGINT，迁移会把既有 INTEGER 列提升为 BIGINT；读取 pg int8 时对 number/string/bigint 三种宿主表示统一做安全整数校验。生产大对象可由宿主注入共享对象存储 adapter。所有 adapter 使用统一的有界 URI-like opaque locator 语法；模型文本中的引用使用结构化 JSON marker，不能用 locator 允许出现的字符做裸分隔符。`read_tool_result` 不假设默认 SQL scheme，并重新校验当前 Run Grant、owner、Run、完整性和读取范围。
 
-PostgreSQL 宽整数升级使用共享的版本化 migration ledger，并在事务级 advisory lock 下串行执行。启动者先查询 `information_schema`，只对仍为 `INTEGER`/`SMALLINT` 的目标列执行 `ALTER ... TYPE BIGINT`；已完成版本直接返回，不在滚动启动时重复取得业务表 `AccessExclusiveLock`。migration 设置 5 秒 `lock_timeout`，不能及时取得所需锁时启动明确失败，由部署层重试，不能带着部分 schema 继续运行。
+PostgreSQL schema 初始化与宽整数升级使用共享的版本化 migration ledger，并在同一个 pinned transaction 的事务级 advisory lock 下串行执行。锁内顺序为 canonical `CREATE TABLE/INDEX IF NOT EXISTS`、ledger 初始化、`information_schema` 检查、必要的 `ALTER ... TYPE BIGINT` 和版本提交；这既避免空 schema 并发首次启动时竞争隐式 relation type，也避免已迁移重启重复取得业务表 `AccessExclusiveLock`。只允许从 `INTEGER`/`SMALLINT` 提升，缺列或其他类型 fail closed。migration 设置 5 秒 `lock_timeout`，不能及时取得所需锁时整个事务回滚、启动明确失败，由部署层重试，不能带着部分 schema 继续运行。
 
 durable outcome 之后的 `tool.result_committed` / `tool.completed` 属于模型与 UI 投影。若其中一次 append 失败，Runtime 尝试追加 `tool.projection_failed` 诊断并继续使用已提交 outcome；若诊断本身也无法持久化，则抛出 `TOOL_PROJECTION_RECOVERY_REQUIRED`，由 RunService 保留 running Plan/Step、创建或保留 recovery state，而不是提交 `run.failed`。这不能静默制造 Event Store 与在线投影差异，也不能把已经确认的 effect 当作可重放失败。
 

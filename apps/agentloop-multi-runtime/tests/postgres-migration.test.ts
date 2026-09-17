@@ -8,6 +8,43 @@ import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
 
 const url = process.env.AGENTLOOP_TEST_POSTGRES_URL;
 
+test("real PostgreSQL serializes complete first startup on an empty schema", {
+  skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
+}, async () => {
+  const admin = await PgConnection.create(url!);
+  try {
+    for (let iteration = 0; iteration < 10; iteration += 1) {
+      const schema = `context_first_start_${randomUUID().replaceAll("-", "")}`;
+      const config = new URL(url!);
+      config.searchParams.set("options", `-c search_path=${schema}`);
+      let first: AppDatabase | undefined;
+      let second: AppDatabase | undefined;
+      try {
+        await admin.exec(`CREATE SCHEMA ${schema}`);
+        [first, second] = await Promise.all([
+          PgConnection.create(config.toString()).then((connection) => AppDatabase.open({ connection })),
+          PgConnection.create(config.toString()).then((connection) => AppDatabase.open({ connection })),
+        ]);
+        await Promise.all([first, second].map((database) => new ControlPlaneStore(database).ready()));
+        await Promise.all([first, second].map((database) =>
+          new SharedFilesystemAttachmentBroker(database, "/unused", "http://router.test").ready()
+        ));
+        await Promise.all([first, second].map((database) => new HostDispatchStore(database).ready()));
+        const versions = await first.prepare(
+          "SELECT COUNT(*) AS count FROM agentloop_schema_migrations",
+        ).get() as { count: number };
+        assert.equal(Number(versions.count), 4);
+      } finally {
+        await second?.close();
+        await first?.close();
+        await admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      }
+    }
+  } finally {
+    await admin.close();
+  }
+});
+
 test("real PostgreSQL upgrades legacy columns once, then permits concurrent startup under a read lock", {
   skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
 }, async () => {

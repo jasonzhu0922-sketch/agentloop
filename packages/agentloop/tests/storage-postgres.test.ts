@@ -11,7 +11,7 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
   try {
     assert.equal(database.dialect, "postgres");
     assert.equal(connection.execSql.length, 4);
-    const schema = connection.execSql[0] ?? "";
+    const schema = connection.execSql.find((sql) => sql.includes("CREATE TABLE IF NOT EXISTS skills")) ?? "";
     assert.ok(schema.includes("CREATE TABLE IF NOT EXISTS discovered_skills"));
     assert.match(schema, /tool_result_blobs[\s\S]*characters BIGINT NOT NULL[\s\S]*created_at BIGINT NOT NULL/u);
     assert.match(schema, /tool_outcomes[\s\S]*result_characters BIGINT[\s\S]*created_at BIGINT NOT NULL/u);
@@ -43,7 +43,7 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
       ["batch_items", ["started_at", "finished_at"]],
       ["audit_events", ["created_at"]],
     ]);
-    const migration = connection.execSql.slice(1).join("\n");
+    const migration = connection.execSql.join("\n");
     for (const [table, columns] of timestampColumns) {
       const tableDefinition = schema.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n      \\);`, "u"))?.[1];
       assert.ok(tableDefinition, `missing canonical PostgreSQL table ${table}`);
@@ -57,6 +57,9 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
       "plans must exist before runtime_actions references it on PostgreSQL",
     );
     assert.ok(!schema.includes("PRAGMA"), "portable schema creation must not include SQLite PRAGMAs");
+    const lockIndex = connection.calls.findIndex((call) => call.sql.includes("pg_advisory_xact_lock"));
+    const schemaIndex = connection.calls.findIndex((call) => call.sql.includes("CREATE TABLE IF NOT EXISTS skills"));
+    assert.ok(lockIndex >= 0 && schemaIndex > lockIndex, "canonical DDL must execute after the PostgreSQL schema lock");
   } finally {
     await database.close();
   }

@@ -1,4 +1,4 @@
-import { ensurePostgresBigIntMigration, type AppDatabase } from "@zhujun/agentloop";
+import { initializePostgresSchema, type AppDatabase } from "@zhujun/agentloop";
 
 export type DispatchClaim =
   | { readonly kind: "claimed" }
@@ -17,7 +17,7 @@ export class HostDispatchStore {
 
   async ready(): Promise<void> {
     const wideInteger = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_host_dispatches (
         dispatch_key TEXT PRIMARY KEY,
         assignment_id TEXT NOT NULL,
@@ -37,12 +37,14 @@ export class HostDispatchStore {
         accepted_at ${wideInteger} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_run_executors_runtime_idx ON mr_run_executors(runtime_id, accepted_at DESC);
-    `);
+    `;
     if (this.database.dialect === "postgres") {
-      await ensurePostgresBigIntMigration(this.database, "multi_runtime_host_dispatch_wide_integers_v1", [
+      await initializePostgresSchema(this.database, canonicalSchema, "multi_runtime_host_dispatch_wide_integers_v1", [
         ["mr_host_dispatches", "lease_expires_at"], ["mr_host_dispatches", "created_at"],
         ["mr_host_dispatches", "updated_at"], ["mr_run_executors", "accepted_at"],
       ]);
+    } else {
+      await this.database.exec(canonicalSchema);
     }
   }
 
