@@ -1,4 +1,4 @@
-import type { AppDatabase } from "@zhujun/agentloop";
+import { ensurePostgresBigIntMigration, type AppDatabase } from "@zhujun/agentloop";
 
 export type DispatchClaim =
   | { readonly kind: "claimed" }
@@ -39,12 +39,10 @@ export class HostDispatchStore {
       CREATE INDEX IF NOT EXISTS mr_run_executors_runtime_idx ON mr_run_executors(runtime_id, accepted_at DESC);
     `);
     if (this.database.dialect === "postgres") {
-      await this.database.exec(`
-        ALTER TABLE mr_host_dispatches ALTER COLUMN lease_expires_at TYPE BIGINT USING lease_expires_at::BIGINT;
-        ALTER TABLE mr_host_dispatches ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-        ALTER TABLE mr_host_dispatches ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
-        ALTER TABLE mr_run_executors ALTER COLUMN accepted_at TYPE BIGINT USING accepted_at::BIGINT;
-      `);
+      await ensurePostgresBigIntMigration(this.database, "multi_runtime_host_dispatch_wide_integers_v1", [
+        ["mr_host_dispatches", "lease_expires_at"], ["mr_host_dispatches", "created_at"],
+        ["mr_host_dispatches", "updated_at"], ["mr_run_executors", "accepted_at"],
+      ]);
     }
   }
 

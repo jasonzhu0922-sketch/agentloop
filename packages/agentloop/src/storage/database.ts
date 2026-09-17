@@ -1,5 +1,6 @@
 import type { SqlConnection, SqlDialect, SqlStatement } from "./connection.ts";
 import { SqliteConnection } from "./sqlite-connection.ts";
+import { ensurePostgresBigIntMigration } from "./postgres-migrations.ts";
 
 const POSTGRES_WIDE_INTEGER_COLUMNS = [
   ["skills", "created_at"], ["skills", "updated_at"],
@@ -524,10 +525,7 @@ export class AppDatabase implements SqlConnection {
       // Canonical timestamps use Date.now() milliseconds, which exceed the
       // signed 32-bit range. Upgrade every historical PostgreSQL time column,
       // plus Tool result character counts, instead of fixing only new tables.
-      await this.connection.exec(POSTGRES_WIDE_INTEGER_COLUMNS
-        .map(([table, column]) =>
-          `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE BIGINT USING ${column}::BIGINT;`)
-        .join("\n"));
+      await ensurePostgresBigIntMigration(this.connection, "kernel_wide_integers_v1", POSTGRES_WIDE_INTEGER_COLUMNS);
     }
 
     // Kernel boundary: business rows are owned by opaque host-provided user

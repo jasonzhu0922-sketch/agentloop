@@ -5,6 +5,7 @@ import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { AppError } from "../src/shared/errors.ts";
+import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
 test("RunService cancels an active async model turn", async () => {
@@ -42,6 +43,51 @@ test("RunService cancels an active async model turn", async () => {
       SELECT state FROM runtime_actions WHERE run_id = ? ORDER BY created_at DESC LIMIT 1
     `).get(run.id)) as { state: string };
     assert.equal(latestAction.state, "failed");
+  } finally {
+    await database.close();
+  }
+});
+
+test("RunService reports cancellation when a non-replay-safe Tool returns after abort", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    let started!: () => void;
+    const toolStarted = new Promise<void>((resolve) => { started = resolve; });
+    let finish!: (value: string) => void;
+    const result = new Promise<string>((resolve) => { finish = resolve; });
+    let effects = 0;
+    const tool: RuntimeTool<unknown> = {
+      name: "delayed_effect", description: "Delayed external effect",
+      inputSchema: { type: "object" }, executionMode: "exclusive", replaySafe: false,
+      parse: (value) => value,
+      async execute() { effects++; started(); return await result; },
+    };
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      async complete() {
+        return { content: "", finishReason: "tool_calls", toolCalls: [{
+          id: "delayed-call", name: "delayed_effect", arguments: {},
+        }] };
+      },
+    };
+    const runs = new RunService({
+      database, skills: new SkillService(database), tools: [tool],
+      modelFactory: () => model,
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const execution = runs.execute(owner.user.id, "cancel delayed effect").catch((error) => error);
+    await toolStarted;
+    const run = (await database.prepare("SELECT id FROM runs WHERE owner_user_id = ?").get(owner.user.id)) as { id: string };
+    await runs.cancel(owner.user.id, run.id);
+    finish("late result");
+    const error = await execution;
+    assert.equal(error instanceof AppError, true);
+    assert.equal(error.code, "CANCELLED");
+    assert.equal(effects, 1);
+    assert.equal((await runs.get(owner.user.id, run.id)).status, "cancelled");
+    assert.equal((await database.prepare("SELECT COUNT(*) AS count FROM tool_outcomes WHERE run_id = ?").get(run.id) as { count: number }).count, 0);
   } finally {
     await database.close();
   }

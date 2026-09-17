@@ -254,9 +254,13 @@ Tool effect
 
 reconciliation 只扫描 lease/deadline 已失效的 Tool Action，并在提交 outcome 前以旧 fence、revision 和状态做条件更新，递增 fence 后取得恢复所有权。有效租约不会被启动流程或 conversation 删除抢占；多个 reconciler 只有一个能 claim。reconciled outcome 与对应 `recovery_review` 在同一 SQL 事务内提交。旧 Worker 若在 claim 后迟到，会收到 `RUNTIME_ACTION_LEASE_LOST` 并停止，不能再写 Step、Plan、Run、Outcome，也不能把权威成功 outcome 再投影成普通 `tool.failed`。
 
+用户取消是另一条权威关闭路径：取消事务先把 dispatched Action 关闭为 `failed/CANCELLED` 并提交 Run 的 cancelled Outcome，再 abort 在线执行。若 Model 或 Tool 忽略 abort 并迟到，执行调用向宿主规范化返回 `CANCELLED`；只有 Run 仍为 running 且 Action fence 被恢复 owner 替换时，才保留 `RUNTIME_ACTION_LEASE_LOST`。这一区分不会允许迟到 Worker 提交 outcome，也不会削弱 reconciler fencing。
+
 “完整序列化”是 outcome commit 的前置条件。字符串原样保存，其他值只接受递归意义上的 plain、lossless JSON：嵌套 `undefined`/function/symbol/BigInt、非有限数、负零、稀疏数组、访问器、symbol/non-enumerable 字段、自定义 prototype 或 `toJSON` 都在 blob/outcome commit 前触发 `TOOL_RESULT_SERIALIZATION_FAILED`。若外部 effect 已经发生，Action 和 Run 保留在恢复边界，不会写入伪造的成功 outcome、删除 recovery state 或自动重放不安全 Tool。
 
 默认 `SqlToolResultStore` 同时使用 SQLite/PostgreSQL 表；内核以及 Multi Runtime Router/Host/附件 schema 中所有毫秒时间、lease、deadline 与 Tool 字符数字段使用 BIGINT，迁移会把既有 INTEGER 列提升为 BIGINT；读取 pg int8 时对 number/string/bigint 三种宿主表示统一做安全整数校验。生产大对象可由宿主注入共享对象存储 adapter。所有 adapter 使用统一的有界 URI-like opaque locator 语法；模型文本中的引用使用结构化 JSON marker，不能用 locator 允许出现的字符做裸分隔符。`read_tool_result` 不假设默认 SQL scheme，并重新校验当前 Run Grant、owner、Run、完整性和读取范围。
+
+PostgreSQL 宽整数升级使用共享的版本化 migration ledger，并在事务级 advisory lock 下串行执行。启动者先查询 `information_schema`，只对仍为 `INTEGER`/`SMALLINT` 的目标列执行 `ALTER ... TYPE BIGINT`；已完成版本直接返回，不在滚动启动时重复取得业务表 `AccessExclusiveLock`。migration 设置 5 秒 `lock_timeout`，不能及时取得所需锁时启动明确失败，由部署层重试，不能带着部分 schema 继续运行。
 
 durable outcome 之后的 `tool.result_committed` / `tool.completed` 属于模型与 UI 投影。若其中一次 append 失败，Runtime 尝试追加 `tool.projection_failed` 诊断并继续使用已提交 outcome；若诊断本身也无法持久化，则抛出 `TOOL_PROJECTION_RECOVERY_REQUIRED`，由 RunService 保留 running Plan/Step、创建或保留 recovery state，而不是提交 `run.failed`。这不能静默制造 Event Store 与在线投影差异，也不能把已经确认的 effect 当作可重放失败。
 

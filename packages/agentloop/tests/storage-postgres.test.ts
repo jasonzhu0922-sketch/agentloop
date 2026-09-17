@@ -10,7 +10,7 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
   const database = await AppDatabase.open({ connection });
   try {
     assert.equal(database.dialect, "postgres");
-    assert.equal(connection.execSql.length, 3);
+    assert.equal(connection.execSql.length, 4);
     const schema = connection.execSql[0] ?? "";
     assert.ok(schema.includes("CREATE TABLE IF NOT EXISTS discovered_skills"));
     assert.match(schema, /tool_result_blobs[\s\S]*characters BIGINT NOT NULL[\s\S]*created_at BIGINT NOT NULL/u);
@@ -43,16 +43,13 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
       ["batch_items", ["started_at", "finished_at"]],
       ["audit_events", ["created_at"]],
     ]);
-    const migration = connection.execSql[1] ?? "";
+    const migration = connection.execSql.slice(1).join("\n");
     for (const [table, columns] of timestampColumns) {
       const tableDefinition = schema.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n      \\);`, "u"))?.[1];
       assert.ok(tableDefinition, `missing canonical PostgreSQL table ${table}`);
       for (const column of columns) {
         assert.match(tableDefinition, new RegExp(`\\b${column} BIGINT(?: NOT NULL)?\\b`, "u"));
-        assert.match(
-          migration,
-          new RegExp(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE BIGINT USING ${column}::BIGINT`, "u"),
-        );
+        assert.doesNotMatch(migration, new RegExp(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE BIGINT`, "u"));
       }
     }
     assert.ok(
@@ -70,7 +67,7 @@ test("AppDatabase operations wait for injected connection migration", async () =
   const database = new AppDatabase({ connection });
   try {
     await database.prepare("SELECT ? AS value").get("ready");
-    assert.deepEqual(connection.calls.map((call) => call.kind), ["exec", "exec", "exec", "get"]);
+    assert.equal(connection.calls.at(-1)?.kind, "get");
   } finally {
     await database.close();
   }
@@ -206,6 +203,7 @@ class RecordingConnection implements SqlConnection {
       },
       get: async <T>(...params): Promise<T | undefined> => {
         this.calls.push({ kind: "get", sql, params });
+        if (sql.includes("information_schema.columns")) return { data_type: "bigint" } as T;
         return undefined;
       },
       all: async <T>(...params): Promise<T[]> => {

@@ -1730,7 +1730,11 @@ export class RunService {
       const appError = error instanceof AppError
         ? error
         : new AppError("INTERNAL_ERROR", "Run failed", 500);
-      if ((await this.runs.get(runId))?.status === "running") {
+      const authoritativeRun = await this.runs.get(runId);
+      if (authoritativeRun?.status === "cancelled") {
+        throw new AppError("CANCELLED", "Run was cancelled", 409, { runId });
+      }
+      if (authoritativeRun?.status === "running") {
         if (appError.code === "HUMAN_LOOP_REQUIRED" && planId !== undefined && runningStepId !== undefined) {
           const requirement = appError.details?.requirement;
           if (requirement === undefined || typeof requirement !== "object" || Array.isArray(requirement)) {

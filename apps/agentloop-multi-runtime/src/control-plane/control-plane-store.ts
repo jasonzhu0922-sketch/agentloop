@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AppDatabase } from "@zhujun/agentloop";
+import { ensurePostgresBigIntMigration, type AppDatabase } from "@zhujun/agentloop";
 import type { PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
@@ -135,17 +135,13 @@ export class ControlPlaneStore {
         ON mr_conversation_runtime_migrations(tenant_id, owner_user_id, conversation_id, created_at DESC);
     `);
     if (this.database.dialect === "postgres") {
-      await this.database.exec(`
-        ALTER TABLE mr_runtime_nodes ALTER COLUMN last_heartbeat_at TYPE BIGINT USING last_heartbeat_at::BIGINT;
-        ALTER TABLE mr_runtime_nodes ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
-        ALTER TABLE mr_tasks ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-        ALTER TABLE mr_tasks ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
-        ALTER TABLE mr_assignments ALTER COLUMN reservation_expires_at TYPE BIGINT USING reservation_expires_at::BIGINT;
-        ALTER TABLE mr_assignments ALTER COLUMN last_observed_at TYPE BIGINT USING last_observed_at::BIGINT;
-        ALTER TABLE mr_assignments ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-        ALTER TABLE mr_assignments ALTER COLUMN updated_at TYPE BIGINT USING updated_at::BIGINT;
-        ALTER TABLE mr_conversation_runtime_migrations ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-      `);
+      await ensurePostgresBigIntMigration(this.database, "multi_runtime_control_plane_wide_integers_v1", [
+        ["mr_runtime_nodes", "last_heartbeat_at"], ["mr_runtime_nodes", "updated_at"],
+        ["mr_tasks", "created_at"], ["mr_tasks", "updated_at"],
+        ["mr_assignments", "reservation_expires_at"], ["mr_assignments", "last_observed_at"],
+        ["mr_assignments", "created_at"], ["mr_assignments", "updated_at"],
+        ["mr_conversation_runtime_migrations", "created_at"],
+      ]);
     }
     // PostgreSQL deployments always start from the canonical schema above.
     // PRAGMA is exclusively a SQLite legacy-schema inspection mechanism.

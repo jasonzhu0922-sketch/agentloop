@@ -90,6 +90,13 @@ test("PostgreSQL Multi Runtime schemas use and migrate every millisecond field a
   const database = {
     dialect: "postgres",
     async exec(sql: string) { statements.push(sql); },
+    async transaction<T>(operation: () => Promise<T>) { return await operation(); },
+    prepare(sql: string) {
+      return {
+        async get() { return sql.includes("information_schema.columns") ? { data_type: "bigint" } : undefined; },
+        async run() { return { changes: 1 }; },
+      };
+    },
   } as unknown as AppDatabase;
 
   await new ControlPlaneStore(database).ready();
@@ -102,7 +109,7 @@ test("PostgreSQL Multi Runtime schemas use and migrate every millisecond field a
     "last_observed_at", "lease_expires_at", "accepted_at",
   ]) {
     assert.match(sql, new RegExp(`${field} BIGINT`), `${field} must be BIGINT in fresh PostgreSQL DDL`);
-    assert.match(sql, new RegExp(`ALTER COLUMN ${field} TYPE BIGINT`), `${field} must be upgraded in existing PostgreSQL schemas`);
+    assert.doesNotMatch(sql, new RegExp(`ALTER COLUMN ${field} TYPE BIGINT`), `${field} must not be re-altered when already BIGINT`);
   }
   assert.doesNotMatch(sql, /(?:last_heartbeat_at|updated_at|created_at|reservation_expires_at|last_observed_at|lease_expires_at|accepted_at) INTEGER/u);
 });

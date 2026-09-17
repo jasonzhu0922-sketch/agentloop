@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { AppDatabase } from "@zhujun/agentloop";
+import { ensurePostgresBigIntMigration, type AppDatabase } from "@zhujun/agentloop";
 import type { PortableResourceRef } from "../domain/contracts.ts";
 import type { ConversationAttachment } from "./attachment-broker.ts";
 
@@ -52,9 +52,9 @@ export class SharedFilesystemAttachmentBroker {
         ON mr_attachments(tenant_id, owner_user_id, conversation_id, created_at DESC);
     `);
     if (this.database.dialect === "postgres") {
-      await this.database.exec(`
-        ALTER TABLE mr_attachments ALTER COLUMN created_at TYPE BIGINT USING created_at::BIGINT;
-      `);
+      await ensurePostgresBigIntMigration(this.database, "multi_runtime_attachments_wide_integers_v1", [
+        ["mr_attachments", "created_at"],
+      ]);
     }
   }
 
