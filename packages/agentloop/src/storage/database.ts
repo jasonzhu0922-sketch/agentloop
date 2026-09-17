@@ -259,6 +259,19 @@ export class AppDatabase implements SqlConnection {
       );
       CREATE INDEX IF NOT EXISTS run_recovery_states_action_idx ON run_recovery_states(action_id);
 
+      CREATE TABLE IF NOT EXISTS run_checkpoints (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+        plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
+        action_id TEXT REFERENCES runtime_actions(id) ON DELETE SET NULL,
+        reason TEXT NOT NULL CHECK(reason IN ('execution_authority_lost')),
+        snapshot_json TEXT NOT NULL,
+        child_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+        created_at INTEGER NOT NULL,
+        consumed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS run_checkpoints_child_idx ON run_checkpoints(child_run_id);
+
       CREATE TABLE IF NOT EXISTS recovery_decisions (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

@@ -231,7 +231,11 @@ export class PlanRepository {
     const proposedById = new Map(next.steps.map((step) => [step.id, step]));
     for (const step of current.steps.filter((item) => item.retiredAt === undefined)) {
       const proposed = proposedById.get(step.id);
-      if (proposed !== undefined && !samePlanStepDefinition(step, proposed)) {
+      if (
+        proposed !== undefined
+        && !samePlanStepDefinition(step, proposed)
+        && !isSafeRecoveryDependencyRewire(step, proposed, currentById, input.retiredStepIds)
+      ) {
         throw new Error(`Plan revision cannot alter existing step ${step.id}`);
       }
       if (step.status === "completed" && proposed === undefined) {
@@ -276,9 +280,19 @@ export class PlanRepository {
           evidence_contract_json, success_criteria_json, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
       `);
+      const updateDependencies = this.database.prepare(`
+        UPDATE plan_steps SET dependencies_json = ?
+        WHERE plan_id = ? AND step_id = ? AND status IN ('pending', 'failed')
+      `);
       let nextPosition = Math.max(-1, ...current.steps.map((step) => step.position)) + 1;
       for (const step of next.steps) {
-        if (currentById.has(step.id)) continue;
+        const existing = currentById.get(step.id);
+        if (existing !== undefined) {
+          if (JSON.stringify(existing.dependencies) !== JSON.stringify(step.dependencies)) {
+            await updateDependencies.run(JSON.stringify(step.dependencies), current.id, step.id);
+          }
+          continue;
+        }
         await insertStep.run(
           current.id,
           step.id,
@@ -427,4 +441,20 @@ function samePlanStepDefinition(left: PlanStep, right: PlanStep): boolean {
     && JSON.stringify(left.executionBinding) === JSON.stringify(right.executionBinding)
     && JSON.stringify(left.evidenceContract ?? null) === JSON.stringify(right.evidenceContract ?? null)
     && JSON.stringify(left.successCriteria) === JSON.stringify(right.successCriteria);
+}
+
+function isSafeRecoveryDependencyRewire(
+  current: PlanStep,
+  proposed: PlanStep,
+  currentById: ReadonlyMap<string, PlanStep>,
+  retiredStepIds: readonly string[],
+): boolean {
+  if (current.status !== "pending" && current.status !== "failed") return false;
+  if (!samePlanStepDefinition({ ...current, dependencies: proposed.dependencies }, proposed)) return false;
+  const removed = current.dependencies.filter((dependency) => !proposed.dependencies.includes(dependency));
+  const added = proposed.dependencies.filter((dependency) => !current.dependencies.includes(dependency));
+  return removed.length > 0
+    && removed.length === added.length
+    && removed.every((dependency) => retiredStepIds.includes(dependency))
+    && added.every((dependency) => !currentById.has(dependency));
 }

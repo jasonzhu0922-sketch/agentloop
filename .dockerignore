@@ -12,3 +12,12 @@
 !apps/agentloop-app/package.json
 !apps/agentloop-multi-runtime/
 !apps/agentloop-multi-runtime/**
+
+# Runtime state, generated browser packages, and local workspaces are neither
+# build inputs nor safe to send to the Docker daemon.  They previously made a
+# Host image rebuild upload nearly 2 GB before dependency installation began.
+apps/agentloop-app/data/
+apps/agentloop-app/workspace/
+apps/agentloop-app/web/node_modules/
+apps/agentloop-multi-runtime/data/
+apps/agentloop-multi-runtime/node_modules/

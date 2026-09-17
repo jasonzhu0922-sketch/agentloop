@@ -256,6 +256,7 @@ export function admitPlan(input: {
     ?? (input.availableTools === undefined
       ? planningCapabilitiesFromToolNames([...input.availableToolNames])
       : planningCapabilitiesFromTools(input.availableTools));
+  assertTerminalArtifactDelivery(admittedSteps, input.taskIntent);
   assertRequiredSourceGrounding(
     admittedSteps,
     input.taskIntent,
@@ -270,7 +271,6 @@ export function admitPlan(input: {
       availableCapabilities,
     });
   }
-
   for (const skillId of selectedSet) {
     const selectedRole = selectedRoleBySkillId.get(skillId);
     const nonExecutingRecoveryRole = recoveryPlan
@@ -304,6 +304,25 @@ export function admitPlan(input: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function assertTerminalArtifactDelivery(
+  steps: readonly PlanStep[],
+  taskIntent: {
+    readonly deliverySurface?: "conversation" | "workspace_artifact";
+    readonly artifactKind?: string;
+  } | undefined,
+): void {
+  if (taskIntent?.deliverySurface !== "workspace_artifact" || taskIntent.artifactKind === undefined || taskIntent.artifactKind === "none") return;
+  const dependedOn = new Set(steps.flatMap((step) => step.dependencies));
+  const terminalLeaves = steps.filter((step) => step.kind === "leaf" && !dependedOn.has(step.id));
+  const hasArtifactProducer = terminalLeaves.some((step) =>
+    step.evidenceContract === undefined
+      || step.evidenceContract.requiredKinds.some((kind) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind)),
+  );
+  if (!hasArtifactProducer) {
+    reject("Requested workspace artifact has no terminal producer with observable artifact evidence; a Human-in-the-Loop-only or text-only terminal step must be repaired before execution");
+  }
 }
 
 function assertRequiredSourceGrounding(

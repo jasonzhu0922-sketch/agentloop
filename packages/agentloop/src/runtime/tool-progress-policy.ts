@@ -35,6 +35,38 @@ export interface RuntimeToolProgressDecision {
   readonly progressHint?: string;
 }
 
+/**
+ * A candidate-rejection hint belongs to the progress policy because it is
+ * advice about the value of another turn, never a substitute for Assessment
+ * or a Tool authorization decision.
+ */
+export function candidateRejectionProgressHint(input: {
+  readonly policy?: RuntimeToolProgressPolicy;
+  readonly evidence: readonly AgentLoopToolEvidence[];
+  readonly rejectedCandidateCount: number;
+}): string {
+  const webSearchCount = input.evidence.filter((item) => item.toolName === "websearch").length;
+  const webFetchCount = input.evidence.filter((item) => item.toolName === "webfetch").length;
+  const successfulSourceCount = input.evidence.filter((item) =>
+    !item.isError && (item.toolName === "websearch" || item.toolName === "webfetch")
+  ).length;
+  const hasSourceEvidence = webSearchCount > 0 || webFetchCount > 0;
+  return [
+    "<runtime_progress_hint>",
+    `The Runtime has rejected ${input.rejectedCandidateCount} completion candidate(s). Do not repeat the rejected format, internal markup, or an unexecuted Tool call.`,
+    "Decide only from expected marginal evidence benefit: another retrieval is useful only when it can materially improve an uncovered claim's coverage, independent corroboration, freshness, or citation traceability.",
+    ...(hasSourceEvidence
+      ? [`Current source activity: ${webSearchCount} search call(s), ${webFetchCount} fetch call(s), ${successfulSourceCount} successful source action(s).`]
+      : []),
+    ...(input.policy === undefined || input.policy.requiredEvidenceKinds.length === 0
+      ? []
+      : [`Current observable evidence obligations: ${input.policy.requiredEvidenceKinds.join(", ")}.`]),
+    "If no remaining authorized action has that benefit, directly return a concise summary from canonical evidence and explicitly caveat what remains unverified.",
+    "A convergence turn has no execution tools; return the summary now rather than describing a future retrieval.",
+    "</runtime_progress_hint>",
+  ].join("\n");
+}
+
 export type RuntimeStepNextAction =
   | "acquire_source_evidence"
   | "produce_artifact"
@@ -278,6 +310,7 @@ export function runtimeStepToolProgressPolicy(
         ? "Use one focused evidence-producing action next: emit a durable structured extraction artifact, run a source parser, summarize an extracted table artifact, or return a completion candidate with explicit caveats when the remaining evidence cannot be produced locally."
         : "Use an evidence-producing tool next: write or update the artifact source, run the Skill validator/build/render command, or verify artifact acceptance.",
       "Do not keep listing, searching, or reading references unless a validator, build, render, or acceptance diagnostic names a concrete missing field or contract.",
+      "Treat this as a benefit decision, not a mandatory next Tool call: act only when the next action can materially improve an unmet current-step success criterion; otherwise submit the bounded summary or completion candidate now.",
       scope === "source"
         ? "If the source evidence cannot be completed with the current grants, return a truthful incomplete completion candidate instead of spending more read-only tool turns."
         : "If the artifact cannot be produced with the current evidence, return a truthful incomplete completion candidate instead of spending more read-only tool turns.",

@@ -62,7 +62,7 @@ test("request_human_loop exposes its typed response and resume contracts to the 
   assert.match(definition.description, /not a JSON Schema/);
 });
 
-test("a malformed request_human_loop call fails closed instead of continuing without user input", async () => {
+test("a malformed request_human_loop call retries once but cannot bypass the HIL gate", async () => {
   const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-invalid-hil", depth: 0, allowedToolNames: [HUMAN_LOOP_TOOL_NAME], allowedSkillIds: [] });
   const events: RuntimeEvent[] = [];
   let modelCalls = 0;
@@ -72,12 +72,59 @@ test("a malformed request_human_loop call fails closed instead of continuing wit
     emit: async (event) => { events.push(event); },
     model: {
       limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        modelCalls += 1;
+        if (modelCalls === 2) {
+          assert.match(request.runtimeContext?.content ?? "", /runtime_human_loop_repair/);
+          return {
+            content: "", finishReason: "tool_calls" as const,
+            toolCalls: [{
+              id: "valid-ask", name: HUMAN_LOOP_TOOL_NAME,
+              arguments: {
+                kind: "selection", title: "Choose", prompt: "Choose", rationale: "Need user direction", evidenceRefs: [],
+                responseSchema: {
+                  type: "select", minSelections: 1, maxSelections: 1,
+                  options: [{ id: "one", label: "One" }, { id: "two", label: "Two" }],
+                },
+                resume: { mode: "continue_step" },
+              },
+            }],
+          };
+        }
+        return {
+          content: "", finishReason: "tool_calls" as const,
+          toolCalls: [{
+            id: "invalid-ask", name: HUMAN_LOOP_TOOL_NAME,
+            arguments: {
+              malformed: "{",
+            },
+          }],
+        };
+      },
+    },
+  }), (error: unknown) => error instanceof AppError && error.code === "HUMAN_LOOP_REQUIRED");
+  assert.equal(modelCalls, 2);
+  assert.equal(events.some((event) => event.type === "tool.rejected"), true);
+  assert.equal(events.some((event) => event.type === "human_loop.invalid"), true);
+  assert.equal(events.some((event) => event.type === "human_loop.required"), true);
+});
+
+test("a repeatedly malformed request_human_loop call fails closed after its bounded repair", async () => {
+  const grant = createCapabilityGrant({ actorUserId: "user-hil", runId: "run-repeated-invalid-hil", depth: 0, allowedToolNames: [HUMAN_LOOP_TOOL_NAME], allowedSkillIds: [] });
+  const events: RuntimeEvent[] = [];
+  let modelCalls = 0;
+  await assert.rejects(() => runAgentLoop({
+    runId: grant.runId, systemPrompt: "test", input: "confirm before proceeding", grant, maxSteps: 3,
+    tools: new ToolRegistry([createHumanLoopTool()]),
+    emit: async (event) => { events.push(event); },
+    model: {
+      limits: TEST_MODEL_LIMITS,
       complete: async () => {
         modelCalls += 1;
         return {
           content: "", finishReason: "tool_calls" as const,
           toolCalls: [{
-            id: "invalid-ask", name: HUMAN_LOOP_TOOL_NAME,
+            id: `invalid-ask-${modelCalls}`, name: HUMAN_LOOP_TOOL_NAME,
             arguments: {
               kind: "selection", title: "Choose", prompt: "Choose", rationale: "Need user direction", evidenceRefs: [],
               // This is a JSON Schema, not the HIL select response schema.
@@ -88,9 +135,11 @@ test("a malformed request_human_loop call fails closed instead of continuing wit
         };
       },
     },
-  }), (error: unknown) => error instanceof AppError && error.code === "HUMAN_LOOP_INVALID");
-  assert.equal(modelCalls, 1);
-  assert.equal(events.some((event) => event.type === "tool.rejected"), true);
+  }), (error: unknown) => error instanceof AppError
+    && error.code === "HUMAN_LOOP_INVALID"
+    && error.details?.attempts === 2);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.filter((event) => event.type === "human_loop.invalid").length, 2);
   assert.equal(events.some((event) => event.type === "human_loop.required"), false);
 });
 

@@ -48,8 +48,10 @@ export class RunOutcomeRepository {
     planId?: string;
     status: "failed" | "cancelled";
     reasonCode: string;
+    output?: string;
   }): Promise<void> {
     const now = Date.now();
+    const output = input.status === "failed" ? input.output ?? null : null;
     await this.connection.transaction(async () => {
       if (input.planId !== undefined) {
         await this.connection.prepare("UPDATE plans SET status = 'failed', updated_at = ? WHERE id = ?")
@@ -57,12 +59,12 @@ export class RunOutcomeRepository {
       }
       await this.connection.prepare(`
         INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-        VALUES (?, ?, ?, NULL, ?, ?)
-      `).run(input.runId, input.planId ?? null, input.status, input.reasonCode, now);
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(input.runId, input.planId ?? null, input.status, output, input.reasonCode, now);
       await this.connection.prepare(`
-        UPDATE runs SET status = ?, error_code = ?, finished_at = ?
+        UPDATE runs SET status = ?, output = ?, error_code = ?, finished_at = ?
         WHERE id = ? AND status = 'running'
-      `).run(input.status, input.reasonCode, now, input.runId);
+      `).run(input.status, output, input.reasonCode, now, input.runId);
       await this.connection.prepare("DELETE FROM run_recovery_states WHERE run_id = ?")
         .run(input.runId);
     });

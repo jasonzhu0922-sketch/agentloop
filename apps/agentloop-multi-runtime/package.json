@@ -8,7 +8,11 @@
   "dependencies": {
     "@zhujun/agentloop": "*",
     "@zhujun/agentloop-skills": "*",
-    "pg": "^8.16.0"
+    "pg": "^8.16.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-icons": "^5.5.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": { "@types/node": "^26.3.0" },
   "scripts": {

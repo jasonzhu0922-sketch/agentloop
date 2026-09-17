@@ -186,7 +186,7 @@ docker compose \
 
 首次运行会构建镜像并安装依赖；构建阶段会输出 npm 下载进度。浏览器访问 [http://127.0.0.1:5174](http://127.0.0.1:5174)，Router 健康检查为 [http://127.0.0.1:8788/healthz](http://127.0.0.1:8788/healthz)。停止服务使用 `Ctrl-C`；如需后台运行，可把最后一行换成 `up --build -d`，日志用同一命令加 `logs -f` 查看。
 
-四个服务复用同一个 `agentloop-multi-runtime:local` 镜像，Compose 只会构建一次；避免在不带 Buildx 的本地 Docker 上并行下载四次相同的 Node 基础镜像。若输出长期只重复 `Pulling fs layer` 且没有出现 `Download complete` 或 `Pull complete`，可先 `Ctrl-C` 中断（不会删除卷），再确认 `docker pull $NODE_IMAGE` 能完成后重新运行。
+四个服务默认复用同一个 `agentloop-multi-runtime:runtime-baseline-local` 镜像，Compose 只会构建一次；直接执行 Compose 与 `npm run start:multi-runtime:docker` 选择相同标签。若输出长期只重复 `Pulling fs layer` 且没有出现 `Download complete` 或 `Pull complete`，可先 `Ctrl-C` 中断（不会删除卷），再确认 `docker pull $NODE_IMAGE` 能完成后重新运行。
 
 真实部署应通过 Secret manager 注入 Provider 配置和服务身份，而不是把这些值提交到仓库。这里的 `RUNTIME_*_TOKEN` 仅适合本地开发，生产中应替换为工作负载身份或 mTLS。
 

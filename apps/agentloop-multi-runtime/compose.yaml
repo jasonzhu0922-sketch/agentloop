@@ -31,8 +31,8 @@ x-app-build: &app_build
 
 # Keep the existing local image as the Compose default, while allowing an
 # already-built Runtime Host image to be selected without rebuilding or
-# retagging it. The Docker launcher defaults this to :markitdown-local.
-x-app-image: &app_image ${MULTI_RUNTIME_IMAGE:-agentloop-multi-runtime:local}
+# retagging it. The Docker launcher defaults this to :runtime-baseline-local.
+x-app-image: &app_image ${MULTI_RUNTIME_IMAGE:-agentloop-multi-runtime:runtime-baseline-local}
 
 services:
   router:

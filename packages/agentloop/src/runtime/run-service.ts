@@ -102,7 +102,9 @@ import {
 } from "../tools/index.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
+import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
+import { RunCheckpointRepository, type RunCheckpointRecord } from "./run-checkpoint-repository.ts";
 import { HumanLoopRepository, type HumanLoopRequest, type HumanLoopResponse, type HumanLoopRequirement } from "./human-loop.ts";
 import {
   ModelPlanRevisionAssessor,
@@ -265,6 +267,12 @@ interface ExecuteOptions {
   readonly sourceIds: readonly string[];
 }
 
+interface ContinuationOptions {
+  readonly parentRunId: string;
+  readonly depth: number;
+  readonly checkpointId: string;
+}
+
 export interface RecoveryDetail {
   readonly state?: RunRecoveryState;
   readonly action?: RuntimeActionRecord;
@@ -295,6 +303,7 @@ export class RunService {
   private readonly scheduler = new DependencyScheduler();
   private readonly terminal: TerminalCommitter;
   private readonly actions: RuntimeActionRepository;
+  private readonly checkpoints: RunCheckpointRepository;
   private readonly recovery: RecoveryRepository;
   private readonly humanLoops: HumanLoopRepository;
   private readonly eventHub = new RunEventHub();
@@ -363,6 +372,7 @@ export class RunService {
     this.humanLoops = new HumanLoopRepository(options.database);
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
     this.actions = new RuntimeActionRepository(options.database);
+    this.checkpoints = new RunCheckpointRepository(options.database);
     this.recovery = new RecoveryRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
     this.planningExtensions = options.planningExtensions ?? [];
@@ -451,6 +461,51 @@ export class RunService {
     const row = await this.runs.getByOwner(runId, actorUserId);
     if (row === undefined) throw notFound("Run");
     return this.toRunRecordWithSources(row);
+  }
+
+  async checkpointForRun(actorUserId: string, runId: string): Promise<RunCheckpointRecord | undefined> {
+    await this.get(actorUserId, runId);
+    return this.checkpoints.getByRun(runId);
+  }
+
+  async startFromCheckpoint(actorUserId: string, checkpointId: string): Promise<RunRecord> {
+    const checkpoint = await this.checkpoints.get(requireString(checkpointId, "checkpointId"));
+    if (checkpoint === undefined) throw notFound("Run checkpoint");
+    const parent = await this.get(actorUserId, checkpoint.runId);
+    if (parent.status !== "failed" || parent.errorCode !== "EXECUTION_AUTHORITY_LOST") {
+      throw new AppError("CONFLICT", "Checkpoint can only continue a Run that lost execution authority", 409);
+    }
+    await this.checkpoints.claim(checkpoint.id);
+    const visibleDirectories = (await this.runs.visibleDirectoriesForRun(parent.id)).map((item) => item.path);
+    const sourceIds = (await this.sources.listByRun(parent.id)).map((item) => item.id);
+    const options: ExecuteOptions = {
+      allowDangerousTools: parent.allowDangerousTools,
+      ...(parent.conversationId === undefined ? {} : { conversationId: parent.conversationId }),
+      ...(parent.modelKey === undefined ? {} : { modelKey: parent.modelKey }),
+      visibleDirectories,
+      sourceIds,
+    };
+    let returned = false;
+    const created = new Promise<RunRecord>((resolve, reject) => {
+      void this.executeInternal(
+        actorUserId,
+        parent.input,
+        options,
+        false,
+        (run) => {
+          returned = true;
+          void this.checkpoints.attachChild(checkpoint.id, run.id)
+            .then(() => resolve(run), reject);
+        },
+        { parentRunId: parent.id, depth: parent.depth + 1, checkpointId: checkpoint.id },
+      ).catch(async (error) => {
+        if (!returned) {
+          await this.checkpoints.releaseClaim(checkpoint.id);
+          reject(error);
+        } else if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
+      });
+    });
+    return created;
   }
 
   async currentHumanLoop(actorUserId: string, runId: string): Promise<HumanLoopRequest | undefined> {
@@ -647,7 +702,7 @@ export class RunService {
   }
 
   async deleteConversation(actorUserId: string, conversationId: string): Promise<void> {
-    await this.actions.reconcileRunningRuns();
+    await this.reconcileInterruptedRuns();
     await this.runs.deleteConversation(actorUserId, conversationId);
   }
 
@@ -1211,7 +1266,15 @@ export class RunService {
           });
           break;
         case "revise_plan":
-          await this.applyPlanRevisionRecovery({ actorUserId, run, action, decision, currentPlan, model });
+          await this.applyPlanRevisionRecovery({
+            actorUserId,
+            run,
+            action,
+            decision,
+            currentPlan,
+            model,
+            setActionStep: (stepId) => { actionScope.stepId = stepId; },
+          });
           break;
       }
     } catch (error) {
@@ -1333,6 +1396,13 @@ export class RunService {
       return this.get(actorUserId, runId);
     } catch (error) {
       if (resumeStarted && (await this.get(actorUserId, runId)).status === "running") {
+        if (error instanceof CompletionFailure) {
+          const output = await error.report();
+          if ((await this.get(actorUserId, runId)).status !== "running") return this.get(actorUserId, runId);
+          await this.terminal.commitStopped({ runId, planId: plan.id, status: "failed", reasonCode: error.code, output });
+          await emit({ type: "run.failed", data: { runId, planId: plan.id, code: error.code, message: error.message, output, recovered: true } });
+          return this.get(actorUserId, runId);
+        }
         const reason = error instanceof AppError ? error.code : "INTERNAL_ERROR";
         await this.recovery.restoreRecovery(runId, action.id, reason);
       }
@@ -1349,7 +1419,98 @@ export class RunService {
   }
 
   async reconcileInterruptedRuns(): Promise<number> {
-    return this.actions.reconcileRunningRuns();
+    let reconciled = 0;
+    const pausedAssessments = await this.database.prepare(`
+      SELECT runs.id AS run_id, runs.owner_user_id, actions.metadata_json
+      FROM runs
+      JOIN run_recovery_states recovery ON recovery.run_id = runs.id
+      JOIN runtime_actions actions ON actions.id = recovery.action_id
+      WHERE runs.status = 'running'
+        AND recovery.state = 'waiting_recovery'
+        AND actions.state = 'recovery_required'
+    `).all() as unknown as Array<{ run_id: string; owner_user_id: string; metadata_json: string }>;
+    for (const paused of pausedAssessments) {
+      if (stringField(JSON.parse(paused.metadata_json) as unknown, "reason") !== "assessment_failed_boundary") continue;
+      try {
+        await this.advanceRecovery(paused.owner_user_id, paused.run_id);
+      } catch (error) {
+        const run = await this.get(paused.owner_user_id, paused.run_id);
+        if (run.status === "running") {
+          let plan: ExecutionPlan | undefined;
+          try {
+            plan = await this.plans.getByRun(paused.run_id);
+          } catch (planError) {
+            if (!(planError instanceof AppError) || planError.code !== "NOT_FOUND") throw planError;
+          }
+          const code = error instanceof AppError ? error.code : "ASSESSMENT_REPAIR_FAILED";
+          await this.terminal.commitStopped({
+            runId: paused.run_id,
+            ...(plan === undefined ? {} : { planId: plan.id }),
+            status: "failed",
+            reasonCode: code,
+          });
+          await this.appendRunEvent(paused.run_id, {
+            type: "run.failed",
+            data: {
+              runId: paused.run_id,
+              ...(plan === undefined ? {} : { planId: plan.id }),
+              code,
+              message: error instanceof Error ? error.message : "Assessment repair failed",
+            },
+          });
+        }
+      }
+      reconciled += 1;
+    }
+    const interrupted = await this.actions.reconcileRunningRuns();
+    for (const item of interrupted) {
+      const run = await this.runs.get(item.runId);
+      if (run === undefined || run.status !== "running") continue;
+      let plan: ExecutionPlan | undefined;
+      try {
+        plan = await this.plans.getByRun(item.runId);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
+      }
+      const events = await this.events(run.owner_user_id, item.runId);
+      const checkpoint = await this.checkpoints.create({
+        runId: item.runId,
+        ...(plan === undefined ? {} : { planId: plan.id }),
+        ...(item.actionId === undefined ? {} : { actionId: item.actionId }),
+        snapshot: {
+          schema: "agentloop.runCheckpoint/v1",
+          reason: "execution_authority_lost",
+          interruption: item,
+          ...(plan === undefined ? {} : { plan }),
+          lastEventSeq: events.at(-1)?.seq ?? 0,
+          confirmedActionIds: (await this.actions.list(item.runId))
+            .filter((action) => action.state === "succeeded")
+            .map((action) => action.id),
+        },
+      });
+      await this.terminal.commitStopped({
+        runId: item.runId,
+        ...(plan === undefined ? {} : { planId: plan.id }),
+        status: "failed",
+        reasonCode: "EXECUTION_AUTHORITY_LOST",
+      });
+      await this.appendRunEvent(item.runId, {
+        type: "run.checkpoint_created",
+        data: { runId: item.runId, checkpointId: checkpoint.id, reason: checkpoint.reason },
+      });
+      await this.appendRunEvent(item.runId, {
+        type: "run.failed",
+        data: {
+          runId: item.runId,
+          ...(plan === undefined ? {} : { planId: plan.id }),
+          code: "EXECUTION_AUTHORITY_LOST",
+          message: "Runtime execution authority was lost; start a new Run from the persisted checkpoint.",
+          checkpointId: checkpoint.id,
+        },
+      });
+      reconciled += 1;
+    }
+    return reconciled;
   }
 
   private resolveRunModelKey(requestedModelKey: string | undefined): string | undefined {
@@ -1367,6 +1528,7 @@ export class RunService {
     executeOptions: ExecuteOptions,
     conversationEntry: boolean,
     onRunStarted?: (run: RunRecord) => void,
+    continuation?: ContinuationOptions,
   ): Promise<RunRecord> {
     const runId = randomUUID();
     const runController = new AbortController();
@@ -1400,6 +1562,10 @@ export class RunService {
         id: runId,
         ownerUserId: actorUserId,
         conversationId,
+        ...(continuation === undefined ? {} : {
+          parentRunId: continuation.parentRunId,
+          depth: continuation.depth,
+        }),
         allowDangerousTools: executeOptions.allowDangerousTools,
         ...(modelKey === undefined ? {} : { modelKey }),
         input,
@@ -1430,7 +1596,12 @@ export class RunService {
       data: {
         runId,
         actorUserId,
-        depth: 0,
+        depth: continuation?.depth ?? 0,
+        ...(continuation === undefined ? {} : {
+          parentRunId: continuation.parentRunId,
+          checkpointId: continuation.checkpointId,
+          continuation: true,
+        }),
         allowDangerousTools: executeOptions.allowDangerousTools,
         ...(modelKey === undefined ? {} : { modelKey }),
         ...(conversationId === undefined ? {} : { conversationId }),
@@ -1626,6 +1797,13 @@ export class RunService {
           ...planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
           ...planningCapabilitiesFromSkills(planningSkills),
         ],
+        capabilityRecovery: {
+          availableSkills: privateSkills,
+          availableCapabilities: [
+            ...planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
+            ...planningCapabilitiesFromSkills(privateSkills),
+          ],
+        },
         ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
         workspaceFacts: planningWorkspace,
         visibleDirectories,
@@ -1677,7 +1855,7 @@ export class RunService {
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
-          availableCapabilities: planningTask.availableCapabilities,
+          availableCapabilities: planningCapabilitiesForAdmittedProposal(proposal, privateSkills, allowedToolSummaries, availableSources),
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
@@ -1716,7 +1894,7 @@ export class RunService {
           availableSkills: privateSkills,
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
-          availableCapabilities: planningTask.availableCapabilities,
+          availableCapabilities: planningCapabilitiesForAdmittedProposal(proposal, privateSkills, allowedToolSummaries, availableSources),
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
@@ -1844,7 +2022,7 @@ export class RunService {
           && failedBoundary.stepId === runningStepId
         ) {
           await this.plans.failStep(planId, runningStepId, appError.message);
-          if (failedBoundaryHasNoAcquisitionPath(
+          if (assessmentRepairIsExhausted(appError.details, failedBoundary) || failedBoundaryHasNoAcquisitionPath(
             await this.plans.getByRun(runId),
             runningStepId,
             failedBoundary,
@@ -1853,7 +2031,9 @@ export class RunService {
               failedBoundary.reusableEvidenceRefs,
             ),
           )) {
-            await this.terminal.commitStopped({ runId, planId, status: "failed", reasonCode: appError.code });
+            const output = await partialOutputForFailure(appError);
+            if ((await this.runs.get(runId))?.status !== "running") return this.get(actorUserId, runId);
+            await this.terminal.commitStopped({ runId, planId, status: "failed", reasonCode: appError.code, output });
             await this.notifyPlanningExtensionsAfterOutcome({
               runId,
               status: "failed",
@@ -1869,29 +2049,19 @@ export class RunService {
                 code: appError.code,
                 message: appError.message,
                 details: appError.details,
+                ...(output === undefined ? {} : { output }),
               },
             });
             return this.get(actorUserId, runId);
           }
-          const action = await this.actions.requireRecoveryReview({
-            runId,
-            planId,
+          await this.applyAssessmentRepair({
+            actorUserId,
+            run: await this.get(actorUserId, runId),
+            currentPlan: await this.plans.get(planId),
             stepId: runningStepId,
-            reason: "assessment_failed_boundary",
-            metadata: {
-              failedBoundary,
-              feedback: stringField(appError.details, "feedback"),
-            },
-          });
-          await emit({
-            type: "run.recovery_required",
-            data: {
-              runId,
-              planId,
-              stepId: runningStepId,
-              actionId: action.id,
-              failedBoundary,
-            },
+            failedBoundary,
+            feedback: stringField(appError.details, "feedback"),
+            ...(appError instanceof CompletionFailure ? { failureReport: () => appError.report() } : {}),
           });
           return this.get(actorUserId, runId);
         }
@@ -1899,7 +2069,9 @@ export class RunService {
           await this.plans.failStep(planId, runningStepId, appError.message);
         }
         const status = appError.code === "CANCELLED" ? "cancelled" : "failed";
-        await this.terminal.commitStopped({ runId, planId, status, reasonCode: appError.code });
+        const output = status === "failed" ? await partialOutputForFailure(appError) : undefined;
+        if ((await this.runs.get(runId))?.status !== "running") return this.get(actorUserId, runId);
+        await this.terminal.commitStopped({ runId, planId, status, reasonCode: appError.code, output });
         await this.notifyPlanningExtensionsAfterOutcome({
           runId,
           status,
@@ -1914,6 +2086,7 @@ export class RunService {
             planId,
             code: appError.code,
             message: appError.message,
+            ...(output === undefined ? {} : { output }),
             ...(appError.details === undefined ? {} : { details: appError.details }),
           },
         });
@@ -2194,6 +2367,16 @@ export class RunService {
       );
       const result = await runAgentLoop({
         runId: input.runId,
+        // Stage 3 is limited to fresh file-producing leaves with a snapshot reader.
+        // Recovery inherits the same state only in stage 5, not implicitly here.
+        ...(recovery === undefined && fileOutputStep && stepGrant.allowedToolNames.has("computer_read_file") ? {
+          workProductContext: {
+            goalId: `${plan.id}:v${plan.version}:${activeStep.id}`,
+            goal: activeStep.objective,
+            workspaceId: input.rootGrant.workspaceRoot ?? this.workspaceRoot,
+            storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
+          },
+        } : {}),
         systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
         stepSemanticFrame,
         runtimeContext: recovery === undefined
@@ -2232,6 +2415,14 @@ export class RunService {
         availableSkills: stepSkills.map((skill) => ({ id: skill.id, name: skill.name, contentHash: skill.contentHash })),
         maxSteps: this.maxSteps,
         ...(this.stepExecutionStrategy === undefined ? {} : { stepExecutionStrategy: this.stepExecutionStrategy }),
+        ...(lookupEvidenceStep ? {
+          toolCallLimits: {
+            websearch: Math.min(
+              MAX_WEB_SEARCHES_PER_PLAN_STEP,
+              Math.max(0, stepTaskProfile.researchPolicy?.maxSearches ?? MAX_WEB_SEARCHES_PER_PLAN_STEP),
+            ),
+          },
+        } : {}),
         candidateRepairGraceSteps: CANDIDATE_REPAIR_GRACE_STEPS,
         ...(stepProgressPolicy === undefined ? {} : { progressPolicy: stepProgressPolicy }),
         ...(fileOutputStep
@@ -2270,6 +2461,7 @@ export class RunService {
             resultFailureCode: toolOperationFailureCode,
           }, operation),
         },
+        deferFailureReport: true,
         evaluateCandidate: async (candidate) => {
           assessmentAttempt += 1;
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
@@ -2279,6 +2471,33 @@ export class RunService {
             toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
             modelSteps: candidate.modelSteps,
           };
+          const temporalScopeGap = temporalScopeGapForCandidate(input.input, evidence.toolCalls);
+          if (temporalScopeGap !== undefined) {
+            const failedBoundary: FailedBoundary = {
+              stepId: activeStep.id,
+              missingEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              violatedSkillRequirements: [],
+              reusableEvidenceRefs: evidence.toolCalls.map((toolCall) => toolCall.toolCallId),
+              suggestedRepairShape: "repair_leaf",
+            };
+            await input.emit({
+              type: "candidate.temporal_scope_rejected",
+              data: {
+                planId: plan.id,
+                stepId: activeStep.id,
+                attempt: assessmentAttempt,
+                requiredDurationDays: temporalScopeGap.requiredDurationDays,
+                observedDurationDays: temporalScopeGap.observedDurationDays,
+                feedback: temporalScopeGap.feedback,
+                failedBoundary,
+              },
+            });
+            await input.emit({
+              type: "assessment.failed_boundary",
+              data: { planId: plan.id, stepId: activeStep.id, attempt: assessmentAttempt, failedBoundary },
+            });
+            return { approved: false, feedback: temporalScopeGap.feedback, failedBoundary };
+          }
           const assessmentProfile = selectAssessmentProfile(activeStep, evidence);
           const useProfiledRuleAssessor = input.defaultAssessmentPolicyEnabled
             && isProfiledRuleAssessmentProfile(assessmentProfile);
@@ -2443,6 +2662,7 @@ export class RunService {
     decision: RecoveryDecisionRecord;
     currentPlan?: ExecutionPlan;
     model: ModelAdapter;
+    setActionStep?: (stepId: string | undefined) => void;
   }): Promise<void> {
     if (input.currentPlan === undefined || input.decision.planRevision === undefined) {
       throw new AppError("PLAN_NOT_ADMITTED", "Plan revision requires the persisted current Plan", 422);
@@ -2536,6 +2756,7 @@ export class RunService {
       });
     }
     await this.recovery.admit(input.decision.id);
+    if (input.action.kind === "recovery_review") await this.actions.resolveRecoveryReview(input.action.id);
     if (isEffectivelyComplete(revised)) {
       const output = finalPlanOutput(revised);
       await this.terminal.commitCompleted(input.run.id, revised.id, output);
@@ -2586,7 +2807,10 @@ export class RunService {
         ...(input.run.conversationId === undefined
           ? {}
           : { conversationHistory: await this.conversationHistory(input.run.conversationId) }),
-        onStepChanged: (stepId) => { runningStepId = stepId; },
+        onStepChanged: (stepId) => {
+          runningStepId = stepId;
+          input.setActionStep?.(stepId);
+        },
       });
       const output = finalPlanOutput(completed);
       const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(completed.id), completed, input.run.id, output);
@@ -2607,7 +2831,7 @@ export class RunService {
         && failedBoundary.stepId === runningStepId
       ) {
         await this.plans.failStep(revised.id, runningStepId, appError.message);
-        if (failedBoundaryHasNoAcquisitionPath(
+        if (assessmentRepairIsExhausted(appError.details, failedBoundary) || failedBoundaryHasNoAcquisitionPath(
           revised,
           runningStepId,
           failedBoundary,
@@ -2616,11 +2840,14 @@ export class RunService {
             failedBoundary.reusableEvidenceRefs,
           ),
         )) {
+          const output = await partialOutputForFailure(appError);
+          if ((await this.runs.get(input.run.id))?.status !== "running") return;
           await this.terminal.commitStopped({
             runId: input.run.id,
             planId: revised.id,
             status: "failed",
             reasonCode: appError.code,
+            output,
           });
           await this.appendRunEvent(input.run.id, {
             type: "run.failed",
@@ -2631,33 +2858,153 @@ export class RunService {
               message: appError.message,
               details: appError.details,
               recovered: true,
+              ...(output === undefined ? {} : { output }),
             },
           });
           return;
         }
-        const action = await this.actions.requireRecoveryReview({
-          runId: input.run.id,
-          planId: revised.id,
+        await this.applyAssessmentRepair({
+          actorUserId: input.actorUserId,
+          run: input.run,
+          currentPlan: revised,
           stepId: runningStepId,
-          reason: "assessment_failed_boundary",
-          metadata: {
-            failedBoundary,
-            feedback: stringField(appError.details, "feedback"),
-          },
-        });
-        await this.appendRunEvent(input.run.id, {
-          type: "run.recovery_required",
-          data: {
-            runId: input.run.id,
-            planId: revised.id,
-            stepId: runningStepId,
-            actionId: action.id,
-            failedBoundary,
-          },
+          failedBoundary,
+          feedback: stringField(appError.details, "feedback"),
+          ...(appError instanceof CompletionFailure ? { failureReport: () => appError.report() } : {}),
         });
         return;
       }
       throw appError;
+    }
+  }
+
+  private async applyAssessmentRepair(input: {
+    actorUserId: string;
+    run: RunRecord;
+    currentPlan: ExecutionPlan;
+    stepId: string;
+    failedBoundary: FailedBoundary;
+    feedback?: string;
+    failureReport?: () => Promise<string>;
+  }): Promise<void> {
+    const action = await this.actions.requireAutomaticRepair({
+      runId: input.run.id,
+      planId: input.currentPlan.id,
+      stepId: input.stepId,
+      metadata: {
+        failedBoundary: input.failedBoundary,
+        ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
+      },
+    });
+    await this.appendRunEvent(input.run.id, {
+      type: "run.repairing",
+      data: {
+        runId: input.run.id,
+        planId: input.currentPlan.id,
+        stepId: input.stepId,
+        actionId: action.id,
+        failedBoundary: input.failedBoundary,
+      },
+    });
+    const actionScope = { planId: action.planId, stepId: action.stepId };
+    const model = new ActionTrackedModel(
+      this.modelFactory(this.retryReporter(input.run.id), input.run.modelKey),
+      this.actions,
+      input.run.id,
+      () => actionScope,
+    );
+    const events = await this.events(input.actorUserId, input.run.id);
+    const proposal = failedBoundaryRecoveryDecision(
+      input.run,
+      action,
+      input.currentPlan,
+      input.failedBoundary,
+      observedReceiptShapes(events, input.failedBoundary.reusableEvidenceRefs),
+    ) ?? await this.recoveryPlannerFactory(model).decide({
+      runId: input.run.id,
+      userInput: input.run.input,
+      action,
+      plan: input.currentPlan,
+      failedBoundary: input.failedBoundary,
+      events,
+      userResponses: [],
+    });
+    const decision = await this.recovery.submit(input.run.id, proposal);
+    try {
+      if (decision.decision === "revise_plan") {
+        await this.applyPlanRevisionRecovery({
+          actorUserId: input.actorUserId,
+          run: input.run,
+          action,
+          decision,
+          currentPlan: input.currentPlan,
+          model,
+          setActionStep: (stepId) => { actionScope.stepId = stepId; },
+        });
+        return;
+      }
+      if (decision.decision === "ask_user") {
+        await this.recovery.admit(decision.id, { kind: "waiting_user", question: decision.question });
+        await this.appendRunEvent(input.run.id, {
+          type: "run.waiting_user",
+          data: {
+            runId: input.run.id,
+            planId: input.currentPlan.id,
+            stepId: input.stepId,
+            actionId: action.id,
+            question: decision.question,
+          },
+        });
+        return;
+      }
+      await this.recovery.admit(decision.id);
+      await this.actions.resolveRecoveryReview(action.id);
+      const output = await input.failureReport?.();
+      if ((await this.runs.get(input.run.id))?.status !== "running") return;
+      await this.terminal.commitStopped({
+        runId: input.run.id,
+        planId: input.currentPlan.id,
+        status: "failed",
+        reasonCode: "STEP_NOT_COMPLETED",
+        output,
+      });
+      await this.appendRunEvent(input.run.id, {
+        type: "run.failed",
+        data: {
+          runId: input.run.id,
+          planId: input.currentPlan.id,
+          stepId: input.stepId,
+          code: "STEP_NOT_COMPLETED",
+          message: "Assessment repair could not produce an admissible continuation.",
+          ...(output === undefined ? {} : { output }),
+        },
+      });
+    } catch (error) {
+      await this.rejectRecoveryDecision(decision.id, error);
+      const run = await this.get(input.actorUserId, input.run.id);
+      if (run.status === "running") {
+        const code = error instanceof AppError ? error.code : "ASSESSMENT_REPAIR_FAILED";
+        const output = error instanceof CompletionFailure ? await error.report() : undefined;
+        if ((await this.runs.get(input.run.id))?.status !== "running") return;
+        await this.terminal.commitStopped({
+          runId: input.run.id,
+          planId: input.currentPlan.id,
+          status: "failed",
+          reasonCode: code,
+          output,
+        });
+        await this.appendRunEvent(input.run.id, {
+          type: "run.failed",
+          data: {
+            runId: input.run.id,
+            planId: input.currentPlan.id,
+            stepId: input.stepId,
+            code,
+            message: error instanceof Error ? error.message : "Assessment repair failed",
+            ...(output === undefined ? {} : { output }),
+          },
+        });
+      }
     }
   }
 
@@ -3619,19 +3966,6 @@ function failedBoundaryRecoveryDecision(
       rationale: `Assessment failedBoundary points to ${failedBoundary.stepId}, but no unfinished active leaf matches it.`,
     };
   }
-  const activeDependents = plan.steps.filter((step) =>
-    step.retiredAt === undefined
-    && step.status !== "completed"
-    && step.dependencies.includes(target.id)
-  );
-  if (activeDependents.length > 0) {
-    return {
-      ...base,
-      decision: "ask_user",
-      rationale: `Assessment rejected step ${target.id}, but pending dependent steps require an explicit user decision before a local repair can safely replace it.`,
-      question: `Step ${target.id} failed assessment, and ${activeDependents.length} pending dependent step(s) still reference it. Confirm whether AgentLoop should create a repair leaf and replan the dependent work.`,
-    };
-  }
   if (planContractMismatchRequiresRevision(target, failedBoundary, observedShapes)) {
     return undefined;
   }
@@ -3642,15 +3976,16 @@ function failedBoundaryRecoveryDecision(
     shape: "recovery_patch",
     selectedSkillIds: plan.selectedSkillIds,
     selectedSkillRoles: [],
-    steps: [
-      ...plan.steps
-        .filter((step) => step.retiredAt === undefined && step.id !== target.id)
-        .map((step): PlanStepProposal => ({
+    steps: plan.steps
+      .filter((step) => step.retiredAt === undefined)
+      .flatMap((step): PlanStepProposal[] => step.id === target.id
+        ? [repairStep]
+        : [{
           id: step.id,
           kind: step.kind,
           ...(step.parentId === undefined ? {} : { parentId: step.parentId }),
           objective: step.objective,
-          dependencies: step.dependencies,
+          dependencies: step.dependencies.map((dependency) => dependency === target.id ? repairStep.id : dependency),
           ...(step.role === undefined ? {} : { role: step.role }),
           refinementState: step.refinementState,
           requiredFacts: step.requiredFacts,
@@ -3658,9 +3993,7 @@ function failedBoundaryRecoveryDecision(
           requiredCapabilities: step.requiredCapabilities,
           ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
           successCriteria: step.successCriteria,
-        })),
-      repairStep,
-    ],
+        }]),
   };
   return {
     ...base,
@@ -3723,6 +4056,95 @@ function failedBoundaryHasNoAcquisitionPath(
   // missing. Retrying it through repair leaves would only reproduce the same
   // candidate; terminate rather than strand the Run in empty recovery.
   return step.executionBinding.sourceKinds.every((kind) => kind === "conversation_workset");
+}
+
+/**
+ * An assessment repair is local to one Agent loop.  Once that loop has
+ * exhausted its bounded candidate-repair budget, creating a recovery review
+ * would only ask a later planner to replay already rejected work.  This is a
+ * Runtime convergence fact, independent of the Skill or source domain.
+ */
+function assessmentRepairIsExhausted(details: unknown, failedBoundary: FailedBoundary): boolean {
+  return asRecord(details)?.repairExhausted === true
+    && failedBoundaryHasMissingSourceEvidence(failedBoundary);
+}
+
+function failedBoundaryHasMissingSourceEvidence(failedBoundary: FailedBoundary): boolean {
+  return failedBoundary.missingEvidenceKinds.some((kind) =>
+    kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "table_coverage"
+    || kind === "structured_extraction_artifact"
+    || kind === "derived_aggregation",
+  );
+}
+
+interface TemporalScopeGap {
+  readonly requiredDurationDays: number;
+  readonly observedDurationDays: number;
+  readonly feedback: string;
+}
+
+/**
+ * Time coverage is neutral source metadata, not a provider- or Skill-specific
+ * conclusion. A bounded source receipt may either cover the requested rolling
+ * range or explicitly prove that the requested range is unavailable; a
+ * shorter successful query may not silently stand in for it.
+ */
+function temporalScopeGapForCandidate(
+  userInput: string,
+  toolCalls: readonly ToolEvidence[],
+): TemporalScopeGap | undefined {
+  const requiredDurationDays = requestedRollingDurationDays(userInput);
+  if (requiredDurationDays === undefined) return undefined;
+  const coverage = toolCalls.flatMap((toolCall) => temporalCoverageFromToolResult(toolCall.result));
+  if (coverage.length === 0) return undefined;
+  if (coverage.some((item) => item.durationDays >= requiredDurationDays)) return undefined;
+  if (coverage.some((item) => item.unavailableForDays >= requiredDurationDays)) return undefined;
+  const observedDurationDays = Math.max(0, ...coverage.map((item) => item.durationDays));
+  return {
+    requiredDurationDays,
+    observedDurationDays,
+    feedback: `The user requested a rolling ${requiredDurationDays}-day source range, but the acquired source evidence covers only ${observedDurationDays} day(s). Do not present a shorter period as a substitute. Acquire evidence covering the requested range, or acquire a structured receipt that explicitly establishes that this exact range is unavailable and state only that boundary.`,
+  };
+}
+
+function requestedRollingDurationDays(input: string): number | undefined {
+  if (/(?:近\s*(?:一(?:个)?|1)\s*(?:月|个月)|过去\s*(?:一(?:个)?|1)\s*(?:月|个月)|近\s*30\s*天|过去\s*30\s*天|最近\s*30\s*天|\b(?:last|past|recent)\s*(?:one\s*)?month\b|\b(?:last|past|recent)\s*30\s*days?\b)/iu.test(input)) {
+    return 30;
+  }
+  if (/(?:近\s*(?:一)?周|过去\s*(?:一)?周|近\s*7\s*天|过去\s*7\s*天|最近\s*7\s*天|\b(?:last|past|recent)\s*(?:one\s*)?week\b|\b(?:last|past|recent)\s*7\s*days?\b)/iu.test(input)) {
+    return 7;
+  }
+  return undefined;
+}
+
+function temporalCoverageFromToolResult(value: string): readonly { durationDays: number; unavailableForDays: number }[] {
+  const root = parseToolResultObject(value);
+  return root === undefined ? [] : temporalCoverageFromRecord(root);
+}
+
+function temporalCoverageFromRecord(record: Readonly<Record<string, unknown>>, depth = 0): readonly { durationDays: number; unavailableForDays: number }[] {
+  if (depth > 3) return [];
+  const coverage = asRecord(record.temporalCoverage);
+  const durationDays = typeof coverage?.durationDays === "number" && Number.isFinite(coverage.durationDays)
+    ? Math.max(0, coverage.durationDays)
+    : 0;
+  const unavailableForDays = coverage?.fulfillment === "unavailable"
+    && typeof coverage.requestedDurationDays === "number"
+    && Number.isFinite(coverage.requestedDurationDays)
+    ? Math.max(0, coverage.requestedDurationDays)
+    : 0;
+  const nested = [record.evidenceReceipt, record.stdout, record.content]
+    .flatMap((value) => {
+      const child = typeof value === "string" ? parseToolResultObject(value) : asRecord(value);
+      return child === undefined ? [] : temporalCoverageFromRecord(child, depth + 1);
+    });
+  return durationDays > 0 || unavailableForDays > 0
+    ? [{ durationDays, unavailableForDays }, ...nested]
+    : nested;
 }
 
 type ReceiptShape = "artifact" | "source";
@@ -3857,6 +4279,25 @@ export function selectPlanningSkills(
   sources: readonly UploadedSourceSummary[] = [],
 ): PrivateSkill[] {
   return selectPlanningSkillRoles(skills, taskInput, boundSkillIds, sources).map((item) => item.skill);
+}
+
+/**
+ * Tool capabilities are available to every admitted Plan under the Run grant.
+ * A Skill-provided capability is available only when that same Plan selected
+ * its declaring Skill, so a broad discovery catalog cannot become an implicit
+ * execution authorization.
+ */
+function planningCapabilitiesForAdmittedProposal(
+  proposal: PlanProposal,
+  allSkills: readonly PrivateSkill[],
+  tools: readonly PlanningToolSummary[],
+  sources: readonly UploadedSourceSummary[],
+) {
+  const selected = new Set(proposal.selectedSkillIds);
+  return [
+    ...planningCapabilitiesFromTools(tools, sources),
+    ...planningCapabilitiesFromSkills(allSkills.filter((skill) => selected.has(skill.id))),
+  ];
 }
 
 export function selectPlanningSkillRoles(
@@ -4664,6 +5105,7 @@ function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment)
  */
 const FILE_OUTPUT_CONVERGENCE_GRACE_STEPS = 8;
 const CANDIDATE_REPAIR_GRACE_STEPS = 4;
+const MAX_WEB_SEARCHES_PER_PLAN_STEP = 3;
 const SOURCE_SUMMARY_CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
 const SOURCE_SUMMARY_CONVERGENCE_PROMPT = [
   "<runtime_source_summary_convergence>",
@@ -4749,6 +5191,9 @@ function shouldConvergeAfterLookupEvidence(
   const sourceReadKeys = lookupSourceReadKeys(successfulLookupEvidence);
   const sourceReadCount = sourceReadKeys.size;
   const minimumSourceReads = minimumSourceReadsForLookupStep(step, successfulLookupEvidence);
+  if (webSearchCount >= MAX_WEB_SEARCHES_PER_PLAN_STEP) {
+    return { converge: true, reason: "lookup_evidence_ready:websearch_limit" };
+  }
   if (requiresContentRead && latestVisibleSourceReadHasContinuation(latestSuccessfulLookupEvidence)) {
     return { converge: false };
   }
@@ -5721,6 +6166,7 @@ function buildStepSystemPrompt(
       "Unless the user explicitly requests another language, all user-facing natural-language output must be in Simplified Chinese. Preserve code, commands, paths, API fields, and proper nouns in their original form.",
       "Use loopStepFrame for model-step continuity and planStepHandoffFrame for Plan-step continuity when present; preserve reusable evidence without executing a future stage unless it is explicitly part of the current boundary.",
       "Do not perform work reserved for a pending downstream Plan step unless the current step objective or success criteria explicitly require that same artifact.",
+      "Before any next action, assess its expected marginal benefit to an unmet current-step success criterion. Take an authorized action only when it materially improves the available evidence or acceptance state; otherwise directly submit a concise completion candidate with explicit caveats rather than continuing for its own sake.",
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
       "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
       "Use only currently exposed tools. Tool success alone does not prove the step is complete.",

@@ -10,6 +10,8 @@ export interface StepExecutionInput {
   readonly availableTools: readonly ModelToolDefinition[];
   readonly priorToolEvidence: readonly AgentLoopToolEvidence[];
   readonly stepEvidenceState?: RuntimeStepEvidenceState;
+  /** Context-only shared facts/judgments. Never used by tool selection or completion gates. */
+  readonly workProductContext?: Readonly<Record<string, unknown>>;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
 }
 
@@ -71,6 +73,7 @@ export interface LoopStepFrame {
     readonly recentToolNames: readonly string[];
   };
   readonly currentEvidenceState?: CompactLoopEvidenceState;
+  readonly workProductContext?: Readonly<Record<string, unknown>>;
   readonly currentStage: {
     readonly objective: string;
     readonly toolUsePolicy: string;
@@ -243,18 +246,21 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
         unknownOperationCount: operationStatuses.filter((status) => status === "unknown").length,
         recentToolNames: [...new Set(input.priorToolEvidence.slice(-6).map((item) => item.toolName))],
       },
-      currentEvidenceState: input.stepEvidenceState === undefined
+      ...(input.workProductContext === undefined ? {} : { workProductContext: input.workProductContext }),
+      currentEvidenceState: input.workProductContext !== undefined || input.stepEvidenceState === undefined
         ? undefined
         : compactLoopEvidenceState(input.stepEvidenceState),
       currentStage: {
         objective: loopCurrentStageObjective(mode, input.priorToolEvidence.length),
         toolUsePolicy: input.convergenceOnly
           ? "No tools are available in this stage; return a completion candidate from existing evidence."
+          : input.workProductContext !== undefined
+            ? "Use workProductContext observations and explicitly attributed judgments to choose a useful next action; it neither certifies delivery nor imposes a unique next tool."
           : input.stepEvidenceState !== undefined
             ? input.stepEvidenceState.instruction
           : input.priorToolEvidence.length === 0
             ? "If tools are needed, choose one bounded batch that advances the current Plan step evidence boundary."
-            : "Inspect reusable prior evidence first; call tools only for missing, stale, contradictory, or explicitly refreshed facts.",
+            : "Inspect reusable prior evidence first; call tools only for missing, stale, unresolved conflicts, or explicitly refreshed facts. A successful scope-matched current-stage result resolves a conflict for this stage; do not call tools solely to reconcile prior evidence.",
         availableToolCount: input.toolCatalog.availableToolNames.length,
       },
       ...(mode === "terminal_candidate"

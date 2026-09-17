@@ -21,6 +21,7 @@ import type {
   TaskSpec,
 } from "./contracts.ts";
 import { admitPlan, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
+import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools } from "./step-execution-binding.ts";
 
 const EVIDENCE_KIND_VALUES = [
@@ -57,6 +58,12 @@ const CAVEAT_POLICY_VALUES = [
   "mark_unverified_facts",
   "strict_fail_on_missing_source",
 ] as const satisfies readonly CaveatPolicy[];
+
+// A plan can expose independent evidence gaps (for example, source grounding
+// followed by a structured schema receipt). Keep recovery bounded while
+// allowing the authorized catalog to add each missing producer.
+const MAX_PLANNING_TURNS = 4;
+const MAX_CAPABILITY_RECOVERIES = 2;
 
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
@@ -148,6 +155,7 @@ const STEP_GRANULARITY_GUIDANCE = {
     "One leaf is one user-value outcome or prerequisite fact boundary, not a checklist of internal actions.",
     "A leaf may contain local tool calls, Skill workflow actions, receipt checks, and export/readback evidence needed to complete that same outcome.",
     "Success criteria state the delivered boundary and assessable evidence, not an internal QA or repair checklist.",
+    "Human-in-the-Loop is a control pause inside an outcome, not a terminal Plan step; preserve every unmet original deliverable after the response.",
     "Optional enhancement, polish, exhaustive source depth, examples, advanced navigation, and visual refinements are execution preferences unless the user explicitly requested them.",
   ],
   splitWhen: [
@@ -224,7 +232,10 @@ export class ModelPlanner implements Planner {
       ...(task.conversationHistory ?? []),
       { role: "user", content: task.input },
     ];
-    const selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
+    let planningTask = task;
+    let selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
+    let capabilityRecoveryCount = 0;
+    let lastPlanningError: AppError | undefined;
     await emit?.({
       type: "planning.profile.created",
       data: taskProfile as unknown as Readonly<Record<string, unknown>>,
@@ -246,12 +257,13 @@ export class ModelPlanner implements Planner {
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
         "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
-        "Use one leaf for ordinary answer or artifact tasks and two leaves only when source facts must be acquired before production.",
+        "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
         "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
         "Bind listed Skills only to concrete leaves; do not expand unloaded Skill internals.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
-        "For browser-presentable, presentation-style, or document-like artifacts, basic openability and requested format/type are core delivery evidence; navigation, interaction, visual polish, examples, and exercises are Skill-owned QA unless the loaded Skill rubric requires them.",
+        "HIL pauses an outcome; preserve its requested deliverable and continue production after the response.",
+        "For browser/document artifacts, require format/openability; Skill-owned QA covers navigation and polish unless required.",
         "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
         "Use contracts only for source provenance, artifacts, high-risk facts, or external effects. Runtime audits normal delivery automatically; do not require its receipt.",
         "For factual materials, require available source grounding and explicit caveats for unavailable facts; do not require inaccessible official/full-text sources as a blocking criterion unless the user asked for strict official-source verification.",
@@ -260,7 +272,7 @@ export class ModelPlanner implements Planner {
       taskProfile,
     });
     let runtimeDirective: string | undefined;
-    for (let turn = 1; turn <= 2; turn += 1) {
+    for (let turn = 1; turn <= MAX_PLANNING_TURNS; turn += 1) {
       await emit?.({
         type: "planning.turn.started",
         data: {
@@ -277,7 +289,7 @@ export class ModelPlanner implements Planner {
         runId: task.runId,
         systemPrompt,
         phase: "planning",
-        runtimeContext: planningRuntimeContext(task, turn, runtimeDirective, taskProfile, selectedSkillRoles),
+        runtimeContext: planningRuntimeContext(planningTask, turn, runtimeDirective, taskProfile, selectedSkillRoles),
         messages,
         tools: [SUBMIT_OUTCOME_PLAN_TOOL],
         toolChoice: { name: SUBMIT_OUTCOME_PLAN_TOOL.name },
@@ -315,8 +327,8 @@ export class ModelPlanner implements Planner {
         if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) {
           throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
         }
-        const proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
-        assertInitialOutcomePlanShape(proposal, task);
+        const proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), planningTask);
+        assertInitialOutcomePlanShape(proposal, planningTask);
         await emit?.({
           type: "planning.outcome_plan.submitted",
           data: {
@@ -329,22 +341,22 @@ export class ModelPlanner implements Planner {
         admitPlan({
           runId: task.runId,
           proposal,
-          availableSkills: task.availableSkills,
-          availableToolNames: new Set(task.availableToolNames),
-          ...(task.availableTools === undefined ? {} : { availableTools: task.availableTools }),
-          ...(task.availableCapabilities === undefined ? {} : { availableCapabilities: task.availableCapabilities }),
-          ...(task.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: task.requiredToolSourceIds }),
-          ...(task.sources === undefined ? {} : { availableUploadedSourceIds: task.sources.map((source) => source.id) }),
-          ...(task.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: task.visibleDirectories.map((directory) => directory.id) }),
+          availableSkills: planningTask.availableSkills,
+          availableToolNames: new Set(planningTask.availableToolNames),
+          ...(planningTask.availableTools === undefined ? {} : { availableTools: planningTask.availableTools }),
+          ...(planningTask.availableCapabilities === undefined ? {} : { availableCapabilities: planningTask.availableCapabilities }),
+          ...(planningTask.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: planningTask.requiredToolSourceIds }),
+          ...(planningTask.sources === undefined ? {} : { availableUploadedSourceIds: planningTask.sources.map((source) => source.id) }),
+          ...(planningTask.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: planningTask.visibleDirectories.map((directory) => directory.id) }),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(
-            task.conversationWorkingSet,
-            task.turnResolution,
+            planningTask.conversationWorkingSet,
+            planningTask.turnResolution,
           ),
           taskIntent: {
             deliverySurface: taskProfile.deliverySurface,
             artifactKind: taskProfile.artifactKind,
             sourceNeed: taskProfile.sourceNeed,
-            evidenceDemand: task.turnResolution?.evidenceDemand,
+            evidenceDemand: planningTask.turnResolution?.evidenceDemand,
           },
         });
         await emit?.({
@@ -359,6 +371,7 @@ export class ModelPlanner implements Planner {
         const planningError = error instanceof AppError && error.code === "PLANNING_ERROR"
           ? error
           : new AppError("PLANNING_ERROR", error instanceof Error ? error.message : "Invalid OutcomePlan", 422);
+        lastPlanningError = planningError;
         await emit?.({
           type: "planning.contract_failed",
           data: {
@@ -366,8 +379,26 @@ export class ModelPlanner implements Planner {
             planningTurn: turn,
           },
         });
+        const resolution = capabilityRecoveryCount < MAX_CAPABILITY_RECOVERIES && isCapabilityRecoveryFailure(planningError)
+          ? resolveCapabilityRecovery(planningTask, outcomePlanCalls, isSourceGroundingFailure(planningError))
+          : undefined;
+        if (resolution !== undefined) {
+          capabilityRecoveryCount += 1;
+          planningTask = resolution.task;
+          selectedSkillRoles = resolution.selectedSkillRoles;
+          runtimeDirective = resolution.directive;
+          await emit?.({
+            type: "planning.capability_gap.resolved",
+            data: {
+              gapCount: resolution.gapCount,
+              candidateCapabilityIds: resolution.candidateCapabilityIds,
+              candidateSkillIds: resolution.candidateSkillIds,
+            },
+          });
+          continue;
+        }
         const retryDirective = turn === 1
-          ? plannerContractRetryDirective(planningError, response, outcomePlanCalls, task.availableToolNames)
+          ? plannerContractRetryDirective(planningError, response, outcomePlanCalls, planningTask.availableToolNames)
           : undefined;
         if (retryDirective !== undefined) {
           runtimeDirective = retryDirective;
@@ -376,7 +407,7 @@ export class ModelPlanner implements Planner {
         throw planningError;
       }
     }
-    throw new AppError("PLANNING_ERROR", "Planner did not produce an OutcomePlan", 422);
+    throw lastPlanningError ?? new AppError("PLANNING_ERROR", "Planner did not produce an OutcomePlan", 422);
   }
 }
 
@@ -448,6 +479,100 @@ function plannerContractRetryDirective(
     return plannerOutcomePlanAdmissionDirective(planningError);
   }
   return undefined;
+}
+
+function isCapabilityRecoveryFailure(error: AppError): boolean {
+  return /requires evidence that its bound capabilities cannot produce:/.test(error.message)
+    || isSourceGroundingFailure(error);
+}
+
+function isSourceGroundingFailure(error: AppError): boolean {
+  return /must bind a capability that produces required source-grounding evidence/.test(error.message);
+}
+
+function resolveCapabilityRecovery(
+  task: TaskSpec,
+  outcomePlanCalls: readonly ModelToolCall[],
+  sourceGroundingRequired: boolean,
+): {
+  readonly task: TaskSpec;
+  readonly selectedSkillRoles: readonly SelectedSkillRole[];
+  readonly directive: string;
+  readonly gapCount: number;
+  readonly candidateCapabilityIds: readonly string[];
+  readonly candidateSkillIds: readonly string[];
+} | undefined {
+  if (task.capabilityRecovery === undefined || outcomePlanCalls.length !== 1) return undefined;
+  let proposal: PlanProposal;
+  try {
+    proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
+  } catch {
+    return undefined;
+  }
+  const evidenceGaps = resolveCapabilityGaps({
+    proposal,
+    currentSkills: task.availableSkills,
+    currentCapabilities: task.availableCapabilities
+      ?? (task.availableTools === undefined
+        ? planningCapabilitiesFromToolNames(task.availableToolNames)
+        : planningCapabilitiesFromTools(task.availableTools, task.sources)),
+    catalog: task.capabilityRecovery,
+  });
+  const sourceGroundingGap = sourceGroundingRequired && task.turnResolution?.evidenceDemand !== undefined
+    && task.turnResolution.evidenceDemand !== "none"
+    ? resolveSourceGroundingGap({
+      catalog: task.capabilityRecovery,
+      evidenceDemand: task.turnResolution.evidenceDemand,
+    })
+    : undefined;
+  const gaps = [...evidenceGaps, ...(sourceGroundingGap === undefined ? [] : [sourceGroundingGap])];
+  if (gaps.length === 0 || gaps.some((gap) => gap.candidates.length === 0)) return undefined;
+  const candidateCapabilityIds = [...new Set(gaps.flatMap((gap) => gap.candidates.map((candidate) => candidate.capabilityId)))].sort();
+  const candidateSkillIds = [...new Set(gaps.flatMap((gap) => gap.candidates.flatMap((candidate) => candidate.requiredSkillIds)))].sort();
+  const recoverySkills = task.capabilityRecovery.availableSkills.filter((skill) => candidateSkillIds.includes(skill.id));
+  const availableSkills = uniqueSkills([...task.availableSkills, ...recoverySkills]);
+  const existingCapabilityIds = new Set((task.availableCapabilities ?? []).map((capability) => capability.id));
+  const availableCapabilities = [
+    ...(task.availableCapabilities ?? (task.availableTools === undefined
+      ? planningCapabilitiesFromToolNames(task.availableToolNames)
+      : planningCapabilitiesFromTools(task.availableTools, task.sources))),
+    ...task.capabilityRecovery.availableCapabilities.filter((capability) =>
+      candidateCapabilityIds.includes(capability.id) && !existingCapabilityIds.has(capability.id)),
+  ];
+  const selectedSkillRoles = uniqueSkillRoles([
+    ...(task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, planningTaskProfile(task))),
+    ...recoverySkills.flatMap((skill) => skill.agentLoop?.roles.includes("source_provider") === true ? [{
+      skillId: skill.id,
+      role: "source_provider" as const,
+      reason: "Candidate evidence producer discovered from the authorized capability catalog.",
+    }] : []),
+  ]);
+  return {
+    task: { ...task, availableSkills, availableCapabilities },
+    selectedSkillRoles,
+    directive: capabilityRecoveryDirective(gaps),
+    gapCount: gaps.length,
+    candidateCapabilityIds,
+    candidateSkillIds,
+  };
+}
+
+function capabilityRecoveryDirective(gaps: ReturnType<typeof resolveCapabilityGaps>): string {
+  return [
+    "Runtime Admission found that the previous plan required evidence its bound capabilities could not produce.",
+    "The authorized capability catalog has now been expanded only with the eligible evidence-producer candidates below.",
+    "Revise the OutcomePlan for the same goal. Bind a selected candidate Skill to the concrete acquisition leaf when required, and make downstream HIL/production leaves depend on that fact leaf instead of claiming that they themselves produced upstream evidence.",
+    "Do not invent capabilities, add permissions, install tools, or keep an evidence requirement on a leaf that does not produce it.",
+    `Capability gaps: ${JSON.stringify(gaps)}.`,
+  ].join("\n");
+}
+
+function uniqueSkills(skills: readonly TaskSpec["availableSkills"][number][]): TaskSpec["availableSkills"] {
+  return [...new Map(skills.map((skill) => [skill.id, skill])).values()];
+}
+
+function uniqueSkillRoles(roles: readonly SelectedSkillRole[]): readonly SelectedSkillRole[] {
+  return [...new Map(roles.map((role) => [role.skillId, role])).values()];
 }
 
 function shouldRetryPlannerEmptyResponse(
@@ -525,6 +650,7 @@ function plannerOutcomePlanAdmissionDirective(planningError: AppError): string {
     "selectedSkillRoles[].skillId and leaves[].skillIds may contain only IDs in planning_context.availableSkillIds. Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds in either Skill field; use leaves[].requiredCapabilities for capabilities. If availableSkillIds is empty, both Skill fields must be empty arrays.",
     "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
+    "A terminal leaf that only proposes options or waits for Human-in-the-Loop cannot satisfy a requested artifact. Keep the artifact-producing obligation in the same resumed leaf or add a dependent production leaf with observable artifact evidence.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
   ].join("\n");
@@ -1166,8 +1292,21 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
 }
 
 function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {
-  if (step.skillIds.length > 0) return true;
-  if (step.requiredCapabilities.includes("workspace_artifact_write")) return true;
+  // An omitted contract is still allowed for legacy/custom planners; Runtime
+  // observes the resulting file evidence. Legacy Skill-bound planners also
+  // use the bound Skill as the execution signal and receive the Runtime-owned
+  // artifact contract during normalization. delivery_receipt is an audit
+  // record, not a semantic assertion that the step is text-only. An explicit
+  // non-artifact contract (for example, a HIL direction/caveat contract),
+  // however, is a semantic claim that this terminal step does not deliver the
+  // requested workspace artifact.
+  const semanticEvidenceKinds = step.evidenceContract?.requiredKinds.filter((kind) =>
+    kind !== "delivery_receipt" && kind !== "basic_navigation",
+  ) ?? [];
+  if (
+    semanticEvidenceKinds.length === 0
+    && (step.requiredCapabilities.includes("workspace_artifact_write") || step.skillIds.length > 0)
+  ) return true;
   return step.evidenceContract?.requiredKinds.some((kind) =>
     kind === "artifact_path"
     || kind === "artifact_non_empty"

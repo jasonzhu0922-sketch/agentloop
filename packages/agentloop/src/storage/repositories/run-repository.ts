@@ -77,6 +77,8 @@ export class RunRepository {
     id: string;
     ownerUserId: string;
     conversationId?: string;
+    parentRunId?: string;
+    depth?: number;
     allowDangerousTools: boolean;
     modelKey?: string;
     input: string;
@@ -91,8 +93,8 @@ export class RunRepository {
       input.id,
       input.ownerUserId,
       input.conversationId ?? null,
-      null,
-      0,
+      input.parentRunId ?? null,
+      input.depth ?? 0,
       input.allowDangerousTools ? 1 : 0,
       input.modelKey ?? null,
       input.input,

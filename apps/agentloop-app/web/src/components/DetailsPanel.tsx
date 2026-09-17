@@ -502,11 +502,25 @@ function CommandActivityList({
         </div>
       ) : null}
       {shown.map((command) => (
-        <details className={"command-card " + command.status} key={command.toolCallId} open={command.status === "running"}>
-          <summary>
+        <div
+          className={"command-card " + command.status}
+          key={command.toolCallId}
+          role="button"
+          tabIndex={0}
+          aria-label={`查看命令详情：${commandLine(command)}`}
+          onClick={() => onOpenDetails(command)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onOpenDetails(command);
+            }
+          }}
+        >
+          <div className="command-card-head">
             <span className={"command-state " + command.status}>{commandStatusLabel(command.status)}</span>
             <span className="command-title">{commandLine(command)}</span>
-          </summary>
+            <span className="command-open-hint">查看详情</span>
+          </div>
           <dl className="command-meta">
             <dt>step</dt>
             <dd>{command.step ?? "-"}</dd>
@@ -520,12 +534,7 @@ function CommandActivityList({
             <dd>{command.toolCallId}</dd>
           </dl>
           <div className="command-summary">{commandSummary(command)}</div>
-          <button type="button" className="command-detail-button" onClick={() => onOpenDetails(command)}>
-            查看完整详情
-          </button>
-          {command.stdout ? <pre className="command-output">{command.stdout}</pre> : null}
-          {command.stderr ? <pre className="command-output error">{command.stderr}</pre> : null}
-        </details>
+        </div>
       ))}
     </div>
   );

@@ -61,6 +61,8 @@ export type {
   WebToolsOptions,
 } from "./tools/index.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
+export { resolveCapabilityGaps, resolveSourceGroundingGap } from "./planning/capability-resolution.ts";
+export type { CapabilityGap, CapabilityGapCandidate } from "./planning/capability-resolution.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";
 export type * from "./runtime/contracts.ts";
 export {
@@ -117,6 +119,8 @@ export type {
   HumanLoopStatus,
 } from "./runtime/human-loop.ts";
 export { RunService } from "./runtime/run-service.ts";
+export { RunCheckpointRepository } from "./runtime/run-checkpoint-repository.ts";
+export type { RunCheckpointRecord } from "./runtime/run-checkpoint-repository.ts";
 export type {
   AssessorFactory,
   CommandOutputContent,

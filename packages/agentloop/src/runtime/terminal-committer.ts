@@ -79,6 +79,8 @@ export class TerminalCommitter {
     planId?: string;
     status: "failed" | "cancelled";
     reasonCode: string;
+    /** User-facing partial report; never an accepted completion or receipt. */
+    output?: string;
   }): Promise<void> {
     await this.outcomes.commitStopped(input);
   }

@@ -13,6 +13,7 @@ export interface OperationProfile {
   readonly id: OperationProfileId;
   readonly name: string;
   readonly description: string;
+  readonly topLevelPrompt?: string;
   readonly planningRules: readonly string[];
   readonly executionRules: readonly string[];
   readonly successEvidence: readonly string[];
@@ -30,6 +31,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     id: "data_analysis",
     name: "Data analysis",
     description: "Inspect, transform, summarize, or reason over tabular, spreadsheet, log, metric, or other bulk data inputs.",
+    topLevelPrompt: "Data-analysis paradigm: acquire the smallest trustworthy data scope that answers the request, analyze it, then deliver. A successful bounded extraction or aggregation is canonical for the current step. In a multi-stage Plan, use dependency evidence as input; when successful, scope-matched evidence obtained in the current stage conflicts with an earlier-stage result, the current-stage evidence governs this stage. Preserve the earlier result as provenance and mention a material conflict, but do not reacquire or revalidate data merely to reconcile it. Do not plan or perform duplicate acquisition, readback, aggregation, or validation merely to increase confidence; do so only for an explicit user request, concrete evidence gap, freshness need, tool failure, or Runtime high-risk gate.",
     planningRules: [
       "Plan a bounded extraction-and-analysis workflow; do not make full raw-data dumping the success criterion.",
       "Require a durable structured extraction artifact when the input is a visible spreadsheet directory, large, wide, or likely to be reused by later writing/reporting.",
@@ -166,12 +168,13 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
 
 export function operationProfileCatalogForPlanning(): readonly Pick<
   OperationProfile,
-  "id" | "name" | "description" | "planningRules" | "successEvidence"
+  "id" | "name" | "description" | "topLevelPrompt" | "planningRules" | "successEvidence"
 >[] {
   return OPERATION_PROFILES.map((profile) => ({
     id: profile.id,
     name: profile.name,
     description: profile.description,
+    ...(profile.topLevelPrompt === undefined ? {} : { topLevelPrompt: profile.topLevelPrompt }),
     planningRules: profile.planningRules,
     successEvidence: profile.successEvidence,
   }));
@@ -207,6 +210,7 @@ export function executionOperationProfile(input: OperationProfileInput): Readonl
   id: OperationProfileId;
   name: string;
   description: string;
+  topLevelPrompt?: string;
   executionRules: readonly string[];
   successEvidence: readonly string[];
 }> {
@@ -215,6 +219,7 @@ export function executionOperationProfile(input: OperationProfileInput): Readonl
     id: selected.id,
     name: selected.name,
     description: selected.description,
+    ...(selected.topLevelPrompt === undefined ? {} : { topLevelPrompt: selected.topLevelPrompt }),
     executionRules: selected.executionRules,
     successEvidence: selected.successEvidence,
   };

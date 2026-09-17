@@ -1,0 +1,105 @@
+{
+  "schema": "agentloop.workProductReplayFixture/v1",
+  "id": "A",
+  "runId": "b564c522-6372-4f35-bf77-6b3a7dd597cd",
+  "workspaceId": "fixture-A",
+  "minimization": "Selected persisted tool.completed fields; source contents omitted; filenames and absolute prefixes anonymized; stdout/stderr previews bounded at 600 characters. Hashes describe original files/streams, not redacted previews. No purpose or completion inference added.",
+  "events": [
+    {
+      "runId": "b564c522-6372-4f35-bf77-6b3a7dd597cd",
+      "workspaceId": "fixture-A",
+      "seq": 761,
+      "originalPayloadSha256": "f1fb3e1dfd068a6c70d308cdb5ae5482fba8fb5ae600cbabf6e2a983af32ebc1",
+      "evidence": {
+        "toolCallId": "call_4yvrb5ets0x5pss4rta8tv3o",
+        "toolName": "computer_write_file",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false,
+        "result": "{\"path\":\"theme.json\",\"mode\":\"create\",\"bytes\":1612,\"sha256\":\"2094167f9e7fadfbb9985160a7a242039b5e22a85f620dc8b08cc16641704d3c\"}"
+      }
+    },
+    {
+      "runId": "b564c522-6372-4f35-bf77-6b3a7dd597cd",
+      "workspaceId": "fixture-A",
+      "seq": 820,
+      "originalPayloadSha256": "8bac7eeed44fc2a6b8fff8c6f901a15095ac7d14821f3831f39bed1ae81c5be4",
+      "evidence": {
+        "toolCallId": "call_00_VkfJCDK4NhG1OgGlTQsS6594",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "exitCode": 0,
+        "isError": false,
+        "result": "{\"exitCode\":0,\"signal\":null,\"fileChanges\":[{\"path\":\"themed.pptx\",\"changeType\":\"created\",\"bytes\":3429079},{\"path\":\"theme-receipt.json\",\"changeType\":\"created\",\"bytes\":3079}],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stdoutRef\":{\"path\":\".agentloop/tool-results/e8/e86a683de02cca5fd8481513530b265593d850fd2113f26b4c956a421860e60e.stdout.txt\",\"sha256\":\"e86a683de02cca5fd8481513530b265593d850fd2113f26b4c956a421860e60e\",\"bytes\":177,\"characters\":177,\"previewCharacters\":2000},\"stdout\":\"{\\\"ok\\\": true, \\\"report\\\": \\\"/workspace/theme-receipt.json\\\"}\\n\",\"stderr\":\"\"}"
+      }
+    },
+    {
+      "runId": "b564c522-6372-4f35-bf77-6b3a7dd597cd",
+      "workspaceId": "fixture-A",
+      "seq": 860,
+      "originalPayloadSha256": "283356700f807db0ca25f8e564aa5ac174c71e89a60bccd0e0fc5db26d116719",
+      "evidence": {
+        "toolCallId": "call_01_WJXldGdlK8cPeWcXjhoA9151",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "exitCode": 0,
+        "isError": false,
+        "result": "{\"exitCode\":0,\"signal\":null,\"fileChanges\":[],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stdoutRef\":{\"path\":\".agentloop/tool-results/bc/bc7d617e77eb04a8facd47d98ca7fb47966bc800853f67a6c2f85ff82bbcba34.stdout.txt\",\"sha256\":\"bc7d617e77eb04a8facd47d98ca7fb47966bc800853f67a6c2f85ff82bbcba34\",\"bytes\":24,\"characters\":24,\"previewCharacters\":2000},\"stdout\":\"All validations PASSED!\\n\",\"stderr\":\"\"}"
+      }
+    },
+    {
+      "runId": "b564c522-6372-4f35-bf77-6b3a7dd597cd",
+      "workspaceId": "fixture-A",
+      "seq": 910,
+      "originalPayloadSha256": "4a9c8e44bf74e212abd71ab27a901468c0d2f15efd0064e38a9cb54c459308d3",
+      "evidence": {
+        "toolCallId": "call_hdb5vu58n2nyt3n5z4h6u7co",
+        "toolName": "computer_write_file",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false,
+        "result": "{\"path\":\"remap_fonts.py\",\"mode\":\"create\",\"bytes\":3072,\"sha256\":\"f183cd72e37a8d48bfebdfd79d88912f110ddcae21a0e67b8e1b62d5d9cace1b\"}"
+      }
+    }
+  ],
+  "emptyModelResponses": [
+    {
+      "seq": 921,
+      "originalPayloadSha256": "3d577bd32dffc62af3c3749d74275c4682113a3eab28cd1304838180b69a0c8e",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    },
+    {
+      "seq": 929,
+      "originalPayloadSha256": "6a70b2c23952f7f33c5d3231528026f50c3b71c1ce81fc5790fa647e18d427e3",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    },
+    {
+      "seq": 947,
+      "originalPayloadSha256": "2acb82b67497a9e4ea0dca8b25f6989f4f7fa0bc6265eac43e305ccbb1880f12",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    },
+    {
+      "seq": 955,
+      "originalPayloadSha256": "80c1ba95c16aa7e289331b87a2e746dfa3efaa698cfa4a32ee183d1d7393bfe4",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    }
+  ]
+}

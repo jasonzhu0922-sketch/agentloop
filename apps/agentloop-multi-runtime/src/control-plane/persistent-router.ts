@@ -8,6 +8,8 @@ export class PersistentMultiRuntimeRouter {
   private readonly heartbeatTtlMs: number;
   private readonly reservationTtlMs: number;
   private readonly now: () => number;
+  private observationCursor = "";
+  private reconciliation?: Promise<void>;
 
   constructor(input: {
     readonly store: ControlPlaneStore;
@@ -50,6 +52,30 @@ export class PersistentMultiRuntimeRouter {
     }));
     for (const models of catalogs) for (const model of models) if (!seen.has(model.key)) seen.set(model.key, model);
     return [...seen.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  /** Reconcile projection only. Never dispatch, resume, cancel, or infer failure from transport errors. */
+  reconcileAssignments(limit = 100): Promise<void> {
+    if (this.reconciliation !== undefined) return this.reconciliation;
+    this.reconciliation = this.reconcileAssignmentBatch(limit).finally(() => { this.reconciliation = undefined; });
+    return this.reconciliation;
+  }
+
+  private async reconcileAssignmentBatch(limit: number): Promise<void> {
+    let assignments = await this.store.unsettledAssignments(this.observationCursor, limit);
+    if (assignments.length === 0 && this.observationCursor !== "") {
+      this.observationCursor = "";
+      assignments = await this.store.unsettledAssignments("", limit);
+    }
+    for (let offset = 0; offset < assignments.length; offset += 4) {
+      await Promise.all(assignments.slice(offset, offset + 4).map(async (assignment) => {
+        let run: RuntimeRunStatus | undefined;
+        try { run = await this.endpointFactory(assignment.runtimeEndpoint).getRun?.(assignment.remoteRunId); }
+        catch { return; } // Keep the last observed state; retry on a later pass.
+        if (run !== undefined && run.remoteRunId === assignment.remoteRunId) await this.store.observeRun(assignment.id, run, this.now());
+      }));
+    }
+    this.observationCursor = assignments.at(-1)?.id ?? "";
   }
 
   async runtimes(): Promise<readonly RuntimeCatalogEntry[]> {
@@ -165,6 +191,16 @@ export class PersistentMultiRuntimeRouter {
     return { assignment: (await this.store.assignment(id)) ?? assignment, run };
   }
 
+  async startFromCheckpoint(id: string): Promise<{ readonly assignment: StoredAssignment; readonly run: RuntimeRunStatus } | undefined> {
+    const assignment = await this.store.assignment(id);
+    if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const start = this.endpointFactory(assignment.runtimeEndpoint).startFromCheckpoint;
+    if (start === undefined) throw new TypeError("Runtime endpoint does not support checkpoint continuation");
+    const run = await start(assignment.remoteRunId);
+    const continuation = await this.store.createContinuationAssignment(assignment.id, run.remoteRunId, this.now());
+    return { assignment: continuation, run };
+  }
+
   async currentHumanLoop(id: string) {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
@@ -191,12 +227,13 @@ function terminalRunFromEvents(events: readonly RuntimeRunEvent[], remoteRunId: 
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event === undefined) continue;
-    if (event.type === "run.completed") return { remoteRunId, status: "completed" };
-    if (event.type === "run.cancelled") return { remoteRunId, status: "cancelled" };
+    if (event.type === "run.completed") return { remoteRunId, status: "completed", finishedAt: event.createdAt };
+    if (event.type === "run.cancelled") return { remoteRunId, status: "cancelled", finishedAt: event.createdAt };
     if (event.type === "run.failed") {
       return {
         remoteRunId,
         status: "failed",
+        finishedAt: event.createdAt,
         ...(stringValue(event.data.code) === undefined ? {} : { errorCode: stringValue(event.data.code) }),
         ...(stringValue(event.data.message) === undefined ? {} : { errorMessage: stringValue(event.data.message) }),
       };

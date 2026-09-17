@@ -42,6 +42,16 @@ export interface RuntimeActionRecord {
   readonly closedAt?: number;
 }
 
+export interface InterruptedRunRecord {
+  readonly runId: string;
+  readonly actionId?: string;
+  readonly planId?: string;
+  readonly stepId?: string;
+  readonly reason: "legacy_state_incomplete" | "deadline_expired" | "worker_lease_expired";
+  readonly replayPolicy?: ReplayPolicy;
+  readonly fence?: number;
+}
+
 interface RuntimeActionRow {
   id: string;
   run_id: string;
@@ -155,9 +165,9 @@ export class RuntimeActionRepository {
     return await this.require(id);
   }
 
-  async reconcileRunningRuns(): Promise<number> {
+  async reconcileRunningRuns(): Promise<InterruptedRunRecord[]> {
     const now = Date.now();
-    let reconciled = 0;
+    const interrupted: InterruptedRunRecord[] = [];
     await this.database.transaction(async () => {
       const legacyRuns = await this.database.prepare(`
         SELECT id FROM runs
@@ -166,17 +176,12 @@ export class RuntimeActionRepository {
           AND NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
       `).all(now - LEGACY_ACTIONLESS_RUN_GRACE_MS) as unknown as Array<{ id: string }>;
       for (const run of legacyRuns) {
-        await this.createRecoveryReview({
-          runId: run.id,
-          reason: "legacy_state_incomplete",
-          replayPolicy: "unsafe",
-          createdAt: now,
-        });
-        reconciled += 1;
+        interrupted.push({ runId: run.id, reason: "legacy_state_incomplete" });
       }
 
       const expired = await this.database.prepare(`
-        SELECT actions.id, actions.run_id, actions.fence, actions.deadline_at,
+        SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
+               actions.replay_policy, actions.fence, actions.deadline_at,
                actions.lease_until, actions.revision
         FROM runtime_actions AS actions
         JOIN runs ON runs.id = actions.run_id
@@ -184,26 +189,100 @@ export class RuntimeActionRepository {
           AND actions.state = 'dispatched'
           AND (actions.deadline_at <= ? OR actions.lease_until <= ?)
       `).all(now, now) as unknown as Array<{
-        id: string; run_id: string; fence: number; deadline_at: number; lease_until: number; revision: number;
+        id: string; run_id: string; plan_id: string | null; step_id: string | null;
+        replay_policy: ReplayPolicy; fence: number; deadline_at: number; lease_until: number; revision: number;
       }>;
       for (const action of expired) {
         const reason = action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired";
         const result = await this.database.prepare(`
           UPDATE runtime_actions
-          SET state = 'recovery_required', lease_until = NULL, revision = revision + 1, updated_at = ?
+          SET state = 'failed', lease_until = NULL, error_code = 'EXECUTION_AUTHORITY_LOST',
+              revision = revision + 1, updated_at = ?, closed_at = ?
           WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-        `).run(now, action.id, action.fence, action.revision) as { changes: number };
+        `).run(now, now, action.id, action.fence, action.revision) as { changes: number };
         if (result.changes !== 1) continue;
-        await this.appendEvent(action.run_id, "action.recovery_required", {
+        await this.appendEvent(action.run_id, "action.interrupted", {
           actionId: action.id,
           fence: action.fence,
           reason,
         }, now);
-        await this.upsertRecoveryState(action.run_id, action.id, "waiting_recovery", undefined, now);
-        reconciled += 1;
+        interrupted.push({
+          runId: action.run_id,
+          actionId: action.id,
+          ...(action.plan_id === null ? {} : { planId: action.plan_id }),
+          ...(action.step_id === null ? {} : { stepId: action.step_id }),
+          reason,
+          replayPolicy: action.replay_policy,
+          fence: action.fence,
+        });
+      }
+
+      const stranded = await this.database.prepare(`
+        SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
+               actions.replay_policy, actions.fence, actions.deadline_at, actions.lease_until
+        FROM runtime_actions AS actions
+        JOIN runs ON runs.id = actions.run_id
+        WHERE runs.status = 'running'
+          AND actions.state = 'failed'
+          AND actions.error_code = 'EXECUTION_AUTHORITY_LOST'
+          AND actions.id NOT IN (${expired.length === 0 ? "SELECT ''" : expired.map(() => "?").join(", ")})
+      `).all(...expired.map((action) => action.id)) as unknown as Array<{
+        id: string; run_id: string; plan_id: string | null; step_id: string | null;
+        replay_policy: ReplayPolicy; fence: number; deadline_at: number | null; lease_until: number | null;
+      }>;
+      for (const action of stranded) interrupted.push({
+        runId: action.run_id,
+        actionId: action.id,
+        ...(action.plan_id === null ? {} : { planId: action.plan_id }),
+        ...(action.step_id === null ? {} : { stepId: action.step_id }),
+        reason: action.deadline_at !== null && action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired",
+        replayPolicy: action.replay_policy,
+        fence: action.fence,
+      });
+
+      const legacyPaused = await this.database.prepare(`
+        SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
+               actions.replay_policy, actions.fence, actions.metadata_json
+        FROM runtime_actions AS actions
+        JOIN runs ON runs.id = actions.run_id
+        JOIN run_recovery_states AS recovery ON recovery.action_id = actions.id
+        WHERE runs.status = 'running'
+          AND actions.state = 'recovery_required'
+          AND recovery.state = 'waiting_recovery'
+      `).all() as unknown as Array<{
+        id: string; run_id: string; plan_id: string | null; step_id: string | null;
+        replay_policy: ReplayPolicy; fence: number; metadata_json: string;
+      }>;
+      for (const action of legacyPaused) {
+        const reason = stringMetadataField(action.metadata_json, "reason");
+        if (reason === "assessment_failed_boundary" || reason === "human_loop_requested") continue;
+        const result = await this.database.prepare(`
+          UPDATE runtime_actions
+          SET state = 'failed', error_code = 'EXECUTION_AUTHORITY_LOST', revision = revision + 1,
+              updated_at = ?, closed_at = ?
+          WHERE id = ? AND state = 'recovery_required'
+        `).run(now, now, action.id) as { changes: number };
+        if (result.changes !== 1) continue;
+        await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
+          .run(action.run_id, action.id);
+        await this.appendEvent(action.run_id, "action.interrupted", {
+          actionId: action.id,
+          fence: action.fence,
+          reason: reason ?? "worker_lease_expired",
+          migratedFrom: "waiting_recovery",
+        }, now);
+        interrupted.push({
+          runId: action.run_id,
+          actionId: action.id,
+          ...(action.plan_id === null ? {} : { planId: action.plan_id }),
+          ...(action.step_id === null ? {} : { stepId: action.step_id }),
+          reason: reason === "legacy_state_incomplete" ? "legacy_state_incomplete" : "worker_lease_expired",
+          replayPolicy: action.replay_policy,
+          fence: action.fence,
+        });
       }
     });
-    return reconciled;
+    return interrupted;
   }
 
   async cancelDispatchedForRun(runId: string, code = "CANCELLED"): Promise<number> {
@@ -230,6 +309,20 @@ export class RuntimeActionRepository {
     return cancelled;
   }
 
+  async resolveRecoveryReview(actionId: string): Promise<void> {
+    const now = Date.now();
+    await this.database.transaction(async () => {
+      const row = await this.requireRow(actionId);
+      const result = await this.database.prepare(`
+        UPDATE runtime_actions
+        SET state = 'succeeded', revision = revision + 1, updated_at = ?, closed_at = ?
+        WHERE id = ? AND kind = 'recovery_review' AND state = 'recovery_required' AND revision = ?
+      `).run(now, now, actionId, row.revision) as { changes: number };
+      if (result.changes !== 1) throw new AppError("CONFLICT", "Recovery review is no longer pending", 409);
+      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence: row.fence }, now);
+    });
+  }
+
   async requireRecoveryReview(input: {
     readonly runId: string;
     readonly planId?: string;
@@ -238,6 +331,20 @@ export class RuntimeActionRepository {
     readonly metadata?: Readonly<Record<string, unknown>>;
   }): Promise<RuntimeActionRecord> {
     return this.requireRecoveryReviewWithPolicy(input, "unsafe");
+  }
+
+  /** Persist an internal repair boundary without pausing the Run for UI-driven recovery. */
+  async requireAutomaticRepair(input: {
+    readonly runId: string;
+    readonly planId: string;
+    readonly stepId: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }): Promise<RuntimeActionRecord> {
+    return this.requireRecoveryReviewWithPolicy(
+      { ...input, reason: "assessment_failed_boundary" },
+      "unsafe",
+      false,
+    );
   }
 
   async requireHumanLoopResume(input: {
@@ -255,7 +362,7 @@ export class RuntimeActionRepository {
     readonly stepId?: string;
     readonly reason: string;
     readonly metadata?: Readonly<Record<string, unknown>>;
-  }, replayPolicy: ReplayPolicy): Promise<RuntimeActionRecord> {
+  }, replayPolicy: ReplayPolicy, pauseRun = true): Promise<RuntimeActionRecord> {
     const now = Date.now();
     let actionId = "";
     await this.database.transaction(async () => {
@@ -266,7 +373,7 @@ export class RuntimeActionRepository {
       `).get(input.runId) as { id: string } | undefined;
       if (existing !== undefined) {
         actionId = existing.id;
-        await this.upsertRecoveryState(input.runId, actionId, "waiting_recovery", undefined, now);
+        if (pauseRun) await this.upsertRecoveryState(input.runId, actionId, "waiting_recovery", undefined, now);
         return;
       }
       actionId = await this.createRecoveryReview({
@@ -278,6 +385,10 @@ export class RuntimeActionRepository {
         replayPolicy,
         createdAt: now,
       });
+      if (!pauseRun) {
+        await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
+          .run(input.runId, actionId);
+      }
     });
     return await this.require(actionId);
   }
@@ -422,4 +533,15 @@ function toRuntimeActionRecord(row: RuntimeActionRow): RuntimeActionRecord {
 
 function errorCode(error: unknown): string {
   return error instanceof AppError ? error.code : "INTERNAL_ERROR";
+}
+
+function stringMetadataField(metadataJson: string, key: string): string | undefined {
+  try {
+    const metadata = JSON.parse(metadataJson) as unknown;
+    if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+    const value = (metadata as Record<string, unknown>)[key];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }

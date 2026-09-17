@@ -424,8 +424,30 @@ export class ControlPlaneStore {
     });
   }
 
+  async createContinuationAssignment(parentAssignmentId: string, remoteRunId: string, now = Date.now()): Promise<StoredAssignment> {
+    return await this.database.transaction(async () => {
+      const parent = await this.database.prepare(`
+        SELECT a.task_id, a.runtime_id, a.created_at FROM mr_assignments a WHERE a.id = ?
+      `).get(parentAssignmentId) as { task_id: string; runtime_id: string; created_at: number } | undefined;
+      if (parent === undefined) throw new RangeError("parent assignment not found");
+      const continuationAt = Math.max(now, parent.created_at + 1);
+      const id = `assignment_${randomUUID()}`;
+      await this.database.prepare(`
+        INSERT INTO mr_assignments(
+          id, task_id, runtime_id, dispatch_key, remote_run_id, status,
+          reservation_expires_at, last_observed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'accepted', NULL, ?, ?, ?)
+      `).run(id, parent.task_id, parent.runtime_id, `checkpoint_${randomUUID()}`, remoteRunId, continuationAt, continuationAt, continuationAt);
+      await this.database.prepare("UPDATE mr_tasks SET status = 'running', updated_at = ? WHERE id = ?")
+        .run(continuationAt, parent.task_id);
+      const row = await this.database.prepare(assignmentSelect("WHERE a.id = ?")).get(id) as AssignmentRow;
+      return toStoredAssignment(row);
+    });
+  }
+
   async observeRun(assignmentId: string, run: RuntimeRunStatus, now = Date.now()): Promise<void> {
     const status = run.status === "running" ? "accepted" : run.status;
+    const finishedAt = Number.isSafeInteger(run.finishedAt) && run.finishedAt! >= 0 ? run.finishedAt! : null;
     await this.database.transaction(async () => {
       // A Host Run is terminal once completed, failed, or cancelled.  A late
       // status poll must not turn that durable terminal projection back into
@@ -435,7 +457,7 @@ export class ControlPlaneStore {
         SET status = ?,
           error_code = CASE WHEN ? = 'failed' THEN COALESCE(?, error_code) ELSE error_code END,
           error_message = CASE WHEN ? = 'failed' THEN COALESCE(?, error_message) ELSE error_message END,
-          last_observed_at = ?, updated_at = ?
+          last_observed_at = ?, updated_at = CASE WHEN ? = 'accepted' THEN updated_at ELSE ? END
         WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
       `)
         .run(
@@ -445,13 +467,21 @@ export class ControlPlaneStore {
           status,
           run.errorMessage ?? null,
           now,
+          status,
           now,
           assignmentId,
         );
       if (updated.changes === 0) return;
       if (status !== "accepted") {
-        await this.database.prepare(`UPDATE mr_tasks SET status = ?, updated_at = ? WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)`)
-          .run(status, now, assignmentId);
+        // Observation time belongs to the assignment. Conversation recency must
+        // use the Host's activity time, never the time a poll happens to discover it.
+        // An unknown finish time must not manufacture new user-visible activity.
+        await this.database.prepare(`UPDATE mr_tasks SET status = ?, updated_at = CASE
+          WHEN ? IS NULL THEN updated_at
+          WHEN ? < created_at THEN created_at ELSE ? END
+          WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)
+            AND ? = (SELECT latest.id FROM mr_assignments latest WHERE latest.task_id = mr_tasks.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`)
+          .run(status, finishedAt, finishedAt, finishedAt, assignmentId, assignmentId);
       }
     });
   }
@@ -459,6 +489,15 @@ export class ControlPlaneStore {
   async assignment(id: string): Promise<StoredAssignment | undefined> {
     const row = await this.database.prepare(assignmentSelect("WHERE a.id = ?")).get(id) as AssignmentRow | undefined;
     return row === undefined ? undefined : toStoredAssignment(row);
+  }
+
+  /** Keyset batches avoid starving later assignments when a Host stays unreachable. */
+  async unsettledAssignments(afterId: string, limit: number): Promise<readonly StoredAssignment[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new RangeError("invalid reconciliation batch size");
+    const rows = await this.database.prepare(assignmentSelect(
+      "WHERE a.status IN ('accepted', 'unknown') AND a.remote_run_id IS NOT NULL AND a.remote_run_id <> '' AND a.id > ? ORDER BY a.id LIMIT ?",
+    )).all(afterId, limit) as AssignmentRow[];
+    return rows.map(toStoredAssignment);
   }
 
   private async reserveForTask(task: TaskRow, now: number, heartbeatTtlMs: number, reservationTtlMs: number): Promise<StoredAssignment> {

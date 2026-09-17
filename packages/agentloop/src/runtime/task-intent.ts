@@ -111,7 +111,7 @@ function inferSourceNeedFromIntent(text: string): SourceNeed {
   if (/(?:source[- ]grounded|source[_ -]summary|source[_ -]urls?|source\s+evidence|research|lookup|cite|citation|standard|policy|regulation|rating|certification|public\s+sources?|web\s+sources?|internet|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处|互联网|联网|网上|公开资料|公开材料|公开信息)/iu.test(text)) {
     return "source_grounded";
   }
-  if (FRESH_LOOKUP_PATTERN.test(text)) return "lookup_lite";
+  if (hasFreshExternalLookupNeed(text)) return "lookup_lite";
   // A specific named external fact does not become safe to answer from model
   // memory merely because the user omitted words such as "search" or
   // "source". Keep this category deliberately structural: a factual question
@@ -129,7 +129,7 @@ function researchPolicyForIntentText(
   _toolNames: readonly string[],
 ): ResearchPolicy | undefined {
   if (sourceNeed === "none") return undefined;
-  const freshnessNeed = FRESH_LOOKUP_PATTERN.test(text)
+  const freshnessNeed = hasFreshExternalLookupNeed(text)
     ? "current"
     : "none";
   if (sourceNeed === "strict_user_source") {
@@ -207,17 +207,30 @@ function matchedConversationAnswerSignals(text: string): string[] {
 }
 
 function matchedSourceSignals(text: string): string[] {
-  return matchSignals(text, [
+  return [
+    ...matchSignals(text, [
     ["strict", /strict source|official source|authoritative|标准全文|官方|权威|严格来源|精确条款|逐条核验/iu],
     ["source_grounded", /source[- ]grounded|source[_ -]summary|source[_ -]urls?|source\s+evidence|research|lookup|cite|citation|standard|policy|regulation|rating|certification|public\s+sources?|web\s+sources?|internet|来源|调研|检索|引用|标准|政策|法规|评级|认证|出处|互联网|联网|网上|公开资料|公开材料|公开信息/iu],
-    ["fresh", FRESH_LOOKUP_PATTERN],
-  ]);
+    ]),
+    ...(hasFreshExternalLookupNeed(text) ? ["fresh"] : []),
+  ];
 }
 
 // Keep the temporal vocabulary used for source need, research policy, and
 // diagnostic signals in one place.  A bounded recent period still needs a
 // live source even when the user does not explicitly say "search" or "web".
 const FRESH_LOOKUP_PATTERN = /(?:latest|current|today|recent|最新|当前|今天|最近|近期|近\s*(?:一)?周|过去\s*(?:一)?周|近\s*七天|过去\s*七天|市场价格|价格|报价|行情|多少钱)/iu;
+const LOCAL_EXECUTABLE_CONTRACT_REFERENCE_PATTERN = /(?:\b(?:load|inspect|read)\b|加载|读取|确认|查看).{0,48}(?:\b(?:skill|tool|renderer|render(?:er)?|schema|enum|parameter|capabilit(?:y|ies))\b|渲染(?:器|\s*schema|契约)?|合法参数|设计轴|工具|技能)/iu;
+
+/**
+ * Freshness can qualify either an external fact ("current price") or a
+ * Runtime-owned contract ("load the current renderer schema"). The latter is
+ * acquired through the already-authorized Skill/Tool interface, not web
+ * research, and must not create a fictitious source-grounding requirement.
+ */
+function hasFreshExternalLookupNeed(text: string): boolean {
+  return FRESH_LOOKUP_PATTERN.test(text) && !LOCAL_EXECUTABLE_CONTRACT_REFERENCE_PATTERN.test(text);
+}
 const SPECIFIC_EXTERNAL_FACT_QUESTION_PATTERN = /(?:\b(?:what|who|where|when|which)\s+(?:is|are|was|were|does|did)\b|是什么|指什么|什么意思|谁是|何时|什么时候|哪(?:个|些|家|项)|介绍一下|说明一下)/iu;
 const EXTERNAL_ENTITY_SIGNAL_PATTERN = /(?:\d{2,}|["“”'][^"“”']{2,}["“”']|\b(?:company|corporation|group|organization|institution|agency|project|program|initiative|policy|standard|product|model)\b|集团|公司|机构|组织|部门|协会|学校|医院|项目|工程|计划|行动|政策|标准|产品|型号)/iu;
 

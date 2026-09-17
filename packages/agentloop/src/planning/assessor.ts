@@ -309,7 +309,9 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
         satisfied,
         rationale: satisfied
           ? "The completion candidate and required observable Runtime operations satisfy the principle assessment gate."
-          : rejectedEvidenceGateRationale(nonEmpty, receipts, requiredKinds, successfulToolRefs),
+          : rejectedEvidenceGateRationale(nonEmpty, receipts,
+            requiredKinds.includes(criterion.id) || criterion.id === "explicit_caveats" ? [criterion.id] : requiredKinds,
+            successfulToolRefs, deliveryCandidate),
         evidenceRefs: satisfied
           ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId), ...(deliveryCandidate?.sourceToolCallIds ?? [])]
           : successfulToolRefs,
@@ -324,7 +326,11 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     }));
     const feedback = criteria.every((criterion) => criterion.satisfied)
       ? ""
-      : "Completion rejected by principle assessment; provide the missing observable Runtime operation or repair the failed artifact.";
+      : [
+        "Completion rejected by Runtime evidence assessment.",
+        ...criteria.filter((criterion) => !criterion.satisfied).map((criterion) => `${criterion.criterionId}: ${criterion.rationale}`),
+        "A missing observable receipt is not proof that the operation never ran. Reuse the bound operation result; if its receipt was lost, repair the evidence handoff or the Plan contract. Rewriting the answer cannot create an operation receipt.",
+      ].join("\n");
     return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
   }
 }
@@ -336,6 +342,7 @@ interface RuntimeObservableReceipt {
   readonly artifactPath?: string;
   readonly satisfied: ReadonlySet<string>;
   readonly failed: ReadonlySet<string>;
+  readonly caveatsRecorded: boolean;
 }
 
 /**
@@ -388,6 +395,9 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
         ...(schema === "agentloop.artifactAcceptance/v1" ? { artifactPath: artifactPathFromRecord(parsed) } : {}),
         satisfied: new Set(evidenceKinds.satisfied),
         failed: new Set(evidenceKinds.failed),
+        caveatsRecorded: Array.isArray((nestedReceipt ?? parsed).caveats)
+          || evidenceKinds.satisfied.includes("explicit_caveats")
+          || evidenceKinds.caveated.includes("explicit_caveats"),
       });
     }
   }
@@ -402,6 +412,9 @@ function criterionSatisfiedByEvidenceGate(
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
 ): boolean {
+  // Semantic caveat evidence must not inherit an unrelated source/artifact
+  // failure (nor automatically pass when all other operation receipts pass).
+  if (criterionId === "explicit_caveats") return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate);
   if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
@@ -414,8 +427,9 @@ function evidenceKindSatisfiedByGate(
   candidate?: RuntimeDeliveryCandidate,
 ): boolean {
   if (kind === "explicit_caveats") {
-    return candidate?.evidenceKinds.satisfied.includes(kind) === true
-      || candidate?.evidenceKinds.caveated.includes(kind) === true;
+    // This proves only that limitations were recorded, not that the model's
+    // explanation is sufficient. A Plan requirement itself is not evidence.
+    return receipts.some((receipt) => !receipt.failed.has(kind) && receipt.caveatsRecorded);
   }
   if (kind === "delivery_receipt") {
     return candidate?.deliveryReceipt !== undefined
@@ -474,12 +488,13 @@ function rejectedEvidenceGateRationale(
   receipts: readonly RuntimeObservableReceipt[],
   requiredKinds: readonly string[],
   successfulToolRefs: readonly string[],
+  candidate?: RuntimeDeliveryCandidate,
 ): string {
   if (!nonEmpty) return "The candidate output is empty.";
   if (successfulToolRefs.length === 0) return "No successful Runtime operation is available.";
   if (receipts.length === 0 && requiredKinds.length > 0) return "No observable Runtime artifact or acceptance receipt is available for the principle assessment gate.";
-  const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs));
-  if (missing.length > 0) return `The principle assessment gate is missing required evidence kind(s): ${missing.join(", ")}.`;
+  const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, candidate));
+  if (missing.length > 0) return `No bound observable evidence confirms: ${missing.join(", ")}. This does not establish that the underlying content or operation is absent.`;
   return "The observable Runtime operations do not satisfy the principle assessment gate.";
 }
 

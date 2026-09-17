@@ -46,6 +46,10 @@ A `.docx` is a ZIP archive of XML files. Choose your approach by task:
 
 After writing a `.docx`, render it and look at it:
 
+> This visual conversion requires an Office-capable Host. The shared Runtime
+> baseline intentionally does not install LibreOffice; when it is unavailable,
+> perform structural validation and report that visual rendering was not run.
+
 ```bash
 python scripts/office/soffice.py --headless --convert-to pdf output.docx
 pdftoppm -jpeg -r 100 output.pdf page
@@ -98,4 +102,4 @@ The script writes `comments.xml`, `commentsExtended.xml`, `commentsIds.xml`, `co
 
 ## Dependencies
 
-`docx` (npm, preinstalled — install only if `require('docx')` fails) · `pandoc` · LibreOffice (`soffice`) · `pdftoppm` (Poppler)
+`docx` (npm, preinstalled — install only if `require('docx')` fails) · `pandoc` · `pdftoppm` (Poppler). LibreOffice (`soffice`) is an optional Office-capable Host dependency for visual conversion and legacy `.doc` handling.

@@ -64,8 +64,9 @@ export function buildStepRuntimeContextSnapshot(input: {
         toolSelectionPolicy: {
           executionBindingGuidesCurrentObjective: true,
           instruction: "Use the step execution binding to understand the current objective, evidence contract, and preferred tool families. Choose among currently exposed Run-authorized tools to satisfy that contract.",
+          marginalBenefitDecision: "Before every next action, decide whether it has material expected benefit for an unmet current-step success criterion. Prefer the action with the greatest evidence or acceptance gain. Do not act merely to continue the loop: when no authorized action can materially improve the current evidence, directly submit a concise completion candidate with explicit caveats for the remaining gap.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
-          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, contradictory, or explicitly refreshed requirements. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
+          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. When successful scope-matched evidence obtained in the current stage contradicts a dependency, use the current-stage evidence for this stage; preserve the earlier result as provenance and do not re-acquire data solely to reconcile it. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },
         currentPlanStep: {
           id: input.step.id,
@@ -99,6 +100,12 @@ export function buildStepRuntimeContextSnapshot(input: {
           return { stepId: dependencyId, output: dependency?.output ?? "" };
         }),
         ...(dependencyEvidenceBindings === undefined ? {} : { dependencyEvidenceBindings }),
+        ...(input.operationProfile.id === "data_analysis" && dependencyEvidenceBindings !== undefined
+          ? {
+            stageEvidencePrecedence:
+              "For multi-stage data analysis, dependency evidence is input, not a veto over this stage. If this stage obtains successful evidence with a comparable scope that conflicts with a prior-stage result, use this stage's evidence as authoritative for the current conclusion. Preserve the prior result as provenance and disclose a material conflict, but do not re-fetch or revalidate solely to reconcile the two. Escalate only for an explicit user verification request, an evidence gap, failed/incomplete current evidence, or a Runtime high-risk gate.",
+          }
+          : {}),
         ...(hasStructuredJsonArtifactDependencies
           ? {
             structuredArtifactConsumptionDiscipline:
@@ -141,7 +148,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           ? {
             researchPolicy: input.taskProfile.researchPolicy,
             researchDiscipline:
-              "Apply researchPolicy only to the current Plan step. Use complete intent-level queries, rank sources by relevance, traceability, and reliability, and classify low-value pages as caveats. Search results establish discovery references, not source-content evidence: when the current evidence contract requires source_summary, read the strongest relevant accessible source with an exposed source-content Tool before proposing completion. Official or first-party sources are preferred when useful and accessible, but are a completion gate only when researchPolicy.authorityNeed is official_required. Stop when the policy budget or source-summary boundary is reached.",
+              "Apply researchPolicy only to the current Plan step. Autonomously expand the search vocabulary from the task's entities, aliases, official names, dates, stages, and adjacent domain concepts, but make each query serve a concrete evidence gap. Rank a possible next retrieval only by its expected marginal gain in claim coverage, independent corroboration, freshness, or citation traceability; if it has no material gain, summarize instead. Search results establish discovery references, not source-content evidence: when the current evidence contract requires source_summary, read the strongest relevant accessible source with an exposed source-content Tool before proposing completion. Official or first-party sources are preferred when useful and accessible, but are a completion gate only when researchPolicy.authorityNeed is official_required. Never exceed three web searches for a current Plan step, even when the policy budget is larger; after that boundary, summarize canonical evidence and explicitly caveat unresolved claims.",
           }
           : {}),
         ...(usesVisibleDirectoryTools
@@ -513,7 +520,7 @@ function buildDependencyEvidenceBindings(
   return {
     schema: "agentloop.dependencyEvidenceBindings/v1",
     instruction:
-      "Evaluate these dependency bindings before acquiring new source evidence. Treat satisfied kinds and artifact refs as reusable inputs for the current step; preserve caveats and acquire only missing, stale, contradictory, or explicitly refreshed evidence.",
+      "Evaluate these dependency bindings before acquiring new source evidence. Treat satisfied kinds and artifact refs as reusable inputs for the current step; preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
     currentStepId: step.id,
     bindings,
   };
@@ -618,7 +625,7 @@ function buildConversationReuseContext(
   return {
     schema: "agentloop.conversationReuseContext/v1",
     instruction:
-      "Use prior accepted step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. Re-read or regenerate only when the current step needs fresher, stricter, missing, or contradictory evidence. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
+      "Use prior accepted step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. Re-read or regenerate only when the current step needs fresher, stricter, missing, or unresolved conflicting evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the prior result as provenance instead of re-acquiring data solely to reconcile it. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
     reusableArtifacts: workset.reusableArtifacts,
     ...(sourceSummaries.length === 0 ? {} : { sourceSummaries }),
     ...(completedStepHandoffs.length === 0 ? {} : { completedStepHandoffs }),

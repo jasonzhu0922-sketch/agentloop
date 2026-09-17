@@ -37,15 +37,23 @@ export function projectAssistantEvent(assistant, event) {
       ...(data.failedBoundary && typeof data.failedBoundary === "object" ? { failedBoundary: data.failedBoundary } : {}),
     };
   }
+  if (event.type === "run.checkpoint_created" && typeof data.checkpointId === "string") {
+    assistant.checkpoint = {
+      id: data.checkpointId,
+      reason: typeof data.reason === "string" ? data.reason : "execution_authority_lost",
+      status: "available",
+    };
+  }
   applyPlanStepEvent(assistant, event);
   if (event.type === "run.completed") {
     if (typeof data.output === "string") assistant.text = data.output;
     assistant.status = "completed";
+    assistant.error = undefined;
   }
   if (event.type === "run.failed") {
     assistant.status = "failed";
     assistant.error = failureMessage(data);
-    assistant.text = assistant.error;
+    assistant.text = typeof data.output === "string" && data.output.trim() ? data.output : assistant.error;
   }
   if (event.type === "run.cancelled") {
     assistant.status = "cancelled";

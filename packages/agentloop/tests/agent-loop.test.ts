@@ -1328,7 +1328,7 @@ test("repeated prepare-stage argument rejection stops before burning the step bu
       && error.message.includes("without forward progress"),
   );
 
-  assert.equal(calls, 3);
+  assert.equal(calls, 4); // One terminal report after the no-progress stop.
   assert.equal(executions, 0);
   const noProgress = events.filter((event) => event.type === "loop.no_progress");
   assert.equal(noProgress.length, 2);
@@ -1613,7 +1613,7 @@ test("candidate repair assessment limit can be blocked for unmet prerequisite cr
     (error) => error instanceof Error && /cannot be accepted with a repair-limit caveat/.test(error.message),
   );
 
-  assert.equal(calls, 3);
+  assert.equal(calls, 4); // Three rejected candidates, then one non-completion report.
   assert.equal(events.filter((event) => event.type === "candidate.repair_limit_blocked").length, 1);
   assert.equal(events.filter((event) => event.type === "candidate.completion_caveated").length, 0);
 });
@@ -3749,6 +3749,288 @@ test("an invalid final convergence candidate receives bounded repair grace befor
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
   assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("convergence keeps tools available until every receipt-backed evidence obligation is satisfied", async () => {
+  const events: RuntimeEvent[] = [];
+  let extractCalls = 0;
+  let aggregateCalls = 0;
+  const extract: RuntimeTool<unknown> = {
+    name: "extract_table",
+    description: "Extract a durable task table",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      extractCalls += 1;
+      return {
+        schema: "agentloop.visibleTableExtraction/v1",
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          evidenceKinds: {
+            satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      };
+    },
+  };
+  const aggregate: RuntimeTool<unknown> = {
+    name: "aggregate_table",
+    description: "Aggregate extracted tasks by owner",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      aggregateCalls += 1;
+      return {
+        schema: "agentloop.tableArtifactAggregation/v1",
+        evidenceReceipt: {
+          schema: "agentloop.toolEvidenceReceipt/v1",
+          evidenceKinds: {
+            satisfied: ["derived_aggregation"],
+            caveated: [],
+            failed: [],
+          },
+        },
+      };
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "extract-1", name: "extract_table", arguments: {} }],
+        };
+      }
+      if (modelCalls === 2) {
+        assert.equal(request.tools.some((tool) => tool.name === "aggregate_table"), true);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "aggregate-1", name: "aggregate_table", arguments: {} }],
+        };
+      }
+      assert.deepEqual(request.tools, []);
+      return {
+        content: "已按责任人完成任务数聚合，并保留了数据范围说明。",
+        finishReason: "stop",
+        toolCalls: [],
+      };
+    },
+  };
+  const grant = makeGrant(["extract_table", "aggregate_table"]);
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Aggregate the task table.",
+    input: "统计每位责任人的任务数",
+    model,
+    tools: new ToolRegistry([extract, aggregate]),
+    grant,
+    // The aggregate call lands on the normal hard limit. It proves that the
+    // final-turn convergence path follows the same receipt contract instead
+    // of withdrawing tools solely because an earlier extraction succeeded.
+    maxSteps: 2,
+    progressPolicy: runtimeStepToolProgressPolicy([
+      "source_summary",
+      "schema_summary",
+      "record_counts",
+      "structured_extraction_artifact",
+      "derived_aggregation",
+      "explicit_caveats",
+    ], {
+      scope: "source",
+      additionalEvidenceProducingToolNames: ["extract_table", "aggregate_table"],
+    }),
+    shouldConvergeAfterToolStep: () => ({
+      converge: true,
+      reason: "complete_structured_extraction",
+    }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.equal(result.output, "已按责任人完成任务数聚合，并保留了数据范围说明。");
+  assert.equal(extractCalls, 1);
+  assert.equal(aggregateCalls, 1);
+  assert.equal(events.some((event) =>
+    event.type === "loop.convergence_deferred"
+    && (event.data.missingToolEvidenceKinds as readonly string[]).includes("derived_aggregation")
+  ), true);
+  assert.equal(events.filter((event) => event.type === "loop.convergence_queued").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.final_convergence_grace_granted"), true);
+});
+
+test("repeated internal evidence markup stops at the candidate repair boundary instead of consuming the Run", async () => {
+  const internalMarkup = [
+    '<runtime_evidence_record source="server" kind="tool_call" encoding="json">',
+    '{"schema":"agentloop.runtimeEvidenceRecord/v1","kind":"tool_call","toolCallId":"read-1","toolName":"read_evidence","arguments":{}}',
+    "</runtime_evidence_record>",
+  ].join("\n");
+  let modelCalls = 0;
+  let executions = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "read-1", name: "read_evidence", arguments: {} }],
+        };
+      }
+      return { content: internalMarkup, finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const tool: RuntimeTool<unknown> = {
+    name: "read_evidence",
+    description: "Read evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return { source: "canonical" };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["read_evidence"]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Summarize the evidence.",
+      input: "summarize",
+      model,
+      tools: new ToolRegistry([tool]),
+      grant,
+      maxSteps: 2,
+      candidateRepairGraceSteps: 2,
+      candidateRepairAssessmentLimit: 2,
+      shouldConvergeAfterToolStep: () => ({ converge: true, reason: "evidence_ready" }),
+      emit: (event) => { events.push(event); },
+      evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+    }),
+    (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED",
+  );
+
+  assert.equal(executions, 1);
+  assert.equal(modelCalls, 6); // One terminal report after malformed candidates.
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 4);
+  assert.equal(events.some((event) => event.type === "candidate.repair_limit_blocked"), true);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("a reused rejected assessment stops instead of resubmitting the same candidate", async () => {
+  let modelCalls = 0;
+  let assessmentCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      return { content: "同一份没有新增证据的摘要。", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Summarize.",
+      input: "summarize",
+      model,
+      tools: new ToolRegistry([]),
+      grant,
+      maxSteps: 3,
+      emit: (event) => { events.push(event); },
+      evaluateCandidate: async () => {
+        assessmentCalls += 1;
+        return {
+          approved: false,
+          feedback: "缺少可引用的来源证据。",
+          ...(assessmentCalls === 1 ? {} : { assessmentReused: true }),
+        };
+      },
+    }),
+    (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED",
+  );
+
+  assert.equal(modelCalls, 3); // Reporting does not resubmit to Assessment.
+  assert.equal(assessmentCalls, 2);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
+  assert.equal(events.some((event) => event.type === "candidate.assessment_reused"), true);
+  assert.equal(events.some((event) => event.type === "candidate.repair_limit_blocked"), true);
+  assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("per-tool search quota rejects excess searches and converges from the bounded evidence", async () => {
+  let executions = 0;
+  let modelCalls = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "websearch",
+    description: "Search public sources",
+    inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, value) => {
+      executions += 1;
+      return { query: (value as { query: string }).query, source: "search" };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: ["a", "b", "c", "d"].map((id) => ({
+            id: `search-${id}`,
+            name: "websearch",
+            arguments: { query: id },
+          })),
+        };
+      }
+      assert.deepEqual(request.tools, []);
+      return { content: "已基于三轮检索结果完成摘要，并标注尚未核实的部分。", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["websearch"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Research public information.",
+    input: "research",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    maxSteps: 2,
+    toolCallLimits: { websearch: 3 },
+    shouldConvergeAfterToolStep: (context) => ({
+      converge: context.toolEvidence.filter((item) => item.toolName === "websearch" && !item.isError).length >= 3,
+      reason: "search_limit",
+    }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /三轮检索/);
+  assert.equal(executions, 3);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.filter((event) => event.type === "tool.rejected").length, 1);
+  assert.equal(events.some((event) => event.type === "loop.convergence_requested"), true);
 });
 
 test("streaming turns emit live deltas before the durable assistant checkpoint", async () => {

@@ -41,12 +41,15 @@ import {
   deriveEvidenceCompletionCandidate,
   evaluateRuntimeToolProgress,
   initialRuntimeToolProgressState,
+  candidateRejectionProgressHint,
   type RuntimeToolProgressPolicy,
 } from "./tool-progress-policy.ts";
 import {
   createHumanLoopControlSignal,
   firstHumanLoopControlSignal,
 } from "./runtime-control-signal.ts";
+import { WorkProductContext, type WorkProductContextOptions } from "./work-product-context.ts";
+import { CompletionFailure } from "./completion-failure.ts";
 
 export interface AgentLoopOptions {
   readonly runId: string;
@@ -71,8 +74,16 @@ export interface AgentLoopOptions {
   readonly convergenceGraceSteps?: number;
   /** Additional tool-enabled steps available when a completion candidate needs another Runtime repair turn. */
   readonly candidateRepairGraceSteps?: number;
-  /** Rejected assessed candidates allowed before accepting the latest non-empty output with a caveat. */
+  /** Bounds rejected assessed candidates and malformed no-tool candidates before the Runtime terminates or caves the result. */
   readonly candidateRepairAssessmentLimit?: number;
+  /** The Run owner may still revise a failed leaf; report only if it commits failure. */
+  readonly deferFailureReport?: boolean;
+  /**
+   * Runtime-enforced per-Tool call ceilings for this Plan step.  These cap
+   * external effects; they do not decide whether the model should summarize
+   * earlier when the next acquisition would add no material value.
+   */
+  readonly toolCallLimits?: Readonly<Record<string, number>>;
   readonly maxToolResultCharacters?: number;
   readonly maxParallelToolCalls?: number;
   readonly contextPolicy?: ContextPolicy;
@@ -87,6 +98,8 @@ export interface AgentLoopOptions {
   ) => boolean | Promise<boolean>;
   readonly progressPolicy?: RuntimeToolProgressPolicy;
   readonly stepExecutionStrategy?: StepExecutionStrategy;
+  /** Stage 3: current-leaf visibility only; no assessment/recovery policy change. */
+  readonly workProductContext?: WorkProductContextOptions;
   readonly signal?: AbortSignal;
   readonly emit?: RuntimeEventSink;
   readonly actionTracker?: {
@@ -190,8 +203,10 @@ const INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT = [
 const DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT = 2;
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
+  const workProducts = options.workProductContext === undefined ? undefined : new WorkProductContext(options.runId, options.workProductContext);
   const emit = async (event: RuntimeEvent): Promise<void> => {
-    await options.emit?.(event);
+    const observed = workProducts?.capture(event) ?? event;
+    await options.emit?.(observed);
   };
   const maxToolResultCharacters = options.maxToolResultCharacters ?? 50_000;
   const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
@@ -204,9 +219,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     0,
     options.candidateRepairAssessmentLimit ?? DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT,
   );
+  const toolCallLimits = normalizeToolCallLimits(options.toolCallLimits);
   let grantedCandidateRepairGraceSteps = 0;
   let grantedFinalConvergenceGraceSteps = 0;
   let rejectedCandidateAssessments = 0;
+  let rejectedUnassessableCandidates = 0;
   let pendingCandidateRepairDirective: string | undefined;
   const messages: ModelMessage[] = [
     ...(options.conversationHistory ?? []),
@@ -252,6 +269,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let convergenceRequested = false;
   let previousPrepareRejectionSignature: string | undefined;
   let consecutivePrepareRejectionSteps = 0;
+  let invalidHumanLoopAttempts = 0;
+  let humanLoopRepairPending = false;
   let toolProgressState = initialRuntimeToolProgressState();
   let stalled = false;
   let requestedConvergenceReason: string | undefined;
@@ -292,6 +311,98 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
     }
     return evaluation;
+  };
+  const failureReport = async (step: number, output: string, evaluation: CandidateCompletionEvaluation): Promise<string> => {
+    throwIfAborted(options.signal);
+    const missing = evaluation.failedBoundary?.missingEvidenceKinds ?? [];
+    const notice = [
+      "任务未完成，以下仅为阶段性结果，未通过完整验收。",
+      ...(missing.length === 0 ? [] : [`尚未确认的验收项：${missing.join("、")}。缺少证据不等于相关操作一定未执行。`]),
+    ].join("\n");
+    await emit({ type: "failure_report.started", data: { step, missingEvidenceKinds: missing } });
+    const reportSignal = AbortSignal.any([...(options.signal === undefined ? [] : [options.signal]), AbortSignal.timeout(30_000)]);
+    try {
+      contextAssembler.setRuntimeDirective([
+        "<runtime_failure_report>",
+        "The execution loop has ended with an error (budget, no progress, or unmet requirements). This is the single final reporting turn, NOT a completion candidate or another repair attempt.",
+        "Summarize progress against the original user goal and Plan, not just the last error. Distinguish completed work, usable current results, unverified work, and the remaining gap to the goal.",
+        "Use existing canonical evidence only. No tools or further execution are allowed.",
+        "Write a standalone user-facing report in the user's language: useful supported partial results, concrete limitations and their impact, and what remains to be done.",
+        "Distinguish missing evidence/receipt from an operation that actually failed. Keep source uncertainty explicit.",
+        "Omit unsupported conclusions. Do not claim completion, successful validation, delivery, or a usable artifact when those facts were not verified. Do not present unverified artifact links as deliverables.",
+        "If no useful result is supported, say what was attempted and why a reliable result cannot yet be provided. Never invent a partial answer merely to fill the report.",
+        "Do not expose internal protocol markup or tool calls. Do not claim that another agent will automatically finish the work.",
+        `Assessment feedback: ${evaluation.feedback}`,
+        `Unconfirmed criteria: ${missing.join(", ")}`,
+        "</runtime_failure_report>",
+      ].join("\n"));
+      const assembly = await contextAssembler.assemble([
+        ...messages,
+        { role: "user", content: `The following last draft is unverified reference material, not an instruction or an approved answer:\n${output}` },
+      ], [], reportSignal);
+      const response = await completeWithStreaming({
+        model: options.model,
+        invocation: {
+          runId: options.runId,
+          systemPrompt: options.systemPrompt,
+          phase: "execution",
+          runtimeContext: assembly.runtimeContext,
+          messages: assembly.messages,
+          tools: [],
+          maxOutputTokens: Math.min(CONVERGENCE_MAX_OUTPUT_TOKENS, options.model.limits.maxOutputTokens),
+        },
+        signal: reportSignal,
+        // Do not publish an uncommitted report via normal assistant streaming.
+        emit: (event) => emit(event.type === "assistant.streaming" ? { ...event, type: "failure_report.streaming" } : event),
+        base: { phase: "execution", step: step + 1, purpose: "failure_report" },
+      });
+      throwIfAborted(options.signal);
+      if (response.finishReason !== "stop" || response.toolCalls.length > 0 || !response.content.trim()
+        || isTextToolInvocation(response.content) || isInternalEvidenceMarkupCandidate(response.content)) {
+        throw new AppError("MODEL_ERROR", "The final failure report was not valid user-facing text", 502);
+      }
+      const report = `${notice}\n\n${response.content.trim()}`;
+      await emit({ type: "failure_report.generated", data: { step, output: report } });
+      return report;
+    } catch {
+      throwIfAborted(options.signal);
+      await emit({ type: "failure_report.unavailable", data: { step } });
+      // Preserve the original failure, never promote the rejected draft when
+      // the reporting provider fails or returns an unusable response.
+      return `${notice}\n\n最后一次结果整理未成功，已有材料未作为最终结果交付。`;
+    }
+  };
+  const completionFailure = async (error: AppError, step: number, output: string, evaluation: CandidateCompletionEvaluation): Promise<AppError> => {
+    if (options.deferFailureReport) return new CompletionFailure(error, () => failureReport(step, output, evaluation));
+    return new AppError(error.code, error.message, error.status, {
+      ...error.details, partialOutput: await failureReport(step, output, evaluation),
+    });
+  };
+  const stopRepeatedAssessmentWithoutNewEvidence = async (input: {
+    readonly step: number;
+    readonly output: string;
+    readonly evaluation: CandidateCompletionEvaluation;
+  }): Promise<void> => {
+    if (input.evaluation.assessmentReused !== true || input.evaluation.approved) return;
+    await emit({
+      type: "candidate.repair_limit_blocked",
+      data: {
+        step: input.step,
+        output: input.output,
+        feedback: input.evaluation.feedback,
+        reason: "assessment_reused_without_new_evidence",
+      },
+    });
+    throw await completionFailure(new AppError(
+      "STEP_NOT_COMPLETED",
+      "The exact completion candidate was already rejected against the same evidence; resubmitting it has no material benefit.",
+      422,
+      {
+        feedback: input.evaluation.feedback,
+        repairExhausted: true,
+        ...(input.evaluation.failedBoundary === undefined ? {} : { failedBoundary: input.evaluation.failedBoundary }),
+      },
+    ), input.step, input.output, input.evaluation);
   };
   const evaluateToolBackedCandidate = async (input: {
     readonly step: number;
@@ -387,6 +498,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         completionCaveat,
       };
     }
+    await stopRepeatedAssessmentWithoutNewEvidence({
+      step: input.step,
+      output: input.output,
+      evaluation,
+    });
     rejectedCandidateAssessments += 1;
     if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
       if (evaluation.allowRepairLimitCompletion !== true) {
@@ -400,15 +516,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             candidateRepairAssessmentLimit,
           },
         });
-        throw new AppError(
+        throw await completionFailure(new AppError(
           "STEP_NOT_COMPLETED",
           "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
           422,
           {
             feedback: evaluation.feedback,
+            repairExhausted: true,
             ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
           },
-        );
+        ), input.step, input.output, evaluation);
       }
       const output = repairLimitCompletionOutput(input.output, candidateRepairAssessmentLimit);
       const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
@@ -441,13 +558,34 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       };
     }
     requestedConvergenceReason = undefined;
-    setCandidateRepairDirective(candidateRepairDirective(evaluation, input.rejectionDirective));
+    setCandidateRepairDirective([
+      candidateRepairDirective(evaluation, input.rejectionDirective),
+      candidateRejectionProgressHint({
+        policy: options.progressPolicy,
+        evidence: toolEvidence,
+        rejectedCandidateCount: rejectedCandidateAssessments,
+      }),
+    ].join("\n"));
     return undefined;
   };
+  let lastModelStep = 0;
+  try {
   for (let step = 1; step <= currentLimit(); step += 1) {
+    lastModelStep = step;
     throwIfAborted(options.signal);
     const inGrace = step > options.maxSteps;
     const hardLimit = currentLimit();
+    // A convergence turn removes every executable Tool.  It is only sound
+    // when the current step has no remaining receipt-backed obligation.  A
+    // caller-specific heuristic (for example, a complete source extraction)
+    // may say that exploration is no longer useful, but it cannot bypass a
+    // still-missing hard evidence kind such as derived_aggregation.
+    const stepEvidenceState = deriveRuntimeStepEvidenceState({
+      policy: options.progressPolicy,
+      evidence: toolEvidence,
+    });
+    const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
+    const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0;
     const finalConvergenceAllowed = requestedConvergenceReason !== undefined
       || step !== hardLimit
       || await shouldUseFinalConvergence(options.shouldUseFinalConvergence, {
@@ -457,7 +595,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         latestToolEvidence: toolEvidence,
         activatedSkillNames: [...activatedSkillNames],
       });
-    const convergenceOnly = toolEvidence.length > 0
+    const convergenceOnly = !humanLoopRepairPending
+      && toolEvidence.length > 0
+      && canConvergeFromCurrentEvidence
       && (requestedConvergenceReason !== undefined || (step === hardLimit && finalConvergenceAllowed));
     if (convergenceOnly) {
       convergenceRequested = true;
@@ -481,10 +621,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // Ported from OpenCode's materialization boundary: each model step gets a
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
     const grantedMaterialized = options.tools.materialize(options.grant);
-    const stepEvidenceState = deriveRuntimeStepEvidenceState({
-      policy: options.progressPolicy,
-      evidence: toolEvidence,
-    });
+    const workProductProjection = await workProducts?.project();
     const stepExecutionDecision = stepExecutionStrategy.prepareModelStep({
       modelStep: step,
       maxSteps: options.maxSteps,
@@ -494,6 +631,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       priorToolEvidence: toolEvidence,
       stepEvidenceState,
       stepSemanticFrame: options.stepSemanticFrame,
+      ...(workProductProjection === undefined ? {} : { workProductContext: workProductProjection }),
     });
     validateToolRecommendations(
       convergenceOnly ? [] : grantedMaterialized.definitions,
@@ -505,7 +643,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       grantedMaterialized.definitions,
       stepExecutionDecision.toolCatalog.preferredToolNames,
     );
-    contextAssembler.setRuntimeStepFrame(JSON.stringify(stepExecutionDecision.loopStepFrame));
+    // Runtime owns fact visibility, including with strategies that predate this optional input.
+    // Strategy recommendations and completion gates remain unchanged.
+    contextAssembler.setRuntimeStepFrame(JSON.stringify(workProductProjection === undefined
+      ? stepExecutionDecision.loopStepFrame
+      : { ...stepExecutionDecision.loopStepFrame, currentEvidenceState: undefined, workProductContext: workProductProjection }));
     contextAssembler.setPromptProjectionPolicy(stepExecutionDecision.promptProjection);
     await emit({
       type: "step_execution.policy_applied",
@@ -551,7 +693,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         maxToolResultCharacters,
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
-        allowEarlyDispatch: options.progressPolicy === undefined,
+        // A call ceiling is checked against the whole provider response.  Do
+        // not dispatch a streamed call before that complete batch can be
+        // admitted against its remaining quota.
+        allowEarlyDispatch: options.progressPolicy === undefined && toolCallLimits.size === 0,
       }, earlyOutcomes);
       if (
         response.toolCalls.length === 0
@@ -681,12 +826,39 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           },
         });
         removeRejectedAssistantCandidate(messages, assistantMessage);
-        // This candidate never reaches the assessor, but it is still a
-        // Runtime rejection that needs the same bounded repair path. Without
-        // this transition, an invalid final convergence answer can consume
-        // the last step and bypass the configured repair budget entirely.
+        // This candidate never reaches Assessment, but it must consume the
+        // same bounded repair budget.  Otherwise a provider that imitates a
+        // server transcript can exhaust the Run without acquiring any new
+        // evidence or producing a user-visible summary.
+        rejectedUnassessableCandidates += 1;
+        if (rejectedUnassessableCandidates >= Math.max(1, candidateRepairAssessmentLimit)) {
+          await emit({
+            type: "candidate.repair_limit_blocked",
+            data: {
+              step,
+              output: response.content,
+              feedback,
+              rejectedCandidateAssessments: rejectedUnassessableCandidates,
+              rejectedUnassessableCandidates,
+              candidateRepairAssessmentLimit,
+            },
+          });
+          throw new AppError(
+            "STEP_NOT_COMPLETED",
+            "The model repeatedly emitted internal Runtime markup instead of a user-visible completion candidate.",
+            422,
+            { feedback, rejectedUnassessableCandidateCount: rejectedUnassessableCandidates },
+          );
+        }
         await grantCandidateRepairGrace(step, feedback);
-        setCandidateRepairDirective(INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT);
+        setCandidateRepairDirective([
+          INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT,
+          candidateRejectionProgressHint({
+            policy: options.progressPolicy,
+            evidence: toolEvidence,
+            rejectedCandidateCount: rejectedUnassessableCandidates,
+          }),
+        ].join("\n"));
         continue;
       }
       const evaluation = await evaluateCandidate(step, {
@@ -770,6 +942,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           completionCaveat,
         };
       }
+      await stopRepeatedAssessmentWithoutNewEvidence({
+        step,
+        output: response.content,
+        evaluation,
+      });
       rejectedCandidateAssessments += 1;
       if (rejectedCandidateAssessments > candidateRepairAssessmentLimit) {
         if (evaluation.allowRepairLimitCompletion !== true) {
@@ -783,15 +960,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               candidateRepairAssessmentLimit,
             },
           });
-          throw new AppError(
+          throw await completionFailure(new AppError(
             "STEP_NOT_COMPLETED",
             "The latest completion candidate still fails required success criteria and cannot be accepted with a repair-limit caveat.",
             422,
             {
               feedback: evaluation.feedback,
+              repairExhausted: true,
               ...(evaluation.failedBoundary === undefined ? {} : { failedBoundary: evaluation.failedBoundary }),
             },
-          );
+          ), step, response.content, evaluation);
         }
         const output = repairLimitCompletionOutput(response.content, candidateRepairAssessmentLimit);
         const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
@@ -825,7 +1003,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       removeRejectedAssistantCandidate(messages, assistantMessage);
       await grantCandidateRepairGrace(step, evaluation.feedback);
       setCandidateRepairDirective(
-        candidateRepairDirective(evaluation, "Completion was rejected. Repair this step using the available evidence."),
+        [
+          candidateRepairDirective(evaluation, "Completion was rejected. Repair this step using the available evidence."),
+          candidateRejectionProgressHint({
+            policy: options.progressPolicy,
+            evidence: toolEvidence,
+            rejectedCandidateCount: rejectedCandidateAssessments,
+          }),
+        ].join("\n"),
       );
       continue;
     }
@@ -916,7 +1101,38 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       // dispatched and are present in earlyOutcomes; only dispatch the rest.
       const remainingCalls = response.toolCalls.filter((call) => !earlyOutcomes.has(call.id));
       const prepared: PreparedEntry[] = [];
+      const quotaRejectedOutcomes = new Map<string, ToolOutcome>();
+      const admittedToolCalls = new Map<string, number>();
       for (const call of remainingCalls) {
+        const limit = toolCallLimits.get(call.name);
+        const priorCalls = toolEvidence.filter((item) => item.toolName === call.name).length;
+        const admittedCalls = admittedToolCalls.get(call.name) ?? 0;
+        if (limit !== undefined && priorCalls + admittedCalls >= limit) {
+          const message = `Tool call limit reached for ${call.name}: at most ${limit} call(s) are allowed for this Plan step`;
+          await emit({
+            type: "tool.rejected",
+            data: {
+              step,
+              toolCallId: call.id,
+              toolName: call.name,
+              reason: message,
+              invocationStatus: "rejected",
+              operationStatus: "unknown",
+              isError: true,
+              failurePhase: "runtime",
+            },
+          });
+          quotaRejectedOutcomes.set(call.id, {
+            call,
+            content: message,
+            invocationStatus: "rejected",
+            operationStatus: "unknown",
+            isError: true,
+            failurePhase: "runtime",
+          });
+          continue;
+        }
+        admittedToolCalls.set(call.name, admittedCalls + 1);
         try {
           const value = grantedMaterialized.prepare(call);
           await emit({
@@ -966,6 +1182,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       outcomes = response.toolCalls.map((call) => {
         const early = earlyOutcomes.get(call.id);
         if (early !== undefined) return early;
+        const quotaRejected = quotaRejectedOutcomes.get(call.id);
+        if (quotaRejected !== undefined) return quotaRejected;
         return lateOutcomes[lateIndex++];
       });
     }
@@ -1040,21 +1258,40 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     // Calling the Runtime-owned HIL Tool is an explicit assertion that this
-    // Step cannot safely advance without a user response. If its request is
-    // malformed, no durable request exists for the user to answer. Treat that
-    // as a control-boundary failure rather than a normal tool repair, which
-    // could otherwise continue to a delivery without the requested approval.
+    // Step cannot safely advance without a user response. A Provider can emit
+    // malformed function arguments before the Tool executes, so allow one
+    // bounded repair turn. That turn remains HIL-blocked: it cannot produce an
+    // artifact or a completion candidate in place of a durable request.
     const rejectedHumanLoop = outcomes.find((outcome) =>
       outcome.call.name === HUMAN_LOOP_TOOL_NAME
       && outcome.isError
       && outcome.failurePhase === "prepare"
     );
     if (rejectedHumanLoop !== undefined) {
+      invalidHumanLoopAttempts += 1;
+      await emit({
+        type: "human_loop.invalid",
+        data: {
+          step,
+          toolCallId: rejectedHumanLoop.call.id,
+          attempt: invalidHumanLoopAttempts,
+          reason: rejectedHumanLoop.content,
+        },
+      });
+      if (invalidHumanLoopAttempts === 1) {
+        humanLoopRepairPending = true;
+        contextAssembler.setRuntimeDirective(invalidHumanLoopRepairDirective(rejectedHumanLoop.content));
+        continue;
+      }
       throw new AppError(
         "HUMAN_LOOP_INVALID",
         "Human-in-the-Loop request must be valid before this Step can continue",
         422,
-        { sourceToolCallId: rejectedHumanLoop.call.id, reason: rejectedHumanLoop.content },
+        {
+          sourceToolCallId: rejectedHumanLoop.call.id,
+          reason: rejectedHumanLoop.content,
+          attempts: invalidHumanLoopAttempts,
+        },
       );
     }
 
@@ -1151,7 +1388,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       latestToolEvidence,
       activatedSkillNames: [...activatedSkillNames],
     });
-    if (convergenceDecision.converge) {
+    const evidenceStateAfterToolStep = deriveRuntimeStepEvidenceState({
+      policy: options.progressPolicy,
+      evidence: toolEvidence,
+    });
+    const missingToolEvidenceKindsAfterToolStep = evidenceStateAfterToolStep?.missingToolEvidenceKinds ?? [];
+    const convergenceQueued = convergenceDecision.converge && missingToolEvidenceKindsAfterToolStep.length === 0;
+    if (convergenceDecision.converge && !convergenceQueued) {
+      await emit({
+        type: "loop.convergence_deferred",
+        data: {
+          step,
+          reason: convergenceDecision.reason ?? "tool_evidence_ready",
+          missingToolEvidenceKinds: missingToolEvidenceKindsAfterToolStep,
+          priorToolResultCount: toolEvidence.length,
+        },
+      });
+    }
+    if (convergenceQueued) {
       requestedConvergenceReason = convergenceDecision.reason ?? "tool_evidence_ready";
       await emit({
         type: "loop.convergence_queued",
@@ -1176,8 +1430,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         });
       }
     }
-    if (!convergenceDecision.converge) {
+    if (!convergenceQueued) {
       contextAssembler.setRuntimeDirective(executionFeedbackDirective({
+        suppressLegacyWorkProductProjection: workProducts !== undefined,
         latestToolEvidence,
         toolEvidence,
         progressPolicy: options.progressPolicy,
@@ -1217,6 +1472,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       stalled,
     },
   );
+  } catch (error) {
+    // A single exit boundary covers limits (including stalled/repeated work),
+    // invalid/unmet candidates and model/assessment errors. Control signals,
+    // cancellation, permissions and infrastructure ownership loss are not
+    // invitations to spend another model turn.
+    if (!(error instanceof AppError) || error instanceof CompletionFailure
+      || typeof error.details?.partialOutput === "string"
+      || !["RUN_LIMIT_EXCEEDED", "STEP_NOT_COMPLETED", "MODEL_ERROR", "ASSESSMENT_ERROR"].includes(error.code)) throw error;
+    const draft = messages.findLast((message) => message.role === "assistant" && !message.toolCalls?.length)?.content ?? "";
+    throw await completionFailure(error, lastModelStep, draft, {
+      approved: false,
+      feedback: error.message,
+    });
+  }
 }
 
 function currentHardLimit(
@@ -1226,6 +1495,18 @@ function currentHardLimit(
   finalConvergenceGraceSteps = 0,
 ): number {
   return maxSteps + convergenceGraceSteps + candidateRepairGraceSteps + finalConvergenceGraceSteps;
+}
+
+function normalizeToolCallLimits(
+  limits: AgentLoopOptions["toolCallLimits"],
+): ReadonlyMap<string, number> {
+  if (limits === undefined) return new Map();
+  const normalized = new Map<string, number>();
+  for (const [name, limit] of Object.entries(limits)) {
+    if (!Number.isFinite(limit) || limit < 0) continue;
+    normalized.set(name, Math.floor(limit));
+  }
+  return normalized;
 }
 
 function validateToolRecommendations(
@@ -1429,6 +1710,7 @@ function projectStructuredCandidateEvidence(
 }
 
 function executionFeedbackDirective(input: {
+  readonly suppressLegacyWorkProductProjection?: boolean;
   readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly progressPolicy?: RuntimeToolProgressPolicy;
@@ -1439,10 +1721,12 @@ function executionFeedbackDirective(input: {
     policy: input.progressPolicy,
     evidence: input.toolEvidence,
   });
-  const recentFailures = input.toolEvidence.filter((item) => item.isError);
+  const recentFailures = (input.suppressLegacyWorkProductProjection ? input.latestToolEvidence : input.toolEvidence)
+    .filter((item) => item.isError);
   const lines = [
     "<runtime_execution_feedback>",
     "The previous tool step produced canonical execution results. Consume these results before choosing the next action.",
+    "Choose the next action only when its expected marginal benefit materially improves an unmet current-step success criterion; otherwise submit a concise completion candidate with explicit caveats instead of extending the loop.",
     "If any tool failed, address the concrete failure cause or change strategy before continuing.",
     "If failures span multiple phases or repeat with new error text, stop replaying the same command shape and switch subgoal or tool family.",
     "If any command created or modified files, treat fileChanges paths as artifact facts. Normally avoid rereading just-written artifact content unless a validator, build, render, or acceptance diagnostic names a concrete missing field, line range, or contract.",
@@ -1450,7 +1734,7 @@ function executionFeedbackDirective(input: {
     "If required evidence is still missing, call the appropriate current-step tool to produce that evidence; do not submit completion from assumptions.",
     "Recent tool results:",
   ];
-  if (stepEvidenceState !== undefined) {
+  if (stepEvidenceState !== undefined && input.suppressLegacyWorkProductProjection !== true) {
     if (stepEvidenceState.recentActionableDiagnostic) {
       lines.push(
         "A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic. Prefer patching, running, or verifying next; read only when it is needed to resolve that diagnostic.",
@@ -1467,7 +1751,7 @@ function executionFeedbackDirective(input: {
       "</runtime_step_semantic_state>",
     );
   }
-  if (input.progressHint !== undefined) {
+  if (input.progressHint !== undefined && input.suppressLegacyWorkProductProjection !== true) {
     lines.push("<runtime_progress_hint>", input.progressHint, "</runtime_progress_hint>");
   }
   for (const item of input.latestToolEvidence.slice(-6)) {
@@ -1905,6 +2189,19 @@ function prepareRejectionRepairDirective(input: {
     "If the same validation failure repeats, the Runtime will stop the step as no progress instead of spending more turns.",
     failures,
     "</runtime_tool_argument_repair>",
+  ].join("\n");
+}
+
+function invalidHumanLoopRepairDirective(reason: string): string {
+  return [
+    "<runtime_human_loop_repair>",
+    "The previous request_human_loop call was rejected before execution, so no durable user request exists.",
+    "This Step remains blocked on Human-in-the-Loop input. Do not create an artifact, write files, claim completion, or replace the user choice with a default.",
+    "On this turn, submit exactly one request_human_loop call with one complete JSON object, not a JSON-encoded string.",
+    "For responseSchema.type=select, include type, minSelections, maxSelections, and options only. Each option needs id and label; descriptions must be ordinary JSON strings with correctly escaped quotes.",
+    "Use resume.mode=continue_step unless the admitted Step explicitly requires a different mode.",
+    `Previous validation failure: ${reason}`,
+    "</runtime_human_loop_repair>",
   ].join("\n");
 }
 

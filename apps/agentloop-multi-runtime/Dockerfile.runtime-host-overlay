@@ -4,20 +4,38 @@
 ARG RUNTIME_HOST_BASE_IMAGE=agentloop-multi-runtime:local
 FROM ${RUNTIME_HOST_BASE_IMAGE}
 
-ARG MARKITDOWN_VERSION=0.1.7
+ARG APT_MIRROR
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
 # Keep the deployment toolchain ahead of source copies. A Host source-only
 # rebuild can then reuse this layer without downloading Python packages again.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-venv \
-  && rm -rf /var/lib/apt/lists/* \
-  && python3 -m venv /opt/agentloop-runtime-tools \
-  && /opt/agentloop-runtime-tools/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" "markitdown==${MARKITDOWN_VERSION}" \
-  && /opt/agentloop-runtime-tools/bin/markitdown --version
+COPY apps/agentloop-multi-runtime/requirements.txt /tmp/agentloop-runtime-requirements.txt
+RUN if \
+    [ -x /opt/agentloop-runtime-tools/bin/markitdown ] \
+    && command -v ffmpeg && command -v gs && command -v pandoc && command -v pdfinfo \
+    && command -v pdftoppm && command -v qpdf && command -v tesseract && command -v unzip && command -v zip \
+    && /opt/agentloop-runtime-tools/bin/python -c 'import anthropic, defusedxml, imageio, lxml, mcp, numpy, openpyxl, pandas, pdf2image, pdfplumber, PIL, playwright, pymysql, pypdf, pytesseract, reportlab' \
+    && /opt/agentloop-runtime-tools/bin/python -m playwright install --list | grep -q chromium; \
+  then \
+    echo "Reusing Runtime Host dependency baseline from base image"; \
+  else \
+    if [ -n "${APT_MIRROR}" ]; then sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ffmpeg fonts-noto-cjk ghostscript pandoc \
+      poppler-utils python3 python3-venv qpdf tesseract-ocr unzip zip \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/agentloop-runtime-tools \
+    && /opt/agentloop-runtime-tools/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -r /tmp/agentloop-runtime-requirements.txt \
+    && /opt/agentloop-runtime-tools/bin/python -m playwright install --with-deps chromium \
+    && /opt/agentloop-runtime-tools/bin/markitdown --version \
+    && /opt/agentloop-runtime-tools/bin/python -c 'import pypdf, pymysql'; \
+  fi
 
 ENV PATH="/opt/agentloop-runtime-tools/bin:${PATH}"
-ENV RUNTIME_REQUIRED_COMMANDS=markitdown
+ENV RUNTIME_REQUIRED_COMMANDS=markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip
+ENV RUNTIME_REQUIRED_PYTHON_MODULES=anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab
+ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp
 
 WORKDIR /app
 # npm workspaces in the base image link this package from /app/node_modules;
@@ -25,9 +43,14 @@ WORKDIR /app
 # Keep the Host manifest and entrypoint together: a base image can have a
 # different start script, so copying only a new source file can leave the old
 # entrypoint active.
+COPY package.json package-lock.json ./
 COPY packages/agentloop ./packages/agentloop
+COPY packages/agentloop-artifact-preview ./packages/agentloop-artifact-preview
 COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
-RUN npm run build --workspace @zhujun/agentloop
+RUN npm install --workspace agentloop-multi-runtime --ignore-scripts --no-audit --no-fund \
+  && npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts \
+  && npm run build --workspace @zhujun/agentloop-artifact-preview \
+  && npm run build --workspace @zhujun/agentloop
 # Do not inherit the base image's default workdir: the Runtime Host package
 # script lives here, while some older local images use /app as their default.
 WORKDIR /app/apps/agentloop-multi-runtime

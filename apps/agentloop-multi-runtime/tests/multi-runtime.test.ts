@@ -9,7 +9,16 @@ import { FileAttachmentBroker } from "../src/attachments/attachment-broker.ts";
 import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
 import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/control-plane/router.ts";
 import { AgentLoopRuntimeHost } from "../src/runtime/runtime-host.ts";
-import { assertRequiredRuntimeCommands, requiredRuntimeCommands } from "../src/runtime/runtime-command-preflight.ts";
+import {
+  assertRequiredRuntimeCommands,
+  assertRequiredRuntimeNodeModules,
+  assertRequiredRuntimePythonModules,
+  hasRuntimePlaywrightChromium,
+  requiredRuntimeCommands,
+  requiredRuntimeNodeModules,
+  requiredRuntimePythonModules,
+  runtimeCommandProbeArguments,
+} from "../src/runtime/runtime-command-preflight.ts";
 import { HttpResourceImporter } from "../src/runtime/http-resource-importer.ts";
 import {
   mergeSkillDirectories,
@@ -39,7 +48,13 @@ import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
 import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
 import { commandToolCallIds, executionActivities } from "../web/execution-detail-projection.js";
-import { LOCAL_MARKITDOWN_VERSION, localRuntimeHostEnvironment, localRuntimeToolsBin, localRuntimeToolsRoot } from "../scripts/local-runtime-tools.mjs";
+import {
+  LOCAL_MARKITDOWN_VERSION,
+  localRuntimeHostEnvironment,
+  localRuntimeToolsBin,
+  localRuntimeToolsRoot,
+  requiredLocalRuntimePythonModules,
+} from "../scripts/local-runtime-tools.mjs";
 // @ts-expect-error The Web server is a plain Node module and is intentionally tested without a build step.
 import { runtimeConfigScript } from "../web/server.mjs";
 
@@ -94,8 +109,20 @@ test("Runtime Host validates deployment-required commands before accepting Runs"
   assert.deepEqual(requiredRuntimeCommands(undefined), []);
   assert.deepEqual(requiredRuntimeCommands(" markitdown, markitdown , python3 "), ["markitdown", "python3"]);
   assert.throws(() => requiredRuntimeCommands("markitdown;curl"), /Invalid required Runtime command/);
+  assert.deepEqual(runtimeCommandProbeArguments("pdftoppm"), ["-v"]);
+  assert.deepEqual(runtimeCommandProbeArguments("qpdf"), ["--version"]);
+  assert.equal(hasRuntimePlaywrightChromium("Browsers:\n  /root/.cache/ms-playwright/chromium-1234"), true);
+  assert.equal(hasRuntimePlaywrightChromium("Browsers:\n  /root/.cache/ms-playwright/firefox-1500"), false);
   assert.doesNotThrow(() => assertRequiredRuntimeCommands([process.execPath]));
   assert.throws(() => assertRequiredRuntimeCommands(["agentloop-command-that-does-not-exist"]), /Required Runtime command is unavailable/);
+  assert.deepEqual(requiredRuntimePythonModules(" pymysql, pymysql "), ["pymysql"]);
+  assert.throws(() => requiredRuntimePythonModules("pymysql;os"), /Invalid required Runtime Python module/);
+  assert.doesNotThrow(() => assertRequiredRuntimePythonModules(["sys"]));
+  assert.throws(() => assertRequiredRuntimePythonModules(["agentloop_module_that_does_not_exist"]), /Required Runtime Python module is unavailable/);
+  assert.deepEqual(requiredRuntimeNodeModules(" docx, docx, @scope/pkg "), ["docx", "@scope/pkg"]);
+  assert.throws(() => requiredRuntimeNodeModules("docx;fs"), /Invalid required Runtime Node module/);
+  assert.doesNotThrow(() => assertRequiredRuntimeNodeModules(["docx"], () => ({ loaded: true })));
+  assert.throws(() => assertRequiredRuntimeNodeModules(["not-installed"], () => { throw new Error("not found"); }), /Required Runtime Node module is unavailable/);
 });
 
 test("local launcher provisions a fixed MarkItDown contract and exposes it to Runtime Hosts", () => {
@@ -105,9 +132,16 @@ test("local launcher provisions a fixed MarkItDown contract and exposes it to Ru
   assert.equal(LOCAL_MARKITDOWN_VERSION, "0.1.7");
   assert.deepEqual(localRuntimeHostEnvironment({ PATH: "/usr/bin" }, toolsBin), {
     PATH: `${toolsBin}:/usr/bin`,
-    RUNTIME_REQUIRED_COMMANDS: "markitdown",
+    RUNTIME_REQUIRED_COMMANDS: "markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip",
+    RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab",
+    RUNTIME_REQUIRED_NODE_MODULES: "docx,pptxgenjs,react,react-dom,react-icons,sharp",
   });
   assert.equal(localRuntimeHostEnvironment({ PATH: "/usr/bin", RUNTIME_REQUIRED_COMMANDS: "markitdown,soffice" }, toolsBin).RUNTIME_REQUIRED_COMMANDS, "markitdown,soffice");
+  assert.deepEqual(requiredLocalRuntimePythonModules(), [
+    "anthropic", "defusedxml", "imageio", "lxml", "mcp", "numpy", "openpyxl", "pandas",
+    "pdf2image", "pdfplumber", "PIL", "playwright", "pymysql", "pypdf", "pytesseract", "reportlab",
+  ]);
+  assert.deepEqual(requiredLocalRuntimePythonModules({ RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic, anthropic ,pymysql" }), ["anthropic", "pymysql"]);
 });
 
 test("Router conversation index paginates newest conversations in stable pages of 30", async () => {
@@ -279,11 +313,13 @@ test("Web leaves conversation classification to the Runtime", async () => {
 });
 
 test("Web uses the shared format-aware preview component instead of text-only artifact output", async () => {
-  const [html, app, server, overrides] = await Promise.all([
+  const [html, app, server, overrides, overlay, dockerfile] = await Promise.all([
     readFile(new URL("../web/index.html", import.meta.url), "utf8"),
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile.runtime-host-overlay", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile", import.meta.url), "utf8"),
   ]);
   assert.match(html, /artifact-preview\.js/);
   assert.match(app, /import \{ openArtifactPreview \} from "\.\/artifact-preview\.js"/);
@@ -293,6 +329,9 @@ test("Web uses the shared format-aware preview component instead of text-only ar
   assert.match(server, /packages\/agentloop-artifact-preview\/dist\/index\.js/);
   assert.match(overrides, /\.preview-backdrop/);
   assert.match(overrides, /\.preview-slide-canvas/);
+  assert.match(overlay, /COPY packages\/agentloop-artifact-preview \.\/packages\/agentloop-artifact-preview/);
+  assert.match(overlay, /npm run build --workspace @zhujun\/agentloop-artifact-preview/);
+  assert.match(dockerfile, /FROM runtime-host AS local-runtime/);
 });
 
 test("Runtime Hosts load only an explicit built-in step execution profile", async () => {
@@ -371,6 +410,22 @@ test("execution details preserve loaded Skills and complete command evidence per
   assert.equal(activities.commands[0]?.stderr, "complete stderr");
 });
 
+test("command activity opens a stable detail dialog instead of a native dropdown", async () => {
+  const [app, html, overrides] = await Promise.all([
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(app, /<details class="command-card/);
+  assert.match(app, /data-command-detail/);
+  assert.match(app, /function openCommandDetail/);
+  assert.match(app, /function renderCommandDetailModal/);
+  assert.match(app, /data-command-detail-close/);
+  assert.match(html, /id="command-detail-modal"/);
+  assert.match(overrides, /.command-card:focus-visible/);
+  assert.match(overrides, /.command-detail-dialog/);
+});
+
 test("conversation Agent replies select their own Run execution detail", async () => {
   const [app, styles] = await Promise.all([
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
@@ -444,8 +499,9 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /mergeRuntimeEvents\(assistant\.events, \[event\]\)/);
   assert.match(app, /message\.status === "completed" \? renderMarkdown\(message\.text\) : formatText\(message\.text\)/);
   assert.match(app, /function renderRecovery\(message\)/);
-  assert.match(app, /recovery\/advance/);
-  assert.match(app, /recovery\/resume/);
+  assert.match(app, /checkpoint\/start/);
+  assert.match(app, /从检查点启动/);
+  assert.doesNotMatch(app, /data-recovery-advance/);
   assert.match(app, /import \{ renderMarkdown \} from "\.\/markdown-renderer\.js"/);
   assert.match(app, /function toolOutcomeLabel\(tool\)/);
   assert.match(detailProjection, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
@@ -554,6 +610,28 @@ test("Web projects a durable recovery boundary without treating it as a terminal
   assert.equal(assistant.status, "running");
 });
 
+test("Web preserves a checkpoint action after execution authority loss becomes terminal", () => {
+  const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [], checkpoint: undefined as unknown };
+  assert.equal(projectAssistantEvent(assistant, {
+    seq: 10,
+    type: "run.checkpoint_created",
+    data: { runId: "run-lost", checkpointId: "checkpoint-lost", reason: "execution_authority_lost" },
+    createdAt: 10,
+  }), false);
+  assert.equal(projectAssistantEvent(assistant, {
+    seq: 11,
+    type: "run.failed",
+    data: { runId: "run-lost", code: "EXECUTION_AUTHORITY_LOST", message: "execution authority lost" },
+    createdAt: 11,
+  }), true);
+  assert.equal(assistant.status, "failed");
+  assert.deepEqual(assistant.checkpoint, {
+    id: "checkpoint-lost",
+    reason: "execution_authority_lost",
+    status: "available",
+  });
+});
+
 test("Web bounds persisted event payloads without truncating the live assistant projection", () => {
   const fullText = "x".repeat(20_000);
   const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [] };
@@ -660,8 +738,7 @@ test("Web tracks active Runs by conversation instead of imposing one global Run 
   assert.match(app, /文件仍在上传，请稍候再发送/);
   assert.match(app, /submitAbortController: new AbortController\(\)/);
   assert.match(app, /发起会话超时，请重试/);
-  assert.match(app, /SSE 在收到 Run 终态前关闭/);
-  assert.match(app, /catch \{ continue; \}/);
+  assert.match(app, /await observeAssignment\(/);
   assert.match(app, /activeRun\.assistant\.status = "cancelled"/);
   assert.match(app, /cancellationTarget\(activeRunsByConversation\.get\(conversation\.id\), conversation\.messages\)/);
   assert.match(app, /停止失败：/);
@@ -1501,6 +1578,38 @@ test("persistent Router forwards recovery advance and resume to the assigned Hos
   const resumed = await router.resumeRecovery(assignment.id);
   assert.equal(resumed?.run.status, "running");
   assert.deepEqual(calls, ["advance:run-recovery", "resume:run-recovery"]);
+  await database.close();
+});
+
+test("persistent Router starts checkpoint continuation as a new Assignment on the same Host", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-checkpoint"), endpoint: "http://runtime-checkpoint" }], 100);
+  await store.heartbeat({ runtimeId: "runtime-checkpoint", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  const calls: string[] = [];
+  const router = new PersistentMultiRuntimeRouter({
+    store,
+    now: () => 200,
+    heartbeatTtlMs: 1_000,
+    endpointFactory: () => ({
+      async dispatch() { return { remoteRunId: "run-failed" }; },
+      async startFromCheckpoint(remoteRunId) {
+        calls.push(remoteRunId);
+        return { remoteRunId: "run-child", status: "running" as const };
+      },
+    }),
+  });
+  const original = await router.submit(task("user-checkpoint", "message-checkpoint"));
+  const continued = await router.startFromCheckpoint(original.id);
+  assert.equal(continued?.run.remoteRunId, "run-child");
+  assert.notEqual(continued?.assignment.id, original.id);
+  assert.equal(continued?.assignment.remoteRunId, "run-child");
+  assert.equal(continued?.assignment.runtimeId, original.runtimeId);
+  assert.deepEqual(calls, ["run-failed"]);
+  const latest = await store.conversation(original.tenantId, original.ownerUserId, original.conversationId);
+  assert.equal(latest?.turns.length, 1);
+  assert.equal(latest?.turns[0]?.assignment?.id, continued?.assignment.id);
   await database.close();
 });
 

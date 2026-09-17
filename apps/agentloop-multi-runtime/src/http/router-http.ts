@@ -54,6 +54,7 @@ interface RouterTaskApi {
   toolArguments?(id: string, toolCallId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly arguments: ToolArgumentsContent } | undefined>;
   advanceRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly recovery: RecoveryDetail } | undefined>;
   resumeRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus } | undefined>;
+  startFromCheckpoint?(id: string): Promise<{ readonly assignment: { readonly id: string; readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus } | undefined>;
   currentHumanLoop?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly request: HumanLoopRequest | undefined } | undefined>;
   respondHumanLoop?(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly response: HumanLoopResponse } | undefined>;
 }
@@ -161,6 +162,16 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         }
         return json(response, 200, { run: projection.run });
       }
+      const checkpointStartMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/checkpoint\/start$/);
+      if (request.method === "POST" && checkpointStartMatch !== null) {
+        if (router.startFromCheckpoint === undefined) return json(response, 501, { error: "checkpoint_continuation_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const projection = await router.startFromCheckpoint(decodeURIComponent(checkpointStartMatch[1]));
+        if (projection === undefined || projection.assignment.tenantId !== identity.tenantId || projection.assignment.ownerUserId !== identity.ownerUserId) {
+          return json(response, 404, { error: "assignment_not_found" });
+        }
+        return json(response, 202, { assignment: projection.assignment, run: projection.run });
+      }
       const assignmentId = assignmentIdFromPath(url.pathname);
       if (request.method === "GET" && assignmentId !== undefined) {
         const id = assignmentId;
@@ -254,7 +265,8 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         if (initial === undefined || initial.assignment.tenantId !== identity.tenantId || initial.assignment.ownerUserId !== identity.ownerUserId) {
           return json(response, 404, { error: "assignment_not_found" });
         }
-        return streamEvents(request, response, bindRouterEvents(router), assignmentId, initial.events);
+        return streamEvents(request, response, bindRouterEvents(router), assignmentId, initial.events,
+          Number(url.searchParams.get("afterSeq") ?? 0), async (id) => (await router.assignment(id))?.run);
       }
       if (request.method === "GET" && eventsMatch !== null) {
         if (router.events === undefined) return json(response, 501, { error: "events_not_configured" });
@@ -301,6 +313,7 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
   async getRun(remoteRunId: string): Promise<RuntimeRunStatus> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}`, `${this.endpoint.replace(/\/$/, "")}/`), {
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+      signal: AbortSignal.timeout(10_000),
     });
     const body = await response.json() as RuntimeRunStatus & { error?: string };
     if (!response.ok || typeof body.remoteRunId !== "string") throw new Error(body.error ?? `runtime status failed with HTTP ${response.status}`);
@@ -351,6 +364,7 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
   async events(remoteRunId: string, afterSeq: number): Promise<readonly RuntimeRunEvent[]> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/events?afterSeq=${afterSeq}`, `${this.endpoint.replace(/\/$/, "")}/`), {
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+      signal: AbortSignal.timeout(10_000),
     });
     const body = await response.json() as { events?: RuntimeRunEvent[]; error?: string };
     if (!response.ok || !Array.isArray(body.events)) throw new Error(body.error ?? `runtime events failed with HTTP ${response.status}`);
@@ -392,6 +406,16 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     });
     const body = await response.json() as { run?: RuntimeRunStatus; error?: string };
     if (!response.ok || body.run === undefined) throw new Error(body.error ?? `runtime recovery resume failed with HTTP ${response.status}`);
+    return body.run;
+  }
+
+  async startFromCheckpoint(remoteRunId: string): Promise<RuntimeRunStatus> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/checkpoint/start`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      method: "POST",
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as { run?: RuntimeRunStatus; error?: string };
+    if (!response.ok || body.run === undefined) throw new Error(body.error ?? `runtime checkpoint start failed with HTTP ${response.status}`);
     return body.run;
   }
 
@@ -567,36 +591,54 @@ export function streamEvents(
   events: (assignmentId: string, afterSeq: number) => Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>,
   assignmentId: string,
   initialEvents: readonly RuntimeRunEvent[],
+  afterSeq = 0,
+  readRun?: (assignmentId: string) => Promise<RuntimeRunStatus | undefined>,
 ): void {
   response.statusCode = 200;
   response.setHeader("content-type", "text/event-stream; charset=utf-8");
   response.setHeader("cache-control", "no-cache, no-transform");
   response.setHeader("connection", "keep-alive");
   response.flushHeaders();
-  let cursor = 0;
+  let cursor = afterSeq;
   let closed = false;
+  let polling = false;
+  let lastStatusCheck = 0;
   const emit = (events: readonly RuntimeRunEvent[]) => {
     for (const event of events) {
+      if (event.seq <= cursor) continue;
       cursor = Math.max(cursor, event.seq);
       response.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     }
   };
   emit(initialEvents);
   const timer = setInterval(() => {
+    if (closed || polling) return;
+    polling = true;
     void events(assignmentId, cursor)
-      .then((projection) => {
+      .then(async (projection) => {
         if (closed) return;
         if (projection === undefined) {
-          response.write("event: error\ndata: {\"error\":\"assignment_not_found\"}\n\n");
+          response.write("event: stream.error\ndata: {\"error\":\"assignment_not_found\"}\n\n");
           response.end();
           return;
         }
         emit(projection.events);
+        if (projection.events.length === 0 && readRun !== undefined && Date.now() - lastStatusCheck >= 5_000) {
+          lastStatusCheck = Date.now();
+          const run = await readRun(assignmentId);
+          if (closed) return;
+          if (run !== undefined && ["completed", "failed", "cancelled"].includes(run.status)) {
+            // Snapshot is explicitly not a fabricated durable event or sequence.
+            response.write(`event: run.snapshot\ndata: ${JSON.stringify({ run })}\n\n`);
+            response.end();
+            return;
+          }
+        }
         response.write(": keepalive\n\n");
       })
       .catch((error) => {
-        if (!closed) response.write(`event: error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n\n`);
-      });
+        if (!closed) response.write(`event: stream.error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n\n`);
+      }).finally(() => { polling = false; });
   }, 1_000);
   // An HTTP GET request is complete as soon as its headers have been read;
   // `request.close` therefore does not describe the lifetime of this SSE

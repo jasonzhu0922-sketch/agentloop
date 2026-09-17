@@ -19,14 +19,14 @@ export interface RuntimeCapacityGate {
 export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   private readonly dispatches = new Map<string, Promise<RuntimeDispatchResult>>();
   private readonly ownersByRunId = new Map<string, string>();
-  private readonly runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "readCommandOutput" | "readToolArguments" | "advanceRecovery" | "resumeRecovery" | "currentHumanLoop" | "respondHumanLoop">>;
+  private readonly runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "readCommandOutput" | "readToolArguments" | "advanceRecovery" | "resumeRecovery" | "checkpointForRun" | "startFromCheckpoint" | "currentHumanLoop" | "respondHumanLoop">>;
   private readonly resourceImporter: ResourceImporter;
   private readonly capacity?: RuntimeCapacityGate;
   private readonly dispatchStore?: HostDispatchStore;
   private admissionTail: Promise<void> = Promise.resolve();
 
   constructor(
-    runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "readCommandOutput" | "readToolArguments" | "advanceRecovery" | "resumeRecovery" | "currentHumanLoop" | "respondHumanLoop">>,
+    runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "readCommandOutput" | "readToolArguments" | "advanceRecovery" | "resumeRecovery" | "checkpointForRun" | "startFromCheckpoint" | "currentHumanLoop" | "respondHumanLoop">>,
     resourceImporter: ResourceImporter,
     capacity?: RuntimeCapacityGate,
     dispatchStore?: HostDispatchStore,
@@ -41,6 +41,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     const run = await this.runs.get(ownerUserId, remoteRunId);
+    const checkpoint = await this.runs.checkpointForRun?.(ownerUserId, remoteRunId);
     return {
       remoteRunId: run.id,
       status: run.status,
@@ -48,6 +49,13 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
       ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
       ...(this.runs.processArtifacts === undefined ? {} : { artifacts: await this.runs.processArtifacts(ownerUserId, remoteRunId) }),
+      ...(checkpoint === undefined ? {} : {
+        checkpoint: {
+          id: checkpoint.id,
+          reason: checkpoint.reason,
+          ...(checkpoint.childRunId === undefined ? {} : { childRunId: checkpoint.childRunId }),
+        },
+      }),
     };
   }
 
@@ -119,6 +127,24 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined || this.runs.resumeRecovery === undefined) throw new TypeError("runtime recovery resume is not configured");
     const run = await this.runs.resumeRecovery(ownerUserId, remoteRunId);
+    return {
+      remoteRunId: run.id,
+      status: run.status,
+      ...(run.output === undefined ? {} : { output: run.output }),
+      ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
+      ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+    };
+  }
+
+  async startFromCheckpoint(remoteRunId: string): Promise<RuntimeRunStatus> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined || this.runs.checkpointForRun === undefined || this.runs.startFromCheckpoint === undefined) {
+      throw new TypeError("runtime checkpoint continuation is not configured");
+    }
+    const checkpoint = await this.runs.checkpointForRun(ownerUserId, remoteRunId);
+    if (checkpoint === undefined) throw new TypeError("runtime checkpoint not found");
+    const run = await this.admit(() => this.runs.startFromCheckpoint!(ownerUserId, checkpoint.id));
+    this.ownersByRunId.set(run.id, ownerUserId);
     return {
       remoteRunId: run.id,
       status: run.status,

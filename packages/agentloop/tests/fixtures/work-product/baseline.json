@@ -1,0 +1,170 @@
+{
+  "capturedAt": "2026-09-16T09:07:55.995Z",
+  "commit": "8e2d6725005a03bc6b1213ffd063b0ea0f201591",
+  "node": "v26.0.0",
+  "npm": "11.12.1",
+  "dependencies": {
+    "typescript": "7.0.2",
+    "@types/node": "26.3.0",
+    "docx": "9.7.1",
+    "jszip": "3.10.1",
+    "pptxgenjs": "4.0.1"
+  },
+  "trackedDiffSha256": "2e5ce7180b742e433ad76888be18c5798e1ecff54c878d3113b3d33e23885a11",
+  "dirtyFiles": [
+    {
+      "path": ".dockerignore",
+      "sha256": "a3b43c71327226404eb359e6a8dbe648363de5697e068224680d0863c326ef47"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/.env.docker.example",
+      "sha256": "5f94ee114a2dedc7a4652333dd8c4289f3bac835cd87f7f4a22377670a133f3e"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/Dockerfile",
+      "sha256": "9a06c9d8a2dd1eaf713ff0ff67579cd514dfcfd025a45e7bd05bfdff9e21978a"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/Dockerfile.runtime-host-overlay",
+      "sha256": "fdf40eb10b3a0aca9dcab2395b15aa7553e0a3903b19daeee68ef74c2943998f"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/README.md",
+      "sha256": "a9c9751fe56e614af0564cd31f14508444c5d6b27d13a7c9a7902823d4bcd6b5"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/compose.yaml",
+      "sha256": "87638194b82f221963fe08304e6997f5aa1e27230ac2166efa8d425a99e349e6"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/package.json",
+      "sha256": "7afaba688aed5513b5d60f14f9887cf1cea6fde8f4b6a1ec44e4a363be24e769"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/scripts/local-runtime-tools.d.mts",
+      "sha256": "984586c9045bac5afaecf1ff531c702d5d08b4189046ce5a4ad9f452577ff528"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/scripts/local-runtime-tools.mjs",
+      "sha256": "da3dcb5fe378dbbd589bcca3fe527924e206e5bdc64d5fa11e66c63666a5c9d6"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/src/entrypoints/runtime-host-main.ts",
+      "sha256": "b459c81f5f5b5316ed2d009169f49d0fa5a577bcd9f1bbefb927dde0d4a63666"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/src/runtime/runtime-command-preflight.ts",
+      "sha256": "9dfbff6da36b6fa180f330eb7403c3dcf012400218513ca47f3a1e983293c638"
+    },
+    {
+      "path": "apps/agentloop-multi-runtime/tests/multi-runtime.test.ts",
+      "sha256": "ddb1e3658b013d5cd0f8dab438de380337611aa05d4d09cebf2888d55d808884"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "98d2c880d9a3ffa65274019edf0d53d303a451f5d5503edb6c931f7440479eda"
+    },
+    {
+      "path": "package.json",
+      "sha256": "dedbde27a1ad5ffda157df88b426de25ef4d26710fbea92ec39dc0c0cdd786fb"
+    },
+    {
+      "path": "packages/agentloop-skills/skills/docx/SKILL.md",
+      "sha256": "9079bff1192f0fb4317797a65c3cc9d38642d96822af0f002bf19f055335cd74"
+    },
+    {
+      "path": "packages/agentloop-skills/skills/pptx/SKILL.md",
+      "sha256": "3affe76d472b4975636ea050569ae053a68d11ce572c99bfd69473cc956a32d9"
+    },
+    {
+      "path": "packages/agentloop-skills/skills/xlsx/SKILL.md",
+      "sha256": "3650421c0e2c4468af45a19750ba393a01fe3ae821f4e2491500d82579357f5d"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/agent-loop.ts",
+      "sha256": "711be0ec521465d101fe88eff1ddab1cfae397be18cfbb15937c6ead110a49e8"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/dynamic-prompt.ts",
+      "sha256": "79afa16f16c1da63246dc0eea4c788c732ea77a4ca8dad4471b5594166871dec"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/execution-context-policy.ts",
+      "sha256": "8f1a3c516e6bc4102214095384dfdb270d5ac893c9e47b8e199873f5a5dad08c"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/operation-profiles.ts",
+      "sha256": "57451d74c90eaf995429f70ea6c27ddfe8d8b9e9ce36c35ad6dd0ce536ce04a3"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/run-service.ts",
+      "sha256": "242c4c470d452b64ca2b25d43650732107693a0432830c2a8d3e95d81cfd3892"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/step-execution-strategy.ts",
+      "sha256": "c89d33e434fad7a1158d32ce6096613eaf88c949df057f1cf920d542cff3f6da"
+    },
+    {
+      "path": "packages/agentloop/src/runtime/tool-progress-policy.ts",
+      "sha256": "6b85c88b490841717cdd65334cda41fde7507628c4b3466970f06089a8003173"
+    },
+    {
+      "path": "packages/agentloop/tests/agent-loop.test.ts",
+      "sha256": "d019dd78a9d7822fcf6fff2d8fa84c334185e4beb3e6a5cd120564757c144b4e"
+    },
+    {
+      "path": "packages/agentloop/tests/execution-context-policy.test.ts",
+      "sha256": "7e95395d376b4f002baefb7ffae0bb5e054e32680c3ce43657e82c5644238d92"
+    },
+    {
+      "path": "packages/agentloop/tests/planning-runtime.test.ts",
+      "sha256": "35b264b5259aff2339f72f8b19db2d802899c550d6a389b4223ccda6e25e77ae"
+    }
+  ],
+  "kernelDistBeforeBuild": {
+    "sha256": "29859bb410e16aca41659b25339aecb0957d847067ea70cbf20ca5484a809a93",
+    "mtime": "2026-09-16T06:27:27.570Z"
+  },
+  "host": {
+    "assignedRuntime": "general-02",
+    "endpoint": "http://127.0.0.1:8792",
+    "configuredLaunch": "npm run start:local --workspace agentloop-multi-runtime -> node src/entrypoints/runtime-host-main.ts",
+    "loadedBuildIdentity": "unknown: on-disk dist hash is not proof of a running process module version; no Host restart or recovery POST performed"
+  },
+  "regressionBefore": {
+    "total": 289,
+    "passed": 278,
+    "failed": 11,
+    "skipped": 0
+  },
+  "regressionFailureNamesBeforeAndAfter": [
+    "artifact progress policy does not require a semantic source receipt after process artifacts exist",
+    "source semantics stay out of the global Runtime progress policy",
+    "ModelPlanner prefers fact-then-produce for visible spreadsheet data analysis replies",
+    "ModelPlanner requires derived aggregation evidence for a structured dependency count question",
+    "ModelPlanner keeps Skill-owned QA evidence out of generic evidence contracts",
+    "Plan admission normalizes conversation-only data analysis final leaves away from artifact gates",
+    "selectPlanningSkills recalls the checked-in presentation Skill for PPTX artifact requests",
+    "PlanRepository preserves OutcomePlan evidence contracts and assessment failed boundaries",
+    "large structured source Tool results preserve receipts for evidence-gate assessment",
+    "fact acquisition converges a complete structured upload extraction despite artifact-write capability",
+    "source contract mismatch routes recovery into a Plan revision instead of repeating the same leaf repair"
+  ],
+  "regressionAfter": {
+    "total": 289,
+    "passed": 278,
+    "failed": 11,
+    "skipped": 0
+  },
+  "stage01Tests": {
+    "total": 28,
+    "passed": 28,
+    "failed": 0
+  },
+  "extraTypecheck": {
+    "command": "npm run typecheck --workspace agentloop-multi-runtime",
+    "status": "failed",
+    "error": "tests/multi-runtime.test.ts(56,3): TS2305: local-runtime-tools.mjs has no exported member requiredLocalRuntimePythonModules",
+    "boundary": "Existing .mjs exports the function, but the corresponding .d.mts does not. Both files match their pre-change SHA-256; not modified in stages 0/1."
+  }
+}

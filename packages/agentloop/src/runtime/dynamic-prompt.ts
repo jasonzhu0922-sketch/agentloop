@@ -32,6 +32,13 @@ export interface DynamicPromptProfile {
   readonly id: string;
   readonly name?: string;
   readonly description?: string;
+  /**
+   * A compact, phase-independent operating principle that belongs in the
+   * system prompt.  Detailed planning/execution rules remain in runtime
+   * context; this is reserved for the one rule that must survive that
+   * projection boundary.
+   */
+  readonly topLevelPrompt?: string;
   readonly planningRules?: readonly string[];
   readonly executionRules?: readonly string[];
   readonly successEvidence?: readonly string[];
@@ -134,6 +141,7 @@ function taskProfileSystemSection(taskProfile: TaskProfile | undefined): string 
       id: profile.id,
       ...(profile.name === undefined ? {} : { name: profile.name }),
       ...(profile.description === undefined ? {} : { description: profile.description }),
+      ...(profile.topLevelPrompt === undefined ? {} : { topLevelPrompt: profile.topLevelPrompt }),
       ...(profile.executionRules === undefined ? {} : { executionRules: profile.executionRules }),
       ...(profile.successEvidence === undefined ? {} : { successEvidence: profile.successEvidence }),
     })),

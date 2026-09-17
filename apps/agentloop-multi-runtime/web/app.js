@@ -8,6 +8,7 @@ import { cancellationTarget } from "./cancellation-target.js";
 import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 import { conversationMessagesFromTurns } from "./conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./execution-detail-projection.js";
+import { observeAssignment } from "./assignment-stream.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -26,8 +27,8 @@ let conversationsLoadingMore = false;
 const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
-const recoveringAssignmentIds = new Set();
 const hydratedDetailAssignmentIds = new Set();
+let commandDetailSelection;
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
 loadIdentity();
@@ -48,6 +49,9 @@ $("input").addEventListener("keydown", (event) => {
 });
 $("user-id").addEventListener("change", reloadConversationsForIdentity);
 $("tenant-id").addEventListener("change", reloadConversationsForIdentity);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeCommandDetail();
+});
 
 function newConversation() {
   const conversation = { id: crypto.randomUUID(), title: "新对话", createdAt: Date.now(), updatedAt: Date.now(), messages: [], pendingAttachments: [] };
@@ -127,7 +131,11 @@ function mergeConversationSummaries(summaries, reset = false) {
     if (existing) {
       existing.title = existing.title && existing.title !== "新对话" ? existing.title : String(summary.title || "新对话");
       existing.createdAt = finiteNumber(existing.createdAt, summary.createdAt);
-      existing.updatedAt = Math.max(finiteNumber(existing.updatedAt, 0), finiteNumber(summary.updatedAt, 0));
+      // Server activity time is authoritative, including downward corrections
+      // after a stale observation polluted browser cache ordering.
+      existing.updatedAt = activeRunsByConversation.has(existing.id)
+        ? Math.max(finiteNumber(existing.updatedAt, 0), finiteNumber(summary.updatedAt, 0))
+        : finiteNumber(summary.updatedAt, existing.updatedAt);
       existing.runCount = finiteNumber(summary.runCount, existing.runCount);
       existing.lastStatus = typeof summary.lastStatus === "string" ? summary.lastStatus : existing.lastStatus;
       if (!nextSessions.some((conversation) => conversation.id === existing.id)) nextSessions.push(existing);
@@ -161,6 +169,7 @@ async function selectConversation(conversationId) {
   if (!conversation) return;
   activeId = conversation.id;
   render();
+  void reconcilePersistedRuns();
   if (conversation.historyLoaded === true || conversation.historyLoading === true) return;
   if (conversation.historyLoaded !== false && conversation.messages.length > 0) return;
   if (finiteNumber(conversation.runCount, 0) === 0) { conversation.historyLoaded = true; return; }
@@ -188,6 +197,9 @@ async function selectConversation(conversationId) {
       hydratedDetailAssignmentIds.add(selected.assignmentId);
     }
     conversation.historyLoaded = true;
+    for (const message of conversation.messages) {
+      if (message.role === "assistant" && message.status === "running" && message.assignmentId) resumeAssignmentObservation(conversation, message, tenantId, userId);
+    }
     saveSessions();
     setStatus("会话内容已加载", "ok");
   } catch (error) {
@@ -223,7 +235,13 @@ async function reconcilePersistedRuns() {
   if (!tenantId || !userId) return;
   let changed = false;
   await Promise.all(sessions.flatMap((conversation) => (conversation.messages || []).map(async (message) => {
-    if (message?.role !== "assistant" || typeof message.assignmentId !== "string" || (message.status !== "running" && !hasIncompleteCompletedPlan(message))) return;
+    if (message?.role !== "assistant" || typeof message.assignmentId !== "string" || activeRunsByConversation.has(conversation.id)) return;
+    const confirmedTerminal = (message.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type));
+    if (message.status !== "running" && !(message.status === "failed" && !confirmedTerminal) && !hasIncompleteCompletedPlan(message)) return;
+    if (message.status === "running") {
+      resumeAssignmentObservation(conversation, message, tenantId, userId);
+      return;
+    }
     try {
       const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(message.assignmentId)}`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
       if (!response.ok) return;
@@ -231,21 +249,34 @@ async function reconcilePersistedRuns() {
       if (applyRecoveredRunState(message, body?.run)) changed = true;
       if (await replayPersistedRunEvents(message, tenantId, userId)) changed = true;
       if (await refreshHumanLoop(message.assignmentId, message, tenantId, userId)) changed = true;
+      if (message.status === "running") resumeAssignmentObservation(conversation, message, tenantId, userId);
     } catch {}
   })));
   if (changed) { saveSessions(); render(); }
 }
 
 function applyRecoveredRunState(assistant, run) {
+  if (run?.status === "running") {
+    if ((assistant.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type))) return false;
+    if (assistant.status === "failed") {
+      // Repair old browser caches that recorded a transport error as a Run failure.
+      assistant.status = "running"; assistant.error = undefined; assistant.text = ""; assistant.completedAt = undefined;
+      return true;
+    }
+    return false;
+  }
   if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return false;
   assistant.status = run.status;
+  assistant.connection = undefined;
+  assistant.error = undefined;
   if (run.status === "completed" && typeof run.output === "string") assistant.text = run.output;
   if (run.status === "failed") {
     assistant.error = recoveredFailureMessage(run) || assistant.error || assistant.text || "Run 失败";
-    assistant.text = assistant.error;
+    assistant.text = typeof run.output === "string" && run.output.trim() ? run.output : assistant.error;
   }
   assistant.reasoning = "";
   assistant.recovery = undefined;
+  if (run.checkpoint?.id) assistant.checkpoint = { ...run.checkpoint, status: run.checkpoint.childRunId ? "started" : "available" };
   assistant.humanLoop = undefined;
   completeAssistantMessage(assistant, { createdAt: run.finishedAt });
   return true;
@@ -340,7 +371,7 @@ async function submit() {
   const input = $("input").value.trim();
   const conversation = activeConversation();
   if (!input || !conversation) return;
-  if (activeRunsByConversation.has(conversation.id)) { setStatus("当前会话仍在发起或执行；请等待或点击停止", "error"); return; }
+  if (activeRunsByConversation.has(conversation.id) || conversation.messages.some((message) => message.role === "assistant" && message.status === "running" && message.assignmentId)) { setStatus("当前会话仍在发起或执行；请等待或点击停止", "error"); return; }
   if (uploadCount(conversation.id) > 0) { setStatus("文件仍在上传，请稍候再发送", "error"); return; }
   const tenantId = $("tenant-id").value.trim();
   const ownerUserId = $("user-id").value.trim();
@@ -378,7 +409,9 @@ async function submit() {
     render();
     await streamAssignment(activeRun.assignmentId, conversation, assistantMessage, tenantId, ownerUserId, activeRun);
   } catch (error) {
-    if (error?.name !== "AbortError" || activeRun.submitTimedOut) { assistantMessage.status = "failed"; assistantMessage.text = activeRun.submitTimedOut ? "发起会话超时，请重试" : `提交失败：${error instanceof Error ? error.message : String(error)}`; completeAssistantMessage(assistantMessage); saveSessions(); render(); setStatus("任务失败", "error"); }
+    if (activeRun.assignmentId) {
+      if (error?.name !== "AbortError") setStatus("观察连接中断，任务状态以 Runtime 为准；重新打开会话可继续同步", "error");
+    } else if (error?.name !== "AbortError" || activeRun.submitTimedOut) { assistantMessage.status = "failed"; assistantMessage.text = activeRun.submitTimedOut ? "发起会话超时，请重试" : `提交失败：${error instanceof Error ? error.message : String(error)}`; completeAssistantMessage(assistantMessage); saveSessions(); render(); setStatus("任务失败", "error"); }
   } finally {
     if (activeRun.submitTimeout !== null) clearTimeout(activeRun.submitTimeout);
     if (activeRunsByConversation.get(conversation.id) === activeRun) activeRunsByConversation.delete(conversation.id);
@@ -447,46 +480,47 @@ function removePendingAttachment(conversation, attachmentId) {
 
 async function streamAssignment(assignmentId, conversation, assistant, tenantId, userId, activeRun) {
   activeRun.abortController = new AbortController();
-  const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assignmentId)}/events/stream`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId }, signal: activeRun.abortController.signal });
-  if (!response.ok || !response.body) throw new Error(`SSE 连接失败：HTTP ${response.status}`);
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-  try {
-    while (true) {
-      const chunk = await reader.read(); if (chunk.done) break; buffer += decoder.decode(chunk.value, { stream: true });
-      const parts = buffer.split("\n\n"); buffer = parts.pop() || "";
-      for (const packet of parts) {
-        const dataLine = packet.split("\n").find((line) => line.startsWith("data: "));
-        if (!dataLine) continue;
-        const eventLine = packet.split("\n").find((line) => line.startsWith("event: "));
-        let payload;
-        try {
-          const raw = JSON.parse(dataLine.slice(6));
-          payload = typeof raw.type === "string" || !eventLine ? raw : { type: eventLine.slice(7), data: raw };
-        } catch { continue; }
-        if (onEvent(payload, conversation, assistant)) {
-          if (["run.completed", "run.failed", "run.cancelled"].includes(payload.type)) {
-            await Promise.all([
-              refreshArtifacts(assignmentId, assistant, tenantId, userId),
-              hydrateCommandEvidence(assistant, tenantId, userId),
-            ]);
-          }
-          try { await reader.cancel(); } catch {}
-          return;
-        }
-      }
-    }
-    throw new Error("SSE 在收到 Run 终态前关闭");
-  } finally { reader.releaseLock(); }
+  await observeAssignment({
+    baseUrl: `${api}/v1/assignments/${encodeURIComponent(assignmentId)}`,
+    headers: { "x-tenant-id": tenantId, "x-user-id": userId },
+    signal: activeRun.abortController.signal,
+    afterSeq: Math.max(0, ...(assistant.events || []).map((event) => Number.isSafeInteger(event.seq) ? event.seq : 0)),
+    onEvent: (event) => onEvent(event, conversation, assistant),
+    onRun: (run) => {
+      applyRecoveredRunState(assistant, run);
+      liveUpdates.flush();
+      setStatus(run.status === "completed" ? "已完成" : run.status === "cancelled" ? "已停止" : "执行失败", run.status === "completed" ? "ok" : "error");
+    },
+    onConnection: (state, error) => {
+      assistant.connection = state;
+      setStatus(state === "connected" ? "已连接 Runtime 事件流" : `连接暂时中断，正在重连；尚未确认任务终态${error ? `：${error}` : ""}`, state === "connected" ? "running" : "error");
+    },
+  });
+  if (["completed", "failed", "cancelled"].includes(assistant.status)) {
+    await Promise.all([refreshArtifacts(assignmentId, assistant, tenantId, userId), hydrateCommandEvidence(assistant, tenantId, userId)]);
+  }
+}
+
+function resumeAssignmentObservation(conversation, assistant, tenantId, userId) {
+  if (activeRunsByConversation.has(conversation.id)) return;
+  const activeRun = { assignmentId: assistant.assignmentId, abortController: null, assistant };
+  activeRunsByConversation.set(conversation.id, activeRun);
+  void streamAssignment(assistant.assignmentId, conversation, assistant, tenantId, userId, activeRun)
+    .catch(() => { setStatus("观察连接中断，任务状态以 Runtime 为准", "error"); })
+    .finally(() => {
+      if (activeRunsByConversation.get(conversation.id) === activeRun) activeRunsByConversation.delete(conversation.id);
+      saveSessions(); render();
+    });
 }
 
 function onEvent(event, conversation, assistant) {
   if (!event || typeof event.type !== "string") return false;
-  if (event.type === "error") { assistant.status = "failed"; assistant.text = event.data?.error || "SSE 连接失败"; assistant.reasoning = ""; completeAssistantMessage(assistant, event); liveUpdates.flush(); setStatus("事件流失败", "error"); return true; }
+  if (event.type === "error" || event.type === "stream.error") { setStatus("事件流暂时不可用，任务状态以 Runtime 为准", "error"); return false; }
   const terminal = projectAssistantEvent(assistant, event);
   assistant.events = mergeRuntimeEvents(assistant.events, [event]);
   setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, [event]));
-  if (terminal) completeAssistantMessage(assistant, event);
-  conversation.updatedAt = Date.now();
+  if (terminal) { assistant.connection = undefined; completeAssistantMessage(assistant, event); }
+  conversation.updatedAt = Math.max(finiteNumber(conversation.updatedAt, 0), finiteNumber(event.createdAt, 0));
   if (event.type === "run.waiting_user" && assistant.assignmentId) {
     void refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => { if (changed) { saveSessions(); render(); } });
     setStatus("等待你的确认或补充信息", "running");
@@ -575,7 +609,7 @@ function render() {
     render();
   }));
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
-  document.querySelectorAll("[data-recovery-advance]").forEach((button) => button.addEventListener("click", () => void advanceRecovery(button.dataset.recoveryAdvance)));
+  document.querySelectorAll("[data-checkpoint-start]").forEach((button) => button.addEventListener("click", () => void startFromCheckpoint(button.dataset.checkpointStart)));
   const selectedAssistant = selectedAssistantMessage(conversation, messages);
   const activeRun = activeRunsByConversation.get(conversation.id);
   const cancelTarget = cancellationTarget(activeRun, messages);
@@ -652,7 +686,9 @@ function renderMessage(message) {
   // controls the user needs in order to continue the Run.
   const projectedOutput = `${interimOutput}${humanLoop}${recovery}`;
   const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(presentation.emptyText)}</span>`;
-  const output = message.status === "failed" ? `<div class="failure-title">${formatText(message.error || message.text || presentation.emptyText)}</div>` : projectedOutput || emptyOutput;
+  const output = message.status === "failed"
+    ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.text && message.text !== message.error ? `<div class="partial-result"><strong>阶段性结果（任务未完成）</strong>${renderMarkdown(message.text)}</div>` : ""}${recovery}`
+    : projectedOutput || emptyOutput;
   const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : presentation.label;
   const stateIcon = presentation.icon;
   const completedAt = formatMessageTime(message.completedAt);
@@ -690,44 +726,60 @@ function renderHumanLoop(message) {
 }
 
 function renderRecovery(message) {
+  const checkpoint = message.checkpoint;
+  if (checkpoint?.id) {
+    const starting = checkpoint.status === "starting";
+    const started = checkpoint.status === "started";
+    const canStart = typeof message.assignmentId === "string" && !starting && !started;
+    return `<section class="human-loop-card recovery-card"><b>可从检查点继续</b><p>原 Run 已因执行权丢失而失败。继续会创建新的子 Run，并复用已确认的 Plan、证据与上下文；不会复活或直接重放旧 Action。</p>${canStart ? `<button type="button" class="human-loop-submit" data-checkpoint-start="${message.id}">从检查点启动</button>` : ""}<small class="human-loop-error" aria-live="polite">${starting ? "正在创建新的子 Run…" : started ? "已从该检查点创建新 Run。" : ""}</small></section>`;
+  }
   const recovery = message.recovery;
   if (!recovery || (recovery.status !== "required" && recovery.status !== "advancing")) return "";
-  const boundary = recovery.failedBoundary || {};
-  const missing = Array.isArray(boundary.missingEvidenceKinds) && boundary.missingEvidenceKinds.length > 0
-    ? `缺少可观察证据：${boundary.missingEvidenceKinds.map((kind) => String(kind)).join("、")}`
-    : "上一步未满足完成契约，需要由 Runtime 重新制定恢复方案。";
-  const advancing = recovery.status === "advancing";
-  const canAdvance = typeof message.assignmentId === "string" && !advancing && !recoveringAssignmentIds.has(message.assignmentId);
-  return `<section class="human-loop-card recovery-card"><b>${advancing ? "正在恢复" : "需要恢复"}</b><p>${escapeHtml(missing)}</p>${canAdvance ? `<button type="button" class="human-loop-submit" data-recovery-advance="${message.id}">继续恢复</button>` : ""}<small class="human-loop-error" aria-live="polite">${advancing ? "Runtime 正在分析失败边界并决定继续、修订计划或请求补充信息。" : ""}</small></section>`;
+  return `<section class="human-loop-card recovery-card"><b>正在迁移旧恢复状态</b><p>Runtime 会自动修复 Assessment 边界；若执行权已经丢失，则会终止原 Run 并生成可启动的新检查点。</p></section>`;
 }
 
-async function advanceRecovery(messageId) {
-  const assistant = [...(activeConversation()?.messages || [])].find((message) => message.id === messageId);
-  if (!assistant?.assignmentId || recoveringAssignmentIds.has(assistant.assignmentId)) return;
-  recoveringAssignmentIds.add(assistant.assignmentId);
-  assistant.recovery = { ...assistant.recovery, status: "advancing" };
-  saveSessions(); render(); setStatus("正在恢复", "running");
+async function startFromCheckpoint(messageId) {
+  const conversation = activeConversation();
+  const assistant = [...(conversation?.messages || [])].find((message) => message.id === messageId);
+  if (!conversation || !assistant?.assignmentId || assistant.checkpoint?.status === "starting" || activeRunsByConversation.has(conversation.id)) return;
+  const tenantId = $("tenant-id").value.trim();
+  const userId = $("user-id").value.trim();
+  const activeRun = { assignmentId: null, abortController: null, submitAbortController: null, submitTimedOut: false, submitTimeout: null, assistant };
+  activeRunsByConversation.set(conversation.id, activeRun);
+  assistant.checkpoint = { ...assistant.checkpoint, status: "starting" };
+  assistant.status = "running";
+  assistant.error = undefined;
+  assistant.completedAt = undefined;
+  saveSessions(); render(); setStatus("正在从检查点创建新的 Run", "running");
   try {
-    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/recovery/advance`, {
+    const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/checkpoint/start`, {
       method: "POST",
-      headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() },
+      headers: { "x-tenant-id": tenantId, "x-user-id": userId },
     });
     const body = await response.json().catch(() => undefined);
-    if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
-    if (body?.recovery?.state?.state === "ready_to_resume") {
-      const resume = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/recovery/resume`, {
-        method: "POST",
-        headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() },
-      });
-      const resumed = await resume.json().catch(() => undefined);
-      if (!resume.ok) throw new Error(resumed?.error || `HTTP ${resume.status}`);
-      assistant.recovery = undefined;
-    }
+    if (!response.ok || !body?.assignment?.id) throw new Error(body?.error || `HTTP ${response.status}`);
+    activeRun.assignmentId = body.assignment.id;
+    assistant.assignmentId = body.assignment.id;
+    assistant.runtimeId = body.assignment.runtimeId || assistant.runtimeId;
+    assistant.checkpoint = { ...assistant.checkpoint, status: "started", childRunId: body.run?.remoteRunId };
+    assistant.events = [];
+    assistant.plan = [];
+    setVolatile(assistant, "detailEvents", []);
+    saveSessions(); render();
+    await streamAssignment(activeRun.assignmentId, conversation, assistant, tenantId, userId, activeRun);
   } catch (error) {
-    assistant.recovery = { ...assistant.recovery, status: "required" };
-    setStatus(`恢复失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    if (activeRun.assignmentId) {
+      if (error?.name !== "AbortError") setStatus("观察连接中断，已启动的 Run 未被停止", "error");
+    } else {
+      assistant.status = "failed";
+      assistant.checkpoint = { ...assistant.checkpoint, status: "available" };
+      assistant.error = `从检查点启动失败：${error instanceof Error ? error.message : String(error)}`;
+      assistant.text = assistant.error;
+      completeAssistantMessage(assistant);
+      setStatus(assistant.error, "error");
+    }
   } finally {
-    recoveringAssignmentIds.delete(assistant.assignmentId);
+    if (activeRunsByConversation.get(conversation.id) === activeRun) activeRunsByConversation.delete(conversation.id);
     saveSessions(); render();
   }
 }
@@ -790,12 +842,27 @@ function renderDetails(conversation, assistant) {
   $("details-runtime").textContent = assistant?.runtimeId || "自动分配";
   const events = assistant?.detailEvents || assistant?.events || [];
   const activities = executionActivities(events, assistant?.commandEvidence);
+  if (commandDetailSelection && commandDetailSelection.assistantId !== assistant?.id) commandDetailSelection = undefined;
   $("details-skills").innerHTML = activities.skills.length ? activities.skills.map(renderSkillActivity).join("") : `<span class="muted">本轮尚未加载 Skill。</span>`;
   $("details-tools").innerHTML = activities.tools.length ? activities.tools.map(renderToolActivity).join("") : `<span class="muted">本轮尚未调用工具。</span>`;
   $("details-commands").innerHTML = activities.commands.length ? activities.commands.map(renderCommandActivity).join("") : `<span class="muted">本轮尚未执行命令。</span>`;
   $("details-output").innerHTML = assistant?.text ? (assistant.status === "completed" ? renderMarkdown(assistant.text) : formatText(assistant.text)) : `<span class="muted">暂无最终回复。</span>`;
   $("details-loading").hidden = !assistant?.detailsLoading && !assistant?.detailsError;
   $("details-loading").textContent = assistant?.detailsLoading ? "正在加载该轮完整执行证据…" : assistant?.detailsError ? `详情加载失败：${assistant.detailsError}` : "";
+  const commandById = new Map(activities.commands.map((command) => [command.id, command]));
+  document.querySelectorAll("[data-command-detail]").forEach((card) => {
+    const command = commandById.get(card.dataset.commandDetail);
+    if (!command) return;
+    const open = () => openCommandDetail(command, assistant?.id);
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+  renderCommandDetailModal(activities.commands);
   renderArtifacts(assistant);
 }
 
@@ -858,8 +925,39 @@ function renderCommandActivity(command) {
   const label = command.status === "running" ? "执行中" : command.status === "completed" ? "已完成" : command.status === "failed" ? "失败" : command.status === "rejected" ? "被拒绝" : "已提交";
   const title = stringValue(command.arguments?.command) || "computer_run_command";
   const summary = command.status === "running" ? "已派发，等待命令返回" : command.status === "failed" || command.status === "rejected" ? (command.error || "命令未执行") : command.status === "completed" ? [command.exitCode === undefined ? "" : `退出码 ${command.exitCode}`, command.stdout ? "stdout 已返回" : "", command.stderr ? "stderr 已返回" : ""].filter(Boolean).join(" · ") || "命令执行完成" : "等待执行";
+  return `<div class="command-card ${command.status}" data-command-detail="${escapeHtml(command.id)}" role="button" tabindex="0" aria-label="查看命令详情：${escapeHtml(title)}"><div class="command-card-head"><span class="command-state ${command.status}">${label}</span><span class="command-title">${escapeHtml(title)}</span><span class="command-open-hint">查看详情</span></div><dl class="command-meta"><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl><div class="command-summary">${escapeHtml(summary)}</div></div>`;
+}
+
+function openCommandDetail(command, assistantId) {
+  if (!command || !assistantId) return;
+  commandDetailSelection = { assistantId, commandId: command.id };
+  renderCommandDetailModal([command]);
+}
+
+function closeCommandDetail() {
+  commandDetailSelection = undefined;
+  renderCommandDetailModal([]);
+}
+
+function renderCommandDetailModal(commands) {
+  const host = $("command-detail-modal");
+  if (!host) return;
+  if (!commandDetailSelection) {
+    host.innerHTML = "";
+    return;
+  }
+  const command = commands.find((item) => item.id === commandDetailSelection.commandId);
+  if (!command) {
+    closeCommandDetail();
+    return;
+  }
   const argumentsText = JSON.stringify(command.arguments || {}, null, 2);
-  return `<details class="command-card ${command.status}" ${command.status === "running" ? "open" : ""}><summary><span class="command-state ${command.status}">${label}</span><span class="command-title">${escapeHtml(title)}</span></summary><dl class="command-meta"><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl><div class="command-summary">${escapeHtml(summary)}</div><h4 class="command-block-title">详细参数</h4><pre class="command-arguments">${escapeHtml(argumentsText)}</pre>${command.stdout ? `<h4 class="command-block-title">stdout</h4><pre class="command-output">${escapeHtml(command.stdout)}</pre>` : ""}${command.stderr ? `<h4 class="command-block-title">stderr</h4><pre class="command-output error">${escapeHtml(command.stderr)}</pre>` : ""}</details>`;
+  const outputBlock = (title, value, error = false) => `<section class="command-detail-section"><h4>${title}</h4><pre class="command-full-output${error ? " error" : ""}">${escapeHtml(value || "(empty)")}</pre></section>`;
+  host.innerHTML = `<div class="preview-backdrop command-detail-backdrop" role="dialog" aria-modal="true" aria-label="命令完整详情"><div class="preview-dialog maximized command-detail-dialog"><div class="preview-head"><div class="preview-title"><strong>命令详情</strong><span>${escapeHtml(command.id)}</span></div><button type="button" class="preview-close" data-command-detail-close aria-label="关闭命令详情">×</button></div><div class="preview-body command-detail-body"><section class="command-detail-section"><h4>完整命令</h4><pre class="command-full-output">${escapeHtml([command.arguments?.command || "?", ...(Array.isArray(command.arguments?.args) ? command.arguments.args : [])].join(" "))}</pre></section><section class="command-detail-section"><h4>调用参数</h4><pre class="command-full-output">${escapeHtml(argumentsText)}</pre></section><section class="command-detail-section"><h4>执行信息</h4><dl class="command-detail-meta-grid"><dt>状态</dt><dd>${escapeHtml(command.status)}</dd><dt>step</dt><dd>${escapeHtml(command.step ?? "-")}</dd><dt>duration</dt><dd>${formatDuration(command.durationMs) || "-"}</dd><dt>call</dt><dd>${escapeHtml(command.id)}</dd></dl></section>${outputBlock("stdout", command.stdout)}${outputBlock("stderr", command.stderr, true)}</div></div></div>`;
+  host.querySelector("[data-command-detail-close]")?.addEventListener("click", closeCommandDetail);
+  host.querySelector(".command-detail-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeCommandDetail();
+  });
 }
 function toolOutcomeLabel(tool) {
   const parts = [];

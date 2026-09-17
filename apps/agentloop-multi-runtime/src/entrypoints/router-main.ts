@@ -5,6 +5,7 @@ import { loadMultiRuntimeConfig, toRuntimeInstance } from "../config/config.ts";
 import { ControlPlaneStore } from "../control-plane/control-plane-store.ts";
 import { createRouterHttpServer, HttpRuntimeEndpoint } from "../http/router-http.ts";
 import { PersistentMultiRuntimeRouter } from "../control-plane/persistent-router.ts";
+import { startAssignmentReconciler } from "../control-plane/assignment-reconciler.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../storage/state-database.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -45,14 +46,16 @@ const server = createRouterHttpServer(router, {
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop multi-runtime Router listening on http://${host}:${port}; registered ${config.runtimes.length} Runtime Host(s)\n`);
 });
+const stopReconciliation = startAssignmentReconciler(router, {
+  onError: (error) => process.stderr.write(`Assignment reconciliation failed: ${error instanceof Error ? error.message : String(error)}\n`),
+});
 
 let closing = false;
 function shutdown(): void {
   if (closing) return;
   closing = true;
   server.close(() => {
-    void database.close();
-    process.exitCode = 0;
+    void stopReconciliation().then(() => database.close()).then(() => { process.exitCode = 0; });
   });
 }
 process.on("SIGINT", shutdown);

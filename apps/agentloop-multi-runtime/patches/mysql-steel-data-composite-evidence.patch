@@ -1,0 +1,66 @@
+--- a/scripts/mysql_steel_data.py
++++ b/scripts/mysql_steel_data.py
+@@ -648,38 +648,61 @@
+ def resolve_and_locate_indicator_series(
+     config: dict[str, Any], mapping: dict[str, Any], query: str, start: dt.date, end: dt.date,
+ ) -> dict[str, Any]:
+     """Resolve one bounded request and acquire its series without a model round trip.
+
+     This keeps catalog interpretation auditable: only the exact mapped values
+     returned by preflight are used, and observations are read only after one
+     exact candidate is found.  It is intentionally for a single requested
+     series, not for comparative or open-ended research.
+     """
+     preflight = preflight_catalog(config, mapping, query)
+     understanding = preflight.get("queryUnderstanding")
+     if not isinstance(understanding, dict):
+         return preflight
+     recommended = understanding.get("recommendedFilters")
+     filters = dict(recommended) if isinstance(recommended, dict) else {}
+     if not filters:
+         return {
+             **preflight,
+             "resolutionAction": "resolve-and-locate-series",
+             "resolutionStatus": "no_catalog_backed_filters",
+         }
+
+     result = locate_indicator_series(config, mapping, filters, start, end)
+     if result.get("action") != "query-series":
+-        return {
++        result = {
+             **result,
+             "resolutionAction": "resolve-and-locate-series",
+             "queryUnderstanding": understanding,
+         }
+-    result = {**result, "acquisitionAction": "resolve-and-locate-series"}
++    else:
++        result = {**result, "acquisitionAction": "resolve-and-locate-series"}
+     receipt = preflight.get("evidenceReceipt")
+     receipt_id = receipt.get("receiptId") if isinstance(receipt, dict) else None
+     result["catalogPreflight"] = {
+         "receiptId": receipt_id if isinstance(receipt_id, str) else None,
+         "queryUnderstanding": understanding,
++        "dataContract": preflight.get("dataContract"),
++        "evidenceReceipt": receipt,
+     }
++    # A composite acquisition must preserve the facts established by its
++    # successful preflight, not merely an ID with no resolvable receipt body.
++    acquired_receipt = result.get("evidenceReceipt")
++    if isinstance(receipt, dict) and isinstance(acquired_receipt, dict):
++        merged = dict(acquired_receipt)
++        merged["facts"] = [*receipt.get("facts", []), *acquired_receipt.get("facts", [])]
++        merged["sourceRefs"] = [*receipt.get("sourceRefs", []), *acquired_receipt.get("sourceRefs", [])]
++        merged["caveats"] = list(dict.fromkeys([*receipt.get("caveats", []), *acquired_receipt.get("caveats", [])]))
++        merged["evidenceKinds"] = {
++            state: list(dict.fromkeys([
++                *receipt.get("evidenceKinds", {}).get(state, []),
++                *acquired_receipt.get("evidenceKinds", {}).get(state, []),
++            ]))
++            for state in ("satisfied", "caveated", "failed")
++        }
++        merged["componentReceiptIds"] = [receipt_id, acquired_receipt.get("receiptId")]
++        merged["receiptId"] = hashlib.sha256(json.dumps(
++            merged["componentReceiptIds"], ensure_ascii=False, sort_keys=True,
++        ).encode("utf-8")).hexdigest()[:32]
++        result["evidenceReceipt"] = merged
+     return result

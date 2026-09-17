@@ -20,6 +20,13 @@ export function createRuntimeHostHttpServer(host: AgentLoopRuntimeHost, options:
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });
         return json(response, 200, { request: await host.currentHumanLoop(decodeURIComponent(humanLoopCurrentMatch[1])) });
       }
+      const checkpointStartMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/checkpoint\/start$/);
+      if (request.method === "POST" && checkpointStartMatch !== undefined && checkpointStartMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
+          return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        }
+        return json(response, 202, { run: await host.startFromCheckpoint(decodeURIComponent(checkpointStartMatch[1])) });
+      }
       const humanLoopRespondMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/human-loop\/([^/]+)\/respond$/);
       if (request.method === "POST" && humanLoopRespondMatch !== undefined && humanLoopRespondMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });

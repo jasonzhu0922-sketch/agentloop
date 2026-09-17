@@ -6,7 +6,7 @@ import { toolOperationFailureCode } from "../src/runtime/tool-operation-outcome.
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 
-test("an expired dispatched Action becomes recovery_required without terminalizing its Run", async () => {
+test("an expired dispatched Action is fenced and reported as execution authority loss without waiting_recovery", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -30,9 +30,12 @@ test("an expired dispatched Action becomes recovery_required without terminalizi
     await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?")
       .run(action.id);
 
-    assert.equal(await actions.reconcileRunningRuns(), 1);
+    const interrupted = await actions.reconcileRunningRuns();
+    assert.equal(interrupted.length, 1);
+    assert.equal(interrupted[0]?.reason, "deadline_expired");
     const recovered = (await actions.list(runId))[0];
-    assert.equal(recovered.state, "recovery_required");
+    assert.equal(recovered.state, "failed");
+    assert.equal(recovered.errorCode, "EXECUTION_AUTHORITY_LOST");
     assert.equal(recovered.fence, action.fence);
     const run = (await database.prepare("SELECT status FROM runs WHERE id = ?").get(runId)) as { status: string };
     assert.equal(run.status, "running");
@@ -41,7 +44,10 @@ test("an expired dispatched Action becomes recovery_required without terminalizi
     assert.equal(outcome.count, 0);
     const event = (await database.prepare("SELECT type FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
       .get(runId)) as { type: string };
-    assert.equal(event.type, "action.recovery_required");
+    assert.equal(event.type, "action.interrupted");
+    const recoveryState = await database.prepare("SELECT COUNT(*) AS count FROM run_recovery_states WHERE run_id = ?")
+      .get(runId) as { count: number };
+    assert.equal(recoveryState.count, 0);
   } finally {
     await database.close();
   }
@@ -107,7 +113,7 @@ test("recovery reconciliation does not mark a freshly created actionless Run as 
     `).run(runId, owner.user.id, "fresh run before planner action", Date.now());
     const actions = new RuntimeActionRepository(database);
 
-    assert.equal(await actions.reconcileRunningRuns(), 0);
+    assert.equal((await actions.reconcileRunningRuns()).length, 0);
     assert.equal((await actions.list(runId)).length, 0);
     const state = await database.prepare("SELECT COUNT(*) AS count FROM run_recovery_states WHERE run_id = ?")
       .get(runId) as { count: number };
@@ -117,7 +123,7 @@ test("recovery reconciliation does not mark a freshly created actionless Run as 
   }
 });
 
-test("old actionless running Runs still enter legacy recovery review", async () => {
+test("old actionless running Runs are reported as interrupted without creating waiting_recovery", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const owner = testOwner();
@@ -130,11 +136,40 @@ test("old actionless running Runs still enter legacy recovery review", async () 
     `).run(runId, owner.user.id, "interrupted before action tracking", Date.now() - 120_000);
     const actions = new RuntimeActionRepository(database);
 
-    assert.equal(await actions.reconcileRunningRuns(), 1);
-    const recovered = (await actions.list(runId))[0];
-    assert.equal(recovered.kind, "recovery_review");
-    assert.equal(recovered.state, "recovery_required");
-    assert.equal(recovered.metadata.reason, "legacy_state_incomplete");
+    const interrupted = await actions.reconcileRunningRuns();
+    assert.deepEqual(interrupted, [{ runId, reason: "legacy_state_incomplete" }]);
+    assert.equal((await actions.list(runId)).length, 0);
+    const recoveryState = await database.prepare("SELECT COUNT(*) AS count FROM run_recovery_states WHERE run_id = ?")
+      .get(runId) as { count: number };
+    assert.equal(recoveryState.count, 0);
+  } finally {
+    await database.close();
+  }
+});
+
+test("legacy waiting_recovery execution loss is migrated to an interruption instead of remaining user-actionable", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "legacy-waiting-recovery-run";
+    database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, "legacy interrupted work", Date.now() - 120_000);
+    const actions = new RuntimeActionRepository(database);
+    const action = await actions.requireRecoveryReview({
+      runId,
+      reason: "legacy_state_incomplete",
+    });
+
+    const interrupted = await actions.reconcileRunningRuns();
+    assert.equal(interrupted.length, 1);
+    assert.equal(interrupted[0]?.runId, runId);
+    assert.equal((await actions.list(runId))[0]?.state, "failed");
+    const state = await database.prepare("SELECT COUNT(*) AS count FROM run_recovery_states WHERE run_id = ?")
+      .get(runId) as { count: number };
+    assert.equal(state.count, 0);
+    assert.equal(action.kind, "recovery_review");
   } finally {
     await database.close();
   }
@@ -168,7 +203,7 @@ test("recovery reconciliation ignores orphaned legacy Actions whose Run no longe
     await database.prepare("DELETE FROM runs WHERE id = ?").run(runId);
     await database.exec("PRAGMA foreign_keys = ON");
 
-    assert.equal(await actions.reconcileRunningRuns(), 0);
+    assert.equal((await actions.reconcileRunningRuns()).length, 0);
     const orphan = (await database.prepare("SELECT state FROM runtime_actions WHERE id = ?")
       .get(action.id)) as { state: string };
     assert.equal(orphan.state, "dispatched");

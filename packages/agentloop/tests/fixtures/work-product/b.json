@@ -1,0 +1,179 @@
+{
+  "schema": "agentloop.workProductReplayFixture/v1",
+  "id": "B",
+  "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+  "workspaceId": "fixture-B",
+  "minimization": "Selected persisted tool.completed fields; source contents omitted; filenames and absolute prefixes anonymized; stdout/stderr previews bounded at 600 characters. Hashes describe original files/streams, not redacted previews. No purpose or completion inference added.",
+  "events": [
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 821,
+      "originalPayloadSha256": "0c82d8caec4f50d3c82403b74757a23ea40755066424b8201cb62f82340ab375",
+      "evidence": {
+        "toolCallId": "call_qei3ukikp1klw0w44l4gqj7a",
+        "toolName": "computer_write_file",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false,
+        "result": "{\"path\":\"generator.js\",\"mode\":\"create\",\"bytes\":25959,\"sha256\":\"6b47f478c96b3b69a69b553eb3b9ea6743183ddc3f351739e36fefbd8611965e\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 858,
+      "originalPayloadSha256": "c27e74091451761d67bdaebbfd37ad07045077958edd91e2f6823f21897508ea",
+      "evidence": {
+        "toolCallId": "call_00_eDyWESVJCPAYJwB77QAP3033",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "failed",
+        "exitCode": 1,
+        "isError": true,
+        "result": "{\"exitCode\":1,\"signal\":null,\"fileChanges\":[],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stderrRef\":{\"path\":\".agentloop/tool-results/04/04dc5498c758674af432203b320d3a9ba30d852ed8ad35b3f70f1689de6bcf22.stderr.txt\",\"sha256\":\"04dc5498c758674af432203b320d3a9ba30d852ed8ad35b3f70f1689de6bcf22\",\"bytes\":995,\"characters\":995,\"previewCharacters\":2000},\"stdout\":\"\",\"stderr\":\"/workspace/generator.js:4\\nconst pptxgen = require(\\\"pptxgenjs\\\");\\n                ^\\n\\nReferenceError: require is not defined in ES module scope, you can use import instead\\nThis file is being treated as an ES module because it has a '.js' file extension and '/repo/apps/agentloop-multi-runtime/package.json' contains \\\"type\\\": \\\"module\\\". To treat it as a CommonJS script, rename it to use the '.cjs' file extension.\\n    at /workspace/generator.js:4:17\\n    at ModuleJob.run (node:internal/modules/esm/module_job:437:25)\\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:642:26)\\n \"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 886,
+      "originalPayloadSha256": "51b554c3e3df1c050ba2c57770cf2cf8e0152f255e0481fb2c3b84ab7c22e920",
+      "evidence": {
+        "toolCallId": "call_vfzucceorzuibe12zslbhrbd",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "exitCode": 0,
+        "isError": false,
+        "result": "{\"exitCode\":0,\"signal\":null,\"fileChanges\":[{\"path\":\"generator.cjs\",\"changeType\":\"created\",\"bytes\":25959},{\"path\":\"generator.js\",\"changeType\":\"deleted\"}],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stdout\":\"\",\"stderr\":\"\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 913,
+      "originalPayloadSha256": "1b64b4b6c1c3753181d5a0a24d1f5b7046ac615c7c3f3014278e7a30ccfbc08a",
+      "evidence": {
+        "toolCallId": "call_00_PATCHPKA0GMGZaND6jOt3849",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "failed",
+        "exitCode": 1,
+        "isError": true,
+        "result": "{\"exitCode\":1,\"signal\":null,\"fileChanges\":[],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stderrRef\":{\"path\":\".agentloop/tool-results/37/379af0560c33e2b9e9459039fcdd89ad72ced2dc138f0abbdaebe59a1ffc49d2.stderr.txt\",\"sha256\":\"379af0560c33e2b9e9459039fcdd89ad72ced2dc138f0abbdaebe59a1ffc49d2\",\"bytes\":1202,\"characters\":1202,\"previewCharacters\":2000},\"stdout\":\"\",\"stderr\":\"/repo/node_modules/pptxgenjs/dist/pptxgen.cjs.js:2201\\n        throw new Error('Missing/Invalid shape parameter! Example: `addShape(pptxgen.shapes.LINE, {x:1, y:1, w:1, h:1});`');\\n        ^\\n\\nError: Missing/Invalid shape parameter! Example: `addShape(pptxgen.shapes.LINE, {x:1, y:1, w:1, h:1});`\\n    at addShapeDefinition (/repo/node_modules/pptxgenjs/dist/pptxgen.cjs.js:2201:15)\\n    at Slide.addShape (/repo/node_modules/pptxgenjs/dist/pptxgen.cjs.js:2880:9)\\n    at Object.<anonymous> (/workspace/generator.cjs:119:5)\\n    at Module._compile (node:internal/modules/cjs/loader:1829:14)\\n    at Module._e\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 1018,
+      "originalPayloadSha256": "401b92e1e52cd00efaa639c65e430ca52d383811b68444e67c68ad3a8c7c2d1d",
+      "evidence": {
+        "toolCallId": "call_gx390ktzc6u892ycvfxocogv",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "failed",
+        "exitCode": 1,
+        "isError": true,
+        "result": "{\"exitCode\":1,\"signal\":null,\"fileChanges\":[],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stdoutRef\":{\"path\":\".agentloop/tool-results/de/de963bdfdc6816a6217299ec8e7088f78b542c98b2e57dd41b6b15376e4020f3.stdout.txt\",\"sha256\":\"de963bdfdc6816a6217299ec8e7088f78b542c98b2e57dd41b6b15376e4020f3\",\"bytes\":274,\"characters\":274,\"previewCharacters\":2000},\"stderrRef\":{\"path\":\".agentloop/tool-results/6f/6fef9e74e4b2e94e58ffbcdfcd87078b9d751eac076329da4c54ab34710e52b8.stderr.txt\",\"sha256\":\"6fef9e74e4b2e94e58ffbcdfcd87078b9d751eac076329da4c54ab34710e52b8\",\"bytes\":985,\"characters\":985,\"previewCharacters\":2000},\"stdout\":\"len 179\\nrect: rect oval: undefined roundRect: roundRect line: line\\nflowChartOfflineStorage,flowChartOnlineStorage,line,lineInv,rect,round1Rect,round2DiagRect,round2SameRect,roundRect,snip1Rect,snip2DiagRect,snip2SameRect,snipRoundRect,wedgeRectCallout,wedgeRoundRectCallout\\n\",\"stderr\":\"node:internal/modules/cjs/loader:691\\n      throw e;\\n      ^\\n\\nError [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './package.json' is not defined by \\\"exports\\\" in /repo/node_modules/pptxgenjs/package.json\\n    at exportsNotFound (node:internal/modules/esm/resolve:310:10)\\n    at packageExportsResolve (node:internal/modules/esm/resolve:658:9)\\n    at resolveExports (node:internal/modules/cjs/loader:684:36)\\n    at Module._findPath (node:internal/modules/cjs/loader:751:31)\\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1460:27)\\n    at wrapResolveFilename (node:internal/modules/cjs\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 1063,
+      "originalPayloadSha256": "7211d1de7504656c74bbf37e3768343994bea311cf39ab144c56607078e63a8d",
+      "evidence": {
+        "toolCallId": "call_01_MaogVLNKhwHUNMjqcYPb9775",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "exitCode": 0,
+        "isError": false,
+        "result": "{\"exitCode\":0,\"signal\":null,\"fileChanges\":[],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stdoutRef\":{\"path\":\".agentloop/tool-results/c0/c0d366e57517084fe6e4bf3f507b32dd2449576f28ab41c1ad4fdebd9d35eb35.stdout.txt\",\"sha256\":\"c0d366e57517084fe6e4bf3f507b32dd2449576f28ab41c1ad4fdebd9d35eb35\",\"bytes\":204,\"characters\":204,\"previewCharacters\":2000},\"stdout\":\"rect => rect\\nroundRect => roundRect\\nellipse => ellipse\\noval => undefined\\nline => line\\nchevron => chevron\\nrightArrow => rightArrow\\ntriangle => triangle\\nhexagon => hexagon\\ndiamond => diamond\\nstar5 => star5\\n\",\"stderr\":\"\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 1159,
+      "originalPayloadSha256": "8697854bcd20e98b287a20d012ca5652a02cb09ff404e6b6644c979a67a92058",
+      "evidence": {
+        "toolCallId": "call_otfrryi90h97wv1ompqqcii6",
+        "toolName": "computer_write_file",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false,
+        "result": "{\"path\":\"gen_test_fill.cjs\",\"mode\":\"create\",\"bytes\":1102,\"sha256\":\"59f252831f3c5ffea8f9e48502b99062e1754d00bfc0d3787bbe88ff0f2dfa48\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 1185,
+      "originalPayloadSha256": "9d8986de0a39677cf0770c08de59488f80cd50c018e96b5f7b52a0c3a05a72a3",
+      "evidence": {
+        "toolCallId": "call_00_hSdGaz2uSDzpznpvKs1A9387",
+        "toolName": "computer_run_command",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "exitCode": 0,
+        "isError": false,
+        "result": "{\"exitCode\":0,\"signal\":null,\"fileChanges\":[{\"path\":\"test_fill.pptx\",\"changeType\":\"created\",\"bytes\":45978}],\"fileChangesTruncated\":false,\"timedOut\":false,\"truncated\":false,\"stdoutRef\":{\"path\":\".agentloop/tool-results/dc/dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22.stdout.txt\",\"sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\",\"bytes\":3,\"characters\":3,\"previewCharacters\":2000},\"stdout\":\"ok\\n\",\"stderr\":\"\"}"
+      }
+    },
+    {
+      "runId": "d0e99198-4811-4c89-a576-1b9d92da5322",
+      "workspaceId": "fixture-B",
+      "seq": 1217,
+      "originalPayloadSha256": "7b85b8a31feb70c542cceb9b3c6d7dba40dd28812c38f215fd0949cdc95e2873",
+      "evidence": {
+        "toolCallId": "call_00_SVXlziySaX2LXuDpHuE71852",
+        "toolName": "computer_write_file",
+        "invocationStatus": "completed",
+        "operationStatus": "succeeded",
+        "isError": false,
+        "result": "{\"path\":\"inspect_fill.py\",\"mode\":\"create\",\"bytes\":771,\"sha256\":\"a88225acce8502b4784d7e1e7632736907a23b090e9e050b32dea277b16830a6\"}"
+      }
+    }
+  ],
+  "emptyModelResponses": [
+    {
+      "seq": 1228,
+      "originalPayloadSha256": "5b1237c61de7573bcee8a96ee0f5f8608aefa4ecddd14ad7e4ae57679b22c7b4",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    },
+    {
+      "seq": 1236,
+      "originalPayloadSha256": "0f1ed45885381ec8a7c4fcbfe0e363ee8ce19c340f71f12720639e9279bcb61d",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    },
+    {
+      "seq": 1254,
+      "originalPayloadSha256": "2f595324825e516642aca17b5c6cbccbabe5a81bd41739a8253c2cd2d8a33a9c",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    },
+    {
+      "seq": 1262,
+      "originalPayloadSha256": "edb75e30b63960253fbe543f04b08d869007def423f7d0bba6d29973eb541244",
+      "response": {
+        "content": "",
+        "finishReason": "stop",
+        "toolCalls": []
+      }
+    }
+  ]
+}

@@ -148,6 +148,19 @@ export interface TaskSpec {
    * Planner inputs only; they cannot admit a Plan or claim completion.
    */
   readonly planningExtensionContexts?: readonly PlanningExtensionContext[];
+  /**
+   * A bounded, authorization-preserving catalog used only after Admission
+   * proves that the first proposal lacks a producer for required evidence.
+   * These entries are not part of the first-round relevance recommendation.
+   */
+  readonly capabilityRecovery?: CapabilityRecoveryCatalog;
+}
+
+export interface CapabilityRecoveryCatalog {
+  /** The complete Skill catalog already authorized by the Run grant. */
+  readonly availableSkills: readonly PrivateSkill[];
+  /** Capabilities declared by the authorized Tools and Skills. */
+  readonly availableCapabilities: readonly PlanningCapability[];
 }
 
 export type ConversationTurnMode = "reply" | "execute" | "clarify";

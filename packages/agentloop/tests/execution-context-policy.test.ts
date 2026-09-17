@@ -467,6 +467,10 @@ test("execution context prefers structured JSON reads for table extraction artif
   assert.match(payload.structuredArtifactConsumptionDiscipline, /Use computer_search_text only/);
   assert.match(payload.derivedAggregationDiscipline, /computer_aggregate_table_artifact/);
   assert.match(payload.derivedAggregationDiscipline, /caveat is not a substitute/i);
+  assert.match(payload.toolSelectionPolicy.beforeAcquiringEvidence, /current-stage evidence for this stage/i);
+  assert.match(payload.stageEvidencePrecedence, /dependency evidence is input, not a veto/i);
+  assert.match(payload.stageEvidencePrecedence, /do not re-fetch or revalidate solely to reconcile/i);
+  assert.match((payload.dependencyEvidenceBindings as { readonly instruction: string }).instruction, /current step resolves a conflict/i);
   const bindings = payload.dependencyEvidenceBindings as {
     readonly bindings: readonly Array<{
       readonly toolEvidence: readonly Array<{
@@ -595,6 +599,10 @@ test("execution context asks acquisition steps to batch independent reads in one
   assert.match(
     payload.evidenceAcquisitionDiscipline as string,
     /Do not wait for Assessment to ask for the next obvious fact/i,
+  );
+  assert.match(
+    (payload.toolSelectionPolicy as { readonly marginalBenefitDecision: string }).marginalBenefitDecision,
+    /material expected benefit/i,
   );
 });
 

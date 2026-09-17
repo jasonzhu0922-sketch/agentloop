@@ -7,7 +7,14 @@ import { HttpResourceImporter } from "../runtime/http-resource-importer.ts";
 import { HostDispatchStore } from "../runtime/host-dispatch-store.ts";
 import { createRuntimeHostHttpServer } from "../http/runtime-host-http.ts";
 import { AgentLoopRuntimeHost } from "../runtime/runtime-host.ts";
-import { assertRequiredRuntimeCommands, requiredRuntimeCommands } from "../runtime/runtime-command-preflight.ts";
+import {
+  assertRequiredRuntimeCommands,
+  assertRequiredRuntimeNodeModules,
+  assertRequiredRuntimePythonModules,
+  requiredRuntimeCommands,
+  requiredRuntimeNodeModules,
+  requiredRuntimePythonModules,
+} from "../runtime/runtime-command-preflight.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../storage/state-database.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -45,6 +52,8 @@ const runtimeLogLabel = colorizeTerminalLogLabel(`[${runtimeId}]`, runtimeId, lo
 // Deployment-owned requirements fail before state initialization or Run dispatch.
 // A Skill may use a command only after the Runtime Host has proved it exists.
 assertRequiredRuntimeCommands(requiredRuntimeCommands(process.env.RUNTIME_REQUIRED_COMMANDS));
+assertRequiredRuntimePythonModules(requiredRuntimePythonModules(process.env.RUNTIME_REQUIRED_PYTHON_MODULES));
+assertRequiredRuntimeNodeModules(requiredRuntimeNodeModules(process.env.RUNTIME_REQUIRED_NODE_MODULES));
 // Skill roots are application configuration, not a Router or task input. Load
 // them before creating runtime state so a bad deployment fails without a
 // partially initialized Host database.
@@ -99,12 +108,21 @@ server.listen(port, host, () => {
   void sendHeartbeat();
 });
 const heartbeatTimer = setInterval(() => { void sendHeartbeat(); }, heartbeatIntervalMs);
+let reconciliationInFlight = false;
+const reconciliationTimer = setInterval(() => {
+  if (reconciliationInFlight) return;
+  reconciliationInFlight = true;
+  void runs.reconcileInterruptedRuns()
+    .catch((error) => process.stderr.write(`Runtime interruption reconciliation failed: ${error instanceof Error ? error.message : String(error)}\n`))
+    .finally(() => { reconciliationInFlight = false; });
+}, heartbeatIntervalMs);
 
 let closing = false;
 function shutdown(): void {
   if (closing) return;
   closing = true;
   clearInterval(heartbeatTimer);
+  clearInterval(reconciliationTimer);
   server.close(() => {
     database.close();
     process.exitCode = 0;

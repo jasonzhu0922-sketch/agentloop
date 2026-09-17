@@ -48,6 +48,11 @@ export interface RuntimeRunStatus {
   readonly errorMessage?: string;
   readonly finishedAt?: number;
   readonly artifacts?: readonly ProcessArtifact[];
+  readonly checkpoint?: {
+    readonly id: string;
+    readonly reason: "execution_authority_lost";
+    readonly childRunId?: string;
+  };
 }
 
 export interface RuntimeRunEvent {
@@ -78,6 +83,8 @@ export interface RuntimeEndpoint {
   advanceRecovery?(remoteRunId: string): Promise<RecoveryDetail>;
   /** Resumes a Host-admitted, replay-safe recovery action. */
   resumeRecovery?(remoteRunId: string): Promise<RuntimeRunStatus>;
+  /** Starts a new child Run from the failed Run's persisted checkpoint. */
+  startFromCheckpoint?(remoteRunId: string): Promise<RuntimeRunStatus>;
   currentHumanLoop?(remoteRunId: string): Promise<HumanLoopRequest | undefined>;
   respondHumanLoop?(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<HumanLoopResponse>;
 }

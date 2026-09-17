@@ -18,7 +18,8 @@ import {
 } from "../src/planning/step-execution-binding.ts";
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
-import { buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
+import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
+import { operationProfileCatalogForPlanning } from "../src/runtime/operation-profiles.ts";
 import { RunService, selectPlanningSkillRoles, selectPlanningSkills } from "../src/runtime/run-service.ts";
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
@@ -342,6 +343,299 @@ test("ModelPlanner corrects a capability mistakenly submitted as a Skill", async
   assert.deepEqual(plan.selectedSkillIds, []);
   assert.deepEqual(plan.steps[0].skillIds, []);
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["uploaded_source_read"]);
+});
+
+test("ModelPlanner discovers an authorized evidence producer before rejecting a Plan", async () => {
+  const hil = skillFixture({
+    id: "visual-directions-hil",
+    name: "visual-directions-hil",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["none"]),
+  });
+  const schemaProvider = skillFixture({
+    id: "database-schema-provider",
+    name: "database-schema-provider",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+      producesEvidenceKinds: ["source_summary", "schema_summary", "explicit_caveats"],
+    },
+  });
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("hil-without-schema-producer", {
+            goal: "Prepare design directions for human review.",
+            selectedSkillRoles: [{ skillId: hil.id, role: "primary_builder", reason: "Prepare the review choices." }],
+            steps: [{
+              id: "prepare_hil_design_directions",
+              objective: "Prepare design directions for human review.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [hil.id],
+              requiredCapabilities: [],
+              evidenceContract: { requiredKinds: ["schema_summary"], caveatPolicy: "mark_unverified_facts" },
+            }],
+          })],
+        };
+      }
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /database-schema-provider/);
+      assert.match(context, /Capability gaps/);
+      assert.match(context, /make downstream HIL\/production leaves depend on that fact leaf/i);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("schema-first-hil", {
+          goal: "Prepare design directions for human review.",
+          shape: "fact_then_produce",
+          selectedSkillRoles: [
+            { skillId: schemaProvider.id, role: "source_provider", reason: "Acquire the source schema first." },
+            { skillId: hil.id, role: "primary_builder", reason: "Prepare review choices from acquired facts." },
+          ],
+          steps: [
+            {
+              id: "acquire_design_schema",
+              objective: "Inspect the authorized source schema for the review directions.",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: [schemaProvider.id],
+              requiredCapabilities: [],
+              evidenceContract: { requiredKinds: ["source_summary", "schema_summary", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+            },
+            {
+              id: "prepare_hil_design_directions",
+              objective: "Prepare design directions for human review from the acquired schema.",
+              dependencies: ["acquire_design_schema"],
+              role: "produce",
+              skillIds: [hil.id],
+              requiredCapabilities: [],
+              evidenceContract: { requiredKinds: ["explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+            },
+          ],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-capability-gap-recovery",
+    input: "Prepare design directions for human review.",
+    availableSkills: [hil],
+    availableToolNames: ["load_skill", "computer_run_command"],
+    availableCapabilities: planningCapabilitiesFromSkills([hil]),
+    capabilityRecovery: {
+      availableSkills: [hil, schemaProvider],
+      availableCapabilities: planningCapabilitiesFromSkills([hil, schemaProvider]),
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["acquire_design_schema", "prepare_hil_design_directions"]);
+  assert.ok(plan.selectedSkillIds.includes(schemaProvider.id));
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "schema_summary", "explicit_caveats"]);
+  assert.deepEqual(plan.steps[1]?.evidenceContract?.requiredKinds, ["explicit_caveats"]);
+});
+
+test("ModelPlanner discovers a source producer for a plan-level lookup grounding gap", async () => {
+  let calls = 0;
+  const tools = [
+    { name: "websearch", description: "Search web sources." },
+    { name: "webfetch", description: "Fetch a web source." },
+  ];
+  const capabilities = planningCapabilitiesFromTools(tools);
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("lookup-without-source", {
+            goal: "Find today's AI news.",
+            steps: [{
+              id: "answer",
+              objective: "Answer the question.",
+              dependencies: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["conversation_delivery"],
+            }],
+          })],
+        };
+      }
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /source_grounding/);
+      assert.match(context, /web_research/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("lookup-with-source", {
+          goal: "Find today's AI news.",
+          shape: "fact_then_produce",
+          steps: [
+            {
+              id: "acquire_sources",
+              objective: "Find and summarize current web sources.",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: [],
+              requiredCapabilities: ["web_research"],
+              evidenceContract: { requiredKinds: ["source_summary", "source_urls", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+            },
+            {
+              id: "answer",
+              objective: "Answer using the acquired sources.",
+              dependencies: ["acquire_sources"],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["conversation_delivery"],
+            },
+          ],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-source-grounding-capability-recovery",
+    input: "Find today's AI news.",
+    availableSkills: [],
+    availableToolNames: tools.map((tool) => tool.name),
+    availableTools: tools,
+    availableCapabilities: capabilities,
+    capabilityRecovery: { availableSkills: [], availableCapabilities: capabilities },
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "Find today's AI news.",
+      evidenceDemand: "lookup_lite",
+      userConstraints: [],
+      source: "deterministic",
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["web_research"]);
+});
+
+test("ModelPlanner preserves bounded multi-gap capability recovery", async () => {
+  const schemaProvider = skillFixture({
+    id: "database-schema-provider",
+    name: "database-schema-provider",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+      producesEvidenceKinds: ["source_summary", "schema_summary", "explicit_caveats"],
+    },
+  });
+  const webTools = [
+    { name: "websearch", description: "Search web sources." },
+    { name: "webfetch", description: "Fetch web sources." },
+    { name: "load_skill", description: "Load an authorized Skill." },
+  ];
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      const common = { goal: "Prepare a grounded schema-backed answer." };
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("gap-one", {
+            ...common,
+            steps: [{
+              id: "answer",
+              objective: "Prepare the answer.",
+              dependencies: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["conversation_delivery"],
+              evidenceContract: { requiredKinds: ["schema_summary"], caveatPolicy: "mark_unverified_facts" },
+            }],
+          })],
+        };
+      }
+      if (calls === 2) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("gap-two", {
+            ...common,
+            steps: [{
+              id: "answer",
+              objective: "Prepare the answer from current web sources.",
+              dependencies: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: ["web_research"],
+              evidenceContract: { requiredKinds: ["schema_summary"], caveatPolicy: "mark_unverified_facts" },
+            }],
+          })],
+        };
+      }
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("recovered", {
+          ...common,
+          shape: "fact_then_produce",
+          selectedSkillRoles: [{ skillId: schemaProvider.id, role: "source_provider", reason: "Read the authorized schema source." }],
+          steps: [{
+            id: "acquire_schema",
+            objective: "Acquire the schema and source caveats.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [schemaProvider.id],
+            requiredCapabilities: ["web_research", "skill_source_provider.database.database-schema-provider"],
+            evidenceContract: { requiredKinds: ["source_summary", "schema_summary", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+          }, {
+            id: "answer",
+            objective: "Prepare the answer from the acquired schema.",
+            dependencies: ["acquire_schema"],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: ["conversation_delivery"],
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-capability-gap-recovery-twice",
+    input: "Prepare a grounded schema-backed answer.",
+    availableSkills: [],
+    availableToolNames: webTools.map((tool) => tool.name),
+    availableTools: webTools,
+    availableCapabilities: planningCapabilitiesFromTools(webTools),
+    capabilityRecovery: {
+      availableSkills: [schemaProvider],
+      availableCapabilities: [
+        ...planningCapabilitiesFromTools(webTools),
+        ...planningCapabilitiesFromSkills([schemaProvider]),
+      ],
+    },
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "Prepare a grounded schema-backed answer.",
+      evidenceDemand: "lookup_lite",
+      userConstraints: [],
+      source: "deterministic",
+    },
+  });
+
+  assert.equal(calls, 3);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["acquire_schema", "answer"]);
 });
 
 test("Task intent treats Chinese summary files as workspace document artifacts", () => {
@@ -690,6 +984,16 @@ test("Task intent treats a bounded recent Chinese news period as a fresh lookup"
   assert.equal(intent.researchPolicy?.freshnessNeed, "current");
 });
 
+test("Task intent keeps a current packaged renderer schema out of web lookup", () => {
+  const intent = classifyTaskIntent({
+    objective: "请先加载 canvas-design 的渲染 schema，确认当前支持的设计轴和合法参数，再生成 PNG 海报。",
+  });
+
+  assert.equal(intent.sourceNeed, "none");
+  assert.equal(intent.researchPolicy, undefined);
+  assert.equal(intent.artifactKind, "image");
+});
+
 test("Task intent requires source grounding for a specific external fact without lookup keywords", () => {
   const intent = classifyTaskIntent({
     objective: "宝武集团 2526 工程是什么？",
@@ -770,6 +1074,27 @@ test("Dynamic prompt context omits research policy when source evidence is not n
 
   assert.doesNotMatch(context, /researchPolicy/);
   assert.doesNotMatch(context, /agentloop\.researchPolicy\/v1/);
+});
+
+test("data-analysis profile projects its no-duplicate-work principle into the planning system prompt", () => {
+  const dataAnalysis = operationProfileCatalogForPlanning().filter((profile) => profile.id === "data_analysis");
+  const systemPrompt = buildDynamicSystemPrompt({
+    phase: "planning",
+    baseInstructions: ["Plan the requested work."],
+    contractLines: ["Use the supplied task profile."],
+    taskProfile: buildTaskProfile({
+      phase: "planning",
+      intent: "execute",
+      operations: dataAnalysis,
+      skillBound: false,
+    }),
+  });
+
+  assert.match(systemPrompt, /Data-analysis paradigm/);
+  assert.match(systemPrompt, /Do not plan or perform duplicate acquisition/);
+  assert.match(systemPrompt, /current-stage evidence governs this stage/);
+  assert.match(systemPrompt, /Preserve the earlier result as provenance/);
+  assert.match(systemPrompt, /Runtime high-risk gate/);
 });
 
 test("ModelPlanner retries once when the planning model attempts execution tools", async () => {
@@ -2116,6 +2441,34 @@ test("Plan admission preserves artifact gates for workspace artifact delivery", 
   ]);
 });
 
+test("Plan admission rejects a Human-in-the-Loop-only terminal artifact step", () => {
+  assert.throws(
+    () => admitPlan({
+      runId: "run-hil-only-terminal-artifact",
+      proposal: {
+        goal: "choose a direction and render a poster",
+        selectedSkillIds: [],
+        steps: [{
+          id: "choose-direction",
+          objective: "Present three directions and wait for the user's choice; do not render the poster yet.",
+          dependencies: [],
+          role: "deliver",
+          skillIds: [],
+          requiredCapabilities: ["workspace_artifact_write"],
+          evidenceContract: { requiredKinds: ["explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+          successCriteria: [{ id: "explicit_caveats", description: "The staged result is caveated.", source: "planner" }],
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(["computer_write_file"]),
+      taskIntent: { deliverySurface: "workspace_artifact", artifactKind: "image" },
+    }),
+    (error: unknown) => error instanceof AppError
+      && error.code === "PLAN_NOT_ADMITTED"
+      && /no terminal producer with observable artifact evidence/.test(error.message),
+  );
+});
+
 test("ModelPlanner accepts paginated HTML materialization as a file-producing artifact plan", async () => {
   const planner = new ModelPlanner(new StaticModel({
     content: "",
@@ -2969,6 +3322,68 @@ test("ModelPlanner rejects text-only plans for requested observable artifacts", 
   );
 });
 
+test("ModelPlanner repairs a Human-in-the-Loop-only terminal artifact plan", async () => {
+  const canvas = skillFixture({
+    id: "canvas-design",
+    name: "canvas-design",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["image"]),
+  });
+  let calls = 0;
+  let observedPrompt = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      observedPrompt += `${request.systemPrompt}\n${request.runtimeContext?.content ?? ""}`;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall(`plan-${calls}`, calls === 1
+          ? {
+            goal: "Choose a poster direction and stop before rendering.",
+            selectedSkillIds: [canvas.id],
+            steps: [{
+              id: "choose-direction",
+              objective: "Present three poster directions, ask the user to choose one, and do not render the final PNG.",
+              dependencies: [],
+              role: "deliver",
+              skillIds: [canvas.id],
+              requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write"],
+              evidenceContract: { requiredKinds: ["explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+              successCriteria: [{ id: "explicit_caveats", description: "The staged direction result is caveated." }],
+            }],
+          }
+          : {
+            goal: "Choose a poster direction and then render the final PNG.",
+            selectedSkillIds: [canvas.id],
+            steps: [{
+              id: "choose-and-render",
+              objective: "Present three poster directions; after the Human-in-the-Loop selection, render and deliver the final PNG with acceptance evidence.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [canvas.id],
+              requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
+              evidenceContract: { requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"], caveatPolicy: "none" },
+              successCriteria: [{ id: "artifact_path", description: "The final PNG path is recorded." }],
+            }],
+          })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "hil-artifact-plan-repair",
+    input: "Create a poster, ask me to choose a visual direction, then generate the final PNG.",
+    availableSkills: [canvas],
+    availableToolNames: ["load_skill", "request_human_loop", "computer_write_file", "verify_artifact_acceptance"],
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(plan.steps[0]?.id, "choose-and-render");
+  assert.equal(plan.steps[0]?.evidenceContract?.requiredKinds.includes("artifact_path"), true);
+  assert.match(observedPrompt, /HIL pauses an outcome/);
+});
+
 test("ModelPlanner keeps executable Skill tasks out of direct-answer-only planning profiles", async () => {
   const skill = skillFixture({ id: "frontend-design", name: "frontend-design" });
   let sawExecutableSkillProfiles = false;
@@ -3407,8 +3822,13 @@ test("ModelPlanner accepts artifact delivery receipts in an empty conversation w
               id: "build_html_ppt",
               objective: "基于调研结果制作并交付 DCMM 4级评级中文培训 HTML-PPT。",
               dependencies: [],
+              role: "produce",
               skillIds: [skill.id],
               requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "workspace_file_read"],
+              evidenceContract: {
+                requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
+                caveatPolicy: "none",
+              },
               successCriteria: [
                 { id: "sc-1", description: "交付非空的 HTML-PPT 文件或可运行的 HTML 演示项目，位于对话工作区内，并提供明确路径。" },
                 { id: "sc-2", description: "通过本地构建或读取检查获得非空交付回执，能够确认输出格式、工作区路径及基本可用性。" },
@@ -3654,6 +4074,10 @@ test("ModelPlanner accepts first-round factual artifact plans with conditional s
                 requiredFacts: [],
                 skillIds: [skill.id],
                 requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "workspace_file_read"],
+                evidenceContract: {
+                  requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request"],
+                  caveatPolicy: "none",
+                },
                 successCriteria: [
                   {
                     id: "html-ppt-delivered",
@@ -4418,7 +4842,7 @@ test("Admission expands a bound source-provider Skill's declared evidence capabi
       sourceKinds: ["database"],
       qaKinds: [],
       executionProfiles: ["local_script"],
-      producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+      producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
     },
   });
   const proposal: PlanProposal = {
@@ -4433,7 +4857,7 @@ test("Admission expands a bound source-provider Skill's declared evidence capabi
       skillIds: [mysql.id],
       requiredCapabilities: [],
       evidenceContract: {
-        requiredKinds: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+        requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
         caveatPolicy: "mark_unverified_facts",
       },
       successCriteria: [{ id: "mysql_source", description: "Bounded source evidence is available.", source: "planner" }],
@@ -4451,6 +4875,7 @@ test("Admission expands a bound source-provider Skill's declared evidence capabi
   assert.deepEqual(binding.sourceKinds, ["database", "workspace_file"]);
   assert.ok(binding.requiredCapabilities.includes("skill_source_provider.database.steel-data"));
   assert.ok(binding.resolvedToolNames.includes("computer_run_command"));
+  assert.ok(binding.evidenceKinds.includes("structured_extraction_artifact"));
   assert.equal(binding.requiredCapabilities.includes("web_research"), false);
   assert.equal(binding.requiredCapabilities.includes("external_api_call"), false);
 
@@ -5141,7 +5566,7 @@ test("ModelPlanner rejects pure Skill activation leaves after one admission corr
   assert.equal(calls, 2);
 });
 
-test("legacy interrupted Runs enter recovery review instead of being terminally failed on restart", async () => {
+test("legacy interrupted Runs fail terminally with a resumable checkpoint on restart", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -5166,18 +5591,105 @@ test("legacy interrupted Runs enter recovery review instead of being terminally 
       availableToolNames: new Set(),
     }));
     await plans.startStep(plan.id, "create-artifact");
-    const runs = new RunService({ database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }) });
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({ content: "continued from checkpoint", toolCalls: [], finishReason: "stop" }),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
 
     assert.equal(await runs.reconcileInterruptedRuns(), 1);
-    assert.equal((await runs.get(owner.user.id, runId)).status, "running");
-    assert.equal((await plans.get(plan.id)).status, "running");
-    assert.equal((await plans.get(plan.id)).steps[0].status, "running");
+    const failed = await runs.get(owner.user.id, runId);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.errorCode, "EXECUTION_AUTHORITY_LOST");
+    assert.equal((await plans.get(plan.id)).status, "failed");
     const actions = await runs.actionsForRun(owner.user.id, runId);
-    assert.equal(actions.length, 1);
-    assert.equal(actions[0].kind, "recovery_review");
-    assert.equal(actions[0].state, "recovery_required");
-    assert.equal(actions[0].metadata.reason, "legacy_state_incomplete");
-    assert.equal((await runs.events(owner.user.id, runId)).at(-1)?.type, "action.recovery_required");
+    assert.equal(actions.length, 0);
+    const checkpoint = await runs.checkpointForRun(owner.user.id, runId);
+    assert.equal(checkpoint?.reason, "execution_authority_lost");
+    const events = await runs.events(owner.user.id, runId);
+    assert.equal(events.some((event) => event.type === "run.checkpoint_created"), true);
+    assert.equal(events.at(-1)?.type, "run.failed");
+    const recoveryState = await database.prepare("SELECT COUNT(*) AS count FROM run_recovery_states WHERE run_id = ?")
+      .get(runId) as { count: number };
+    assert.equal(recoveryState.count, 0);
+    assert.equal(await runs.reconcileInterruptedRuns(), 0);
+    const child = await runs.startFromCheckpoint(owner.user.id, checkpoint!.id);
+    assert.equal(child.parentRunId, runId);
+    assert.equal(child.depth, 1);
+    const consumed = await runs.checkpointForRun(owner.user.id, runId);
+    assert.equal(consumed?.childRunId, child.id);
+    assert.notEqual(child.id, runId);
+    assert.equal((await runs.get(owner.user.id, runId)).status, "failed");
+    for (let attempt = 0; attempt < 20 && (await runs.get(owner.user.id, child.id)).status === "running"; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal((await runs.get(owner.user.id, child.id)).status, "completed");
+  } finally {
+    database.close();
+  }
+});
+
+test("startup reconciliation migrates legacy assessment waiting_recovery into automatic repair", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const runId = "legacy-assessment-recovery-run";
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+        status, input, created_at
+      ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, "repair the rejected result", Date.now());
+    const plans = new PlanRepository(database);
+    let plan = await plans.create(admitPlan({
+      runId,
+      proposal: {
+        goal: "repair the rejected result",
+        selectedSkillIds: [],
+        steps: [step("rejected-step")],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    plan = await plans.startStep(plan.id, "rejected-step");
+    plan = await plans.failStep(plan.id, "rejected-step", "Assessment rejected the evidence boundary.");
+    const failedBoundary = {
+      stepId: "rejected-step",
+      missingEvidenceKinds: ["delivery_receipt"],
+      violatedSkillRequirements: [],
+      reusableEvidenceRefs: ["candidateOutput"],
+      suggestedRepairShape: "repair_leaf" as const,
+    };
+    await new RuntimeActionRepository(database).requireRecoveryReview({
+      runId,
+      planId: plan.id,
+      stepId: "rejected-step",
+      reason: "assessment_failed_boundary",
+      metadata: { failedBoundary },
+    });
+
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({ content: "repaired result", toolCalls: [], finishReason: "stop" }),
+      assessorFactory: () => approvingTestAssessor(),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({ approved: true, feedback: "", evidenceRefs: ["assessment.failed_boundary"] }),
+      }),
+    });
+
+    assert.equal(await runs.reconcileInterruptedRuns(), 1);
+    assert.equal((await runs.get(owner.user.id, runId)).status, "completed");
+    const recovery = await runs.recoveryForRun(owner.user.id, runId);
+    assert.equal(recovery.state, undefined);
+    const revised = await runs.plan(owner.user.id, runId);
+    assert.equal(revised.plan.steps.some((item) => item.role === "repair" && item.status === "completed"), true);
+    const events = await runs.events(owner.user.id, runId);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+    assert.equal(events.some((event) => event.type === "run.completed"), true);
     assert.equal(await runs.reconcileInterruptedRuns(), 0);
   } finally {
     database.close();
@@ -6649,7 +7161,8 @@ test("ProfiledRuleStepAssessor rejects incomplete table coverage despite the mod
 
   assert.equal(assessment.approved, false);
   assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "table_coverage")?.satisfied, false);
-  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["table_coverage", "explicit_caveats"]);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["table_coverage"]);
+  assert.equal(assessment.criteria.find((criterion) => criterion.criterionId === "explicit_caveats")?.satisfied, true);
 });
 
 test("ProfiledRuleStepAssessor does not re-assess the model's interpretation of an aggregation", async () => {
@@ -6822,7 +7335,7 @@ test("RunService keeps Planner-declared direct-answer leaves rule-assessed witho
   }
 });
 
-test("RunService emits assessment failed boundaries for rejected candidates", async () => {
+test("RunService automatically handles assessment failed boundaries without waiting_recovery", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -6839,10 +7352,48 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
       database,
       skills,
       modelFactory: () => new StaticModel({ content: "partial result", toolCalls: [], finishReason: "stop" }),
-      plannerFactory: () => singleStepTestPlanner(),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          const proposal = await singleStepTestPlanner().plan(task);
+          return {
+            ...proposal,
+            shape: "pipeline" as const,
+            steps: [
+              ...proposal.steps,
+              {
+                ...proposal.steps[0]!,
+                id: "downstream-delivery",
+                objective: "Deliver the repaired result.",
+                dependencies: ["test-step"],
+              },
+            ],
+          };
+        },
+      }),
       assessorFactory: () => ({
         assess: async (input) => {
           assert.equal(input.evidence.deliveryCandidate?.schema, "agentloop.runtimeDeliveryCandidate/v1");
+          if (input.step.role === "repair" || input.step.id === "downstream-delivery") {
+            return {
+              id: `approve-${input.step.id}-${input.attempt}`,
+              planId: input.planId,
+              stepId: input.step.id,
+              attempt: input.attempt,
+              assessmentProfile: input.assessmentProfile,
+              assessmentMethod: "model",
+              approved: true,
+              criteria: input.step.successCriteria.map((criterion) => ({
+                criterionId: criterion.id,
+                satisfied: true,
+                rationale: "The repair leaf supplied the required delivery evidence.",
+                evidenceRefs: ["candidateOutput"],
+              })),
+              skills: [],
+              evidenceDigest: "repair-digest",
+              feedback: "",
+              createdAt: Date.now(),
+            };
+          }
           return {
           id: `reject-${input.attempt}`,
           planId: input.planId,
@@ -6865,22 +7416,36 @@ test("RunService emits assessment failed boundaries for rejected candidates", as
           };
         },
       }),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({ approved: true, feedback: "", evidenceRefs: ["assessment.failed_boundary"] }),
+      }),
       maxSteps: 2,
     });
 
     const run = await runs.execute(owner.user.id, "produce a delivery receipt");
     const started = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "run.started");
     assert.equal((started?.data as { allowDangerousTools?: boolean } | undefined)?.allowDangerousTools, true);
-    const recovery = await waitForRecoveryState(runs, owner.user.id, run.id, "waiting_recovery");
-    assert.equal((await runs.get(owner.user.id, run.id)).status, "running");
-    assert.equal(recovery.action?.stepId, "test-step");
-    assert.deepEqual(recovery.action?.metadata.failedBoundary, failedBoundary);
+    assert.equal((await runs.get(owner.user.id, run.id)).status, "completed");
+    const recovery = await runs.recoveryForRun(owner.user.id, run.id);
+    assert.equal(recovery.state, undefined);
+    assert.equal(recovery.action, undefined);
     const events = await runs.events(owner.user.id, run.id);
     const assessed = events.find((event) => event.type === "skill.compliance.assessed");
     assert.deepEqual((assessed?.data as { failedBoundary?: unknown } | undefined)?.failedBoundary, failedBoundary);
     const boundary = events.find((event) => event.type === "assessment.failed_boundary");
     assert.deepEqual((boundary?.data as { failedBoundary?: unknown } | undefined)?.failedBoundary, failedBoundary);
-    assert.equal(events.some((event) => event.type === "run.recovery_required"), true);
+    assert.equal(events.some((event) => event.type === "run.repairing"), true);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+    const detail = await runs.plan(owner.user.id, run.id);
+    const repair = detail.plan.steps.find((step) => step.role === "repair");
+    const downstream = detail.plan.steps.find((step) => step.id === "downstream-delivery");
+    assert.equal(downstream?.status, "completed");
+    assert.deepEqual(downstream?.dependencies, [repair?.id]);
+    const modelActions = (await runs.actionsForRun(owner.user.id, run.id)).filter((action) => action.kind === "model_turn");
+    assert.equal(modelActions.at(-1)?.stepId, "downstream-delivery");
+    const recoveryState = await database.prepare("SELECT COUNT(*) AS count FROM run_recovery_states WHERE run_id = ?")
+      .get(run.id) as { count: number };
+    assert.equal(recoveryState.count, 0);
   } finally {
     database.close();
   }
@@ -7073,6 +7638,215 @@ test("RunService terminally fails source evidence gaps with no acquisition path"
   }
 });
 
+test("RunService terminally fails an exhausted source repair instead of opening recovery", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let assessmentCalls = 0;
+    const webfetch: RuntimeTool<unknown> = {
+      name: "webfetch",
+      description: "Fetch a current web source",
+      inputSchema: { type: "object" },
+      async execute() {
+        throw new Error("The exhausted repair test must not execute another source call");
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({
+        content: "The requested source result is not yet evidenced.",
+        toolCalls: [],
+        finishReason: "stop",
+      }),
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Summarize a current web source.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "web-source",
+            objective: "Acquire and summarize a current web source.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["web_research"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "A source summary is recorded.", source: "planner" },
+              { id: "source_urls", description: "Source URLs are recorded.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+      assessorFactory: () => ({
+        assess: async (input) => {
+          assessmentCalls += 1;
+          return {
+            id: `reject-${input.attempt}`,
+            planId: input.planId,
+            stepId: input.step.id,
+            attempt: input.attempt,
+            assessmentProfile: input.assessmentProfile,
+            assessmentMethod: "model",
+            approved: false,
+            criteria: input.step.successCriteria.map((criterion) => ({
+              criterionId: criterion.id,
+              satisfied: false,
+              rationale: "No source receipt was acquired.",
+              evidenceRefs: ["candidateOutput"],
+            })),
+            skills: [],
+            evidenceDigest: "no-source-receipt",
+            feedback: "Acquire a source receipt before completing.",
+            failedBoundary: {
+              stepId: input.step.id,
+              missingEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              violatedSkillRequirements: [],
+              reusableEvidenceRefs: ["candidateOutput"],
+              suggestedRepairShape: "repair_leaf",
+            },
+            createdAt: Date.now(),
+          };
+        },
+      }),
+      tools: [webfetch],
+      maxSteps: 4,
+    });
+
+    const run = await runs.execute(owner.user.id, "summarize a current web source");
+
+    assert.equal(run.status, "failed");
+    assert.equal(assessmentCalls, 1);
+    const detail = await runs.plan(owner.user.id, run.id);
+    assert.deepEqual(detail.plan.steps[0]?.executionBinding.sourceKinds, ["web"]);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) => event.type === "candidate.repair_limit_blocked"), true);
+    assert.equal(events.some((event) => event.type === "run.failed"), true);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+    assert.equal((await runs.recoveryForRun(owner.user.id, run.id)).state, undefined);
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService rejects a shorter source window until the requested monthly boundary is evidenced", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let modelCalls = 0;
+    let assessmentCalls = 0;
+    const webfetch: RuntimeTool<{ url: string }> = {
+      name: "webfetch",
+      description: "Fetch a source URL",
+      inputSchema: { type: "object" },
+      parse: (value) => value as { url: string },
+      async execute(_context, input) {
+        if (input.url.endsWith("/week")) {
+          return {
+            schema: "agentloop.sourceSummary/v1",
+            evidenceReceipt: {
+              schema: "agentloop.toolEvidenceReceipt/v1",
+              temporalCoverage: { schema: "agentloop.temporalCoverage/v1", kind: "rolling_window", durationDays: 7 },
+              sourceRefs: [{ uri: input.url, title: "Seven-day source" }],
+              evidenceKinds: { satisfied: ["source_summary", "source_urls"], caveated: ["explicit_caveats"], failed: [] },
+            },
+          };
+        }
+        return {
+          schema: "agentloop.sourceSummary/v1",
+          evidenceReceipt: {
+            schema: "agentloop.toolEvidenceReceipt/v1",
+            temporalCoverage: { schema: "agentloop.temporalCoverage/v1", kind: "rolling_window", requestedDurationDays: 30, fulfillment: "unavailable" },
+            sourceRefs: [{ uri: input.url, title: "Monthly source boundary" }],
+            caveats: ["The requested rolling 30-day source is unavailable."],
+            evidenceKinds: { satisfied: ["source_summary", "source_urls"], caveated: ["explicit_caveats"], failed: [] },
+          },
+        };
+      },
+    };
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async () => {
+        modelCalls += 1;
+        if (modelCalls === 1) return toolCallResponse("week-source", "webfetch", { url: "https://example.test/week" });
+        if (modelCalls === 2) return { content: "以下是最近一周的 10 条热点，作为近一个月结果交付。", finishReason: "stop", toolCalls: [] };
+        if (modelCalls === 3) return toolCallResponse("month-boundary", "webfetch", { url: "https://example.test/monthly" });
+        return { content: "该来源没有可供抽取的滚动近一个月列表，因此不以最近一周替代。", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Provide current news for the most recent month.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "monthly-news",
+            objective: "Acquire source evidence for the most recent month without substituting a shorter window.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["web_research"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "Source evidence is recorded.", source: "planner" },
+              { id: "source_urls", description: "Source URLs are recorded.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+      assessorFactory: () => ({
+        assess: async (input) => {
+          assessmentCalls += 1;
+          assert.match(input.evidence.candidateOutput, /不以最近一周替代/);
+          return {
+            id: `approved-${input.attempt}`,
+            planId: input.planId,
+            stepId: input.step.id,
+            attempt: input.attempt,
+            assessmentProfile: input.assessmentProfile,
+            assessmentMethod: "model",
+            approved: true,
+            criteria: input.step.successCriteria.map((criterion) => ({
+              criterionId: criterion.id,
+              satisfied: true,
+              rationale: "The exact monthly boundary is evidenced.",
+              evidenceRefs: ["month-boundary"],
+            })),
+            skills: [],
+            evidenceDigest: "monthly-boundary-evidenced",
+            feedback: "",
+            createdAt: Date.now(),
+          };
+        },
+      }),
+      tools: [webfetch],
+      maxSteps: 6,
+    });
+
+    const run = await runs.execute(owner.user.id, "给我近一个月的 10 条 AI 热点新闻");
+
+    assert.equal(run.status, "completed");
+    assert.equal(assessmentCalls, 1);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) => event.type === "candidate.temporal_scope_rejected"), true);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
+    assert.match(run.output ?? "", /不以最近一周替代/);
+  } finally {
+    database.close();
+  }
+});
+
 test("failedBoundary recovery creates and executes only a targeted repair leaf", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -7129,9 +7903,7 @@ test("failedBoundary recovery creates and executes only a targeted repair leaf",
     });
 
     const run = await runs.execute(owner.user.id, "produce a delivery receipt");
-    await waitForRecoveryState(runs, owner.user.id, run.id, "waiting_recovery");
-
-    const recovery = await runs.advanceRecovery(owner.user.id, run.id);
+    const recovery = await runs.recoveryForRun(owner.user.id, run.id);
 
     assert.equal(recovery.state, undefined);
     assert.equal((await runs.get(owner.user.id, run.id)).status, "completed");
@@ -7146,6 +7918,7 @@ test("failedBoundary recovery creates and executes only a targeted repair leaf",
     assert.equal(detail.assessments.some((assessment) => assessment.stepId === "test-step.repair.2" && assessment.approved), true);
     const events = await runs.events(owner.user.id, run.id);
     assert.equal(events.filter((event) => event.type === "recovery.repair_leaf_created").length, 1);
+    assert.equal(events.some((event) => event.type === "run.recovery_required"), false);
     assert.equal(recovery.decisions[0]?.planRevision?.shape, "recovery_patch");
     const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
       .get(run.id) as { status: string; reason_code: string };
@@ -9107,6 +9880,9 @@ test("execution context injects data-analysis operation profile before the first
         const context = request.runtimeContext?.content ?? "";
         sawDataAnalysisProfile = /"id":"data_analysis"/.test(context)
           && /dynamic_prompt_profile/.test(request.systemPrompt)
+          && /Data-analysis paradigm/.test(request.systemPrompt)
+          && /Do not plan or perform duplicate acquisition/.test(request.systemPrompt)
+          && /current-stage evidence governs this stage/.test(request.systemPrompt)
           && /dynamic_prompt_context/.test(context)
           && /agentloop\.taskProfile\/v2/.test(context)
           && /structured extraction artifact/.test(context)
@@ -11459,7 +12235,7 @@ test("an approved recovery revision can retire an unfinished safe tail step and 
       runId, planId: plan.id, stepId: "critique-polish", kind: "model_turn", replayPolicy: "safe", deadlineMs: 1_000,
     });
     await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-    assert.equal(await actions.reconcileRunningRuns(), 1);
+    await seedLegacyRecoveryState(database, runId, action.id);
     const runs = new RunService({
       database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
       recoveryPlannerFactory: () => ({
@@ -11503,7 +12279,7 @@ test("recovery never resumes an unsafe Action and preserves the Run for a new de
     const actions = new RuntimeActionRepository(database);
     const action = await actions.dispatch({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 });
     await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-    await actions.reconcileRunningRuns();
+    await seedLegacyRecoveryState(database, runId, action.id);
     const runs = new RunService({
       database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
       recoveryPlannerFactory: () => ({
@@ -11535,7 +12311,7 @@ test("recovery records a user question instead of inferring an unsafe external f
     const actions = new RuntimeActionRepository(database);
     const action = await actions.dispatch({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 });
     await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-    await actions.reconcileRunningRuns();
+    await seedLegacyRecoveryState(database, runId, action.id);
     const runs = new RunService({
       database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
       recoveryPlannerFactory: () => ({
@@ -11556,7 +12332,7 @@ test("recovery records a user question instead of inferring an unsafe external f
   }
 });
 
-test("source contract mismatch routes recovery into a Plan revision instead of repeating the same leaf repair", async () => {
+test("source contract gaps with no acquisition path fail without waiting_recovery", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const skills = new SkillService(database);
@@ -11621,7 +12397,7 @@ test("source contract mismatch routes recovery into a Plan revision instead of r
                 missingEvidenceKinds: ["source_summary", "explicit_caveats"],
                 violatedSkillRequirements: [],
                 reusableEvidenceRefs: ["artifact-receipt"],
-                suggestedRepairShape: "repair_leaf" as const,
+                suggestedRepairShape: "revise_plan" as const,
               },
             }),
             createdAt: Date.now(),
@@ -11670,35 +12446,10 @@ test("source contract mismatch routes recovery into a Plan revision instead of r
     });
 
     const run = await runs.execute(owner.user.id, "查询宝武集团数据中台中员工画像API 的参数信息");
-    const waiting = await waitForRecoveryState(runs, owner.user.id, run.id, "waiting_recovery");
-    assert.equal(waiting.state?.state, "waiting_recovery");
-    await database.prepare(`
-      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
-      VALUES (?, ?, 'tool.completed', ?, ?)
-    `).run(
-      run.id,
-      10_000,
-      JSON.stringify({
-        toolCallId: "artifact-receipt",
-        toolName: "implementation_detail_is_irrelevant",
-        result: JSON.stringify({
-          artifactReceipt: {
-            schema: "agentloop.artifactReceipt/v1",
-            evidenceKinds: { satisfied: ["artifact_path"], caveated: [], failed: [] },
-          },
-        }),
-      }),
-      Date.now(),
-    );
-
-    const recovery = await runs.advanceRecovery(owner.user.id, run.id);
-    assert.equal(recovery.decisions[0]?.decision, "revise_plan");
-    assert.equal(recovery.decisions[0]?.planRevision?.steps[0].id, "summarize-api-catalog.repair.2");
-    assert.deepEqual(recovery.decisions[0]?.planRevision?.steps[0].evidenceContract, {
-      requiredKinds: ["delivery_receipt"],
-      caveatPolicy: "none",
-    });
-    assert.equal((await runs.get(owner.user.id, run.id)).status, "completed");
+    const recovery = await runs.recoveryForRun(owner.user.id, run.id);
+    assert.equal(recovery.decisions.length, 0);
+    assert.equal((await runs.get(owner.user.id, run.id)).status, "failed");
+    assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "run.recovery_required"), false);
   } finally {
     database.close();
   }
@@ -11742,7 +12493,7 @@ test("safe recovery rebuilds only complete exchanges, resumes the interrupted st
       runId, JSON.stringify({ step: 1, toolCallId: "unfinished-tool", toolName: "external_write", replaySafe: true }), Date.now(),
     );
     await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-    await actions.reconcileRunningRuns();
+    await seedLegacyRecoveryState(database, runId, action.id);
     let modelCalls = 0;
     const model: ModelAdapter = {
       limits: TEST_MODEL_LIMITS,
@@ -11794,7 +12545,7 @@ test("a persisted user recovery response reopens Planner decision-making for the
     const actions = new RuntimeActionRepository(database);
     const action = await actions.dispatch({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 });
     await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-    await actions.reconcileRunningRuns();
+    await seedLegacyRecoveryState(database, runId, action.id);
     let decisions = 0;
     const runs = new RunService({
       database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
@@ -11826,6 +12577,20 @@ test("a persisted user recovery response reopens Planner decision-making for the
     database.close();
   }
 });
+
+async function seedLegacyRecoveryState(database: AppDatabase, runId: string, actionId: string): Promise<void> {
+  await database.transaction(async () => {
+    await database.prepare(`
+      UPDATE runtime_actions
+      SET state = 'recovery_required', lease_until = NULL, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND run_id = ? AND state = 'dispatched'
+    `).run(Date.now(), actionId, runId);
+    await database.prepare(`
+      INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
+      VALUES (?, 'waiting_recovery', ?, NULL, ?)
+    `).run(runId, actionId, Date.now());
+  });
+}
 
 class StaticModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
