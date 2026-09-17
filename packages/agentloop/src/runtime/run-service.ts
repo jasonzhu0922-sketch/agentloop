@@ -2498,7 +2498,8 @@ export class RunService {
             });
             return { approved: false, feedback: temporalScopeGap.feedback, failedBoundary };
           }
-          const assessmentProfile = selectAssessmentProfile(activeStep, evidence);
+          const holisticSourceContractMismatch = sourceContractNeedsHolisticAssessment(activeStep, evidence);
+          const assessmentProfile = selectAssessmentProfile(activeStep, evidence, holisticSourceContractMismatch);
           const useProfiledRuleAssessor = input.defaultAssessmentPolicyEnabled
             && isProfiledRuleAssessmentProfile(assessmentProfile);
           const assessor = useProfiledRuleAssessor
@@ -2563,6 +2564,10 @@ export class RunService {
                   evidence,
                 }),
                 allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(reusedAssessment),
+                requiresEvidenceProgress: requiresEvidenceProgressAfterHolisticAssessment(
+                  reusedAssessment,
+                  holisticSourceContractMismatch,
+                ),
                 ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
                 assessmentReused: true,
               };
@@ -2576,6 +2581,7 @@ export class RunService {
             modelEvidence,
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
+            ...(holisticSourceContractMismatch ? { holisticSourceContractMismatch: true } : {}),
             attempt: assessmentAttempt,
           }, input.signal, input.emit);
           const assessment = useProfiledRuleAssessor
@@ -2634,6 +2640,10 @@ export class RunService {
               evidence,
             }),
             allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(assessment),
+            requiresEvidenceProgress: requiresEvidenceProgressAfterHolisticAssessment(
+              assessment,
+              holisticSourceContractMismatch,
+            ),
             ...(assessment.failedBoundary === undefined ? {} : { failedBoundary: assessment.failedBoundary }),
           };
         },
@@ -4999,6 +5009,17 @@ function shouldDeferValidationToUser(input: {
   return input.assessment.criteria.some((criterion) => !criterion.satisfied);
 }
 
+function requiresEvidenceProgressAfterHolisticAssessment(
+  assessment: SkillComplianceAssessment,
+  holisticSourceContractMismatch: boolean,
+): boolean {
+  return holisticSourceContractMismatch
+    && assessment.assessmentMethod === "model"
+    && !assessment.approved
+    && assessment.failedBoundary?.suggestedRepairShape === "repair_leaf"
+    && (assessment.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0;
+}
+
 function shouldCompleteWithEvidenceBoundary(input: {
   assessment: SkillComplianceAssessment;
   assessmentAttempt: number;
@@ -5892,6 +5913,7 @@ function mergeAssessmentToolEvidence(
 function selectAssessmentProfile(
   step: ExecutionPlan["steps"][number],
   evidence?: StepEvidence,
+  holisticSourceContractMismatch = sourceContractNeedsHolisticAssessment(step, evidence),
 ): AssessmentProfileId {
   const text = [
     step.objective,
@@ -5899,6 +5921,7 @@ function selectAssessmentProfile(
   ].join("\n");
   const artifactDeliveryEvidenceGate = stepUsesArtifactDeliveryEvidenceGate(step);
   if (artifactDeliveryEvidenceGate) return "evidence_gate";
+  if (holisticSourceContractMismatch) return "source_grounded";
   // Runtime-owned observable evidence is a prerequisite, not a semantic
   // opinion. Check it before keyword-selected model profiles so wording such
   // as "do not fabricate" cannot approve a candidate that never acquired the
@@ -5935,6 +5958,64 @@ const RUNTIME_RECEIPT_ASSESSMENT_KINDS = new Set([
   "delivery_receipt",
   "explicit_caveats",
 ]);
+
+function sourceContractNeedsHolisticAssessment(
+  step: ExecutionPlan["steps"][number],
+  evidence?: StepEvidence,
+): boolean {
+  const requiresSemanticSourceEvidence = (step.evidenceContract?.requiredKinds ?? []).some((kind) =>
+    kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "explicit_caveats"
+  );
+  if (!requiresSemanticSourceEvidence || evidence === undefined || evidence.candidateOutput.trim().length === 0) return false;
+  const shapes = evidenceReceiptShapes(evidence.toolCalls);
+  // A bounded artifact can preserve the actual research outcome even when a
+  // generic command/write tool did not emit the Skill's source-receipt shape.
+  // This is a semantic sufficiency question for the LLM, not a reason to ask
+  // it to rewrite the same candidate until a label appears.
+  return shapes.has("artifact") && !shapes.has("source");
+}
+
+function evidenceReceiptShapes(toolCalls: readonly ToolEvidence[]): ReadonlySet<ReceiptShape> {
+  const shapes = new Set<ReceiptShape>();
+  for (const toolCall of toolCalls) {
+    if (toolCall.isError) continue;
+    for (const result of toolResultRecords(toolCall.result)) {
+      const nestedReceipt = isPlainRecord(result.evidenceReceipt)
+        ? result.evidenceReceipt
+        : isPlainRecord(result.artifactReceipt)
+          ? result.artifactReceipt
+          : undefined;
+      const schema = typeof result.schema === "string"
+        ? result.schema
+        : typeof nestedReceipt?.schema === "string"
+          ? nestedReceipt.schema
+          : undefined;
+      if (schema === "agentloop.artifactReceipt/v1" || schema === "agentloop.artifactAcceptance/v1") {
+        shapes.add("artifact");
+      }
+      if (schema === "agentloop.sourceSummary/v1") shapes.add("source");
+      const evidenceKinds = isPlainRecord(nestedReceipt?.evidenceKinds)
+        ? nestedReceipt.evidenceKinds
+        : isPlainRecord(result.evidenceKinds)
+          ? result.evidenceKinds
+          : undefined;
+      const satisfied = stringArrayField(evidenceKinds?.satisfied);
+      if (satisfied.some((kind) =>
+        kind === "source_summary"
+        || kind === "source_urls"
+        || kind === "schema_summary"
+        || kind === "record_counts"
+        || kind === "structured_extraction_artifact"
+      )) shapes.add("source");
+      if (satisfied.some((kind) => kind.startsWith("artifact_") || kind === "delivery_receipt")) shapes.add("artifact");
+    }
+  }
+  return shapes;
+}
 
 function stepEvidenceSupportsRuntimeEvidenceGate(
   step: ExecutionPlan["steps"][number],

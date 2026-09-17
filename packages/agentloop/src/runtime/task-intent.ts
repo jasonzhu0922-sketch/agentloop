@@ -23,6 +23,11 @@ export interface TaskIntentInput {
   readonly userConstraints?: readonly string[];
   readonly successCriteria?: readonly { readonly id: string; readonly description: string }[];
   readonly toolNames?: readonly string[];
+  /**
+   * Informative only. Skill availability or names must not change user-owned
+   * delivery intent: a catalog can contain both artifact builders and
+   * source-provider Skills for every Run.
+   */
   readonly skillNames?: readonly string[];
   readonly responseOnly?: boolean;
   /**
@@ -38,7 +43,6 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     input.objective,
     ...(input.userConstraints ?? []),
     ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
-    ...(input.skillNames ?? []),
   ].join("\n"));
   const signals = {
     action: matchedArtifactActions(text),

@@ -726,6 +726,14 @@ function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> |
         "If authoritative external sources were attempted and remain unavailable, forbidden, paywalled, or missing full text: do not approve criteria that require those missing facts. In feedback, explicitly separate verified facts from unavailable or unverified facts so Runtime can decide whether a limited-evidence delivery is acceptable. Treat source evidence as blocking only when exact/current/official source facts are the user's required deliverable; otherwise it is auxiliary grounding for the core artifact.",
     };
   }
+  if (input.holisticSourceContractMismatch === true) {
+    policy.holisticCompletion = {
+      judgment:
+        "Judge the goal, candidate, successful tool evidence, and explicit limitations together. A missing source-summary or caveat receipt shape is not automatic failure.",
+      boundary:
+        "Approve only supported conclusions. If a material fact remains missing, reject it with failedBoundary: name the missing evidence kind and choose repair_leaf only when a current-step tool can obtain it; otherwise choose revise_plan, ask_user, or fail.",
+    };
+  }
   return Object.keys(policy).length === 0 ? undefined : policy;
 }
 

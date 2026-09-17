@@ -1240,6 +1240,11 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
   ) {
     const primaryBuilderSkillIds = nativePrimaryBuilderSkillIds(task, taskIntent.artifactKind);
     const onlyStep = proposal.steps[0];
+    // A continuation after a failed artifact Run may legitimately be a
+    // recovery patch. It still has the same non-splittable ownership boundary:
+    // one primary builder leaf owns the original file through acceptance.
+    const hasSingleNativeTransformationBoundary = proposal.shape === "single_leaf"
+      || proposal.shape === "recovery_patch";
     const ownsNativeTransformation = primaryBuilderSkillIds.length === 0
       || primaryBuilderSkillIds.some((skillId) =>
         onlyStep?.skillIds.includes(skillId) === true
@@ -1248,7 +1253,7 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
         ) === true
       );
     if (
-      proposal.shape !== "single_leaf"
+      !hasSingleNativeTransformationBoundary
       || proposal.steps.length !== 1
       || onlyStep?.role === "fact_acquisition"
       || !ownsNativeTransformation
@@ -1785,9 +1790,10 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   const evidenceContract = record.evidenceContract === undefined || record.evidenceContract === null
     ? undefined
     : parseEvidenceContract(record.evidenceContract, index);
-  // Some tool-call providers materialize an omitted optional object as `{}`.
-  // A bare sourceConstraint carries no binding semantics, so canonicalize it
-  // to absence before Admission rather than rejecting an otherwise valid Plan.
+  // Some tool-call providers materialize an omitted optional object as `{}` or
+  // as an object whose optional ID arrays are all null. A bare
+  // sourceConstraint carries no binding semantics, so canonicalize it to
+  // absence before Admission rather than rejecting an otherwise valid Plan.
   const sourceConstraint = record.sourceConstraint === undefined || record.sourceConstraint === null
     ? undefined
     : parseSourceConstraint(record.sourceConstraint, index);
@@ -1829,9 +1835,7 @@ function parseSourceConstraint(value: unknown, index: number): PlanStepProposal[
   const requiredVisibleDirectoryIds = record.requiredVisibleDirectoryIds === undefined || record.requiredVisibleDirectoryIds === null
     ? []
     : canonicalStringSet(record.requiredVisibleDirectoryIds, `leaves[${index}].sourceConstraint.requiredVisibleDirectoryIds`, 20);
-  if (requiredToolSourceIds.length === 0 && requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) {
-    throw badRequest(`leaves[${index}].sourceConstraint must bind at least one ToolSource, uploaded source, or visible directory`);
-  }
+  if (requiredToolSourceIds.length === 0 && requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) return undefined;
   return {
     ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
     ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),

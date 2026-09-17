@@ -530,6 +530,8 @@ export interface StepAssessmentInput {
   readonly modelEvidence?: StepEvidence;
   readonly contextSummary?: string;
   readonly assessmentProfile?: AssessmentProfileId;
+  /** This candidate has an artifact/source-receipt shape mismatch for holistic assessment. */
+  readonly holisticSourceContractMismatch?: boolean;
   readonly attempt: number;
 }
 

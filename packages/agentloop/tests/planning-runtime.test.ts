@@ -672,6 +672,63 @@ test("Task intent keeps a referenced uploaded HTML source conversational when fi
   assert.equal(intent.wantsArtifact, false);
 });
 
+test("Task intent does not infer a workspace artifact from available Skill names", () => {
+  const intent = classifyTaskIntent({
+    objective: "查询宝武数据中台中关于差旅用车的 API",
+    skillNames: ["api-query", "build-dashboard", "web-artifacts-builder"],
+  });
+
+  assert.equal(intent.artifactKind, "none");
+  assert.equal(intent.deliverySurface, "conversation");
+  assert.equal(intent.wantsArtifact, false);
+});
+
+test("ModelPlanner treats an all-null optional sourceConstraint as absent", async () => {
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: "submit-null-source-constraint",
+        name: "submit_outcome_plan",
+        arguments: {
+          schema: "agentloop.outcomePlan/v2",
+          goal: "Provide the requested answer.",
+          shape: "single_leaf",
+          selectedSkillRoles: [],
+          leaves: [{
+            id: "answer",
+            objective: "Provide the requested answer in the conversation.",
+            dependsOn: [],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: ["conversation_delivery"],
+            sourceConstraint: {
+              requiredToolSourceIds: null,
+              requiredUploadedSourceIds: null,
+              requiredVisibleDirectoryIds: null,
+            },
+            evidenceContract: {
+              requiredKinds: ["delivery_receipt", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        },
+      }],
+    }),
+  });
+
+  const plan = await planner.plan({
+    runId: "run-null-source-constraint",
+    input: "Provide the requested answer.",
+    availableSkills: [],
+    availableToolNames: ["respond_to_user"],
+  });
+
+  assert.equal(plan.steps[0]?.sourceConstraint, undefined);
+});
+
 test("Task intent treats uploaded file transforms as workspace artifacts", () => {
   const intent = classifyTaskIntent({ objective: "帮我合并pdf" });
 
@@ -902,6 +959,105 @@ test("ModelPlanner keeps an uploaded PPTX visual transformation in one Skill-own
   assert.equal(calls, 2);
   assert.equal(plan.shape, "single_leaf");
   assert.deepEqual(plan.steps.map((step) => step.id), ["transform_themed_pptx"]);
+  assert.deepEqual(plan.steps[0]?.skillIds, [pptx.id]);
+  assert.ok(plan.steps[0]?.requiredCapabilities.includes("uploaded_source_materialization"));
+  assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [sourceId]);
+});
+
+test("ModelPlanner admits a recovered uploaded PPTX transformation as one primary-builder repair leaf", async () => {
+  const sourceId = "src_recovered_pptx";
+  const pptx = skillFixture({
+    id: "discovered:pptx",
+    name: "pptx",
+    description: "Build, edit, redesign, render, and verify PowerPoint presentations.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["presentation"]),
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"artifactKind":"presentation"/);
+      assert.match(context, /"planShape":"recovery_patch"/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("recover-native-pptx", {
+          goal: "Apply the existing theme to the uploaded PPTX and verify the output.",
+          shape: "recovery_patch",
+          selectedSkillRoles: [{
+            skillId: pptx.id,
+            role: "primary_builder",
+            reason: "The PPTX Skill owns native repair and final acceptance.",
+          }],
+          steps: [{
+            id: "recover_themed_pptx",
+            objective: "Materialize the uploaded PPTX, reuse the existing theme, repair the prior failed application, and verify the final deck.",
+            dependencies: [],
+            role: "repair",
+            skillIds: [pptx.id],
+            requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
+            sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-recovered-uploaded-pptx",
+    input: "继续，尽快生成目标文件",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "continue_prior",
+      targetRunId: "prior-pptx-run",
+      effectiveGoal: "请为上传的 PPTX 生成统一视觉主题。",
+      evidenceDemand: "none",
+      userConstraints: ["复用已有主题配置", "输出可打开且非空的 PPTX 文件"],
+      source: "model_guarded",
+    },
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-recovered-uploaded-pptx",
+      runCount: 1,
+      planCursors: [],
+      reusableArtifacts: [],
+      failedBoundaries: [{
+        runId: "prior-pptx-run",
+        category: "execution",
+        message: "The prior theme application did not produce the requested file.",
+      }],
+      recommendedCapabilities: { skillIds: [pptx.id], toolNames: [] },
+      resumeSuggestion: "Continue the prior PPTX transformation from its failed application step.",
+    },
+    availableSkills: [pptx],
+    availableToolNames: [
+      "read_source",
+      "materialize_source_file",
+      "load_skill",
+      "computer_write_file",
+      "computer_run_command",
+      "verify_artifact_acceptance",
+    ],
+    sources: [{
+      id: sourceId,
+      originalName: "prior-theme-target.pptx",
+      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      extension: ".pptx",
+      byteSize: 2_300_000,
+      sha256: "d".repeat(64),
+      status: "ready",
+      chunkCount: 2,
+      truncated: false,
+    }],
+  });
+
+  assert.equal(plan.shape, "recovery_patch");
+  assert.equal(plan.steps[0]?.role, "repair");
   assert.deepEqual(plan.steps[0]?.skillIds, [pptx.id]);
   assert.ok(plan.steps[0]?.requiredCapabilities.includes("uploaded_source_materialization"));
   assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [sourceId]);
@@ -9664,6 +9820,237 @@ test("RunService binds the resolved prior Run's accepted source evidence into a 
     assert.equal(events.some((event) => event.type === "candidate.rejected"), false);
   } finally {
     database.close();
+  }
+});
+
+test("artifact-backed source-contract mismatch uses one holistic model assessment", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-holistic-source-boundary-"));
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionCalls = 0;
+    let assessmentCalls = 0;
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: workspace,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          if (request.phase === "assessment") {
+            assessmentCalls += 1;
+            assert.match(request.runtimeContext?.content ?? "", /travel_vehicle_api_catalog_summary/);
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "holistic-assessment",
+                name: "submit_assessment",
+                arguments: {
+                  criteria: [
+                    { criterionId: "source_summary", satisfied: true, rationale: "The bounded catalog artifact and answer identify the queried APIs.", evidenceRefs: ["candidateOutput", "write-catalog"] },
+                    { criterionId: "explicit_caveats", satisfied: true, rationale: "The answer explicitly distinguishes missing documentation fields.", evidenceRefs: ["candidateOutput", "write-catalog"] },
+                  ],
+                  skills: [],
+                  feedback: "",
+                },
+              }],
+            };
+          }
+          executionCalls += 1;
+          if (executionCalls === 1) {
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "write-catalog",
+                name: "computer_write_file",
+                arguments: {
+                  path: "evidence/travel_vehicle_api_catalog_summary.md",
+                  content: "# Travel vehicle API catalog\n\n24 matching APIs were found.\n\n## Caveats\n\nAPI URLs are unavailable in the catalog.",
+                },
+              }],
+            };
+          }
+          return {
+            content: "已查询到 24 条差旅用车相关 API 并写入目录；API_URL 为空，因此调用地址仍需到平台页面核验。",
+            finishReason: "stop",
+            toolCalls: [],
+          };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Query the travel vehicle API catalog and state any unavailable documentation fields.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "query-api-catalog",
+            objective: "Query the travel vehicle API catalog and deliver a bounded result with caveats.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "The catalog results are summarized.", source: "planner" },
+              { id: "explicit_caveats", description: "Unavailable documentation fields remain explicit.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+    });
+
+    const run = await runs.execute(owner.user.id, "查询差旅用车 API", { allowDangerousTools: true });
+
+    assert.equal(run.status, "completed");
+    assert.equal(executionCalls, 2);
+    assert.equal(assessmentCalls, 1);
+    const assessment = (await runs.plan(owner.user.id, run.id)).assessments.at(-1);
+    assert.equal(assessment?.approved, true);
+    assert.equal(assessment?.assessmentProfile, "source_grounded");
+    assert.equal(assessment?.assessmentMethod, "model");
+  } finally {
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("holistic source-contract rejection repairs through new current-step evidence", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-holistic-source-repair-"));
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionCalls = 0;
+    let assessmentCalls = 0;
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: workspace,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          if (request.phase === "assessment") {
+            assessmentCalls += 1;
+            const initiallyMissingDirectoryDetail = assessmentCalls === 1;
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: `holistic-assessment-${assessmentCalls}`,
+                name: "submit_assessment",
+                arguments: {
+                  criteria: [
+                    {
+                      criterionId: "source_summary",
+                      satisfied: !initiallyMissingDirectoryDetail,
+                      rationale: initiallyMissingDirectoryDetail
+                        ? "The artifact names the catalog but does not expose the requested parameter detail."
+                        : "The current-step read supplied the parameter detail needed to support the answer.",
+                      evidenceRefs: initiallyMissingDirectoryDetail ? ["write-catalog"] : ["read-catalog"],
+                    },
+                    {
+                      criterionId: "explicit_caveats",
+                      satisfied: true,
+                      rationale: "The candidate keeps the unavailable endpoint field explicit.",
+                      evidenceRefs: ["candidateOutput"],
+                    },
+                  ],
+                  skills: [],
+                  feedback: initiallyMissingDirectoryDetail ? "Read the generated directory to verify the parameter detail before completing." : "",
+                  ...(initiallyMissingDirectoryDetail ? {
+                    failedBoundary: {
+                      stepId: "query-api-catalog",
+                      missingEvidenceKinds: ["source_summary"],
+                      violatedSkillRequirements: [],
+                      reusableEvidenceRefs: ["write-catalog"],
+                      suggestedRepairShape: "repair_leaf",
+                    },
+                  } : {}),
+                },
+              }],
+            };
+          }
+          executionCalls += 1;
+          if (executionCalls === 1) {
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "write-catalog",
+                name: "computer_write_file",
+                arguments: {
+                  path: "evidence/travel_vehicle_api_catalog.md",
+                  content: "# Travel vehicle API catalog\n\n24 matching APIs were found. Required parameter: tripId.\n\nAPI_URL is unavailable.",
+                },
+              }],
+            };
+          }
+          if (executionCalls === 2) {
+            return {
+              content: "已查询到 24 条差旅用车相关 API；当前目录未展示请求参数，且 API_URL 仍需到平台核验。",
+              finishReason: "stop",
+              toolCalls: [],
+            };
+          }
+          if (executionCalls === 3) {
+            assert.match(request.runtimeContext?.content ?? "", /holistic assessment found a substantive gap/i);
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "read-catalog",
+                name: "computer_read_file",
+                arguments: { path: "evidence/travel_vehicle_api_catalog.md" },
+              }],
+            };
+          }
+          return {
+            content: "已查询到 24 条差旅用车相关 API；目录确认所需参数为 tripId，API_URL 当前不可用，调用地址仍需到平台页面核验。",
+            finishReason: "stop",
+            toolCalls: [],
+          };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async () => ({
+          goal: "Query the travel vehicle API catalog and deliver supported parameter details with caveats.",
+          selectedSkillIds: [],
+          steps: [{
+            id: "query-api-catalog",
+            objective: "Query the travel vehicle API catalog and deliver supported parameter details with caveats.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["workspace_file_read", "workspace_artifact_write"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+            successCriteria: [
+              { id: "source_summary", description: "The catalog result includes supported parameter details.", source: "planner" },
+              { id: "explicit_caveats", description: "Unavailable documentation fields remain explicit.", source: "planner" },
+            ],
+          }],
+        }),
+      }),
+    });
+
+    const run = await runs.execute(owner.user.id, "查询差旅用车 API", { allowDangerousTools: true });
+
+    assert.equal(run.status, "completed");
+    assert.equal(executionCalls, 4);
+    assert.equal(assessmentCalls, 2);
+    const assessments = (await runs.plan(owner.user.id, run.id)).assessments;
+    assert.equal(assessments.at(-2)?.failedBoundary?.missingEvidenceKinds.includes("source_summary"), true);
+    assert.equal(assessments.at(-1)?.approved, true);
+  } finally {
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
   }
 });
 
