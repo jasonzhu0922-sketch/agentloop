@@ -441,6 +441,93 @@ test("ModelPlanner discovers an authorized evidence producer before rejecting a 
   assert.deepEqual(plan.steps[1]?.evidenceContract?.requiredKinds, ["explicit_caveats"]);
 });
 
+test("ModelPlanner binds source grounding to the selected API Skill without unrelated recovery capabilities", async () => {
+  const apiQuery = skillFixture({
+    id: "discovered:api-query",
+    name: "api-query",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+    },
+  });
+  const unrelatedNews = skillFixture({
+    id: "discovered:aihot",
+    name: "aihot",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+    },
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /skill_source_provider\.api\.discovered:api-query/);
+      assert.doesNotMatch(context, /skill_source_provider\.api\.discovered:aihot/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("api-query-grounded", {
+          goal: "查询宝武数据中台中关于差旅用车的 API 信息",
+          selectedSkillRoles: [{
+            skillId: apiQuery.id,
+            role: "source_provider",
+            reason: "The API catalog is the requested source.",
+          }],
+          steps: [{
+            id: "query_travel_api",
+            objective: "Query the travel API catalog and answer.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [apiQuery.id],
+            requiredCapabilities: [
+              "skill_source_provider.api.discovered:api-query",
+              "conversation_delivery",
+            ],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-api-source-grounding-recovery",
+    input: "查询宝武数据中台中关于差旅用车的 API 信息",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "查询宝武数据中台中关于差旅用车的 API 信息",
+      evidenceDemand: "source_grounded",
+      userConstraints: [],
+      source: "model",
+    },
+    availableSkills: [apiQuery],
+    selectedSkillRoles: [{
+      skillId: apiQuery.id,
+      role: "source_provider",
+      reason: "The API catalog is the requested source.",
+    }],
+    availableToolNames: ["load_skill", "computer_run_command"],
+    availableCapabilities: planningCapabilitiesFromSkills([apiQuery]),
+    capabilityRecovery: {
+      availableSkills: [apiQuery, unrelatedNews],
+      availableCapabilities: planningCapabilitiesFromSkills([apiQuery, unrelatedNews]),
+    },
+  });
+
+  assert.deepEqual(plan.selectedSkillIds, [apiQuery.id]);
+  assert.deepEqual(plan.steps[0]?.skillIds, [apiQuery.id]);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, [
+    "skill_source_provider.api.discovered:api-query",
+    "conversation_delivery",
+  ]);
+});
+
 test("ModelPlanner discovers a source producer for a plan-level lookup grounding gap", async () => {
   let calls = 0;
   const tools = [
