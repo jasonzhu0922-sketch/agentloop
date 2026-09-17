@@ -766,6 +766,11 @@ test("Web keeps uploaded attachment records removable until send and snapshots t
   assert.match(html, /id="upload-file"/);
   assert.match(html, /accept="\.txt,\.md,\.csv,\.json,\.html,\.htm,\.pdf,\.doc,\.docx,\.xlsx,\.pptx"/);
   assert.match(app, /async function uploadAttachments\(fileList\)/);
+  assert.match(app, /const MAX_ATTACHMENT_BYTES = 25 \* 1024 \* 1024;/);
+  assert.match(app, /const rejected = selected\.filter\(\(file\) => file\.size > MAX_ATTACHMENT_BYTES\)/);
+  assert.match(app, /function attachmentSizeError\(file, limit = MAX_ATTACHMENT_BYTES\)/);
+  assert.match(app, /超过单个文件/);
+  assert.match(app, /failures\.length > 0 \? uploadFailureStatus\(failures\) : "文件已准备好"/);
   assert.match(app, /conversation\.pendingAttachments = \[\.\.\.pendingAttachments\(conversation\), attachment\]/);
   assert.match(app, /function removePendingAttachment\(conversation, attachmentId\)/);
   assert.match(app, /attachmentIds: attachments\.map\(\(attachment\) => attachment\.id\)/);

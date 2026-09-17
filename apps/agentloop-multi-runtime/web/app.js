@@ -15,6 +15,7 @@ const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "agentloop.multi-runtime.sessions.v1";
 const IDENTITY_KEY = "agentloop.multi-runtime.identity.v1";
 const MAX_PENDING_ATTACHMENTS = 20;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const CONVERSATION_PAGE_SIZE = 30;
 const recoveredSessions = sortSessions(loadSessions());
 let sessions = [];
@@ -428,10 +429,17 @@ async function uploadAttachments(fileList) {
   if (!conversation || selected.length === 0 || activeRunsByConversation.has(conversation.id)) return;
   if (!tenantId || !ownerUserId) { setStatus("请先填写用户和租户 ID", "error"); return; }
   saveIdentity();
-  changeUploadCount(conversation.id, selected.length);
+  const rejected = selected.filter((file) => file.size > MAX_ATTACHMENT_BYTES);
+  const uploadable = selected.filter((file) => file.size <= MAX_ATTACHMENT_BYTES);
+  const failures = rejected.map(attachmentSizeError);
+  if (uploadable.length === 0) {
+    setStatus(uploadFailureStatus(failures), "error");
+    return;
+  }
+  changeUploadCount(conversation.id, uploadable.length);
   render();
   try {
-    for (const file of selected) {
+    for (const file of uploadable) {
       try {
         const body = await call("/v1/attachments", tenantId, ownerUserId, {
           conversationId: conversation.id,
@@ -446,15 +454,31 @@ async function uploadAttachments(fileList) {
         conversation.pendingAttachments = [...pendingAttachments(conversation), attachment].slice(0, MAX_PENDING_ATTACHMENTS);
         saveSessions();
       } catch (error) {
-        setStatus(`上传失败：${error instanceof Error ? error.message : String(error)}`, "error");
+        failures.push(uploadFailureMessage(file, error));
       } finally {
         changeUploadCount(conversation.id, -1);
         render();
       }
     }
   } finally {
-    if (uploadCount(conversation.id) === 0 && !activeRunsByConversation.has(conversation.id)) setStatus("文件已准备好", "ok");
+    if (uploadCount(conversation.id) === 0 && !activeRunsByConversation.has(conversation.id)) {
+      setStatus(failures.length > 0 ? uploadFailureStatus(failures) : "文件已准备好", failures.length > 0 ? "error" : "ok");
+    }
   }
+}
+
+function attachmentSizeError(file, limit = MAX_ATTACHMENT_BYTES) {
+  return `“${file.name}”为 ${formatBytes(file.size)}，超过单个文件 ${formatBytes(limit)} 上限（超出 ${formatBytes(file.size - limit)}），未上传`;
+}
+
+function uploadFailureMessage(file, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = /^attachment exceeds (\d+) bytes$/.exec(message);
+  return match === null ? `“${file.name}”上传失败：${message}` : attachmentSizeError(file, Number(match[1]));
+}
+
+function uploadFailureStatus(failures) {
+  return failures.length === 1 ? failures[0] : `${failures[0]}；另有 ${failures.length - 1} 个文件未上传`;
 }
 
 function pendingAttachments(conversation) {
