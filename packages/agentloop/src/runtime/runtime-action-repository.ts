@@ -165,7 +165,10 @@ export class RuntimeActionRepository {
     return await this.require(id);
   }
 
-  async reconcileRunningRuns(): Promise<InterruptedRunRecord[]> {
+  async reconcileRunningRuns(runIds?: readonly string[]): Promise<InterruptedRunRecord[]> {
+    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
+    if (scopedRunIds !== undefined && scopedRunIds.length === 0) return [];
+    const runScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
     const now = Date.now();
     const interrupted: InterruptedRunRecord[] = [];
     await this.database.transaction(async () => {
@@ -174,7 +177,8 @@ export class RuntimeActionRepository {
         WHERE status = 'running'
           AND created_at <= ?
           AND NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
-      `).all(now - LEGACY_ACTIONLESS_RUN_GRACE_MS) as unknown as Array<{ id: string }>;
+          ${runScope}
+      `).all(now - LEGACY_ACTIONLESS_RUN_GRACE_MS, ...(scopedRunIds ?? [])) as unknown as Array<{ id: string }>;
       for (const run of legacyRuns) {
         interrupted.push({ runId: run.id, reason: "legacy_state_incomplete" });
       }
@@ -188,7 +192,8 @@ export class RuntimeActionRepository {
         WHERE runs.status = 'running'
           AND actions.state = 'dispatched'
           AND (actions.deadline_at <= ? OR actions.lease_until <= ?)
-      `).all(now, now) as unknown as Array<{
+          ${runScope}
+      `).all(now, now, ...(scopedRunIds ?? [])) as unknown as Array<{
         id: string; run_id: string; plan_id: string | null; step_id: string | null;
         replay_policy: ReplayPolicy; fence: number; deadline_at: number; lease_until: number; revision: number;
       }>;
@@ -217,6 +222,8 @@ export class RuntimeActionRepository {
         });
       }
 
+      const expiredIds = expired.map((action) => action.id);
+      const excludedActions = expiredIds.length === 0 ? "SELECT ''" : expiredIds.map(() => "?").join(", ");
       const stranded = await this.database.prepare(`
         SELECT actions.id, actions.run_id, actions.plan_id, actions.step_id,
                actions.replay_policy, actions.fence, actions.deadline_at, actions.lease_until
@@ -225,8 +232,9 @@ export class RuntimeActionRepository {
         WHERE runs.status = 'running'
           AND actions.state = 'failed'
           AND actions.error_code = 'EXECUTION_AUTHORITY_LOST'
-          AND actions.id NOT IN (${expired.length === 0 ? "SELECT ''" : expired.map(() => "?").join(", ")})
-      `).all(...expired.map((action) => action.id)) as unknown as Array<{
+          AND actions.id NOT IN (${excludedActions})
+          ${runScope}
+      `).all(...expiredIds, ...(scopedRunIds ?? [])) as unknown as Array<{
         id: string; run_id: string; plan_id: string | null; step_id: string | null;
         replay_policy: ReplayPolicy; fence: number; deadline_at: number | null; lease_until: number | null;
       }>;
@@ -249,7 +257,8 @@ export class RuntimeActionRepository {
         WHERE runs.status = 'running'
           AND actions.state = 'recovery_required'
           AND recovery.state = 'waiting_recovery'
-      `).all() as unknown as Array<{
+          ${runScope}
+      `).all(...(scopedRunIds ?? [])) as unknown as Array<{
         id: string; run_id: string; plan_id: string | null; step_id: string | null;
         replay_policy: ReplayPolicy; fence: number; metadata_json: string;
       }>;

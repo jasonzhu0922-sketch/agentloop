@@ -76,6 +76,13 @@ test("a malformed request_human_loop call retries once but cannot bypass the HIL
         modelCalls += 1;
         if (modelCalls === 2) {
           assert.match(request.runtimeContext?.content ?? "", /runtime_human_loop_repair/);
+          assert.equal(
+            request.messages.some((message) =>
+              message.role === "assistant" && message.toolCalls?.some((call) => call.name === HUMAN_LOOP_TOOL_NAME)),
+            false,
+          );
+          assert.equal(request.messages.some((message) => message.role === "tool"), false);
+          assert.match(request.messages.map((message) => message.content).join("\n"), /agentloop\.runtimeToolRejection\/v1/);
           return {
             content: "", finishReason: "tool_calls" as const,
             toolCalls: [{
@@ -95,9 +102,10 @@ test("a malformed request_human_loop call retries once but cannot bypass the HIL
           content: "", finishReason: "tool_calls" as const,
           toolCalls: [{
             id: "invalid-ask", name: HUMAN_LOOP_TOOL_NAME,
-            arguments: {
-              malformed: "{",
-            },
+            // A provider can finish a native function call with invalid JSON.
+            // It must remain durable rejection evidence, not a native call in
+            // the repair request's provider transcript.
+            arguments: "{\"kind\":",
           }],
         };
       },

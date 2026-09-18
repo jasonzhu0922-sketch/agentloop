@@ -147,6 +147,34 @@ test("old actionless running Runs are reported as interrupted without creating w
   }
 });
 
+test("scoped reconciliation cannot interrupt a Run owned by another Runtime Host", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runIds = ["owned-run", "other-host-run"];
+    for (const runId of runIds) {
+      database.prepare(`
+        INSERT INTO runs(
+          id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+          status, input, created_at
+        ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+      `).run(runId, owner.user.id, runId, Date.now() - 120_000);
+    }
+    const actions = new RuntimeActionRepository(database);
+
+    assert.deepEqual(await actions.reconcileRunningRuns(["owned-run"]), [{
+      runId: "owned-run",
+      reason: "legacy_state_incomplete",
+    }]);
+    assert.deepEqual(await actions.reconcileRunningRuns(["other-host-run"]), [{
+      runId: "other-host-run",
+      reason: "legacy_state_incomplete",
+    }]);
+  } finally {
+    await database.close();
+  }
+});
+
 test("legacy waiting_recovery execution loss is migrated to an interruption instead of remaining user-actionable", async () => {
   const database = new AppDatabase(":memory:");
   try {

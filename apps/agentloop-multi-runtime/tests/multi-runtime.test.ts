@@ -1529,6 +1529,21 @@ test("a shared state database reports active Runs only to their accepting Host",
   await database.close();
 });
 
+test("a Runtime Host reconciles only Runs durably accepted by its own executor ledger", async () => {
+  const database = new AppDatabase(":memory:");
+  const hostA = new HostDispatchStore(database, "runtime-a");
+  const hostB = new HostDispatchStore(database, "runtime-b");
+  await hostA.ready();
+  await hostB.ready();
+  await hostA.claim({ dispatchKey: "dispatch-a", assignmentId: "assignment-a", ownerUserId: "user-a", now: 100, leaseMs: 1_000 });
+  await hostA.accept("dispatch-a", "run-a", 101);
+  await hostB.claim({ dispatchKey: "dispatch-b", assignmentId: "assignment-b", ownerUserId: "user-b", now: 100, leaseMs: 1_000 });
+  await hostB.accept("dispatch-b", "run-b", 101);
+  assert.deepEqual(await hostA.ownedRunIds(), ["run-a"]);
+  assert.deepEqual(await hostB.ownedRunIds(), ["run-b"]);
+  await database.close();
+});
+
 test("persistent Router forwards cancellation to the assigned Host and persists terminal state", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);

@@ -97,7 +97,10 @@ const runs = new RunService({
   },
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
-await runs.reconcileInterruptedRuns();
+const reconcileOwnedRuns = async (): Promise<void> => {
+  await runs.reconcileInterruptedRuns(await dispatchStore.ownedRunIds());
+};
+await reconcileOwnedRuns();
 const runtimeHost = new AgentLoopRuntimeHost(runs, new HttpResourceImporter(runs, routerAttachmentToken), {
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
@@ -112,7 +115,7 @@ let reconciliationInFlight = false;
 const reconciliationTimer = setInterval(() => {
   if (reconciliationInFlight) return;
   reconciliationInFlight = true;
-  void runs.reconcileInterruptedRuns()
+  void reconcileOwnedRuns()
     .catch((error) => process.stderr.write(`Runtime interruption reconciliation failed: ${error instanceof Error ? error.message : String(error)}\n`))
     .finally(() => { reconciliationInFlight = false; });
 }, heartbeatIntervalMs);

@@ -738,10 +738,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         maxToolResultCharacters,
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
-        // A call ceiling is checked against the whole provider response.  Do
-        // not dispatch a streamed call before that complete batch can be
-        // admitted against its remaining quota.
-        allowEarlyDispatch: options.progressPolicy === undefined && toolCallLimits.size === 0,
+        toolCallLimits,
+        priorToolCallCounts: countToolCallsByName(toolEvidence),
+        // Each ready call is admitted against the same per-Tool ceiling as a
+        // completed response. Later calls beyond that ceiling are rejected;
+        // they never roll back a valid, already-dispatched earlier call.
+        allowEarlyDispatch: true,
       }, earlyOutcomes);
       if (
         response.toolCalls.length === 0
@@ -795,17 +797,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const replayableToolCalls = response.finishReason === "length"
       ? response.toolCalls.filter((call) => earlyOutcomes.has(call.id))
       : response.toolCalls;
-    const replayableToolCallIds = new Set(replayableToolCalls.map((call) => call.id));
-    const assistantMessage: ModelMessage = {
-      role: "assistant",
-      content: response.content,
-      ...(replayableToolCalls.length === 0 ? {} : { toolCalls: replayableToolCalls }),
-      ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
-    };
-    // Do not retain an unexecuted, truncated assistant turn as a prior model
-    // message. The next-turn Runtime directive carries its explicit failure
-    // evidence without pretending that a native function exchange occurred.
-    if (response.finishReason !== "length" || replayableToolCalls.length > 0) messages.push(assistantMessage);
 
     // This awaited event is the durable checkpoint before any external effect.
     await emit({
@@ -824,6 +815,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     });
 
     if (response.toolCalls.length === 0) {
+      const assistantMessage: ModelMessage = {
+        role: "assistant",
+        content: response.content,
+        ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
+      };
+      // Do not retain an unexecuted, truncated assistant turn as a prior model
+      // message. The next-turn Runtime directive carries its explicit failure
+      // evidence without pretending that a native function exchange occurred.
+      if (response.finishReason !== "length") messages.push(assistantMessage);
       if (response.finishReason !== "stop") {
         const feedback = `Completion candidate was not accepted because the model finished with ${response.finishReason}`;
         await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
@@ -1147,7 +1147,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       const remainingCalls = response.toolCalls.filter((call) => !earlyOutcomes.has(call.id));
       const prepared: PreparedEntry[] = [];
       const quotaRejectedOutcomes = new Map<string, ToolOutcome>();
-      const admittedToolCalls = new Map<string, number>();
+      const admittedToolCalls = countEarlyAdmittedToolCalls(earlyOutcomes);
       for (const call of remainingCalls) {
         const limit = toolCallLimits.get(call.name);
         const priorCalls = toolEvidence.filter((item) => item.toolName === call.name).length;
@@ -1233,6 +1233,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
     }
 
+    // A tool call rejected during prepare did not form a provider-valid native
+    // function exchange. Replaying it (or an orphaned tool result) can make a
+    // schema-valid repair request fail at the provider before the model sees
+    // the Runtime's repair instruction. Preserve the rejection as neutral
+    // server evidence instead, for every Tool rather than only HIL.
+    const rejectedProviderToolCalls = replayableToolCalls.filter((call) =>
+      outcomes.some((outcome) => outcome.call.id === call.id && outcome.failurePhase === "prepare"),
+    );
+    const providerReplayableToolCalls = replayableToolCalls.filter((call) =>
+      !rejectedProviderToolCalls.some((rejected) => rejected.id === call.id),
+    );
+    const replayableToolCallIds = new Set(providerReplayableToolCalls.map((call) => call.id));
+    const assistantMessage: ModelMessage = {
+      role: "assistant",
+      content: response.content,
+      ...(providerReplayableToolCalls.length === 0 ? {} : { toolCalls: providerReplayableToolCalls }),
+      ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
+    };
+    if (response.finishReason !== "length" || providerReplayableToolCalls.length > 0) messages.push(assistantMessage);
+
     // Provider protocol requires tool results in source call order even when the
     // actual effects complete out of order.
     const latestToolEvidence: AgentLoopToolEvidence[] = [];
@@ -1275,6 +1295,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           });
         }
       }
+    }
+    if (rejectedProviderToolCalls.length > 0) {
+      messages.push({
+        role: "user",
+        content: rejectedToolCallsEvidenceMessage(rejectedProviderToolCalls, outcomes),
+      });
     }
     await emit({
       type: "step.completed",
@@ -1585,6 +1611,24 @@ function normalizeToolCallLimits(
   return normalized;
 }
 
+function countToolCallsByName(evidence: readonly AgentLoopToolEvidence[]): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of evidence) counts.set(item.toolName, (counts.get(item.toolName) ?? 0) + 1);
+  return counts;
+}
+
+function countEarlyAdmittedToolCalls(outcomes: ReadonlyMap<string, ToolOutcome>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const outcome of outcomes.values()) {
+    // An early quota rejection never reserved a call slot. Prepared calls do,
+    // including a later prepare/operation failure, which matches late-batch
+    // admission semantics.
+    if (outcome.failurePhase === "runtime") continue;
+    counts.set(outcome.call.name, (counts.get(outcome.call.name) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function validateToolRecommendations(
   availableTools: readonly { readonly name: string }[],
   decision: StepExecutionDecision,
@@ -1664,6 +1708,27 @@ function removeRejectedAssistantCandidate(messages: ModelMessage[], candidate: M
   if (last !== candidate || last.role !== "assistant") return;
   if ((last.toolCalls?.length ?? 0) > 0) return;
   messages.pop();
+}
+
+function rejectedToolCallsEvidenceMessage(
+  rejectedCalls: readonly ModelToolCall[],
+  outcomes: readonly ToolOutcome[],
+): string {
+  const outcomeByCallId = new Map(outcomes.map((outcome) => [outcome.call.id, outcome]));
+  const payload = JSON.stringify({
+    schema: "agentloop.runtimeToolRejection/v1",
+    kind: "tool_rejection",
+    rejections: rejectedCalls.map((call) => ({
+      toolCallId: call.id,
+      toolName: call.name,
+      reason: outcomeByCallId.get(call.id)?.content ?? "Tool call was rejected during prepare",
+    })),
+  }).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
+  return [
+    '<runtime_evidence_record source="server" kind="tool_rejection" encoding="json">',
+    payload,
+    "</runtime_evidence_record>",
+  ].join("\n");
 }
 
 function isInternalEvidenceMarkupCandidate(value: string): boolean {
@@ -2039,6 +2104,8 @@ interface StreamingDispatchContext {
   readonly maxToolResultCharacters: number;
   readonly maxParallelToolCalls: number;
   readonly actionTracker: AgentLoopOptions["actionTracker"];
+  readonly toolCallLimits: ReadonlyMap<string, number>;
+  readonly priorToolCallCounts: ReadonlyMap<string, number>;
   readonly allowEarlyDispatch: boolean;
 }
 
@@ -2057,8 +2124,41 @@ async function completeWithStreamingAndDispatch(
 ): Promise<ModelResponse> {
   const limiter = createConcurrencyLimiter(Math.max(1, context.maxParallelToolCalls));
   const dispatches: Array<Promise<void>> = [];
+  const readyCalls = new Map<string, ModelToolCall>();
+  const earlyAdmittedCalls = new Map<string, number>();
 
   const dispatchEarly = (call: ModelToolCall): void => {
+    const limit = context.toolCallLimits.get(call.name);
+    const priorCalls = context.priorToolCallCounts.get(call.name) ?? 0;
+    const admittedCalls = earlyAdmittedCalls.get(call.name) ?? 0;
+    if (limit !== undefined && priorCalls + admittedCalls >= limit) {
+      const message = `Tool call limit reached for ${call.name}: at most ${limit} call(s) are allowed for this Plan step`;
+      dispatches.push((async () => {
+        await context.emit({
+          type: "tool.rejected",
+          data: {
+            step: context.step,
+            toolCallId: call.id,
+            toolName: call.name,
+            reason: message,
+            invocationStatus: "rejected",
+            operationStatus: "unknown",
+            isError: true,
+            failurePhase: "runtime",
+          },
+        });
+        earlyOutcomes.set(call.id, {
+          call,
+          content: message,
+          invocationStatus: "rejected",
+          operationStatus: "unknown",
+          isError: true,
+          failurePhase: "runtime",
+        });
+      })());
+      return;
+    }
+    earlyAdmittedCalls.set(call.name, admittedCalls + 1);
     dispatches.push((async () => {
       await limiter.acquire();
       try {
@@ -2109,41 +2209,65 @@ async function completeWithStreamingAndDispatch(
     })());
   };
 
-  const response = await completeWithStreaming({
-    model: context.model,
-    invocation: context.invocation,
-    emit: context.emit,
-    signal: context.signal,
-    base: { phase: "execution", step: context.step },
-    onToolCallReady: async (call) => {
-      // When the turn was dispatched without tools (convergence) any tool call is
-      // model misbehaviour and is never executed, so skip both commit and dispatch.
-      if (context.invocation.tools.length === 0) return;
-      await context.emit({
-        type: "assistant.tool_call.committed",
-        data: {
-          step: context.step,
-          toolCallId: call.id,
-          name: call.name,
-          arguments: call.arguments,
-        },
-      });
-      await context.emit({
-        type: "model.stream.awaiting_completion",
-        data: {
-          phase: "execution",
-          step: context.step,
-          toolCallId: call.id,
-          toolName: call.name,
-        },
-      });
-      if (!context.allowEarlyDispatch) return;
-      dispatchEarly(call);
-    },
-  });
+  let response: ModelResponse;
+  try {
+    response = await completeWithStreaming({
+      model: context.model,
+      invocation: context.invocation,
+      emit: context.emit,
+      signal: context.signal,
+      base: { phase: "execution", step: context.step },
+      onToolCallReady: async (call) => {
+        // When the turn was dispatched without tools (convergence) any tool call is
+        // model misbehaviour and is never executed, so skip both commit and dispatch.
+        if (context.invocation.tools.length === 0 || readyCalls.has(call.id)) return;
+        readyCalls.set(call.id, call);
+        await context.emit({
+          type: "assistant.tool_call.committed",
+          data: {
+            step: context.step,
+            toolCallId: call.id,
+            name: call.name,
+            arguments: call.arguments,
+          },
+        });
+        await context.emit({
+          type: "model.stream.awaiting_completion",
+          data: {
+            phase: "execution",
+            step: context.step,
+            toolCallId: call.id,
+            toolName: call.name,
+          },
+        });
+        if (!context.allowEarlyDispatch) return;
+        dispatchEarly(call);
+      },
+    });
+  } catch (error) {
+    await Promise.all(dispatches);
+    const recoveredCalls = [...readyCalls.values()].filter((call) => earlyOutcomes.get(call.id)?.failurePhase !== "prepare");
+    if (!isRecoverableToolReadyStreamAbort(error) || recoveredCalls.length === 0) throw error;
+    await context.emit({
+      type: "model.stream.tool_ready_recovered",
+      data: {
+        phase: "execution",
+        step: context.step,
+        toolCallIds: recoveredCalls.map((call) => call.id),
+        reason: "stream_idle_timeout",
+      },
+    });
+    return { content: "", finishReason: "tool_calls", toolCalls: recoveredCalls };
+  }
 
   await Promise.all(dispatches);
   return response;
+}
+
+function isRecoverableToolReadyStreamAbort(error: unknown): boolean {
+  if (!(error instanceof AppError) || error.code !== "MODEL_ERROR") return false;
+  const reason = error.details?.abortReason;
+  return reason === "stream_idle_timeout" || reason === "stream_wall_timeout";
 }
 
 async function executePreparedSchedule(

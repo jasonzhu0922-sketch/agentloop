@@ -4381,6 +4381,59 @@ test("tool_call_ready dispatches the tool before the full assistant checkpoint",
   assert.equal(awaitingCompletion.data.toolName, "echo");
 });
 
+test("a ready tool call survives an idle stream timeout under a per-Tool ceiling", async () => {
+  const events: RuntimeEvent[] = [];
+  let executions = 0;
+  let modelCalls = 0;
+  const tool: RuntimeTool<unknown> = {
+    name: "echo",
+    description: "Echo a value",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, value) => {
+      executions += 1;
+      return (value as { value: number }).value;
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      throw new Error("streaming path expected");
+    },
+    streamComplete: async (request, sink) => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const call = { id: "idle-echo", name: "echo", arguments: { value: 7 } };
+        await sink({ type: "tool_call_ready", index: 0, ...call });
+        throw new AppError("MODEL_ERROR", "Model request timed out", 502, { abortReason: "stream_idle_timeout" });
+      }
+      assert.equal(request.messages.some((message) => message.role === "tool" && message.name === "echo"), true);
+      return { content: "done", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["echo"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Recover a ready tool call.",
+    input: "echo 7",
+    model,
+    tools: new ToolRegistry([tool]),
+    grant,
+    toolCallLimits: { echo: 1 },
+    maxSteps: 3,
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "done");
+  assert.equal(executions, 1);
+  assert.equal(modelCalls, 2);
+  assert.equal(events.some((event) => event.type === "tool.planned" && event.data.toolCallId === "idle-echo"), true);
+  assert.equal(events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "idle-echo"), true);
+  assert.equal(events.some((event) => event.type === "model.stream.tool_ready_recovered"), true);
+});
+
 test("model request failures are emitted before the run fails", async () => {
   const events: RuntimeEvent[] = [];
   const model: ModelAdapter = {

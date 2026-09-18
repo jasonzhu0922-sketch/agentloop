@@ -94,6 +94,16 @@ export class HostDispatchStore {
     return row?.owner_user_id;
   }
 
+  async ownedRunIds(): Promise<readonly string[]> {
+    const rows = await this.database.prepare(`
+      SELECT remote_run_id
+      FROM mr_run_executors
+      WHERE runtime_id = ?
+      ORDER BY accepted_at, remote_run_id
+    `).all(this.runtimeId) as Array<{ remote_run_id: string }>;
+    return rows.map((row) => row.remote_run_id);
+  }
+
   /**
    * Counts only Runs this Host is actively executing, even when every Host
    * shares one database. A Run paused for durable recovery has no executing

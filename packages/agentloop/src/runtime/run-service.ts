@@ -1418,7 +1418,15 @@ export class RunService {
     }));
   }
 
-  async reconcileInterruptedRuns(): Promise<number> {
+  /**
+   * Reconcile interrupted work. Multi-Runtime Hosts pass their durable
+   * executor-owned Run IDs; the single-process app omits the scope and keeps
+   * the historical global reconciliation behavior.
+   */
+  async reconcileInterruptedRuns(runIds?: readonly string[]): Promise<number> {
+    const scopedRunIds = runIds === undefined ? undefined : [...new Set(runIds)];
+    if (scopedRunIds !== undefined && scopedRunIds.length === 0) return 0;
+    const runScope = scopedRunIds === undefined ? "" : ` AND runs.id IN (${scopedRunIds.map(() => "?").join(", ")})`;
     let reconciled = 0;
     const pausedAssessments = await this.database.prepare(`
       SELECT runs.id AS run_id, runs.owner_user_id, actions.metadata_json
@@ -1428,7 +1436,8 @@ export class RunService {
       WHERE runs.status = 'running'
         AND recovery.state = 'waiting_recovery'
         AND actions.state = 'recovery_required'
-    `).all() as unknown as Array<{ run_id: string; owner_user_id: string; metadata_json: string }>;
+        ${runScope}
+    `).all(...(scopedRunIds ?? [])) as unknown as Array<{ run_id: string; owner_user_id: string; metadata_json: string }>;
     for (const paused of pausedAssessments) {
       if (stringField(JSON.parse(paused.metadata_json) as unknown, "reason") !== "assessment_failed_boundary") continue;
       try {
@@ -1462,7 +1471,7 @@ export class RunService {
       }
       reconciled += 1;
     }
-    const interrupted = await this.actions.reconcileRunningRuns();
+    const interrupted = await this.actions.reconcileRunningRuns(scopedRunIds);
     for (const item of interrupted) {
       const run = await this.runs.get(item.runId);
       if (run === undefined || run.status !== "running") continue;
@@ -1618,13 +1627,19 @@ export class RunService {
     try {
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       const rawModel = this.modelFactory(this.retryReporter(runId), modelKey);
+      // The conversational intent resolver is the first model operation after
+      // run.started. Track it with the same durable Action/lease contract as
+      // planning and execution so a slow resolver cannot look like an
+      // actionless, abandoned Run to a Runtime Host's reconciliation pass.
+      const actionScope: { planId?: string; stepId?: string } = {};
+      const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
       const requiresExecution = requiresDeterministicConversationExecution(input, conversationWorkingSet);
       const turnResolution = !conversationEntry
         ? undefined
         : requiresExecution && (conversationHistory?.length ?? 0) === 0
           ? deterministicConversationTurnResolution(input)
           : await resolveConversationTurn(
-            rawModel,
+            model,
             input,
             conversationHistory,
             {
@@ -1749,8 +1764,6 @@ export class RunService {
         allowedSkillIds: privateSkills.map((skill) => skill.id),
       });
 
-      const actionScope: { planId?: string; stepId?: string } = {};
-      const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
       const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
         effectiveGoal,
