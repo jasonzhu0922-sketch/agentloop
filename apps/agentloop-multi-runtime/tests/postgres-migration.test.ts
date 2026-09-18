@@ -7,6 +7,7 @@ import {
   ensurePostgresBigIntMigration,
   initializePostgresSchema,
 } from "@zhujun/agentloop";
+import type { SqlConnection, SqlStatement } from "@zhujun/agentloop";
 import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
 import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
 import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
@@ -17,51 +18,20 @@ const SCHEMA_LOCK_KEY = "agentloop:postgres-schema-migrations:v1";
 test("real PostgreSQL lock timeout leaves no partial schema and permits a complete retry", {
   skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
 }, async () => {
-  const schema = `context_timeout_${randomUUID().replaceAll("-", "")}`;
-  const admin = await PgConnection.create(url!);
-  const config = postgresSchemaUrl(url!, schema);
-  const holder = await PgConnection.create(config);
-  const blockedConnection = await PgConnection.create(config);
-  let releaseLock!: () => void;
-  const holdLock = new Promise<void>((resolve) => { releaseLock = resolve; });
-  let lockAcquired!: () => void;
-  const acquired = new Promise<void>((resolve) => { lockAcquired = resolve; });
-  let holding: Promise<void> | undefined;
-  let retry: AppDatabase | undefined;
-  try {
-    await admin.exec(`CREATE SCHEMA ${schema}`);
-    holding = holder.transaction(async () => {
-      await holder.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(SCHEMA_LOCK_KEY);
-      lockAcquired();
-      await holdLock;
-    });
-    await acquired;
+  await runLockTimeoutScenario(url!, { watchdogMs: 8_000, expectDatabaseTimeout: true });
+});
 
-    const startedAt = Date.now();
-    await assert.rejects(
-      AppDatabase.open({ connection: blockedConnection }),
-      /lock timeout|canceling statement due to lock timeout/u,
-    );
-    assert.ok(Date.now() - startedAt >= 4_500, "schema lock timeout must not fail before its 5 second boundary");
-    const partialCount = await schemaRelationCount(admin, schema);
-    assert.equal(partialCount, 0, "a timed-out first startup must not leave canonical tables or the ledger");
-
-    releaseLock();
-    await holding;
-    retry = await AppDatabase.open({ connection: await PgConnection.create(config) });
-    const versions = await retry.prepare(
-      "SELECT COUNT(*) AS count FROM agentloop_schema_migrations WHERE version = ?",
-    ).get("kernel_wide_integers_v1") as { count: number };
-    assert.equal(Number(versions.count), 1);
-  } finally {
-    releaseLock();
-    await holding;
-    await retry?.close();
-    await blockedConnection.close();
-    await holder.close();
-    await admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
-    await admin.close();
-  }
+test("real PostgreSQL timeout watchdog releases the holder and cleans up when database timeout is absent", {
+  skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
+}, async () => {
+  await assert.rejects(
+    runLockTimeoutScenario(url!, {
+      watchdogMs: 500,
+      expectDatabaseTimeout: false,
+      ignoreDatabaseLockTimeout: true,
+    }),
+    /test watchdog released the PostgreSQL schema lock after 500ms/u,
+  );
 });
 
 test("real PostgreSQL rolls canonical DDL and ledger back when migration validation fails", {
@@ -139,6 +109,117 @@ async function schemaRelationCount(connection: PgConnection, schema: string): Pr
     WHERE n.nspname = ? AND c.relkind IN ('r', 'p')
   `).get(schema) as { count: number };
   return Number(row.count);
+}
+
+async function runLockTimeoutScenario(
+  connectionUrl: string,
+  options: {
+    readonly watchdogMs: number;
+    readonly expectDatabaseTimeout: boolean;
+    readonly ignoreDatabaseLockTimeout?: boolean;
+  },
+): Promise<void> {
+  const schema = `context_timeout_${randomUUID().replaceAll("-", "")}`;
+  const admin = await PgConnection.create(connectionUrl);
+  const config = postgresSchemaUrl(connectionUrl, schema);
+  const holder = await PgConnection.create(config);
+  const rawBlockedConnection = await PgConnection.create(config);
+  const blockedConnection = options.ignoreDatabaseLockTimeout
+    ? new IgnoreLockTimeoutConnection(rawBlockedConnection)
+    : rawBlockedConnection;
+  let releaseLock!: () => void;
+  const holdLock = new Promise<void>((resolve) => { releaseLock = resolve; });
+  let resolveAcquired!: () => void;
+  let rejectAcquired!: (error: unknown) => void;
+  const acquired = new Promise<void>((resolve, reject) => {
+    resolveAcquired = resolve;
+    rejectAcquired = reject;
+  });
+  let holding: Promise<void> | undefined;
+  let opened: AppDatabase | undefined;
+  let retry: AppDatabase | undefined;
+  let primaryError: unknown;
+  try {
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    holding = holder.transaction(async () => {
+      await holder.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(SCHEMA_LOCK_KEY);
+      resolveAcquired();
+      await holdLock;
+    });
+    void holding.catch(rejectAcquired);
+    await acquired;
+
+    let watchdogFired = false;
+    const watchdog = setTimeout(() => {
+      watchdogFired = true;
+      releaseLock();
+    }, options.watchdogMs);
+    const startedAt = Date.now();
+    let startupError: unknown;
+    try {
+      opened = await AppDatabase.open({ connection: blockedConnection });
+    } catch (error) {
+      startupError = error;
+    } finally {
+      clearTimeout(watchdog);
+    }
+    if (watchdogFired) {
+      throw new Error(`test watchdog released the PostgreSQL schema lock after ${options.watchdogMs}ms`);
+    }
+    if (startupError === undefined) throw new Error("blocked PostgreSQL startup unexpectedly succeeded");
+    assert.match(String(startupError), /lock timeout|canceling statement due to lock timeout/u);
+    if (options.expectDatabaseTimeout) {
+      assert.ok(Date.now() - startedAt >= 4_500, "schema lock timeout must not fail before its 5 second boundary");
+    }
+    assert.equal(
+      await schemaRelationCount(admin, schema),
+      0,
+      "a timed-out first startup must not leave canonical tables or the ledger",
+    );
+
+    releaseLock();
+    await holding;
+    retry = await AppDatabase.open({ connection: await PgConnection.create(config) });
+    const versions = await retry.prepare(
+      "SELECT COUNT(*) AS count FROM agentloop_schema_migrations WHERE version = ?",
+    ).get("kernel_wide_integers_v1") as { count: number };
+    assert.equal(Number(versions.count), 1);
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    releaseLock();
+    const cleanup = await Promise.allSettled([
+      holding ?? Promise.resolve(),
+      opened?.close() ?? blockedConnection.close(),
+      retry?.close() ?? Promise.resolve(),
+      holder.close(),
+    ]);
+    const schemaCleanup = await Promise.allSettled([
+      admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`),
+    ]);
+    const adminCleanup = await Promise.allSettled([admin.close()]);
+    if (primaryError === undefined) {
+      primaryError = firstRejectedReason([...cleanup, ...schemaCleanup, ...adminCleanup]);
+    }
+  }
+  if (primaryError !== undefined) throw primaryError;
+}
+
+function firstRejectedReason(results: readonly PromiseSettledResult<unknown>[]): unknown {
+  return results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
+}
+
+class IgnoreLockTimeoutConnection implements SqlConnection {
+  readonly dialect = "postgres" as const;
+  private readonly inner: SqlConnection;
+  constructor(inner: SqlConnection) { this.inner = inner; }
+  async exec(sql: string): Promise<void> {
+    if (sql.trim().startsWith("SET LOCAL lock_timeout")) return;
+    await this.inner.exec(sql);
+  }
+  prepare(sql: string): SqlStatement { return this.inner.prepare(sql); }
+  transaction<T>(operation: () => T | Promise<T>): Promise<T> { return this.inner.transaction(operation); }
+  close(): Promise<void> { return this.inner.close(); }
 }
 
 test("real PostgreSQL upgrades legacy columns once, then permits concurrent startup under a read lock", {
