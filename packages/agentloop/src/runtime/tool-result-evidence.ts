@@ -3,6 +3,7 @@ const RUNTIME_EVIDENCE_SCHEMAS = new Set([
   "agentloop.artifactReceipt/v1",
   "agentloop.sourceSummary/v1",
   "agentloop.toolEvidenceReceipt/v1",
+  "agentloop.commandComputationReceipt/v1",
 ]);
 
 export interface RuntimeEvidenceKindArrays {
@@ -15,6 +16,16 @@ export function runtimeEvidenceRecordsFromToolResult(result: string): readonly R
   const parsed = parseJsonRecord(result);
   if (parsed === undefined) return [];
   const records: Record<string, unknown>[] = [parsed];
+  const artifactReceipt = recordValue(parsed.artifactReceipt);
+  if (artifactReceipt !== undefined && hasRuntimeEvidenceSchema(artifactReceipt)) records.push(artifactReceipt);
+  const computationReceipt = recordValue(parsed.computationReceipt);
+  if (computationReceipt !== undefined && hasRuntimeEvidenceSchema(computationReceipt)) records.push(computationReceipt);
+  if (Array.isArray(parsed.artifactReceipts)) {
+    for (const value of parsed.artifactReceipts) {
+      const receipt = recordValue(value);
+      if (receipt !== undefined && hasRuntimeEvidenceSchema(receipt)) records.push(receipt);
+    }
+  }
   const stdout = stringValue(parsed.stdout);
   if (stdout !== undefined) {
     const stdoutRecord = parseJsonRecord(stdout);

@@ -1696,6 +1696,75 @@ test("server-owned executable aliases expose a safe name instead of an arbitrary
   }
 });
 
+test("computer_run_command binds a standard computation artifact to immutable inputs", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-computation-"));
+  try {
+    const series = JSON.stringify({ rows: [{ value: 3_520 }, { value: 3_590 }] });
+    await fs.writeFile(join(root, "series.json"), series);
+    const sha256 = createHash("sha256").update(series).digest("hex");
+    const inputRefs = [{ path: "series.json" }];
+    const executor = new ComputerExecutor(root, { executableAliases: { "trusted-node": process.execPath } });
+    const result = await executor.runCommand({
+      command: "trusted-node",
+      args: ["-e", [
+        "const fs=require('node:fs');",
+        "const rows=JSON.parse(fs.readFileSync('series.json','utf8')).rows;",
+        `process.stdout.write(JSON.stringify({schema:'agentloop.commandComputation/v1',inputRefs:${JSON.stringify(inputRefs)},facts:{records:rows.length,change:rows[1].value-rows[0].value}}));`,
+      ].join("")],
+      cwd: ".",
+      timeoutMs: 2_000,
+      computationInputs: [{ path: "series.json" }],
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.computationEvidenceError, undefined);
+    assert.deepEqual(result.computationReceipt, {
+      schema: "agentloop.commandComputationReceipt/v1",
+      receiptId: result.computationReceipt?.receiptId,
+      sourceType: "command_computation",
+      sourceRefs: [{ path: "series.json", sha256, bytes: Buffer.byteLength(series) }],
+      output: {
+        stream: "stdout",
+        sha256: createHash("sha256").update(result.stdout).digest("hex"),
+        bytes: Buffer.byteLength(result.stdout),
+        ...(result.stdoutRef === undefined ? {} : { path: result.stdoutRef.path }),
+      },
+      facts: { records: 2, change: 70 },
+      caveats: [],
+      evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+    });
+    assert.match(result.computationReceipt?.receiptId ?? "", /^[a-f0-9]{64}$/);
+
+    const unstructured = await executor.runCommand({
+      command: "trusted-node",
+      args: ["-e", "process.stdout.write(JSON.stringify({records:2,change:70}))"],
+      cwd: ".",
+      timeoutMs: 2_000,
+      computationInputs: [{ path: "series.json" }],
+    });
+    assert.equal(unstructured.exitCode, 0);
+    assert.equal(unstructured.computationReceipt, undefined);
+    assert.match(unstructured.computationEvidenceError ?? "", /No valid agentloop\.commandComputation\/v1 artifact/);
+
+    const mutatedInput = await executor.runCommand({
+      command: "trusted-node",
+      args: ["-e", [
+        "const fs=require('node:fs');",
+        "fs.writeFileSync('series.json','tampered');",
+        `process.stdout.write(JSON.stringify({schema:'agentloop.commandComputation/v1',inputRefs:${JSON.stringify(inputRefs)},facts:{records:2}}));`,
+      ].join("")],
+      cwd: ".",
+      timeoutMs: 2_000,
+      computationInputs: [{ path: "series.json" }],
+    });
+    assert.equal(mutatedInput.exitCode, 0);
+    assert.equal(mutatedInput.computationReceipt, undefined);
+    assert.match(mutatedInput.computationEvidenceError ?? "", /input changed during command execution/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer command arguments preserve long workspace paths while rejecting outside absolute paths", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-long-command-argument-"));
   try {

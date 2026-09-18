@@ -349,7 +349,9 @@ interface RuntimeObservableReceipt {
  * The principle gate verifies only effects that Runtime can observe without
  * interpreting the model's work. Structured source receipts establish that
  * source material was actually acquired, while the model remains responsible
- * for interpreting that material. Artifact receipts never prove source facts.
+ * for interpreting that material. A command-computation receipt establishes a
+ * reproducible transformation over hash-bound inputs, without elevating any
+ * Skill executor into a separate execution authority.
  */
 const RUNTIME_OBSERVABLE_GATE_KINDS = new Set([
   "source_summary",
@@ -455,7 +457,8 @@ function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
   return schema === "agentloop.artifactAcceptance/v1"
     || schema === "agentloop.artifactReceipt/v1"
     || schema === "agentloop.sourceSummary/v1"
-    || schema === "agentloop.toolEvidenceReceipt/v1";
+    || schema === "agentloop.toolEvidenceReceipt/v1"
+    || schema === "agentloop.commandComputationReceipt/v1";
 }
 
 /**

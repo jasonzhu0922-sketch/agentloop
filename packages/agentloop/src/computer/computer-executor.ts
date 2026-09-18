@@ -83,6 +83,25 @@ interface DirectoryFileEntry {
   readonly bytes: number;
 }
 
+/**
+ * A calculation input is captured before a command starts. Runtime owns the
+ * content hash; callers only identify the source path.
+ */
+interface CommandComputationInput {
+  readonly path: string;
+}
+
+interface CapturedCommandComputationInput {
+  readonly path: string;
+  readonly sha256: string;
+  readonly bytes: number;
+}
+
+interface CommandComputationArtifact {
+  readonly facts: Record<string, unknown>;
+  readonly caveats: readonly string[];
+}
+
 interface DirectoryFieldProfile {
   readonly field: string;
   readonly observed: number;
@@ -372,7 +391,9 @@ export class ComputerExecutor {
     const file = await this.readFile(path, 8_000_000);
     if (file.truncated) throw badRequest("Content reference exceeds the 8000000 byte read limit");
     const sha256 = createHash("sha256").update(file.content).digest("hex");
-    if (sha256 !== expectedSha256) throw badRequest("Content reference hash mismatch; the file changed since acquisition");
+    if (sha256 !== expectedSha256) {
+      throw badRequest("Content reference hash mismatch; expectedSha256 does not match current content");
+    }
     if (characterOffset > file.content.length) throw badRequest("characterOffset exceeds content length");
     const content = file.content.slice(characterOffset, characterOffset + characterLimit);
     const end = characterOffset + content.length;
@@ -1214,6 +1235,7 @@ export class ComputerExecutor {
     args: readonly string[];
     cwd: string;
     timeoutMs: number;
+    computationInputs?: readonly CommandComputationInput[];
     signal?: AbortSignal;
   }): Promise<{
     exitCode: number | null;
@@ -1227,6 +1249,8 @@ export class ComputerExecutor {
     truncated: boolean;
     timedOut: boolean;
     evidenceReceipt?: Record<string, unknown>;
+    computationReceipt?: Record<string, unknown>;
+    computationEvidenceError?: string;
     }> {
     if (!EXECUTABLE_NAME_PATTERN.test(input.command)) {
       throw badRequest("command must be an executable name without shell syntax or path separators");
@@ -1237,6 +1261,7 @@ export class ComputerExecutor {
     }
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
     await this.assertCommandArgumentsDoNotEscape(input.args, cwdResolution);
+    const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
     const cwd = cwdResolution.path;
     if (!(await fs.stat(cwd)).isDirectory()) throw badRequest("cwd must be a directory");
     const limit = DEFAULT_OUTPUT_LIMIT;
@@ -1328,6 +1353,16 @@ export class ComputerExecutor {
             const stdoutProjection = await this.projectCommandOutput("stdout", stdout.toString("utf8"), { allowControlSignals });
             const stderrProjection = await this.projectCommandOutput("stderr", stderr.toString("utf8"));
             const evidenceReceipt = extractStdoutEvidenceReceipt(stdout.toString("utf8"));
+            const computationEvidence = await this.bindCommandComputationEvidence({
+              inputs: computationInputs,
+              command: input.command,
+              args: input.args,
+              exitCode,
+              signal,
+              truncated,
+              stdout: stdout.toString("utf8"),
+              stdoutRef: stdoutProjection.reference,
+            });
             resolvePromise({
               exitCode,
               signal,
@@ -1340,6 +1375,8 @@ export class ComputerExecutor {
               truncated,
               timedOut,
               ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+              ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
+              ...(computationEvidence.error === undefined ? {} : { computationEvidenceError: computationEvidence.error }),
             });
           } catch (error) {
             rejectPromise(error);
@@ -1347,6 +1384,82 @@ export class ComputerExecutor {
         })();
       });
     });
+  }
+
+  private async captureCommandComputationInputs(
+    inputs: readonly CommandComputationInput[],
+  ): Promise<readonly CapturedCommandComputationInput[]> {
+    const captured: CapturedCommandComputationInput[] = [];
+    for (const input of inputs) {
+      const resolved = await this.resolveReadablePath(input.path);
+      const stat = await fs.stat(resolved.absolutePath);
+      if (!stat.isFile()) throw badRequest(`computation input must be a file: ${input.path}`);
+      const sha256 = await sha256File(resolved.absolutePath);
+      captured.push({ path: resolved.workspacePath, sha256, bytes: stat.size });
+    }
+    return captured;
+  }
+
+  private async bindCommandComputationEvidence(input: {
+    readonly inputs: readonly CapturedCommandComputationInput[];
+    readonly command: string;
+    readonly args: readonly string[];
+    readonly exitCode: number | null;
+    readonly signal: string | null;
+    readonly truncated: boolean;
+    readonly stdout: string;
+    readonly stdoutRef?: CommandOutputReference;
+  }): Promise<{ readonly receipt?: Record<string, unknown>; readonly error?: string }> {
+    if (input.inputs.length === 0) return {};
+    if (input.exitCode !== 0 || input.signal !== null) {
+      return { error: "Command did not succeed, so a derived aggregation cannot be bound." };
+    }
+    if (input.truncated) {
+      return { error: "Command stdout was truncated, so its computation artifact cannot be bound." };
+    }
+    for (const source of input.inputs) {
+      const resolved = await this.resolveReadablePath(source.path);
+      const currentSha256 = await sha256File(resolved.absolutePath);
+      if (currentSha256 !== source.sha256) {
+        return { error: `Computation input changed during command execution: ${source.path}` };
+      }
+    }
+    const artifact = parseCommandComputationArtifact(input.stdout, input.inputs);
+    if (artifact === undefined) {
+      return {
+        error: "No valid agentloop.commandComputation/v1 artifact was found in stdout. Output one JSON document with matching input paths and a non-empty facts object.",
+      };
+    }
+    const output = {
+      stream: "stdout",
+      sha256: createHash("sha256").update(input.stdout).digest("hex"),
+      bytes: Buffer.byteLength(input.stdout),
+      ...(input.stdoutRef === undefined ? {} : { path: input.stdoutRef.path }),
+    };
+    const receiptMaterial = JSON.stringify({
+      inputs: input.inputs,
+      output,
+      command: input.command,
+      argsSha256: createHash("sha256").update(JSON.stringify(input.args)).digest("hex"),
+      facts: artifact.facts,
+      caveats: artifact.caveats,
+    });
+    return {
+      receipt: {
+        schema: "agentloop.commandComputationReceipt/v1",
+        receiptId: createHash("sha256").update(receiptMaterial).digest("hex"),
+        sourceType: "command_computation",
+        sourceRefs: input.inputs,
+        output,
+        facts: artifact.facts,
+        caveats: artifact.caveats,
+        evidenceKinds: {
+          satisfied: ["derived_aggregation"],
+          caveated: artifact.caveats.length > 0 ? ["explicit_caveats"] : [],
+          failed: [],
+        },
+      },
+    };
   }
 
   private async projectCommandOutput(
@@ -1844,6 +1957,36 @@ function extractEvidenceReceipt(record: Record<string, unknown>): Record<string,
   if (receipt?.schema !== "agentloop.toolEvidenceReceipt/v1") return undefined;
   if (!isPlainRecord(receipt.evidenceKinds)) return undefined;
   return receipt;
+}
+
+/**
+ * This is intentionally a neutral data-transformation envelope. Runtime owns
+ * source hashes and only matches the declared input paths; it does not accept
+ * caller-supplied hashes as authority or interpret the facts/domain method.
+ */
+function parseCommandComputationArtifact(
+  content: string,
+  inputs: readonly CapturedCommandComputationInput[],
+): CommandComputationArtifact | undefined {
+  const artifact = parseJsonRecord(content);
+  if (artifact?.schema !== "agentloop.commandComputation/v1") return undefined;
+  const inputRefs = Array.isArray(artifact.inputRefs) ? artifact.inputRefs : undefined;
+  if (inputRefs === undefined || inputRefs.length !== inputs.length) return undefined;
+  for (let index = 0; index < inputs.length; index += 1) {
+    const expected = inputs[index]!;
+    const actual = inputRefs[index];
+    if (!isPlainRecord(actual) || actual.path !== expected.path) return undefined;
+  }
+  const facts = isPlainRecord(artifact.facts) && Object.keys(artifact.facts).length > 0
+    ? artifact.facts
+    : undefined;
+  if (facts === undefined) return undefined;
+  const caveats = artifact.caveats === undefined
+    ? []
+    : Array.isArray(artifact.caveats) && artifact.caveats.every((item) => typeof item === "string" && item.trim().length > 0)
+      ? artifact.caveats.map((item) => item.trim())
+      : undefined;
+  return caveats === undefined ? undefined : { facts, caveats };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

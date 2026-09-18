@@ -231,10 +231,10 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
     }
     if (toolName !== "computer_run_command" || result?.exitCode !== 0 || typeof result.stdout !== "string") continue;
     for (const path of artifactPathsFromCommandFileChanges(result)) {
-      if (!candidates.has(path)) candidates.set(path, "computer_run_command");
+      if (!candidates.has(path)) candidates.set(path, toolName);
     }
     for (const path of artifactPathsMentionedInCommandOutput(result.stdout)) {
-      if (!candidates.has(path)) candidates.set(path, "computer_run_command");
+      if (!candidates.has(path)) candidates.set(path, toolName);
     }
   }
   return [...candidates.entries()].map(([path, sourceTool]) => ({ path, sourceTool }));

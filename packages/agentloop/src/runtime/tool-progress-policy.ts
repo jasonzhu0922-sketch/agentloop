@@ -596,6 +596,18 @@ function artifactRecordsFromResult(record: Record<string, unknown>): readonly Re
   if (artifactPath !== undefined) records.push({ path: artifactPath });
   const path = stringField(record, "path") ?? stringField(asRecord(record.output), "path");
   if (path !== undefined) records.push(record);
+  if (Array.isArray(record.changes)) {
+    for (const change of record.changes) {
+      const changeRecord = asRecord(change);
+      if (changeRecord !== undefined && stringField(changeRecord, "path") !== undefined) records.push(changeRecord);
+    }
+  }
+  if (Array.isArray(record.artifactReceipts)) {
+    for (const receipt of record.artifactReceipts) {
+      const artifact = asRecord(asRecord(receipt)?.artifact);
+      if (artifact !== undefined) records.push(artifact);
+    }
+  }
   if (Array.isArray(record.fileChanges)) {
     for (const item of record.fileChanges) {
       const fileChange = asRecord(item);
@@ -616,6 +628,17 @@ function nextActionForEvidenceGap(input: {
   const satisfied = new Set(input.satisfiedEvidenceKinds);
   if (input.failedEvidenceKinds.length > 0 && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
+  }
+  // A source/script artifact already produced for this leaf is current work
+  // evidence.  When it can produce the requested deliverable, execute it
+  // before asking the model to reacquire semantic source material merely
+  // because the final artifact receipt is still absent.
+  if (
+    input.workProduct.status === "process_artifact_available"
+    && (missing.has("artifact_path") || missing.has("artifact_non_empty"))
+    && hasArtifactProducer(input.policy)
+  ) {
+    return "produce_artifact";
   }
   if (
     missing.has("source_summary")

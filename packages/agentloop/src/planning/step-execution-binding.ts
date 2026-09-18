@@ -441,6 +441,7 @@ const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
     "computer_summarize_table_artifact",
     "computer_aggregate_table_artifact",
   ],
+  workspace_command_computation: ["computer_run_command"],
   workspace_artifact_write: [
     "computer_write_file",
     "computer_patch_file",
@@ -543,6 +544,17 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     sourceKinds: ["workspace_file", "generated_artifact"],
     sideEffect: "workspace_write",
     risk: "medium",
+  },
+  {
+    id: "workspace_command_computation",
+    category: "structured_data",
+    label: "Compute over hash-bound workspace inputs",
+    description: "Run a generic workspace command that emits a standard computation artifact bound to immutable input references.",
+    produces: ["derived_aggregation", "explicit_caveats"],
+    sourceKinds: ["workspace_file"],
+    sideEffect: "workspace_write",
+    risk: "medium",
+    constraints: ["requires computer_run_command and immutable workspace input references"],
   },
   {
     id: "external_api_call",

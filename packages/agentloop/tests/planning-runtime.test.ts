@@ -5025,6 +5025,62 @@ test("ModelPlanner creates response-only conversational Plans without a planning
   assert.equal(plan.steps[0]?.evidenceContract, undefined);
 });
 
+test("conversation intent resolution is durable before a slow resolver can appear actionless", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "resolver-lease-conversation";
+    let releaseResolver: () => void = () => {};
+    const resolverGate = new Promise<void>((resolve) => { releaseResolver = resolve; });
+    let calls = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      async complete(): Promise<ModelResponse> {
+        calls += 1;
+        if (calls === 1) {
+          await resolverGate;
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "resolve-turn",
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "reply",
+                relation: "new_goal",
+                effectiveGoal: "answer the user",
+                evidenceDemand: "none",
+                userConstraints: [],
+              },
+            }],
+          };
+        }
+        return { content: "已回复", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({ database, skills, modelFactory: () => model, tools: [] });
+    await runs.ensureConversation(owner.user.id, conversationId, "先前问题");
+    const started = await runs.startConversation(owner.user.id, "继续回答", { conversationId });
+    const deadline = Date.now() + 1_000;
+    while (calls === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls, 1);
+    const action = (await database.prepare("SELECT state, kind FROM runtime_actions WHERE run_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(started.id)) as { state: string; kind: string } | undefined;
+    assert.deepEqual(action, { state: "dispatched", kind: "planning" });
+    releaseResolver();
+    const deadlineAfterRelease = Date.now() + 1_000;
+    let finished = await runs.get(owner.user.id, started.id);
+    while (finished.status === "running" && Date.now() < deadlineAfterRelease) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      finished = await runs.get(owner.user.id, started.id);
+    }
+    assert.notEqual(finished.status, "running");
+  } finally {
+    database.close();
+  }
+});
+
 test("selectPlanningSkills prefers the matching Skill summary and allows no-skill", () => {
   const canvas = skillFixture({ id: "canvas", name: "canvas-design", description: "Create beautiful poster and visual art in .png and .pdf documents using design philosophy.", agentLoop: agentLoopMetadata(["primary_builder"], ["image"]) });
   const algorithmic = skillFixture({ id: "algo", name: "algorithmic-art", description: "Creating algorithmic art using p5.js with seeded randomness and interactive parameter exploration.", agentLoop: agentLoopMetadata(["primary_builder"], ["image"]) });
@@ -6861,6 +6917,92 @@ test("evidence-gate recognizes source references and caveats embedded in a sourc
 
   assert.equal(assessment.approved, true);
   assert.equal(assessment.feedback, "");
+});
+
+test("evidence-gate accepts a Runtime-bound generic command computation", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("aggregate-series"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["derived_aggregation"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [{
+        id: "derived_aggregation",
+        description: "A reproducible aggregation over the acquired series is available.",
+        source: "planner",
+      }],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "已基于已绑定的原始序列计算出区间涨跌与记录数。",
+      toolCalls: [{
+        toolCallId: "generic-command-aggregation",
+        toolName: "computer_run_command",
+        isError: false,
+        result: JSON.stringify({
+          exitCode: 0,
+          computationReceipt: {
+            schema: "agentloop.commandComputationReceipt/v1",
+            sourceType: "command_computation",
+            sourceRefs: [{ path: "evidence/series.json", sha256: "a".repeat(64), bytes: 128 }],
+            output: { stream: "stdout", sha256: "b".repeat(64), bytes: 256 },
+            facts: { records: 70, endpointChange: 70 },
+            caveats: ["同日多值需由上层方法论决定取值口径。"],
+            evidenceKinds: {
+              satisfied: ["derived_aggregation"],
+              caveated: ["explicit_caveats"],
+              failed: [],
+            },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.feedback, "");
+  assert.equal(assessment.criteria[0]?.satisfied, true);
+});
+
+test("generic command computation capability can satisfy a derived aggregation contract", () => {
+  const admitted = admitPlan({
+    runId: "command-computation-plan",
+    proposal: {
+      goal: "Aggregate an acquired JSON series.",
+      selectedSkillIds: [],
+      steps: [{
+        id: "aggregate-series",
+        objective: "Compute reproducible facts from the acquired JSON series.",
+        dependencies: [],
+        skillIds: [],
+        requiredCapabilities: ["workspace_command_computation"],
+        evidenceContract: {
+          requiredKinds: ["derived_aggregation"],
+          caveatPolicy: "mark_unverified_facts",
+        },
+        successCriteria: [{
+          id: "derived_aggregation",
+          description: "A reproducible aggregation is available.",
+          source: "planner",
+        }],
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(["computer_run_command"]),
+  });
+
+  assert.deepEqual(admitted.steps[0]?.requiredCapabilities, ["workspace_command_computation"]);
+  assert.deepEqual(admitted.steps[0]?.executionBinding.resolvedToolNames, ["computer_run_command"]);
 });
 
 test("evidence-gate accepts structured source evidence and semantic caveats", async () => {

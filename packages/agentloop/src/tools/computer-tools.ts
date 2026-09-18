@@ -652,6 +652,7 @@ export function createComputerTools(
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
+        "For a reusable derived aggregation from workspace data, provide computationInputs with source paths only. Runtime captures the live hashes; callers must not pass or reproduce hashes. On success, stdout must be one agentloop.commandComputation/v1 JSON document with matching input paths and a non-empty facts object; Runtime then binds a generic command-computation receipt. Do not self-issue an evidenceReceipt for this purpose.",
         `timeoutMs is optional, defaults to ${DEFAULT_COMMAND_TIMEOUT_MS}, and must be between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS}.`,
       ].join(" "),
       inputSchema: objectSchema(["command", "args"], {
@@ -663,6 +664,14 @@ export function createComputerTools(
         },
         cwd: { type: "string" },
         timeoutMs: { type: "integer", minimum: MIN_COMMAND_TIMEOUT_MS, maximum: MAX_COMMAND_TIMEOUT_MS },
+        computationInputs: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: objectSchema(["path"], {
+            path: { type: "string", maxLength: 4_000 },
+          }),
+        },
       }),
       executionMode: "exclusive",
       replaySafe: false,
@@ -677,10 +686,11 @@ export function createComputerTools(
           args: commandArguments(record.args),
           cwd: record.cwd === undefined || record.cwd === "" ? "." : requireString(record.cwd, "cwd", { max: 4_000 }),
           timeoutMs: timeoutMs as number,
+          ...(record.computationInputs === undefined ? {} : { computationInputs: commandComputationInputs(record.computationInputs) }),
         };
       },
       execute: async (context, value) => executorForContext(executor, context).runCommand({
-        ...(value as { command: string; args: string[]; cwd: string; timeoutMs: number }),
+        ...(value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
         signal: context.signal,
       }),
     },
@@ -725,6 +735,20 @@ function commandArguments(value: unknown): string[] {
     throw badRequest(`args must contain at most ${MAX_COMMAND_ARGUMENTS_TOTAL_CHARACTERS} characters in total`);
   }
   return result;
+}
+
+function commandComputationInputs(value: unknown): Array<{ path: string }> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
+    throw badRequest("computationInputs must contain 1-32 immutable file references");
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const record = requireRecord(entry, `computationInputs[${index}]`);
+    const path = requireString(record.path, `computationInputs[${index}].path`, { max: 4_000 });
+    if (seen.has(path)) throw badRequest(`computationInputs must not repeat path: ${path}`);
+    seen.add(path);
+    return { path };
+  });
 }
 
 function optionalPositiveInteger(value: unknown, field: string): number | undefined {

@@ -139,7 +139,10 @@ test("reference windows page exactly and reject changed hashes, invalid ranges, 
   await assert.rejects(executor.readContentReference(ref.path, ref.sha256, content.length + 1, 100), /exceeds/);
   await assert.rejects(executor.readContentReference("../outside.txt", ref.sha256, 0, 100));
   await fs.writeFile(join(root, ref.path), "changed");
-  await assert.rejects(executor.readContentReference(ref.path, ref.sha256, 0, 100), /hash mismatch/);
+  await assert.rejects(
+    executor.readContentReference(ref.path, ref.sha256, 0, 100),
+    /hash mismatch; expectedSha256 does not match current content/,
+  );
 });
 
 test("oversized web tool serialization retains a readable ref through the agent loop", async (t) => {
