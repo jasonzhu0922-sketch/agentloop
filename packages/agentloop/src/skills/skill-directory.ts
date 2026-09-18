@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import { AppError } from "../shared/errors.ts";
+import { readSkillExecutionManifest } from "./skill-execution-manifest.ts";
 import { inspectSkillPackage } from "./skill-package.ts";
 import type { SkillPackageInspection } from "./skill-package.ts";
 
@@ -68,6 +69,10 @@ export async function discoverSkillDirectory(directory: string): Promise<SkillDi
         `Skill directory ${child.name} does not match SKILL.md name ${inspection.name}`,
       );
     }
+    await readSkillExecutionManifest(inspection.root).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      throw invalidDirectory(`Invalid Skill execution manifest at ${sourceDirectory}: ${message}`);
+    });
     const source = await readVerifiedSourceLock(
       resolve(root, `${child.name}.source.json`),
       inspection,

@@ -1,4 +1,4 @@
-import { notFound } from "../shared/errors.ts";
+import { AppError, notFound } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import { formatLoadedSkill } from "../skills/skill-context.ts";
 import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
@@ -38,9 +38,20 @@ export function createSkillLoader(skills: readonly PrivateSkill[]): RuntimeTool<
     execute: async (context, value) => {
       const skill = byReference.get((value as { name: string }).name);
       if (skill === undefined || !context.grant.allowedSkillIds.has(skill.id)) throw notFound("Skill");
-      const executionEntrypoints = skill.package === undefined
-        ? []
-        : await readSkillExecutionManifest(skill.package.root);
+      let executionEntrypoints: Awaited<ReturnType<typeof readSkillExecutionManifest>> = [];
+      if (skill.package !== undefined) {
+        try {
+          executionEntrypoints = await readSkillExecutionManifest(skill.package.root);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown manifest error";
+          throw new AppError(
+            "SKILL_PACKAGE_INVALID",
+            `Skill execution manifest is invalid: ${message}`,
+            422,
+            { skillId: skill.id, skillName: skill.name },
+          );
+        }
+      }
       return formatLoadedSkill(skill, {
         executionCwd: skillExecutionCwd,
         executionRootEnvName: skillExecutionRootEnvName,

@@ -210,6 +210,47 @@ test("a package execution manifest exposes an action interface without putting c
   }
 });
 
+test("Skill discovery rejects a package whose execution manifest violates its interface limits", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-invalid-executor-manifest-"));
+  try {
+    const skill = join(root, "broken-manifest");
+    await fs.mkdir(skill);
+    await fs.writeFile(join(skill, "SKILL.md"), [
+      "---",
+      "name: broken-manifest",
+      "description: A package with an invalid execution manifest",
+      "---",
+      "",
+      "SKILL-BODY",
+    ].join("\n"));
+    await fs.writeFile(join(skill, "agentloop.executors.json"), JSON.stringify({
+      schema: "agentloop.skillExecutors/v1",
+      executors: [{
+        id: "data-query",
+        description: "Read simple data rows.",
+        command: "python3",
+        script: "scripts/query.py",
+        actions: [{
+          id: "query",
+          description: "Return a bounded row set.",
+          inputs: [],
+          args: ["--action", "query"],
+          result: "x".repeat(501),
+        }],
+      }],
+    }), "utf8");
+
+    await assert.rejects(
+      () => discoverSkillDirectory(root),
+      (error: unknown) => error instanceof Error
+        && error.message.includes("Invalid Skill execution manifest")
+        && error.message.includes("Skill executor action result must be a non-empty string of at most 500 characters"),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("load_skill reads a package execution manifest and tells the model to invoke it directly", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-loader-manifest-"));
   try {
@@ -261,6 +302,65 @@ test("load_skill reads a package execution manifest and tells the model to invok
     assert.match(String(loaded), /command="python3" script="scripts\/company\.py"/);
     assert.match(String(loaded), /invoke it directly with computer_run_command/);
     assert.match(String(loaded), /do not list package directories/);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("load_skill reports an invalid manifest as a Skill package error if the package changes after discovery", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-loader-invalid-manifest-"));
+  try {
+    await fs.writeFile(join(workspace, "agentloop.executors.json"), JSON.stringify({
+      schema: "agentloop.skillExecutors/v1",
+      executors: [{
+        id: "company-query",
+        description: "Query a company registry.",
+        command: "python3",
+        script: "scripts/company.py",
+        actions: [{
+          id: "search",
+          description: "Find company candidates.",
+          inputs: [],
+          args: ["--action", "search"],
+          result: "x".repeat(501),
+        }],
+      }],
+    }), "utf8");
+    const skill = {
+      id: "discovered:company-query",
+      ownerUserId: "system",
+      name: "company-query",
+      description: "Company registry lookup.",
+      instructions: "Search candidates before showing registration details.",
+      version: 1,
+      sourceKind: "package" as const,
+      contentHash: "a".repeat(64),
+      updatedAt: 0,
+      package: {
+        root: workspace,
+        entrypointPath: "SKILL.md" as const,
+        packageHash: "a".repeat(64),
+        fileCount: 2,
+        totalBytes: 1,
+      },
+    };
+    const loader = createSkillLoader([skill]);
+    await assert.rejects(
+      () => loader.execute({
+        grant: createCapabilityGrant({
+          actorUserId: "test-user",
+          runId: "test-run",
+          depth: 0,
+          allowedToolNames: ["load_skill"],
+          allowedSkillIds: [skill.id],
+        }),
+      }, loader.parse({ name: skill.name })),
+      (error: unknown) => error instanceof Error
+        && "code" in error
+        && error.code === "SKILL_PACKAGE_INVALID"
+        && error.message.includes("Skill execution manifest is invalid")
+        && error.message.includes("at most 500 characters"),
+    );
   } finally {
     await fs.rm(workspace, { recursive: true, force: true });
   }
