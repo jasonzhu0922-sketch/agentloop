@@ -18,20 +18,78 @@ const SCHEMA_LOCK_KEY = "agentloop:postgres-schema-migrations:v1";
 test("real PostgreSQL lock timeout leaves no partial schema and permits a complete retry", {
   skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
 }, async () => {
-  await runLockTimeoutScenario(url!, { watchdogMs: 8_000, expectDatabaseTimeout: true });
+  const outcome = await runLockTimeoutScenario(url!, { watchdogMs: 8_000, expectDatabaseTimeout: true });
+  assert.equal(outcome.kind, "database_timeout");
+  assert.equal(await schemaExists(url!, outcome.schema), false);
 });
 
 test("real PostgreSQL timeout watchdog releases the holder and cleans up when database timeout is absent", {
   skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
 }, async () => {
-  await assert.rejects(
-    runLockTimeoutScenario(url!, {
-      watchdogMs: 500,
-      expectDatabaseTimeout: false,
-      ignoreDatabaseLockTimeout: true,
-    }),
-    /test watchdog released the PostgreSQL schema lock after 500ms/u,
-  );
+  const startedAt = Date.now();
+  const outcome = await runLockTimeoutScenario(url!, {
+    watchdogMs: 500,
+    expectDatabaseTimeout: false,
+    ignoreDatabaseLockTimeout: true,
+  });
+  assert.equal(outcome.kind, "watchdog_released");
+  assert.ok(Date.now() - startedAt < 2_000);
+  assert.equal(await schemaExists(url!, outcome.schema), false);
+});
+
+test("real PostgreSQL cleanup failure is reported and does not hide behind the watchdog outcome", {
+  skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
+}, async () => {
+  let leakedSchema = "";
+  try {
+    await assert.rejects(
+      runLockTimeoutScenario(url!, {
+        watchdogMs: 500,
+        expectDatabaseTimeout: false,
+        ignoreDatabaseLockTimeout: true,
+        injectSchemaCleanupFailure: true,
+      }),
+      (error: unknown) => {
+        assert.equal(error instanceof ScenarioCleanupError, true);
+        leakedSchema = (error as ScenarioCleanupError).schema;
+        assert.match(String(error), /schema cleanup injection/u);
+        return true;
+      },
+    );
+    assert.notEqual(leakedSchema, "");
+    assert.equal(await schemaExists(url!, leakedSchema), true);
+  } finally {
+    if (leakedSchema !== "") await dropSchema(url!, leakedSchema);
+  }
+  assert.equal(await schemaExists(url!, leakedSchema), false);
+});
+
+test("real PostgreSQL holder acquisition is cancelled when another process owns the schema lock", {
+  skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
+}, async () => {
+  const externalHolder = await PgConnection.create(url!);
+  let releaseExternal!: () => void;
+  const holdExternal = new Promise<void>((resolve) => { releaseExternal = resolve; });
+  let resolveExternalAcquired!: () => void;
+  const externalAcquired = new Promise<void>((resolve) => { resolveExternalAcquired = resolve; });
+  const holding = externalHolder.transaction(async () => {
+    await externalHolder.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(SCHEMA_LOCK_KEY);
+    resolveExternalAcquired();
+    await holdExternal;
+  });
+  try {
+    await externalAcquired;
+    const startedAt = Date.now();
+    await assert.rejects(
+      runLockTimeoutScenario(url!, { watchdogMs: 500, expectDatabaseTimeout: false }),
+      /holder acquisition watchdog|canceling statement due to user request/u,
+    );
+    assert.ok(Date.now() - startedAt < 4_000, "holder acquisition must not wait for an external CI timeout");
+  } finally {
+    releaseExternal();
+    await holding;
+    await externalHolder.close();
+  }
 });
 
 test("real PostgreSQL rolls canonical DDL and ledger back when migration validation fails", {
@@ -111,14 +169,36 @@ async function schemaRelationCount(connection: PgConnection, schema: string): Pr
   return Number(row.count);
 }
 
+async function schemaExists(connectionUrl: string, schema: string): Promise<boolean> {
+  const admin = await PgConnection.create(connectionUrl);
+  try {
+    const row = await admin.prepare(`
+      SELECT COUNT(*) AS count FROM information_schema.schemata WHERE schema_name = ?
+    `).get(schema) as { count: number };
+    return Number(row.count) === 1;
+  } finally {
+    await admin.close();
+  }
+}
+
+async function dropSchema(connectionUrl: string, schema: string): Promise<void> {
+  const admin = await PgConnection.create(connectionUrl);
+  try {
+    await admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  } finally {
+    await admin.close();
+  }
+}
+
 async function runLockTimeoutScenario(
   connectionUrl: string,
   options: {
     readonly watchdogMs: number;
     readonly expectDatabaseTimeout: boolean;
     readonly ignoreDatabaseLockTimeout?: boolean;
+    readonly injectSchemaCleanupFailure?: boolean;
   },
-): Promise<void> {
+): Promise<{ readonly kind: "database_timeout" | "watchdog_released"; readonly schema: string }> {
   const schema = `context_timeout_${randomUUID().replaceAll("-", "")}`;
   const admin = await PgConnection.create(connectionUrl);
   const config = postgresSchemaUrl(connectionUrl, schema);
@@ -135,19 +215,32 @@ async function runLockTimeoutScenario(
     resolveAcquired = resolve;
     rejectAcquired = reject;
   });
+  let resolveAcquisitionStarted!: (backendPid: number) => void;
+  let rejectAcquisitionStarted!: (error: unknown) => void;
+  const acquisitionStarted = new Promise<number>((resolve, reject) => {
+    resolveAcquisitionStarted = resolve;
+    rejectAcquisitionStarted = reject;
+  });
   let holding: Promise<void> | undefined;
   let opened: AppDatabase | undefined;
   let retry: AppDatabase | undefined;
   let primaryError: unknown;
+  let outcome: { readonly kind: "database_timeout" | "watchdog_released"; readonly schema: string } | undefined;
   try {
     await admin.exec(`CREATE SCHEMA ${schema}`);
     holding = holder.transaction(async () => {
+      const backend = await holder.prepare("SELECT pg_backend_pid() AS pid").get() as { pid: number };
+      resolveAcquisitionStarted(backend.pid);
       await holder.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(SCHEMA_LOCK_KEY);
       resolveAcquired();
       await holdLock;
     });
-    void holding.catch(rejectAcquired);
-    await acquired;
+    void holding.catch((error) => {
+      rejectAcquisitionStarted(error);
+      rejectAcquired(error);
+    });
+    const backendPid = await acquisitionStarted;
+    await waitForHolderAcquisition(acquired, admin, backendPid, 2_000);
 
     let watchdogFired = false;
     const watchdog = setTimeout(() => {
@@ -164,26 +257,28 @@ async function runLockTimeoutScenario(
       clearTimeout(watchdog);
     }
     if (watchdogFired) {
-      throw new Error(`test watchdog released the PostgreSQL schema lock after ${options.watchdogMs}ms`);
-    }
-    if (startupError === undefined) throw new Error("blocked PostgreSQL startup unexpectedly succeeded");
-    assert.match(String(startupError), /lock timeout|canceling statement due to lock timeout/u);
-    if (options.expectDatabaseTimeout) {
-      assert.ok(Date.now() - startedAt >= 4_500, "schema lock timeout must not fail before its 5 second boundary");
-    }
-    assert.equal(
-      await schemaRelationCount(admin, schema),
-      0,
-      "a timed-out first startup must not leave canonical tables or the ledger",
-    );
+      outcome = { kind: "watchdog_released", schema };
+    } else {
+      if (startupError === undefined) throw new Error("blocked PostgreSQL startup unexpectedly succeeded");
+      assert.match(String(startupError), /lock timeout|canceling statement due to lock timeout/u);
+      if (options.expectDatabaseTimeout) {
+        assert.ok(Date.now() - startedAt >= 4_500, "schema lock timeout must not fail before its 5 second boundary");
+      }
+      assert.equal(
+        await schemaRelationCount(admin, schema),
+        0,
+        "a timed-out first startup must not leave canonical tables or the ledger",
+      );
 
-    releaseLock();
-    await holding;
-    retry = await AppDatabase.open({ connection: await PgConnection.create(config) });
-    const versions = await retry.prepare(
-      "SELECT COUNT(*) AS count FROM agentloop_schema_migrations WHERE version = ?",
-    ).get("kernel_wide_integers_v1") as { count: number };
-    assert.equal(Number(versions.count), 1);
+      releaseLock();
+      await holding;
+      retry = await AppDatabase.open({ connection: await PgConnection.create(config) });
+      const versions = await retry.prepare(
+        "SELECT COUNT(*) AS count FROM agentloop_schema_migrations WHERE version = ?",
+      ).get("kernel_wide_integers_v1") as { count: number };
+      assert.equal(Number(versions.count), 1);
+      outcome = { kind: "database_timeout", schema };
+    }
   } catch (error) {
     primaryError = error;
   } finally {
@@ -194,19 +289,56 @@ async function runLockTimeoutScenario(
       retry?.close() ?? Promise.resolve(),
       holder.close(),
     ]);
-    const schemaCleanup = await Promise.allSettled([
-      admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`),
-    ]);
+    const schemaCleanup = await Promise.allSettled([options.injectSchemaCleanupFailure
+      ? Promise.reject(new Error("schema cleanup injection"))
+      : admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)]);
     const adminCleanup = await Promise.allSettled([admin.close()]);
-    if (primaryError === undefined) {
-      primaryError = firstRejectedReason([...cleanup, ...schemaCleanup, ...adminCleanup]);
+    const cleanupErrors = rejectedReasons([...cleanup, ...schemaCleanup, ...adminCleanup]);
+    if (cleanupErrors.length > 0) {
+      throw new ScenarioCleanupError(schema, cleanupErrors, primaryError);
     }
   }
   if (primaryError !== undefined) throw primaryError;
+  if (outcome === undefined) throw new Error("PostgreSQL lock timeout scenario produced no outcome");
+  return outcome;
 }
 
-function firstRejectedReason(results: readonly PromiseSettledResult<unknown>[]): unknown {
-  return results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
+async function waitForHolderAcquisition(
+  acquired: Promise<void>,
+  admin: PgConnection,
+  backendPid: number,
+  watchdogMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      void admin.prepare("SELECT pg_cancel_backend(?)").get(backendPid).then(
+        () => reject(new Error(`holder acquisition watchdog cancelled backend after ${watchdogMs}ms`)),
+        reject,
+      );
+    }, watchdogMs);
+  });
+  try {
+    await Promise.race([acquired, watchdog]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function rejectedReasons(results: readonly PromiseSettledResult<unknown>[]): unknown[] {
+  return results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+}
+
+class ScenarioCleanupError extends AggregateError {
+  readonly schema: string;
+  constructor(schema: string, cleanupErrors: readonly unknown[], primaryError?: unknown) {
+    super(primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors],
+      `PostgreSQL timeout scenario cleanup failed for ${schema}: ${cleanupErrors.map(String).join("; ")}`);
+    this.name = "ScenarioCleanupError";
+    this.schema = schema;
+  }
 }
 
 class IgnoreLockTimeoutConnection implements SqlConnection {
