@@ -1,12 +1,93 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { AppDatabase, PgConnection, ensurePostgresBigIntMigration } from "@zhujun/agentloop";
+import {
+  AppDatabase,
+  PgConnection,
+  ensurePostgresBigIntMigration,
+  initializePostgresSchema,
+} from "@zhujun/agentloop";
 import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
 import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
 import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
 
 const url = process.env.AGENTLOOP_TEST_POSTGRES_URL;
+const SCHEMA_LOCK_KEY = "agentloop:postgres-schema-migrations:v1";
+
+test("real PostgreSQL lock timeout leaves no partial schema and permits a complete retry", {
+  skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
+}, async () => {
+  const schema = `context_timeout_${randomUUID().replaceAll("-", "")}`;
+  const admin = await PgConnection.create(url!);
+  const config = postgresSchemaUrl(url!, schema);
+  const holder = await PgConnection.create(config);
+  const blockedConnection = await PgConnection.create(config);
+  let releaseLock!: () => void;
+  const holdLock = new Promise<void>((resolve) => { releaseLock = resolve; });
+  let lockAcquired!: () => void;
+  const acquired = new Promise<void>((resolve) => { lockAcquired = resolve; });
+  let holding: Promise<void> | undefined;
+  let retry: AppDatabase | undefined;
+  try {
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    holding = holder.transaction(async () => {
+      await holder.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(SCHEMA_LOCK_KEY);
+      lockAcquired();
+      await holdLock;
+    });
+    await acquired;
+
+    const startedAt = Date.now();
+    await assert.rejects(
+      AppDatabase.open({ connection: blockedConnection }),
+      /lock timeout|canceling statement due to lock timeout/u,
+    );
+    assert.ok(Date.now() - startedAt >= 4_500, "schema lock timeout must not fail before its 5 second boundary");
+    const partialCount = await schemaRelationCount(admin, schema);
+    assert.equal(partialCount, 0, "a timed-out first startup must not leave canonical tables or the ledger");
+
+    releaseLock();
+    await holding;
+    retry = await AppDatabase.open({ connection: await PgConnection.create(config) });
+    const versions = await retry.prepare(
+      "SELECT COUNT(*) AS count FROM agentloop_schema_migrations WHERE version = ?",
+    ).get("kernel_wide_integers_v1") as { count: number };
+    assert.equal(Number(versions.count), 1);
+  } finally {
+    releaseLock();
+    await holding;
+    await retry?.close();
+    await blockedConnection.close();
+    await holder.close();
+    await admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin.close();
+  }
+});
+
+test("real PostgreSQL rolls canonical DDL and ledger back when migration validation fails", {
+  skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
+}, async () => {
+  const schema = `context_rollback_${randomUUID().replaceAll("-", "")}`;
+  const admin = await PgConnection.create(url!);
+  const connection = await PgConnection.create(postgresSchemaUrl(url!, schema));
+  try {
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    await assert.rejects(
+      initializePostgresSchema(
+        connection,
+        "CREATE TABLE rollback_probe(id TEXT PRIMARY KEY, invalid_value TEXT NOT NULL)",
+        "rollback_probe_v1",
+        [["rollback_probe", "invalid_value"]],
+      ),
+      /Cannot migrate rollback_probe\.invalid_value from text to BIGINT/u,
+    );
+    assert.equal(await schemaRelationCount(admin, schema), 0);
+  } finally {
+    await connection.close();
+    await admin.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin.close();
+  }
+});
 
 test("real PostgreSQL serializes complete first startup on an empty schema", {
   skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
@@ -44,6 +125,21 @@ test("real PostgreSQL serializes complete first startup on an empty schema", {
     await admin.close();
   }
 });
+
+function postgresSchemaUrl(connectionUrl: string, schema: string): string {
+  const config = new URL(connectionUrl);
+  config.searchParams.set("options", `-c search_path=${schema}`);
+  return config.toString();
+}
+
+async function schemaRelationCount(connection: PgConnection, schema: string): Promise<number> {
+  const row = await connection.prepare(`
+    SELECT COUNT(*) AS count FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = ? AND c.relkind IN ('r', 'p')
+  `).get(schema) as { count: number };
+  return Number(row.count);
+}
 
 test("real PostgreSQL upgrades legacy columns once, then permits concurrent startup under a read lock", {
   skip: url === undefined ? "AGENTLOOP_TEST_POSTGRES_URL not set" : false,
