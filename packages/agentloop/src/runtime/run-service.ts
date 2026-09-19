@@ -13,7 +13,10 @@ import type {
   ConversationCompletedStepHandoff,
   ConversationEvidenceLedger,
   ConversationFailedBoundary,
+  ConversationInputBinding,
   ConversationOutcomeRelation,
+  ConversationResultReference,
+  ConversationReusableResult,
   ConversationResolvedIntent,
   ConversationReusableArtifact,
   ConversationSourceFact,
@@ -63,6 +66,7 @@ import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
+import { ConversationResultRepository } from "../storage/repositories/conversation-result-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
@@ -100,6 +104,7 @@ import {
   ToolRegistry,
   type RuntimeTool,
 } from "../tools/index.ts";
+import type { ToolExecutionPlugin } from "../tools/tool-execution-plugin.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
@@ -120,6 +125,7 @@ import {
   type RunRecoveryState,
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
+import { decisionCommitsFromEvents, enforceDecisionGate, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
@@ -152,6 +158,7 @@ export const DEFAULT_MAX_STEPS = 24;
 
 const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
 const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
+const CONVERSATION_WORKING_SET_RESULT_LIMIT = 8;
 const CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT = 8;
 const CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT = 12;
 const CONVERSATION_COMPLETED_STEP_HANDOFF_OUTPUT_CHARACTERS = 3_000;
@@ -300,6 +307,7 @@ export class RunService {
   private readonly plans: PlanRepository;
   private readonly sources: SourceRepository;
   private readonly sourceIntake: SourceIntakeService;
+  private readonly conversationResults: ConversationResultRepository;
   private readonly scheduler = new DependencyScheduler();
   private readonly terminal: TerminalCommitter;
   private readonly actions: RuntimeActionRepository;
@@ -311,6 +319,7 @@ export class RunService {
   private readonly activeRunControllers = new Map<string, AbortController>();
   private readonly planningExtensions: readonly PlanningExtension[];
   private readonly stepExecutionStrategy?: StepExecutionStrategy;
+  private readonly toolExecutionPlugins: readonly ToolExecutionPlugin[];
 
   constructor(options: {
     database: SqlConnection;
@@ -333,6 +342,7 @@ export class RunService {
     runEventLogSink?: RunEventLogSink;
     planningExtensions?: readonly PlanningExtension[];
     stepExecutionStrategy?: StepExecutionStrategy;
+    toolExecutionPlugins?: readonly ToolExecutionPlugin[];
   }) {
     this.database = options.database;
     this.skills = options.skills;
@@ -359,15 +369,17 @@ export class RunService {
     const acceptanceService = new ArtifactAcceptanceService({
       providers: options.acceptanceProviders,
     });
+    this.runs = new RunRepository(options.database);
+    this.plans = new PlanRepository(options.database);
+    this.sources = new SourceRepository(options.database);
+    this.conversationResults = new ConversationResultRepository(options.database);
     this.coreTools = createCoreTools({
       executor: computerExecutor,
       driver: options.computerDriver,
       acceptanceService,
+      conversationResults: this.conversationResults,
       pluginTools: options.tools,
     });
-    this.runs = new RunRepository(options.database);
-    this.plans = new PlanRepository(options.database);
-    this.sources = new SourceRepository(options.database);
     this.sourceIntake = new SourceIntakeService(this.sources, this.workspaceRoot);
     this.humanLoops = new HumanLoopRepository(options.database);
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
@@ -377,6 +389,7 @@ export class RunService {
     this.runEventLogSink = options.runEventLogSink;
     this.planningExtensions = options.planningExtensions ?? [];
     this.stepExecutionStrategy = options.stepExecutionStrategy;
+    this.toolExecutionPlugins = Object.freeze([...(options.toolExecutionPlugins ?? [])]);
   }
 
   async execute(
@@ -739,6 +752,7 @@ export class RunService {
     const consideredRuns = allRuns.slice(-CONVERSATION_WORKING_SET_RUN_LIMIT);
     const planCursors: Array<ConversationWorkingSet["planCursors"][number]> = [];
     const reusableArtifacts: ConversationReusableArtifact[] = [];
+    const reusableResults: ConversationReusableResult[] = [];
     const completedStepHandoffs: ConversationCompletedStepHandoff[] = [];
     const failedBoundaries: ConversationFailedBoundary[] = [];
     const requiredSkillIds = new Set<string>();
@@ -866,9 +880,32 @@ export class RunService {
           reusable: true,
         });
       }
+      if (outcome?.status === "completed" && outcome.output !== undefined && outcome.output.trim().length > 0) {
+        const content = outcome.output;
+        const result: ConversationResultReference = {
+          schema: "agentloop.conversationResultRef/v1",
+          runId: run.id,
+          sha256: createHash("sha256").update(content).digest("hex"),
+          characters: content.length,
+        };
+        const summary = truncateWorkingSetText(content, 1_200);
+        reusableResults.push({
+          result,
+          ...(outcome.planId === undefined ? {} : { planId: outcome.planId }),
+          goal: truncateWorkingSetText(plan?.goal ?? run.input, 600),
+          summary,
+          summaryTruncated: summary.length < content.replace(/\s+/g, " ").trim().length,
+          artifactPaths: artifacts.map((artifact) => artifact.path),
+          evidenceRefs: [
+            `run:${run.id}`,
+            ...(outcome.planId === undefined ? [] : [`plan:${outcome.planId}`]),
+          ],
+        });
+      }
     }
 
     const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
+    const boundedResults = reusableResults.slice(-CONVERSATION_WORKING_SET_RESULT_LIMIT);
     const boundedSourceSummaries = sourceSummaries.slice(-CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT);
     const boundedStepHandoffs = completedStepHandoffs.slice(-CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT);
     for (const handoff of boundedStepHandoffs) {
@@ -893,6 +930,7 @@ export class RunService {
       ...(activeGoal === undefined ? {} : { activeGoal }),
       planCursors,
       ...(resolvedIntents.length === 0 ? {} : { resolvedIntents }),
+      reusableResults: boundedResults,
       reusableArtifacts: boundedArtifacts,
       failedBoundaries,
       ...(outcomeRelations.length === 0 ? {} : { outcomeRelations }),
@@ -1371,7 +1409,7 @@ export class RunService {
         model,
         assessor,
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
-        registry: new ToolRegistry(allTools),
+        registry: new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins }),
         emit,
         visibleDirectories,
         sources,
@@ -1403,11 +1441,68 @@ export class RunService {
           await emit({ type: "run.failed", data: { runId, planId: plan.id, code: error.code, message: error.message, output, recovered: true } });
           return this.get(actorUserId, runId);
         }
+        if (error instanceof AppError && error.code === "HUMAN_LOOP_REQUIRED" && actionScope.stepId !== undefined) {
+          await this.persistHumanLoopPause({
+            runId,
+            planId: plan.id,
+            stepId: actionScope.stepId,
+            requirement: error.details?.requirement,
+            sourceToolCallId: error.details?.sourceToolCallId,
+            emit,
+          });
+          return this.get(actorUserId, runId);
+        }
         const reason = error instanceof AppError ? error.code : "INTERNAL_ERROR";
         await this.recovery.restoreRecovery(runId, action.id, reason);
       }
       throw error;
     }
+  }
+
+  /**
+   * A Human-in-the-Loop pause is a durable Runtime state. Both the initial
+   * execution and a resumed Step use this path so a later pause is not reduced
+   * to a recovery error with no request the user can answer.
+   */
+  private async persistHumanLoopPause(input: {
+    readonly runId: string;
+    readonly planId: string;
+    readonly stepId: string;
+    readonly requirement: unknown;
+    readonly sourceToolCallId: unknown;
+    readonly emit: (event: RuntimeEvent) => Promise<void>;
+  }): Promise<void> {
+    if (input.requirement === undefined || typeof input.requirement !== "object" || Array.isArray(input.requirement)) {
+      throw new AppError("INTERNAL_ERROR", "Human-in-the-Loop request was not structured", 500);
+    }
+    const action = await this.actions.requireHumanLoopResume({
+      runId: input.runId,
+      planId: input.planId,
+      stepId: input.stepId,
+      metadata: { sourceToolCallId: input.sourceToolCallId },
+    });
+    const request = await this.humanLoops.create({
+      ...(input.requirement as HumanLoopRequirement),
+      runId: input.runId,
+      planId: input.planId,
+      stepId: input.stepId,
+      actionId: action.id,
+      origin: "tool",
+    });
+    // Carry the persisted request snapshot so an active SSE connection (and
+    // durable replay) can render the required interaction without a second
+    // best-effort lookup.
+    await input.emit({
+      type: "run.waiting_user",
+      data: {
+        runId: input.runId,
+        planId: input.planId,
+        stepId: input.stepId,
+        requestId: request.id,
+        kind: request.kind,
+        request,
+      },
+    });
   }
 
   toolCatalog(): Array<{ name: string; dangerous: boolean; description: string }> {
@@ -1861,6 +1956,7 @@ export class RunService {
       });
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       let plan: ExecutionPlan;
+      const inputBindings = conversationInputBindingsForTurn(turnResolution);
       try {
         plan = admitPlan({
           runId,
@@ -1873,6 +1969,7 @@ export class RunService {
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
+          ...(inputBindings.length === 0 ? {} : { inputBindings }),
           taskIntent: admissionTaskIntent,
         });
       } catch (error) {
@@ -1912,6 +2009,7 @@ export class RunService {
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
+          ...(inputBindings.length === 0 ? {} : { inputBindings }),
           taskIntent: admissionTaskIntent,
         });
       }
@@ -1934,7 +2032,7 @@ export class RunService {
       });
 
       const assessor = this.assessorFactory(model);
-      const registry = new ToolRegistry(allTools);
+      const registry = new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins });
       plan = await this.executePlanSteps({
         actorUserId,
         runId,
@@ -2000,30 +2098,14 @@ export class RunService {
         : new AppError("INTERNAL_ERROR", "Run failed", 500);
       if ((await this.runs.get(runId))?.status === "running") {
         if (appError.code === "HUMAN_LOOP_REQUIRED" && planId !== undefined && runningStepId !== undefined) {
-          const requirement = appError.details?.requirement;
-          if (requirement === undefined || typeof requirement !== "object" || Array.isArray(requirement)) {
-            throw new AppError("INTERNAL_ERROR", "Human-in-the-Loop request was not structured", 500);
-          }
-          const action = await this.actions.requireHumanLoopResume({
+          await this.persistHumanLoopPause({
             runId,
             planId,
             stepId: runningStepId,
-            metadata: { sourceToolCallId: appError.details?.sourceToolCallId },
+            requirement: appError.details?.requirement,
+            sourceToolCallId: appError.details?.sourceToolCallId,
+            emit,
           });
-          const request = await this.humanLoops.create({
-            ...(requirement as HumanLoopRequirement),
-            runId,
-            planId,
-            stepId: runningStepId,
-            actionId: action.id,
-            origin: "tool",
-          });
-          // A waiting-user event is a displayable Runtime state, not merely a
-          // notification that the browser should make a second best-effort
-          // request.  Carry the persisted request snapshot so an active SSE
-          // connection (and its durable replay) can render the required
-          // interaction even if that follow-up lookup is temporarily absent.
-          await emit({ type: "run.waiting_user", data: { runId, planId, stepId: runningStepId, requestId: request.id, kind: request.kind, request } });
           return this.get(actorUserId, runId);
         }
         const failedBoundary = failedBoundaryFromErrorDetails(appError.details);
@@ -2250,6 +2332,7 @@ export class RunService {
       toolEvidence: readonly AgentLoopToolEvidence[];
       facts: unknown;
     }>;
+    decisionLedger?: readonly RuntimeDecisionCommit[];
     onStepChanged: (stepId: string | undefined) => void;
     signal?: AbortSignal;
   }): Promise<ExecutionPlan> {
@@ -2324,6 +2407,10 @@ export class RunService {
         .filter((assessment) => assessment.stepId === activeStep.id).length;
       const assessedCandidates = new Map<string, SkillComplianceAssessment>();
       const recovery = input.initialRecovery?.stepId === activeStep.id ? input.initialRecovery : undefined;
+      const decisionLedger = input.decisionLedger
+        ?? (isRecord(recovery?.facts) && Array.isArray(recovery.facts.decisionLedger)
+          ? recovery.facts.decisionLedger as RuntimeDecisionCommit[]
+          : []);
       const fileOutputStep = (stepAllowsSkillFileOutput(activeStep)
         && stepSkills.some((skill) => skillRequiresFileOutput(skill)))
         || stepRequiresFileOutput(activeStep);
@@ -2403,6 +2490,7 @@ export class RunService {
             skillExecutionRoots,
             stepTaskProfile,
             input.conversationWorkingSet,
+            decisionLedger,
           )
           : buildRecoveredStepRuntimeContext(
             activeStep,
@@ -2415,6 +2503,7 @@ export class RunService {
             skillExecutionRoots,
             stepTaskProfile,
             input.conversationWorkingSet,
+            decisionLedger,
           ),
         input: input.input,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -2596,8 +2685,9 @@ export class RunService {
             assessmentProfile,
             ...(holisticSourceContractMismatch ? { holisticSourceContractMismatch: true } : {}),
             attempt: assessmentAttempt,
+            decisionLedger,
           }, input.signal, input.emit);
-          const assessment = useProfiledRuleAssessor
+          const assessed = useProfiledRuleAssessor
             ? await this.actions.execute({
               runId: input.runId,
               planId: plan.id,
@@ -2608,6 +2698,7 @@ export class RunService {
               metadata: { phase: "assessment", assessmentProfile, assessmentMethod: "rule" },
             }, assess)
             : await assess();
+          const assessment = enforceDecisionGate({ assessment: assessed, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
           assessedCandidates.set(assessmentSignature, assessment);
           await this.plans.saveAssessment(assessment);
           await input.emit({
@@ -2823,10 +2914,11 @@ export class RunService {
         model: input.model,
         assessor,
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
-        registry: new ToolRegistry(allTools),
+        registry: new ToolRegistry(allTools, { plugins: this.toolExecutionPlugins }),
         emit: async (event) => this.appendRunEvent(input.run.id, event),
         visibleDirectories,
         sources,
+        decisionLedger: decisionCommitsFromEvents(await this.runtimeEvents(input.run.id)),
         ...(input.run.conversationId === undefined
           ? {}
           : { conversationHistory: await this.conversationHistory(input.run.conversationId) }),
@@ -3044,7 +3136,7 @@ export class RunService {
       && retired.has(item.stepId)
       && item.kind !== "recovery_review"
       && item.replayPolicy === "unsafe"
-      && item.state !== "succeeded",
+      && this.unsafeActionNeedsEffectConfirmation(item),
     );
     if (unsafe !== undefined) {
       throw new AppError(
@@ -3053,6 +3145,10 @@ export class RunService {
         409,
       );
     }
+  }
+
+  private unsafeActionNeedsEffectConfirmation(action: RuntimeActionRecord): boolean {
+    return action.effectState !== "not_started" && action.effectState !== "applied";
   }
 
   private async rejectRecoveryDecision(decisionId: string, error: unknown): Promise<void> {
@@ -5211,7 +5307,8 @@ function shouldConvergeAfterLookupEvidence(
   // the model re-read the same source instead of persisting a cross-turn
   // source-summary candidate.
   const sourceSummaryCandidateStep = stepAllowsSourceSummaryCandidateConvergence(step);
-  if (!stepCanConvergeFromLookupEvidence(step) && !sourceSummaryCandidateStep) return { converge: false };
+  const requiresSourceSummary = stepRequiresSourceSummary(step);
+  if (!stepCanConvergeFromLookupEvidence(step) && !requiresSourceSummary) return { converge: false };
   const latestSuccessfulLookupEvidence = context.latestToolEvidence
     .filter((item) => !item.isError && isLookupToolName(item.toolName));
   if (latestSuccessfulLookupEvidence.length === 0) return { converge: false };
@@ -5225,14 +5322,14 @@ function shouldConvergeAfterLookupEvidence(
   const sourceReadKeys = lookupSourceReadKeys(successfulLookupEvidence);
   const sourceReadCount = sourceReadKeys.size;
   const minimumSourceReads = minimumSourceReadsForLookupStep(step, successfulLookupEvidence);
-  if (webSearchCount >= MAX_WEB_SEARCHES_PER_PLAN_STEP) {
+  if (!requiresSourceSummary && webSearchCount >= MAX_WEB_SEARCHES_PER_PLAN_STEP) {
     return { converge: true, reason: "lookup_evidence_ready:websearch_limit" };
   }
   if (requiresContentRead && latestVisibleSourceReadHasContinuation(latestSuccessfulLookupEvidence)) {
     return { converge: false };
   }
   if (
-    sourceSummaryCandidateStep
+    requiresSourceSummary
     && hasSatisfiedEvidenceKind(successfulLookupEvidence, "source_summary")
     && hasCompleteStructuredExtractionEvidence(successfulLookupEvidence)
   ) {
@@ -5255,7 +5352,7 @@ function shouldConvergeAfterLookupEvidence(
       }
     }
   }
-  if (sourceSummaryCandidateStep) {
+  if (requiresSourceSummary) {
     if (!hasSatisfiedEvidenceKind(successfulLookupEvidence, "source_summary")) {
       return { converge: false };
     }
@@ -5468,7 +5565,11 @@ function minimumSourceReadsForLookupStep(
   evidence: readonly AgentLoopToolEvidence[],
 ): number {
   if (!stepUsesTool(step, (name) => isSourceContentReadToolName(name))) return 0;
-  const defaultMinimum = stepAllowsSourceSummaryCandidateConvergence(step) ? 5 : 1;
+  // Any step that promises a source summary must read a bounded set of
+  // distinct source bodies before tools are withdrawn. Final delivery leaves
+  // are just as vulnerable to premature convergence as fact-acquisition
+  // leaves; their role must not weaken the evidence boundary.
+  const defaultMinimum = stepRequiresSourceSummary(step) ? 5 : 1;
   const discovered = discoveredSourceCount(evidence);
   if (discovered === undefined) return defaultMinimum;
   return Math.max(1, Math.min(defaultMinimum, discovered));
@@ -6279,6 +6380,7 @@ function buildStepRuntimeContext(
   skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
   taskProfile: TaskProfile = executionTaskProfileForStep(step, skills),
   conversationWorkingSet?: ConversationWorkingSet,
+  decisionLedger: readonly RuntimeDecisionCommit[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
@@ -6298,6 +6400,7 @@ function buildStepRuntimeContext(
     operationProfile,
     requiresFileOutput: stepRequiresFileOutput(step),
     conversationWorkingSet,
+    decisionLedger,
   });
 }
 
@@ -6312,6 +6415,7 @@ function buildRecoveredStepRuntimeContext(
   skillExecutionRoots: readonly SkillExecutionRootGrant[] = [],
   taskProfile: TaskProfile = executionTaskProfileForStep(step, skills),
   conversationWorkingSet?: ConversationWorkingSet,
+  decisionLedger: readonly RuntimeDecisionCommit[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const base = buildStepRuntimeContext(
     step,
@@ -6323,6 +6427,7 @@ function buildRecoveredStepRuntimeContext(
     skillExecutionRoots,
     taskProfile,
     conversationWorkingSet,
+    decisionLedger,
   );
   return {
     ...base,
@@ -6336,6 +6441,10 @@ function buildRecoveredStepRuntimeContext(
       "</recovery_context>",
     ].join("\n"),
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function finalPlanOutput(plan: ExecutionPlan): string {
@@ -6541,6 +6650,26 @@ const CONVERSATION_TURN_TOOL = {
         enum: ["new_goal", "continue_prior", "correct_prior", "refine_prior", "challenge_prior"],
       },
       targetRunId: { type: "string" },
+      targetArtifact: {
+        type: "object",
+        additionalProperties: false,
+        required: ["runId", "path"],
+        properties: {
+          runId: { type: "string", minLength: 1, maxLength: 120 },
+          path: { type: "string", minLength: 1, maxLength: 1_200 },
+        },
+      },
+      targetResult: {
+        type: "object",
+        additionalProperties: false,
+        required: ["schema", "runId", "sha256", "characters"],
+        properties: {
+          schema: { type: "string", const: "agentloop.conversationResultRef/v1" },
+          runId: { type: "string", minLength: 1, maxLength: 120 },
+          sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          characters: { type: "integer", minimum: 1, maximum: 20_000_000 },
+        },
+      },
       effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
       evidenceDemand: {
         type: "string",
@@ -6586,7 +6715,9 @@ async function resolveConversationTurn(
     const resolution = parseConversationTurnResolution(response, context.conversationWorkingSet);
     if (resolution !== undefined) {
       const inherited = inheritContinuedConversationIntent(resolution, context.conversationWorkingSet);
-      return applyConversationTurnEvidenceFloor(inherited, input, context.conversationWorkingSet);
+      const artifactBound = bindUnambiguousPriorArtifact(inherited, input, context.conversationWorkingSet);
+      const resultBound = bindUnambiguousPriorResult(artifactBound, context.conversationWorkingSet);
+      return applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet);
     }
     repairFeedback = conversationTurnRepairFeedback(response);
   }
@@ -6638,15 +6769,77 @@ function uniqueConversationConstraints(values: readonly string[]): string[] {
   return result;
 }
 
+/**
+ * The resolver owns the semantic edge to a prior Run; Runtime owns binding a
+ * concrete work product. When that target Run has exactly one reusable
+ * artifact and the latest turn asks for a prior-artifact change, binding is
+ * deterministic rather than a best-effort prompt convention. Multiple
+ * artifacts deliberately remain unresolved for the model/HIL boundary.
+ */
+function bindUnambiguousPriorArtifact(
+  resolution: ConversationTurnResolution,
+  input: string,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution {
+  if (
+    resolution.mode !== "execute"
+    || resolution.targetArtifact !== undefined
+    || resolution.targetRunId === undefined
+    || resolution.relation === "new_goal"
+    || !requestsPriorArtifactChange(input)
+  ) return resolution;
+  const candidates = workset?.reusableArtifacts.filter((artifact) =>
+    artifact.reusable && artifact.runId === resolution.targetRunId,
+  ) ?? [];
+  if (candidates.length !== 1) return resolution;
+  const artifact = candidates[0];
+  if (artifact === undefined) return resolution;
+  return {
+    ...resolution,
+    targetArtifact: { runId: artifact.runId, path: artifact.path },
+    source: "model_guarded",
+  };
+}
+
+/** A semantic Outcome is a reusable work product just as an artifact is. */
+function bindUnambiguousPriorResult(
+  resolution: ConversationTurnResolution,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution {
+  if (
+    resolution.mode !== "execute"
+    || resolution.targetResult !== undefined
+    || resolution.targetRunId === undefined
+    || resolution.relation === "new_goal"
+  ) return resolution;
+  const candidates = workset?.reusableResults?.filter((item) => item.result.runId === resolution.targetRunId) ?? [];
+  if (candidates.length !== 1) return resolution;
+  const candidate = candidates[0];
+  if (candidate === undefined) return resolution;
+  return { ...resolution, targetResult: candidate.result, source: "model_guarded" };
+}
+
+function conversationInputBindingsForTurn(
+  resolution: ConversationTurnResolution | undefined,
+): readonly ConversationInputBinding[] {
+  if (resolution?.targetResult === undefined || resolution.relation === "new_goal") return [];
+  return [{
+    schema: "agentloop.conversationInputBinding/v1",
+    result: resolution.targetResult,
+    relation: resolution.relation,
+  }];
+}
+
 function applyConversationTurnEvidenceFloor(
   resolution: ConversationTurnResolution,
   input: string,
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
   if (resolution.mode === "clarify") return resolution;
-  const targetInput = resolution.targetRunId === undefined
-    ? undefined
-    : workset?.planCursors.find((cursor) => cursor.runId === resolution.targetRunId)?.input;
+  const hasBoundPriorWorkProduct = resolution.targetArtifact !== undefined || resolution.targetResult !== undefined;
+  const targetInput = !hasBoundPriorWorkProduct && resolution.targetRunId !== undefined
+    ? workset?.planCursors.find((cursor) => cursor.runId === resolution.targetRunId)?.input
+    : undefined;
   const userAuthoredSourceNeed = classifyTaskIntent({
     // The evidence floor may use only user-authored text. A model-generated
     // effectiveGoal can preserve semantics, but it
@@ -6659,6 +6852,15 @@ function applyConversationTurnEvidenceFloor(
     ? "source_grounded"
     : resolution.evidenceDemand;
   const guardedSourceNeed = strongerConversationEvidenceDemand(modelSourceNeed, userAuthoredSourceNeed);
+  // A bound native work product is an input artifact, not a request to
+  // reacquire the facts that led to its earlier creation. If the latest
+  // user-authored request has no source demand, retain prior provenance in the
+  // artifact lineage but do not turn a layout/file transformation into
+  // source-grounded research merely because the target Run was grounded.
+  if (hasBoundPriorWorkProduct && userAuthoredSourceNeed === "none") {
+    if (resolution.evidenceDemand === "none" && resolution.mode === "execute") return resolution;
+    return { ...resolution, mode: "execute", evidenceDemand: "none", source: "model_guarded" };
+  }
   if (guardedSourceNeed === resolution.evidenceDemand && resolution.mode === "execute") return resolution;
   if (guardedSourceNeed === "none") return resolution;
   return {
@@ -6694,6 +6896,8 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
       "targetRunId must be one of the priorRunGoals or priorRunIntents IDs in runtimeContext and is required for every relation except new_goal.",
+      "When changing a prior delivered file, select its exact { runId, path } from reusableArtifacts as targetArtifact, use that artifact's runId as targetRunId, and use refine_prior. Do not select targetArtifact for a request that only reuses prior facts or delivery text.",
+      "When a follow-up consumes a prior accepted Outcome result, select its exact result ref from reusableResults as targetResult. A prior result's source lineage is provenance; it does not require new source acquisition unless the latest user request explicitly asks to refresh, reanalyze, or verify it.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
@@ -6724,6 +6928,8 @@ function parseConversationTurnResolution(
   const targetRunId = typeof argumentsRecord.targetRunId === "string"
     ? argumentsRecord.targetRunId.trim()
     : undefined;
+  const targetArtifact = conversationArtifactReference(argumentsRecord.targetArtifact);
+  const targetResult = conversationResultReference(argumentsRecord.targetResult);
   const userConstraints = Array.isArray(argumentsRecord.userConstraints)
     && argumentsRecord.userConstraints.length <= 8
     && argumentsRecord.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
@@ -6732,6 +6938,8 @@ function parseConversationTurnResolution(
   if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return undefined;
   if (!isConversationTurnRelation(relation)) return undefined;
   if (!isConversationEvidenceDemand(evidenceDemand)) return undefined;
+  if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
+  if (argumentsRecord.targetResult !== undefined && targetResult === undefined) return undefined;
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000 || userConstraints === undefined) return undefined;
   if (mode !== "execute" && evidenceDemand !== "none") return undefined;
 
@@ -6741,11 +6949,29 @@ function parseConversationTurnResolution(
   } else if (targetRunId === undefined || !priorRunIds.has(targetRunId)) {
     return undefined;
   }
+  if (targetArtifact !== undefined) {
+    if (relation === "new_goal" || targetRunId !== targetArtifact.runId) return undefined;
+    const isReusable = workset?.reusableArtifacts.some((artifact) =>
+      artifact.runId === targetArtifact.runId && artifact.path === targetArtifact.path && artifact.reusable,
+    ) === true;
+    if (!isReusable) return undefined;
+  }
+  if (targetResult !== undefined) {
+    if (relation === "new_goal" || targetRunId !== targetResult.runId) return undefined;
+    const isReusable = workset?.reusableResults?.some((item) =>
+      item.result.runId === targetResult.runId
+      && item.result.sha256 === targetResult.sha256
+      && item.result.characters === targetResult.characters,
+    ) === true;
+    if (!isReusable) return undefined;
+  }
   return {
     schema: "agentloop.conversationTurnResolution/v1",
     mode,
     relation,
     ...(targetRunId === undefined ? {} : { targetRunId }),
+    ...(targetArtifact === undefined ? {} : { targetArtifact }),
+    ...(targetResult === undefined ? {} : { targetResult }),
     effectiveGoal,
     evidenceDemand,
     userConstraints,
@@ -6798,6 +7024,8 @@ function conversationTurnResolutionFromEvents(
     const source = data.source;
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
     const targetRunId = typeof data.targetRunId === "string" ? data.targetRunId.trim() : undefined;
+    const targetArtifact = conversationArtifactReference(data.targetArtifact);
+    const targetResult = conversationResultReference(data.targetResult);
     const userConstraints = stringArrayField(data.userConstraints).map((item) => item.trim());
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
     if (!isConversationTurnMode(mode) || !isConversationTurnRelation(relation)) return undefined;
@@ -6810,11 +7038,15 @@ function conversationTurnResolutionFromEvents(
     ) return undefined;
     if (mode !== "execute" && evidenceDemand !== "none") return undefined;
     if (relation !== "new_goal" && (targetRunId === undefined || targetRunId.length === 0)) return undefined;
+    if (targetArtifact !== undefined && (relation === "new_goal" || targetArtifact.runId !== targetRunId)) return undefined;
+    if (data.targetResult !== undefined && (targetResult === undefined || relation === "new_goal" || targetResult.runId !== targetRunId)) return undefined;
     return {
       schema: "agentloop.conversationTurnResolution/v1",
       mode,
       relation,
       ...(targetRunId === undefined || targetRunId.length === 0 ? {} : { targetRunId }),
+      ...(targetArtifact === undefined ? {} : { targetArtifact }),
+      ...(targetResult === undefined ? {} : { targetResult }),
       effectiveGoal,
       evidenceDemand,
       userConstraints,
@@ -6822,6 +7054,32 @@ function conversationTurnResolutionFromEvents(
     };
   }
   return undefined;
+}
+
+function conversationArtifactReference(value: unknown): { readonly runId: string; readonly path: string } | undefined {
+  const record = optionalRecord(value);
+  const runId = typeof record.runId === "string" ? record.runId.trim() : "";
+  const path = typeof record.path === "string" ? record.path.trim() : "";
+  if (runId.length === 0 || runId.length > 120 || path.length === 0 || path.length > 1_200) return undefined;
+  if (isAbsolute(path) || path.split(/[\\\\/]/u).some((segment) => segment === "..")) return undefined;
+  return { runId, path };
+}
+
+function conversationResultReference(value: unknown): ConversationResultReference | undefined {
+  const record = optionalRecord(value);
+  const runId = typeof record.runId === "string" ? record.runId.trim() : "";
+  const sha256 = typeof record.sha256 === "string" ? record.sha256.trim() : "";
+  const characters = record.characters;
+  if (
+    record.schema !== "agentloop.conversationResultRef/v1"
+    || runId.length === 0
+    || runId.length > 120
+    || !/^[a-f0-9]{64}$/u.test(sha256)
+    || !Number.isInteger(characters)
+    || (characters as number) < 1
+    || (characters as number) > 20_000_000
+  ) return undefined;
+  return { schema: "agentloop.conversationResultRef/v1", runId, sha256, characters: characters as number };
 }
 
 function isConversationTurnMode(value: unknown): value is ConversationTurnResolution["mode"] {
@@ -6903,7 +7161,14 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
         })),
         priorRunIntents: context.conversationWorkingSet.resolvedIntents ?? [],
         activeGoal: context.conversationWorkingSet.activeGoal,
-        reusableArtifactCount: context.conversationWorkingSet.reusableArtifacts.length,
+        reusableArtifacts: context.conversationWorkingSet.reusableArtifacts.map((artifact) => ({
+          runId: artifact.runId,
+          path: artifact.path,
+          name: artifact.name,
+          mimeType: artifact.mimeType,
+          bytes: artifact.bytes,
+        })),
+        reusableResults: context.conversationWorkingSet.reusableResults ?? [],
         failedBoundaryCount: context.conversationWorkingSet.failedBoundaries.length,
         failedBoundaries: context.conversationWorkingSet.failedBoundaries,
         outcomeRelations: context.conversationWorkingSet.outcomeRelations ?? [],

@@ -1,6 +1,10 @@
 import type { SqlConnection } from "../storage/connection.ts";
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import {
+  failureEffectState,
+  type RuntimeActionEffectState,
+} from "./action-effect.ts";
 
 export type RuntimeActionKind =
   | "planning"
@@ -37,6 +41,7 @@ export interface RuntimeActionRecord {
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly resultRef?: string;
   readonly errorCode?: string;
+  readonly effectState: RuntimeActionEffectState;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly closedAt?: number;
@@ -69,6 +74,7 @@ interface RuntimeActionRow {
   metadata_json: string;
   result_ref: string | null;
   error_code: string | null;
+  effect_state: RuntimeActionEffectState;
   created_at: number;
   updated_at: number;
   closed_at: number | null;
@@ -106,11 +112,11 @@ export class RuntimeActionRepository {
       if (resultFailureCode === undefined) {
         await this.succeed(action.id, action.fence);
       } else {
-        await this.fail(action.id, action.fence, resultFailureCode);
+        await this.fail(action.id, action.fence, resultFailureCode, "unknown");
       }
       return value;
     } catch (error) {
-      await this.fail(action.id, action.fence, errorCode(error));
+      await this.fail(action.id, action.fence, errorCode(error), failureEffectState(error));
       throw error;
     }
   }
@@ -136,8 +142,8 @@ export class RuntimeActionRepository {
         INSERT INTO runtime_actions(
           id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
           replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'dispatched', 1, 1, ?, ?, ?, 1, 1, ?, ?, ?)
+          effect_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'dispatched', 1, 1, ?, ?, ?, 1, 1, ?, 'not_started', ?, ?)
       `).run(
         id,
         input.runId,
@@ -157,6 +163,7 @@ export class RuntimeActionRepository {
         planId: input.planId,
         stepId: input.stepId,
         replayPolicy: input.replayPolicy,
+        effectState: "not_started",
         deadlineAt,
       }, now);
       await this.appendEvent(input.runId, "action.leased", { actionId: id, fence: 1, leaseUntil: deadlineAt }, now);
@@ -201,7 +208,7 @@ export class RuntimeActionRepository {
         const reason = action.deadline_at <= now ? "deadline_expired" : "worker_lease_expired";
         const result = await this.database.prepare(`
           UPDATE runtime_actions
-          SET state = 'failed', lease_until = NULL, error_code = 'EXECUTION_AUTHORITY_LOST',
+          SET state = 'failed', lease_until = NULL, error_code = 'EXECUTION_AUTHORITY_LOST', effect_state = 'unknown',
               revision = revision + 1, updated_at = ?, closed_at = ?
           WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
         `).run(now, now, action.id, action.fence, action.revision) as { changes: number };
@@ -210,6 +217,7 @@ export class RuntimeActionRepository {
           actionId: action.id,
           fence: action.fence,
           reason,
+          effectState: "unknown",
         }, now);
         interrupted.push({
           runId: action.run_id,
@@ -267,7 +275,7 @@ export class RuntimeActionRepository {
         if (reason === "assessment_failed_boundary" || reason === "human_loop_requested") continue;
         const result = await this.database.prepare(`
           UPDATE runtime_actions
-          SET state = 'failed', error_code = 'EXECUTION_AUTHORITY_LOST', revision = revision + 1,
+          SET state = 'failed', error_code = 'EXECUTION_AUTHORITY_LOST', effect_state = 'unknown', revision = revision + 1,
               updated_at = ?, closed_at = ?
           WHERE id = ? AND state = 'recovery_required'
         `).run(now, now, action.id) as { changes: number };
@@ -279,6 +287,7 @@ export class RuntimeActionRepository {
           fence: action.fence,
           reason: reason ?? "worker_lease_expired",
           migratedFrom: "waiting_recovery",
+          effectState: "unknown",
         }, now);
         interrupted.push({
           runId: action.run_id,
@@ -306,12 +315,12 @@ export class RuntimeActionRepository {
       for (const action of actions) {
         const result = await this.database.prepare(`
           UPDATE runtime_actions
-          SET state = 'failed', lease_until = NULL, error_code = ?, revision = revision + 1,
+          SET state = 'failed', lease_until = NULL, error_code = ?, effect_state = 'unknown', revision = revision + 1,
               updated_at = ?, closed_at = ?
           WHERE id = ? AND state = 'dispatched' AND revision = ?
         `).run(code, now, now, action.id, action.revision) as { changes: number };
         if (result.changes !== 1) continue;
-        await this.appendEvent(runId, "action.failed", { actionId: action.id, fence: action.fence, code }, now);
+        await this.appendEvent(runId, "action.failed", { actionId: action.id, fence: action.fence, code, effectState: "unknown" }, now);
         cancelled += 1;
       }
     });
@@ -328,7 +337,7 @@ export class RuntimeActionRepository {
         WHERE id = ? AND kind = 'recovery_review' AND state = 'recovery_required' AND revision = ?
       `).run(now, now, actionId, row.revision) as { changes: number };
       if (result.changes !== 1) throw new AppError("CONFLICT", "Recovery review is no longer pending", 409);
-      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence: row.fence }, now);
+      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence: row.fence, effectState: "applied" }, now);
     });
   }
 
@@ -408,27 +417,32 @@ export class RuntimeActionRepository {
       const row = await this.requireRow(actionId);
       const result = await this.database.prepare(`
         UPDATE runtime_actions
-        SET state = 'succeeded', lease_until = NULL, revision = revision + 1,
+        SET state = 'succeeded', lease_until = NULL, effect_state = 'applied', revision = revision + 1,
             updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
       `).run(now, now, actionId, fence, row.revision) as { changes: number };
       if (result.changes !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
-      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence }, now);
+      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence, effectState: "applied" }, now);
     });
   }
 
-  private async fail(actionId: string, fence: number, code: string): Promise<void> {
+  private async fail(
+    actionId: string,
+    fence: number,
+    code: string,
+    effectState: Extract<RuntimeActionEffectState, "not_started" | "unknown">,
+  ): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
       const row = await this.requireRow(actionId);
       const result = await this.database.prepare(`
         UPDATE runtime_actions
-        SET state = 'failed', lease_until = NULL, error_code = ?, revision = revision + 1,
+        SET state = 'failed', lease_until = NULL, error_code = ?, effect_state = ?, revision = revision + 1,
             updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-      `).run(code, now, now, actionId, fence, row.revision) as { changes: number };
+      `).run(code, effectState, now, now, actionId, fence, row.revision) as { changes: number };
       if (result.changes !== 1) return;
-      await this.appendEvent(row.run_id, "action.failed", { actionId, fence, code }, now);
+      await this.appendEvent(row.run_id, "action.failed", { actionId, fence, code, effectState }, now);
     });
   }
 
@@ -447,9 +461,9 @@ export class RuntimeActionRepository {
       INSERT INTO runtime_actions(
         id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,
         replay_policy, deadline_at, lease_until, fence, revision, metadata_json,
-        created_at, updated_at
+        effect_state, created_at, updated_at
       ) VALUES (?, ?, ?, ?, 'recovery_review', 'recovery_required', 0, 0,
-                ?, NULL, NULL, 0, 1, ?, ?, ?)
+                ?, NULL, NULL, 0, 1, ?, 'not_started', ?, ?)
     `).run(
       id,
       input.runId,
@@ -463,6 +477,7 @@ export class RuntimeActionRepository {
     await this.appendEvent(input.runId, "action.created", {
       actionId: id,
       kind: "recovery_review",
+      effectState: "not_started",
       ...(input.planId === undefined ? {} : { planId: input.planId }),
       ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
     }, input.createdAt);
@@ -534,6 +549,7 @@ function toRuntimeActionRecord(row: RuntimeActionRow): RuntimeActionRecord {
     metadata: JSON.parse(row.metadata_json) as Record<string, unknown>,
     ...(row.result_ref === null ? {} : { resultRef: row.result_ref }),
     ...(row.error_code === null ? {} : { errorCode: row.error_code }),
+    effectState: row.effect_state,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),

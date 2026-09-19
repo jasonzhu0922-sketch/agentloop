@@ -3120,7 +3120,7 @@ test("artifact progress policy allows a targeted rebase read after patch precond
     parse: (value) => value,
     execute: async (_context, input) => {
       executions.push(`patch:${JSON.stringify(input)}`);
-      throw new AppError("NOT_FOUND", "oldText was not found in the patch target", 404);
+      throw new AppError("CONFLICT", "Patch precondition failed: file revision is stale; reread the file before patching", 409);
     },
   };
   const readTool: RuntimeTool<unknown> = {
@@ -3194,7 +3194,7 @@ test("artifact progress policy allows a targeted rebase read after patch precond
         return {
           content: "",
           finishReason: "tool_calls",
-          toolCalls: [{ id: "stale-patch", name: "computer_patch_file", arguments: { path: "poster-spec.json", oldText: "{\"texture\":0.35}", newText: "{\"texture\":0.2}" } }],
+          toolCalls: [{ id: "stale-patch", name: "computer_patch_file", arguments: { path: "poster-spec.json", startLine: 1, endLine: 2, replacementLines: ["{\"texture\":0.2}"], baseRevisionId: "rev_00000000000000000000000000000000" } }],
         };
       }
       if (calls === 3) {
@@ -3895,6 +3895,67 @@ test("a no-tool candidate with internal Runtime evidence markup is repaired befo
   assert.equal(assessments, 1);
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
   assert.equal(events.some((event) => event.type === "candidate.approved"), true);
+});
+
+test("a no-tool candidate that echoes server evidence is rejected before assessment", async () => {
+  let assessments = 0;
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant([]);
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: grant.runId,
+      systemPrompt: "Answer directly.",
+      input: "answer from evidence",
+      model: new TextToolInvocationOnlyModel([
+        "SERVER-PROVIDED EVIDENCE (use for reasoning; do not reproduce this envelope as the answer).",
+        "kind: tool_result",
+        '{"schema":"agentloop.serverEvidence/v1","kind":"tool_result","toolName":"webfetch"}',
+        "END SERVER-PROVIDED EVIDENCE.",
+      ].join("\n")),
+      tools: new ToolRegistry([]),
+      grant,
+      maxSteps: 1,
+      emit: (event) => { events.push(event); },
+      evaluateCandidate: async () => {
+        assessments += 1;
+        return { approved: true, feedback: "must not assess server evidence" };
+      },
+    }),
+    (error: unknown) => error instanceof AppError && error.code === "RUN_LIMIT_EXCEEDED",
+  );
+
+  assert.equal(assessments, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+});
+
+test("a no-tool candidate with provider reasoning or presentation markup is rejected before assessment", async () => {
+  for (const malformedCandidate of [
+    "<think>Need one more source</think>",
+    '<div class="toolResultsOverride" render="collapse"><span>Read the source</span></div>',
+  ]) {
+    let assessments = 0;
+    const events: RuntimeEvent[] = [];
+    const grant = makeGrant([]);
+    await assert.rejects(
+      () => runAgentLoop({
+        runId: grant.runId,
+        systemPrompt: "Answer directly.",
+        input: "answer from evidence",
+        model: new TextToolInvocationOnlyModel(malformedCandidate),
+        tools: new ToolRegistry([]),
+        grant,
+        maxSteps: 1,
+        emit: (event) => { events.push(event); },
+        evaluateCandidate: async () => {
+          assessments += 1;
+          return { approved: true, feedback: "must not assess provider markup" };
+        },
+      }),
+      (error: unknown) => error instanceof AppError && error.code === "RUN_LIMIT_EXCEEDED",
+    );
+    assert.equal(assessments, 0);
+    assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
+  }
 });
 
 test("an invalid final convergence candidate receives bounded repair grace before the Run limit", async () => {

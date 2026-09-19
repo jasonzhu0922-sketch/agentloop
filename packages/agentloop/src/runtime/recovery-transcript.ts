@@ -1,4 +1,5 @@
 import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall } from "./contracts.ts";
+import { decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import {
   classifyToolOperationOutcome,
   type ToolInvocationStatus,
@@ -19,6 +20,7 @@ export interface RecoveryTranscript {
     checkpointEventSeq?: number;
     unfinishedToolCalls: readonly Readonly<{ toolCallId: string; toolName: string }>[];
     candidateOutputs: readonly string[];
+    decisionLedger: readonly RuntimeDecisionCommit[];
   }>;
 }
 
@@ -262,6 +264,7 @@ export function reconstructRecoveryTranscript(input: {
       ...(checkpointEventSeq === undefined ? {} : { checkpointEventSeq }),
       unfinishedToolCalls,
       candidateOutputs,
+      decisionLedger: decisionCommitsFromEvents(scope),
     },
   };
 }
@@ -310,6 +313,9 @@ function humanLoopResolution(request: HumanLoopRequestSnapshot, value: unknown):
         ...(typeof option.description === "string" ? { description: option.description } : {}),
         ...(Array.isArray(option.evidenceRefs)
           ? { evidenceRefs: option.evidenceRefs.filter((reference): reference is string => typeof reference === "string") }
+          : {}),
+        ...(Array.isArray(option.identityRefs)
+          ? { identityRefs: option.identityRefs.filter((reference): reference is string => typeof reference === "string") }
           : {}),
       }];
     });

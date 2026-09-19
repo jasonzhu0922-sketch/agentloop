@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { SqlConnection } from "../storage/connection.ts";
 import { AppError, badRequest } from "../shared/errors.ts";
+import { createDecisionCommit } from "./decision-ledger.ts";
 
 export type HumanLoopKind = "selection" | "input" | "confirmation" | "approval";
 export type HumanLoopOrigin = "skill" | "tool" | "planner" | "assessor" | "recovery";
 export type HumanLoopStatus = "open" | "answered" | "superseded" | "cancelled" | "expired";
 
 export type HumanLoopResponseSchema =
-  | { readonly type: "select"; readonly minSelections: number; readonly maxSelections: number; readonly options: readonly { readonly id: string; readonly label: string; readonly description?: string; readonly evidenceRefs?: readonly string[] }[] }
+  | { readonly type: "select"; readonly minSelections: number; readonly maxSelections: number; readonly options: readonly { readonly id: string; readonly label: string; readonly description?: string; readonly evidenceRefs?: readonly string[]; readonly identityRefs?: readonly string[] }[] }
   | { readonly type: "form"; readonly fields: readonly { readonly id: string; readonly label: string; readonly valueType: "text" | "textarea" | "date" | "number" | "file_ref"; readonly required: boolean; readonly description?: string; readonly maxLength?: number }[] }
   | { readonly type: "confirm"; readonly acceptLabel: string; readonly rejectLabel: string; readonly requireReasonOnReject?: boolean };
 
@@ -93,6 +94,26 @@ export class HumanLoopRepository {
       await this.database.prepare("INSERT INTO human_loop_responses(id, request_id, run_id, request_revision, response_json, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(id, input.requestId, input.runId, input.expectedRevision, JSON.stringify(input.value), input.actorUserId, now);
       await appendEvent(this.database, input.runId, "human_loop.answered", { requestId: input.requestId, requestRevision: input.expectedRevision, value: input.value }, now);
+      if (request.responseSchema.type === "select" && Array.isArray(input.value)) {
+        const byId = new Map(request.responseSchema.options.map((option) => [option.id, option] as const));
+        const selectedOptions = input.value.flatMap((id) => {
+          const option = byId.get(typeof id === "string" ? id : "");
+          return option === undefined ? [] : [{
+            id: option.id,
+            label: option.label,
+            ...(option.description === undefined ? {} : { description: option.description }),
+            ...(option.identityRefs === undefined ? {} : { identityRefs: option.identityRefs }),
+          }];
+        });
+        const commit = createDecisionCommit({
+          requestId: request.id,
+          requestRevision: input.expectedRevision,
+          ...(request.planId === undefined ? {} : { planId: request.planId }),
+          ...(request.stepId === undefined ? {} : { stepId: request.stepId }),
+          selectedOptions,
+        });
+        await appendEvent(this.database, input.runId, "decision.committed", { commit }, now);
+      }
     });
     return { schema: "agentloop.humanLoopResponse/v1", id, requestId: input.requestId, runId: input.runId, requestRevision: input.expectedRevision, value: input.value, actorUserId: input.actorUserId, createdAt: now };
   }
@@ -124,7 +145,24 @@ function validateRequirement(value: HumanLoopRequirement): void {
   if (!Array.isArray(value.evidenceRefs) || value.evidenceRefs.length > 50 || value.evidenceRefs.some((x) => typeof x !== "string" || !x)) throw badRequest("Human-in-the-Loop evidenceRefs are invalid");
   const schema = value.responseSchema;
   if (!schema || !["select", "form", "confirm"].includes(schema.type)) throw badRequest("Human-in-the-Loop responseSchema is invalid");
-  if (schema.type === "select" && (!Array.isArray(schema.options) || schema.options.length === 0 || !Number.isInteger(schema.minSelections) || !Number.isInteger(schema.maxSelections) || schema.minSelections < 0 || schema.maxSelections < schema.minSelections || schema.maxSelections > schema.options.length || schema.options.some((option) => !option || typeof option.id !== "string" || !option.id || typeof option.label !== "string" || !option.label))) throw badRequest("Human-in-the-Loop select schema is invalid");
+  if (schema.type === "select" && (
+    !Array.isArray(schema.options)
+    || schema.options.length === 0
+    || !Number.isInteger(schema.minSelections)
+    || !Number.isInteger(schema.maxSelections)
+    || schema.minSelections < 0
+    || schema.maxSelections < schema.minSelections
+    || schema.maxSelections > schema.options.length
+    || schema.options.some((option) =>
+      !option
+      || typeof option.id !== "string"
+      || !option.id
+      || typeof option.label !== "string"
+      || !option.label
+      || (option.identityRefs !== undefined && (!Array.isArray(option.identityRefs)
+        || option.identityRefs.some((ref) => typeof ref !== "string" || !ref)))
+    )
+  )) throw badRequest("Human-in-the-Loop select schema is invalid");
   if (schema.type === "form" && (!Array.isArray(schema.fields) || schema.fields.length === 0 || schema.fields.some((field) => !field || typeof field.id !== "string" || !field.id || typeof field.label !== "string" || !field.label || typeof field.required !== "boolean" || !["text", "textarea", "date", "number", "file_ref"].includes(field.valueType)))) throw badRequest("Human-in-the-Loop form schema is invalid");
   if (schema.type === "confirm" && (!schema.acceptLabel || !schema.rejectLabel)) throw badRequest("Human-in-the-Loop confirm schema is invalid");
   const resume = value.resume;

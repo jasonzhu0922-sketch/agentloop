@@ -1143,7 +1143,7 @@ function readTargetPaths(call: ModelToolCall): string[] {
 }
 
 function isPatchPreconditionDiagnostic(result: string): boolean {
-  return /oldText was not found|oldText matched more than once|expectedSha256 does not match current file/iu.test(result);
+  return /file revision is stale|baseRevisionId (?:is unknown|does not belong)/iu.test(result);
 }
 
 function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {

@@ -3,8 +3,54 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { toolOperationFailureCode } from "../src/runtime/tool-operation-outcome.ts";
+import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { AppError } from "../src/shared/errors.ts";
+import { ToolRegistry } from "../src/tools/tool-registry.ts";
+
+test("Action failures preserve the explicit pre-effect boundary and otherwise fail closed", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "action-effect-state-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
+    `).run(runId, owner.user.id, "test action effect state", Date.now());
+    const actions = new RuntimeActionRepository(database);
+    let executions = 0;
+    const grant = createCapabilityGrant({
+      actorUserId: owner.user.id, runId, depth: 0, allowedToolNames: ["unsafe_tool"], allowedSkillIds: [],
+    });
+    const prepared = new ToolRegistry([{
+      name: "unsafe_tool", description: "unsafe test tool", inputSchema: { type: "object" },
+      executionMode: "exclusive", replaySafe: false,
+      parse: (value) => value,
+      preflight: async () => { throw new AppError("FORBIDDEN", "Rejected before execution", 403); },
+      execute: async () => { executions += 1; },
+    }]).materialize(grant).prepare({ id: "preflight-rejected", name: "unsafe_tool", arguments: {} });
+
+    await assert.rejects(
+      () => actions.execute(
+        { runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 },
+        () => prepared.execute({ grant }),
+      ),
+      (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+    );
+    await assert.rejects(
+      () => actions.execute({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 }, async () => {
+        throw new AppError("TOOL_EXECUTION_ERROR", "The operation may have started", 500);
+      }),
+      (error: unknown) => error instanceof AppError && error.code === "TOOL_EXECUTION_ERROR",
+    );
+
+    assert.equal(executions, 0);
+    assert.deepEqual((await actions.list(runId)).map((action) => action.effectState).sort(), ["not_started", "unknown"]);
+  } finally {
+    await database.close();
+  }
+});
 
 test("an expired dispatched Action is fenced and reported as execution authority loss without waiting_recovery", async () => {
   const database = new AppDatabase(":memory:");
@@ -85,6 +131,7 @@ test("a resolved tool Action records a returned nonzero exit as operation failur
     `).get(runId) as { type: string; payload_json: string };
     assert.equal(event.type, "action.failed");
     assert.equal(JSON.parse(event.payload_json).code, "TOOL_OPERATION_FAILED");
+    assert.equal(JSON.parse(event.payload_json).effectState, "unknown");
 
     const successValue = await actions.execute({
       runId,

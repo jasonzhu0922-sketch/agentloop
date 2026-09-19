@@ -530,7 +530,10 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "workspace_structured_artifact_read",
     category: "structured_data",
     label: "Read structured workspace artifact",
-    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "derived_aggregation", "explicit_caveats"],
+    // This capability can inspect an extraction that was already produced by
+    // another operation.  It cannot itself attest that an extraction happened:
+    // a generic JSON read is not a source-bound extraction receipt.
+    produces: ["source_summary", "schema_summary", "record_counts", "derived_aggregation", "explicit_caveats"],
     sourceKinds: ["workspace_file"],
     sideEffect: "workspace_read",
     risk: "low",

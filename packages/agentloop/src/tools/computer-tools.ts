@@ -64,6 +64,7 @@ export function createComputerTools(
         "For loaded Skill reference files, use @skills/<skill-name>/... paths with this tool instead of shell cat/sed loops.",
         "If a bare filename is missing at the workspace root, the tool searches authorized subdirectories by basename; unique ranked matches are read and ambiguous matches return candidate paths.",
         "Use optional 1-indexed offset and limit for one line window, or ranges for multiple line windows; do not combine ranges with offset or limit.",
+        "A direct workspace-file read returns an opaque revisionId. Keep it for a later patch of that same file; never substitute a hash from a tool result.",
         "For contentLocation/stdoutRef/stderrRef, supply expectedSha256 plus characterOffset (0-based, default 0) and characterLimit (default/max 12000) for a verified content window; follow nextCharacterOffset. Do not mix character windows with line windows.",
       ].join(" "),
       inputSchema: readFileInputSchema(["path"], {
@@ -463,7 +464,8 @@ export function createComputerTools(
         "For explicitly paginated HTML, HTML-PPT, or browser slide decks that fit a compact page spec, use materialize_paginated_html instead of streaming the full generated document here.",
         "For ordinary standalone HTML, custom visual pages, dashboards, apps, or interactions, this Tool may write the authored HTML/CSS/JS file directly.",
         "For other very large content, prefer reusable scripts or several smaller append calls over one oversized call so each content argument stays within the output budget.",
-        "The result includes the write mode, bytes written by this call, final file sha256, final byte size, line count, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
+        "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
+        "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),
       inputSchema: objectSchema(["path", "content"], {
         path: { type: "string" },
@@ -472,6 +474,12 @@ export function createComputerTools(
       }),
       executionMode: "exclusive",
       replaySafe: false,
+      preflight: async (context, value) => {
+        const input = value as { path: string; content: string; mode: WriteFileMode };
+        const scoped = executorForContext(executor, context);
+        if (input.mode === "append") await scoped.inspectFile(input.path);
+        await scoped.prepareWritableFile(input.path, input.mode === "append" ? "overwrite" : input.mode);
+      },
       parse: (value) => {
         const record = requireRecord(value, "computer_write_file arguments");
         if (record.overwrite !== undefined && typeof record.overwrite !== "boolean") {
@@ -510,30 +518,35 @@ export function createComputerTools(
     {
       name: "computer_patch_file",
       description: [
-        "Patch an existing UTF-8 text file under the workspace root by replacing one exact fragment; requires dangerous-tool consent.",
+        "Patch an existing UTF-8 text file under the workspace root by replacing a line interval from a read revision; requires dangerous-tool consent.",
         "Use this for local repairs to an existing artifact or generated source file instead of rewriting the whole file with computer_write_file.",
         "path must be relative to the workspace root; absolute paths and read-only virtual roots are rejected.",
-        "oldText must match the current file exactly once; zero matches or multiple matches fail closed. Provide a larger surrounding fragment when needed.",
-        "expectedSha256 is optional but should be set when a prior receipt or read result exposed the current file hash.",
+        "baseRevisionId is required. Obtain it by reading or writing this exact workspace file in the current Run; it is an opaque server handle, never a content hash.",
+        "Replace the one-indexed half-open line interval [startLine, endLine) observed in that read. replacementLines contains complete new lines without line terminators; use startLine === endLine to insert lines.",
+        "This is a surgical edit: replacementLines is capped at 50000 characters. For a larger new file body, use computer_write_file in bounded chunks instead.",
+        "Do not pass a hash or derive a version from any tool-result hash. If the revision is stale, reread the file and use its new revisionId.",
         "The result includes schema agentloop.filePatch/v1, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
       ].join(" "),
-      inputSchema: objectSchema(["path", "oldText", "newText"], {
+      inputSchema: objectSchema(["path", "startLine", "endLine", "replacementLines", "baseRevisionId"], {
         path: { type: "string" },
-        oldText: { type: "string", minLength: 1, maxLength: 500_000 },
-        newText: { type: "string", maxLength: 500_000 },
-        expectedSha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        startLine: { type: "integer", minimum: 1 },
+        endLine: { type: "integer", minimum: 1 },
+        replacementLines: { type: "array", maxItems: 2_000, items: { type: "string", maxLength: 50_000 } },
+        baseRevisionId: { type: "string", pattern: "^rev_[a-f0-9]{32}$" },
       }),
       executionMode: "exclusive",
       replaySafe: false,
       parse: (value) => {
         const record = requireRecord(value, "computer_patch_file arguments");
+        if (record.expectedSha256 !== undefined) {
+          throw badRequest("expectedSha256 is not accepted for patches; use the opaque baseRevisionId returned by the server");
+        }
         return {
           path: requireString(record.path, "path", { max: 4_000 }),
-          oldText: requirePatchText(record.oldText, "oldText", { min: 1, max: 500_000 }),
-          newText: requirePatchText(record.newText, "newText", { min: 0, max: 500_000 }),
-          expectedSha256: record.expectedSha256 === undefined
-            ? undefined
-            : requireString(record.expectedSha256, "expectedSha256", { min: 64, max: 64, pattern: /^[0-9a-f]{64}$/u }),
+          startLine: requireBoundedInteger(record.startLine, "startLine", 1, Number.MAX_SAFE_INTEGER),
+          endLine: requireBoundedInteger(record.endLine, "endLine", 1, Number.MAX_SAFE_INTEGER),
+          replacementLines: requirePatchLines(record.replacementLines),
+          baseRevisionId: requireString(record.baseRevisionId, "baseRevisionId", { min: 36, max: 36, pattern: /^rev_[a-f0-9]{32}$/u }),
         };
       },
       execute: async (_context, value) => {
@@ -549,7 +562,7 @@ export function createComputerTools(
             inspection: receipt.inspection,
           }, {
             writeMode: "patch",
-            writtenBytes: Buffer.byteLength((value as PatchFileInput).newText),
+            writtenBytes: Buffer.byteLength((value as PatchFileInput).replacementLines.join("\n")),
             replacementCount: receipt.replacements,
             beforeSha256: receipt.before.sha256,
             afterSha256: receipt.after.sha256,
@@ -615,6 +628,10 @@ export function createComputerTools(
       }),
       executionMode: "exclusive",
       replaySafe: false,
+      preflight: async (context, value) => {
+        const input = value as ReturnType<typeof parsePaginatedHtmlMaterializeInput>;
+        await executorForContext(executor, context).prepareWritableFile(input.path, input.overwrite ? "overwrite" : "create");
+      },
       parse: parsePaginatedHtmlMaterializeInput,
       execute: async (context, value) => {
         const input = value as ReturnType<typeof parsePaginatedHtmlMaterializeInput>;
@@ -675,6 +692,9 @@ export function createComputerTools(
       }),
       executionMode: "exclusive",
       replaySafe: false,
+      preflight: async (context, value) => executorForContext(executor, context).preflightRunCommand(
+        value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> },
+      ),
       parse: (value) => {
         const record = requireRecord(value, "computer_run_command arguments");
         const timeoutMs = record.timeoutMs === undefined ? DEFAULT_COMMAND_TIMEOUT_MS : record.timeoutMs;
@@ -711,10 +731,9 @@ function executorForContext(executor: ComputerExecutor, context: ToolExecutionCo
     })),
   ];
   if (context.grant.workspaceRoot !== undefined) {
-    return executor.withWorkspaceRoot(context.grant.workspaceRoot, { commandRoots });
+    return executor.withWorkspaceRoot(context.grant.workspaceRoot, { commandRoots, fileRevisionScope: context.grant.runId });
   }
-  if (commandRoots.length > 0) return executor.withWorkspaceRoot(executor.workspaceRoot, { commandRoots });
-  return executor;
+  return executor.withWorkspaceRoot(executor.workspaceRoot, { commandRoots, fileRevisionScope: context.grant.runId });
 }
 
 function commandArguments(value: unknown): string[] {
@@ -1637,11 +1656,14 @@ function parseWriteFileMode(mode: unknown, overwrite: unknown): WriteFileMode {
   throw badRequest("mode must be one of create, overwrite, or append");
 }
 
-function requirePatchText(value: unknown, label: string, options: { min: number; max: number }): string {
-  if (typeof value !== "string") throw badRequest(`${label} must be a string`);
-  if (value.length < options.min) throw badRequest(`${label} must contain at least ${options.min} characters`);
-  if (value.length > options.max) throw badRequest(`${label} must contain at most ${options.max} characters`);
-  return value;
+function requirePatchLines(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 2_000) throw badRequest("replacementLines must be an array of at most 2000 strings");
+  const lines = value.map((line, index) => requireString(line, `replacementLines[${index}]`, { max: 50_000 }));
+  if (lines.some((line) => /[\r\n]/u.test(line))) throw badRequest("replacementLines must contain complete lines without line terminators");
+  if (lines.reduce((total, line) => total + line.length, 0) > 50_000) {
+    throw badRequest("replacementLines must contain at most 50000 characters");
+  }
+  return lines;
 }
 
 function objectSchema(required: readonly string[], properties: Record<string, unknown>): Record<string, unknown> {

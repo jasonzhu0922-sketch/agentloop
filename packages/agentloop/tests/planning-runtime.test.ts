@@ -16,6 +16,7 @@ import {
   planningCapabilitiesFromTools,
   requiredToolSourceIdsFromInput,
 } from "../src/planning/step-execution-binding.ts";
+import { resolveCapabilityGaps } from "../src/planning/capability-resolution.ts";
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
@@ -24,6 +25,7 @@ import { RunService, selectPlanningSkillRoles, selectPlanningSkills } from "../s
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import { markActionFailedBeforeEffect } from "../src/runtime/action-effect.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { AppError } from "../src/shared/errors.ts";
@@ -2256,6 +2258,104 @@ test("source capability catalog and admission never promise tabular extraction f
   );
 });
 
+test("workspace structured readers cannot admit a new uploaded-source extraction contract", () => {
+  const sourceId = "src_74747474747474747474747474747474";
+  const tools = [
+    { name: "read_source", description: "Read authorized uploaded source chunks." },
+    { name: "computer_read_json", description: "Read a pre-existing structured workspace artifact." },
+  ];
+  const capabilities = planningCapabilitiesFromTools(tools, [{
+    id: sourceId,
+    originalName: "weekly-report.pdf",
+    mimeType: "application/pdf",
+    extension: ".pdf",
+    byteSize: 1024,
+    sha256: "c".repeat(64),
+    status: "ready" as const,
+    chunkCount: 1,
+    truncated: false,
+  }]);
+
+  assert.throws(
+    () => admitPlan({
+      runId: "workspace-reader-is-not-extractor",
+      proposal: {
+        goal: "Analyze the uploaded report and create a reusable extraction.",
+        selectedSkillIds: [],
+        steps: [{
+          id: "analyze-upload",
+          objective: "Read the upload and create a structured extraction.",
+          dependencies: [],
+          skillIds: [],
+          role: "fact_acquisition",
+          requiredCapabilities: ["uploaded_source_read", "workspace_structured_artifact_read"],
+          sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+          evidenceContract: {
+            requiredKinds: ["source_summary", "schema_summary", "structured_extraction_artifact"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+          successCriteria: [{ id: "facts", description: "Structured source facts are available.", source: "planner" }],
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(tools.map((tool) => tool.name)),
+      availableTools: tools,
+      availableCapabilities: capabilities,
+      availableUploadedSourceIds: [sourceId],
+    }),
+    (error: unknown) => error instanceof AppError
+      && /bound capabilities cannot produce: structured_extraction_artifact/.test(error.message),
+  );
+});
+
+test("capability recovery does not offer a different source namespace for a bound upload", () => {
+  const proposal: PlanProposal = {
+    goal: "Analyze the authorized upload.",
+    selectedSkillIds: [],
+    steps: [{
+      id: "read-upload",
+      objective: "Read the authorized upload as structured source evidence.",
+      dependencies: [],
+      skillIds: [],
+      role: "fact_acquisition",
+      requiredCapabilities: ["uploaded_source_read"],
+      sourceConstraint: { requiredUploadedSourceIds: ["src_75757575757575757575757575757575"] },
+      evidenceContract: {
+        requiredKinds: ["source_summary", "structured_extraction_artifact"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [{ id: "facts", description: "Structured source facts are available.", source: "planner" }],
+    }],
+  };
+  const currentCapabilities = [{
+    id: "uploaded_source_read",
+    produces: ["source_summary"] as const,
+    sourceKinds: ["uploaded_source"] as const,
+    sideEffect: "none" as const,
+    risk: "low" as const,
+  }];
+  const databaseExtractor = {
+    id: "database-extractor",
+    produces: ["structured_extraction_artifact"] as const,
+    sourceKinds: ["database"] as const,
+    sideEffect: "external_read" as const,
+    risk: "medium" as const,
+  };
+
+  const gaps = resolveCapabilityGaps({
+    proposal,
+    currentSkills: [],
+    currentCapabilities,
+    catalog: { availableSkills: [], availableCapabilities: [...currentCapabilities, databaseExtractor] },
+  });
+
+  assert.deepEqual(gaps, [{
+    stepId: "read-upload",
+    missingEvidenceKinds: ["structured_extraction_artifact"],
+    candidates: [],
+  }]);
+});
+
 test("visible directory IDs bind visible tools without entering the ToolSource namespace", () => {
   const directoryId = "visible_dir_1";
   const proposal: PlanProposal = {
@@ -3332,6 +3432,188 @@ test("ModelPlanner admits a grounded artifact continuation from target-bound pri
     "format_matches_request",
     "explicit_caveats",
   ]);
+});
+
+test("ModelPlanner treats a bound prior artifact as a native transformation, not source-grounded regeneration", async () => {
+  const priorRunId = "prior-pdf-run";
+  const priorPath = "deliverables/weekly-report.pdf";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /"targetArtifact":\{"runId":"prior-pdf-run","path":"deliverables\/weekly-report\.pdf"\}/);
+      assert.match(context, /"sourceNeed":"none"/);
+      assert.match(context, /"planShape":"single_leaf"/);
+      assert.match(context, /"artifactKind":"document"/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("remove-toc", {
+          goal: "删除上一轮 PDF 的目录页并交付修订版。",
+          shape: "single_leaf",
+          selectedSkillRoles: [],
+          steps: [{
+            id: "remove-toc",
+            objective: "修改目标 PDF，删除目录页并验收修订版。",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "transform-prior-pdf",
+    input: "把这个 PDF 的目录页去掉。",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "refine_prior",
+      targetRunId: priorRunId,
+      targetArtifact: { runId: priorRunId, path: priorPath },
+      effectiveGoal: "修改上一轮交付的 PDF，删除目录页并交付修订版。",
+      evidenceDemand: "none",
+      userConstraints: ["去掉目录页"],
+      source: "model_guarded",
+    },
+    availableSkills: [],
+    availableToolNames: ["computer_write_file", "computer_run_command", "verify_artifact_acceptance"],
+    sources: [{
+      id: "src_0123456789abcdef0123456789abcdef",
+      originalName: "original-weekly-report.pdf",
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 1_024,
+      sha256: "a".repeat(64),
+      status: "ready",
+      chunkCount: 1,
+      truncated: false,
+    }],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-prior-pdf",
+      runCount: 1,
+      planCursors: [{
+        runId: priorRunId,
+        planId: "prior-pdf-plan",
+        input: "生成一份基于周报的 PDF。",
+        goal: "生成周报 PDF。",
+        status: "completed",
+        selectedSkillIds: [],
+        steps: [],
+      }],
+      reusableArtifacts: [{
+        runId: priorRunId,
+        path: priorPath,
+        name: "weekly-report.pdf",
+        bytes: 1_024,
+        mimeType: "application/pdf",
+        sourceTool: "verify_artifact_acceptance",
+        reusable: true,
+      }],
+      failedBoundaries: [],
+      recommendedCapabilities: { skillIds: [], capabilityIds: [] },
+    },
+  });
+
+  assert.equal(plan.steps.length, 1);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
+  assert.equal(plan.steps[0]?.role, "produce");
+});
+
+test("ModelPlanner treats a bound prior Outcome as a materializable input, not a source-acquisition task", async () => {
+  const priorOutput = "已完成的市场分析结论。".repeat(200);
+  const priorSha256 = createHash("sha256").update(priorOutput).digest("hex");
+  const priorResult = {
+    schema: "agentloop.conversationResultRef/v1" as const,
+    runId: "prior-analysis-run",
+    sha256: priorSha256,
+    characters: priorOutput.length,
+  };
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const context = request.runtimeContext?.content ?? "";
+      assert.match(context, /candidateSourceResults/);
+      assert.match(context, new RegExp(priorSha256));
+      assert.match(context, /formal Plan input/);
+      assert.match(context, /"sourceNeed":"none"/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("materialize-prior-result", {
+          goal: "将上一轮分析整理为 PDF 文件。",
+          shape: "single_leaf",
+          selectedSkillRoles: [],
+          steps: [{
+            id: "materialize-prior-result",
+            objective: "读取绑定的前序 Outcome，并将其整理为 PDF 后验收。",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "materialize-prior-analysis",
+    input: "把这个分析生成 PDF 文件",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "refine_prior",
+      targetRunId: priorResult.runId,
+      targetResult: priorResult,
+      effectiveGoal: "将上一轮分析整理为 PDF 文件。",
+      evidenceDemand: "none",
+      userConstraints: [],
+      source: "model_guarded",
+    },
+    availableSkills: [],
+    availableToolNames: ["computer_write_file", "read_conversation_result"],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "prior-analysis-conversation",
+      runCount: 1,
+      planCursors: [{
+        runId: priorResult.runId,
+        planId: "prior-analysis-plan",
+        goal: "完成市场分析",
+        status: "completed",
+        selectedSkillIds: [],
+        steps: [],
+      }],
+      reusableResults: [{
+        result: priorResult,
+        planId: "prior-analysis-plan",
+        goal: "完成市场分析",
+        summary: priorOutput.slice(0, 1_200),
+        summaryTruncated: true,
+        artifactPaths: [],
+        evidenceRefs: ["run:prior-analysis-run", "plan:prior-analysis-plan"],
+      }],
+      reusableArtifacts: [],
+      failedBoundaries: [],
+      recommendedCapabilities: { skillIds: [], capabilityIds: [] },
+    },
+  });
+
+  assert.equal(plan.shape, "single_leaf");
+  assert.equal(plan.steps[0]?.role, "produce");
 });
 
 test("Admission reusable evidence remains scoped to the resolved prior Run and relation", () => {
@@ -5430,6 +5712,8 @@ test("ModelPlanner treats unrelated source-provider prefilter results as candida
       assert.match(context, /"candidateSkillRoles":/);
       assert.doesNotMatch(context, /"selectedSkillRoles":\[\{"skillId":"api-query"/);
       assert.match(context, /relevance candidates, not selected Plan dependencies/);
+      assert.match(request.systemPrompt ?? "", /selectedSkillRoles is an execution-selection list, not a candidate list/);
+      assert.match(context, /every initially selected Skill, regardless of role, must be bound to a concrete leaf/);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -5472,38 +5756,6 @@ test("ModelPlanner treats unrelated source-provider prefilter results as candida
 
   assert.deepEqual(plan.selectedSkillIds, []);
   assert.deepEqual(plan.steps[0]?.skillIds, []);
-});
-
-test("selectPlanningSkills recalls the checked-in presentation Skill for PPTX artifact requests", async () => {
-  const inspected = await inspectSkillPackage(resolve(import.meta.dirname, "..", "..", "agentloop-skills", "skills", "presentation-skill"));
-  const presentation = skillFixture({
-    id: inspected.name,
-    name: inspected.name,
-    description: inspected.description,
-    instructions: inspected.instructions,
-    contentHash: inspected.packageHash,
-    agentLoop: inspected.agentLoop,
-  });
-  const xlsx = skillFixture({
-    id: "xlsx",
-    name: "xlsx",
-    description: "Use this skill any time a spreadsheet file is the primary input or output.",
-    agentLoop: agentLoopMetadata(["primary_builder"], ["spreadsheet"]),
-  });
-
-  const selected = selectPlanningSkills(
-    [xlsx, presentation],
-    "基于这个设计稿帮我生成一份 pptx ，以一种惊悚，悬疑的风格来推介这个游戏。",
-    [],
-  );
-
-  assert.deepEqual(inspected.agentLoop, {
-    roles: ["primary_builder"],
-    artifactKinds: ["presentation"],
-    sourceKinds: [],
-    qaKinds: [],
-  });
-  assert.deepEqual(selected.map((skill) => skill.name), ["presentation-skill"]);
 });
 
 test("selectPlanningSkills routes legacy Word find-and-replace to the checked-in docx Skill", async () => {
@@ -9382,7 +9634,7 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
   }
 });
 
-test("RunService routes follow-up file creation through completed delivery text when no artifact exists", async () => {
+test("RunService binds a prior Outcome as a formal input for follow-up file creation", async () => {
   const database = new AppDatabase(":memory:");
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-delivery-text-followup-"));
   try {
@@ -9392,6 +9644,8 @@ test("RunService routes follow-up file creation through completed delivery text 
     const conversationId = "conversation-delivery-text-followup";
     const priorRunId = "prior-summary-run";
     const priorPlanId = "prior-summary-plan";
+    const priorOutput = "上一轮完成的总结文本。".repeat(900);
+    const priorSha256 = createHash("sha256").update(priorOutput).digest("hex");
     const now = Date.now();
     await database.prepare(`
       INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
@@ -9407,7 +9661,7 @@ test("RunService routes follow-up file creation through completed delivery text 
       owner.user.id,
       conversationId,
       "检索资料并总结",
-      "上一轮完成的总结文本。",
+      priorOutput,
       now - 10_000,
       now - 8_000,
     );
@@ -9434,21 +9688,63 @@ test("RunService routes follow-up file creation through completed delivery text 
         evidenceKinds: ["source_summary"],
       }),
       JSON.stringify([{ id: "summary", description: "Summary text is delivered.", source: "planner" }]),
-      "上一轮完成的总结文本。",
+      priorOutput,
       now - 9_000,
       now - 8_000,
     );
     await database.prepare(`
       INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
       VALUES (?, ?, 'completed', ?, 'plan_assessed_and_completed', ?)
-    `).run(priorRunId, priorPlanId, "上一轮完成的总结文本。", now - 8_000);
+    `).run(priorRunId, priorPlanId, priorOutput, now - 8_000);
 
     let capturedTask: TaskSpec | undefined;
+    let resolverContext = "";
+    let executionContext = "";
+    let resultReadCalls = 0;
     const runs = new RunService({
       database,
       skills,
       workspaceRoot: workspace,
-      modelFactory: () => new StaticModel({ content: "summary file written", finishReason: "stop", toolCalls: [] }),
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          if (request.runId.startsWith("conversation-turn:")) {
+            resolverContext = request.runtimeContext?.content ?? "";
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "resolve-prior-result",
+                name: "resolve_conversation_turn",
+                // Runtime, rather than a prompt convention, binds the unique
+                // completed Outcome returned for this prior Run.
+                arguments: {
+                  mode: "execute",
+                  relation: "refine_prior",
+                  targetRunId: priorRunId,
+                  effectiveGoal: "将上一轮分析整理为 PDF 文件。",
+                  evidenceDemand: "source_grounded",
+                  userConstraints: [],
+                },
+              }],
+            };
+          }
+          executionContext = request.runtimeContext?.content ?? "";
+          if (resultReadCalls === 0) {
+            resultReadCalls += 1;
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "read-prior-result",
+                name: "read_conversation_result",
+                arguments: { runId: priorRunId, sha256: priorSha256, maxCharacters: 40_000 },
+              }],
+            };
+          }
+          return { content: "summary file written", finishReason: "stop", toolCalls: [] };
+        },
+      }),
       plannerFactory: () => ({
         plan: async (task) => {
           capturedTask = task;
@@ -9469,14 +9765,39 @@ test("RunService routes follow-up file creation through completed delivery text 
       assessorFactory: () => approvingTestAssessor(),
     });
 
-    const run = await runs.executeConversation(owner.user.id, "你倒是生成一个总结文件啊", {
+    const run = await runs.executeConversation(owner.user.id, "把这个分析生成 PDF 文件", {
       conversationId,
       allowDangerousTools: true,
     });
 
     assert.equal(run.status, "completed");
     assert.equal(capturedTask?.conversationWorkingSet?.reusableArtifacts.length, 0);
-    assert.equal(capturedTask?.conversationWorkingSet?.planCursors[0]?.steps[0]?.output, "上一轮完成的总结文本。");
+    assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.result.sha256, priorSha256);
+    assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.summaryTruncated, true);
+    assert.deepEqual(capturedTask?.turnResolution?.targetResult, {
+      schema: "agentloop.conversationResultRef/v1",
+      runId: priorRunId,
+      sha256: priorSha256,
+      characters: priorOutput.length,
+    });
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
+    assert.match(resolverContext, /reusableResults/);
+    assert.match(executionContext, /planInputBindings/);
+    assert.match(executionContext, new RegExp(priorSha256));
+    assert.equal(resultReadCalls, 1);
+    const plan = (await runs.plan(owner.user.id, run.id)).plan;
+    assert.deepEqual(plan.inputBindings, [{
+      schema: "agentloop.conversationInputBinding/v1",
+      result: {
+        schema: "agentloop.conversationResultRef/v1",
+        runId: priorRunId,
+        sha256: priorSha256,
+        characters: priorOutput.length,
+      },
+      relation: "refine_prior",
+    }]);
+    const resolved = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(resolved?.data.evidenceDemand, "none");
     assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
   } finally {
     database.close();
@@ -10440,11 +10761,36 @@ test("RunService carries completed artifact lineage into qualitative follow-up p
     `).run(priorRunId, priorPlanId, "已生成 artifacts/m9-poster.png", "plan_assessed_and_completed", now - 8_000);
 
     let capturedTask: TaskSpec | undefined;
+    let resolverContext = "";
     const runs = new RunService({
       database,
       skills,
       workspaceRoot: workspace,
-      modelFactory: () => new StaticModel({ content: "regenerated", finishReason: "stop", toolCalls: [] }),
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          if (request.runId.startsWith("conversation-turn:")) {
+            resolverContext = request.runtimeContext?.content ?? "";
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "bind-poster-artifact",
+                name: "resolve_conversation_turn",
+                arguments: {
+                  mode: "execute",
+                  relation: "refine_prior",
+                  targetRunId: priorRunId,
+                  effectiveGoal: "修改上一轮交付的海报并重新生成。",
+                  evidenceDemand: "source_grounded",
+                  userConstraints: ["重新生成"],
+                },
+              }],
+            };
+          }
+          return { content: "regenerated", finishReason: "stop", toolCalls: [] };
+        },
+      }),
       plannerFactory: () => ({
         plan: async (task) => {
           capturedTask = task;
@@ -10476,6 +10822,13 @@ test("RunService carries completed artifact lineage into qualitative follow-up p
     assert.deepEqual(workset?.recommendedCapabilities.skillIds, [skill.id]);
     assert.equal(workset?.recommendedCapabilities.capabilityIds.includes("workspace_artifact_write"), true);
     assert.equal(workset?.reusableArtifacts[0]?.sourceSkillIds?.includes(skill.id), true);
+    assert.match(resolverContext, /"reusableArtifacts":\[\{"runId":"prior-completed-image-run","path":"artifacts\/m9-poster\.png"/);
+    assert.deepEqual(capturedTask?.turnResolution?.targetArtifact, {
+      runId: priorRunId,
+      path: "artifacts/m9-poster.png",
+    });
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
+    assert.equal(capturedTask?.turnResolution?.source, "model_guarded");
     assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
   } finally {
     database.close();
@@ -12181,7 +12534,7 @@ test("lookup source-summary steps converge when repeated reads add no new source
   }
 });
 
-test("web source-summary steps converge only after bounded distinct source reads", async () => {
+test("web delivery steps with a source-summary contract converge only after bounded distinct source reads", async () => {
   const database = new AppDatabase(":memory:");
   try {
 
@@ -12200,8 +12553,8 @@ test("web source-summary steps converge only after bounded distinct source reads
         selectedSkillIds: [],
         steps: [{
           ...step("collect-web-sources"),
-          role: "fact_acquisition",
-          objective: "Read representative web sources and return a bounded source summary.",
+          role: "produce",
+          objective: "Read representative web sources and deliver a bounded public summary.",
           requiredCapabilities: ["web_research"],
           evidenceContract: {
             requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
@@ -12881,6 +13234,132 @@ test("an approved recovery revision can retire an unfinished safe tail step and 
   }
 });
 
+test("a recovery revision may retire a step whose earlier unsafe call was rejected before execution", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const runId = "policy-denied-retirement-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
+    `).run(runId, owner.user.id, "produce the requested artifact", Date.now());
+    const plans = new PlanRepository(database);
+    const plan = await plans.create(admitPlan({
+      runId,
+      proposal: {
+        goal: "produce the requested artifact",
+        selectedSkillIds: [],
+        steps: [step("build"), { ...step("critique-polish"), dependencies: ["build"] }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    await plans.startStep(plan.id, "build");
+    await plans.saveAssessment({
+      id: "build-assessment", planId: plan.id, stepId: "build", attempt: 1, approved: true,
+      criteria: [{ criterionId: "build-done", satisfied: true, rationale: "canonical evidence", evidenceRefs: ["candidateOutput"] }],
+      skills: [], evidenceDigest: "build-evidence", feedback: "", createdAt: Date.now(),
+    });
+    await plans.completeStep(plan.id, "build", "verified artifact", { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 });
+    const actions = new RuntimeActionRepository(database);
+    await assert.rejects(
+      () => actions.execute({
+        runId, planId: plan.id, stepId: "critique-polish", kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000,
+      }, async () => { throw markActionFailedBeforeEffect(new AppError("FORBIDDEN", "Rejected before tool invocation", 403)); }),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+    const recoveryAction = await actions.dispatch({
+      runId, planId: plan.id, stepId: "critique-polish", kind: "model_turn", replayPolicy: "safe", deadlineMs: 1_000,
+    });
+    await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(recoveryAction.id);
+    await seedLegacyRecoveryState(database, runId, recoveryAction.id);
+    const runs = new RunService({
+      database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
+      recoveryPlannerFactory: () => ({
+        decide: async () => ({
+          actionId: recoveryAction.id, expectedActionRevision: 2, decision: "revise_plan", rationale: "The requested artifact is already assessed.", evidenceRefs: ["build-assessment"],
+          planRevision: { goal: "produce the requested artifact", selectedSkillIds: [], steps: [step("build")] },
+        }),
+      }),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({ approved: true, feedback: "", evidenceRefs: ["build-assessment"] }),
+      }),
+    });
+
+    const recovery = await runs.advanceRecovery(owner.user.id, runId);
+    assert.equal(recovery.decisions[0]?.state, "admitted");
+    assert.equal((await runs.get(owner.user.id, runId)).status, "completed");
+    assert.notEqual((await runs.plan(owner.user.id, runId)).plan.steps.find((item) => item.id === "critique-polish")?.retiredAt, undefined);
+  } finally {
+    database.close();
+  }
+});
+
+test("a recovery revision cannot retire a step with an unsafe Action whose effect is unknown", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const runId = "unknown-effect-retirement-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
+    `).run(runId, owner.user.id, "produce the requested artifact", Date.now());
+    const plans = new PlanRepository(database);
+    const plan = await plans.create(admitPlan({
+      runId,
+      proposal: {
+        goal: "produce the requested artifact",
+        selectedSkillIds: [],
+        steps: [step("build"), { ...step("critique-polish"), dependencies: ["build"] }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    await plans.startStep(plan.id, "build");
+    await plans.saveAssessment({
+      id: "build-assessment", planId: plan.id, stepId: "build", attempt: 1, approved: true,
+      criteria: [{ criterionId: "build-done", satisfied: true, rationale: "canonical evidence", evidenceRefs: ["candidateOutput"] }],
+      skills: [], evidenceDigest: "build-evidence", feedback: "", createdAt: Date.now(),
+    });
+    await plans.completeStep(plan.id, "build", "verified artifact", { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 });
+    const actions = new RuntimeActionRepository(database);
+    await assert.rejects(
+      () => actions.execute({
+        runId, planId: plan.id, stepId: "critique-polish", kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000,
+      }, async () => { throw new AppError("TOOL_EXECUTION_ERROR", "The tool may have begun execution", 500); }),
+      (error: unknown) => hasCode(error, "TOOL_EXECUTION_ERROR"),
+    );
+    const recoveryAction = await actions.dispatch({
+      runId, planId: plan.id, stepId: "critique-polish", kind: "model_turn", replayPolicy: "safe", deadlineMs: 1_000,
+    });
+    await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(recoveryAction.id);
+    await seedLegacyRecoveryState(database, runId, recoveryAction.id);
+    const runs = new RunService({
+      database, skills, modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
+      recoveryPlannerFactory: () => ({
+        decide: async () => ({
+          actionId: recoveryAction.id, expectedActionRevision: 2, decision: "revise_plan", rationale: "The requested artifact is already assessed.", evidenceRefs: ["build-assessment"],
+          planRevision: { goal: "produce the requested artifact", selectedSkillIds: [], steps: [step("build")] },
+        }),
+      }),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({ approved: true, feedback: "", evidenceRefs: ["build-assessment"] }),
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.advanceRecovery(owner.user.id, runId),
+      (error: unknown) => hasCode(error, "TOOL_POLICY_DENIED"),
+    );
+    assert.equal((await runs.get(owner.user.id, runId)).status, "running");
+    assert.equal((await runs.plan(owner.user.id, runId)).plan.steps.find((item) => item.id === "critique-polish")?.retiredAt, undefined);
+  } finally {
+    database.close();
+  }
+});
+
 test("recovery never resumes an unsafe Action and preserves the Run for a new decision", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -13066,6 +13545,85 @@ test("source contract gaps with no acquisition path fail without waiting_recover
     assert.equal(recovery.decisions.length, 0);
     assert.equal((await runs.get(owner.user.id, run.id)).status, "failed");
     assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "run.recovery_required"), false);
+  } finally {
+    database.close();
+  }
+});
+
+test("a resumed Step persists a subsequent Human-in-the-Loop request", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionTurns = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        assert.equal(request.phase, "execution");
+        executionTurns += 1;
+        const first = executionTurns === 1;
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: first ? "choose-first" : "choose-second",
+            name: "request_human_loop",
+            arguments: {
+              kind: "selection",
+              title: first ? "Choose the first input" : "Choose the second input",
+              prompt: first ? "Select the first input before continuing." : "Select the second input before continuing.",
+              rationale: "The two choices require user confirmation.",
+              evidenceRefs: [],
+              responseSchema: {
+                type: "select",
+                minSelections: 1,
+                maxSelections: 1,
+                options: [{ id: first ? "first" : "second", label: first ? "First" : "Second" }],
+              },
+              resume: { mode: "continue_step" },
+            },
+          }],
+        };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const initial = await runs.execute(owner.user.id, "Ask for two independent choices before delivering the answer.");
+    assert.equal(initial.status, "running");
+    const firstRequest = await runs.currentHumanLoop(owner.user.id, initial.id);
+    assert.equal(firstRequest?.title, "Choose the first input");
+    assert.ok(firstRequest);
+
+    await runs.respondHumanLoop(
+      owner.user.id,
+      initial.id,
+      firstRequest.id,
+      ["first"],
+      firstRequest.revision,
+    );
+
+    const deadline = Date.now() + 1_000;
+    let secondRequest = await runs.currentHumanLoop(owner.user.id, initial.id);
+    while ((secondRequest === undefined || secondRequest.id === firstRequest.id) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      secondRequest = await runs.currentHumanLoop(owner.user.id, initial.id);
+    }
+
+    assert.equal(secondRequest?.title, "Choose the second input");
+    assert.notEqual(secondRequest?.id, firstRequest.id);
+    assert.equal(secondRequest?.status, "open");
+    assert.equal(executionTurns, 2);
+    const history = await runs.humanLoopHistory(owner.user.id, initial.id);
+    assert.deepEqual(history.map((request) => request.status), ["answered", "open"]);
+    const events = await runs.events(owner.user.id, initial.id);
+    assert.equal(events.filter((event) => event.type === "run.waiting_user").length, 2);
+    assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
   } finally {
     database.close();
   }
@@ -14248,19 +14806,9 @@ class WebSourceSummaryConvergenceModel implements ModelAdapter {
     }
     this.sawConvergenceTurn = true;
     assert.equal(request.tools.length, 0);
-    assert.match(request.runtimeContext?.content ?? "", /agentloop\.sourceSummaryCandidate\/v1/);
+    assert.match(request.runtimeContext?.content ?? "", /runtime_convergence/);
     return {
-      content: JSON.stringify({
-        schema: "agentloop.sourceSummaryCandidate/v1",
-        coveredTopics: ["bounded web source reads"],
-        facts: [{
-          claim: "Three distinct web sources were read before source-summary convergence.",
-          sourceRefs: ["fetch-web-1", "fetch-web-2", "fetch-web-3"],
-          confidence: "source_supported",
-        }],
-        missingOrUnverified: [],
-        recommendedNextStep: "produce_artifact",
-      }),
+      content: "Three distinct web sources were read before this bounded public summary was delivered.",
       finishReason: "stop",
       toolCalls: [],
     };

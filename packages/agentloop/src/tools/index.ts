@@ -1,4 +1,6 @@
 export { ToolRegistry } from "./tool-registry.ts";
+export { SimpleCommandSafetyPlugin } from "./simple-command-safety-plugin.ts";
+export type { ToolExecutionPlugin, ToolExecutionPluginDecision, ToolExecutionPluginInput } from "./tool-execution-plugin.ts";
 export type {
   MaterializedTools,
   PreparedToolCall,
@@ -17,4 +19,5 @@ export { createSourceTools } from "./source-tools.ts";
 export { SKILL_LOADER_TOOL_NAME, createSkillLoader, skillExecutionCwd, skillExecutionRootEnvName } from "./skill-loader.ts";
 export { assertNoDuplicateTools, composeRunTools, createCoreTools } from "./compose.ts";
 export { HUMAN_LOOP_TOOL_NAME, createHumanLoopTool } from "./human-loop-tool.ts";
+export { CONVERSATION_RESULT_TOOL_NAME, createConversationResultTool } from "./conversation-result-tool.ts";
 export type { ComposeRunToolsOptions, CoreToolsOptions } from "./compose.ts";

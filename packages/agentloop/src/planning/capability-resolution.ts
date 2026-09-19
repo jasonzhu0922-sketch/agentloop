@@ -1,5 +1,5 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { CapabilityRecoveryCatalog, EvidenceKind, PlanProposal, PlanningCapability } from "./contracts.ts";
+import type { CapabilityRecoveryCatalog, EvidenceKind, PlanProposal, PlanningCapability, SourceConstraint } from "./contracts.ts";
 import { skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 
 const TOOL_PRODUCED_EVIDENCE_KINDS = new Set<EvidenceKind>([
@@ -58,7 +58,7 @@ export function resolveCapabilityGaps(input: {
     if (missingEvidenceKinds.length === 0) return [];
     const candidates = [...catalogById.values()]
       .filter((capability) => !boundCapabilities.has(capability.id))
-      .filter((capability) => compatibleWithSourceConstraint(capability, step.sourceConstraint?.requiredToolSourceIds ?? []))
+      .filter((capability) => compatibleWithSourceConstraint(capability, step.sourceConstraint))
       .filter((capability) => missingEvidenceKinds.some((kind) => capability.produces.includes(kind)))
       .map((capability) => ({
         capabilityId: capability.id,
@@ -102,9 +102,25 @@ export function resolveSourceGroundingGap(input: {
   };
 }
 
-function compatibleWithSourceConstraint(capability: PlanningCapability, requiredSourceIds: readonly string[]): boolean {
-  if (requiredSourceIds.length === 0 || capability.sourceIds === undefined || capability.sourceIds.length === 0) return true;
-  return requiredSourceIds.some((id) => capability.sourceIds!.includes(id));
+function compatibleWithSourceConstraint(capability: PlanningCapability, constraint: SourceConstraint | undefined): boolean {
+  const requiredToolSourceIds = constraint?.requiredToolSourceIds ?? [];
+  if (
+    requiredToolSourceIds.length > 0
+    && capability.sourceIds !== undefined
+    && capability.sourceIds.length > 0
+    && !requiredToolSourceIds.some((id) => capability.sourceIds!.includes(id))
+  ) return false;
+
+  // An explicit upload/directory binding is an input-identity constraint, not
+  // merely a hint to prefer a related capability.  A provider for a different
+  // source namespace cannot repair an evidence gap for that concrete input.
+  if ((constraint?.requiredUploadedSourceIds?.length ?? 0) > 0 && !capability.sourceKinds.includes("uploaded_source")) {
+    return false;
+  }
+  if ((constraint?.requiredVisibleDirectoryIds?.length ?? 0) > 0 && !capability.sourceKinds.includes("visible_directory")) {
+    return false;
+  }
+  return true;
 }
 
 function sourceProviderSkillsByCapability(skills: readonly PrivateSkill[]): ReadonlyMap<string, readonly string[]> {

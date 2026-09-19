@@ -1085,6 +1085,7 @@ function structuredToolEvidenceProjection(content: string): string | undefined {
       factCount: facts.length,
       sourceRefs: sourceRefLimit <= 0 ? undefined : sourceRefs.slice(0, sourceRefLimit).map(compactEvidenceSourceRef),
       facts: facts.slice(0, 24).map(compactEvidenceFactForProjection),
+      deliveryFacts: compactDeliveryFactsForContext(receipt.deliveryFacts),
       caveats: compactArray(receipt.caveats, 20),
       evidenceKinds: recordValue(receipt.evidenceKinds),
     },
@@ -1193,6 +1194,31 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   }
   if (recordValue(value.evidenceReceipt) !== undefined) return undefined;
   const schema = stringValue(value.schema);
+  if (toolName === "computer_read_file" && stringValue(value.revisionId) !== undefined) {
+    return JSON.stringify(omitUndefinedDeep({
+      schema: "agentloop.contextFileRead/v1",
+      path: value.resolvedPath ?? value.requestedPath,
+      revisionId: value.revisionId,
+      bytes: value.bytes,
+      truncated: value.truncated,
+      offset: value.offset,
+      limit: value.limit,
+      totalLines: value.totalLines,
+      nextOffset: value.nextOffset,
+      ranges: Array.isArray(value.ranges) ? value.ranges.map((range) => {
+        const item = recordValue(range);
+        return item === undefined ? undefined : {
+          offset: item.offset,
+          limit: item.limit,
+          startLine: item.startLine,
+          endLine: item.endLine,
+          truncated: item.truncated,
+          nextOffset: item.nextOffset,
+        };
+      }) : undefined,
+      instruction: "This is a direct workspace-file read. Use revisionId only as baseRevisionId when patching the same path. It is not a hash. For omitted file details, request a smaller line window with computer_read_file; do not use a content-reference character window.",
+    }));
+  }
   const contentLocation = commandOutputContentLocationProjection(value);
   if (contentLocation !== undefined) {
     return JSON.stringify(omitUndefinedDeep({
@@ -1702,12 +1728,39 @@ function structuredToolEvidenceLedger(content: string): string | undefined {
       factCount: facts.length,
       sourceRefSamples: sourceRefLimit <= 0 ? undefined : sourceRefs.slice(0, sourceRefLimit).map(compactEvidenceSourceRef),
       factSummaries: facts.slice(0, 12).map(compactEvidenceFactForLedger),
+      deliveryFacts: compactDeliveryFactsForContext(receipt.deliveryFacts),
       caveats: caveats.slice(0, 12),
       evidenceKinds: recordValue(receipt.evidenceKinds),
     },
     instruction: "Carry this receipt ledger forward without rewriting raw source facts. Use receiptId/sourceRefs to request exact rereads only when needed.",
   };
   return JSON.stringify(omitUndefinedDeep(ledger));
+}
+
+const DELIVERY_FACTS_CONTEXT_CHARACTER_LIMIT = 8_000;
+const DELIVERY_FACTS_PREVIEW_CHARACTER_LIMIT = 2_000;
+
+/**
+ * Delivery facts are owned by the producing tool or Skill.  The Runtime only
+ * carries a bounded, schema-agnostic JSON projection forward so a subsequent
+ * model turn can use computed facts without rereading the complete receipt.
+ */
+function compactDeliveryFactsForContext(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return undefined;
+  const record = recordValue(value);
+  return omitUndefinedDeep({
+    schema: "agentloop.contextDeliveryFacts/v1",
+    sourceSchema: stringValue(record?.schema),
+    originalCharacters: serialized.length,
+    originalSha256: digest(serialized),
+    truncated: serialized.length > DELIVERY_FACTS_CONTEXT_CHARACTER_LIMIT,
+    facts: serialized.length <= DELIVERY_FACTS_CONTEXT_CHARACTER_LIMIT ? value : undefined,
+    preview: serialized.length <= DELIVERY_FACTS_CONTEXT_CHARACTER_LIMIT
+      ? undefined
+      : truncateForSummary(serialized, DELIVERY_FACTS_PREVIEW_CHARACTER_LIMIT),
+  });
 }
 
 function compactEvidenceFactForLedger(value: unknown): unknown {

@@ -19,13 +19,15 @@ test("HumanLoopRepository persists a typed request and accepts exactly one schem
     const humanLoops = new HumanLoopRepository(database);
     const request = await humanLoops.create({
       runId: "run-hil", origin: "tool", kind: "selection", title: "Choose", prompt: "Choose a target", rationale: "Targets differ", evidenceRefs: ["tool-call-1"],
-      responseSchema: { type: "select", minSelections: 1, maxSelections: 1, options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] },
+      responseSchema: { type: "select", minSelections: 1, maxSelections: 1, options: [{ id: "a", label: "A", identityRefs: ["identity-a"] }, { id: "b", label: "B" }] },
       resume: { mode: "continue_step" },
     });
     assert.equal((await humanLoops.current("run-hil"))?.id, request.id);
     await assert.rejects(() => humanLoops.respond({ requestId: request.id, runId: "run-hil", actorUserId: "user-hil", expectedRevision: request.revision, value: ["missing"] }));
     const response = await humanLoops.respond({ requestId: request.id, runId: "run-hil", actorUserId: "user-hil", expectedRevision: request.revision, value: ["a"] });
     assert.deepEqual(response.value, ["a"]);
+    const decisionEvent = await database.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND type = 'decision.committed'").get("run-hil") as { payload_json: string } | undefined;
+    assert.deepEqual(JSON.parse(decisionEvent?.payload_json ?? "{}").commit.selectedOptions, [{ id: "a", label: "A", identityRefs: ["identity-a"] }]);
     assert.equal(await humanLoops.current("run-hil"), undefined);
     await assert.rejects(() => humanLoops.respond({ requestId: request.id, runId: "run-hil", actorUserId: "user-hil", expectedRevision: request.revision, value: ["b"] }));
   } finally { database.close(); }

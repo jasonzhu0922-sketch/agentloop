@@ -13,6 +13,7 @@ import type {
   UploadedSourceSummary,
   VisibleDirectoryGrant,
 } from "./contracts.ts";
+import type { RuntimeDecisionCommit } from "./decision-ledger.ts";
 
 export function buildStepRuntimeContextSnapshot(input: {
   readonly step: ExecutionPlan["steps"][number];
@@ -26,6 +27,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   readonly operationProfile: DynamicPromptProfile;
   readonly requiresFileOutput: boolean;
   readonly conversationWorkingSet?: ConversationWorkingSet;
+  readonly decisionLedger?: readonly RuntimeDecisionCommit[];
 }): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const visibleDirectories = input.visibleDirectories ?? [];
   const sources = input.sources ?? [];
@@ -58,6 +60,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   });
   return {
     phase: "execution",
+    ...(input.decisionLedger === undefined || input.decisionLedger.length === 0 ? {} : { decisionLedger: input.decisionLedger }),
     content: [
       "<execution_context source=\"server\">",
       JSON.stringify({
@@ -66,7 +69,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           instruction: "Use the step execution binding to understand the current objective, evidence contract, and preferred tool families. Choose among currently exposed Run-authorized tools to satisfy that contract.",
           marginalBenefitDecision: "Before every next action, decide whether it has material expected benefit for an unmet current-step success criterion. Prefer the action with the greatest evidence or acceptance gain. Do not act merely to continue the loop: when no authorized action can materially improve the current evidence, directly submit a concise completion candidate with explicit caveats for the remaining gap.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
-          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect dependencyEvidenceBindings and conversationReuseContext. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. When successful scope-matched evidence obtained in the current stage contradicts a dependency, use the current-stage evidence for this stage; preserve the earlier result as provenance and do not re-acquire data solely to reconcile it. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
+          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect planInputBindings, dependencyEvidenceBindings, and conversationReuseContext. A bound prior Outcome is a formal input: use its summary, then read_conversation_result with its immutable ref when more content is needed. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. A prior result's source lineage is provenance, not a reason to reacquire it. When successful scope-matched evidence obtained in the current stage contradicts a dependency, use the current-stage evidence for this stage; preserve the earlier result as provenance and do not re-acquire data solely to reconcile it. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },
         currentPlanStep: {
           id: input.step.id,
@@ -78,6 +81,8 @@ export function buildStepRuntimeContextSnapshot(input: {
           ...(input.step.evidenceContract === undefined ? {} : { evidenceContract: input.step.evidenceContract }),
           successCriteria: input.step.successCriteria,
         },
+        decisionLedger: input.decisionLedger ?? [],
+        planInputBindings: input.plan.inputBindings ?? [],
         stepSemanticFrame,
         planStepHandoffFrame,
         downstreamPlanSteps: input.plan.steps
@@ -613,19 +618,22 @@ function buildConversationReuseContext(
   | {
       readonly schema: "agentloop.conversationReuseContext/v1";
       readonly instruction: string;
+      readonly reusableResults?: NonNullable<ConversationWorkingSet["reusableResults"]>;
       readonly reusableArtifacts: ConversationWorkingSet["reusableArtifacts"];
       readonly sourceSummaries?: NonNullable<ConversationWorkingSet["evidenceLedger"]>["sourceSummaries"];
       readonly completedStepHandoffs?: NonNullable<ConversationWorkingSet["completedStepHandoffs"]>;
     }
   | undefined {
   if (workset === undefined) return undefined;
+  const reusableResults = workset.reusableResults ?? [];
   const sourceSummaries = workset.evidenceLedger?.sourceSummaries ?? [];
   const completedStepHandoffs = workset.completedStepHandoffs ?? [];
-  if (workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepHandoffs.length === 0) return undefined;
+  if (reusableResults.length === 0 && workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepHandoffs.length === 0) return undefined;
   return {
     schema: "agentloop.conversationReuseContext/v1",
     instruction:
-      "Use prior accepted step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. Re-read or regenerate only when the current step needs fresher, stricter, missing, or unresolved conflicting evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the prior result as provenance instead of re-acquiring data solely to reconcile it. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
+      "Use prior accepted Outcome results, step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A result contentRef is an immutable, same-conversation reference: use read_conversation_result when the compact summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
+    ...(reusableResults.length === 0 ? {} : { reusableResults }),
     reusableArtifacts: workset.reusableArtifacts,
     ...(sourceSummaries.length === 0 ? {} : { sourceSummaries }),
     ...(completedStepHandoffs.length === 0 ? {} : { completedStepHandoffs }),

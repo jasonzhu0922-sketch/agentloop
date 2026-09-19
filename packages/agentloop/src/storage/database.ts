@@ -152,6 +152,7 @@ export class AppDatabase implements SqlConnection {
         version INTEGER NOT NULL,
         goal TEXT NOT NULL,
         selected_skill_ids_json TEXT NOT NULL,
+        input_bindings_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL CHECK(status IN ('admitted', 'running', 'completed', 'failed')),
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -212,6 +213,7 @@ export class AppDatabase implements SqlConnection {
         metadata_json TEXT NOT NULL,
         result_ref TEXT,
         error_code TEXT,
+        effect_state TEXT NOT NULL DEFAULT 'unknown' CHECK(effect_state IN ('not_started', 'unknown', 'applied')),
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         closed_at INTEGER
@@ -495,6 +497,7 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("runs", "allow_dangerous_tools", "INTEGER NOT NULL DEFAULT 0");
       await this.ensureColumn("runs", "conversation_id", "TEXT REFERENCES conversations(id) ON DELETE SET NULL");
       await this.ensureColumn("runs", "model_key", "TEXT");
+      await this.ensureColumn("plans", "input_bindings_json", "TEXT NOT NULL DEFAULT '[]'");
       await this.ensureColumn("plan_steps", "kind", "TEXT NOT NULL DEFAULT 'leaf'");
       await this.ensureColumn("plan_steps", "parent_step_id", "TEXT");
       await this.ensureColumn("plan_steps", "role", "TEXT");
@@ -506,6 +509,7 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
       await this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
       await this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
+      await this.ensureColumn("runtime_actions", "effect_state", "TEXT NOT NULL DEFAULT 'unknown'");
       await this.ensureSkillAssessmentProfileConstraint();
     }
     await this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");

@@ -176,10 +176,42 @@ export interface ConversationTurnResolution {
   readonly mode: ConversationTurnMode;
   readonly relation: ConversationTurnRelation;
   readonly targetRunId?: string;
+  /**
+   * Server-validated identity of a prior accepted work product that this turn
+   * changes. A Run is provenance, not an executable file target: a follow-up
+   * must bind the concrete artifact before planning a native transformation.
+   */
+  readonly targetArtifact?: ConversationArtifactReference;
+  /**
+   * Server-validated identity of a completed prior Outcome whose semantic
+   * result is an input to this Run. Unlike an artifact path, this reference
+   * denotes the accepted result content itself and can be materialized through
+   * the Runtime's scoped result reader.
+   */
+  readonly targetResult?: ConversationResultReference;
   readonly effectiveGoal: string;
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
   readonly source: "model" | "model_guarded" | "deterministic" | "fallback";
+}
+
+export interface ConversationArtifactReference {
+  readonly runId: string;
+  readonly path: string;
+}
+
+export interface ConversationResultReference {
+  readonly schema: "agentloop.conversationResultRef/v1";
+  readonly runId: string;
+  readonly sha256: string;
+  readonly characters: number;
+}
+
+/** A persisted, Plan-owned declaration that a prior accepted Outcome is input. */
+export interface ConversationInputBinding {
+  readonly schema: "agentloop.conversationInputBinding/v1";
+  readonly result: ConversationResultReference;
+  readonly relation: "continue_prior" | "refine_prior" | "correct_prior" | "challenge_prior";
 }
 
 export interface PlanningExtensionContext {
@@ -215,6 +247,12 @@ export interface ConversationWorkingSet {
    * its own `runs.output` is empty.
    */
   readonly completedStepHandoffs?: readonly ConversationCompletedStepHandoff[];
+  /**
+   * Completed terminal Outcomes are semantic work products, independently of
+   * whether they also emitted a workspace artifact. Their compact projection
+   * is for planning; contentRef can retrieve the immutable full text on demand.
+   */
+  readonly reusableResults?: readonly ConversationReusableResult[];
   readonly reusableArtifacts: readonly ConversationReusableArtifact[];
   readonly failedBoundaries: readonly ConversationFailedBoundary[];
   /** Append-only semantic links; historical terminal records remain immutable. */
@@ -222,6 +260,16 @@ export interface ConversationWorkingSet {
   readonly recommendedCapabilities: ConversationRecommendedCapabilities;
   readonly evidenceLedger?: ConversationEvidenceLedger;
   readonly resumeSuggestion?: string;
+}
+
+export interface ConversationReusableResult {
+  readonly result: ConversationResultReference;
+  readonly planId?: string;
+  readonly goal: string;
+  readonly summary: string;
+  readonly summaryTruncated: boolean;
+  readonly artifactPaths: readonly string[];
+  readonly evidenceRefs: readonly string[];
 }
 
 export interface ConversationResolvedIntent {
@@ -424,6 +472,8 @@ export interface ExecutionPlan {
   readonly version: number;
   readonly goal: string;
   readonly selectedSkillIds: readonly string[];
+  /** Explicit, persisted prior-Outcome inputs selected for this Plan. */
+  readonly inputBindings?: readonly ConversationInputBinding[];
   readonly status: PlanStatus;
   readonly steps: readonly PlanStep[];
   readonly createdAt: number;
@@ -533,6 +583,7 @@ export interface StepAssessmentInput {
   /** This candidate has an artifact/source-receipt shape mismatch for holistic assessment. */
   readonly holisticSourceContractMismatch?: boolean;
   readonly attempt: number;
+  readonly decisionLedger?: readonly import("../runtime/decision-ledger.ts").RuntimeDecisionCommit[];
 }
 
 export interface StepAssessor {

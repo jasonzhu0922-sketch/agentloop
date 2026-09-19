@@ -74,6 +74,109 @@ test("ContextAssembler projects structured Tool evidence instead of raw read con
   assert.equal(events.some((event) => event.type === "context.tool_outputs_projected" && event.data.reason === "structured_evidence"), true);
 });
 
+test("ContextAssembler carries bounded tool-provided delivery facts with the durable content reference", async () => {
+  const toolResult = JSON.stringify({
+    schema: "example.computedResult/v1",
+    contentLocation: {
+      kind: "content_addressed",
+      path: ".agentloop/tool-results/example.json",
+      sha256: "a".repeat(64),
+      characters: 12_000,
+    },
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1",
+      sourceType: "computed_analysis",
+      receiptId: "computed-receipt",
+      sourceRefs: [],
+      facts: [{ kind: "derived_aggregation", totalRecords: 70 }],
+      deliveryFacts: {
+        schema: "example.deliveryFacts/v1",
+        summary: { first: 10, last: 14, absoluteChange: 4 },
+        observations: Array.from({ length: 24 }, (_, index) => ({ index, value: index + 10 })),
+      },
+      caveats: [],
+      evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+    },
+  });
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-delivery-facts-projection",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "compute", name: "computer_run_command", arguments: {} }] },
+    { role: "tool", toolCallId: "compute", name: "computer_run_command", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const projection = JSON.parse(projected.split("\n\n")[0]) as {
+    contentLocation?: { path?: string };
+    evidenceReceipt?: {
+      deliveryFacts?: {
+        schema?: string;
+        sourceSchema?: string;
+        truncated?: boolean;
+        facts?: { summary?: { absoluteChange?: number }; observations?: unknown[] };
+      };
+    };
+  };
+  const deliveryFacts = projection.evidenceReceipt?.deliveryFacts;
+
+  assert.equal(projection.contentLocation?.path, ".agentloop/tool-results/example.json");
+  assert.equal(deliveryFacts?.schema, "agentloop.contextDeliveryFacts/v1");
+  assert.equal(deliveryFacts?.sourceSchema, "example.deliveryFacts/v1");
+  assert.equal(deliveryFacts?.facts?.summary?.absoluteChange, 4);
+  assert.equal(deliveryFacts?.truncated, false);
+  assert.equal(deliveryFacts?.facts?.observations?.length, 24);
+});
+
+test("ContextAssembler bounds oversized tool-provided delivery facts", async () => {
+  const toolResult = JSON.stringify({
+    schema: "example.computedResult/v1",
+    contentLocation: { kind: "content_addressed", path: ".agentloop/tool-results/oversized.json", sha256: "b".repeat(64) },
+    evidenceReceipt: {
+      schema: "agentloop.toolEvidenceReceipt/v1",
+      sourceType: "computed_analysis",
+      receiptId: "oversized-computed-receipt",
+      sourceRefs: [],
+      facts: [],
+      deliveryFacts: { schema: "example.deliveryFacts/v1", raw: "x".repeat(9_000) },
+      caveats: [],
+      evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+    },
+  });
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-oversized-delivery-facts-projection",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "compute", name: "computer_run_command", arguments: {} }] },
+    { role: "tool", toolCallId: "compute", name: "computer_run_command", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const projection = JSON.parse(projected.split("\n\n")[0]) as {
+    contentLocation?: { path?: string };
+    evidenceReceipt?: { deliveryFacts?: { truncated?: boolean; facts?: unknown; preview?: string } };
+  };
+
+  assert.equal(projection.contentLocation?.path, ".agentloop/tool-results/oversized.json");
+  assert.equal(projection.evidenceReceipt?.deliveryFacts?.truncated, true);
+  assert.equal(projection.evidenceReceipt?.deliveryFacts?.facts, undefined);
+  assert.ok((projection.evidenceReceipt?.deliveryFacts?.preview?.length ?? 0) <= 2_200);
+  assert.doesNotMatch(projected, /x{3000}/);
+});
+
 test("ContextAssembler exposes a durable aggregation result reference without inlining groups", async () => {
   const toolResult = JSON.stringify({
     schema: "agentloop.tableArtifactAggregation/v1",
@@ -928,6 +1031,10 @@ test("ContextAssembler summarizes structured evidence as a receipt ledger", asyn
         excerpt: longExcerpt,
         truncated: false,
       }],
+      deliveryFacts: {
+        schema: "example.deliveryFacts/v1",
+        conclusionInputs: { totalRecords: 18, complete: true },
+      },
       caveats: ["canonical event retained"],
       evidenceKinds: { satisfied: ["source_read"], caveated: [], failed: [] },
     },
@@ -940,6 +1047,8 @@ test("ContextAssembler summarizes structured evidence as a receipt ledger", asyn
       const prompt = request.messages[0]?.content ?? "";
       assert.match(prompt, /agentloop\.contextEvidenceLedger\/v1/);
       assert.match(prompt, /receipt-ledger-1/);
+      assert.match(prompt, /agentloop\.contextDeliveryFacts\/v1/);
+      assert.match(prompt, /"totalRecords":18/);
       assert.doesNotMatch(prompt, /agentloop\.contextEvidenceProjection\/v1/);
       assert.doesNotMatch(prompt, /raw source paragraph raw source paragraph raw source paragraph/);
       assert.doesNotMatch(prompt, /important extracted fact important extracted fact important extracted fact/);
@@ -1141,6 +1250,42 @@ test("ContextAssembler projects large ToolResults before they pollute the next m
   assert.match(projectedTool?.content ?? "", /canonical event retained/);
   assert.ok(canonical[1].content.length === largeProfile.length, "canonical ToolResult remains unchanged");
   assert.ok(events.some((event) => event.type === "context.tool_outputs_projected"));
+});
+
+test("ContextAssembler retains an opaque workspace revision when a large file read is projected", async () => {
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 80_000, maxOutputTokens: 4_096 },
+    complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-file-revision-projection",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+  const content = "source detail ".repeat(2_000);
+  const toolResult = JSON.stringify({
+    content,
+    bytes: content.length,
+    truncated: false,
+    offset: 1,
+    limit: 2_000,
+    totalLines: 2_000,
+    revisionId: "rev_0123456789abcdef0123456789abcdef",
+  });
+  assert.ok(toolResult.length > 16_000);
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "read-workspace", name: "computer_read_file", arguments: { path: "report.html" } }] },
+    { role: "tool", toolCallId: "read-workspace", name: "computer_read_file", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
+  const value = JSON.parse(projected.split("\n\n")[0]) as { schema?: string; revisionId?: string; instruction?: string; content?: string };
+
+  assert.equal(value.schema, "agentloop.contextFileRead/v1");
+  assert.equal(value.revisionId, "rev_0123456789abcdef0123456789abcdef");
+  assert.match(value.instruction ?? "", /baseRevisionId/);
+  assert.equal(value.content, undefined);
+  assert.doesNotMatch(projected, /source detail source detail source detail/);
 });
 
 test("ContextAssembler applies step prompt projection thresholds to large ToolResult previews", async () => {

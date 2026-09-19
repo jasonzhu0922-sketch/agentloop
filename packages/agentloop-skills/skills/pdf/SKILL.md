@@ -26,8 +26,12 @@ deliverable. Do not spend the run on open-ended renderer exploration.
 Preferred workflow:
 - Read the source document once and identify the output path before writing code.
 - Prefer a deterministic local generator using ReportLab/Platypus when it is
-  available, especially for Chinese/CJK reports. Use a known CJK-capable font
-  from `fc-list` or a system font path, and verify the extracted text layer.
+  available, especially for Chinese/CJK reports. Use the bundled
+  `assets/fonts/NotoSansSC.ttf`, never `fc-list`, `fc-match`, a system-font
+  path, or a downloaded font. The Runtime exposes the read-only package root
+  as `AGENTLOOP_SKILL_ROOT_PDF`; resolve the asset from that environment
+  variable and embed it with ReportLab `TTFont` before creating any visible
+  text styles.
 - Use WeasyPrint only if `weasyprint --version` succeeds. If it fails because
   libraries such as Pango/Cairo are missing, immediately fall back to ReportLab
   or PyMuPDF. Do not run package-manager installation commands such as
@@ -46,6 +50,40 @@ For "beautiful", "polished", or "professional" PDF reports, create visible
 structure in the final file: cover page, concise summary, section headings,
 tables styled with consistent colors, headers/footers or page numbers, and
 readable margins. Do not let visual refinement replace the acceptance evidence.
+
+## Bundled Font Contract
+
+`assets/fonts/NotoSansSC.ttf` is an OFL-licensed, redistributable CJK font
+shipped in this Skill package. It is the default for every generated PDF that
+can contain Chinese, including its Latin text, numbers, headers, footers,
+tables, and page numbers. It is deliberately package-owned: never spend a run
+discovering host fonts or use a host-specific fallback. If the asset cannot be
+resolved or registered, report that package/runtime failure rather than
+substituting another font.
+
+Use this registration once, before constructing any `Canvas`, `Paragraph`, or
+`ParagraphStyle`:
+
+```python
+import os
+from pathlib import Path
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+font_path = Path(os.environ["AGENTLOOP_SKILL_ROOT_PDF"]) / "assets" / "fonts" / "NotoSansSC.ttf"
+if not font_path.is_file():
+    raise FileNotFoundError(f"Bundled PDF font is unavailable: {font_path}")
+
+PDF_FONT = "AgentLoopNotoSansSC"
+pdfmetrics.registerFont(TTFont(PDF_FONT, str(font_path)))
+```
+
+Set `fontName=PDF_FONT` for all Platypus styles and use
+`canvas.setFont(PDF_FONT, size)` for canvas text. Do not use
+`UnicodeCIDFont("STSong-Light")`: it relies on a viewer font instead of
+embedding the font program. When `pdffonts` is available, require the final
+PDF to list the bundled font with `emb=yes`; still render pages to inspect
+wrapping and clipping.
 
 ## Quick Start
 

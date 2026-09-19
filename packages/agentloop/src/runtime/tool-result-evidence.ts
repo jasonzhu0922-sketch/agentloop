@@ -4,6 +4,7 @@ const RUNTIME_EVIDENCE_SCHEMAS = new Set([
   "agentloop.sourceSummary/v1",
   "agentloop.toolEvidenceReceipt/v1",
   "agentloop.commandComputationReceipt/v1",
+  "agentloop.commandOutputProjection/v1",
 ]);
 
 export interface RuntimeEvidenceKindArrays {
@@ -29,7 +30,7 @@ export function runtimeEvidenceRecordsFromToolResult(result: string): readonly R
   const stdout = stringValue(parsed.stdout);
   if (stdout !== undefined) {
     const stdoutRecord = parseJsonRecord(stdout);
-    if (stdoutRecord !== undefined && hasRuntimeEvidenceSchema(stdoutRecord)) {
+    if (stdoutRecord !== undefined && (hasRuntimeEvidenceSchema(stdoutRecord) || recordValue(stdoutRecord.decisionClaim) !== undefined)) {
       records.push(stdoutRecord);
     }
   }

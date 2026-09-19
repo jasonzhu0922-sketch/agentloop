@@ -3,6 +3,7 @@ import { notFound } from "../shared/errors.ts";
 import type {
   AssessmentMethod,
   AssessmentProfileId,
+  ConversationInputBinding,
   ExecutionPlan,
   PlanStatus,
   PlanStep,
@@ -17,6 +18,7 @@ interface PlanRow {
   version: number;
   goal: string;
   selected_skill_ids_json: string;
+  input_bindings_json?: string;
   status: PlanStatus;
   created_at: number;
   updated_at: number;
@@ -67,14 +69,15 @@ export class PlanRepository {
   async create(plan: ExecutionPlan): Promise<ExecutionPlan> {
     await this.database.transaction(async () => {
       await this.database.prepare(`
-        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         plan.id,
         plan.runId,
         plan.version,
         plan.goal,
         JSON.stringify(plan.selectedSkillIds),
+        JSON.stringify(plan.inputBindings ?? []),
         plan.status,
         plan.createdAt,
         plan.updatedAt,
@@ -341,6 +344,7 @@ export class PlanRepository {
       version: row.version,
       goal: row.goal,
       selectedSkillIds: JSON.parse(row.selected_skill_ids_json),
+      inputBindings: parseInputBindings(row.input_bindings_json),
       status: row.status,
       steps: steps.map(toStep),
       createdAt: row.created_at,
@@ -352,6 +356,7 @@ export class PlanRepository {
     const proposal = {
       goal: plan.goal,
       selectedSkillIds: plan.selectedSkillIds,
+      inputBindings: plan.inputBindings ?? [],
       steps: plan.steps.map((step) => ({
         id: step.id,
         kind: step.kind,
@@ -391,6 +396,38 @@ function parseAssessmentProfile(value: string | undefined): AssessmentProfileId 
 
 function parseAssessmentMethod(value: string | undefined): AssessmentMethod {
   return value === "rule" || value === "model" ? value : "model";
+}
+
+function parseInputBindings(value: string | undefined): readonly ConversationInputBinding[] {
+  if (value === undefined) return [];
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("Plan has invalid input bindings; replan required");
+  return parsed.map((binding) => {
+    if (binding === null || typeof binding !== "object" || Array.isArray(binding)) {
+      throw new Error("Plan has invalid input binding; replan required");
+    }
+    const item = binding as Record<string, unknown>;
+    const result = item.result;
+    if (
+      item.schema !== "agentloop.conversationInputBinding/v1"
+      || !["continue_prior", "refine_prior", "correct_prior", "challenge_prior"].includes(String(item.relation))
+      || result === null
+      || typeof result !== "object"
+      || Array.isArray(result)
+    ) {
+      throw new Error("Plan has invalid input binding; replan required");
+    }
+    const ref = result as Record<string, unknown>;
+    if (
+      ref.schema !== "agentloop.conversationResultRef/v1"
+      || typeof ref.runId !== "string"
+      || typeof ref.sha256 !== "string"
+      || typeof ref.characters !== "number"
+    ) {
+      throw new Error("Plan has invalid input binding result reference; replan required");
+    }
+    return binding as ConversationInputBinding;
+  });
 }
 
 function toStep(row: StepRow): PlanStep {

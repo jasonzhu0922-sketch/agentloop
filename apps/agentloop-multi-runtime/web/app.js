@@ -633,6 +633,15 @@ function render() {
     render();
   }));
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
+  document.querySelectorAll("[data-human-loop-option]").forEach((input) => input.addEventListener("change", () => {
+    rememberHumanLoopSelection(
+      input.dataset.humanLoopMessage,
+      input.dataset.humanLoopRequest,
+      input.value,
+      input.checked,
+      Number(input.dataset.humanLoopMaxSelections),
+    );
+  }));
   document.querySelectorAll("[data-checkpoint-start]").forEach((button) => button.addEventListener("click", () => void startFromCheckpoint(button.dataset.checkpointStart)));
   const selectedAssistant = selectedAssistantMessage(conversation, messages);
   const activeRun = activeRunsByConversation.get(conversation.id);
@@ -743,10 +752,32 @@ function renderHumanLoop(message) {
   const schema = request.responseSchema || {};
   const key = `${message.id}-${request.id}`;
   let fields = "";
-  if (schema.type === "select") fields = `<div class="human-loop-options">${(schema.options || []).map((option) => `<label class="human-loop-option"><input type="checkbox" name="human-${key}" value="${escapeHtml(option.id)}" ${schema.maxSelections === 1 ? "data-human-single" : ""}/><span><b>${escapeHtml(option.label)}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}</div>`;
+  if (schema.type === "select") {
+    const selections = humanLoopSelections(message, request.id);
+    fields = `<div class="human-loop-options">${(schema.options || []).map((option) => `<label class="human-loop-option"><input type="${schema.maxSelections === 1 ? "radio" : "checkbox"}" name="human-${key}" value="${escapeHtml(option.id)}" data-human-loop-option data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" data-human-loop-max-selections="${escapeHtml(String(schema.maxSelections || 0))}" ${selections.has(option.id) ? "checked" : ""}/><span><b>${escapeHtml(option.label)}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}</div>`;
+  }
   else if (schema.type === "form") fields = `<div class="human-loop-form">${(schema.fields || []).map((field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}${field.valueType === "textarea" ? `<textarea data-human-field="${escapeHtml(field.id)}" ${field.required ? "required" : ""}></textarea>` : `<input data-human-field="${escapeHtml(field.id)}" type="${field.valueType === "date" ? "date" : field.valueType === "number" ? "number" : "text"}" ${field.required ? "required" : ""}/>`}${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}</label>`).join("")}</div>`;
   else fields = `<div class="human-loop-confirm"><label><input type="radio" name="human-${key}" value="accept" checked/>${escapeHtml(schema.acceptLabel || "确认")}</label><label><input type="radio" name="human-${key}" value="reject"/>${escapeHtml(schema.rejectLabel || "拒绝")}</label></div>`;
   return `<section class="human-loop-card" data-human-loop="${escapeHtml(request.id)}" data-human-kind="${escapeHtml(schema.type || "")}" data-human-revision="${request.revision}"><b>${escapeHtml(request.title)}</b><p>${escapeHtml(request.prompt)}</p>${fields}<button type="button" class="human-loop-submit" data-human-loop-submit="${message.id}">提交</button><small class="human-loop-error" aria-live="polite"></small></section>`;
+}
+
+/** Preserve an unfinished HIL answer across unrelated live-state renders. */
+function humanLoopSelections(message, requestId) {
+  const values = message?.humanLoopDrafts?.[requestId];
+  return new Set(Array.isArray(values) ? values.filter((value) => typeof value === "string") : []);
+}
+
+function rememberHumanLoopSelection(messageId, requestId, optionId, checked, maxSelections) {
+  const assistant = (activeConversation()?.messages || []).find((message) => message.id === messageId && message.role === "assistant");
+  if (!assistant || assistant.humanLoop?.id !== requestId) return;
+  const current = humanLoopSelections(assistant, requestId);
+  if (maxSelections === 1) {
+    if (checked) current.clear();
+    if (checked) current.add(optionId);
+  } else if (checked) current.add(optionId);
+  else current.delete(optionId);
+  assistant.humanLoopDrafts = { ...(assistant.humanLoopDrafts || {}), [requestId]: [...current] };
+  saveSessions();
 }
 
 function renderRecovery(message) {
@@ -820,7 +851,9 @@ async function submitHumanLoop(messageId) {
   try {
     const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/human-loop/${encodeURIComponent(request.id)}/respond`, { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() }, body: JSON.stringify({ value, expectedRevision: request.revision }) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-    assistant.humanLoop = undefined; saveSessions(); render(); setStatus("已收到你的回答，继续执行", "running");
+    assistant.humanLoop = undefined;
+    if (assistant.humanLoopDrafts) delete assistant.humanLoopDrafts[request.id];
+    saveSessions(); render(); setStatus("已收到你的回答，继续执行", "running");
   } catch (cause) { if (error) error.textContent = `提交失败：${cause instanceof Error ? cause.message : String(cause)}`; }
 }
 

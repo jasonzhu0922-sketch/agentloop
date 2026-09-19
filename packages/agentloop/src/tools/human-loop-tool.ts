@@ -36,6 +36,7 @@ export function createHumanLoopTool(): RuntimeTool<HumanLoopRequirement> {
                       label: { type: "string", minLength: 1 },
                       description: { type: "string" },
                       evidenceRefs: { type: "array", items: { type: "string" } },
+                      identityRefs: { type: "array", items: { type: "string" } },
                     },
                   },
                 },

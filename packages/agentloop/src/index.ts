@@ -46,6 +46,7 @@ export {
   HUMAN_LOOP_TOOL_NAME,
   skillExecutionCwd,
   ToolRegistry,
+  SimpleCommandSafetyPlugin,
   VISIBLE_DIRECTORY_TOOL_NAMES,
 } from "./tools/index.ts";
 export type {
@@ -58,6 +59,9 @@ export type {
   ToolSourceCapability,
   ToolSourceDescriptor,
   ToolExecutionContext,
+  ToolExecutionPlugin,
+  ToolExecutionPluginDecision,
+  ToolExecutionPluginInput,
   WebToolsOptions,
 } from "./tools/index.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
@@ -102,12 +106,14 @@ export type {
   PptxPreviewTextRun,
 } from "./runtime/process-artifacts.ts";
 export { RuntimeActionRepository } from "./runtime/runtime-action-repository.ts";
+export { markActionFailedBeforeEffect } from "./runtime/action-effect.ts";
 export type {
   ReplayPolicy,
   RuntimeActionKind,
   RuntimeActionRecord,
   RuntimeActionState,
 } from "./runtime/runtime-action-repository.ts";
+export type { RuntimeActionEffectState } from "./runtime/action-effect.ts";
 export { HumanLoopRepository } from "./runtime/human-loop.ts";
 export type {
   HumanLoopKind,
@@ -118,6 +124,18 @@ export type {
   HumanLoopResponseSchema,
   HumanLoopStatus,
 } from "./runtime/human-loop.ts";
+export {
+  createDecisionCommit,
+  decisionClaimsFromEvidence,
+  decisionCommitsFromEvents,
+  decisionSatisfied,
+  enforceDecisionGate,
+} from "./runtime/decision-ledger.ts";
+export type {
+  RuntimeDecisionClaim,
+  RuntimeDecisionCommit,
+  RuntimeDecisionOption,
+} from "./runtime/decision-ledger.ts";
 export { RunService } from "./runtime/run-service.ts";
 export { RunCheckpointRepository } from "./runtime/run-checkpoint-repository.ts";
 export type { RunCheckpointRecord } from "./runtime/run-checkpoint-repository.ts";

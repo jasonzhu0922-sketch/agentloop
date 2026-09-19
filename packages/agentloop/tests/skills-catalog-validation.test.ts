@@ -28,7 +28,6 @@ const EXPECTED_BUILTIN_SKILL_NAMES = [
   "mcp-builder",
   "pdf",
   "pptx",
-  "presentation-skill",
   "skill-creator",
   "slack-gif-creator",
   "theme-factory",
@@ -88,6 +87,14 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
     assert.match(canvasDesign!.inspection.instructions, /Do not read the renderer source/);
     assert.match(canvasDesign!.inspection.instructions, /Do not reread the philosophy or JSON spec/);
 
+    const pdf = discovered.find((entry) => entry.inspection.name === "pdf");
+    assert.notEqual(pdf, undefined);
+    assert.ok(pdf!.inspection.files.includes("assets/fonts/NotoSansSC.ttf"));
+    assert.ok(pdf!.inspection.files.includes("assets/fonts/OFL.txt"));
+    assert.match(pdf!.inspection.instructions, /AGENTLOOP_SKILL_ROOT_PDF/);
+    assert.match(pdf!.inspection.instructions, /NotoSansSC\.ttf/);
+    assert.doesNotMatch(pdf!.inspection.instructions, /from `fc-list` or a system font path/);
+
     const owner = testOwner();
     const skills = new SkillService(database, {
       packageStoreRoot: packageStore,
@@ -128,10 +135,10 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
 });
 
 test("loaded package Skills show the Runtime path contract before Skill instructions", async () => {
-  const source = await inspectSkillPackage(resolve(SKILL_DIRECTORY, "presentation-skill"));
+  const source = await inspectSkillPackage(resolve(SKILL_DIRECTORY, "pdf"));
   const loaded = formatLoadedSkill(
     {
-      id: "discovered:presentation-skill",
+      id: "discovered:pdf",
       ownerUserId: "system",
       name: source.name,
       description: source.description,
@@ -142,7 +149,7 @@ test("loaded package Skills show the Runtime path contract before Skill instruct
       createdAt: 0,
       updatedAt: 0,
       package: {
-        root: resolve(SKILL_DIRECTORY, "presentation-skill"),
+        root: resolve(SKILL_DIRECTORY, "pdf"),
         entrypointPath: source.entrypointPath,
         packageHash: source.packageHash,
         fileCount: source.fileCount,
@@ -150,8 +157,8 @@ test("loaded package Skills show the Runtime path contract before Skill instruct
       },
     },
     {
-      executionCwd: () => "@skills/presentation-skill",
-      executionRootEnvName: () => "AGENTLOOP_SKILL_ROOT_PRESENTATION_SKILL",
+      executionCwd: () => "@skills/pdf",
+      executionRootEnvName: () => "AGENTLOOP_SKILL_ROOT_PDF",
     },
   );
   assert.ok(
@@ -364,15 +371,6 @@ test("load_skill reports an invalid manifest as a Skill package error if the pac
   } finally {
     await fs.rm(workspace, { recursive: true, force: true });
   }
-});
-
-test("presentation Skill body does not teach workspace-relative paths under the read-only Skill cwd", async () => {
-  const source = await inspectSkillPackage(resolve(SKILL_DIRECTORY, "presentation-skill"));
-  assert.doesNotMatch(source.instructions, /--workspace\s+decks\//);
-  assert.doesNotMatch(source.instructions, /--output\s+out\.pptx/);
-  assert.doesNotMatch(source.instructions, /--outdir\s+(?:renders|review|\/tmp)\b/);
-  assert.match(source.instructions, /execution_context\.workspace\.root/);
-  assert.match(source.instructions, /SKILL_PACKAGE_MUTATED/);
 });
 
 function escapeRegExp(value: string): string {

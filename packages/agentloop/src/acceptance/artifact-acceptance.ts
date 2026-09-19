@@ -544,7 +544,10 @@ function pdfTextLayerProblems(text: string): {
   matchedMarkers: readonly string[];
 } {
   const markers = new Set<string>();
-  const markupMatches = text.match(/<\/?(?:super|sub)(?:\b[^>\r\n]{0,80}>)?/giu) ?? [];
+  // Require the closing delimiter. PDF dictionaries commonly contain
+  // `/Subtype`; a prefix-only match would otherwise misread `</Subtype` in
+  // a dictionary as a leaked `</sub` HTML tag.
+  const markupMatches = text.match(/<\/?(?:super|sub)\b(?:[^>\r\n]{0,80})?>/giu) ?? [];
   for (const marker of markupMatches.slice(0, 12)) markers.add(marker);
   const replacementMatches = text.match(/[\uFFFD\u25A0\u25A1]{2,}/gu) ?? [];
   for (const marker of replacementMatches.slice(0, 12)) markers.add(marker);

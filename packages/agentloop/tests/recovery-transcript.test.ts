@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { reconstructRecoveryTranscript } from "../src/runtime/recovery-transcript.ts";
 import type { RecoveryEvent } from "../src/runtime/recovery-transcript.ts";
+import { createDecisionCommit } from "../src/runtime/decision-ledger.ts";
 
 function events(...items: Array<[string, Record<string, unknown>]>): RecoveryEvent[] {
   return items.map(([type, data], index) => ({ seq: index + 1, type, data }));
@@ -281,4 +282,20 @@ test("recovery keeps the legacy raw HIL value when historical events lack a requ
     role: "user",
     content: "Human-in-the-Loop response: [\"option-1\"]",
   });
+});
+
+test("recovery restores the durable decision ledger without converting it into a mutable user turn", () => {
+  const commit = createDecisionCommit({
+    requestId: "request-1", requestRevision: 1, stepId: "step-1",
+    selectedOptions: [{ id: "selected", label: "Selected", identityRefs: ["identity-1"] }],
+  });
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "do the thing",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["decision.committed", { commit }],
+    ),
+  });
+  assert.deepEqual(transcript.facts.decisionLedger, [commit]);
 });

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream, promises as fs, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,7 +49,8 @@ const READ_RANGE_MAX_LIMIT = 2_000;
 const READ_RANGE_MAX_RANGES = 20;
 const SEARCH_CONTEXT_MAX_LINES = 20;
 const COMMAND_FILE_CHANGE_SCAN_LIMIT = 5_000;
-const PATCH_TEXT_MAX_CHARACTERS = 500_000;
+const PATCH_REPLACEMENT_MAX_CHARACTERS = 50_000;
+const FILE_REVISION_ID_PATTERN = /^rev_[a-f0-9]{32}$/;
 const COMMAND_FILE_CHANGE_RESULT_LIMIT = 200;
 const COMMAND_FILE_CHANGE_IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".agentloop"]);
 const READ_ONLY_ROOT_CHANGE_SCAN_LIMIT = 10_000;
@@ -199,9 +200,19 @@ export type WriteFileMode = "create" | "overwrite" | "append";
 
 export interface PatchFileInput {
   readonly path: string;
-  readonly oldText: string;
-  readonly newText: string;
-  readonly expectedSha256?: string;
+  /** One-indexed, half-open line interval [startLine, endLine) from the read revision. */
+  readonly startLine: number;
+  readonly endLine: number;
+  /** Complete replacement lines without line terminators. */
+  readonly replacementLines: readonly string[];
+  /** Opaque, Run-scoped server handle returned by a workspace file read or write. */
+  readonly baseRevisionId: string;
+}
+
+interface FileRevisionRecord {
+  readonly schema: "agentloop.fileRevision/v1";
+  readonly path: string;
+  readonly sha256: string;
 }
 
 interface ResolvedReadableFile {
@@ -242,6 +253,8 @@ export interface ComputerExecutorOptions {
   readonly readOnlyRoots?: readonly string[];
   /** Server-managed, read-only roots that may be used as command cwd aliases. */
   readonly commandRoots?: readonly CommandRootMount[];
+  /** Run-owned namespace for opaque workspace file revisions. Never model supplied. */
+  readonly fileRevisionScope?: string;
 }
 
 export class ComputerExecutor {
@@ -250,6 +263,7 @@ export class ComputerExecutor {
   private readonly commandEnvironment: Readonly<Record<string, string>>;
   private readonly readOnlyRoots: readonly string[];
   private readonly commandRoots: readonly CommandRootMount[];
+  private readonly fileRevisionScope?: string;
 
   constructor(workspaceRoot: string, options: ComputerExecutorOptions = {}) {
     this.workspaceRoot = realpathSync(resolve(workspaceRoot));
@@ -293,17 +307,22 @@ export class ComputerExecutor {
       }
       return { id: root.id, path: canonical };
     }));
+    if (options.fileRevisionScope !== undefined && (options.fileRevisionScope.length === 0 || options.fileRevisionScope.length > 4_000)) {
+      throw new TypeError("File revision scope must be a non-empty string of at most 4000 characters");
+    }
+    this.fileRevisionScope = options.fileRevisionScope;
   }
 
   withWorkspaceRoot(
     workspaceRoot: string,
-    options: { commandRoots?: readonly CommandRootMount[] } = {},
+    options: { commandRoots?: readonly CommandRootMount[]; fileRevisionScope?: string } = {},
   ): ComputerExecutor {
     return new ComputerExecutor(workspaceRoot, {
       executableAliases: Object.fromEntries(this.executableAliases),
       commandEnvironment: this.commandEnvironment,
       readOnlyRoots: this.readOnlyRoots,
       commandRoots: options.commandRoots ?? this.commandRoots,
+      fileRevisionScope: options.fileRevisionScope ?? this.fileRevisionScope,
     });
   }
 
@@ -331,43 +350,67 @@ export class ComputerExecutor {
     totalLines?: number;
     nextOffset?: number;
     ranges?: ReadFileRangeResult[];
+    revisionId?: string;
   }> {
     const resolvedFile = await this.resolveReadableFile(path);
     const target = resolvedFile.absolutePath;
-    const stat = await fs.stat(target);
-    if (!stat.isFile()) throw badRequest("path must identify a regular file");
+    const bindWorkspaceRevision = this.fileRevisionScope !== undefined && isInsideRoot(target, this.workspaceRoot);
+    const readStable = async <T>(read: () => Promise<T>): Promise<{ value: T; revisionId?: string }> => {
+      if (!bindWorkspaceRevision) return { value: await read() };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const beforeSha256 = await sha256File(target);
+        const value = await read();
+        const afterSha256 = await sha256File(target);
+        if (beforeSha256 === afterSha256) {
+          const revision = await this.issueFileRevision(resolvedFile, afterSha256);
+          return { value, ...revision };
+        }
+      }
+      throw conflict("File changed while it was being read; reread the file before patching");
+    };
     if (options.ranges !== undefined || options.offset !== undefined || options.limit !== undefined) {
       const requestedRanges = normalizeReadLineRanges(
         options.ranges ?? [{ offset: options.offset ?? 1, limit: options.limit }],
       );
-      const { ranges, totalLines } = await readLineRanges(target, requestedRanges);
-      const nextOffset = ranges.length === 1 ? ranges[0].nextOffset : undefined;
+      const { value, revisionId } = await readStable(async () => {
+        const stat = await fs.stat(target);
+        if (!stat.isFile()) throw badRequest("path must identify a regular file");
+        const { ranges, totalLines } = await readLineRanges(target, requestedRanges);
+        const nextOffset = ranges.length === 1 ? ranges[0].nextOffset : undefined;
+        return {
+          content: formatReadRangeContent(resolvedFile.workspacePath, ranges),
+          bytes: stat.size,
+          truncated: stat.size > maximumBytes || ranges.some((range) => range.truncated),
+          totalLines,
+          nextOffset,
+          ranges,
+        };
+      });
       return {
-        content: formatReadRangeContent(resolvedFile.workspacePath, ranges),
-        bytes: stat.size,
-        truncated: stat.size > maximumBytes || ranges.some((range) => range.truncated),
+        ...value,
         ...readFileResolutionMetadata(resolvedFile),
         ...(options.ranges === undefined ? { offset: requestedRanges[0].offset, limit: requestedRanges[0].limit } : {}),
-        totalLines,
-        ...(nextOffset === undefined ? {} : { nextOffset }),
-        ranges,
+        ...(revisionId === undefined ? {} : { revisionId }),
       };
     }
-    const handle = await fs.open(target, "r");
-    try {
-      const length = Math.min(stat.size, maximumBytes);
-      const buffer = Buffer.alloc(length);
-      await handle.read(buffer, 0, length, 0);
-      const content = buffer.toString("utf8");
-      return {
-        content,
-        bytes: stat.size,
-        truncated: stat.size > maximumBytes,
-        ...readFileResolutionMetadata(resolvedFile),
-      };
-    } finally {
-      await handle.close();
-    }
+    const { value, revisionId } = await readStable(async () => {
+      const stat = await fs.stat(target);
+      if (!stat.isFile()) throw badRequest("path must identify a regular file");
+      const handle = await fs.open(target, "r");
+      try {
+        const length = Math.min(stat.size, maximumBytes);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, 0);
+        return { content: buffer.toString("utf8"), bytes: stat.size, truncated: stat.size > maximumBytes };
+      } finally {
+        await handle.close();
+      }
+    });
+    return {
+      ...value,
+      ...readFileResolutionMetadata(resolvedFile),
+      ...(revisionId === undefined ? {} : { revisionId }),
+    };
   }
 
   async storeContentReference(content: string): Promise<ContentReference> {
@@ -424,6 +467,73 @@ export class ComputerExecutor {
       sha256: await sha256File(resolvedFile.absolutePath),
       ...readFileResolutionMetadata(resolvedFile),
     };
+  }
+
+  /**
+   * File content hashes remain server-only. Callers receive an opaque handle
+   * which is bound to this Run namespace and the resolved workspace path.
+   */
+  private async issueFileRevision(
+    file: ResolvedReadableFile,
+    knownSha256?: string,
+  ): Promise<{ revisionId?: string }> {
+    if (this.fileRevisionScope === undefined || !isInsideRoot(file.absolutePath, this.workspaceRoot)) return {};
+    const revisionId = `rev_${randomUUID().replace(/-/g, "")}`;
+    const directory = this.fileRevisionDirectory();
+    this.assertContained(directory);
+    this.assertNotReadOnly(directory);
+    await this.ensureWritableDirectory(directory);
+    const record: FileRevisionRecord = {
+      schema: "agentloop.fileRevision/v1",
+      path: file.workspacePath,
+      sha256: knownSha256 ?? await sha256File(file.absolutePath),
+    };
+    const target = resolve(directory, `${revisionId}.json`);
+    this.assertContained(target);
+    this.assertNotReadOnly(target);
+    await fs.writeFile(target, JSON.stringify(record), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return { revisionId };
+  }
+
+  private async assertCurrentFileRevision(revisionId: string, path: string, currentSha256: string): Promise<void> {
+    if (this.fileRevisionScope === undefined) {
+      throw conflict("Patch requires a Run-scoped file revision; reread the file before patching");
+    }
+    if (!FILE_REVISION_ID_PATTERN.test(revisionId)) {
+      throw badRequest("baseRevisionId must be an opaque revision handle returned by computer_read_file, computer_write_file, or computer_patch_file");
+    }
+    const target = resolve(this.fileRevisionDirectory(), `${revisionId}.json`);
+    this.assertContained(target);
+    let raw: string;
+    try {
+      raw = await fs.readFile(target, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw conflict("Patch precondition failed: baseRevisionId is unknown for this Run; reread the file before patching");
+      }
+      throw error;
+    }
+    let record: FileRevisionRecord | undefined;
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        const candidate = value as Record<string, unknown>;
+        if (candidate.schema === "agentloop.fileRevision/v1" && typeof candidate.path === "string" && typeof candidate.sha256 === "string") {
+          record = { schema: "agentloop.fileRevision/v1", path: candidate.path, sha256: candidate.sha256 };
+        }
+      }
+    } catch { /* Invalid server record is not a model-repairable input. */ }
+    if (record === undefined || record.path !== path) {
+      throw conflict("Patch precondition failed: baseRevisionId does not belong to this file; reread the target before patching");
+    }
+    if (record.sha256 !== currentSha256) {
+      throw conflict("Patch precondition failed: file revision is stale; reread the file before patching");
+    }
+  }
+
+  private fileRevisionDirectory(): string {
+    const scope = createHash("sha256").update(this.fileRevisionScope!).digest("hex");
+    return resolve(this.workspaceRoot, ".agentloop", "file-revisions", scope.slice(0, 32));
   }
 
   async prepareWritableFile(path: string, mode: "create" | "overwrite"): Promise<{
@@ -1099,6 +1209,7 @@ export class ComputerExecutor {
     characters: number;
     totalLines: number;
     inspection: WrittenFileInspection;
+    revisionId?: string;
   }> {
     const target = await this.resolveWritable(path);
     const writeMode = typeof mode === "boolean" ? (mode ? "overwrite" : "create") : mode;
@@ -1121,8 +1232,9 @@ export class ComputerExecutor {
     }
     const finalContent = await fs.readFile(target, "utf8");
     const inspection = inspectWrittenText(finalContent);
+    const workspacePath = relative(this.workspaceRoot, target).split(sep).join("/");
     return {
-      path: relative(this.workspaceRoot, target).split(sep).join("/"),
+      path: workspacePath,
       mode: writeMode,
       writtenBytes: Buffer.byteLength(content),
       bytes: Buffer.byteLength(finalContent),
@@ -1130,16 +1242,18 @@ export class ComputerExecutor {
       characters: inspection.characters,
       totalLines: inspection.totalLines,
       inspection,
+      ...(await this.issueFileRevision({ absolutePath: target, workspacePath })),
     };
   }
 
   async patchFile(input: PatchFileInput): Promise<{
     schema: "agentloop.filePatch/v1";
     path: string;
-    operation: "replace_text";
+    operation: "replace_lines";
     replacements: number;
     hunk: {
       startLine: number;
+      endLine: number;
       oldLines: number;
       newLines: number;
     };
@@ -1161,13 +1275,17 @@ export class ComputerExecutor {
       totalLines: number;
     };
     inspection: WrittenFileInspection;
+    revisionId?: string;
   }> {
-    if (input.oldText.length === 0) throw badRequest("oldText must not be empty");
-    if (input.oldText.length > PATCH_TEXT_MAX_CHARACTERS) {
-      throw badRequest(`oldText must contain at most ${PATCH_TEXT_MAX_CHARACTERS} characters`);
+    if (!Number.isSafeInteger(input.startLine) || !Number.isSafeInteger(input.endLine)) {
+      throw badRequest("startLine and endLine must be safe integers");
     }
-    if (input.newText.length > PATCH_TEXT_MAX_CHARACTERS) {
-      throw badRequest(`newText must contain at most ${PATCH_TEXT_MAX_CHARACTERS} characters`);
+    if (input.replacementLines.some((line) => /[\r\n]/u.test(line))) {
+      throw badRequest("replacementLines must contain complete lines without line terminators");
+    }
+    const replacementCharacters = input.replacementLines.reduce((total, line) => total + line.length, 0);
+    if (replacementCharacters > PATCH_REPLACEMENT_MAX_CHARACTERS) {
+      throw badRequest(`replacementLines must contain at most ${PATCH_REPLACEMENT_MAX_CHARACTERS} characters`);
     }
     const target = await this.resolveExistingWritableFile(input.path);
     const canonicalTarget = await fs.realpath(target);
@@ -1184,16 +1302,21 @@ export class ComputerExecutor {
     const beforeContent = await fs.readFile(target, "utf8");
     if (beforeContent.includes("\0")) throw badRequest("Patch target must be a UTF-8 text file");
     const beforeInspection = inspectWrittenText(beforeContent);
-    if (input.expectedSha256 !== undefined && input.expectedSha256 !== beforeInspection.sha256) {
-      throw conflict("Patch precondition failed: expectedSha256 does not match current file");
+    await this.assertCurrentFileRevision(input.baseRevisionId, workspacePath, beforeInspection.sha256);
+    const beforeLines = splitTextLines(beforeContent);
+    if (input.startLine < 1 || input.endLine < input.startLine || input.endLine > beforeLines.length + 1) {
+      throw badRequest(`line range [${input.startLine}, ${input.endLine}) is outside the ${beforeLines.length}-line file`);
     }
-    const firstMatch = beforeContent.indexOf(input.oldText);
-    if (firstMatch === -1) throw new AppError("NOT_FOUND", "oldText was not found in the patch target", 404);
-    const secondMatch = beforeContent.indexOf(input.oldText, firstMatch + input.oldText.length);
-    if (secondMatch !== -1) {
-      throw conflict("oldText matched more than once; provide a larger unique surrounding fragment");
-    }
-    const afterContent = beforeContent.slice(0, firstMatch) + input.newText + beforeContent.slice(firstMatch + input.oldText.length);
+    const firstLineIndex = input.startLine - 1;
+    const endLineIndex = input.endLine - 1;
+    const afterLines = [
+      ...beforeLines.slice(0, firstLineIndex),
+      ...input.replacementLines,
+      ...beforeLines.slice(endLineIndex),
+    ];
+    const lineEnding = beforeContent.includes("\r\n") ? "\r\n" : "\n";
+    const hasTrailingLineEnding = /\r?\n$/u.test(beforeContent);
+    const afterContent = afterLines.join(lineEnding) + (hasTrailingLineEnding && afterLines.length > 0 ? lineEnding : "");
     if (afterContent === beforeContent) throw badRequest("Patch would not change the file");
     await fs.writeFile(target, afterContent, { encoding: "utf8", flag: "w", mode: 0o600 });
     const afterInspection = inspectWrittenText(afterContent);
@@ -1202,12 +1325,13 @@ export class ComputerExecutor {
     return {
       schema: "agentloop.filePatch/v1",
       path: workspacePath,
-      operation: "replace_text",
+      operation: "replace_lines",
       replacements: 1,
       hunk: {
-        startLine: lineNumberAtOffset(beforeContent, firstMatch),
-        oldLines: splitTextLines(input.oldText).length,
-        newLines: splitTextLines(input.newText).length,
+        startLine: input.startLine,
+        endLine: input.endLine,
+        oldLines: endLineIndex - firstLineIndex,
+        newLines: input.replacementLines.length,
       },
       before: {
         bytes: beforeBytes,
@@ -1227,6 +1351,7 @@ export class ComputerExecutor {
         totalLines: afterInspection.totalLines - beforeInspection.totalLines,
       },
       inspection: afterInspection,
+      ...(await this.issueFileRevision({ absolutePath: canonicalTarget, workspacePath }, afterInspection.sha256)),
     };
   }
 
@@ -1252,6 +1377,17 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
     }> {
+    await this.preflightRunCommand(input);
+    return await this.runCommandAfterPreflight(input);
+  }
+
+  async preflightRunCommand(input: {
+    command: string;
+    args: readonly string[];
+    cwd: string;
+    timeoutMs: number;
+    computationInputs?: readonly CommandComputationInput[];
+  }): Promise<void> {
     if (!EXECUTABLE_NAME_PATTERN.test(input.command)) {
       throw badRequest("command must be an executable name without shell syntax or path separators");
     }
@@ -1261,9 +1397,36 @@ export class ComputerExecutor {
     }
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
     await this.assertCommandArgumentsDoNotEscape(input.args, cwdResolution);
-    const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
     const cwd = cwdResolution.path;
     if (!(await fs.stat(cwd)).isDirectory()) throw badRequest("cwd must be a directory");
+    await this.captureCommandComputationInputs(input.computationInputs ?? []);
+  }
+
+  private async runCommandAfterPreflight(input: {
+    command: string;
+    args: readonly string[];
+    cwd: string;
+    timeoutMs: number;
+    computationInputs?: readonly CommandComputationInput[];
+    signal?: AbortSignal;
+  }): Promise<{
+    exitCode: number | null;
+    signal: string | null;
+    stdout: string;
+    stderr: string;
+    stdoutRef?: CommandOutputReference;
+    stderrRef?: CommandOutputReference;
+    fileChanges: CommandFileChange[];
+    fileChangesTruncated: boolean;
+    truncated: boolean;
+    timedOut: boolean;
+    evidenceReceipt?: Record<string, unknown>;
+    computationReceipt?: Record<string, unknown>;
+    computationEvidenceError?: string;
+  }> {
+    const cwdResolution = await this.resolveCommandCwd(input.cwd);
+    const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
+    const cwd = cwdResolution.path;
     const limit = DEFAULT_OUTPUT_LIMIT;
     const beforeFiles = await this.snapshotWorkspaceFiles();
     const beforeReadOnlyRoots = await snapshotCommandRoots(commandRootsToProtect(this.commandRoots, cwdResolution.readOnlyRoot));
@@ -1856,7 +2019,7 @@ function structuredStdoutProjection(
 ): string | undefined {
   const structured = structuredCommandOutput(content, kind, options);
   if (structured === undefined) return undefined;
-  const { parsed, deliveryCandidate, evidenceReceipt, controlSignals } = structured;
+  const { parsed, deliveryCandidate, evidenceReceipt, controlSignals, decisionClaim } = structured;
   const contentLocation = {
     kind: "content_addressed",
     stream: kind,
@@ -1875,6 +2038,7 @@ function structuredStdoutProjection(
     ...(typeof parsed.delivery_markdown === "string" ? { delivery_markdown: parsed.delivery_markdown } : {}),
     ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
     ...(controlSignals === undefined ? {} : { controlSignals }),
+    ...(decisionClaim === undefined ? {} : { decisionClaim }),
     ...(parsed.assessmentProjection === undefined ? {} : { assessmentProjection: parsed.assessmentProjection }),
     ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
     contentLocation,
@@ -1895,6 +2059,7 @@ function structuredStdoutProjection(
     ...(parsed.assessment_summary === undefined ? {} : { assessment_summary: parsed.assessment_summary }),
     ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
     ...(controlSignals === undefined ? {} : { controlSignals }),
+    ...(decisionClaim === undefined ? {} : { decisionClaim }),
     contentLocation,
     stdoutRef: reference,
     stdoutReferenceNotice: commandOutputReferenceNotice(kind, reference),
@@ -1910,6 +2075,7 @@ function structuredCommandOutput(
   readonly deliveryCandidate?: Record<string, unknown>;
   readonly evidenceReceipt?: Record<string, unknown>;
   readonly controlSignals?: readonly HumanLoopControlSignal[];
+  readonly decisionClaim?: Record<string, unknown>;
 } | undefined {
   if (kind !== "stdout") return undefined;
   const parsed = parseJsonRecord(content);
@@ -1925,12 +2091,14 @@ function structuredCommandOutput(
   const humanLoopSignal = options.allowControlSignals === true
     ? createHumanLoopControlSignal(parsed.humanLoopRequirement)
     : undefined;
-  if (!hasDeliveryOutput && !hasDeliveryMarkdown && evidenceReceipt === undefined && humanLoopSignal === undefined) return undefined;
+  const decisionClaim = isPlainRecord(parsed.decisionClaim) ? parsed.decisionClaim : undefined;
+  if (!hasDeliveryOutput && !hasDeliveryMarkdown && evidenceReceipt === undefined && humanLoopSignal === undefined && decisionClaim === undefined) return undefined;
   return {
     parsed,
     ...(deliveryCandidate === undefined ? {} : { deliveryCandidate }),
     ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
     ...(humanLoopSignal === undefined ? {} : { controlSignals: [humanLoopSignal] }),
+    ...(decisionClaim === undefined ? {} : { decisionClaim }),
   };
 }
 
@@ -2019,15 +2187,6 @@ function splitTextLines(content: string): string[] {
   const lines = content.split(/\r?\n/u);
   if (lines.at(-1) === "") lines.pop();
   return lines;
-}
-
-function lineNumberAtOffset(content: string, offset: number): number {
-  if (offset <= 0) return 1;
-  let line = 1;
-  for (let index = 0; index < offset; index += 1) {
-    if (content.charCodeAt(index) === 10) line += 1;
-  }
-  return line;
 }
 
 function writtenFileSampleRanges(lines: readonly string[]): WrittenFileSampleRange[] {

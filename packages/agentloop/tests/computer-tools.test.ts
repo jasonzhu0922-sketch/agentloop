@@ -215,7 +215,7 @@ test("dangerous computer tools remain unavailable until the Run grant explicitly
     assert.equal(denied.definitions.some((tool) => tool.name === "computer_write_file"), false);
     assert.equal(denied.definitions.some((tool) => tool.name === "materialize_paginated_html"), false);
     assert.throws(
-      () => denied.prepare({ id: "patch-1", name: "computer_patch_file", arguments: { path: "x", oldText: "x", newText: "y" } }),
+      () => denied.prepare({ id: "patch-1", name: "computer_patch_file", arguments: { path: "x", startLine: 1, endLine: 2, replacementLines: ["y"] } }),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
     );
     assert.throws(
@@ -359,6 +359,92 @@ test("convert_artifact converts an existing workspace artifact and returns a sta
       targetFormat: "pdf",
     });
     assert.match(await fs.readFile(join(root, "deliverables", "report.pdf"), "utf8"), /^%PDF-1\.4/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("convert_artifact converts PPTX to PDF without routing through LibreOffice", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-pptx-pdf-"));
+  try {
+    await fs.writeFile(join(root, "deck.pptx"), "PK\u0003\u0004 fake pptx payload");
+    const python3 = await writeExecutableFixture(root, "fake-python3.cjs", [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const [, , mode, script, input, output] = process.argv;",
+      "if (mode !== '-c' || !script.includes('python-pptx') && !script.includes('from pptx import Presentation')) process.exit(2);",
+      "if (!fs.existsSync(input)) process.exit(3);",
+      "fs.writeFileSync(output, '%PDF-1.4\\n% pptx renderer\\n%%EOF\\n');",
+      "",
+    ].join("\n"));
+    const soffice = await writeExecutableFixture(root, "fake-soffice.cjs", [
+      "#!/usr/bin/env node",
+      "process.stderr.write('LibreOffice must not be invoked for PPTX PDF conversion');",
+      "process.exit(9);",
+      "",
+    ].join("\n"));
+    const executor = new ComputerExecutor(root, { executableAliases: { python3, soffice } });
+    const registry = new ToolRegistry(createCoreTools({ executor }));
+    const allowed = registry.materialize(grant(["convert_artifact", "verify_artifact_acceptance"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "convert_artifact");
+    assert.match(definition?.description ?? "", /PPTX sources currently support PDF output/);
+    const prepared = allowed.prepare({
+      id: "convert-pptx",
+      name: "convert_artifact",
+      arguments: {
+        inputPath: "deck.pptx",
+        outputPath: "deliverables/deck.pdf",
+        targetFormat: "pdf",
+      },
+    });
+    const result = await prepared.tool.execute(grantContext(["convert_artifact", "verify_artifact_acceptance"]), prepared.input) as {
+      schema: string;
+      source: { format: string };
+      output: { path: string; format: string; mimeType: string };
+      engine: string;
+      commands: Array<{ engine: string; exitCode: number | null }>;
+      artifactReceipt: { operation: { conversionEngine: string; sourceFormat: string; targetFormat: string } };
+    };
+
+    assert.equal(result.schema, "agentloop.artifactConversion/v1");
+    assert.equal(result.source.format, "pptx");
+    assert.equal(result.output.path, "deliverables/deck.pdf");
+    assert.equal(result.output.format, "pdf");
+    assert.equal(result.output.mimeType, "application/pdf");
+    assert.equal(result.engine, "python-pptx-reportlab");
+    assert.deepEqual(result.commands.map((command) => [command.engine, command.exitCode]), [
+      ["python-pptx-reportlab", 0],
+    ]);
+    assert.equal(result.artifactReceipt.operation.conversionEngine, "python-pptx-reportlab");
+    assert.equal(result.artifactReceipt.operation.sourceFormat, "pptx");
+    assert.equal(result.artifactReceipt.operation.targetFormat, "pdf");
+    assert.match(await fs.readFile(join(root, "deliverables", "deck.pdf"), "utf8"), /^%PDF-1\.4/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("convert_artifact rejects unsupported PPTX target formats before spawning a converter", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-pptx-target-"));
+  try {
+    await fs.writeFile(join(root, "deck.pptx"), "PK\u0003\u0004 fake pptx payload");
+    const executor = new ComputerExecutor(root);
+    const registry = new ToolRegistry(createCoreTools({ executor }));
+    const allowed = registry.materialize(grant(["convert_artifact"]));
+    const prepared = allowed.prepare({
+      id: "convert-pptx-html",
+      name: "convert_artifact",
+      arguments: {
+        inputPath: "deck.pptx",
+        outputPath: "deck.html",
+        targetFormat: "html",
+      },
+    });
+    await assert.rejects(
+      () => prepared.tool.execute(grantContext(["convert_artifact"]), prepared.input),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && String((error as Error).message).includes("pptx source format currently supports only pdf target format"),
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -1319,6 +1405,36 @@ test("verify_artifact_acceptance rejects PDF text-layer markup leaks", async () 
   }
 });
 
+test("verify_artifact_acceptance does not mistake a PDF Subtype dictionary for a sub tag", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-pdf-subtype-"));
+  try {
+    await fs.writeFile(join(root, "font.pdf"), [
+      "%PDF-1.4",
+      "1 0 obj <</Type /Font /Subtype /OpenType /Length 0>> endobj",
+      "%%EOF",
+    ].join("\n"));
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["verify_artifact_acceptance"]));
+    const prepared = allowed.prepare({
+      id: "accept-pdf-subtype",
+      name: "verify_artifact_acceptance",
+      arguments: { artifactPath: "font.pdf", profileId: "pdf" },
+    });
+
+    const result = await prepared.tool.execute(grantContext(["verify_artifact_acceptance"]), prepared.input) as {
+      verdict: string;
+      evidenceKinds: { failed: string[] };
+      checks: Array<{ id: string; status: string; evidence: Record<string, unknown> }>;
+    };
+
+    assert.notEqual(result.verdict, "rejected");
+    assert.deepEqual(result.evidenceKinds.failed, []);
+    assert.equal(check(result, "pdf_static_text_sanity")?.status, "passed");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verify_artifact_acceptance keeps structurally valid PDF evidence caveated without text leaks", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-pdf-ok-"));
   try {
@@ -1469,7 +1585,7 @@ test("computer_write_file appends chunks and receipts the final file state", asy
   }
 });
 
-test("computer_patch_file replaces one exact fragment and receipts the patched artifact", async () => {
+test("computer_patch_file replaces a revision-bound line interval and receipts the patched artifact", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-"));
   try {
     const before = [
@@ -1485,18 +1601,36 @@ test("computer_patch_file replaces one exact fragment and receipts the patched a
     await fs.writeFile(join(root, "reports", "report.html"), before);
     const beforeSha256 = createHash("sha256").update(before).digest("hex");
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
-    const allowed = registry.materialize(grant(["computer_patch_file", "verify_artifact_acceptance"]));
+    const allowed = registry.materialize(grant(["computer_read_file", "computer_patch_file", "verify_artifact_acceptance"]));
     const definition = allowed.definitions.find((tool) => tool.name === "computer_patch_file");
-    assert.match(definition?.description ?? "", /oldText must match the current file exactly once/);
+    assert.match(definition?.description ?? "", /half-open line interval/);
+    assert.match(definition?.description ?? "", /baseRevisionId/);
     assert.match(definition?.description ?? "", /verify_artifact_acceptance/);
+    const read = allowed.prepare({
+      id: "read-report-before-patch",
+      name: "computer_read_file",
+      arguments: { path: "reports/report.html" },
+    });
+    const readResult = await read.tool.execute(grantContext(["computer_read_file", "computer_patch_file", "verify_artifact_acceptance"]), read.input) as { revisionId?: string };
+    assert.match(readResult.revisionId ?? "", /^rev_[a-f0-9]{32}$/);
+    assert.equal("sha256" in readResult, false, "direct reads expose an opaque revision, not a transferable file hash");
+    assert.throws(
+      () => allowed.prepare({
+        id: "patch-reject-hash",
+        name: "computer_patch_file",
+        arguments: { path: "reports/report.html", startLine: 2, endLine: 3, replacementLines: ["status: final"], expectedSha256: "0".repeat(64) },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST") && String((error as Error).message).includes("expectedSha256 is not accepted"),
+    );
     const prepared = allowed.prepare({
       id: "patch-report",
       name: "computer_patch_file",
       arguments: {
         path: "reports/report.html",
-        oldText: "const RAW_DATA = [{ n: 1 }];\n{n:2},",
-        newText: "const RAW_DATA = [{ n: 1 }, { n: 2 }];",
-        expectedSha256: beforeSha256,
+        startLine: 4,
+        endLine: 6,
+        replacementLines: ["const RAW_DATA = [{ n: 1 }, { n: 2 }];"],
+        baseRevisionId: readResult.revisionId,
       },
     });
 
@@ -1505,7 +1639,7 @@ test("computer_patch_file replaces one exact fragment and receipts the patched a
       path: string;
       operation: string;
       replacements: number;
-      hunk: { startLine: number; oldLines: number; newLines: number };
+      hunk: { startLine: number; endLine: number; oldLines: number; newLines: number };
       before: { bytes: number; sha256: string; totalLines: number };
       after: { bytes: number; sha256: string; totalLines: number };
       delta: { bytes: number; totalLines: number };
@@ -1529,9 +1663,9 @@ test("computer_patch_file replaces one exact fragment and receipts the patched a
     assert.equal(await fs.readFile(join(root, "reports", "report.html"), "utf8"), after);
     assert.equal(result.schema, "agentloop.filePatch/v1");
     assert.equal(result.path, "reports/report.html");
-    assert.equal(result.operation, "replace_text");
+    assert.equal(result.operation, "replace_lines");
     assert.equal(result.replacements, 1);
-    assert.deepEqual(result.hunk, { startLine: 4, oldLines: 2, newLines: 1 });
+    assert.deepEqual(result.hunk, { startLine: 4, endLine: 6, oldLines: 2, newLines: 1 });
     assert.equal(result.before.sha256, beforeSha256);
     assert.equal(result.before.bytes, Buffer.byteLength(before));
     assert.equal(result.before.totalLines, 7);
@@ -1555,50 +1689,74 @@ test("computer_patch_file replaces one exact fragment and receipts the patched a
   }
 });
 
-test("computer_patch_file fails closed for stale, missing, and ambiguous patch preconditions", async () => {
+test("computer_patch_file fails closed for stale revisions, cross-file handles, and invalid line intervals", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-preconditions-"));
   try {
     await fs.writeFile(join(root, "report.txt"), "alpha\nneedle\nneedle\nomega\n");
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
-    const allowed = registry.materialize(grant(["computer_patch_file"]));
+    const allowed = registry.materialize(grant(["computer_read_file", "computer_patch_file"]));
+
+    const read = allowed.prepare({
+      id: "read-before-stale-patch",
+      name: "computer_read_file",
+      arguments: { path: "report.txt" },
+    });
+    const readResult = await read.tool.execute(grantContext(["computer_read_file", "computer_patch_file"]), read.input) as { revisionId?: string };
+    await fs.writeFile(join(root, "report.txt"), "changed\nneedle\nneedle\nomega\n");
 
     const stale = allowed.prepare({
       id: "patch-stale",
       name: "computer_patch_file",
-      arguments: { path: "report.txt", oldText: "alpha", newText: "beta", expectedSha256: "0".repeat(64) },
+      arguments: { path: "report.txt", startLine: 1, endLine: 2, replacementLines: ["beta"], baseRevisionId: readResult.revisionId },
     });
     await assert.rejects(
       () => stale.tool.execute(grantContext(["computer_patch_file"]), stale.input),
       (error: unknown) => hasCode(error, "CONFLICT")
-        && String((error as Error).message).includes("expectedSha256"),
+        && String((error as Error).message).includes("file revision is stale"),
     );
 
-    const missing = allowed.prepare({
-      id: "patch-missing",
+    const freshRead = allowed.prepare({
+      id: "read-after-stale-patch",
+      name: "computer_read_file",
+      arguments: { path: "report.txt" },
+    });
+    const freshReadResult = await freshRead.tool.execute(grantContext(["computer_read_file", "computer_patch_file"]), freshRead.input) as { revisionId?: string };
+    await fs.writeFile(join(root, "other.txt"), "alpha");
+    const wrongFile = allowed.prepare({
+      id: "patch-wrong-file-revision",
       name: "computer_patch_file",
-      arguments: { path: "report.txt", oldText: "absent", newText: "present" },
+      arguments: { path: "other.txt", startLine: 1, endLine: 2, replacementLines: ["beta"], baseRevisionId: freshReadResult.revisionId },
     });
     await assert.rejects(
-      () => missing.tool.execute(grantContext(["computer_patch_file"]), missing.input),
-      (error: unknown) => hasCode(error, "NOT_FOUND")
-        && String((error as Error).message).includes("oldText"),
+      () => wrongFile.tool.execute(grantContext(["computer_patch_file"]), wrongFile.input),
+      (error: unknown) => hasCode(error, "CONFLICT") && String((error as Error).message).includes("does not belong to this file"),
     );
 
-    const ambiguous = allowed.prepare({
-      id: "patch-ambiguous",
+    const invalidRange = allowed.prepare({
+      id: "patch-invalid-range",
       name: "computer_patch_file",
-      arguments: { path: "report.txt", oldText: "needle", newText: "pin" },
+      arguments: { path: "report.txt", startLine: 3, endLine: 6, replacementLines: ["present"], baseRevisionId: freshReadResult.revisionId },
     });
     await assert.rejects(
-      () => ambiguous.tool.execute(grantContext(["computer_patch_file"]), ambiguous.input),
-      (error: unknown) => hasCode(error, "CONFLICT")
-        && String((error as Error).message).includes("more than once"),
+      () => invalidRange.tool.execute(grantContext(["computer_patch_file"]), invalidRange.input),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && String((error as Error).message).includes("line range"),
+    );
+
+    assert.throws(
+      () => allowed.prepare({
+        id: "patch-line-terminator",
+        name: "computer_patch_file",
+        arguments: { path: "report.txt", startLine: 2, endLine: 3, replacementLines: ["pin\nneedle"], baseRevisionId: freshReadResult.revisionId },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && String((error as Error).message).includes("line terminators"),
     );
 
     const absentParent = allowed.prepare({
       id: "patch-absent-parent",
       name: "computer_patch_file",
-      arguments: { path: "missing/report.txt", oldText: "x", newText: "y" },
+      arguments: { path: "missing/report.txt", startLine: 1, endLine: 2, replacementLines: ["y"], baseRevisionId: freshReadResult.revisionId },
     });
     await assert.rejects(
       () => absentParent.tool.execute(grantContext(["computer_patch_file"]), absentParent.input),
@@ -1611,7 +1769,7 @@ test("computer_patch_file fails closed for stale, missing, and ambiguous patch p
         && (error as { code: unknown }).code === "ENOENT",
     );
 
-    assert.equal(await fs.readFile(join(root, "report.txt"), "utf8"), "alpha\nneedle\nneedle\nomega\n");
+    assert.equal(await fs.readFile(join(root, "report.txt"), "utf8"), "changed\nneedle\nneedle\nomega\n");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

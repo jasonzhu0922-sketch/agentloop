@@ -10,7 +10,7 @@ const DEFAULT_CONVERSION_TIMEOUT_MS = 120_000;
 const MIN_CONVERSION_TIMEOUT_MS = 1_000;
 const MAX_CONVERSION_TIMEOUT_MS = 300_000;
 
-const SOURCE_FORMATS = ["auto", "markdown", "html", "docx", "txt"] as const;
+const SOURCE_FORMATS = ["auto", "markdown", "html", "docx", "pptx", "txt"] as const;
 const TARGET_FORMATS = ["docx", "pdf", "html", "markdown", "txt"] as const;
 const REPORTLAB_PDF_FALLBACK_SCRIPT = String.raw`
 import html
@@ -126,6 +126,134 @@ if __name__ == "__main__":
     build_pdf(sys.argv[1], sys.argv[2], sys.argv[3])
 `;
 
+// LibreOffice is deliberately not part of the Runtime conversion contract. This
+// renderer covers the portable PPTX subset (slide geometry, fills, text, images,
+// and basic shapes) using the same Python packages already used by the PPTX Skill.
+const PPTX_PDF_RENDERER_SCRIPT = String.raw`
+from io import BytesIO
+import sys
+import textwrap
+
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from reportlab.lib.colors import HexColor, black, white
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfgen.canvas import Canvas
+
+EMU_PER_POINT = 12700.0
+FONT_NAME = "STSong-Light"
+pdfmetrics.registerFont(UnicodeCIDFont(FONT_NAME))
+
+
+def color(value, fallback=black):
+    try:
+        rgb = value.rgb
+        if rgb is not None:
+            return HexColor("#" + str(rgb))
+    except Exception:
+        pass
+    return fallback
+
+
+def fill_color(shape):
+    try:
+        if shape.fill.type is None:
+            return None
+        return color(shape.fill.fore_color, white)
+    except Exception:
+        return None
+
+
+def line_color(shape):
+    try:
+        return color(shape.line.color, black)
+    except Exception:
+        return None
+
+
+def draw_text(canvas, shape, slide_height):
+    frame = shape.text_frame
+    left = shape.left / EMU_PER_POINT
+    top = slide_height - (shape.top + shape.height) / EMU_PER_POINT
+    width = max(shape.width / EMU_PER_POINT, 1.0)
+    height = max(shape.height / EMU_PER_POINT, 1.0)
+    margin_left = getattr(frame, "margin_left", 0) / EMU_PER_POINT
+    margin_top = getattr(frame, "margin_top", 0) / EMU_PER_POINT
+    x = left + margin_left
+    y = top + height - margin_top
+    for paragraph in frame.paragraphs:
+        runs = [run for run in paragraph.runs if run.text]
+        text = "".join(run.text for run in runs).strip()
+        if not text:
+            y -= 12
+            continue
+        run = runs[0] if runs else None
+        size = 12
+        if run is not None and run.font.size is not None:
+            size = max(run.font.size.pt, 4)
+        canvas.setFont(FONT_NAME, size)
+        canvas.setFillColor(color(run.font.color, black) if run is not None else black)
+        line_height = size * 1.25
+        max_chars = max(int(width / max(size * 0.55, 1)), 1)
+        for line in text.splitlines() or [""]:
+            for wrapped in textwrap.wrap(line, width=max_chars, break_long_words=False, break_on_hyphens=False) or [""]:
+                if y < top:
+                    return
+                canvas.drawString(x, y - size, wrapped)
+                y -= line_height
+
+
+def draw_shape(canvas, shape, slide_height):
+    shape_type = getattr(shape, "shape_type", None)
+    if shape_type == MSO_SHAPE_TYPE.GROUP:
+        for child in shape.shapes:
+            draw_shape(canvas, child, slide_height)
+        return
+    if shape_type not in {MSO_SHAPE_TYPE.AUTO_SHAPE, MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.TEXT_BOX, MSO_SHAPE_TYPE.PLACEHOLDER}:
+        raise RuntimeError("unsupported PPTX shape type: " + str(shape_type))
+    left = shape.left / EMU_PER_POINT
+    bottom = slide_height - (shape.top + shape.height) / EMU_PER_POINT
+    width = max(shape.width / EMU_PER_POINT, 0)
+    height = max(shape.height / EMU_PER_POINT, 0)
+    if shape_type == MSO_SHAPE_TYPE.PICTURE:
+        canvas.drawImage(ImageReader(BytesIO(shape.image.blob)), left, bottom, width, height, preserveAspectRatio=True, anchor="c", mask="auto")
+    else:
+        fill = fill_color(shape)
+        stroke = line_color(shape)
+        if fill is not None:
+            canvas.setFillColor(fill)
+        if stroke is not None:
+            canvas.setStrokeColor(stroke)
+        canvas.rect(left, bottom, width, height, fill=1 if fill is not None else 0, stroke=1 if stroke is not None else 0)
+    if getattr(shape, "has_text_frame", False):
+        draw_text(canvas, shape, slide_height)
+
+
+def render(input_path, output_path):
+    presentation = Presentation(input_path)
+    width = presentation.slide_width / EMU_PER_POINT
+    height = presentation.slide_height / EMU_PER_POINT
+    canvas = Canvas(output_path, pagesize=(width, height))
+    for slide in presentation.slides:
+        try:
+            background = slide.background.fill
+            if background.type is not None:
+                canvas.setFillColor(color(background.fore_color, white))
+                canvas.rect(0, 0, width, height, fill=1, stroke=0)
+        except Exception:
+            pass
+        for shape in slide.shapes:
+            draw_shape(canvas, shape, height)
+        canvas.showPage()
+    canvas.save()
+
+
+if __name__ == "__main__":
+    render(sys.argv[1], sys.argv[2])
+`;
+
 type SourceFormat = typeof SOURCE_FORMATS[number];
 type ResolvedSourceFormat = Exclude<SourceFormat, "auto">;
 type TargetFormat = typeof TARGET_FORMATS[number];
@@ -145,7 +273,8 @@ export function createArtifactConverterTools(executor: ComputerExecutor): Runtim
     description: [
       "Convert an existing artifact under the workspace root to another document format; requires dangerous-tool consent.",
       "inputPath and outputPath must be relative to the workspace root; absolute paths and @skills/@visible aliases are rejected.",
-      "Supported source formats are auto, markdown, html, docx, and txt. Supported target formats are docx, pdf, html, markdown, and txt.",
+      "Supported source formats are auto, markdown, html, docx, pptx, and txt. Supported target formats are docx, pdf, html, markdown, and txt.",
+      "PPTX sources currently support PDF output through the portable python-pptx/reportlab renderer; LibreOffice is not required.",
       "PDF output is rendered through an HTML pipeline when possible, avoiding direct LaTeX-dependent Markdown-to-PDF conversion.",
       "The result includes schema agentloop.artifactConversion/v1 and an embedded artifactReceipt for the converted output. After conversion, call verify_artifact_acceptance for the requested target format.",
     ].join(" "),
@@ -208,9 +337,17 @@ async function executeArtifactConversion(
   if (normalizeWorkspacePath(source.path) === normalizeWorkspacePath(input.outputPath)) {
     throw badRequest("outputPath must be different from inputPath");
   }
+  if (sourceFormat === "pptx" && input.targetFormat !== "pdf") {
+    throw badRequest("pptx source format currently supports only pdf target format");
+  }
   const preparedOutput = await executor.prepareWritableFile(input.outputPath, input.overwrite ? "overwrite" : "create");
   const commands: Array<{ engine: string; args: readonly string[]; exitCode: number | null }> = [];
-  if (input.targetFormat === "pdf") {
+  if (sourceFormat === "pptx") {
+    const args = ["-c", PPTX_PDF_RENDERER_SCRIPT, source.path, preparedOutput.path] as const;
+    const result = await executor.runCommand({ command: "python3", args, cwd: ".", timeoutMs: input.timeoutMs, signal });
+    commands.push({ engine: "python-pptx-reportlab", args: ["-c", "[embedded-pptx-pdf-renderer]", source.path, preparedOutput.path], exitCode: result.exitCode });
+    assertCommandSucceeded("python-pptx-reportlab", result);
+  } else if (input.targetFormat === "pdf") {
     const htmlPath = sourceFormat === "html"
       ? source.path
       : `.agentloop/conversions/${conversionId(source.path, preparedOutput.path)}.html`;
@@ -342,6 +479,7 @@ function inferSourceFormat(path: string): ResolvedSourceFormat | undefined {
   if (extension === ".md" || extension === ".markdown") return "markdown";
   if (extension === ".html" || extension === ".htm") return "html";
   if (extension === ".docx") return "docx";
+  if (extension === ".pptx") return "pptx";
   if (extension === ".txt") return "txt";
   return undefined;
 }

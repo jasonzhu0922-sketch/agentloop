@@ -9,6 +9,7 @@ import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext,
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type {
   CaveatPolicy,
+  ConversationInputBinding,
   ConversationReusableArtifact,
   EvidenceContract,
   EvidenceKind,
@@ -16,6 +17,7 @@ import type {
   OutcomePlanShape,
   PlanProposal,
   PlanStepProposal,
+  PlanningCapability,
   Planner,
   SelectedSkillRole,
   TaskSpec,
@@ -259,7 +261,7 @@ export class ModelPlanner implements Planner {
         "Use the supplied TaskProfile shape as the default shape; only choose a narrower valid shape when the user request is simpler.",
         "Use one leaf for ordinary answers/artifacts; split only for reusable source facts.",
         "Leaves are durable evidence boundaries, not workflow scripts or internal tool checklists.",
-        "Bind listed Skills only to concrete leaves; do not expand unloaded Skill internals.",
+        "selectedSkillRoles is an execution-selection list, not a candidate list: every listed Skill, regardless of role, must also appear in at least one concrete leaf.skillIds; otherwise omit it.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
         "HIL pauses an outcome; preserve its requested deliverable and continue production after the response.",
@@ -352,6 +354,7 @@ export class ModelPlanner implements Planner {
             planningTask.conversationWorkingSet,
             planningTask.turnResolution,
           ),
+          inputBindings: conversationInputBindingsForPlanningTask(planningTask),
           taskIntent: {
             deliverySurface: taskProfile.deliverySurface,
             artifactKind: taskProfile.artifactKind,
@@ -677,8 +680,8 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function planningTaskProfile(task: TaskSpec): TaskProfile {
-  const taskIntent = classifyTaskIntent({
+function planningTaskIntent(task: TaskSpec) {
+  const intent = classifyTaskIntent({
     objective: planningIntentObjective(task),
     toolNames: task.availableToolNames,
     skillNames: task.availableSkills.map((skill) => skill.name),
@@ -686,6 +689,25 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     evidenceDemand: task.turnResolution?.evidenceDemand,
     userConstraints: task.turnResolution?.userConstraints,
   });
+  const target = conversationArtifactTransformationTarget(task);
+  if (target === undefined) return intent;
+  // A server-validated reusable artifact is an explicit workspace deliverable
+  // target. Its format, rather than a lossy paraphrase of the latest turn,
+  // owns the native transformation boundary.
+  return {
+    ...intent,
+    deliverySurface: "workspace_artifact" as const,
+    artifactKind: conversationArtifactKind(target),
+    sourceNeed: "none" as const,
+    researchPolicy: undefined,
+    wantsArtifact: true,
+    wantsConversationAnswer: false,
+  };
+}
+
+function planningTaskProfile(task: TaskSpec): TaskProfile {
+  const taskIntent = planningTaskIntent(task);
+  const priorArtifactTransformation = conversationArtifactTransformationTarget(task) !== undefined;
   const operationProfiles = relevantOperationProfiles(task);
   const operationProfileIds = new Set(operationProfiles.map((profile) => profile.id));
   const artifactKind = taskIntent.artifactKind;
@@ -694,11 +716,13 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     && (task.sources?.length ?? 0) > 0
     && task.responseOnly !== true
     && !uploadedArtifactTransformation
+    && !priorArtifactTransformation
     ? "source_grounded"
     : taskIntent.sourceNeed;
   const recovery = task.conversationWorkingSet?.failedBoundaries.length
     || task.conversationWorkingSet?.activeGoal?.unfinished === true;
-  const dataAnalysisSourceTask = operationProfileIds.has("data_analysis")
+  const dataAnalysisSourceTask = !priorArtifactTransformation
+    && operationProfileIds.has("data_analysis")
     && (taskHasVisibleDataSource(task) || taskHasUploadedDataSource(task));
   const planShape = recovery
     ? "recovery_patch"
@@ -783,6 +807,29 @@ function isUploadedArtifactTransformationTask(
       || (source.originalName.trim().length > 0 && normalizedObjective.includes(source.originalName.toLowerCase()))
     )
   );
+}
+
+/**
+ * Prior accepted artifacts already live in the conversation workspace. Unlike
+ * uploads, they do not need source materialization, but their identity must
+ * be resolved by Runtime before Planner treats the request as a native edit.
+ */
+function conversationArtifactTransformationTarget(task: TaskSpec): ConversationReusableArtifact | undefined {
+  const target = task.turnResolution?.targetArtifact;
+  if (target === undefined || task.turnResolution?.evidenceDemand !== "none") return undefined;
+  return task.conversationWorkingSet?.reusableArtifacts.find((artifact) =>
+    artifact.reusable && artifact.runId === target.runId && artifact.path === target.path,
+  );
+}
+
+function conversationArtifactKind(artifact: ConversationReusableArtifact): NonNullable<TaskProfile["artifactKind"]> {
+  const signal = `${artifact.path} ${artifact.name} ${artifact.mimeType}`.toLowerCase();
+  if (/(?:\.pptx?\b|powerpoint|presentationml)/u.test(signal)) return "presentation";
+  if (/(?:\.xlsx?\b|\.xlsm\b|spreadsheetml|\bexcel\b|\.csv\b)/u.test(signal)) return "spreadsheet";
+  if (/(?:\.html?\b|text\/html)/u.test(signal)) return "html";
+  if (/(?:\.png\b|\.jpe?g\b|\.webp\b|\.gif\b|\.svg\b|image\/)/u.test(signal)) return "image";
+  if (/(?:\.js\b|\.ts\b|\.py\b|\.json\b|\.yaml?\b|text\/x-)/u.test(signal)) return "code";
+  return "document";
 }
 
 function referencesProvidedArtifact(value: string): boolean {
@@ -945,7 +992,7 @@ function planningRuntimeContext(
             "do not create QA or repair leaves unless TaskProfile.planShape is recovery_patch",
             "candidateSkillRoles are suggestions only; do not copy them into selectedSkillRoles unless a concrete leaf binds and executes that Skill",
             "initial selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only",
-            "every initially selected primary_builder Skill must be bound to a concrete leaf that uses it",
+            "every initially selected Skill, regardless of role, must be bound to a concrete leaf that uses it",
           ],
         },
       }),
@@ -966,7 +1013,8 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
     ?? (task.availableTools === undefined
       ? planningCapabilitiesFromToolNames(task.availableToolNames)
       : planningCapabilitiesFromTools(task.availableTools, task.sources));
-  const producibleSourceKinds = new Set(capabilities.flatMap((capability) => capability.produces));
+  const sourceBoundCapabilities = capabilitiesForConcreteTaskSources(task, capabilities);
+  const producibleSourceKinds = new Set(sourceBoundCapabilities.flatMap((capability) => capability.produces));
   const sourceKinds = (["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
     .filter((kind) => producibleSourceKinds.has(kind));
   const strictSourceKinds = sourceKinds.includes("source_summary")
@@ -1022,18 +1070,28 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
   };
 }
 
+/**
+ * Evidence-policy recommendations must describe the concrete inputs in this
+ * Run.  In particular, an upload must not inherit evidence kinds from a
+ * workspace reader whose only valid input is an artifact from an earlier
+ * operation.  Admission remains the authoritative fail-closed check.
+ */
+function capabilitiesForConcreteTaskSources(
+  task: TaskSpec,
+  capabilities: readonly PlanningCapability[],
+): readonly PlanningCapability[] {
+  const sourceKinds = new Set<PlanningCapability["sourceKinds"][number]>();
+  if ((task.sources?.length ?? 0) > 0) sourceKinds.add("uploaded_source");
+  if ((task.visibleDirectories?.length ?? 0) > 0) sourceKinds.add("visible_directory");
+  if (sourceKinds.size === 0) return capabilities;
+  return capabilities.filter((capability) => capability.sourceKinds.some((kind) => sourceKinds.has(kind)));
+}
+
 function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationProfileCatalogForPlanning> {
   const catalog = operationProfileCatalogForPlanning();
   const artifactFollowup = buildArtifactFollowupContext(task);
   const objective = planningIntentObjective(task);
-  const taskIntent = classifyTaskIntent({
-    objective,
-    successCriteria: [],
-    toolNames: [],
-    skillNames: task.availableSkills.map((skill) => skill.name),
-    responseOnly: task.responseOnly,
-    evidenceDemand: task.turnResolution?.evidenceDemand,
-  });
+  const taskIntent = planningTaskIntent(task);
   const selected = inferOperationProfile({
     objective,
     successCriteria: [],
@@ -1079,6 +1137,14 @@ function buildArtifactFollowupContext(task: TaskSpec): {
     readonly runId: string;
     readonly reason: string;
   }[];
+  readonly candidateSourceResults: readonly {
+    readonly result: NonNullable<NonNullable<TaskSpec["conversationWorkingSet"]>["reusableResults"]>[number]["result"];
+    readonly goal: string;
+    readonly summary: string;
+    readonly summaryTruncated: boolean;
+    readonly artifactPaths: readonly string[];
+    readonly evidenceRefs: readonly string[];
+  }[];
   readonly fallbackDeliveryText?: string;
   readonly sourceSelectionPolicy: readonly string[];
 } | undefined {
@@ -1091,13 +1157,7 @@ function buildArtifactFollowupContext(task: TaskSpec): {
     && /(?:\b(?:convert|export|render|generate|create|save|produce|make)\b|转|转换|导出|生成|创建|保存|输出|产出|制作)/iu.test(text);
   const editRequested = artifactMentioned
     && /(?:\b(?:edit|update|modify|change|correct|replace|rename|title)\b|编辑|修改|更改|改为|改成|改掉|替换|标题|重命名|修正)/iu.test(text);
-  const taskIntent = classifyTaskIntent({
-    objective: planningIntentObjective(task),
-    toolNames: task.availableToolNames,
-    skillNames: task.availableSkills.map((skill) => skill.name),
-    responseOnly: task.responseOnly,
-    evidenceDemand: task.turnResolution?.evidenceDemand,
-  });
+  const taskIntent = planningTaskIntent(task);
   const deliveryTextFileRequested = taskIntent.deliverySurface === "workspace_artifact"
     && artifactMentioned
     && /(?:\b(?:generate|create|save|produce|make|write|export)\b|生成|创建|保存|输出|产出|制作|写|导出)/iu.test(text);
@@ -1119,8 +1179,16 @@ function buildArtifactFollowupContext(task: TaskSpec): {
     .filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== undefined)
     .slice(0, 5);
 
-  const fallbackDeliveryText = latestCompletedDeliveryText(workset);
-  if (candidates.length === 0 && fallbackDeliveryText === undefined) return undefined;
+  const boundResult = conversationResultInput(task);
+  const candidateSourceResults = boundResult === undefined
+    ? []
+    : [boundResult];
+  // Older completed steps can help legacy conversations, but a newly bound
+  // Outcome result is authoritative and remains readable through its ref.
+  const fallbackDeliveryText = candidateSourceResults.length === 0
+    ? latestCompletedDeliveryText(workset)
+    : undefined;
+  if (candidates.length === 0 && candidateSourceResults.length === 0 && fallbackDeliveryText === undefined) return undefined;
   return {
     schema: "agentloop.artifactFollowup/v1",
     intent: editRequested
@@ -1132,16 +1200,38 @@ function buildArtifactFollowupContext(task: TaskSpec): {
           : "artifact_followup",
     ...(requestedOutputFormat === undefined ? {} : { requestedOutputFormat }),
     candidateSourceArtifacts: candidates,
+    candidateSourceResults,
     ...(fallbackDeliveryText === undefined ? {} : { fallbackDeliveryText }),
     sourceSelectionPolicy: [
       "Prefer an explicitly referenced reusable artifact path or file name from conversationWorkingSet.reusableArtifacts.",
       "For editing an existing artifact in place, use computer_patch_file when available and then verify the patched artifact; do not rewrite the whole file unless the required change cannot be expressed as a unique local patch.",
-      "For artifact conversion, use convert_artifact when available; prefer reusable Markdown, HTML, text, or document artifacts as the conversion source before completed delivery text.",
+      "For artifact conversion, use convert_artifact when available; prefer reusable Markdown, HTML, text, document, or PPTX artifacts as the conversion source before completed delivery text. PPTX sources currently convert directly to PDF through the portable PPTX renderer.",
       "Use completed delivery text only when no reusable artifact can provide the requested content or the user explicitly asks to convert the answer text.",
+      "For a candidateSourceResults entry, its result ref is a formal Plan input. Use its compact summary first and read_conversation_result with that ref for needed content; do not substitute source reacquisition merely because the prior result has source lineage.",
       "When the user asks to generate or save a file from a prior answer and no reusable artifact exists, use the latest completed delivery text as the source content instead of restarting source acquisition.",
       "Use uploaded or original sources only when the user explicitly asks to reanalyze, regenerate from source data, or change source-grounded content.",
     ],
   };
+}
+
+function conversationResultInput(task: TaskSpec): NonNullable<NonNullable<TaskSpec["conversationWorkingSet"]>["reusableResults"]>[number] | undefined {
+  const target = task.turnResolution?.targetResult;
+  if (target === undefined || task.turnResolution?.evidenceDemand !== "none") return undefined;
+  return task.conversationWorkingSet?.reusableResults?.find((item) =>
+    item.result.runId === target.runId
+    && item.result.sha256 === target.sha256
+    && item.result.characters === target.characters,
+  );
+}
+
+function conversationInputBindingsForPlanningTask(task: TaskSpec): readonly ConversationInputBinding[] {
+  const resolution = task.turnResolution;
+  if (resolution?.targetResult === undefined || resolution.relation === "new_goal") return [];
+  return [{
+    schema: "agentloop.conversationInputBinding/v1",
+    result: resolution.targetResult,
+    relation: resolution.relation,
+  }];
 }
 
 function artifactFollowupReason(
@@ -1216,14 +1306,16 @@ function summarizePlanningError(message: string): string {
 }
 
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
-  const taskIntent = classifyTaskIntent({
-    objective: planningIntentObjective(task),
-    toolNames: task.availableToolNames,
-    skillNames: task.availableSkills.map((skill) => skill.name),
-    responseOnly: task.responseOnly,
-    evidenceDemand: task.turnResolution?.evidenceDemand,
-    userConstraints: task.turnResolution?.userConstraints,
-  });
+  const taskIntent = planningTaskIntent(task);
+  const priorResultMaterialization = conversationResultInput(task) !== undefined
+    && taskIntent.deliverySurface === "workspace_artifact";
+  if (priorResultMaterialization && proposal.steps.some((step) => step.role === "fact_acquisition")) {
+    throw new AppError(
+      "PLANNING_ERROR",
+      "A workspace artifact derived from a bound prior Outcome must materialize that formal input in its producer leaf; do not add fact acquisition unless the current user request requires refresh or verification",
+      422,
+    );
+  }
   if (
     taskIntent.deliverySurface === "workspace_artifact"
     && proposal.steps.every((step) => !stepCanProduceObservableArtifact(step))
@@ -1235,9 +1327,8 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
       { artifactKind: taskIntent.artifactKind, deliverySurface: taskIntent.deliverySurface },
     );
   }
-  if (
-    isUploadedArtifactTransformationTask(task, taskIntent)
-  ) {
+  const uploadedArtifactTransformation = isUploadedArtifactTransformationTask(task, taskIntent);
+  if (uploadedArtifactTransformation || conversationArtifactTransformationTarget(task) !== undefined) {
     const primaryBuilderSkillIds = nativePrimaryBuilderSkillIds(task, taskIntent.artifactKind);
     const onlyStep = proposal.steps[0];
     // A continuation after a failed artifact Run may legitimately be a
@@ -1260,7 +1351,9 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
     ) {
       throw new AppError(
         "PLANNING_ERROR",
-        "An uploaded artifact transformation must use one primary-builder leaf that owns original-file materialization, native-format work, and final acceptance; do not create a generic fact-acquisition/source-summary leaf",
+        uploadedArtifactTransformation
+          ? "An uploaded artifact transformation must use one primary-builder leaf that owns original-file materialization, native-format work, and final acceptance; do not create a generic fact-acquisition/source-summary leaf"
+          : "An artifact transformation must use one primary-builder leaf that owns the target file, native-format work, and final acceptance; do not create a generic fact-acquisition/source-summary leaf",
         422,
         { artifactKind: taskIntent.artifactKind, deliverySurface: taskIntent.deliverySurface },
       );
@@ -1372,13 +1465,7 @@ function normalizeUploadedSourceTransformationStep(
     || step.role === "fact_acquisition"
     || !task.availableToolNames.includes("materialize_source_file")
   ) return step;
-  const taskIntent = classifyTaskIntent({
-    objective: planningIntentObjective(task),
-    toolNames: task.availableToolNames,
-    skillNames: task.availableSkills.map((skill) => skill.name),
-    responseOnly: task.responseOnly,
-    evidenceDemand: task.turnResolution?.evidenceDemand,
-  });
+  const taskIntent = planningTaskIntent(task);
   if (!isUploadedArtifactTransformationTask(task, taskIntent)) return step;
   const readySourceIds = (task.sources ?? [])
     .filter((source) => source.status === "ready")

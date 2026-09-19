@@ -211,7 +211,7 @@ const INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT = [
   "<runtime_candidate_repair>",
   "The previous completion candidate exposed internal Runtime evidence markup instead of a user-visible answer.",
   "Return a complete standalone answer for the user using only canonical evidence already present.",
-  "Do not include runtime_evidence_record tags, JSON evidence envelopes, tool-call records, or provider protocol markup.",
+  "Do not include Runtime tags, server-provided evidence envelopes, JSON evidence records, tool-call records, or provider protocol markup.",
   "Do not request or emit tool calls.",
   "</runtime_candidate_repair>",
 ].join("\n");
@@ -1735,7 +1735,14 @@ function isInternalEvidenceMarkupCandidate(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed.length === 0) return false;
   return /<runtime_evidence_record\b/i.test(trimmed)
-    || /"schema"\s*:\s*"agentloop\.runtimeEvidenceRecord\/v1"/i.test(trimmed);
+    || /"schema"\s*:\s*"agentloop\.(?:runtimeEvidenceRecord|serverEvidence)\/v1"/i.test(trimmed)
+    || /\bSERVER-PROVIDED EVIDENCE\b/i.test(trimmed)
+    // Provider reasoning delimiters and the Runtime's presentation-only tool
+    // placeholders are never user-facing completion content. This is a
+    // protocol boundary, not HTML sanitisation: ordinary requested HTML is
+    // unaffected.
+    || /<\/?think\b[^>]*>/i.test(trimmed)
+    || /\btoolResultsOverride\b/i.test(trimmed);
 }
 
 async function evaluateToolStepConvergence(
@@ -2336,9 +2343,7 @@ async function executePrepared(
       type: "tool.dispatched",
       data: { step, toolCallId: call.id, toolName: call.name, replaySafe: tool.replaySafe },
     });
-    const execute = async (): Promise<unknown> => {
-      return tool.execute({ grant, signal }, input);
-    };
+    const execute = async (): Promise<unknown> => entry.value.execute({ grant, signal });
     const value = actionTracker === undefined
       ? await execute()
       : await actionTracker.executeToolCall({
