@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseJsonRecord, runtimeEvidenceRecordsFromToolResult } from "./tool-result-evidence.ts";
 import type { AgentLoopToolEvidence } from "./contracts.ts";
-import type { SkillComplianceAssessment, ToolEvidence } from "../planning/contracts.ts";
+import type { DecisionBindingAssessment, SkillComplianceAssessment, ToolEvidence } from "../planning/contracts.ts";
 
 export interface RuntimeDecisionOption {
   readonly id: string;
@@ -98,8 +98,12 @@ export function decisionSatisfied(commit: RuntimeDecisionCommit, claims: readonl
   });
 }
 
-/** The narrow terminal gate: exact required decisions need matching observable evidence. */
-export function enforceDecisionGate(input: {
+/**
+ * Decision commitments are assessment input, not a second TerminalCommitter
+ * policy.  Missing provenance is an honest `unverified` observation; only a
+ * demonstrated conflict can block a risk-sensitive step.
+ */
+export function assessDecisionBindings(input: {
   readonly assessment: SkillComplianceAssessment;
   readonly planId: string;
   readonly stepId: string;
@@ -109,32 +113,70 @@ export function enforceDecisionGate(input: {
   const required = input.ledger.filter((commit) =>
     commit.mode === "exact"
     && commit.satisfaction === "required"
-    && (commit.planId === undefined || commit.planId === input.planId),
+    && (commit.planId === undefined || commit.planId === input.planId)
+    && (commit.stepId === undefined || commit.stepId === input.stepId),
   );
-  const missing = required.filter((commit) => !decisionSatisfied(commit, decisionClaimsFromEvidence(input.evidence)));
-  if (missing.length === 0) return input.assessment;
-  const refs = missing.map((commit) => commit.id);
+  if (required.length === 0) return input.assessment;
+  const claims = decisionClaimsFromEvidence(input.evidence);
+  const bindings = required.map((commit) => assessBinding(commit, claims, input.assessment.assessmentProfile));
+  const blockingConflict = bindings.some((binding) => binding.blocking && binding.status === "conflict");
+  const observations = bindings
+    .filter((binding) => binding.status !== "satisfied")
+    .map((binding) => `${binding.decisionId}: ${binding.rationale}`);
   return {
     ...input.assessment,
-    approved: false,
-    criteria: input.assessment.criteria.map((criterion) => ({
-      ...criterion,
-      satisfied: false,
-      rationale: `${criterion.rationale} Required user decision binding was not proven.`,
-      evidenceRefs: [...criterion.evidenceRefs, ...refs],
-    })),
-    evidenceDigest: createHash("sha256").update(`${input.assessment.evidenceDigest}:${refs.join(",")}`).digest("hex"),
-    feedback: [
-      input.assessment.feedback,
-      `Decision binding is required before completion: ${refs.join(", ")}. Reuse the committed selection; do not substitute another option.`,
-    ].filter(Boolean).join("\n"),
-    failedBoundary: {
-      stepId: input.stepId,
-      missingEvidenceKinds: ["decision_binding"],
-      violatedSkillRequirements: [],
-      reusableEvidenceRefs: refs,
-      suggestedRepairShape: "repair_leaf",
-    },
+    decisionBindings: bindings,
+    approved: input.assessment.approved && !blockingConflict,
+    evidenceDigest: createHash("sha256")
+      .update(`${input.assessment.evidenceDigest}:${bindings.map((binding) => `${binding.decisionId}:${binding.status}`).join(",")}`)
+      .digest("hex"),
+    feedback: observations.length === 0
+      ? input.assessment.feedback
+      : [input.assessment.feedback, `Decision-binding observations: ${observations.join(" ")}`].filter(Boolean).join("\n"),
+    ...(blockingConflict
+      ? {
+        failedBoundary: {
+          stepId: input.stepId,
+          missingEvidenceKinds: [],
+          violatedSkillRequirements: ["decision_binding_conflict"],
+          reusableEvidenceRefs: bindings.flatMap((binding) => binding.evidenceRefs),
+          suggestedRepairShape: "ask_user" as const,
+        },
+      }
+      : {}),
+  };
+}
+
+function assessBinding(
+  commit: RuntimeDecisionCommit,
+  claims: readonly RuntimeDecisionClaim[],
+  profile: SkillComplianceAssessment["assessmentProfile"],
+): DecisionBindingAssessment {
+  const blocking = profile === "risk_sensitive";
+  if (decisionSatisfied(commit, claims)) {
+    return {
+      decisionId: commit.id, status: "satisfied", blocking,
+      rationale: "Observable evidence matches the committed user decision.", evidenceRefs: [commit.id],
+    };
+  }
+  const selectedIds = new Set(commit.selectedOptions.map((option) => option.id));
+  const selectedRefs = new Set(commit.selectedOptions.flatMap((option) => option.identityRefs ?? []));
+  const conflicting = claims.some((claim) => {
+    if (claim.status === "conflict") return true;
+    if (claim.status !== "satisfied") return false;
+    const claimedIds = claim.selectedOptionIds ?? [];
+    const claimedRefs = claim.identityRefs ?? [];
+    return (claimedIds.length > 0 && !claimedIds.some((id) => selectedIds.has(id)))
+      || (claimedRefs.length > 0 && !claimedRefs.some((ref) => selectedRefs.has(ref)));
+  });
+  return {
+    decisionId: commit.id,
+    status: conflicting ? "conflict" : "unverified",
+    blocking,
+    rationale: conflicting
+      ? "Observable evidence conflicts with the committed user decision."
+      : "No observable evidence independently confirms the committed user decision.",
+    evidenceRefs: [commit.id],
   };
 }
 

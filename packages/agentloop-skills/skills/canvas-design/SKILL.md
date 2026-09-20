@@ -29,7 +29,7 @@ Before proposing directions, writing the philosophy, or creating a render spec, 
 
 `python3 -c "import os,runpy;runpy.run_path(os.path.join(os.environ['AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN'],'scripts','render_static_canvas.py'), run_name='__main__')" --schema`
 
-Treat the returned art-direction values, layout families, composition variants, motif kinds, and topology mappings as the current executable contract. Do not invent enum values and repair them after rendering fails. Use the schema to understand renderer capability, not to choose the aesthetic direction. If a concept cannot be represented by the returned grammar or motifs, choose a custom renderer before writing the spec.
+Treat the returned art-direction values, layout families, composition variants, motif kinds, and topology mappings as the current executable contract. Do not invent enum values and repair them after rendering fails. Use the schema to understand renderer capability, not to choose the aesthetic direction. The renderer does not infer visual direction from the subject, title, labels, industry, mood, or `designIntent`; every render spec must carry an explicit `artDirection`. If a concept cannot be represented by the returned grammar or motifs, choose a custom renderer before writing the spec.
 
 ## Find a distinct direction
 
@@ -50,6 +50,14 @@ Changing only the movement name, palette, seed, or arrangement of the same lines
 The candidate set itself must be diverse. Every pair must differ on at least four axes, including composition topology or central metaphor. When the brief does not fix them, use three different topologies, at least two color strategies, and at least two material languages and image modes. Include one counter-default direction that expresses the subject without the category's familiar palette, glow, geometry, or iconography while preserving the requested tone. A set of three dark technological scenes, three centered monuments, or three variants of the same luminous structure fails this gate.
 
 For each candidate, keep a compact decision record containing its concept, seven axis values exactly as returned by the schema, thumbnail silhouette, supported rendering path, brief evidence, and main tradeoff. Do not write the philosophy or spec until this comparison has produced either an evidence-backed selection or a HIL request. Mentioning three possibilities only in hidden reasoning does not satisfy this gate; preserve the comparison in the HIL options or in the philosophy's design-decision section.
+
+## Revise a prior poster without cloning its form
+
+When the task refines, corrects, or changes a prior poster, inspect its actual image and its prior `artDirection` before proposing a new render spec. Record a `revisionIntent` in the philosophy with three fields: `preserve`, `replace`, and `reason`.
+
+`preserve` may retain brief-owned constraints such as required copy, brand assets, tone, or delivery size. It must not silently retain topology, central metaphor, title zone, material language, color strategy, or image mode merely because they appeared in the previous spec. A request to change style, add visual complexity, or shift emphasis requires a new candidate comparison against the prior thumbnail. The new direction must change at least four visual axes, including composition topology or central metaphor, unless the user explicitly requires the previous form to remain; state that explicit reason in `reason`.
+
+Do not turn “keep a dark, formal technology tone” into “keep the dark network field.” Tone constrains emotional register; it does not authorize reusing a composition grammar, title placement, motif set, or visual metaphor.
 
 ## Resolve material style ambiguity with HIL
 
@@ -143,7 +151,7 @@ Write a compact JSON spec. Copy the selected `artDirection` exactly from the phi
 }
 ```
 
-The renderer derives a default palette, texture, density, family, and variant from `artDirection`. Explicit values may refine that direction but must not contradict it. Unsupported family and variant names fail instead of silently falling back.
+The renderer derives a default palette, texture, density, family, and variant from `artDirection`. It never derives a direction or layout from keywords in the title, labels, or `designIntent`. Explicit values may refine that direction but must not contradict it. Unsupported family and variant names fail instead of silently falling back.
 
 Composition topology maps to the packaged grammar:
 

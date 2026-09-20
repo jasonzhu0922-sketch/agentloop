@@ -38,6 +38,11 @@
   max-width: 820px;
 }
 
+.composer-input {
+  max-height: 4.5em;
+  overflow-y: auto;
+}
+
 .composer-bar {
   flex-wrap: wrap;
 }

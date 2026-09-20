@@ -187,9 +187,14 @@ export function admitPlan(input: {
     }
     const requiredCapabilities = new Set(step.requiredCapabilities);
     if (kind === "leaf" && stepSkillIds.length > 0) requiredCapabilities.add("skill_instruction_load");
+    // Artifact delivery observations are a single receipt family. A planner
+    // may ask for openability or format matching without repeating the
+    // receipt's umbrella name. Bind the verifier from the Runtime-owned
+    // capability catalog instead of making that redundant spelling a
+    // precondition for admission.
     if (
       kind === "leaf"
-      && evidenceContract?.requiredKinds.includes("artifact_acceptance")
+      && evidenceContract?.requiredKinds.some((kind) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind))
       && input.availableToolNames.has("verify_artifact_acceptance")
     ) {
       requiredCapabilities.add("artifact_acceptance");

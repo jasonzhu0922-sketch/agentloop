@@ -12,7 +12,6 @@ import hashlib
 import math
 import os
 import random
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -134,7 +133,7 @@ IMAGE_MODE_TITLE_FACTORS = {
 }
 
 SPEC_SCHEMA = {
-    "schema": "agentloop.canvasDesignSpec/v2",
+    "schema": "agentloop.canvasDesignSpec/v3",
     # Keep executable choices before prose and examples. Runtime tool-result
     # previews preserve the beginning of large schema output, so contract
     # values must survive even when later descriptive content is compacted.
@@ -150,8 +149,8 @@ SPEC_SCHEMA = {
         "subtitle": "Visible secondary phrase, CJK-safe.",
         "movement": "Short Latin style marker for the upper-left label.",
         "designIntent": "Subject purpose: technology-system, campaign-launch, commemoration, editorial-publication, or identity-recognition. It does not determine visual form.",
-        "artDirection": "Required when designIntent is present. Contains concept, emotionalRegister, materialLanguage, compositionTopology, typographicVoice, colorStrategy, imageMode, and optional avoid.",
-        "layoutFamily": "Optional composition grammar: signal-field, monument-axis, editorial-blocks, kinetic-ribbons, or emblem-grid.",
+        "artDirection": "Required explicit visual direction. Contains concept, emotionalRegister, materialLanguage, compositionTopology, typographicVoice, colorStrategy, imageMode, and optional avoid. The renderer never infers this from subject words or designIntent.",
+        "layoutFamily": "Optional composition grammar derived from artDirection.compositionTopology. If supplied, it must agree with that direction.",
         "compositionVariant": "Optional named composition within the chosen grammar. Use one returned by --schema; omit or use auto only when the subject has no specific spatial direction.",
         "palette": {
             "backgroundTop": "#08111f",
@@ -224,7 +223,7 @@ def main() -> int:
     image, layout_family, composition_variant, visual_motifs, design_intent, art_direction = render(spec)
     image.save(output, "PNG", optimize=True)
     print(json.dumps({
-        "schema": "agentloop.canvasDesignRender/v2",
+        "schema": "agentloop.canvasDesignRender/v3",
         "artifactPath": str(output),
         "width": image.width,
         "height": image.height,
@@ -252,8 +251,11 @@ def render(spec: dict[str, Any]) -> tuple[Image.Image, str, str, list[dict[str, 
     if raw_design_intent and design_intent is None:
         raise ValueError(f"unsupported designIntent={raw_design_intent}")
     art_direction = normalize_art_direction(spec.get("artDirection") or spec.get("art_direction"))
-    if design_intent and art_direction is None:
-        raise ValueError("artDirection is required when designIntent is present")
+    if art_direction is None:
+        raise ValueError(
+            "DESIGN_DIRECTION_REQUIRED: artDirection is required; "
+            "the renderer does not infer a visual direction from title, labels, or designIntent"
+        )
 
     color_strategy = art_direction.get("colorStrategy") if art_direction else "nocturne-electric"
     palette = dict(COLOR_STRATEGY_PALETTES[color_strategy])
@@ -381,13 +383,13 @@ def resolve_layout_family(spec: dict[str, Any], art_direction: dict[str, Any] | 
     normalized_requested = normalize_layout_family(requested) if requested else None
     if requested and normalized_requested is None:
         raise ValueError(f"unsupported layoutFamily={requested}")
-    if art_direction:
-        topology = art_direction["compositionTopology"]
-        expected = COMPOSITION_TOPOLOGY_FAMILIES[topology]
-        if normalized_requested and normalized_requested != expected:
-            raise ValueError(f"artDirection.compositionTopology={topology} requires layoutFamily={expected}")
-        return expected
-    return normalized_requested or auto_layout_family(spec)
+    if art_direction is None:
+        raise ValueError("DESIGN_DIRECTION_REQUIRED: artDirection is required to resolve layoutFamily")
+    topology = art_direction["compositionTopology"]
+    expected = COMPOSITION_TOPOLOGY_FAMILIES[topology]
+    if normalized_requested and normalized_requested != expected:
+        raise ValueError(f"artDirection.compositionTopology={topology} requires layoutFamily={expected}")
+    return expected
 
 
 def resolve_composition_variant(spec: dict[str, Any], layout_family: str, art_direction: dict[str, Any] | None) -> str:
@@ -428,34 +430,6 @@ def normalize_visual_motifs(value: Any) -> list[dict[str, str]]:
         label = clean_text(item.get("label", ""))[:40]
         motifs.append({"kind": kind, "label": label})
     return motifs
-
-
-def auto_layout_family(spec: dict[str, Any]) -> str:
-    text_parts = [
-        clean_text(spec.get("title", "")),
-        clean_text(spec.get("subtitle", "")),
-        clean_text(spec.get("movement", "")),
-        " ".join(clean_text(item) for item in spec.get("labels", []) if clean_text(item)),
-    ]
-    text = " ".join(text_parts).lower()
-    semantic_hints = [
-        (("纪念", "周年", "历史", "胜利", "memorial", "anniversary", "heritage"), "monument-axis"),
-        (("数据", "智能", "平台", "ai", "network", "system", "technology"), "signal-field"),
-        (("活动", "发布", "开幕", "节", "festival", "launch", "campaign"), "kinetic-ribbons"),
-        (("论坛", "展览", "报告", "publication", "editorial", "forum", "exhibit"), "editorial-blocks"),
-        (("品牌", "徽章", "奖项", "logo", "identity", "award"), "emblem-grid"),
-    ]
-    for tokens, family in semantic_hints:
-        if any(hint_matches(text, token) for token in tokens):
-            return family
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    return LAYOUT_FAMILIES[digest[0] % len(LAYOUT_FAMILIES)]
-
-
-def hint_matches(text: str, token: str) -> bool:
-    if any("\u3400" <= char <= "\u9fff" for char in token):
-        return token in text
-    return re.search(rf"\b{re.escape(token)}\b", text) is not None
 
 
 def draw_signal_field(

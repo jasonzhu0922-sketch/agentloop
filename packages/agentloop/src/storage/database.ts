@@ -349,6 +349,7 @@ export class AppDatabase implements SqlConnection {
         evidence_digest TEXT NOT NULL,
         feedback TEXT NOT NULL,
         failed_boundary_json TEXT,
+        decision_bindings_json TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
         UNIQUE(plan_id, step_id, attempt),
         FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
@@ -509,6 +510,7 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
       await this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
       await this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
+      await this.ensureColumn("skill_compliance_assessments", "decision_bindings_json", "TEXT NOT NULL DEFAULT '[]'");
       await this.ensureColumn("runtime_actions", "effect_state", "TEXT NOT NULL DEFAULT 'unknown'");
       await this.ensureSkillAssessmentProfileConstraint();
     }
@@ -757,17 +759,18 @@ export class AppDatabase implements SqlConnection {
           evidence_digest TEXT NOT NULL,
           feedback TEXT NOT NULL,
           failed_boundary_json TEXT,
+          decision_bindings_json TEXT NOT NULL DEFAULT '[]',
           created_at INTEGER NOT NULL,
           UNIQUE(plan_id, step_id, attempt),
           FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
         );
         INSERT INTO skill_compliance_assessments(
           id, plan_id, step_id, attempt, assessment_profile, assessment_method,
-          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, created_at
+          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, decision_bindings_json, created_at
         )
         SELECT
           id, plan_id, step_id, attempt, assessment_profile, assessment_method,
-          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, created_at
+          approved, criteria_json, skills_json, evidence_digest, feedback, failed_boundary_json, '[]', created_at
         FROM skill_compliance_assessments_old;
         DROP TABLE skill_compliance_assessments_old;
         CREATE INDEX IF NOT EXISTS skill_assessment_step_idx

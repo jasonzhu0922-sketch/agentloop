@@ -564,14 +564,15 @@ function buildAssessment(
   assessmentMethod: AssessmentMethod = "model",
   failedBoundary?: FailedBoundary,
 ): SkillComplianceAssessment {
+  const classifiedCriteria = criteria.map((criterion) => classifyCriterion(input, criterion));
   const hasCaveatedSkill = skills.some((item) =>
     item.status === "skipped_unavailable" || item.status === "process_caveat"
   );
   const approved = input.evidence.candidateOutput.trim().length > 0
-    && criteria.every((item) => item.satisfied);
+    && classifiedCriteria.every((item) => item.satisfied || item.blocking !== true);
   const derivedFailedBoundary = approved
     ? undefined
-    : failedBoundary ?? deriveFailedBoundary(input, criteria, skills);
+    : failedBoundary ?? deriveFailedBoundary(input, classifiedCriteria, skills);
   return {
     id: randomUUID(),
     planId: input.planId,
@@ -580,12 +581,29 @@ function buildAssessment(
     assessmentProfile,
     assessmentMethod,
     approved,
-    criteria,
+    criteria: classifiedCriteria,
     skills,
     evidenceDigest: evidenceDigest(input.evidence),
-    feedback: approved && !hasCaveatedSkill ? "" : feedback || defaultFeedback(criteria, skills),
+    feedback: approved && !hasCaveatedSkill && classifiedCriteria.every((item) => item.status === "satisfied")
+      ? ""
+      : feedback || defaultFeedback(classifiedCriteria, skills),
     ...(derivedFailedBoundary === undefined ? {} : { failedBoundary: derivedFailedBoundary }),
     createdAt: Date.now(),
+  };
+}
+
+function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAssessment): CriterionAssessment {
+  const admitted = input.step.successCriteria.find((item) => item.id === criterion.criterionId);
+  const blocking = admitted?.blocking ?? true;
+  const verification = admitted?.verification ?? "deterministic";
+  return {
+    ...criterion,
+    blocking,
+    status: criterion.satisfied
+      ? "satisfied"
+      : verification === "model_judged" || verification === "decision_context"
+        ? "unverified"
+        : "conflict",
   };
 }
 
@@ -643,7 +661,7 @@ function deriveFailedBoundary(
   criteria: readonly CriterionAssessment[],
   _skills: readonly SkillAssessment[],
 ): FailedBoundary {
-  const failedCriteria = criteria.filter((item) => !item.satisfied);
+  const failedCriteria = criteria.filter((item) => !item.satisfied && item.blocking === true);
   const evidenceKinds = new Set<string>(input.step.evidenceContract?.requiredKinds ?? []);
   const missingEvidenceKinds = failedCriteria.flatMap((criterion) => {
     if (evidenceKinds.has(criterion.criterionId)) return [criterion.criterionId];
@@ -855,6 +873,10 @@ function defaultFeedback(
   criteria: readonly CriterionAssessment[],
   _skills: readonly SkillAssessment[],
 ): string {
-  const failedCriteria = criteria.filter((item) => !item.satisfied).map((item) => item.criterionId);
-  return `Completion rejected. Unsatisfied criteria: ${failedCriteria.join(", ") || "none"}. Repair the same step and resubmit.`;
+  const failedCriteria = criteria.filter((item) => !item.satisfied && item.blocking === true).map((item) => item.criterionId);
+  if (failedCriteria.length > 0) {
+    return `Completion rejected. Unsatisfied blocking criteria: ${failedCriteria.join(", ")}. Repair the same step and resubmit.`;
+  }
+  const unverified = criteria.filter((item) => item.status === "unverified").map((item) => item.criterionId);
+  return `Completion delivered with non-blocking unverified criteria: ${unverified.join(", ") || "none"}.`;
 }

@@ -112,7 +112,7 @@ export class WorkProductContext {
         observationWarnings: facts.issues.length, rejectedDeclarations: semantics.rejected.length },
       omitted: { objects: objects.length, issues: issues.length, failedOperations: failures.length },
       ...(fullStateRef === undefined ? {} : { fullStateRef,
-        readInstruction: "摘要未列出的状态仍在 fullStateRef。按需用 computer_read_file(path, expectedSha256, characterOffset, characterLimit<=12000) 或 computer_read_json 的 JSON Pointer 数组窗口读取；不要为补摘要重跑生成命令。" }),
+        readInstruction: "摘要未列出的状态仍在 fullStateRef。按需用 computer_read_file(path, characterOffset, characterLimit<=12000) 或 computer_read_json 的 JSON Pointer 数组窗口读取；Runtime 会计算读取内容的摘要。不要为补摘要重跑生成命令。" }),
       declarationRejections: semantics.rejected.slice(-3),
     };
     // Reserve budget across categories; never slice the facts before deriving semantics.

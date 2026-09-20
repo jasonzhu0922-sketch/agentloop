@@ -39,6 +39,14 @@ export interface RecoveryUserResponse {
   readonly createdAt: number;
 }
 
+export type RecoveryEventLogSink = (event: {
+  readonly runId: string;
+  readonly seq: number;
+  readonly type: string;
+  readonly data: Readonly<Record<string, unknown>>;
+  readonly createdAt: number;
+}) => void;
+
 interface DecisionRow {
   id: string;
   run_id: string;
@@ -65,9 +73,11 @@ interface RecoveryStateRow {
 
 export class RecoveryRepository {
   private readonly database: SqlConnection;
+  private readonly eventLogSink?: RecoveryEventLogSink;
 
-  constructor(database: SqlConnection) {
+  constructor(database: SqlConnection, eventLogSink?: RecoveryEventLogSink) {
     this.database = database;
+    this.eventLogSink = eventLogSink;
   }
 
   async state(runId: string): Promise<RunRecoveryState | undefined> {
@@ -359,6 +369,7 @@ export class RecoveryRepository {
       INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(runId, sequence.seq, type, JSON.stringify(data), createdAt);
+    this.eventLogSink?.({ runId, seq: sequence.seq, type, data, createdAt });
   }
 }
 

@@ -4,9 +4,12 @@ import {
   createDecisionCommit,
   decisionClaimsFromEvidence,
   decisionCommitsFromEvents,
-  enforceDecisionGate,
+  assessDecisionBindings,
   decisionSatisfied,
 } from "../src/runtime/decision-ledger.ts";
+import { ModelStepAssessor } from "../src/planning/assessor.ts";
+import type { ModelAdapter } from "../src/runtime/contracts.ts";
+import type { StepAssessmentInput } from "../src/planning/contracts.ts";
 
 const commit = createDecisionCommit({
   requestId: "request-1",
@@ -53,10 +56,29 @@ test("a matching identity claim satisfies an exact decision", () => {
   assert.equal(decisionSatisfied(commit, claims), true);
 });
 
-test("the minimal assessment gate rejects an otherwise approved conflicting delivery", () => {
-  const assessment = enforceDecisionGate({
+test("an absent observable decision claim is a non-blocking assessment caveat", () => {
+  const assessment = assessDecisionBindings({
     assessment: {
       id: "assessment-1", planId: "plan-1", stepId: "step-1", attempt: 1, approved: true,
+      criteria: [{ criterionId: "source_summary", satisfied: true, rationale: "source present", evidenceRefs: [] }],
+      skills: [], evidenceDigest: "original", feedback: "", createdAt: 1,
+    },
+    planId: "plan-1",
+    stepId: "step-1",
+    ledger: [commit],
+    evidence: [],
+  });
+  assert.equal(assessment.approved, true);
+  assert.deepEqual(assessment.decisionBindings?.map((binding) => ({ status: binding.status, blocking: binding.blocking })), [
+    { status: "unverified", blocking: false },
+  ]);
+});
+
+test("a demonstrated conflicting decision blocks a risk-sensitive assessment", () => {
+  const assessment = assessDecisionBindings({
+    assessment: {
+      id: "assessment-1", planId: "plan-1", stepId: "step-1", attempt: 1, approved: true,
+      assessmentProfile: "risk_sensitive",
       criteria: [{ criterionId: "source_summary", satisfied: true, rationale: "source present", evidenceRefs: [] }],
       skills: [], evidenceDigest: "original", feedback: "", createdAt: 1,
     },
@@ -71,5 +93,50 @@ test("the minimal assessment gate rejects an otherwise approved conflicting deli
     }],
   });
   assert.equal(assessment.approved, false);
-  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["decision_binding"]);
+  assert.deepEqual(assessment.decisionBindings?.map((binding) => ({ status: binding.status, blocking: binding.blocking })), [
+    { status: "conflict", blocking: true },
+  ]);
+  assert.deepEqual(assessment.failedBoundary?.violatedSkillRequirements, ["decision_binding_conflict"]);
+});
+
+test("a non-blocking model-judged criterion is retained as unverified without rejecting delivery", async () => {
+  const model = {
+    limits: { maxOutputTokens: 1_024 },
+    async complete() {
+      return {
+        content: "",
+        finishReason: "tool_calls" as const,
+        toolCalls: [{
+          id: "assessment-call",
+          name: "submit_assessment",
+          arguments: {
+            criteria: [{ criterionId: "visual-quality", satisfied: false, rationale: "Cannot objectively verify aesthetic quality.", evidenceRefs: [] }],
+            skills: [], feedback: "Visual quality should be reviewed by the user.",
+          },
+        }],
+      };
+    },
+  } as unknown as ModelAdapter;
+  const input = {
+    runId: "run-1", planId: "plan-1", attempt: 1,
+    step: {
+      id: "step-1",
+      objective: "Deliver a visual artifact.",
+      role: "deliver",
+      executionBinding: {
+        schema: "agentloop.stepExecutionBinding/v1",
+        requiredCapabilities: [], resolvedToolNames: [], sourceKinds: [], sideEffect: "none", evidenceKinds: [],
+      },
+      successCriteria: [{
+        id: "visual-quality", description: "The visual direction is appropriate.", source: "task",
+        verification: "model_judged", blocking: false,
+      }],
+    },
+    skills: [], evidence: { candidateOutput: "A PNG was delivered.", toolCalls: [], modelSteps: 1 },
+  } as unknown as StepAssessmentInput;
+  const assessment = await new ModelStepAssessor(model).assess(input);
+  assert.equal(assessment.approved, true);
+  assert.deepEqual(assessment.criteria.map((criterion) => ({ status: criterion.status, blocking: criterion.blocking })), [
+    { status: "unverified", blocking: false },
+  ]);
 });

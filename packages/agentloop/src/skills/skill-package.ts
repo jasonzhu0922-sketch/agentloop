@@ -218,7 +218,7 @@ export async function copySkillPackage(
   if (copied.packageHash !== inspection.packageHash) {
     throw invalidPackage("Copied Skill package does not match its source hash");
   }
-  await makePackageReadOnly(copied);
+  await makeSkillPackageReadOnly(copied);
   return copied;
 }
 
@@ -242,7 +242,12 @@ export async function removeSkillPackage(directory: string): Promise<void> {
   await fs.rm(root, { recursive: true, force: true });
 }
 
-async function makePackageReadOnly(inspection: SkillPackageInspection): Promise<void> {
+/**
+ * Reassert the filesystem-level immutability expected for a Runtime-owned
+ * package copy. Directory-discovered sources remain developer-owned and are
+ * never chmod'ed in place.
+ */
+export async function makeSkillPackageReadOnly(inspection: SkillPackageInspection): Promise<void> {
   const directories = new Set<string>([inspection.root]);
   for (const packagePath of inspection.files) {
     const absolute = resolve(inspection.root, ...packagePath.split("/"));

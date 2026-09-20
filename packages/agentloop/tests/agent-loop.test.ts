@@ -3656,57 +3656,6 @@ test("repeated execution failures surface failure phases and a strategy switch d
   assert.equal(calls, 3);
 });
 
-test("next model turn receives actionable feedback for Skill package mutation", async () => {
-  let calls = 0;
-  const tool: RuntimeTool<unknown> = {
-    name: "run_package_script",
-    description: "Run one Skill package script",
-    inputSchema: { type: "object" },
-    executionMode: "parallel",
-    replaySafe: false,
-    parse: (value) => value,
-    execute: async () => {
-      throw new AppError(
-        "SKILL_PACKAGE_MUTATED",
-        "Command modified read-only command root @skills/presentation-skill",
-        409,
-      );
-    },
-  };
-  const model: ModelAdapter = {
-    limits: TEST_MODEL_LIMITS,
-    complete: async (request) => {
-      calls += 1;
-      if (calls === 1) {
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "mutate-skill", name: "run_package_script", arguments: {} }],
-        };
-      }
-      const runtimeContext = request.runtimeContext?.content ?? "";
-      assert.match(runtimeContext, /runtime_execution_feedback/);
-      assert.match(runtimeContext, /SKILL_PACKAGE_MUTATED means a command wrote under a read-only Skill command root/);
-      assert.match(runtimeContext, /writable --workspace\/--output\/--outdir arguments resolve under the writable workspace root/);
-      assert.match(runtimeContext, /do not inspect package internals solely to diagnose/);
-      return { content: "repaired with workspace-root output paths", finishReason: "stop", toolCalls: [] };
-    },
-  };
-  const grant = makeGrant(["run_package_script"]);
-  const result = await runAgentLoop({
-    runId: grant.runId,
-    systemPrompt: "Run package workflow.",
-    input: "build a deck",
-    model,
-    tools: new ToolRegistry([tool]),
-    grant,
-    maxSteps: 3,
-  });
-
-  assert.equal(result.output, "repaired with workspace-root output paths");
-  assert.equal(calls, 2);
-});
-
 test("a looping model reaches the real hard limit when it repeats authorized tool calls", async () => {
   let executions = 0;
   const tool: RuntimeTool<unknown> = {

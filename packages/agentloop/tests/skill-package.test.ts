@@ -521,8 +521,8 @@ class InspectPackageModel implements ModelAdapter {
           name: "computer_run_command",
           arguments: {
             command: "node",
-            args: ["scripts/probe.mjs"],
-            cwd: "@skills/runtime-package",
+            args: ["-e", "import(require('node:path').join(process.env.AGENTLOOP_SKILL_ROOT_RUNTIME_PACKAGE, 'scripts', 'probe.mjs'))"],
+            cwd: ".",
             timeoutMs: 2_000,
           },
         }],

@@ -11,7 +11,10 @@ const SOURCE_REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 export interface SkillDirectoryEntry {
+  /** Developer-owned configured directory used for discovery and provenance. */
   readonly sourceDirectory: string;
+  /** Runtime-owned immutable package copy used for execution, when configured. */
+  readonly executionDirectory?: string;
   /**
    * Optional upstream provenance from a sibling `.source.json` file.
    *

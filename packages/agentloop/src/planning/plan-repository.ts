@@ -178,8 +178,8 @@ export class PlanRepository {
       INSERT INTO skill_compliance_assessments(
         id, plan_id, step_id, attempt, assessment_profile, assessment_method,
         approved, criteria_json, skills_json,
-        evidence_digest, feedback, failed_boundary_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        evidence_digest, feedback, failed_boundary_json, decision_bindings_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       assessment.id,
       assessment.planId,
@@ -193,6 +193,7 @@ export class PlanRepository {
       assessment.evidenceDigest,
       assessment.feedback,
       assessment.failedBoundary === undefined ? null : JSON.stringify(assessment.failedBoundary),
+      JSON.stringify(assessment.decisionBindings ?? []),
       assessment.createdAt,
     );
   }
@@ -201,13 +202,13 @@ export class PlanRepository {
     const rows = await this.database.prepare(`
       SELECT id, plan_id, step_id, attempt, assessment_profile, assessment_method,
              approved, criteria_json, skills_json,
-             evidence_digest, feedback, failed_boundary_json, created_at
+             evidence_digest, feedback, failed_boundary_json, decision_bindings_json, created_at
       FROM skill_compliance_assessments WHERE plan_id = ? ORDER BY step_id, attempt
     `).all(planId) as unknown as Array<{
       id: string; plan_id: string; step_id: string; attempt: number;
       assessment_profile?: string; assessment_method?: string; approved: number;
       criteria_json: string; skills_json: string; evidence_digest: string; feedback: string;
-      failed_boundary_json: string | null; created_at: number;
+      failed_boundary_json: string | null; decision_bindings_json: string | null; created_at: number;
     }>;
     return rows.map((row) => ({
       id: row.id,
@@ -218,6 +219,7 @@ export class PlanRepository {
       assessmentMethod: parseAssessmentMethod(row.assessment_method),
       approved: row.approved === 1,
       criteria: JSON.parse(row.criteria_json),
+      decisionBindings: JSON.parse(row.decision_bindings_json ?? "[]"),
       skills: JSON.parse(row.skills_json),
       evidenceDigest: row.evidence_digest,
       feedback: row.feedback,

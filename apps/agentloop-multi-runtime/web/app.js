@@ -9,6 +9,7 @@ import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 import { conversationMessagesFromTurns } from "./conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./execution-detail-projection.js";
 import { observeAssignment } from "./assignment-stream.js";
+import { autoResizeComposerInput, resetComposerInput } from "./composer-input.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
@@ -37,7 +38,7 @@ void loadConversationPage(true);
 void loadModels();
 void loadRuntimes();
 render();
-document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; $("input").focus(); }));
+document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; autoResizeComposerInput($("input")); $("input").focus(); }));
 $("theme-toggle")?.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "" : "dark"; });
 
 $("new-chat").addEventListener("click", () => { activeId = newConversation().id; render(); $("input").focus(); });
@@ -48,6 +49,7 @@ $("attachment").addEventListener("change", () => void uploadAttachments($("attac
 $("input").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
 });
+$("input").addEventListener("input", () => autoResizeComposerInput($("input")));
 $("user-id").addEventListener("change", reloadConversationsForIdentity);
 $("tenant-id").addEventListener("change", reloadConversationsForIdentity);
 document.addEventListener("keydown", (event) => {
@@ -393,6 +395,7 @@ async function submit() {
   conversation.updatedAt = Date.now();
   saveSessions();
   $("input").value = "";
+  resetComposerInput($("input"));
   render();
   setStatus("正在分配 Runtime…", "running");
   try {

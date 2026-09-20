@@ -99,7 +99,7 @@ for (const id of ["a", "b"]) test(`stage 3 fixture ${id}: actual model input pre
   assert.ok(storage.saved.has(final.fullStateRef.path));
 });
 
-test("snapshot overflow is bounded, fully readable with hash verification, and does not disappear after unrelated events", async () => {
+test("snapshot overflow is bounded, fully readable with a Runtime-owned digest, and does not disappear after unrelated events", async () => {
   const root = await mkdtemp(join(tmpdir(), "work-product-context-"));
   try {
     const executor = new ComputerExecutor(root);
@@ -115,7 +115,7 @@ test("snapshot overflow is bounded, fully readable with hash verification, and d
     const ref = projection.fullStateRef;
     let content = "";
     for (let offset = 0; offset < ref.characters; offset += 12000) {
-      const part = await executor.readContentReference(ref.path, ref.sha256, offset, 12000);
+      const part = await executor.readContentReference(ref.path, offset, 12000);
       content += part.content;
     }
     const stored = JSON.parse(content);

@@ -2011,14 +2011,6 @@ function executionFeedbackDirective(input: {
       lines.push("These failures span multiple phases. Do not keep replaying the same command shape; switch subgoal or tool family.");
     }
   }
-  const skillPackageMutation = input.latestToolEvidence.find((item) =>
-    item.isError && /SKILL_PACKAGE_MUTATED/.test(item.result)
-  );
-  if (skillPackageMutation !== undefined) {
-    lines.push(
-      "SKILL_PACKAGE_MUTATED means a command wrote under a read-only Skill command root. Rerun from the Skill cwd only for package scripts, but make writable --workspace/--output/--outdir arguments resolve under the writable workspace root; do not inspect package internals solely to diagnose this already-known boundary.",
-    );
-  }
   lines.push("</runtime_execution_feedback>");
   return lines.join("\n");
 }

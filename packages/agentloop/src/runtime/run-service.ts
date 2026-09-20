@@ -121,11 +121,12 @@ import {
   RecoveryRepository,
   type PlanRevisionAssessmentRecord,
   type RecoveryDecisionRecord,
+  type RecoveryEventLogSink,
   type RecoveryUserResponse,
   type RunRecoveryState,
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
-import { decisionCommitsFromEvents, enforceDecisionGate, type RuntimeDecisionCommit } from "./decision-ledger.ts";
+import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
@@ -385,8 +386,11 @@ export class RunService {
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
     this.actions = new RuntimeActionRepository(options.database);
     this.checkpoints = new RunCheckpointRepository(options.database);
-    this.recovery = new RecoveryRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
+    const recoveryEventLogSink: RecoveryEventLogSink = (event) => {
+      this.logRunEvent(event.runId, event.seq, { type: event.type, data: event.data }, event.createdAt);
+    };
+    this.recovery = new RecoveryRepository(options.database, recoveryEventLogSink);
     this.planningExtensions = options.planningExtensions ?? [];
     this.stepExecutionStrategy = options.stepExecutionStrategy;
     this.toolExecutionPlugins = Object.freeze([...(options.toolExecutionPlugins ?? [])]);
@@ -1859,17 +1863,32 @@ export class RunService {
         allowedSkillIds: privateSkills.map((skill) => skill.id),
       });
 
+      // Prior Skills remain in the catalog as continuation context, but they
+      // are not preselected execution dependencies. The latest task goal
+      // alone determines this turn's candidate roles; the Planner can still
+      // select a retained Skill when its current task and handoffs justify it.
+      const continuationSkillIds = responseOnly
+        ? []
+        : (conversationWorkingSet?.recommendedCapabilities.skillIds ?? [])
+          .filter((skillId) => privateSkills.some((skill) => skill.id === skillId));
       const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
-        effectiveGoal,
-        conversationWorkingSet?.recommendedCapabilities.skillIds ?? [],
+        // Resolver goals carry previous-source provenance so that the Planner
+        // can understand a follow-up. That provenance is not a fresh user
+        // request for the same source Skill. Select this turn's candidates
+        // from the latest user input; retained Skills and handoffs stay in
+        // planning context for genuine continuations.
+        input,
+        [],
         availableSources,
         turnResolution?.evidenceDemand,
       );
-      const planningSkills = planningSkillRoles.map((item) => item.skill);
-      const continuationSkillIds = planningSkills
-        .filter((skill) => conversationWorkingSet?.recommendedCapabilities.skillIds.includes(skill.id) === true)
-        .map((skill) => skill.id);
+      const planningSkills = [...new Map([
+        ...planningSkillRoles.map((item) => [item.skill.id, item.skill] as const),
+        ...privateSkills
+          .filter((skill) => continuationSkillIds.includes(skill.id))
+          .map((skill) => [skill.id, skill] as const),
+      ]).values()];
       if (!responseOnly) {
         await emit({
           type: "planning.skills.selected",
@@ -2619,6 +2638,7 @@ export class RunService {
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
+            decisionLedger,
           });
           const reusedAssessment = assessedCandidates.get(assessmentSignature);
           if (reusedAssessment !== undefined) {
@@ -2698,7 +2718,7 @@ export class RunService {
               metadata: { phase: "assessment", assessmentProfile, assessmentMethod: "rule" },
             }, assess)
             : await assess();
-          const assessment = enforceDecisionGate({ assessment: assessed, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
+          const assessment = assessDecisionBindings({ assessment: assessed, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
           assessedCandidates.set(assessmentSignature, assessment);
           await this.plans.saveAssessment(assessment);
           await input.emit({
@@ -3374,6 +3394,9 @@ const TERMINAL_EVENT_TYPES = new Set([
   "skill.activation.available",
   "skill.activated",
   "skill.compliance.assessed",
+  "recovery.resume_started",
+  "recovery.resume_interrupted",
+  "human_loop.resume_failed",
   "model.retry",
   "action.failed",
 ]);
@@ -3415,6 +3438,9 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   addString(details, "assessmentProfile", data.assessmentProfile);
   addString(details, "assessmentMethod", data.assessmentMethod);
   addBoolean(details, "approved", data.approved);
+  addString(details, "actionId", data.actionId);
+  addString(details, "requestId", data.requestId);
+  addString(details, "reason", data.reason);
   addNumber(details, "attempt", data.attempt);
   addNumber(details, "maxAttempts", data.maxAttempts);
   addNumber(details, "status", data.status);
@@ -5101,6 +5127,21 @@ function completionCaveatReasonCode(
   )) {
     return "completed_with_deferred_validation";
   }
+  if ([...latestByStep.values()].some((assessment) =>
+    assessment.decisionBindings?.some((binding) => binding.status === "conflict" && !binding.blocking)
+  )) {
+    return "completed_with_decision_binding_conflict";
+  }
+  if ([...latestByStep.values()].some((assessment) =>
+    assessment.decisionBindings?.some((binding) => binding.status === "unverified" && !binding.blocking)
+  )) {
+    return "completed_with_unverified_decision_binding";
+  }
+  if ([...latestByStep.values()].some((assessment) =>
+    assessment.criteria.some((criterion) => (criterion.status === "unverified" || criterion.status === "conflict") && !criterion.blocking)
+  )) {
+    return "completed_with_unverified_quality";
+  }
   return undefined;
 }
 
@@ -5913,6 +5954,7 @@ function stepAssessmentSignature(input: {
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
+  decisionLedger: readonly RuntimeDecisionCommit[];
 }): string {
   return createHash("sha256").update(JSON.stringify({
     stepId: input.stepId,
@@ -5922,6 +5964,14 @@ function stepAssessmentSignature(input: {
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
     evidence: assessmentEvidenceSignature(input.evidence),
     modelEvidence: assessmentEvidenceSignature(input.modelEvidence),
+    decisionLedger: input.decisionLedger.map((commit) => ({
+      id: commit.id,
+      hash: commit.hash,
+      planId: commit.planId,
+      stepId: commit.stepId,
+      mode: commit.mode,
+      satisfaction: commit.satisfaction,
+    })),
   })).digest("hex");
 }
 

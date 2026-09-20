@@ -129,7 +129,7 @@ export {
   decisionClaimsFromEvidence,
   decisionCommitsFromEvents,
   decisionSatisfied,
-  enforceDecisionGate,
+  assessDecisionBindings,
 } from "./runtime/decision-ledger.ts";
 export type {
   RuntimeDecisionClaim,

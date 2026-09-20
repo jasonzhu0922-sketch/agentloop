@@ -16,6 +16,7 @@ import {
   assertPathInside,
   copySkillPackage,
   inspectSkillPackage,
+  makeSkillPackageReadOnly,
   readSkillAgentLoopMetadata,
   removeSkillPackage,
 } from "./skill-package.ts";
@@ -176,9 +177,47 @@ export class SkillService {
       entries.push(...await discoverSkillDirectory(directory));
     }
     assertUniqueDiscoveredNames(entries);
-    this.directoryEntries = entries;
+    this.directoryEntries = await this.materializeDirectoryExecutionRoots(entries);
     await this.syncDiscoveryPersistence(entries);
     return this.discovered();
+  }
+
+  /**
+   * Directory discovery is an authoring/import boundary, not an execution
+   * boundary. When this Host owns package storage, execute a verified copy
+   * there so direct package scripts have a read-only cwd without changing the
+   * developer-owned configured directory.
+   */
+  private async materializeDirectoryExecutionRoots(
+    entries: readonly SkillDirectoryEntry[],
+  ): Promise<readonly SkillDirectoryEntry[]> {
+    if (this.packageStore === undefined) return entries;
+    const discoveredStore = resolve(this.packageStore, "discovered");
+    assertPathInside(discoveredStore, this.packageStore, "Discovered Skill package store");
+    await fs.mkdir(discoveredStore, { recursive: true, mode: 0o700 });
+    return await Promise.all(entries.map(async (entry) => {
+      const destination = resolve(discoveredStore, entry.inspection.packageHash);
+      assertPathInside(destination, discoveredStore, "Discovered Skill package root");
+      const existing = await fs.stat(destination).then(() => true).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      });
+      const executionInspection = existing
+        ? await inspectSkillPackage(destination)
+        : await copySkillPackage(entry.inspection, destination);
+      if (
+        executionInspection.packageHash !== entry.inspection.packageHash
+        || executionInspection.name !== entry.inspection.name
+      ) {
+        throw new AppError(
+          "SKILL_PACKAGE_MUTATED",
+          `Runtime-owned copy for discovered Skill ${entry.inspection.name} does not match its source package`,
+          409,
+        );
+      }
+      await makeSkillPackageReadOnly(executionInspection);
+      return { ...entry, executionDirectory: executionInspection.root };
+    }));
   }
 
   /**
@@ -526,7 +565,7 @@ export class SkillService {
       ...(entry.inspection.agentLoop === undefined ? {} : { agentLoop: entry.inspection.agentLoop }),
       updatedAt: 0,
       package: {
-        root: entry.sourceDirectory,
+        root: entry.executionDirectory ?? entry.sourceDirectory,
         entrypointPath: entry.inspection.entrypointPath,
         packageHash: entry.inspection.packageHash,
         fileCount: entry.inspection.fileCount,

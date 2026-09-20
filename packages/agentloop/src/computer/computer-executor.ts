@@ -53,7 +53,6 @@ const PATCH_REPLACEMENT_MAX_CHARACTERS = 50_000;
 const FILE_REVISION_ID_PATTERN = /^rev_[a-f0-9]{32}$/;
 const COMMAND_FILE_CHANGE_RESULT_LIMIT = 200;
 const COMMAND_FILE_CHANGE_IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".agentloop"]);
-const READ_ONLY_ROOT_CHANGE_SCAN_LIMIT = 10_000;
 const MISSING_BASENAME_LOOKUP_SCAN_LIMIT = 5_000;
 const MISSING_BASENAME_LOOKUP_CANDIDATE_LIMIT = 25;
 const WRITTEN_FILE_OUTLINE_LIMIT = 120;
@@ -426,7 +425,7 @@ export class ComputerExecutor {
     return { kind: "content_addressed", path, sha256, bytes: Buffer.byteLength(content), characters: content.length, format };
   }
 
-  async readContentReference(path: string, expectedSha256: string, characterOffset: number, characterLimit: number) {
+  async readContentReference(path: string, characterOffset: number, characterLimit: number) {
     if (!Number.isSafeInteger(characterOffset) || characterOffset < 0
       || !Number.isSafeInteger(characterLimit) || characterLimit < 1 || characterLimit > CONTENT_REFERENCE_WINDOW_CHARACTERS) {
       throw badRequest("Invalid content reference character window");
@@ -434,9 +433,6 @@ export class ComputerExecutor {
     const file = await this.readFile(path, 8_000_000);
     if (file.truncated) throw badRequest("Content reference exceeds the 8000000 byte read limit");
     const sha256 = createHash("sha256").update(file.content).digest("hex");
-    if (sha256 !== expectedSha256) {
-      throw badRequest("Content reference hash mismatch; expectedSha256 does not match current content");
-    }
     if (characterOffset > file.content.length) throw badRequest("characterOffset exceeds content length");
     const content = file.content.slice(characterOffset, characterOffset + characterLimit);
     const end = characterOffset + content.length;
@@ -1429,7 +1425,6 @@ export class ComputerExecutor {
     const cwd = cwdResolution.path;
     const limit = DEFAULT_OUTPUT_LIMIT;
     const beforeFiles = await this.snapshotWorkspaceFiles();
-    const beforeReadOnlyRoots = await snapshotCommandRoots(commandRootsToProtect(this.commandRoots, cwdResolution.readOnlyRoot));
     return new Promise((resolvePromise, rejectPromise) => {
       let stdout: Buffer = Buffer.alloc(0);
       let stderr: Buffer = Buffer.alloc(0);
@@ -1492,22 +1487,6 @@ export class ComputerExecutor {
           try {
             const afterFiles = await this.snapshotWorkspaceFiles();
             const fileChangeSummary = summarizeFileChanges(beforeFiles, afterFiles);
-            for (const beforeReadOnlyRoot of beforeReadOnlyRoots) {
-              const afterReadOnlyRoot = await snapshotReadOnlyRoot(beforeReadOnlyRoot.root);
-              const rootChangeSummary = summarizeFileChanges(beforeReadOnlyRoot.snapshot, afterReadOnlyRoot);
-              if (rootChangeSummary.changes.length > 0 || rootChangeSummary.truncated) {
-                throw new AppError(
-                  "SKILL_PACKAGE_MUTATED",
-                  `Command modified read-only command root ${beforeReadOnlyRoot.root.id}`,
-                  409,
-                  {
-                    skillExecutionRoot: beforeReadOnlyRoot.root.id,
-                    changes: rootChangeSummary.changes,
-                    changesTruncated: rootChangeSummary.truncated,
-                  },
-                );
-              }
-            }
             // Only an immutable, Runtime-registered Skill package may publish
             // a control signal through command stdout. Workspace commands and
             // later file reads remain ordinary content, never control-plane
@@ -2512,52 +2491,6 @@ function summarizeFileChanges(
   };
 }
 
-async function snapshotReadOnlyRoot(root: CommandRootMount): Promise<{
-  readonly files: ReadonlyMap<string, CommandFileSnapshotEntry>;
-  readonly truncated: boolean;
-}> {
-  const files = new Map<string, CommandFileSnapshotEntry>();
-  let truncated = false;
-  const queue: string[] = [root.path];
-  while (queue.length > 0 && !truncated) {
-    const directory = queue.shift()!;
-    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
-      const target = resolve(directory, entry.name);
-      if (entry.isDirectory()) {
-        queue.push(target);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const stat = await fs.stat(target).catch(() => undefined);
-      if (stat === undefined || !stat.isFile()) continue;
-      files.set(relative(root.path, target).split(sep).join("/"), {
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
-      });
-      if (files.size >= READ_ONLY_ROOT_CHANGE_SCAN_LIMIT) {
-        truncated = true;
-        break;
-      }
-    }
-  }
-  return { files, truncated };
-}
-
-async function snapshotCommandRoots(roots: readonly CommandRootMount[]): Promise<Array<{
-  readonly root: CommandRootMount;
-  readonly snapshot: {
-    readonly files: ReadonlyMap<string, CommandFileSnapshotEntry>;
-    readonly truncated: boolean;
-  };
-}>> {
-  return await Promise.all(roots.map(async (root) => ({
-    root,
-    snapshot: await snapshotReadOnlyRoot(root),
-  })));
-}
-
 function commandRootEnvironment(roots: readonly CommandRootMount[]): Record<string, string> {
   return Object.fromEntries(roots
     .filter((root) => root.id.startsWith("@skills/"))
@@ -2570,18 +2503,6 @@ function commandRootEnvironmentName(id: string): string {
   return kind === "skills"
     ? `AGENTLOOP_SKILL_ROOT_${normalized}`
     : `AGENTLOOP_VISIBLE_ROOT_${normalized}`;
-}
-
-function commandRootsToProtect(
-  roots: readonly CommandRootMount[],
-  currentRoot: CommandRootMount | undefined,
-): CommandRootMount[] {
-  const byId = new Map<string, CommandRootMount>();
-  for (const root of roots) {
-    if (root.id.startsWith("@skills/")) byId.set(root.id, root);
-  }
-  if (currentRoot !== undefined) byId.set(currentRoot.id, currentRoot);
-  return [...byId.values()];
 }
 
 function assertInsideRoot(candidate: string, root: string, label: string): void {

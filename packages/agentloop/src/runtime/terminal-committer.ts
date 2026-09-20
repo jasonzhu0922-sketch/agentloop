@@ -53,7 +53,11 @@ export class TerminalCommitter {
     for (const step of leafSteps) {
       const latest = assessments.filter((item) => item.stepId === step.id).at(-1);
       if (latest?.approved === true) {
-        if (latest.skills.some((skill) => skill.status === "process_caveat" || skill.status === "skipped_unavailable")) {
+        // An approved assessment may still carry non-blocking uncertainty.
+        // Treat that uncertainty as a caveat and deliver it, rather than
+        // reinterpreting "approved" as "nothing is unknown" and rejecting
+        // the terminal commit.
+        if (isCaveatedAssessment(latest, step)) {
           hasCaveat = true;
         }
         continue;
@@ -97,6 +101,12 @@ function isCaveatedAssessment(
   step: PlanStep,
 ): boolean {
   if (assessment?.skills.some((skill) => skill.status === "skipped_unavailable" || skill.status === "process_caveat") === true) {
+    return true;
+  }
+  if (assessment?.decisionBindings?.some((binding) => binding.status !== "satisfied" && !binding.blocking) === true) {
+    return true;
+  }
+  if (assessment?.criteria.some((criterion) => criterion.status !== "satisfied" && !criterion.blocking) === true) {
     return true;
   }
   return step.evidence?.completionCaveat?.reason === "repair_limit"

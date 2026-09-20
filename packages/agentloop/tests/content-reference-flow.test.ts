@@ -70,9 +70,9 @@ test("web snapshot -> projected ref -> exact read -> consumed summary -> restore
   assert.deepEqual(initial.contentLocation, web.contentLocation);
   assert.equal(initial.contentSummary.properties.items.count, 10);
   assert.equal(initial.content, undefined);
-  assert.match(initial.instruction, /expectedSha256/);
+  assert.match(initial.instruction, /Runtime computes the content digest/);
 
-  const args = { path: initial.contentLocation.path, expectedSha256: initial.contentLocation.sha256, characterOffset: 0, characterLimit: 12000 };
+  const args = { path: initial.contentLocation.path, characterOffset: 0, characterLimit: 12000 };
   const read = await execute("computer_read_file", args);
   append(messages, "computer_read_file", args, read);
   const fresh = projected((await context.assemble(messages, [])).messages, "computer_read_file");
@@ -91,7 +91,7 @@ test("web snapshot -> projected ref -> exact read -> consumed summary -> restore
   }
   assert.equal(fetches, 1);
 
-  const jsonArgs = { path: args.path, expectedSha256: args.expectedSha256, queries: [{ pointer: "/items", offset: 8, limit: 2 }] };
+  const jsonArgs = { path: args.path, queries: [{ pointer: "/items", offset: 8, limit: 2 }] };
   const jsonRead = await execute("computer_read_json", jsonArgs);
   append(messages, "computer_read_json", jsonArgs, jsonRead);
   const selected = projected((await context.assemble(messages, [])).messages, "computer_read_json");
@@ -113,14 +113,14 @@ test("command refs survive 2048/800 projection for both small and large stdout/s
     assert.equal(view.exitCode, 0);
     for (const [stream, count] of [["stdout", size], ["stderr", 2500]] as const) {
       const ref = view.outputReferences[stream];
-      const read = await executor.readContentReference(ref.path, ref.sha256, 0, 12000);
+      const read = await executor.readContentReference(ref.path, 0, 12000);
       assert.equal(read.content.length, count);
       assert.equal(read.complete, true);
     }
   }
 });
 
-test("reference windows page exactly and reject changed hashes, invalid ranges, and root escape", async (t) => {
+test("reference windows page exactly, report Runtime-owned digests, and reject invalid ranges and root escape", async (t) => {
   const root = await fs.mkdtemp(join(tmpdir(), "reference-range-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const executor = new ComputerExecutor(root);
@@ -130,19 +130,18 @@ test("reference windows page exactly and reject changed hashes, invalid ranges, 
   let recovered = "";
   let offset: number | null = 0;
   while (offset !== null) {
-    const page = await executor.readContentReference(ref.path, ref.sha256, offset, 317);
+    const page = await executor.readContentReference(ref.path, offset, 317);
     recovered += page.content;
     offset = page.nextCharacterOffset;
   }
   assert.equal(recovered, content);
-  await assert.rejects(executor.readContentReference(ref.path, ref.sha256, 0, 12001), /Invalid.*window/);
-  await assert.rejects(executor.readContentReference(ref.path, ref.sha256, content.length + 1, 100), /exceeds/);
-  await assert.rejects(executor.readContentReference("../outside.txt", ref.sha256, 0, 100));
+  await assert.rejects(executor.readContentReference(ref.path, 0, 12001), /Invalid.*window/);
+  await assert.rejects(executor.readContentReference(ref.path, content.length + 1, 100), /exceeds/);
+  await assert.rejects(executor.readContentReference("../outside.txt", 0, 100));
   await fs.writeFile(join(root, ref.path), "changed");
-  await assert.rejects(
-    executor.readContentReference(ref.path, ref.sha256, 0, 100),
-    /hash mismatch; expectedSha256 does not match current content/,
-  );
+  const changed = await executor.readContentReference(ref.path, 0, 100);
+  assert.equal(changed.content, "changed");
+  assert.equal(changed.contentLocation.sha256, createHash("sha256").update("changed").digest("hex"));
 });
 
 test("oversized web tool serialization retains a readable ref through the agent loop", async (t) => {
@@ -173,7 +172,7 @@ test("oversized web tool serialization retains a readable ref through the agent 
           assert.equal(evidence.contentSummary.properties.records.count, 200);
           assert.equal(await fs.readFile(join(root, evidence.contentLocation.path), "utf8"), source);
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read", name: "computer_read_json", arguments: {
-            path: evidence.contentLocation.path, expectedSha256: evidence.contentLocation.sha256,
+            path: evidence.contentLocation.path,
             queries: [{ pointer: "/records", offset: 199, limit: 1 }],
           } }] };
         }
@@ -197,7 +196,7 @@ test("compaction receives durable refs and cannot consume the current requested 
   });
   messages.push({ role: "assistant", content: "old reasoning ".repeat(4000) });
   const window = "exact current window ".repeat(400);
-  append(messages, "computer_read_file", { path: location.path, expectedSha256: hash, characterLimit: 12000 }, {
+  append(messages, "computer_read_file", { path: location.path, characterLimit: 12000 }, {
     schema: "agentloop.contentReferenceRead/v1", contentLocation: location, content: window,
     characterOffset: 0, returnedCharacters: window.length, nextCharacterOffset: null,
   });
@@ -219,7 +218,7 @@ test("compaction receives durable refs and cannot consume the current requested 
   assert.equal(projected(assembly.messages, "computer_read_file").content, window);
 });
 
-test("a verified window survives JSON escaping at the tool serialization boundary", async (t) => {
+test("a Runtime-owned content window survives JSON escaping at the tool serialization boundary", async (t) => {
   const root = await fs.mkdtemp(join(tmpdir(), "reference-escaping-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const executor = new ComputerExecutor(root);
@@ -234,7 +233,7 @@ test("a verified window survives JSON escaping at the tool serialization boundar
     model: { limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 }, complete: async (input) => {
       calls += 1;
       if (calls === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read", name: "computer_read_file", arguments: {
-        path: ref.path, expectedSha256: ref.sha256, characterOffset: 0, characterLimit: 12000,
+        path: ref.path, characterOffset: 0, characterLimit: 12000,
       } }] };
       const read = projected(input.messages, "computer_read_file");
       assert.equal(read.content, content);

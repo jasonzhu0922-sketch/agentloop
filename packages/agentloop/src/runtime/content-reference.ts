@@ -11,7 +11,7 @@ export interface ContentReference {
 }
 
 export const CONTENT_REFERENCE_READ_INSTRUCTION =
-  "Full content is stored at contentLocation, not lost. Read computer_read_file with path, expectedSha256, characterOffset (0-based), and characterLimit (up to 12000); follow nextCharacterOffset for more. For JSON, computer_read_json supports a profile and JSON Pointer array windows. Read only what the task requires; do not fetch or execute again solely to recover omitted content. A preview is not complete source coverage.";
+  "Full content is stored at contentLocation, not lost. Read computer_read_file with path, characterOffset (0-based), and characterLimit (up to 12000); follow nextCharacterOffset for more. The Runtime computes the content digest from the file it reads. For JSON, computer_read_json supports a profile and JSON Pointer array windows. Read only what the task requires; do not fetch or execute again solely to recover omitted content. A preview is not complete source coverage.";
 
 /** Shape and counts are navigation metadata, never domain interpretation. */
 export function contentStructure(content: string): Record<string, unknown> {

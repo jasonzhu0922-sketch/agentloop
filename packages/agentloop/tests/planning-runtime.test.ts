@@ -2508,7 +2508,7 @@ test("ModelPlanner keeps Skill-owned QA evidence out of generic evidence contrac
   });
 });
 
-test("Plan admission adds artifact acceptance Tool when the evidence contract requires it", () => {
+test("Plan admission adds artifact acceptance Tool for concrete artifact receipt evidence", () => {
   const proposal: PlanProposal = {
     goal: "build and verify an artifact",
     selectedSkillIds: [],
@@ -2519,10 +2519,10 @@ test("Plan admission adds artifact acceptance Tool when the evidence contract re
       skillIds: [],
       requiredCapabilities: ["workspace_artifact_write"],
       evidenceContract: {
-        requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+        requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_openable"],
         caveatPolicy: "none",
       },
-      successCriteria: [{ id: "artifact_acceptance", description: "Acceptance receipt is recorded.", source: "planner" }],
+      successCriteria: [{ id: "artifact_openable", description: "The artifact can be opened.", source: "planner" }],
     }],
   };
 
@@ -2814,7 +2814,7 @@ test("Plan admission rejects a Human-in-the-Loop-only terminal artifact step", (
         }],
       },
       availableSkills: [],
-      availableToolNames: new Set(["computer_write_file"]),
+      availableToolNames: new Set(["computer_write_file", "verify_artifact_acceptance"]),
       taskIntent: { deliverySurface: "workspace_artifact", artifactKind: "image" },
     }),
     (error: unknown) => error instanceof AppError
@@ -6489,6 +6489,72 @@ test("TerminalCommitter ignores milestone nodes and requires assessments only fo
   }
 });
 
+test("TerminalCommitter delivers approved steps with non-blocking unknown decision evidence as a caveat", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "run-terminal-unverified-decision";
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+        status, input, created_at
+      ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, owner.user.id, "deliver the result", Date.now());
+
+    const plans = new PlanRepository(database);
+    let plan = await plans.create(admitPlan({
+      runId,
+      proposal: {
+        goal: "deliver the result",
+        selectedSkillIds: [],
+        steps: [{ ...step("deliver") }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    plan = await plans.startStep(plan.id, "deliver");
+    plan = await plans.completeStep(plan.id, "deliver", "delivered output", {
+      candidateOutput: "delivered output",
+      toolCalls: [],
+      modelSteps: 1,
+    });
+    await plans.saveAssessment({
+      id: "assessment-unverified-decision-1",
+      planId: plan.id,
+      stepId: "deliver",
+      attempt: 1,
+      approved: true,
+      criteria: [{
+        criterionId: "deliver-done",
+        satisfied: true,
+        rationale: "The result is available.",
+        evidenceRefs: ["candidateOutput"],
+      }],
+      decisionBindings: [{
+        decisionId: "decision:request-1:1",
+        status: "unverified",
+        blocking: false,
+        rationale: "No independent evidence confirms the user choice.",
+        evidenceRefs: ["decision:request-1:1"],
+      }],
+      skills: [],
+      evidenceDigest: "unverified-decision-evidence",
+      feedback: "The result is delivered; the user choice could not be independently verified.",
+      createdAt: Date.now(),
+    });
+
+    await new TerminalCommitter(plans, new RunOutcomeRepository(database))
+      .commitCompletedWithCaveats(runId, plan.id, "delivered output", "completed_with_unverified_decision_binding");
+
+    const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(runId) as { status: string; reason_code: string };
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason_code, "completed_with_unverified_decision_binding");
+  } finally {
+    database.close();
+  }
+});
+
 test("PlanRepository preserves OutcomePlan evidence contracts and assessment failed boundaries", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -6528,7 +6594,7 @@ test("PlanRepository preserves OutcomePlan evidence contracts and assessment fai
         }],
       },
       availableSkills: [],
-      availableToolNames: new Set(["computer_write_file"]),
+      availableToolNames: new Set(["computer_write_file", "verify_artifact_acceptance"]),
     }));
 
     assert.deepEqual((await plans.get(plan.id)).steps[0].evidenceContract, evidenceContract);
@@ -6553,6 +6619,13 @@ test("PlanRepository preserves OutcomePlan evidence contracts and assessment fai
         { criterionId: "artifact_non_empty", satisfied: true, rationale: "Content exists", evidenceRefs: ["write-file"] },
         { criterionId: "artifact_openable", satisfied: false, rationale: "No openability evidence", evidenceRefs: [] },
       ],
+      decisionBindings: [{
+        decisionId: "decision:request-1:1",
+        status: "unverified",
+        blocking: false,
+        rationale: "No independent decision receipt was supplied.",
+        evidenceRefs: ["decision:request-1:1"],
+      }],
       skills: [],
       evidenceDigest: "digest",
       feedback: "Openability evidence is missing.",
@@ -6561,6 +6634,13 @@ test("PlanRepository preserves OutcomePlan evidence contracts and assessment fai
     });
 
     assert.deepEqual((await plans.assessments(plan.id))[0].failedBoundary, failedBoundary);
+    assert.deepEqual((await plans.assessments(plan.id))[0].decisionBindings, [{
+      decisionId: "decision:request-1:1",
+      status: "unverified",
+      blocking: false,
+      rationale: "No independent decision receipt was supplied.",
+      evidenceRefs: ["decision:request-1:1"],
+    }]);
   } finally {
     database.close();
   }
@@ -9153,8 +9233,9 @@ test("Skill-bound artifact execution context carries workspace and evidence disc
     assert.equal(run.status, "completed");
     assert.match(executionRuntimeContext, /agentloop\.skillArtifactWorkflowDiscipline\/v1/);
     assert.match(executionRuntimeContext, /"evidenceContract":\{"requiredKinds":\["artifact_path","artifact_non_empty","artifact_acceptance"\]/);
-    assert.match(executionRuntimeContext, /If computer_run_command cwd is a read-only @skills\/<name> root/);
-    assert.match(executionRuntimeContext, /A relative writable argument passed while cwd is @skills\/<name> resolves under the read-only Skill package/);
+    assert.match(executionRuntimeContext, /invoke its package entrypoint directly with relative script arguments/);
+    assert.match(executionRuntimeContext, /every writable argument such as --workspace, --output, --outdir/);
+    assert.doesNotMatch(executionRuntimeContext, /cannot be used as a command cwd/);
     assert.match(executionRuntimeContext, /After the required Skill entrypoint and generated brief\/readiness file are read/);
     assert.match(executionRuntimeContext, /Do not add optional strict QA or fail-on-warning command flags/);
     assert.equal(executionRuntimeContext.includes(workspace), true);
@@ -9652,6 +9733,16 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
 
     const skills = new SkillService(database);
     const owner = testOwner();
+    const aihot = await skills.create(owner.user.id, {
+      name: "aihot",
+      description: "查询当前 AI 热点新闻和 AIHOT 精选。",
+      instructions: instructionsWithAgentLoopMetadata(
+        "Use the AI news API only when the current request needs fresh news.",
+        ["source_provider"],
+        ["none"],
+        ["api"],
+      ),
+    });
     const conversationId = "conversation-delivery-text-followup";
     const priorRunId = "prior-summary-run";
     const priorPlanId = "prior-summary-plan";
@@ -9678,24 +9769,32 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
     );
     await database.prepare(`
       INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, status, created_at, updated_at)
-      VALUES (?, ?, 1, ?, '[]', 'completed', ?, ?)
-    `).run(priorPlanId, priorRunId, "Summarize source documents", now - 9_000, now - 8_000);
+      VALUES (?, ?, 1, ?, ?, 'completed', ?, ?)
+    `).run(
+      priorPlanId,
+      priorRunId,
+      "Summarize source documents",
+      JSON.stringify([aihot.id]),
+      now - 9_000,
+      now - 8_000,
+    );
     await database.prepare(`
       INSERT INTO plan_steps(
         plan_id, step_id, position, objective, dependencies_json, skill_ids_json,
         required_capabilities_json, recommended_tool_names_json, execution_binding_json,
         success_criteria_json, status, output, evidence_json, error,
         started_at, finished_at
-      ) VALUES (?, 'summarize', 0, ?, '[]', '[]', ?, '[]', ?, ?, 'completed', ?, NULL, NULL, ?, ?)
+      ) VALUES (?, 'summarize', 0, ?, '[]', ?, ?, '[]', ?, ?, 'completed', ?, NULL, NULL, ?, ?)
     `).run(
       priorPlanId,
       "Summarize the selected source documents.",
-      JSON.stringify(["visible_directory_read"]),
+      JSON.stringify([aihot.id]),
+      JSON.stringify(["skill_instruction_load", "web_research"]),
       executionBindingJson({
-        requiredCapabilities: ["visible_directory_read"],
-        resolvedToolNames: ["visible_read_files"],
-        sourceKinds: ["visible_directory"],
-        sideEffect: "workspace_read",
+        requiredCapabilities: ["skill_instruction_load", "web_research"],
+        resolvedToolNames: ["load_skill", "websearch", "webfetch"],
+        sourceKinds: ["web"],
+        sideEffect: "external_read",
         evidenceKinds: ["source_summary"],
       }),
       JSON.stringify([{ id: "summary", description: "Summary text is delivered.", source: "planner" }]),
@@ -9733,7 +9832,7 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
                   mode: "execute",
                   relation: "refine_prior",
                   targetRunId: priorRunId,
-                  effectiveGoal: "将上一轮分析整理为 PDF 文件。",
+                  effectiveGoal: "根据此前已获取的 AI 热点新闻来源数据，将上一轮分析整理为 PDF 文件。",
                   evidenceDemand: "source_grounded",
                   userConstraints: [],
                 },
@@ -9785,6 +9884,9 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
     assert.equal(capturedTask?.conversationWorkingSet?.reusableArtifacts.length, 0);
     assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.result.sha256, priorSha256);
     assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.summaryTruncated, true);
+    assert.deepEqual(capturedTask?.availableSkills.map((skill) => skill.id), [aihot.id]);
+    assert.deepEqual(capturedTask?.selectedSkillRoles, []);
+    assert.deepEqual(capturedTask?.continuationSkillIds, [aihot.id]);
     assert.deepEqual(capturedTask?.turnResolution?.targetResult, {
       schema: "agentloop.conversationResultRef/v1",
       runId: priorRunId,
@@ -13566,6 +13668,7 @@ test("a resumed Step persists a subsequent Human-in-the-Loop request", async () 
   try {
     const skills = new SkillService(database);
     const owner = testOwner();
+    const eventLines: string[] = [];
     let executionTurns = 0;
     const model: ModelAdapter = {
       limits: TEST_MODEL_LIMITS,
@@ -13603,6 +13706,7 @@ test("a resumed Step persists a subsequent Human-in-the-Loop request", async () 
       modelFactory: () => model,
       plannerFactory: () => singleStepTestPlanner(),
       assessorFactory: () => approvingTestAssessor(),
+      runEventLogSink: (line) => eventLines.push(line),
     });
 
     const initial = await runs.execute(owner.user.id, "Ask for two independent choices before delivering the answer.");
@@ -13635,6 +13739,7 @@ test("a resumed Step persists a subsequent Human-in-the-Loop request", async () 
     const events = await runs.events(owner.user.id, initial.id);
     assert.equal(events.filter((event) => event.type === "run.waiting_user").length, 2);
     assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
+    assert.ok(eventLines.some((line) => line.includes("event=recovery.resume_started")));
   } finally {
     database.close();
   }

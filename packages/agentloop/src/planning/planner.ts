@@ -951,7 +951,7 @@ function planningRuntimeContext(
           ? {}
           : {
             continuationSkillIds: task.continuationSkillIds,
-            continuationSkillPolicy: "These are Skills canonically bound by completed prior steps. Decide their relevance from the latest request together with conversation history and completedStepHandoffs; do not infer continuation from a keyword alone.",
+            continuationSkillPolicy: "These are Skills canonically bound by completed prior steps. They remain available context, not selected Plan dependencies. Re-evaluate them against the latest TaskProfile, request, conversation history, and completedStepHandoffs; do not infer continuation from a keyword alone. A source_provider-only continuation belongs on a new fact_acquisition leaf only when the latest turn actually needs source work; do not bind it to an artifact-producing leaf merely because it supplied the prior content.",
           }),
         ...(taskProfile.researchPolicy === undefined
           ? {}

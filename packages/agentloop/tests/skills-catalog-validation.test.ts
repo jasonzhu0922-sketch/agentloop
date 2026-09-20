@@ -118,7 +118,9 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
       assert.equal(skill.package?.packageHash, source?.inspection.packageHash);
       assert.equal(skill.package?.fileCount, source?.inspection.fileCount);
       assert.equal(skill.package?.totalBytes, source?.inspection.totalBytes);
-      assert.equal(skill.package?.root, source?.sourceDirectory);
+      assert.notEqual(skill.package?.root, source?.sourceDirectory);
+      assert.ok(skill.package?.root.startsWith(resolve(await fs.realpath(packageStore), "discovered")));
+      assert.equal((await fs.stat(skill.package!.root)).mode & 0o222, 0);
       assert.match(catalogContext, new RegExp(`<name>${skill.name}</name>`));
       assert.doesNotMatch(catalogContext, new RegExp(escapeRegExp(skill.instructions)));
 
@@ -165,7 +167,7 @@ test("loaded package Skills show the Runtime path contract before Skill instruct
     loaded.indexOf("Runtime execution cwd for this Skill:") < loaded.indexOf(source.instructions),
     "Runtime package path contract must precede loaded Skill instructions",
   );
-  assert.match(loaded, /relative writable task paths such as decks\/my-deck/);
+  assert.match(loaded, /cannot be used as computer_run_command\.cwd/);
   assert.match(loaded, /execution_context\.workspace\.root/);
 });
 

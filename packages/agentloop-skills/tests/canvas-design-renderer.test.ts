@@ -32,6 +32,47 @@ const EDITORIAL_DIRECTION = {
   avoid: ["dark network field", "glowing central orb"],
 };
 
+const MONUMENT_DIRECTION = {
+  concept: "A public memory rises through a measured ceremonial axis",
+  emotionalRegister: "solemn",
+  materialLanguage: "polished-metal",
+  compositionTopology: "axial-monument",
+  typographicVoice: "monumental-display",
+  colorStrategy: "monochrome-accent",
+  imageMode: "symbolic-object",
+  avoid: ["dark network field"],
+};
+
+const KINETIC_DIRECTION = {
+  concept: "A campaign moves as an energetic public procession",
+  emotionalRegister: "exuberant",
+  materialLanguage: "cut-paper",
+  compositionTopology: "directional-flow",
+  typographicVoice: "compressed-impact",
+  colorStrategy: "saturated-pop",
+  imageMode: "collaged-fragments",
+  avoid: ["static network field"],
+};
+
+const EMBLEM_DIRECTION = {
+  concept: "A shared identity is assembled as a field of distinct civic marks",
+  emotionalRegister: "humanist",
+  materialLanguage: "raw-print",
+  compositionTopology: "symbolic-grid",
+  typographicVoice: "editorial-contrast",
+  colorStrategy: "earth-paper",
+  imageMode: "symbolic-object",
+  avoid: ["glowing central orb"],
+};
+
+const DIRECTION_BY_FAMILY = {
+  "signal-field": NETWORK_DIRECTION,
+  "monument-axis": MONUMENT_DIRECTION,
+  "editorial-blocks": EDITORIAL_DIRECTION,
+  "kinetic-ribbons": KINETIC_DIRECTION,
+  "emblem-grid": EMBLEM_DIRECTION,
+} as const;
+
 test("canvas-design renderer exposes layout families without domain-specific example leakage", () => {
   const result = spawnSync("python3", [RENDERER, "--schema"], {
     cwd: PACKAGE_ROOT,
@@ -48,7 +89,7 @@ test("canvas-design renderer exposes layout families without domain-specific exa
     compositionTopologyFamilies: Record<string, string>;
     example: { title: string; layoutFamily: string };
   };
-  assert.equal(schema.schema, "agentloop.canvasDesignSpec/v2");
+  assert.equal(schema.schema, "agentloop.canvasDesignSpec/v3");
   assert.deepEqual(schema.layoutFamilies, [
     "signal-field",
     "monument-axis",
@@ -156,8 +197,18 @@ test("canvas-design layoutFamily changes composition, not just copy or color", (
       canvas: { width: 900, height: 1200 },
     };
 
-    const first = render(workspace, { ...baseSpec, output: "monument.png", layoutFamily: "monument-axis" });
-    const second = render(workspace, { ...baseSpec, output: "blocks.png", layoutFamily: "editorial-blocks" });
+    const first = render(workspace, {
+      ...baseSpec,
+      output: "monument.png",
+      artDirection: MONUMENT_DIRECTION,
+      layoutFamily: "monument-axis",
+    });
+    const second = render(workspace, {
+      ...baseSpec,
+      output: "blocks.png",
+      artDirection: EDITORIAL_DIRECTION,
+      layoutFamily: "editorial-blocks",
+    });
 
     assert.equal(first.layoutFamily, "monument-axis");
     assert.equal(second.layoutFamily, "editorial-blocks");
@@ -174,6 +225,7 @@ test("canvas-design composition variants and visible motifs change a shared gram
       title: "共同体纪念日",
       subtitle: "看得见的人与城市",
       movement: "Civic Memory",
+      artDirection: MONUMENT_DIRECTION,
       layoutFamily: "monument-axis",
       palette: {
         backgroundTop: "#5c0a14",
@@ -228,6 +280,7 @@ test("canvas-design variants alter the primary composition in every non-monument
         title: "Visible Systems",
         subtitle: "One subject, different spatial decisions",
         movement: "Divergent Form",
+        artDirection: DIRECTION_BY_FAMILY[family],
         layoutFamily: family,
         palette: {
           backgroundTop: "#efe9dc",
@@ -275,50 +328,29 @@ test("canvas-design rejects unsupported variants instead of silently replacing t
   }
 });
 
-test("canvas-design requires an art direction for new subject-intent specs", () => {
+test("canvas-design refuses to infer a layout from subject keywords", () => {
   const workspace = mkdtempSync(join(tmpdir(), "agentloop-canvas-design-missing-direction-"));
   try {
     const specPath = join(workspace, "missing.json");
     writeFileSync(specPath, JSON.stringify({
       output: "missing.png",
-      title: "AI System",
+      title: "AI 智能数据平台发布暨 77 周年纪念活动",
+      subtitle: "Technology, network, system, campaign, anniversary",
       designIntent: "technology-system",
     }), "utf8");
     const result = spawnSync("python3", [RENDERER, specPath], { cwd: workspace, encoding: "utf8" });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /artDirection is required/u);
+    assert.match(result.stderr, /DESIGN_DIRECTION_REQUIRED/u);
+    assert.match(result.stderr, /does not infer a visual direction/u);
+    assert.equal(result.stdout, "");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("canvas-design renderer chooses a non-singleton layout when layoutFamily is omitted", () => {
-  const workspace = mkdtempSync(join(tmpdir(), "agentloop-canvas-design-auto-"));
-  try {
-    const memorial = render(workspace, {
-      output: "memorial.png",
-      title: "Victory Memorial Anniversary",
-      subtitle: "Memory, history, and public ceremony",
-      movement: "Eternal Dawn",
-      labels: ["1945", "Peace", "History", "Commemoration"],
-      seed: 81,
-      canvas: { width: 900, height: 1200 },
-    });
-    const campaign = render(workspace, {
-      output: "campaign.png",
-      title: "Festival Launch Campaign",
-      subtitle: "Movement, gathering, and public energy",
-      movement: "Civic Motion",
-      labels: ["Opening", "Live", "Studio", "Program"],
-      seed: 81,
-      canvas: { width: 900, height: 1200 },
-    });
-
-    assert.equal(memorial.layoutFamily, "monument-axis");
-    assert.equal(campaign.layoutFamily, "kinetic-ribbons");
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
+test("canvas-design contains no subject-keyword layout routing", () => {
+  const source = readFileSync(RENDERER, "utf8");
+  assert.doesNotMatch(source, /auto_layout_family|semantic_hints|hint_matches/u);
 });
 
 test("canvas-design renderer accepts the documented low texture range", () => {
@@ -329,6 +361,7 @@ test("canvas-design renderer accepts the documented low texture range", () => {
       title: "National Day",
       subtitle: "Public ceremony and shared memory",
       movement: "Monumental Festival",
+      artDirection: MONUMENT_DIRECTION,
       layoutFamily: "monument-axis",
       labels: ["1949", "2026", "77", "Celebration"],
       texture: 0.18,

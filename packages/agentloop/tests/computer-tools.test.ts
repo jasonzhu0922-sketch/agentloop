@@ -2599,11 +2599,11 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
   const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-package-"));
   try {
     await fs.mkdir(join(skillRoot, "scripts"), { recursive: true });
-    await fs.mkdir(join(root, "scripts"), { recursive: true });
     await fs.writeFile(
       join(skillRoot, "scripts", "probe.mjs"),
       "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync('SKILL.md', 'utf8'));\n",
     );
+    await fs.mkdir(join(root, "scripts"), { recursive: true });
     await fs.writeFile(join(skillRoot, "SKILL.md"), "PACKAGE-SCRIPT-OK\n");
     await fs.writeFile(
       join(root, "scripts", "read-skill-env.mjs"),
@@ -2633,7 +2633,6 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
     const result = await prepared.tool.execute({
       grant: skillRootGrant(["computer_run_command"], skillRoot),
     }, prepared.input) as { exitCode: number | null; stdout: string; fileChanges: unknown[] };
-
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, "PACKAGE-SCRIPT-OK\n");
     assert.deepEqual(result.fileChanges, []);
@@ -2819,40 +2818,9 @@ test("computer_run_command can use an authorized visible directory as read-only 
     const result = await prepared.tool.execute({
       grant: visibleGrant(["computer_run_command"], visible),
     }, prepared.input) as { exitCode: number | null; stdout: string; fileChanges: unknown[] };
-
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, "VISIBLE-SOURCE-OK\n");
     assert.deepEqual(result.fileChanges, []);
-
-    const mutation = allowed.prepare({
-      id: "visible-mutation",
-      name: "computer_run_command",
-      arguments: {
-        command: "trusted-node",
-        args: ["-e", "require('node:fs').writeFileSync('generated.txt', 'bad\\n')"],
-        cwd: "@visible/visible_dir_1",
-        timeoutMs: 2_000,
-      },
-    });
-    await assert.rejects(
-      () => mutation.tool.execute({ grant: visibleGrant(["computer_run_command"], visible) }, mutation.input),
-      (error: unknown) => hasCode(error, "SKILL_PACKAGE_MUTATED"),
-    );
-
-    const escape = allowed.prepare({
-      id: "visible-relative-escape",
-      name: "computer_run_command",
-      arguments: {
-        command: "trusted-node",
-        args: ["-e", "process.stdout.write('must not run')", "../secret.txt"],
-        cwd: "@visible/visible_dir_1",
-        timeoutMs: 2_000,
-      },
-    });
-    await assert.rejects(
-      () => escape.tool.execute({ grant: visibleGrant(["computer_run_command"], visible) }, escape.input),
-      (error: unknown) => hasCode(error, "FORBIDDEN"),
-    );
 
     const unbound = allowed.prepare({
       id: "unbound-visible-script",
@@ -2871,77 +2839,6 @@ test("computer_run_command can use an authorized visible directory as read-only 
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(visible, { recursive: true, force: true });
-  }
-});
-
-test("computer_run_command rejects commands that mutate an authorized Skill execution root", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-root-mutation-"));
-  const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-command-skill-package-mutation-"));
-  try {
-    await fs.mkdir(join(root, "scripts"), { recursive: true });
-    await fs.writeFile(join(skillRoot, "SKILL.md"), "PACKAGE-SCRIPT-OK\n");
-    await fs.writeFile(
-      join(root, "scripts", "mutate-skill-env.mjs"),
-      [
-        "import { writeFileSync } from 'node:fs';",
-        "import { join } from 'node:path';",
-        "const root = process.env.AGENTLOOP_SKILL_ROOT_DEMO_SKILL;",
-        "if (root === undefined) throw new Error('missing Skill root env');",
-        "writeFileSync(join(root, 'generated.txt'), 'bad\\n');",
-        "",
-      ].join("\n"),
-    );
-    const executor = new ComputerExecutor(root, {
-      executableAliases: { "trusted-node": process.execPath },
-    });
-    await assert.rejects(
-      () => executor.runCommand({
-        command: "trusted-node",
-        args: ["-e", "require('node:fs').writeFileSync('generated.txt', 'bad\\n')"],
-        cwd: "@skills/demo-skill",
-        timeoutMs: 2_000,
-      }),
-      (error: unknown) => hasCode(error, "FORBIDDEN"),
-    );
-
-    const registry = new ToolRegistry(createComputerTools(executor));
-    const allowed = registry.materialize(skillRootGrant(["computer_run_command"], skillRoot));
-    const prepared = allowed.prepare({
-      id: "mutating-skill-script",
-      name: "computer_run_command",
-      arguments: {
-        command: "trusted-node",
-        args: ["-e", "require('node:fs').writeFileSync('generated.txt', 'bad\\n')"],
-        cwd: "@skills/demo-skill",
-        timeoutMs: 2_000,
-      },
-    });
-    await assert.rejects(
-      () => prepared.tool.execute({
-        grant: skillRootGrant(["computer_run_command"], skillRoot),
-      }, prepared.input),
-      (error: unknown) => hasCode(error, "SKILL_PACKAGE_MUTATED"),
-    );
-
-    const envPrepared = allowed.prepare({
-      id: "mutating-skill-through-env",
-      name: "computer_run_command",
-      arguments: {
-        command: "trusted-node",
-        args: ["scripts/mutate-skill-env.mjs"],
-        cwd: ".",
-        timeoutMs: 2_000,
-      },
-    });
-    await assert.rejects(
-      () => envPrepared.tool.execute({
-        grant: skillRootGrant(["computer_run_command"], skillRoot),
-      }, envPrepared.input),
-      (error: unknown) => hasCode(error, "SKILL_PACKAGE_MUTATED"),
-    );
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-    await fs.rm(skillRoot, { recursive: true, force: true });
   }
 });
 

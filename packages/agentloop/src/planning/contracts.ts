@@ -415,6 +415,13 @@ export interface SuccessCriterion {
   readonly id: string;
   readonly description: string;
   readonly source: "task" | "planner";
+  /**
+   * States what kind of observation can support this criterion.  The default
+   * remains deterministic/blocking for compatibility with existing Plans.
+   */
+  readonly verification?: "deterministic" | "model_judged" | "decision_context";
+  /** A non-blocking criterion is retained as an honest completion caveat. */
+  readonly blocking?: boolean;
 }
 
 export interface RequiredFact {
@@ -500,13 +507,25 @@ export interface StepEvidence {
 }
 
 export interface CompletionCaveat {
-  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit" | "evidence_boundary";
+  readonly reason: "deferred_validation" | "process_caveat" | "repair_limit" | "evidence_boundary" | "unverified_decision_binding" | "unverified_quality";
   readonly feedback: string;
 }
 
 export interface CriterionAssessment {
   readonly criterionId: string;
   readonly satisfied: boolean;
+  /** `unverified` is distinct from a demonstrated contradiction. */
+  readonly status?: "satisfied" | "unverified" | "conflict";
+  /** Copied from the admitted criterion so TerminalCommitter need not infer semantics. */
+  readonly blocking?: boolean;
+  readonly rationale: string;
+  readonly evidenceRefs: readonly string[];
+}
+
+export interface DecisionBindingAssessment {
+  readonly decisionId: string;
+  readonly status: "satisfied" | "unverified" | "conflict";
+  readonly blocking: boolean;
   readonly rationale: string;
   readonly evidenceRefs: readonly string[];
 }
@@ -547,6 +566,8 @@ export interface SkillComplianceAssessment {
   readonly assessmentMethod?: AssessmentMethod;
   readonly approved: boolean;
   readonly criteria: readonly CriterionAssessment[];
+  /** Server-owned HIL commitments evaluated alongside, not after, Assessment. */
+  readonly decisionBindings?: readonly DecisionBindingAssessment[];
   readonly skills: readonly SkillAssessment[];
   readonly evidenceDigest: string;
   readonly feedback: string;

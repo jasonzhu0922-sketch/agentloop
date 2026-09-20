@@ -463,8 +463,8 @@ function skillArtifactWorkflowDiscipline(
     })),
     writableWorkspaceRoot: workspaceRoot,
     rules: [
-      "If computer_run_command cwd is a read-only @skills/<name> root, writable arguments such as --workspace, --output, --outdir, --input-output workspace paths, or generated source paths must resolve under writableWorkspaceRoot.",
-      "A relative writable argument passed while cwd is @skills/<name> resolves under the read-only Skill package and can trigger SKILL_PACKAGE_MUTATED; pass an absolute path under writableWorkspaceRoot or run from the workspace root when the Skill script supports it.",
+      "If computer_run_command cwd is a read-only @skills/<name> root, invoke its package entrypoint directly with relative script arguments such as scripts/<script>; never create outputs relative to that root.",
+      "While cwd is @skills/<name>, every writable argument such as --workspace, --output, --outdir, input-output workspace paths, or generated source paths must be an absolute path under writableWorkspaceRoot.",
       "After the required Skill entrypoint and generated brief/readiness file are read, move to authoring or building the artifact. Do not continue listing, searching, or reading Skill references unless a validator, build, render, or acceptance diagnostic identifies a concrete missing field or contract.",
       "Do not add optional strict QA or fail-on-warning command flags merely because a Skill supports them. Use strict QA gates only when the currentPlanStep evidenceContract, the user request, or a concrete Skill delivery rubric requires that QA evidence; otherwise surface warnings and continue toward artifact_path, artifact_non_empty, artifact_openable, format_matches_request, and artifact_acceptance.",
       "Completion still requires the currentPlanStep evidenceContract; Skill instructions, command success, and fileChanges are inputs to that evidence, not terminal completion by themselves.",
