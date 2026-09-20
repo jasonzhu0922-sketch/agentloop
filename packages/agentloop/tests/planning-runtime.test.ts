@@ -5342,6 +5342,7 @@ test("conversation intent resolution is durable before a slow resolver can appea
               arguments: {
                 mode: "reply",
                 relation: "new_goal",
+                inputMode: "none",
                 effectiveGoal: "answer the user",
                 evidenceDemand: "none",
                 userConstraints: [],
@@ -9830,8 +9831,11 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
                 // completed Outcome returned for this prior Run.
                 arguments: {
                   mode: "execute",
-                  relation: "refine_prior",
-                  targetRunId: priorRunId,
+                  // Reproduce the production failure: the model treats an
+                  // artifact follow-up as a fresh goal despite one unique
+                  // completed result being available.
+                  relation: "new_goal",
+                  inputMode: "none",
                   effectiveGoal: "根据此前已获取的 AI 热点新闻来源数据，将上一轮分析整理为 PDF 文件。",
                   evidenceDemand: "source_grounded",
                   userConstraints: [],
@@ -9894,7 +9898,9 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
       characters: priorOutput.length,
     });
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
-    assert.match(resolverContext, /reusableResults/);
+    assert.match(resolverContext, /reusableResultCandidates/);
+    assert.doesNotMatch(resolverContext, new RegExp(priorSha256));
+    assert.doesNotMatch(resolverContext, new RegExp(priorRunId));
     assert.match(executionContext, /planInputBindings/);
     assert.match(executionContext, new RegExp(priorSha256));
     assert.equal(resultReadCalls, 1);
@@ -9911,10 +9917,125 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
     }]);
     const resolved = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.turn.resolved");
     assert.equal(resolved?.data.evidenceDemand, "none");
+    assert.equal(resolved?.data.relation, "refine_prior");
+    assert.equal(resolved?.data.inputMode, "prior_result");
     assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
   } finally {
     database.close();
     await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("RunService retries an ambiguous prior-result follow-up until the model selects an opaque candidate", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-opaque-result-candidate";
+    const firstRunId = "first-completed-result";
+    const secondRunId = "second-completed-result";
+    const firstOutput = "First completed analysis.";
+    const secondOutput = "Second completed analysis selected by the user follow-up.";
+    const secondSha256 = createHash("sha256").update(secondOutput).digest("hex");
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "Opaque result candidates", now - 30_000, now - 1_000);
+    for (const [runId, input, output, createdAt] of [
+      [firstRunId, "第一次分析", firstOutput, now - 20_000],
+      [secondRunId, "第二次分析", secondOutput, now - 10_000],
+    ] as const) {
+      await database.prepare(`
+        INSERT INTO runs(
+          id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+          model_key, status, input, output, error_code, created_at, finished_at
+        ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
+      `).run(runId, owner.user.id, conversationId, input, output, createdAt, createdAt + 1_000);
+      await database.prepare(`
+        INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
+        VALUES (?, NULL, 'completed', ?, 'plan_assessed_and_completed', ?)
+      `).run(runId, output, createdAt + 1_000);
+    }
+
+    let resolverCalls = 0;
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          resolverCalls += 1;
+          const context = request.runtimeContext?.content ?? "";
+          assert.match(context, /result_candidate_1/);
+          assert.match(context, /result_candidate_2/);
+          assert.doesNotMatch(context, new RegExp(firstRunId));
+          assert.doesNotMatch(context, new RegExp(secondRunId));
+          assert.doesNotMatch(context, new RegExp(secondSha256));
+          if (resolverCalls === 1) {
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "omit-result-candidate",
+                name: "resolve_conversation_turn",
+                arguments: {
+                  mode: "execute",
+                  relation: "new_goal",
+                  inputMode: "none",
+                  effectiveGoal: "把之前的分析结果生成 PDF。",
+                  evidenceDemand: "source_grounded",
+                  userConstraints: ["生成 PDF"],
+                },
+              }],
+            };
+          }
+          assert.match(request.systemPrompt, /multiple reusable results are available/i);
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "select-result-candidate",
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "execute",
+                relation: "new_goal",
+                inputMode: "prior_result",
+                resultCandidateId: "result_candidate_2",
+                effectiveGoal: "把第二次分析结果生成 PDF。",
+                evidenceDemand: "source_grounded",
+                userConstraints: ["生成 PDF"],
+              },
+            }],
+          };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          throw new AppError("PLANNING_ERROR", "Stop after opaque result binding", 400);
+        },
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "把之前的分析结果生成 PDF", {
+        conversationId,
+        allowDangerousTools: true,
+      }),
+      (error: unknown) => error instanceof AppError && error.code === "PLANNING_ERROR",
+    );
+
+    assert.equal(resolverCalls, 2);
+    assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
+    assert.equal(capturedTask?.turnResolution?.relation, "refine_prior");
+    assert.equal(capturedTask?.turnResolution?.targetRunId, secondRunId);
+    assert.equal(capturedTask?.turnResolution?.targetResult?.runId, secondRunId);
+    assert.equal(capturedTask?.turnResolution?.targetResult?.sha256, secondSha256);
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
+  } finally {
+    database.close();
   }
 });
 
@@ -10078,8 +10199,8 @@ test("RunService inherits canonical persisted intent for a pure continuation wit
       complete: async (request) => {
         assert.equal(request.tools[0]?.name, "resolve_conversation_turn");
         const context = request.runtimeContext?.content ?? "";
-        assert.match(context, /priorRunIntents/);
-        assert.match(context, new RegExp(priorRunId));
+        assert.match(context, /priorGoalCandidates/);
+        assert.doesNotMatch(context, new RegExp(priorRunId));
         assert.match(context, /其余内容保持不变/);
         return {
           content: "",
@@ -10090,7 +10211,8 @@ test("RunService inherits canonical persisted intent for a pure continuation wit
             arguments: {
               mode: "execute",
               relation: "continue_prior",
-              targetRunId: priorRunId,
+              inputMode: "none",
+              targetGoalCandidateId: "goal_candidate_1",
               effectiveGoal: "继续修改姓名。",
               evidenceDemand: "none",
               userConstraints: ["输出一个新文件", "只修改指定姓名"],
@@ -10131,12 +10253,120 @@ test("RunService inherits canonical persisted intent for a pure continuation wit
         schema: "agentloop.conversationTurnResolution/v1",
         mode: "execute",
         relation: "new_goal",
+        inputMode: "none",
         effectiveGoal: priorEffectiveGoal,
         evidenceDemand: "source_grounded",
         userConstraints: priorConstraints,
         source: "model",
       },
     }]);
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService continues a failed goal while inheriting its completed prior-result input", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-failed-goal-result-input";
+    const resultRunId = "completed-analysis-result";
+    const failedRunId = "failed-pdf-goal";
+    const priorOutput = "Completed analysis that must remain the PDF content source.";
+    const priorSha256 = createHash("sha256").update(priorOutput).digest("hex");
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "Failed PDF continuation", now - 30_000, now - 1_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
+    `).run(resultRunId, owner.user.id, conversationId, "分析附件", priorOutput, now - 20_000, now - 18_000);
+    await database.prepare(`
+      INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
+      VALUES (?, NULL, 'completed', ?, 'plan_assessed_and_completed', ?)
+    `).run(resultRunId, priorOutput, now - 18_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'failed', ?, NULL, 'PLANNING_ERROR', ?, ?)
+    `).run(failedRunId, owner.user.id, conversationId, "把分析结果生成 PDF", now - 10_000, now - 8_000);
+    await database.prepare(`
+      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
+      VALUES (?, 1, 'conversation.turn.resolved', ?, ?)
+    `).run(
+      failedRunId,
+      JSON.stringify({
+        schema: "agentloop.conversationTurnResolution/v1",
+        mode: "execute",
+        relation: "refine_prior",
+        inputMode: "prior_result",
+        targetRunId: resultRunId,
+        targetResult: {
+          schema: "agentloop.conversationResultRef/v1",
+          runId: resultRunId,
+          sha256: priorSha256,
+          characters: priorOutput.length,
+        },
+        effectiveGoal: "把已完成的分析结果生成 PDF。",
+        evidenceDemand: "none",
+        userConstraints: ["生成 PDF"],
+        source: "model_guarded",
+      }),
+      now - 9_000,
+    );
+
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          assert.equal(request.tools[0]?.name, "resolve_conversation_turn");
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "continue-failed-pdf-goal",
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "execute",
+                relation: "continue_prior",
+                inputMode: "none",
+                targetGoalCandidateId: "goal_candidate_1",
+                effectiveGoal: "继续。",
+                evidenceDemand: "none",
+                userConstraints: [],
+              },
+            }],
+          };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          throw new AppError("PLANNING_ERROR", "Stop after capturing inherited result input", 400);
+        },
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "继续", { conversationId, allowDangerousTools: true }),
+      (error: unknown) => error instanceof AppError && error.code === "PLANNING_ERROR",
+    );
+
+    assert.equal(capturedTask?.turnResolution?.targetRunId, failedRunId);
+    assert.equal(capturedTask?.turnResolution?.relation, "continue_prior");
+    assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
+    assert.equal(capturedTask?.turnResolution?.targetResult?.runId, resultRunId);
+    assert.equal(capturedTask?.turnResolution?.targetResult?.sha256, priorSha256);
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
   } finally {
     database.close();
   }
@@ -10205,7 +10435,8 @@ test("RunService rebinds terse correction feedback to the completed prior goal a
       limits: TEST_MODEL_LIMITS,
       complete: async (request) => {
         if (request.tools[0]?.name === "resolve_conversation_turn") {
-          assert.match(request.runtimeContext?.content ?? "", new RegExp(priorRunId));
+          assert.match(request.runtimeContext?.content ?? "", /goal_candidate_1/);
+          assert.doesNotMatch(request.runtimeContext?.content ?? "", new RegExp(priorRunId));
           assert.equal(request.messages.some((message) => message.content.includes("unsupported expansion")), true);
           return {
             content: "",
@@ -10219,7 +10450,8 @@ test("RunService rebinds terse correction feedback to the completed prior goal a
                 // floor for the specific external fact.
                 mode: "reply",
                 relation: "correct_prior",
-                targetRunId: priorRunId,
+                inputMode: "refresh_sources",
+                targetGoalCandidateId: "goal_candidate_1",
                 effectiveGoal: "What is the external initiative? Replace the prior unsupported answer.",
                 evidenceDemand: "none",
                 userConstraints: ["Do not invent unsupported facts."],
@@ -10413,7 +10645,8 @@ test("RunService binds the resolved prior Run's accepted source evidence into a 
               arguments: {
                 mode: "execute",
                 relation: "refine_prior",
-                targetRunId: priorRunId,
+                inputMode: "refresh_sources",
+                targetGoalCandidateId: "goal_candidate_1",
                 effectiveGoal: "Deliver the already grounded cautious conclusion without reacquiring the same sources.",
                 evidenceDemand: "source_grounded",
                 userConstraints: ["Do not invent the numeric definition."],
@@ -10893,7 +11126,9 @@ test("RunService carries completed artifact lineage into qualitative follow-up p
                 arguments: {
                   mode: "execute",
                   relation: "refine_prior",
-                  targetRunId: priorRunId,
+                  inputMode: "prior_artifact",
+                  targetGoalCandidateId: "goal_candidate_1",
+                  targetArtifact: { path: "artifacts/m9-poster.png" },
                   effectiveGoal: "修改上一轮交付的海报并重新生成。",
                   evidenceDemand: "source_grounded",
                   userConstraints: ["重新生成"],
@@ -10935,7 +11170,8 @@ test("RunService carries completed artifact lineage into qualitative follow-up p
     assert.deepEqual(workset?.recommendedCapabilities.skillIds, [skill.id]);
     assert.equal(workset?.recommendedCapabilities.capabilityIds.includes("workspace_artifact_write"), true);
     assert.equal(workset?.reusableArtifacts[0]?.sourceSkillIds?.includes(skill.id), true);
-    assert.match(resolverContext, /"reusableArtifacts":\[\{"runId":"prior-completed-image-run","path":"artifacts\/m9-poster\.png"/);
+    assert.match(resolverContext, /"reusableArtifacts":\[\{"goalCandidateId":"goal_candidate_1","path":"artifacts\/m9-poster\.png"/);
+    assert.doesNotMatch(resolverContext, new RegExp(priorRunId));
     assert.deepEqual(capturedTask?.turnResolution?.targetArtifact, {
       runId: priorRunId,
       path: "artifacts/m9-poster.png",

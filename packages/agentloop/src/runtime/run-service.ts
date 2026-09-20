@@ -23,6 +23,7 @@ import type {
   ConversationSourceReference,
   ConversationSourceSummary,
   ConversationTurnRelation,
+  ConversationTurnInputMode,
   ConversationTurnResolution,
   ConversationWorkingSet,
   ExecutionPlan,
@@ -6689,38 +6690,31 @@ async function resolveVisibleDirectories(paths: readonly string[]): Promise<Visi
 
 const CONVERSATION_TURN_TOOL = {
   name: "resolve_conversation_turn",
-  description: "Bind the latest conversational turn to its effective goal and evidence demand using prior canonical conversation state.",
+  description: "Bind the latest conversational turn to its effective goal, goal lineage, and Runtime-issued prior-work candidate.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["mode", "relation", "effectiveGoal", "evidenceDemand", "userConstraints"],
+    required: ["mode", "relation", "inputMode", "effectiveGoal", "evidenceDemand", "userConstraints"],
     properties: {
       mode: { type: "string", enum: ["reply", "execute", "clarify"] },
       relation: {
         type: "string",
         enum: ["new_goal", "continue_prior", "correct_prior", "refine_prior", "challenge_prior"],
       },
-      targetRunId: { type: "string" },
+      inputMode: {
+        type: "string",
+        enum: ["none", "prior_result", "prior_artifact", "refresh_sources"],
+      },
+      targetGoalCandidateId: { type: "string", pattern: "^goal_candidate_[1-9][0-9]*$" },
       targetArtifact: {
         type: "object",
         additionalProperties: false,
-        required: ["runId", "path"],
+        required: ["path"],
         properties: {
-          runId: { type: "string", minLength: 1, maxLength: 120 },
           path: { type: "string", minLength: 1, maxLength: 1_200 },
         },
       },
-      targetResult: {
-        type: "object",
-        additionalProperties: false,
-        required: ["schema", "runId", "sha256", "characters"],
-        properties: {
-          schema: { type: "string", const: "agentloop.conversationResultRef/v1" },
-          runId: { type: "string", minLength: 1, maxLength: 120 },
-          sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
-          characters: { type: "integer", minimum: 1, maximum: 20_000_000 },
-        },
-      },
+      resultCandidateId: { type: "string", pattern: "^result_candidate_[1-9][0-9]*$" },
       effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
       evidenceDemand: {
         type: "string",
@@ -6746,6 +6740,7 @@ async function resolveConversationTurn(
 ): Promise<ConversationTurnResolution> {
   const runtimeContextId = `conversation-turn-context:${randomUUID()}`;
   let repairFeedback: string | undefined;
+  let semanticFeedback: string | undefined;
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
     const response = await model.complete({
       runId: `conversation-turn:${randomUUID()}`,
@@ -6766,11 +6761,29 @@ async function resolveConversationTurn(
     const resolution = parseConversationTurnResolution(response, context.conversationWorkingSet);
     if (resolution !== undefined) {
       const inherited = inheritContinuedConversationIntent(resolution, context.conversationWorkingSet);
-      const artifactBound = bindUnambiguousPriorArtifact(inherited, input, context.conversationWorkingSet);
-      const resultBound = bindUnambiguousPriorResult(artifactBound, context.conversationWorkingSet);
-      return applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet);
+      const inheritedBinding = inheritPriorWorkProductBinding(inherited, context.conversationWorkingSet);
+      const artifactBound = bindUnambiguousPriorArtifact(inheritedBinding, input, context.conversationWorkingSet);
+      const resultBound = bindUnambiguousPriorResult(artifactBound, input, context.conversationWorkingSet);
+      semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
+      if (semanticFeedback === undefined) {
+        return applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet);
+      }
+      repairFeedback = semanticFeedback;
+      continue;
     }
     repairFeedback = conversationTurnRepairFeedback(response);
+  }
+  if (semanticFeedback !== undefined) {
+    return {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "clarify",
+      relation: "new_goal",
+      inputMode: "none",
+      effectiveGoal: "Clarify which prior completed result should be used as input.",
+      evidenceDemand: "none",
+      userConstraints: [semanticFeedback],
+      source: "deterministic",
+    };
   }
   return fallbackConversationTurnResolution(input);
 }
@@ -6821,6 +6834,48 @@ function uniqueConversationConstraints(values: readonly string[]): string[] {
 }
 
 /**
+ * Goal lineage and work-product ownership are independent. A failed Run can
+ * remain the continuation target while its accepted input is inherited from a
+ * different completed Run.
+ */
+function inheritPriorWorkProductBinding(
+  resolution: ConversationTurnResolution,
+  workset: ConversationWorkingSet | undefined,
+): ConversationTurnResolution {
+  if (
+    resolution.mode !== "execute"
+    || resolution.relation === "new_goal"
+    || resolution.targetRunId === undefined
+    || resolution.targetResult !== undefined
+    || resolution.inputMode === "refresh_sources"
+  ) return resolution;
+  const inherited = inheritedResultForRun(resolution.targetRunId, workset);
+  if (inherited === undefined) return resolution;
+  return {
+    ...resolution,
+    inputMode: "prior_result",
+    targetResult: inherited,
+    source: "model_guarded",
+  };
+}
+
+function inheritedResultForRun(
+  runId: string,
+  workset: ConversationWorkingSet | undefined,
+): ConversationResultReference | undefined {
+  const intents = new Map((workset?.resolvedIntents ?? []).map((item) => [item.runId, item.resolution]));
+  const seen = new Set<string>();
+  let currentRunId: string | undefined = runId;
+  while (currentRunId !== undefined && !seen.has(currentRunId)) {
+    seen.add(currentRunId);
+    const intent = intents.get(currentRunId);
+    if (intent?.targetResult !== undefined) return intent.targetResult;
+    currentRunId = intent?.targetRunId;
+  }
+  return undefined;
+}
+
+/**
  * The resolver owns the semantic edge to a prior Run; Runtime owns binding a
  * concrete work product. When that target Run has exactly one reusable
  * artifact and the latest turn asks for a prior-artifact change, binding is
@@ -6847,6 +6902,7 @@ function bindUnambiguousPriorArtifact(
   if (artifact === undefined) return resolution;
   return {
     ...resolution,
+    inputMode: "prior_artifact",
     targetArtifact: { runId: artifact.runId, path: artifact.path },
     source: "model_guarded",
   };
@@ -6855,19 +6911,59 @@ function bindUnambiguousPriorArtifact(
 /** A semantic Outcome is a reusable work product just as an artifact is. */
 function bindUnambiguousPriorResult(
   resolution: ConversationTurnResolution,
+  input: string,
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
-  if (
-    resolution.mode !== "execute"
-    || resolution.targetResult !== undefined
-    || resolution.targetRunId === undefined
-    || resolution.relation === "new_goal"
-  ) return resolution;
-  const candidates = workset?.reusableResults?.filter((item) => item.result.runId === resolution.targetRunId) ?? [];
+  if (resolution.mode !== "execute" || resolution.inputMode === "refresh_sources") return resolution;
+  if (resolution.targetResult !== undefined) {
+    if (resolution.relation !== "new_goal") return resolution;
+    return {
+      ...resolution,
+      relation: "refine_prior",
+      inputMode: "prior_result",
+      targetRunId: resolution.targetRunId ?? resolution.targetResult.runId,
+      source: "model_guarded",
+    };
+  }
+  const targetCandidates = resolution.targetRunId === undefined
+    ? []
+    : workset?.reusableResults?.filter((item) => item.result.runId === resolution.targetRunId) ?? [];
+  const candidates = targetCandidates.length > 0
+    ? targetCandidates
+    : referencesPriorConversationResult(input)
+      ? workset?.reusableResults ?? []
+      : [];
   if (candidates.length !== 1) return resolution;
   const candidate = candidates[0];
   if (candidate === undefined) return resolution;
-  return { ...resolution, targetResult: candidate.result, source: "model_guarded" };
+  return {
+    ...resolution,
+    relation: resolution.relation === "new_goal" ? "refine_prior" : resolution.relation,
+    inputMode: "prior_result",
+    targetRunId: resolution.targetRunId ?? candidate.result.runId,
+    targetResult: candidate.result,
+    source: "model_guarded",
+  };
+}
+
+function conversationTurnSemanticFeedback(
+  resolution: ConversationTurnResolution,
+  input: string,
+  workset: ConversationWorkingSet | undefined,
+): string | undefined {
+  if (!referencesPriorConversationResult(input) || resolution.targetResult !== undefined) return undefined;
+  const candidates = workset?.reusableResults ?? [];
+  if (candidates.length === 0) {
+    return "The user refers to a prior result, but no completed reusable Outcome is available. Ask the user to clarify or provide the content; do not silently reacquire sources.";
+  }
+  return candidates.length === 1
+    ? "The user refers to the available prior result. Set inputMode=prior_result and select result_candidate_1."
+    : "The user refers to a prior result, but multiple reusable results are available. Select the matching opaque resultCandidateId from reusableResultCandidates; if the transcript does not distinguish them, return clarify.";
+}
+
+function referencesPriorConversationResult(input: string): boolean {
+  if (!requestsArtifactBuildFromIntent(input)) return false;
+  return /(?:\b(?:this|that|the\s+above|above|previous|prior|earlier|last|latest)\s+(?:analysis|result|answer|summary|report|content|findings?)\b|\b(?:analysis|result|answer|summary|findings?)\s+from\s+(?:the\s+)?(?:previous|prior|last|earlier)\b|(?:这个|该|上述|前述|之前的|先前的|刚才的|上一轮的?|上轮的?)(?:分析(?:结果)?|结果|结论|回答|总结|报告|内容|材料)|(?:分析结果|上述结论|前述结论).{0,12}(?:生成|制作|导出|转换|转成|保存))/iu.test(input);
 }
 
 function conversationInputBindingsForTurn(
@@ -6946,9 +7042,12 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
-      "targetRunId must be one of the priorRunGoals or priorRunIntents IDs in runtimeContext and is required for every relation except new_goal.",
-      "When changing a prior delivered file, select its exact { runId, path } from reusableArtifacts as targetArtifact, use that artifact's runId as targetRunId, and use refine_prior. Do not select targetArtifact for a request that only reuses prior facts or delivery text.",
-      "When a follow-up consumes a prior accepted Outcome result, select its exact result ref from reusableResults as targetResult. A prior result's source lineage is provenance; it does not require new source acquisition unless the latest user request explicitly asks to refresh, reanalyze, or verify it.",
+      "targetGoalCandidateId must be one of priorGoalCandidates and is required for every relation except new_goal. Never reconstruct or emit a Run ID.",
+      "When changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
+      "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
+      "Set inputMode=prior_artifact only when changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
+      "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while resultCandidateId identifies the completed Outcome supplying its content.",
+      "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceDemand=none. For 'reanalyze the source and make a PDF', use refresh_sources with source-grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
@@ -6972,15 +7071,28 @@ function parseConversationTurnResolution(
   const argumentsRecord = optionalRecord(calls[0].arguments);
   const mode = argumentsRecord.mode;
   const relation = argumentsRecord.relation;
+  const inputMode = argumentsRecord.inputMode;
   const evidenceDemand = argumentsRecord.evidenceDemand;
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
     : "";
-  const targetRunId = typeof argumentsRecord.targetRunId === "string"
-    ? argumentsRecord.targetRunId.trim()
+  const targetGoalCandidateId = typeof argumentsRecord.targetGoalCandidateId === "string"
+    ? argumentsRecord.targetGoalCandidateId.trim()
     : undefined;
-  const targetArtifact = conversationArtifactReference(argumentsRecord.targetArtifact);
-  const targetResult = conversationResultReference(argumentsRecord.targetResult);
+  const targetRunId = targetGoalCandidateId === undefined
+    ? undefined
+    : conversationRunIdForGoalCandidate(workset, targetGoalCandidateId);
+  const artifactRecord = optionalRecord(argumentsRecord.targetArtifact);
+  const artifactPath = typeof artifactRecord.path === "string" ? artifactRecord.path.trim() : undefined;
+  const targetArtifact = artifactPath !== undefined && targetRunId !== undefined
+    ? { runId: targetRunId, path: artifactPath }
+    : undefined;
+  const resultCandidateId = typeof argumentsRecord.resultCandidateId === "string"
+    ? argumentsRecord.resultCandidateId.trim()
+    : undefined;
+  const targetResult = resultCandidateId === undefined
+    ? undefined
+    : conversationResultForCandidateId(workset, resultCandidateId);
   const userConstraints = Array.isArray(argumentsRecord.userConstraints)
     && argumentsRecord.userConstraints.length <= 8
     && argumentsRecord.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
@@ -6988,9 +7100,15 @@ function parseConversationTurnResolution(
     : undefined;
   if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return undefined;
   if (!isConversationTurnRelation(relation)) return undefined;
+  if (!isConversationTurnInputMode(inputMode)) return undefined;
   if (!isConversationEvidenceDemand(evidenceDemand)) return undefined;
   if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
-  if (argumentsRecord.targetResult !== undefined && targetResult === undefined) return undefined;
+  if (targetGoalCandidateId !== undefined && targetRunId === undefined) return undefined;
+  if (resultCandidateId !== undefined && targetResult === undefined) return undefined;
+  if (inputMode === "prior_result" && targetResult === undefined) return undefined;
+  if (inputMode !== "prior_result" && resultCandidateId !== undefined) return undefined;
+  if (inputMode === "prior_artifact" && targetArtifact === undefined) return undefined;
+  if (inputMode !== "prior_artifact" && targetArtifact !== undefined) return undefined;
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000 || userConstraints === undefined) return undefined;
   if (mode !== "execute" && evidenceDemand !== "none") return undefined;
 
@@ -7007,19 +7125,11 @@ function parseConversationTurnResolution(
     ) === true;
     if (!isReusable) return undefined;
   }
-  if (targetResult !== undefined) {
-    if (relation === "new_goal" || targetRunId !== targetResult.runId) return undefined;
-    const isReusable = workset?.reusableResults?.some((item) =>
-      item.result.runId === targetResult.runId
-      && item.result.sha256 === targetResult.sha256
-      && item.result.characters === targetResult.characters,
-    ) === true;
-    if (!isReusable) return undefined;
-  }
   return {
     schema: "agentloop.conversationTurnResolution/v1",
     mode,
     relation,
+    inputMode,
     ...(targetRunId === undefined ? {} : { targetRunId }),
     ...(targetArtifact === undefined ? {} : { targetArtifact }),
     ...(targetResult === undefined ? {} : { targetResult }),
@@ -7028,6 +7138,33 @@ function parseConversationTurnResolution(
     userConstraints,
     source: "model",
   };
+}
+
+function conversationResultForCandidateId(
+  workset: ConversationWorkingSet | undefined,
+  candidateId: string,
+): ConversationResultReference | undefined {
+  const match = /^result_candidate_([1-9][0-9]*)$/u.exec(candidateId);
+  if (match === null) return undefined;
+  const index = Number(match[1]) - 1;
+  return workset?.reusableResults?.[index]?.result;
+}
+
+function conversationRunIdForGoalCandidate(
+  workset: ConversationWorkingSet | undefined,
+  candidateId: string,
+): string | undefined {
+  const match = /^goal_candidate_([1-9][0-9]*)$/u.exec(candidateId);
+  if (match === null) return undefined;
+  const index = Number(match[1]) - 1;
+  return [...conversationTurnTargetRunIds(workset)][index];
+}
+
+function isConversationTurnInputMode(value: unknown): value is ConversationTurnInputMode {
+  return value === "none"
+    || value === "prior_result"
+    || value === "prior_artifact"
+    || value === "refresh_sources";
 }
 
 function conversationTurnRepairFeedback(response: ModelResponse): string {
@@ -7040,7 +7177,7 @@ function conversationTurnRepairFeedback(response: ModelResponse): string {
   if (response.toolCalls[0]?.name !== CONVERSATION_TURN_TOOL.name) {
     return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_TURN_TOOL.name}.`;
   }
-  return "The previous response did not provide a valid mode, relation, target Run, effective goal, evidence demand, and constraint list.";
+  return "The previous response did not provide a valid mode, relation, input mode, opaque candidate selection, effective goal, evidence demand, and constraint list.";
 }
 
 function deterministicConversationTurnResolution(input: string): ConversationTurnResolution {
@@ -7048,6 +7185,7 @@ function deterministicConversationTurnResolution(input: string): ConversationTur
     schema: "agentloop.conversationTurnResolution/v1",
     mode: "execute",
     relation: "new_goal",
+    inputMode: "none",
     effectiveGoal: input.trim() || "Complete the latest user request",
     evidenceDemand: classifyTaskIntent({ objective: input }).sourceNeed,
     userConstraints: [],
@@ -7071,6 +7209,13 @@ function conversationTurnResolutionFromEvents(
     const data = optionalRecord(event.data);
     const mode = data.mode;
     const relation = data.relation;
+    const inputMode = data.inputMode === undefined
+      ? data.targetResult !== undefined
+        ? "prior_result"
+        : data.targetArtifact !== undefined
+          ? "prior_artifact"
+          : "none"
+      : data.inputMode;
     const evidenceDemand = data.evidenceDemand;
     const source = data.source;
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
@@ -7080,6 +7225,7 @@ function conversationTurnResolutionFromEvents(
     const userConstraints = stringArrayField(data.userConstraints).map((item) => item.trim());
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
     if (!isConversationTurnMode(mode) || !isConversationTurnRelation(relation)) return undefined;
+    if (!isConversationTurnInputMode(inputMode)) return undefined;
     if (!isConversationEvidenceDemand(evidenceDemand) || !isConversationTurnResolutionSource(source)) return undefined;
     if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return undefined;
     if (
@@ -7090,11 +7236,12 @@ function conversationTurnResolutionFromEvents(
     if (mode !== "execute" && evidenceDemand !== "none") return undefined;
     if (relation !== "new_goal" && (targetRunId === undefined || targetRunId.length === 0)) return undefined;
     if (targetArtifact !== undefined && (relation === "new_goal" || targetArtifact.runId !== targetRunId)) return undefined;
-    if (data.targetResult !== undefined && (targetResult === undefined || relation === "new_goal" || targetResult.runId !== targetRunId)) return undefined;
+    if (data.targetResult !== undefined && targetResult === undefined) return undefined;
     return {
       schema: "agentloop.conversationTurnResolution/v1",
       mode,
       relation,
+      inputMode,
       ...(targetRunId === undefined || targetRunId.length === 0 ? {} : { targetRunId }),
       ...(targetArtifact === undefined ? {} : { targetArtifact }),
       ...(targetResult === undefined ? {} : { targetResult }),
@@ -7179,6 +7326,9 @@ interface ConversationIntentExternalContext {
 }
 
 function formatConversationTurnContext(context: ConversationIntentExternalContext): string {
+  const workset = context.conversationWorkingSet;
+  const goalRunIds = [...conversationTurnTargetRunIds(workset)];
+  const goalCandidateIdByRunId = new Map(goalRunIds.map((runId, index) => [runId, `goal_candidate_${index + 1}`]));
   const payload = {
     schema: "agentloop.conversationTurnContext/v1",
     externalContextPolicy: {
@@ -7200,31 +7350,63 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       chunkCount: source.chunkCount,
       truncated: source.truncated,
     })),
-    conversationWorkingSet: context.conversationWorkingSet === undefined
+    conversationWorkingSet: workset === undefined
       ? undefined
       : {
-        priorRunGoals: context.conversationWorkingSet.planCursors.map((cursor) => ({
-          runId: cursor.runId,
-          planId: cursor.planId,
-          ...(cursor.input === undefined ? {} : { input: cursor.input }),
-          goal: cursor.goal,
-          status: cursor.status,
-        })),
-        priorRunIntents: context.conversationWorkingSet.resolvedIntents ?? [],
-        activeGoal: context.conversationWorkingSet.activeGoal,
-        reusableArtifacts: context.conversationWorkingSet.reusableArtifacts.map((artifact) => ({
-          runId: artifact.runId,
+        priorGoalCandidates: goalRunIds.map((runId, index) => {
+          const cursor = workset.planCursors.find((item) => item.runId === runId);
+          const intent = workset.resolvedIntents?.find((item) => item.runId === runId)?.resolution;
+          const failure = workset.failedBoundaries.find((item) => item.runId === runId);
+          return {
+            candidateId: `goal_candidate_${index + 1}`,
+            ...(cursor?.input === undefined ? {} : { input: cursor.input }),
+            goal: cursor?.goal ?? intent?.effectiveGoal ?? (
+              workset.activeGoal?.runId === runId ? workset.activeGoal.goal : undefined
+            ),
+            status: cursor?.status ?? (
+              workset.activeGoal?.runId === runId
+                ? workset.activeGoal.status
+                : failure === undefined ? undefined : "failed"
+            ),
+            ...(intent === undefined ? {} : {
+              priorIntent: {
+                mode: intent.mode,
+                relation: intent.relation,
+                inputMode: intent.inputMode,
+                effectiveGoal: intent.effectiveGoal,
+                evidenceDemand: intent.evidenceDemand,
+                userConstraints: intent.userConstraints,
+              },
+            }),
+            ...(failure === undefined ? {} : {
+              failedBoundary: {
+                code: failure.code,
+                message: failure.message,
+                reasonCode: failure.reasonCode,
+                category: failure.category,
+              },
+            }),
+          };
+        }),
+        ...(workset.activeGoal === undefined ? {} : {
+          activeGoalCandidateId: goalCandidateIdByRunId.get(workset.activeGoal.runId),
+        }),
+        reusableArtifacts: workset.reusableArtifacts.map((artifact) => ({
+          goalCandidateId: goalCandidateIdByRunId.get(artifact.runId),
           path: artifact.path,
           name: artifact.name,
           mimeType: artifact.mimeType,
           bytes: artifact.bytes,
         })),
-        reusableResults: context.conversationWorkingSet.reusableResults ?? [],
-        failedBoundaryCount: context.conversationWorkingSet.failedBoundaries.length,
-        failedBoundaries: context.conversationWorkingSet.failedBoundaries,
-        outcomeRelations: context.conversationWorkingSet.outcomeRelations ?? [],
-        recommendedCapabilities: context.conversationWorkingSet.recommendedCapabilities,
-        resumeSuggestion: context.conversationWorkingSet.resumeSuggestion,
+        reusableResultCandidates: (workset.reusableResults ?? []).map((item, index) => ({
+          candidateId: `result_candidate_${index + 1}`,
+          goal: item.goal,
+          summary: item.summary,
+          summaryTruncated: item.summaryTruncated,
+          artifactPaths: item.artifactPaths,
+        })),
+        failedBoundaryCount: workset.failedBoundaries.length,
+        recommendedCapabilities: workset.recommendedCapabilities,
       },
   };
   return [

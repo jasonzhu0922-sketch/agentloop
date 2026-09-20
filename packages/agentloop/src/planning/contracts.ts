@@ -171,10 +171,22 @@ export type ConversationTurnRelation =
   | "refine_prior"
   | "challenge_prior";
 
+export type ConversationTurnInputMode =
+  | "none"
+  | "prior_result"
+  | "prior_artifact"
+  | "refresh_sources";
+
 export interface ConversationTurnResolution {
   readonly schema: "agentloop.conversationTurnResolution/v1";
   readonly mode: ConversationTurnMode;
   readonly relation: ConversationTurnRelation;
+  /**
+   * Model-authored semantic choice over Runtime-issued candidates. The
+   * concrete result reference remains Runtime-owned and is never reconstructed
+   * from model-supplied hashes or Run IDs.
+   */
+  readonly inputMode: ConversationTurnInputMode;
   readonly targetRunId?: string;
   /**
    * Server-validated identity of a prior accepted work product that this turn
@@ -184,9 +196,9 @@ export interface ConversationTurnResolution {
   readonly targetArtifact?: ConversationArtifactReference;
   /**
    * Server-validated identity of a completed prior Outcome whose semantic
-   * result is an input to this Run. Unlike an artifact path, this reference
-   * denotes the accepted result content itself and can be materialized through
-   * the Runtime's scoped result reader.
+   * result is an input to this Run. This input owner may differ from
+   * targetRunId: a turn can continue a failed goal while consuming the
+   * completed Outcome that originally supplied that goal's content.
    */
   readonly targetResult?: ConversationResultReference;
   readonly effectiveGoal: string;

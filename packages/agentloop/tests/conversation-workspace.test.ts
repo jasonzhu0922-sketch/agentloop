@@ -621,6 +621,7 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
           arguments: {
             mode,
             relation: "new_goal",
+            inputMode: "none",
             effectiveGoal: latest,
             evidenceDemand: "none",
             userConstraints: [],
