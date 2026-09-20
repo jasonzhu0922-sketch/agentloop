@@ -21,7 +21,13 @@ import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
 import { operationProfileCatalogForPlanning } from "../src/runtime/operation-profiles.ts";
-import { RunService, selectPlanningSkillRoles, selectPlanningSkills } from "../src/runtime/run-service.ts";
+import {
+  DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS,
+  DEFAULT_MAX_STEPS,
+  RunService,
+  selectPlanningSkillRoles,
+  selectPlanningSkills,
+} from "../src/runtime/run-service.ts";
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
@@ -40,6 +46,11 @@ import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOw
 type LegacyPlanStepFixture = Omit<PlanProposal["steps"][number], "successCriteria"> & {
   readonly successCriteria?: readonly { readonly id: string; readonly description: string; readonly source?: "task" | "planner" }[];
 };
+
+test("default file-producing step budget is 32 primary turns plus 12 convergence turns", () => {
+  assert.equal(DEFAULT_MAX_STEPS, 32);
+  assert.equal(DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS, 12);
+});
 
 function assertStrictProviderSchema(value: unknown, path = "schema"): void {
   if (Array.isArray(value)) {

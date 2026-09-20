@@ -154,7 +154,7 @@ export const DEFAULT_RUNNER_SYSTEM_PROMPT =
   "你是一个严谨、可靠的智能助手。根据当前用户请求选择必要能力；在形成可核验的结果之前，不要宣称完成。";
 
 /** Server-wide default model-turn budget per Plan step. */
-export const DEFAULT_MAX_STEPS = 24;
+export const DEFAULT_MAX_STEPS = 32;
 
 const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
 const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
@@ -2528,7 +2528,7 @@ export class RunService {
         candidateRepairGraceSteps: CANDIDATE_REPAIR_GRACE_STEPS,
         ...(stepProgressPolicy === undefined ? {} : { progressPolicy: stepProgressPolicy }),
         ...(fileOutputStep
-          ? { convergenceGraceSteps: FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
+          ? { convergenceGraceSteps: DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS }
           : {}),
         ...(lookupEvidenceStep && stepAllowsSourceSummaryCandidateConvergence(activeStep) ? {
           convergencePrompt: SOURCE_SUMMARY_CONVERGENCE_PROMPT,
@@ -5233,7 +5233,8 @@ function shouldAllowRepairLimitCompletion(assessment: SkillComplianceAssessment)
  * this grace keeps the chain advancing to a real artifact instead of forcing a
  * premature convergence candidate.
  */
-const FILE_OUTPUT_CONVERGENCE_GRACE_STEPS = 8;
+/** Default additional model-turn budget for a file-producing Plan step. */
+export const DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS = 12;
 const CANDIDATE_REPAIR_GRACE_STEPS = 4;
 const MAX_WEB_SEARCHES_PER_PLAN_STEP = 3;
 const SOURCE_SUMMARY_CONVERGENCE_MAX_OUTPUT_TOKENS = 4_096;
