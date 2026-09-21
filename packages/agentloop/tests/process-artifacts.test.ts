@@ -177,9 +177,9 @@ test("process artifacts include patched outputs from computer_patch_file", async
         toolName: "computer_patch_file",
         isError: false,
         result: JSON.stringify({
-          schema: "agentloop.filePatch/v1",
+          schema: "agentloop.filePatch/v2",
           path: "report.html",
-          operation: "replace_text",
+          operation: "apply_hunks",
           replacements: 1,
           artifactReceipt: {
             schema: "agentloop.artifactReceipt/v1",

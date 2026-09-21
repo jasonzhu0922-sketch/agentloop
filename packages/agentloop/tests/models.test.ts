@@ -67,6 +67,116 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
   }
 });
 
+test("OpenAI-compatible adapter rejects provider output that exceeds the requested token budget", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: "x".repeat(70 * 1024) } }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 4_096,
+      maxOutputTokens: 1,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.complete({
+        runId: "run-oversized-json-response",
+        systemPrompt: "System",
+        phase: "execution",
+        messages: [{ role: "user", content: "Check" }],
+        tools: [],
+      }),
+      (error: unknown) => {
+        const failure = error as { message?: string; details?: Record<string, unknown> };
+        assert.equal(failure.message, "Model provider response exceeded the configured output budget");
+        assert.equal(failure.details?.limitKind, "output");
+        assert.equal(failure.details?.maxOutputTokens, 1);
+        assert.equal(failure.details?.maxBytes, 64 * 1024);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible streaming adapter stops cumulative deltas at the provider output boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  const delta = "x".repeat(1024);
+  globalThis.fetch = async () => sseResponse(Array.from({ length: 70 }, () =>
+    `data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 4_096,
+      maxOutputTokens: 1,
+      maxAttempts: 1,
+    });
+    let emittedBytes = 0;
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "run-oversized-stream-output",
+        systemPrompt: "System",
+        phase: "execution",
+        messages: [{ role: "user", content: "Check" }],
+        tools: [],
+      }, async (event) => {
+        if (event.type === "text_delta") emittedBytes += Buffer.byteLength(event.text);
+      }),
+      (error: unknown) => {
+        const failure = error as { message?: string; details?: Record<string, unknown> };
+        assert.equal(failure.message, "Model provider response exceeded the configured output budget");
+        assert.equal(failure.details?.limitKind, "output");
+        assert.equal(failure.details?.field, "content");
+        return true;
+      },
+    );
+    assert.equal(emittedBytes, 64 * 1024);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses streaming adapter rejects a giant SSE event before JSON parsing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "x".repeat(400 * 1024) })}\n\n`,
+  ]);
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6",
+      contextWindowTokens: 4_096,
+      maxOutputTokens: 1,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "run-oversized-responses-event",
+        systemPrompt: "System",
+        phase: "execution",
+        messages: [{ role: "user", content: "Check" }],
+        tools: [],
+      }, async () => undefined),
+      (error: unknown) => {
+        const failure = error as { message?: string; details?: Record<string, unknown> };
+        assert.equal(failure.message, "Model provider response exceeded the configured output budget");
+        assert.equal(failure.details?.limitKind, "stream_event");
+        assert.equal(failure.details?.maxBytes, 320 * 1024);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible adapter normalizes double-encoded object tool arguments", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {

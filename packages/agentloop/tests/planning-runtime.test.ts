@@ -6144,12 +6144,6 @@ test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and su
     description: "查询集团（宝武数据中台）API 目录信息。Use when 用户要了解某个 API/接口/服务是干什么的、有哪些入参、哪些出参、涉及哪些数据表，或要检索现有 API。触发词：查API、查接口、API入参出参、这个接口是干啥的、接口涉及哪些表、API目录检索。数据源为数智域通用 SQL API。",
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
   });
-  const exploreData = skillFixture({
-    id: "explore-data",
-    name: "explore-data",
-    description: "Profile and explore a dataset to understand its shape, quality, and patterns.",
-    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["dataset"]),
-  });
   const dashboard = skillFixture({
     id: "build-dashboard",
     name: "build-dashboard",
@@ -6158,14 +6152,14 @@ test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and su
   });
 
   const naturalLanguageSelected = selectPlanningSkills(
-    [exploreData, dashboard, apiQuery],
+    [dashboard, apiQuery],
     "了解合同备案相关的 API 信息",
     [],
   );
   assert.deepEqual(naturalLanguageSelected.map((skill) => skill.name), ["api-query"]);
 
   const aliasSelected = selectPlanningSkills(
-    [exploreData, dashboard, apiQuery],
+    [dashboard, apiQuery],
     "查接口涉及哪些表",
     [],
   );
@@ -6179,15 +6173,8 @@ test("selectPlanningSkills recalls an API source-provider Skill for Chinese para
     description: "查询 API 目录信息，包括用途、入参、出参和关联数据表。",
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
   });
-  const exploreData = skillFixture({
-    id: "explore-data",
-    name: "explore-data",
-    description: "Profile and explore a dataset to understand its shape, quality, and patterns.",
-    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["dataset"]),
-  });
-
   const selected = selectPlanningSkills(
-    [exploreData, apiQuery],
+    [apiQuery],
     "查询宝武集团数据中台中合同备案 API 的参数信息",
     [],
   );
@@ -6357,7 +6344,7 @@ test("ModelPlanner treats unrelated source-provider prefilter results as candida
     id: "pdf-image-text-extractor",
     name: "pdf-image-text-extractor",
     description: "从图片或 PDF 文档中识别并提取文字内容。",
-    agentLoop: agentLoopMetadata(["source_provider"], ["document"], ["document"]),
+    agentLoop: agentLoopMetadata(["source_provider"], ["document"], ["document"], [], ["source_summary", "record_counts", "explicit_caveats"]),
   });
   const candidateRoles = [apiQuery, enterpriseInfo, pdfOcr].map((skill) => ({
     skillId: skill.id,
@@ -6431,7 +6418,7 @@ test("selectPlanningSkills routes legacy Word find-and-replace to the checked-in
     id: "city-carbon-ai-assessment",
     name: "city-carbon-ai-assessment",
     description: "用于 City Carbon 城市碳评估、项目碳排放评估、低碳评分、0-10 分制指标打分、优化建议和评估报告；build evaluation workflows from assessment models and uploaded project materials with structured scoring, advice, and reports.",
-    agentLoop: agentLoopMetadata(["primary_builder", "source_provider"], ["document", "none"], ["document", "rubric"]),
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document", "none"], ["document", "rubric"]),
   });
   const reviewContract = skillFixture({
     id: "review-contract",
@@ -10401,6 +10388,8 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
         ["source_provider"],
         ["none"],
         ["api"],
+        [],
+        ["source_summary", "source_urls", "explicit_caveats"],
       ),
     });
     const conversationId = "conversation-delivery-text-followup";
@@ -12889,6 +12878,9 @@ test("source provider command receipts satisfy principle assessment evidence gat
         "    - none",
         "  sourceKinds:",
         "    - api",
+        "  producesEvidenceKinds:",
+        "    - source_summary",
+        "    - explicit_caveats",
         "  qaKinds: []",
         "---",
         "Query API catalog metadata and return structured source receipts.",
@@ -13236,6 +13228,8 @@ test("fact acquisition source reads are not capped by file-output skill heuristi
         ["source_provider"],
         ["none"],
         ["document"],
+        [],
+        ["source_summary", "explicit_caveats"],
       ),
     });
     const model = new FactAcquisitionReadSkillModel();
@@ -16358,8 +16352,18 @@ function agentLoopMetadata(
   artifactKinds: NonNullable<PrivateSkill["agentLoop"]>["artifactKinds"],
   sourceKinds: NonNullable<PrivateSkill["agentLoop"]>["sourceKinds"] = [],
   qaKinds: NonNullable<PrivateSkill["agentLoop"]>["qaKinds"] = [],
+  producesEvidenceKinds: NonNullable<PrivateSkill["agentLoop"]>["producesEvidenceKinds"] = [],
 ): NonNullable<PrivateSkill["agentLoop"]> {
-  return { roles, artifactKinds, sourceKinds, qaKinds };
+  const effectiveProduces = producesEvidenceKinds.length > 0 || !roles.includes("source_provider")
+    ? producesEvidenceKinds
+    : ["source_summary", "explicit_caveats"] as const;
+  return {
+    roles,
+    artifactKinds,
+    sourceKinds,
+    qaKinds,
+    ...(effectiveProduces.length === 0 ? {} : { producesEvidenceKinds: effectiveProduces }),
+  };
 }
 
 function instructionsWithAgentLoopMetadata(
@@ -16368,7 +16372,11 @@ function instructionsWithAgentLoopMetadata(
   artifactKinds: NonNullable<PrivateSkill["agentLoop"]>["artifactKinds"] = ["none"],
   sourceKinds: NonNullable<PrivateSkill["agentLoop"]>["sourceKinds"] = [],
   qaKinds: NonNullable<PrivateSkill["agentLoop"]>["qaKinds"] = [],
+  producesEvidenceKinds: NonNullable<PrivateSkill["agentLoop"]>["producesEvidenceKinds"] = [],
 ): string {
+  const effectiveProduces = producesEvidenceKinds.length > 0 || !roles.includes("source_provider")
+    ? producesEvidenceKinds
+    : ["source_summary", "explicit_caveats"] as const;
   const lines = [
     "---",
     "agentloop:",
@@ -16382,6 +16390,9 @@ function instructionsWithAgentLoopMetadata(
     ...(qaKinds.length === 0
       ? ["  qaKinds: []"]
       : ["  qaKinds:", ...qaKinds.map((kind) => `    - ${kind}`)]),
+    ...(effectiveProduces.length === 0
+      ? []
+      : ["  producesEvidenceKinds:", ...effectiveProduces.map((kind) => `    - ${kind}`)]),
     "---",
     body,
   ];

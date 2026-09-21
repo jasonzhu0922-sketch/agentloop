@@ -22,7 +22,6 @@ const EXPECTED_BUILTIN_SKILL_NAMES = [
   "build-dashboard",
   "canvas-design",
   "docx",
-  "explore-data",
   "frontend-design",
   "internal-comms",
   "mcp-builder",

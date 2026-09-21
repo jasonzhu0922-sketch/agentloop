@@ -166,7 +166,7 @@ test("path normalization joins aliases but does not escape the workspace or infe
 });
 
 test("patch uses after metadata, not the before hash or another nested artifact's bytes", () => {
-  const state = derive([event(1, { schema: "agentloop.filePatch/v1", path: "output.bin", before: { bytes: 10, sha256: h1 },
+  const state = derive([event(1, { schema: "agentloop.filePatch/v2", path: "output.bin", before: { bytes: 10, sha256: h1 },
     after: { bytes: 20, sha256: h2 } }, "computer_patch_file")]);
   assert.equal(state.observations[0].sha256, h2);
   assert.equal(state.observations[0].bytes, 20);

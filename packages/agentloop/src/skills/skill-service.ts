@@ -353,6 +353,7 @@ export class SkillService {
     this.assertNotDiscoveredSkillName(name);
     const description = requireString(input.description, "description", { max: 500 });
     const instructions = requireString(input.instructions, "instructions", { max: 200_000 });
+    const agentLoop = skillAgentLoopMetadata(instructions);
     const id = randomUUID();
     const now = Date.now();
     const contentHash = createHash("sha256").update(instructions).digest("hex");
@@ -375,7 +376,7 @@ export class SkillService {
       sourceKind: "inline",
       version: 1,
       contentHash,
-      ...skillAgentLoopMetadata(instructions),
+      ...agentLoop,
       updatedAt: now,
     };
   }

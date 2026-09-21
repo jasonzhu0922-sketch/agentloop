@@ -136,6 +136,36 @@ test("AgentLoop sourceKinds reject business-specific values", async () => {
   }
 });
 
+test("AgentLoop source providers must declare the evidence kinds their execution can emit", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-package-source-provider-evidence-"));
+  try {
+    const source = [
+      "---",
+      "name: missing-source-evidence",
+      "description: Reads an API but does not declare its evidence contract.",
+      "agentloop:",
+      "  roles:",
+      "    - source_provider",
+      "  artifactKinds:",
+      "    - none",
+      "  sourceKinds:",
+      "    - api",
+      "  qaKinds: []",
+      "---",
+      "",
+      "# Missing Source Evidence",
+      "",
+    ].join("\n");
+    await fs.writeFile(join(workspace, "SKILL.md"), source);
+    await assert.rejects(
+      () => inspectSkillPackage(workspace),
+      /agentloop\.source_provider must declare at least one producesEvidenceKinds value/,
+    );
+  } finally {
+    await removeSkillPackage(workspace);
+  }
+});
+
 test("AgentLoop execution profiles are exposed in the available Skill catalog", () => {
   const skill: PrivateSkill = {
     id: "discovered:api-query",

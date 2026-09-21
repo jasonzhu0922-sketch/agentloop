@@ -1004,6 +1004,7 @@ function artifactKindMatchesExpected(actual: string, expected: string): boolean 
       || normalizedActual === "markdown"
       || normalizedActual === "generic_file";
   }
+  if (normalizedExpected === "presentation") return normalizedActual === "pptx";
   if (normalizedExpected === "spreadsheet") return normalizedActual === "xlsx" || normalizedActual === "csv";
   if (normalizedExpected === "image") return normalizedActual === "svg";
   return false;
@@ -1143,7 +1144,7 @@ function readTargetPaths(call: ModelToolCall): string[] {
 }
 
 function isPatchPreconditionDiagnostic(result: string): boolean {
-  return /file revision is stale|baseRevisionId (?:is unknown|does not belong)/iu.test(result);
+  return /file revision is stale|baseRevisionId (?:is unknown|does not belong)|expectedLines do not match the current file/iu.test(result);
 }
 
 function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {

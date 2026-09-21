@@ -262,6 +262,9 @@ test("RunService refreshes the discovered Skill directory before planning a new 
       "    - none",
       "  sourceKinds:",
       "    - api",
+      "  producesEvidenceKinds:",
+      "    - source_summary",
+      "    - explicit_caveats",
       "  qaKinds: []",
       "---",
       "",
@@ -291,7 +294,7 @@ test("RunService refreshes the discovered Skill directory before planning a new 
       id: "discovered:directory-demo",
       name: "directory-demo",
       role: "source_provider",
-      reason: "Skill metadata declares source_provider for requested source-grounded work.",
+      reason: "Low-confidence lexical recall candidate; Planner must decide semantic relevance from the current goal and Skill intent examples.",
     }]);
   } finally {
     await database.close();
@@ -619,11 +622,12 @@ function refreshedDirectoryPlanner(): Planner {
         artifactKinds: ["none"],
         sourceKinds: ["api"],
         qaKinds: [],
+        producesEvidenceKinds: ["source_summary", "explicit_caveats"],
       });
       assert.deepEqual(task.selectedSkillRoles, [{
         skillId: skill.id,
         role: "source_provider",
-        reason: "Skill metadata declares source_provider for requested source-grounded work.",
+        reason: "Low-confidence lexical recall candidate; Planner must decide semantic relevance from the current goal and Skill intent examples.",
       }]);
       return {
         goal: "Query the internal API catalog",

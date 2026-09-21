@@ -107,7 +107,21 @@ class StreamConsumptionError extends Error {
 
 const STREAM_WALL_TIMEOUT_FACTOR = 3;
 const STREAM_WALL_TIMEOUT_MAX_MS = 15 * 60 * 1_000;
+const MODEL_OUTPUT_BYTES_PER_TOKEN = 32;
+const MIN_MODEL_OUTPUT_BYTES = 64 * 1024;
+const MODEL_RESPONSE_ENVELOPE_MULTIPLIER = 4;
+const MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024;
 const NEVER_ABORT_SIGNAL = new AbortController().signal;
+
+interface ModelResponseBudget {
+  readonly maxOutputTokens: number;
+  readonly maxOutputBytes: number;
+  readonly maxResponseBytes: number;
+  addOutputBytes(value: string, field: string): void;
+  replaceOutputBytes(previous: string, value: string, field: string): void;
+  assertEventBytes(value: string): void;
+  assertResponse(response: ModelResponse): void;
+}
 
 export class OpenAICompatibleModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
@@ -235,9 +249,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
         throw await providerHttpError(response, request.logContext);
       }
 
+      const budget = createModelResponseBudget(invocation, this.limits);
       let payload: CompatibleResponse;
       try {
-        payload = (await response.json()) as CompatibleResponse;
+        payload = await readJsonResponseWithinLimit(response, budget) as CompatibleResponse;
         assertChatCompletionsPayload(payload);
       } catch (error) {
         if (combinedSignal.aborted) throw modelRequestAborted();
@@ -261,7 +276,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, combinedSignal, undefined, request.logContext);
         continue;
       }
-      return {
+      const result: ModelResponse = {
         content: message.content ?? "",
         toolCalls,
         finishReason: normalizeFinishReason(choice?.finish_reason, toolCalls.length),
@@ -277,6 +292,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
               },
             }),
       };
+      budget.assertResponse(result);
+      return result;
     }
     throw new AppError("MODEL_ERROR", "Model request exhausted its attempts", 502);
   }
@@ -332,7 +349,12 @@ export class OpenAICompatibleModel implements ModelAdapter {
         }
 
         try {
-          return await this.consumeStream(response, sink, requestTimeout.recordActivity);
+          return await this.consumeStream(
+            response,
+            sink,
+            requestTimeout.recordActivity,
+            createModelResponseBudget(invocation, this.limits),
+          );
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
@@ -397,6 +419,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     response: Response,
     sink: ModelStreamSink,
     recordActivity: () => void = () => undefined,
+    budget: ModelResponseBudget,
   ): Promise<ModelResponse> {
     if (response.body === null) {
       throw new AppError("MODEL_ERROR", "Model provider returned no streaming body", 502);
@@ -423,6 +446,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       diagnostics.eventsSeen += 1;
       diagnostics.lastEvent = summarizeStreamEvent(data);
       if (data.trim() === "[DONE]") return;
+      budget.assertEventBytes(data);
       let payload: CompatibleStreamChunk;
       try {
         payload = JSON.parse(data) as CompatibleStreamChunk;
@@ -433,11 +457,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
       const choice = payload.choices?.[0];
       const deltaContent = choice?.delta?.content;
       if (typeof deltaContent === "string" && deltaContent.length > 0) {
+        budget.addOutputBytes(deltaContent, "content");
         content += deltaContent;
         await emit({ type: "text_delta", text: deltaContent });
       }
       const reasoningDelta = choice?.delta?.reasoning_content;
       if (typeof reasoningDelta === "string" && reasoningDelta.length > 0) {
+        budget.addOutputBytes(reasoningDelta, "reasoningContent");
         reasoningContent += reasoningDelta;
         await emit({ type: "reasoning_delta", text: reasoningDelta });
       }
@@ -449,7 +475,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
         if (typeof nameDelta === "string" && nameDelta.length > 0) accumulated.name = nameDelta;
         const rawArgumentsDelta = call.function?.arguments;
         const argumentsDelta = typeof rawArgumentsDelta === "string" ? rawArgumentsDelta : "";
-        if (argumentsDelta.length > 0) accumulated.arguments += argumentsDelta;
+        if (argumentsDelta.length > 0) {
+          budget.addOutputBytes(argumentsDelta, "toolCall.arguments");
+          accumulated.arguments += argumentsDelta;
+        }
         toolCallAccumulator.set(index, accumulated);
         await emit({
           type: "tool_call_delta",
@@ -514,7 +543,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         await sink({ type: "tool_call_ready", index, id: call.id, name: call.name, arguments: call.arguments });
       }
     }
-    return {
+    const result: ModelResponse = {
       content,
       toolCalls,
       finishReason: finalFinishReason,
@@ -528,6 +557,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
             },
           }),
     };
+    budget.assertResponse(result);
+    return result;
   }
 }
 
@@ -662,12 +693,15 @@ export class ResponsesModel implements ModelAdapter {
         }
 
         try {
+          const budget = createModelResponseBudget(invocation, this.limits);
           if (isJsonResponse(response)) {
-            const payload = await response.json();
+            const payload = await readJsonResponseWithinLimit(response, budget);
             assertResponsesPayload(payload);
-            return parseResponsesResponse(payload);
+            const result = parseResponsesResponse(payload);
+            budget.assertResponse(result);
+            return result;
           }
-          return await this.consumeStream(response, sink, requestTimeout.recordActivity);
+          return await this.consumeStream(response, sink, requestTimeout.recordActivity, budget);
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
@@ -740,6 +774,7 @@ export class ResponsesModel implements ModelAdapter {
     response: Response,
     sink: ModelStreamSink,
     recordActivity: () => void = () => undefined,
+    budget: ModelResponseBudget,
   ): Promise<ModelResponse> {
     if (response.body === null) {
       throw new AppError("MODEL_ERROR", "Model provider returned no streaming body", 502);
@@ -764,6 +799,7 @@ export class ResponsesModel implements ModelAdapter {
     const handleData = async (data: string): Promise<void> => {
       diagnostics.eventsSeen += 1;
       diagnostics.lastEvent = summarizeStreamEvent(data);
+      budget.assertEventBytes(data);
       let chunk: ResponsesStreamChunk;
       try {
         chunk = JSON.parse(data) as ResponsesStreamChunk;
@@ -774,12 +810,14 @@ export class ResponsesModel implements ModelAdapter {
       switch (chunk.type) {
         case "response.reasoning_summary_text.delta":
           if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
+            budget.addOutputBytes(chunk.delta, "reasoningContent");
             reasoningContent += chunk.delta;
             await sink({ type: "reasoning_delta", text: chunk.delta });
           }
           break;
         case "response.output_text.delta":
           if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
+            budget.addOutputBytes(chunk.delta, "content");
             content += chunk.delta;
             await sink({ type: "text_delta", text: chunk.delta });
           }
@@ -802,6 +840,7 @@ export class ResponsesModel implements ModelAdapter {
           if (chunk.item_id === undefined || typeof chunk.delta !== "string") break;
           const call = functionCalls.get(chunk.item_id);
           if (call === undefined) break;
+          budget.addOutputBytes(chunk.delta, "toolCall.arguments");
           call.arguments += chunk.delta;
           await sink({
             type: "tool_call_delta",
@@ -816,7 +855,10 @@ export class ResponsesModel implements ModelAdapter {
           if (chunk.item_id === undefined) break;
           const call = functionCalls.get(chunk.item_id);
           if (call === undefined) break;
-          if (typeof chunk.arguments === "string") call.arguments = chunk.arguments;
+          if (typeof chunk.arguments === "string") {
+            budget.replaceOutputBytes(call.arguments, chunk.arguments, "toolCall.arguments");
+            call.arguments = chunk.arguments;
+          }
           await emitReadyIfComplete(call);
           break;
         }
@@ -827,7 +869,10 @@ export class ResponsesModel implements ModelAdapter {
           if (call === undefined) break;
           if (item.call_id !== undefined) call.callId = item.call_id;
           if (item.name !== undefined) call.name = item.name;
-          if (typeof item.arguments === "string" && call.arguments.length === 0) call.arguments = item.arguments;
+          if (typeof item.arguments === "string" && call.arguments.length === 0) {
+            budget.addOutputBytes(item.arguments, "toolCall.arguments");
+            call.arguments = item.arguments;
+          }
           await emitReadyIfComplete(call);
           break;
         }
@@ -891,6 +936,7 @@ export class ResponsesModel implements ModelAdapter {
     const final = finalResponse === undefined
       ? undefined
       : parseResponsesResponse(finalResponse, content);
+    if (final !== undefined) budget.assertResponse(final);
     const usage = finalResponse?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
     if (usage?.input_tokens !== undefined) inputTokens = usage.input_tokens;
     if (usage?.output_tokens !== undefined) outputTokens = usage.output_tokens;
@@ -898,7 +944,7 @@ export class ResponsesModel implements ModelAdapter {
     const streamedToolCalls = responseStreamToolCalls(functionCalls);
     if (final !== undefined) {
       const finalToolCalls = final.toolCalls.length > 0 ? final.toolCalls : streamedToolCalls;
-      return {
+      const result: ModelResponse = {
         ...final,
         toolCalls: finalToolCalls,
         finishReason: normalizeFinishReason(final.finishReason, finalToolCalls.length),
@@ -912,9 +958,11 @@ export class ResponsesModel implements ModelAdapter {
               },
             }),
       };
+      budget.assertResponse(result);
+      return result;
     }
     const toolCalls = streamedToolCalls;
-    return {
+    const result: ModelResponse = {
       content,
       toolCalls,
       finishReason: normalizeFinishReason(undefined, toolCalls.length),
@@ -928,6 +976,8 @@ export class ResponsesModel implements ModelAdapter {
             },
           }),
     };
+    budget.assertResponse(result);
+    return result;
   }
 }
 
@@ -1197,6 +1247,132 @@ function describeToolChoice(value: unknown): string {
 
 function requestRequiresToolCall(toolChoice: string): boolean {
   return toolChoice === "required" || toolChoice.startsWith("function:");
+}
+
+function createModelResponseBudget(
+  invocation: ModelInvocation,
+  limits: Readonly<{ maxOutputTokens: number }>,
+): ModelResponseBudget {
+  const maxOutputTokens = Math.min(invocation.maxOutputTokens ?? limits.maxOutputTokens, limits.maxOutputTokens);
+  const maxOutputBytes = Math.max(MIN_MODEL_OUTPUT_BYTES, maxOutputTokens * MODEL_OUTPUT_BYTES_PER_TOKEN);
+  const maxResponseBytes = maxOutputBytes * MODEL_RESPONSE_ENVELOPE_MULTIPLIER
+    + MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES;
+  let outputBytes = 0;
+
+  const assertOutputBytes = (observedBytes: number, field: string): void => {
+    if (observedBytes <= maxOutputBytes) return;
+    throw modelResponseLimitError({
+      limitKind: "output",
+      field,
+      maxOutputTokens,
+      maxBytes: maxOutputBytes,
+      observedBytes,
+    });
+  };
+
+  return {
+    maxOutputTokens,
+    maxOutputBytes,
+    maxResponseBytes,
+    addOutputBytes(value, field) {
+      outputBytes += Buffer.byteLength(value);
+      assertOutputBytes(outputBytes, field);
+    },
+    replaceOutputBytes(previous, value, field) {
+      outputBytes = Math.max(0, outputBytes - Buffer.byteLength(previous)) + Buffer.byteLength(value);
+      assertOutputBytes(outputBytes, field);
+    },
+    assertEventBytes(value) {
+      const observedBytes = Buffer.byteLength(value);
+      if (observedBytes <= maxResponseBytes) return;
+      throw modelResponseLimitError({
+        limitKind: "stream_event",
+        field: "event",
+        maxOutputTokens,
+        maxBytes: maxResponseBytes,
+        observedBytes,
+      });
+    },
+    assertResponse(response) {
+      assertOutputBytes(modelResponseOutputBytes(response), "response");
+    },
+  };
+}
+
+function modelResponseOutputBytes(response: ModelResponse): number {
+  let bytes = Buffer.byteLength(response.content);
+  if (response.reasoningContent !== undefined) bytes += Buffer.byteLength(response.reasoningContent);
+  for (const call of response.toolCalls) bytes += Buffer.byteLength(safeJsonStringify(call.arguments));
+  return bytes;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function modelResponseLimitError(input: {
+  readonly limitKind: "output" | "response" | "stream_event";
+  readonly field: string;
+  readonly maxOutputTokens: number;
+  readonly maxBytes: number;
+  readonly observedBytes: number;
+}): AppError {
+  return new AppError("MODEL_ERROR", "Model provider response exceeded the configured output budget", 502, {
+    limitKind: input.limitKind,
+    field: input.field,
+    maxOutputTokens: input.maxOutputTokens,
+    maxBytes: input.maxBytes,
+    observedBytes: input.observedBytes,
+  });
+}
+
+async function readJsonResponseWithinLimit(response: Response, budget: ModelResponseBudget): Promise<unknown> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const observedBytes = Number(declaredLength);
+    if (Number.isFinite(observedBytes) && observedBytes > budget.maxResponseBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw modelResponseLimitError({
+        limitKind: "response",
+        field: "body",
+        maxOutputTokens: budget.maxOutputTokens,
+        maxBytes: budget.maxResponseBytes,
+        observedBytes,
+      });
+    }
+  }
+  // Keep compatibility with injected/fake Responses that expose json() but no
+  // ReadableStream while using the bounded reader for real fetch responses.
+  if (response.body == null) return await response.json() as unknown;
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let observedBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      observedBytes += value.byteLength;
+      if (observedBytes > budget.maxResponseBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw modelResponseLimitError({
+          limitKind: "response",
+          field: "body",
+          maxOutputTokens: budget.maxOutputTokens,
+          maxBytes: budget.maxResponseBytes,
+          observedBytes,
+        });
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
 function isJsonResponse(response: Response): boolean {

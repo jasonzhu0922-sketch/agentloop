@@ -215,7 +215,11 @@ test("dangerous computer tools remain unavailable until the Run grant explicitly
     assert.equal(denied.definitions.some((tool) => tool.name === "computer_write_file"), false);
     assert.equal(denied.definitions.some((tool) => tool.name === "materialize_paginated_html"), false);
     assert.throws(
-      () => denied.prepare({ id: "patch-1", name: "computer_patch_file", arguments: { path: "x", startLine: 1, endLine: 2, replacementLines: ["y"] } }),
+      () => denied.prepare({
+        id: "patch-1",
+        name: "computer_patch_file",
+        arguments: { path: "x", hunks: [{ startLine: 1, expectedLines: ["x"], replacementLines: ["y"] }] },
+      }),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
     );
     assert.throws(
@@ -1671,7 +1675,7 @@ test("computer_write_file appends chunks and receipts the final file state", asy
   }
 });
 
-test("computer_patch_file replaces a revision-bound line interval and receipts the patched artifact", async () => {
+test("computer_patch_file transactionally applies exact revision-bound hunks and receipts the patched artifact", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-"));
   try {
     const before = [
@@ -1689,7 +1693,8 @@ test("computer_patch_file replaces a revision-bound line interval and receipts t
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
     const allowed = registry.materialize(grant(["computer_read_file", "computer_patch_file", "verify_artifact_acceptance"]));
     const definition = allowed.definitions.find((tool) => tool.name === "computer_patch_file");
-    assert.match(definition?.description ?? "", /half-open line interval/);
+    assert.match(definition?.description ?? "", /exact expectedLines/);
+    assert.match(definition?.description ?? "", /preserved byte-for-byte/);
     assert.match(definition?.description ?? "", /baseRevisionId/);
     assert.match(definition?.description ?? "", /verify_artifact_acceptance/);
     const read = allowed.prepare({
@@ -1704,18 +1709,38 @@ test("computer_patch_file replaces a revision-bound line interval and receipts t
       () => allowed.prepare({
         id: "patch-reject-hash",
         name: "computer_patch_file",
-        arguments: { path: "reports/report.html", startLine: 2, endLine: 3, replacementLines: ["status: final"], expectedSha256: "0".repeat(64) },
+        arguments: {
+          path: "reports/report.html",
+          hunks: [{ startLine: 2, expectedLines: ["status: draft"], replacementLines: ["status: final"] }],
+          expectedSha256: "0".repeat(64),
+        },
       }),
       (error: unknown) => hasCode(error, "BAD_REQUEST") && String((error as Error).message).includes("expectedSha256 is not accepted"),
+    );
+    assert.throws(
+      () => allowed.prepare({
+        id: "patch-reject-ambiguous-range",
+        name: "computer_patch_file",
+        arguments: {
+          path: "reports/report.html",
+          startLine: 2,
+          endLine: 2,
+          replacementLines: ["status: final"],
+          baseRevisionId: readResult.revisionId,
+        },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST") && String((error as Error).message).includes("explicit hunks"),
     );
     const prepared = allowed.prepare({
       id: "patch-report",
       name: "computer_patch_file",
       arguments: {
         path: "reports/report.html",
-        startLine: 4,
-        endLine: 6,
-        replacementLines: ["const RAW_DATA = [{ n: 1 }, { n: 2 }];"],
+        hunks: [{
+          startLine: 4,
+          expectedLines: ["const RAW_DATA = [{ n: 1 }];", "{n:2},"],
+          replacementLines: ["const RAW_DATA = [{ n: 1 }, { n: 2 }];"],
+        }],
         baseRevisionId: readResult.revisionId,
       },
     });
@@ -1725,7 +1750,7 @@ test("computer_patch_file replaces a revision-bound line interval and receipts t
       path: string;
       operation: string;
       replacements: number;
-      hunk: { startLine: number; endLine: number; oldLines: number; newLines: number };
+      hunks: Array<{ startLine: number; deletedLineCount: number; insertedLineCount: number }>;
       before: { bytes: number; sha256: string; totalLines: number };
       after: { bytes: number; sha256: string; totalLines: number };
       delta: { bytes: number; totalLines: number };
@@ -1747,11 +1772,11 @@ test("computer_patch_file replaces a revision-bound line interval and receipts t
     ].join("\n");
     const afterSha256 = createHash("sha256").update(after).digest("hex");
     assert.equal(await fs.readFile(join(root, "reports", "report.html"), "utf8"), after);
-    assert.equal(result.schema, "agentloop.filePatch/v1");
+    assert.equal(result.schema, "agentloop.filePatch/v2");
     assert.equal(result.path, "reports/report.html");
-    assert.equal(result.operation, "replace_lines");
+    assert.equal(result.operation, "apply_hunks");
     assert.equal(result.replacements, 1);
-    assert.deepEqual(result.hunk, { startLine: 4, endLine: 6, oldLines: 2, newLines: 1 });
+    assert.deepEqual(result.hunks, [{ startLine: 4, deletedLineCount: 2, insertedLineCount: 1 }]);
     assert.equal(result.before.sha256, beforeSha256);
     assert.equal(result.before.bytes, Buffer.byteLength(before));
     assert.equal(result.before.totalLines, 7);
@@ -1775,7 +1800,82 @@ test("computer_patch_file replaces a revision-bound line interval and receipts t
   }
 });
 
-test("computer_patch_file fails closed for stale revisions, cross-file handles, and invalid line intervals", async () => {
+test("computer_patch_file preserves indentation, trailing spaces, and blank lines across multiple hunks", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-whitespace-"));
+  try {
+    const before = [
+      "def render():",
+      "    value = \"old\"",
+      "    return value",
+      "",
+      "tail = \"old\"",
+      "",
+    ].join("\n");
+    await fs.writeFile(join(root, "poster.py"), before);
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
+    const allowed = registry.materialize(grant(["computer_read_file", "computer_patch_file"]));
+    const read = allowed.prepare({
+      id: "read-python-before-patch",
+      name: "computer_read_file",
+      arguments: { path: "poster.py" },
+    });
+    const readResult = await read.tool.execute(
+      grantContext(["computer_read_file", "computer_patch_file"]),
+      read.input,
+    ) as { revisionId?: string };
+    const prepared = allowed.prepare({
+      id: "patch-python-whitespace",
+      name: "computer_patch_file",
+      arguments: {
+        path: "poster.py",
+        hunks: [
+          {
+            startLine: 2,
+            expectedLines: ["    value = \"old\"", "    return value"],
+            replacementLines: ["    value = \"new\"  ", "", "    return value"],
+          },
+          {
+            startLine: 4,
+            expectedLines: [""],
+            replacementLines: [],
+          },
+          {
+            startLine: 5,
+            expectedLines: ["tail = \"old\""],
+            replacementLines: ["tail = \"new\""],
+          },
+          {
+            startLine: 6,
+            expectedLines: [],
+            replacementLines: ["# end"],
+          },
+        ],
+        baseRevisionId: readResult.revisionId,
+      },
+    });
+
+    const result = await prepared.tool.execute(
+      grantContext(["computer_patch_file"]),
+      prepared.input,
+    ) as { replacements: number; hunks: unknown[] };
+
+    assert.equal(await fs.readFile(join(root, "poster.py"), "utf8"), [
+      "def render():",
+      "    value = \"new\"  ",
+      "",
+      "    return value",
+      "tail = \"new\"",
+      "# end",
+      "",
+    ].join("\n"));
+    assert.equal(result.replacements, 4);
+    assert.equal(result.hunks.length, 4);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_patch_file fails closed for stale revisions, cross-file handles, mismatched lines, and invalid hunks", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-patch-file-preconditions-"));
   try {
     await fs.writeFile(join(root, "report.txt"), "alpha\nneedle\nneedle\nomega\n");
@@ -1793,7 +1893,11 @@ test("computer_patch_file fails closed for stale revisions, cross-file handles, 
     const stale = allowed.prepare({
       id: "patch-stale",
       name: "computer_patch_file",
-      arguments: { path: "report.txt", startLine: 1, endLine: 2, replacementLines: ["beta"], baseRevisionId: readResult.revisionId },
+      arguments: {
+        path: "report.txt",
+        hunks: [{ startLine: 1, expectedLines: ["alpha"], replacementLines: ["beta"] }],
+        baseRevisionId: readResult.revisionId,
+      },
     });
     await assert.rejects(
       () => stale.tool.execute(grantContext(["computer_patch_file"]), stale.input),
@@ -1811,29 +1915,59 @@ test("computer_patch_file fails closed for stale revisions, cross-file handles, 
     const wrongFile = allowed.prepare({
       id: "patch-wrong-file-revision",
       name: "computer_patch_file",
-      arguments: { path: "other.txt", startLine: 1, endLine: 2, replacementLines: ["beta"], baseRevisionId: freshReadResult.revisionId },
+      arguments: {
+        path: "other.txt",
+        hunks: [{ startLine: 1, expectedLines: ["alpha"], replacementLines: ["beta"] }],
+        baseRevisionId: freshReadResult.revisionId,
+      },
     });
     await assert.rejects(
       () => wrongFile.tool.execute(grantContext(["computer_patch_file"]), wrongFile.input),
       (error: unknown) => hasCode(error, "CONFLICT") && String((error as Error).message).includes("does not belong to this file"),
     );
 
+    const mismatched = allowed.prepare({
+      id: "patch-mismatched-lines",
+      name: "computer_patch_file",
+      arguments: {
+        path: "report.txt",
+        hunks: [
+          { startLine: 1, expectedLines: ["changed"], replacementLines: ["beta"] },
+          { startLine: 4, expectedLines: ["not-omega"], replacementLines: ["present"] },
+        ],
+        baseRevisionId: freshReadResult.revisionId,
+      },
+    });
+    await assert.rejects(
+      () => mismatched.tool.execute(grantContext(["computer_patch_file"]), mismatched.input),
+      (error: unknown) => hasCode(error, "CONFLICT")
+        && String((error as Error).message).includes("expectedLines do not match"),
+    );
+
     const invalidRange = allowed.prepare({
       id: "patch-invalid-range",
       name: "computer_patch_file",
-      arguments: { path: "report.txt", startLine: 3, endLine: 6, replacementLines: ["present"], baseRevisionId: freshReadResult.revisionId },
+      arguments: {
+        path: "report.txt",
+        hunks: [{ startLine: 5, expectedLines: ["missing"], replacementLines: ["present"] }],
+        baseRevisionId: freshReadResult.revisionId,
+      },
     });
     await assert.rejects(
       () => invalidRange.tool.execute(grantContext(["computer_patch_file"]), invalidRange.input),
       (error: unknown) => hasCode(error, "BAD_REQUEST")
-        && String((error as Error).message).includes("line range"),
+        && String((error as Error).message).includes("outside"),
     );
 
     assert.throws(
       () => allowed.prepare({
         id: "patch-line-terminator",
         name: "computer_patch_file",
-        arguments: { path: "report.txt", startLine: 2, endLine: 3, replacementLines: ["pin\nneedle"], baseRevisionId: freshReadResult.revisionId },
+        arguments: {
+          path: "report.txt",
+          hunks: [{ startLine: 2, expectedLines: ["needle"], replacementLines: ["pin\nneedle"] }],
+          baseRevisionId: freshReadResult.revisionId,
+        },
       }),
       (error: unknown) => hasCode(error, "BAD_REQUEST")
         && String((error as Error).message).includes("line terminators"),
@@ -1842,7 +1976,11 @@ test("computer_patch_file fails closed for stale revisions, cross-file handles, 
     const absentParent = allowed.prepare({
       id: "patch-absent-parent",
       name: "computer_patch_file",
-      arguments: { path: "missing/report.txt", startLine: 1, endLine: 2, replacementLines: ["y"], baseRevisionId: freshReadResult.revisionId },
+      arguments: {
+        path: "missing/report.txt",
+        hunks: [{ startLine: 1, expectedLines: ["x"], replacementLines: ["y"] }],
+        baseRevisionId: freshReadResult.revisionId,
+      },
     });
     await assert.rejects(
       () => absentParent.tool.execute(grantContext(["computer_patch_file"]), absentParent.input),

@@ -2,6 +2,67 @@
   "schema": "agentloop.skillExecutors/v1",
   "executors": [
     {
+      "id": "native-pptx",
+      "description": "Build and inspect editable PPTX files through a versioned package-owned pptxgenjs API contract instead of runtime API probing.",
+      "command": "node",
+      "script": "scripts/pptx_runtime.cjs",
+      "actions": [
+        {
+          "id": "preflight",
+          "description": "Verify the installed pptxgenjs CommonJS module, public presentation and slide methods, and public shape and chart enumerations before building.",
+          "inputs": [],
+          "args": [
+            "preflight"
+          ],
+          "result": "An agentloop.pptxGenJsApiContract/v1 readiness receipt."
+        },
+        {
+          "id": "build",
+          "description": "Build an editable PPTX from an agentloop.pptxDeckSpec/v1 JSON document using only the package-owned public API adapter.",
+          "inputs": [
+            {
+              "name": "spec-path",
+              "description": "Absolute workspace path of the agentloop.pptxDeckSpec/v1 JSON input.",
+              "required": true
+            },
+            {
+              "name": "output-path",
+              "description": "Absolute workspace path for the generated editable .pptx file.",
+              "required": true
+            }
+          ],
+          "args": [
+            "build",
+            "{{spec-path}}",
+            "{{output-path}}"
+          ],
+          "result": "An agentloop.pptxBuildReceipt/v1 receipt with output path, byte size, SHA-256, and slide count."
+        },
+        {
+          "id": "inspect",
+          "description": "Inspect a PPTX package and extract ordered slide text and structural facts without shell composition or markitdown argument guessing.",
+          "inputs": [
+            {
+              "name": "input-path",
+              "description": "Absolute workspace path of the .pptx file to inspect.",
+              "required": true
+            },
+            {
+              "name": "report-path",
+              "description": "Absolute workspace path for the generated inspection JSON.",
+              "required": true
+            }
+          ],
+          "args": [
+            "inspect",
+            "{{input-path}}",
+            "{{report-path}}"
+          ],
+          "result": "An agentloop.pptxInspection/v1 report with package facts and ordered slide text."
+        }
+      ]
+    },
+    {
       "id": "unified-theme",
       "description": "Inventory and apply a colour/font-only theme while preserving the editable source deck.",
       "command": "python3",

@@ -20,9 +20,9 @@ A `.pptx` is a ZIP archive of XML files. Choose your approach by task:
 
 | Task | Approach |
 |---|---|
-| **Create** a new deck | Write a `pptxgenjs` script — see gotchas below |
+| **Create** a new deck | Prefer the package-owned `native-pptx build` executor with an `agentloop.pptxDeckSpec/v1` JSON spec; use raw `pptxgenjs` only for a native feature the adapter does not expose |
 | **Edit** an existing deck, or build from a template | unzip → edit `ppt/slides/slideN.xml` → zip |
-| **Read** content | `markitdown deck.pptx` (one block per slide under `<!-- Slide number: N -->` markers); visual grid: `python scripts/thumbnail.py deck.pptx` |
+| **Read** content | Prefer the package-owned `native-pptx inspect` executor; `markitdown deck.pptx` remains an optional text-only fallback; visual grid: `python scripts/thumbnail.py deck.pptx` |
 
 ## Scripts
 
@@ -30,6 +30,7 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 
 | Script | What it does |
 |---|---|
+| `scripts/pptx_runtime.cjs preflight/build/inspect` | Versioned CommonJS adapter for the installed `pptxgenjs` public API. Builds editable PPTX files from neutral JSON specs and extracts ordered slide text/package facts without probing the module at runtime |
 | `scripts/thumbnail.py deck.pptx [prefix]` | Labeled grid of every slide, for picking template layouts. `.pptx` only. Pass `prefix` — it defaults to `thumbnails`, which overwrites the grids of any other deck done in the same directory |
 | `scripts/apply_unified_theme.py inventory/apply` | One safe primitive for a colour/font-only theme transformation. It inventories actual colours/fonts and applies a supplied declarative mapping without regex-editing OOXML. |
 | `scripts/add_slide.py unpacked/ slide2.xml [--after slideN.xml]` | Duplicate a slide (or a `slideLayoutN.xml`) with all the package bookkeeping. Also takes a `.pptx` directly with `-o out.pptx` |
@@ -39,7 +40,56 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 
 ## Creating with pptxgenjs — gotchas
 
-`pptxgenjs` is preinstalled — do not run `npm install` first; write the script and `require('pptxgenjs')` directly. Only if that require fails: `npm install pptxgenjs`. The model knows the API; these are the footguns:
+For a new deck, write an `agentloop.pptxDeckSpec/v1` JSON file in the task workspace and call the loaded Skill's `native-pptx build` action. The package adapter owns the module format, the installed `pptxgenjs` API shape, public shape/chart enumeration lookup, output writing, and the build receipt. Its neutral element types are `text`, `shape`, `image`, `table`, and `chart`; every element has an `options` object, shapes name a public uppercase `presentation.shapes` key, and charts name a public `presentation.ChartType` key. Run `native-pptx inspect` on the result, then the required artifact acceptance and visual QA.
+
+Minimal spec shape:
+
+```json
+{
+  "schema": "agentloop.pptxDeckSpec/v1",
+  "layout": "16:9",
+  "title": "Deck title",
+  "slides": [
+    {
+      "background": "FFFFFF",
+      "notes": "Speaker note",
+      "elements": [
+        {
+          "type": "text",
+          "text": "Slide title",
+          "options": { "x": 0.6, "y": 0.4, "w": 8.8, "h": 0.6, "fontSize": 32, "color": "222222", "margin": 0 }
+        },
+        {
+          "type": "shape",
+          "shape": "ROUNDED_RECTANGLE",
+          "options": { "x": 0.6, "y": 1.4, "w": 4.2, "h": 2.4, "fill": { "color": "E8EEF7" } }
+        },
+        {
+          "type": "image",
+          "options": { "path": "/absolute/workspace/image.png", "x": 5.2, "y": 1.4, "w": 4.0, "h": 2.4 }
+        }
+      ]
+    }
+  ]
+}
+```
+
+For a table element use `{"type":"table","rows":[["A","B"],["1","2"]],"options":{...}}`. For a chart element use `{"type":"chart","chart":"bar","data":[{"name":"Series","labels":["A","B"],"values":[1,2]}],"options":{...}}`. Image `options.path` must be an absolute workspace path; an image data URI may be supplied as `options.data`. All colors are six uppercase hexadecimal digits without `#`. The adapter rejects underscore-prefixed/private fields, unknown shape/chart keys, unsupported layouts, relative image paths, and invalid geometry before writing the deck.
+
+Do not start by writing `node -e` probes, listing package internals, testing `_shapeType`/`_chartType`, or guessing whether methods live on the presentation or slide. `native-pptx preflight` is the single supported API readiness check. If the adapter lacks a required native feature, raw `pptxgenjs` is allowed as a bounded fallback, but it must follow this exact public contract:
+
+```js
+// Use .cjs in this ESM Host so require() is unambiguous.
+const PptxGenJS = require("pptxgenjs");
+const pptx = new PptxGenJS();
+pptx.layout = "LAYOUT_16x9";
+const slide = pptx.addSlide();
+slide.addShape(pptx.shapes.OVAL, { x: 1, y: 1, w: 2, h: 2 });
+slide.addText("Title", { x: 1, y: 0.4, w: 8, h: 0.5 });
+await pptx.writeFile({ fileName: "output.pptx" });
+```
+
+`pptxgenjs` is preinstalled; never run `npm install` during a task. Use only public `pptx.shapes.*`, `pptx.ChartType.*`, presentation methods such as `addSlide`/`writeFile`, and slide methods such as `addShape`/`addText`/`addImage`/`addTable`/`addChart`. Never use `_shapeType`, `_chartType`, `_shapes`, or other underscore-prefixed internals. The remaining footguns are:
 
 - **Set `pres.layout` before adding slides.** The default canvas is `LAYOUT_16x9` = **10" × 5.625"**, not 13.3" wide. Coordinates past the edge are written, not clamped — the shape just isn't on the slide. (`LAYOUT_WIDE` is 13.3" × 7.5".)
 - **Hex colors: never `#`, never 8 digits.** `color: "FF0000"`. Both `"#FF0000"` and alpha baked into the hex (`"00000020"`) **corrupt the file**. For translucency: `transparency: 0-100` on fills and images, `opacity: 0.0-1.0` on shadows — each is silently ignored on the other.
@@ -208,6 +258,8 @@ Your first render usually has a few real issues — overlaps, overflow, misalign
 ```bash
 markitdown output.pptx
 ```
+
+With `computer_run_command`, that fallback is `command: "markitdown", args: ["/absolute/workspace/output.pptx"]`. The executable name is not repeated in `args`, and `python3 -c "markitdown ..."` is Python source, not a shell command. Prefer `native-pptx inspect` so filenames, including non-ASCII names, are passed through one stable package interface.
 
 Check for missing content, typos, wrong order.
 

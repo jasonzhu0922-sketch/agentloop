@@ -381,6 +381,9 @@ function parseAgentLoopFrontmatter(lines: readonly string[], closing: number): S
   const requiredSkillNames = (fields.get("requiredSkillNames") ?? [])
     .map((value) => normalizeAgentLoopSkillName(value));
   if (roles.length === 0) throw invalidPackage("agentloop.roles must declare at least one role");
+  if (roles.includes("source_provider") && producesEvidenceKinds.length === 0) {
+    throw invalidPackage("agentloop.source_provider must declare at least one producesEvidenceKinds value");
+  }
   if (semanticTags.length > MAX_AGENT_LOOP_SEMANTIC_TAGS) {
     throw invalidPackage(`agentloop.semanticTags must contain at most ${MAX_AGENT_LOOP_SEMANTIC_TAGS} values`);
   }

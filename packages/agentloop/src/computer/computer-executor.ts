@@ -49,6 +49,8 @@ const READ_RANGE_MAX_LIMIT = 2_000;
 const READ_RANGE_MAX_RANGES = 20;
 const SEARCH_CONTEXT_MAX_LINES = 20;
 const COMMAND_FILE_CHANGE_SCAN_LIMIT = 5_000;
+const PATCH_MAX_HUNKS = 64;
+const PATCH_MAX_LINES = 2_000;
 const PATCH_REPLACEMENT_MAX_CHARACTERS = 50_000;
 const FILE_REVISION_ID_PATTERN = /^rev_[a-f0-9]{32}$/;
 const COMMAND_FILE_CHANGE_RESULT_LIMIT = 200;
@@ -199,13 +201,19 @@ export type WriteFileMode = "create" | "overwrite" | "append";
 
 export interface PatchFileInput {
   readonly path: string;
-  /** One-indexed, half-open line interval [startLine, endLine) from the read revision. */
-  readonly startLine: number;
-  readonly endLine: number;
-  /** Complete replacement lines without line terminators. */
-  readonly replacementLines: readonly string[];
+  /** Non-overlapping edits against the exact lines observed in the read revision. */
+  readonly hunks: readonly PatchFileHunkInput[];
   /** Opaque, Run-scoped server handle returned by a workspace file read or write. */
   readonly baseRevisionId: string;
+}
+
+export interface PatchFileHunkInput {
+  /** One-indexed first line. A file-end insertion uses totalLines + 1. */
+  readonly startLine: number;
+  /** Exact current lines to replace. An empty array means insert before startLine. */
+  readonly expectedLines: readonly string[];
+  /** Exact new lines, preserving leading/trailing whitespace. An empty array means delete. */
+  readonly replacementLines: readonly string[];
 }
 
 interface FileRevisionRecord {
@@ -1243,16 +1251,15 @@ export class ComputerExecutor {
   }
 
   async patchFile(input: PatchFileInput): Promise<{
-    schema: "agentloop.filePatch/v1";
+    schema: "agentloop.filePatch/v2";
     path: string;
-    operation: "replace_lines";
+    operation: "apply_hunks";
     replacements: number;
-    hunk: {
+    hunks: Array<{
       startLine: number;
-      endLine: number;
-      oldLines: number;
-      newLines: number;
-    };
+      deletedLineCount: number;
+      insertedLineCount: number;
+    }>;
     before: {
       bytes: number;
       sha256: string;
@@ -1273,15 +1280,32 @@ export class ComputerExecutor {
     inspection: WrittenFileInspection;
     revisionId?: string;
   }> {
-    if (!Number.isSafeInteger(input.startLine) || !Number.isSafeInteger(input.endLine)) {
-      throw badRequest("startLine and endLine must be safe integers");
+    if (input.hunks.length < 1 || input.hunks.length > PATCH_MAX_HUNKS) {
+      throw badRequest(`hunks must contain between 1 and ${PATCH_MAX_HUNKS} entries`);
     }
-    if (input.replacementLines.some((line) => /[\r\n]/u.test(line))) {
-      throw badRequest("replacementLines must contain complete lines without line terminators");
+    let expectedCharacters = 0;
+    let replacementCharacters = 0;
+    for (const [index, hunk] of input.hunks.entries()) {
+      if (!Number.isSafeInteger(hunk.startLine) || hunk.startLine < 1) {
+        throw badRequest(`hunks[${index}].startLine must be a positive safe integer`);
+      }
+      if (hunk.expectedLines.length > PATCH_MAX_LINES || hunk.replacementLines.length > PATCH_MAX_LINES) {
+        throw badRequest(`hunks[${index}] line arrays must contain at most ${PATCH_MAX_LINES} lines`);
+      }
+      if (hunk.expectedLines.length === 0 && hunk.replacementLines.length === 0) {
+        throw badRequest(`hunks[${index}] must insert, replace, or delete at least one line`);
+      }
+      if ([...hunk.expectedLines, ...hunk.replacementLines].some((line) => /[\r\n]/u.test(line))) {
+        throw badRequest(`hunks[${index}] lines must not contain line terminators`);
+      }
+      expectedCharacters += hunk.expectedLines.reduce((total, line) => total + line.length, 0);
+      replacementCharacters += hunk.replacementLines.reduce((total, line) => total + line.length, 0);
     }
-    const replacementCharacters = input.replacementLines.reduce((total, line) => total + line.length, 0);
+    if (expectedCharacters > PATCH_REPLACEMENT_MAX_CHARACTERS) {
+      throw badRequest(`expectedLines must contain at most ${PATCH_REPLACEMENT_MAX_CHARACTERS} characters in total`);
+    }
     if (replacementCharacters > PATCH_REPLACEMENT_MAX_CHARACTERS) {
-      throw badRequest(`replacementLines must contain at most ${PATCH_REPLACEMENT_MAX_CHARACTERS} characters`);
+      throw badRequest(`replacementLines must contain at most ${PATCH_REPLACEMENT_MAX_CHARACTERS} characters in total`);
     }
     const target = await this.resolveExistingWritableFile(input.path);
     const canonicalTarget = await fs.realpath(target);
@@ -1300,16 +1324,28 @@ export class ComputerExecutor {
     const beforeInspection = inspectWrittenText(beforeContent);
     await this.assertCurrentFileRevision(input.baseRevisionId, workspacePath, beforeInspection.sha256);
     const beforeLines = splitTextLines(beforeContent);
-    if (input.startLine < 1 || input.endLine < input.startLine || input.endLine > beforeLines.length + 1) {
-      throw badRequest(`line range [${input.startLine}, ${input.endLine}) is outside the ${beforeLines.length}-line file`);
+    let previousStartLine = 0;
+    let previousEndLineExclusive = 0;
+    for (const [index, hunk] of input.hunks.entries()) {
+      const endLineExclusive = hunk.startLine + hunk.expectedLines.length;
+      if (hunk.startLine > beforeLines.length + 1 || endLineExclusive > beforeLines.length + 1) {
+        throw badRequest(`hunks[${index}] is outside the ${beforeLines.length}-line file`);
+      }
+      if (index > 0 && (hunk.startLine <= previousStartLine || hunk.startLine < previousEndLineExclusive)) {
+        throw badRequest("hunks must be ordered by strictly increasing startLine and must not overlap");
+      }
+      const firstLineIndex = hunk.startLine - 1;
+      const actualLines = beforeLines.slice(firstLineIndex, firstLineIndex + hunk.expectedLines.length);
+      if (!linesEqual(actualLines, hunk.expectedLines)) {
+        throw conflict(`Patch precondition failed: expectedLines do not match the current file at hunks[${index}]; reread the target before patching`);
+      }
+      previousStartLine = hunk.startLine;
+      previousEndLineExclusive = endLineExclusive;
     }
-    const firstLineIndex = input.startLine - 1;
-    const endLineIndex = input.endLine - 1;
-    const afterLines = [
-      ...beforeLines.slice(0, firstLineIndex),
-      ...input.replacementLines,
-      ...beforeLines.slice(endLineIndex),
-    ];
+    const afterLines = [...beforeLines];
+    for (const hunk of [...input.hunks].reverse()) {
+      afterLines.splice(hunk.startLine - 1, hunk.expectedLines.length, ...hunk.replacementLines);
+    }
     const lineEnding = beforeContent.includes("\r\n") ? "\r\n" : "\n";
     const hasTrailingLineEnding = /\r?\n$/u.test(beforeContent);
     const afterContent = afterLines.join(lineEnding) + (hasTrailingLineEnding && afterLines.length > 0 ? lineEnding : "");
@@ -1319,16 +1355,15 @@ export class ComputerExecutor {
     const beforeBytes = Buffer.byteLength(beforeContent);
     const afterBytes = Buffer.byteLength(afterContent);
     return {
-      schema: "agentloop.filePatch/v1",
+      schema: "agentloop.filePatch/v2",
       path: workspacePath,
-      operation: "replace_lines",
-      replacements: 1,
-      hunk: {
-        startLine: input.startLine,
-        endLine: input.endLine,
-        oldLines: endLineIndex - firstLineIndex,
-        newLines: input.replacementLines.length,
-      },
+      operation: "apply_hunks",
+      replacements: input.hunks.length,
+      hunks: input.hunks.map((hunk) => ({
+        startLine: hunk.startLine,
+        deletedLineCount: hunk.expectedLines.length,
+        insertedLineCount: hunk.replacementLines.length,
+      })),
       before: {
         bytes: beforeBytes,
         sha256: beforeInspection.sha256,
@@ -2166,6 +2201,10 @@ function splitTextLines(content: string): string[] {
   const lines = content.split(/\r?\n/u);
   if (lines.at(-1) === "") lines.pop();
   return lines;
+}
+
+function linesEqual(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((line, index) => line === expected[index]);
 }
 
 function writtenFileSampleRanges(lines: readonly string[]): WrittenFileSampleRange[] {

@@ -64,7 +64,7 @@ export function createComputerTools(
         "For loaded Skill reference files, use @skills/<skill-name>/... paths with this tool instead of shell cat/sed loops.",
         "If a bare filename is missing at the workspace root, the tool searches authorized subdirectories by basename; unique ranked matches are read and ambiguous matches return candidate paths.",
         "Use optional 1-indexed offset and limit for one line window, or ranges for multiple line windows; do not combine ranges with offset or limit.",
-        "A direct workspace-file read returns an opaque revisionId. Keep it for a later patch of that same file; never substitute a hash from a tool result.",
+        "A direct workspace-file read returns an opaque revisionId. Keep it for a later patch of that same file; copy exact target lines including indentation into each patch hunk's expectedLines, and never substitute a hash from a tool result.",
         "For contentLocation/stdoutRef/stderrRef, supply characterOffset (0-based, default 0) and characterLimit (default/max 12000) for a content window; follow nextCharacterOffset. The Runtime computes the content digest. Do not mix character windows with line windows.",
       ].join(" "),
       inputSchema: readFileInputSchema(["path"], {
@@ -509,20 +509,34 @@ export function createComputerTools(
     {
       name: "computer_patch_file",
       description: [
-        "Patch an existing UTF-8 text file under the workspace root by replacing a line interval from a read revision; requires dangerous-tool consent.",
+        "Patch an existing UTF-8 text file under the workspace root as one validated transaction of exact, revision-bound line hunks; requires dangerous-tool consent.",
         "Use this for local repairs to an existing artifact or generated source file instead of rewriting the whole file with computer_write_file.",
         "path must be relative to the workspace root; absolute paths and read-only virtual roots are rejected.",
         "baseRevisionId is required. Obtain it by reading or writing this exact workspace file in the current Run; it is an opaque server handle, never a content hash.",
-        "Replace the one-indexed half-open line interval [startLine, endLine) observed in that read. replacementLines contains complete new lines without line terminators; use startLine === endLine to insert lines.",
-        "This is a surgical edit: replacementLines is capped at 50000 characters. For a larger new file body, use computer_write_file in bounded chunks instead.",
+        "Each hunk has a 1-indexed startLine, exact expectedLines copied from that read, and exact replacementLines. Use expectedLines=[] to insert before startLine, replacementLines=[] to delete, and non-empty arrays on both sides to replace.",
+        "Line strings are preserved byte-for-byte, including indentation, trailing spaces, and empty strings. Do not include newline characters inside a line string.",
+        "All hunks are validated against the same revision before any write; they must be ordered by strictly increasing startLine and must not overlap. Any mismatch rejects the entire patch without changing the file.",
+        "This is a surgical edit: at most 64 hunks and 50000 total expected/replacement characters are accepted. For a larger new file body, use computer_write_file in bounded chunks instead.",
         "Do not pass a hash or derive a version from any tool-result hash. If the revision is stale, reread the file and use its new revisionId.",
-        "The result includes schema agentloop.filePatch/v1, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
+        "The result includes schema agentloop.filePatch/v2, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
       ].join(" "),
-      inputSchema: objectSchema(["path", "startLine", "endLine", "replacementLines", "baseRevisionId"], {
+      inputSchema: objectSchema(["path", "hunks", "baseRevisionId"], {
         path: { type: "string" },
-        startLine: { type: "integer", minimum: 1 },
-        endLine: { type: "integer", minimum: 1 },
-        replacementLines: { type: "array", maxItems: 2_000, items: { type: "string", maxLength: 50_000 } },
+        hunks: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["startLine", "expectedLines", "replacementLines"],
+            properties: {
+              startLine: { type: "integer", minimum: 1 },
+              expectedLines: { type: "array", maxItems: 2_000, items: { type: "string", maxLength: 50_000 } },
+              replacementLines: { type: "array", maxItems: 2_000, items: { type: "string", maxLength: 50_000 } },
+            },
+          },
+        },
         baseRevisionId: { type: "string", pattern: "^rev_[a-f0-9]{32}$" },
       }),
       executionMode: "exclusive",
@@ -532,11 +546,12 @@ export function createComputerTools(
         if (record.expectedSha256 !== undefined) {
           throw badRequest("expectedSha256 is not accepted for patches; use the opaque baseRevisionId returned by the server");
         }
+        if (record.startLine !== undefined || record.endLine !== undefined || record.replacementLines !== undefined) {
+          throw badRequest("root-level startLine, endLine, and replacementLines are not accepted; use explicit hunks with expectedLines");
+        }
         return {
           path: requireString(record.path, "path", { max: 4_000 }),
-          startLine: requireBoundedInteger(record.startLine, "startLine", 1, Number.MAX_SAFE_INTEGER),
-          endLine: requireBoundedInteger(record.endLine, "endLine", 1, Number.MAX_SAFE_INTEGER),
-          replacementLines: requirePatchLines(record.replacementLines),
+          hunks: requirePatchHunks(record.hunks),
           baseRevisionId: requireString(record.baseRevisionId, "baseRevisionId", { min: 36, max: 36, pattern: /^rev_[a-f0-9]{32}$/u }),
         };
       },
@@ -553,7 +568,10 @@ export function createComputerTools(
             inspection: receipt.inspection,
           }, {
             writeMode: "patch",
-            writtenBytes: Buffer.byteLength((value as PatchFileInput).replacementLines.join("\n")),
+            writtenBytes: (value as PatchFileInput).hunks.reduce(
+              (total, hunk) => total + Buffer.byteLength(hunk.replacementLines.join("\n")),
+              0,
+            ),
             replacementCount: receipt.replacements,
             beforeSha256: receipt.before.sha256,
             afterSha256: receipt.after.sha256,
@@ -1647,14 +1665,41 @@ function parseWriteFileMode(mode: unknown, overwrite: unknown): WriteFileMode {
   throw badRequest("mode must be one of create, overwrite, or append");
 }
 
-function requirePatchLines(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > 2_000) throw badRequest("replacementLines must be an array of at most 2000 strings");
-  const lines = value.map((line, index) => requireString(line, `replacementLines[${index}]`, { max: 50_000 }));
-  if (lines.some((line) => /[\r\n]/u.test(line))) throw badRequest("replacementLines must contain complete lines without line terminators");
-  if (lines.reduce((total, line) => total + line.length, 0) > 50_000) {
-    throw badRequest("replacementLines must contain at most 50000 characters");
+function requirePatchHunks(value: unknown): PatchFileInput["hunks"] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 64) {
+    throw badRequest("hunks must be an array with between 1 and 64 entries");
   }
-  return lines;
+  const hunks = value.map((item, index) => {
+    const record = requireRecord(item, `hunks[${index}]`);
+    return {
+      startLine: requireBoundedInteger(record.startLine, `hunks[${index}].startLine`, 1, Number.MAX_SAFE_INTEGER),
+      expectedLines: requireExactPatchLines(record.expectedLines, `hunks[${index}].expectedLines`),
+      replacementLines: requireExactPatchLines(record.replacementLines, `hunks[${index}].replacementLines`),
+    };
+  });
+  const expectedCharacters = hunks.reduce(
+    (total, hunk) => total + hunk.expectedLines.reduce((sum, line) => sum + line.length, 0),
+    0,
+  );
+  const replacementCharacters = hunks.reduce(
+    (total, hunk) => total + hunk.replacementLines.reduce((sum, line) => sum + line.length, 0),
+    0,
+  );
+  if (expectedCharacters > 50_000) throw badRequest("expectedLines must contain at most 50000 characters in total");
+  if (replacementCharacters > 50_000) throw badRequest("replacementLines must contain at most 50000 characters in total");
+  return hunks;
+}
+
+function requireExactPatchLines(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length > 2_000) {
+    throw badRequest(`${field} must be an array of at most 2000 strings`);
+  }
+  return value.map((line, index) => {
+    if (typeof line !== "string") throw badRequest(`${field}[${index}] must be a string`);
+    if (line.length > 50_000) throw badRequest(`${field}[${index}] must contain at most 50000 characters`);
+    if (/[\r\n]/u.test(line)) throw badRequest(`${field}[${index}] must not contain line terminators`);
+    return line;
+  });
 }
 
 function objectSchema(required: readonly string[], properties: Record<string, unknown>): Record<string, unknown> {

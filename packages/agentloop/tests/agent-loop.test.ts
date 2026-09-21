@@ -2770,6 +2770,45 @@ test("artifact progress policy treats DOC and DOCX receipts as the same Word del
   }
 });
 
+test("artifact progress policy treats a successful PPTX acceptance receipt as the presentation deliverable", () => {
+  const policy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+    { expectedArtifactKind: "presentation" },
+  );
+  const state = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [{
+      toolCallId: "verify-deck",
+      toolName: "verify_artifact_acceptance",
+      isError: false,
+      operationStatus: "succeeded",
+      result: JSON.stringify({
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: {
+          path: "山猪祭墟_游戏介绍.pptx",
+          bytes: 147_306,
+          sha256: "e5c1ffb4881828055398e981541dc70365b3d7c3fd836b97e5861469488777f0",
+          kind: "pptx",
+          profileId: "pptx",
+        },
+        verdict: "caveated",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_non_empty", "artifact_openable", "artifact_path", "format_matches_request"],
+          caveated: ["artifact_acceptance", "explicit_caveats"],
+          failed: [],
+        },
+        caveats: ["PPTX visual/application render acceptance is unavailable in this runtime."],
+      }),
+    }],
+  });
+
+  assert.equal(state?.workProduct.status, "accepted");
+  assert.deepEqual(state?.missingToolEvidenceKinds, []);
+  assert.deepEqual(state?.workProduct.deliverableArtifacts.map((artifact) => artifact.path), ["山猪祭墟_游戏介绍.pptx"]);
+  assert.deepEqual(state?.workProduct.processArtifacts, []);
+  assert.equal(state?.nextAction, "submit_completion_candidate");
+});
+
 test("artifact progress policy allows diagnostic-driven intermediate source repair before rerender", async () => {
   const executions: string[] = [];
   let renderAttempts = 0;
@@ -3120,7 +3159,11 @@ test("artifact progress policy allows a targeted rebase read after patch precond
     parse: (value) => value,
     execute: async (_context, input) => {
       executions.push(`patch:${JSON.stringify(input)}`);
-      throw new AppError("CONFLICT", "Patch precondition failed: file revision is stale; reread the file before patching", 409);
+      throw new AppError(
+        "CONFLICT",
+        "Patch precondition failed: expectedLines do not match the current file at hunks[0]; reread the target before patching",
+        409,
+      );
     },
   };
   const readTool: RuntimeTool<unknown> = {
@@ -3194,7 +3237,15 @@ test("artifact progress policy allows a targeted rebase read after patch precond
         return {
           content: "",
           finishReason: "tool_calls",
-          toolCalls: [{ id: "stale-patch", name: "computer_patch_file", arguments: { path: "poster-spec.json", startLine: 1, endLine: 2, replacementLines: ["{\"texture\":0.2}"], baseRevisionId: "rev_00000000000000000000000000000000" } }],
+          toolCalls: [{
+            id: "stale-patch",
+            name: "computer_patch_file",
+            arguments: {
+              path: "poster-spec.json",
+              hunks: [{ startLine: 1, expectedLines: ["{\"texture\":0.18}"], replacementLines: ["{\"texture\":0.2}"] }],
+              baseRevisionId: "rev_00000000000000000000000000000000",
+            },
+          }],
         };
       }
       if (calls === 3) {
