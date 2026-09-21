@@ -5,6 +5,7 @@ import {
   failureEffectState,
   type RuntimeActionEffectState,
 } from "./action-effect.ts";
+import type { RuntimeResultRecord } from "./runtime-result.ts";
 
 export type RuntimeActionKind =
   | "planning"
@@ -104,16 +105,16 @@ export class RuntimeActionRepository {
     metadata?: Readonly<Record<string, unknown>>;
     /** A resolved operation may still report a semantic failure, such as a nonzero command exit. */
     resultFailureCode?: (value: unknown) => string | undefined;
-    /** Persist the canonical result before atomically binding its opaque ref to Action success. */
-    prepareResultRef?: (value: T, action: RuntimeActionRecord) => Promise<string>;
+    /** Build the canonical Runtime result that is atomically committed with Action success. */
+    prepareResult?: (value: T, action: RuntimeActionRecord) => Promise<RuntimeResultRecord>;
   }, operation: () => Promise<T>): Promise<T> {
     const action = await this.dispatch(input);
     try {
       const value = await operation();
       const resultFailureCode = input.resultFailureCode?.(value);
       if (resultFailureCode === undefined) {
-        const resultRef = await input.prepareResultRef?.(value, action);
-        await this.succeed(action.id, action.fence, resultRef);
+        const result = await input.prepareResult?.(value, action);
+        await this.succeed(action.id, action.fence, result);
       } else {
         await this.fail(action.id, action.fence, resultFailureCode, "unknown");
       }
@@ -414,16 +415,39 @@ export class RuntimeActionRepository {
     return await this.require(actionId);
   }
 
-  private async succeed(actionId: string, fence: number, resultRef?: string): Promise<void> {
+  private async succeed(actionId: string, fence: number, runtimeResult?: RuntimeResultRecord): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
       const row = await this.requireRow(actionId);
+      if (
+        runtimeResult !== undefined
+        && (
+          runtimeResult.kind !== "tool"
+          || runtimeResult.publication.status !== "committed"
+          || runtimeResult.producer.actionId !== actionId
+          || runtimeResult.producer.runId !== row.run_id
+          || runtimeResult.producer.planId !== (row.plan_id ?? undefined)
+          || runtimeResult.producer.stepId !== (row.step_id ?? undefined)
+        )
+      ) {
+        throw new AppError("CONFLICT", "Runtime result producer does not match the committing Action", 409);
+      }
+      const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+      const resultRef = runtimeResult?.ref.resultId;
       const result = await this.database.prepare(`
         UPDATE runtime_actions
-        SET state = 'succeeded', lease_until = NULL, effect_state = 'applied', result_ref = ?, revision = revision + 1,
+        SET state = 'succeeded', lease_until = NULL, effect_state = 'applied', result_ref = ?, metadata_json = ?, revision = revision + 1,
             updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-      `).run(resultRef ?? null, now, now, actionId, fence, row.revision) as { changes: number };
+      `).run(
+        resultRef ?? null,
+        JSON.stringify(runtimeResult === undefined ? metadata : { ...metadata, runtimeResult }),
+        now,
+        now,
+        actionId,
+        fence,
+        row.revision,
+      ) as { changes: number };
       if (result.changes !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
       await this.appendEvent(row.run_id, "action.result_committed", {
         actionId,

@@ -1,9 +1,10 @@
 import { AppError } from "../shared/errors.ts";
 import type { PlanRepository } from "../planning/plan-repository.ts";
-import type { PlanStep, SkillComplianceAssessment } from "../planning/contracts.ts";
 import { activeLeafSteps } from "../planning/plan-utils.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import type { HumanLoopRepository } from "./human-loop.ts";
+import { createRuntimeResult, type RuntimeResultRecord } from "./runtime-result.ts";
+import { isCaveatedStepResult } from "./step-result-committer.ts";
 
 export class TerminalCommitter {
   private readonly plans: PlanRepository;
@@ -34,7 +35,7 @@ export class TerminalCommitter {
         );
       }
     }
-    await this.outcomes.commitCompleted({ runId, planId, output });
+    await this.outcomes.commitCompleted({ runId, planId, result: runResult(plan, output) });
   }
 
   async commitCompletedWithDeferredValidation(runId: string, planId: string, output: string): Promise<void> {
@@ -57,12 +58,12 @@ export class TerminalCommitter {
         // Treat that uncertainty as a caveat and deliver it, rather than
         // reinterpreting "approved" as "nothing is unknown" and rejecting
         // the terminal commit.
-        if (isCaveatedAssessment(latest, step)) {
+        if (isCaveatedStepResult(latest, step.evidence ?? {})) {
           hasCaveat = true;
         }
         continue;
       }
-      if (isCaveatedAssessment(latest, step)) {
+      if (isCaveatedStepResult(latest, step.evidence ?? {})) {
         hasCaveat = true;
         continue;
       }
@@ -75,7 +76,7 @@ export class TerminalCommitter {
     if (!hasCaveat) {
       throw new AppError("ASSESSMENT_ERROR", "Caveated completion commit requires at least one caveated assessment", 409);
     }
-    await this.outcomes.commitCompletedWithCaveats({ runId, planId, output, reasonCode });
+    await this.outcomes.commitCompletedWithCaveats({ runId, planId, result: runResult(plan, output), reasonCode });
   }
 
   async commitStopped(input: {
@@ -96,19 +97,20 @@ export class TerminalCommitter {
   }
 }
 
-function isCaveatedAssessment(
-  assessment: SkillComplianceAssessment | undefined,
-  step: PlanStep,
-): boolean {
-  if (assessment?.skills.some((skill) => skill.status === "skipped_unavailable" || skill.status === "process_caveat") === true) {
-    return true;
-  }
-  if (assessment?.decisionBindings?.some((binding) => binding.status !== "satisfied" && !binding.blocking) === true) {
-    return true;
-  }
-  if (assessment?.criteria.some((criterion) => criterion.status !== "satisfied" && !criterion.blocking) === true) {
-    return true;
-  }
-  return step.evidence?.completionCaveat?.reason === "repair_limit"
-    || step.evidence?.completionCaveat?.reason === "evidence_boundary";
+function runResult(plan: Awaited<ReturnType<PlanRepository["get"]>>, output: string): RuntimeResultRecord {
+  const leaves = activeLeafSteps(plan);
+  const inputs = leaves.map((step) => {
+    const result = step.evidence?.publishedResult;
+    if (result === undefined) {
+      throw new AppError("ASSESSMENT_ERROR", `Terminal commit requires a published result for step ${step.id}`, 409);
+    }
+    return result.ref;
+  });
+  return createRuntimeResult({
+    kind: "run",
+    producer: { runId: plan.runId, planId: plan.id },
+    value: output,
+    inputs,
+    publication: { status: "published" },
+  });
 }

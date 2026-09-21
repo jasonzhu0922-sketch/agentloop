@@ -1266,7 +1266,7 @@ function buildArtifactFollowupContext(task: TaskSpec): {
       "For artifact conversion, use convert_artifact when available; prefer reusable Markdown, HTML, text, document, or PPTX artifacts as the conversion source before completed delivery text. PPTX sources currently convert directly to PDF through the portable PPTX renderer.",
       "When the requested source exists only as model-generated or completed delivery Markdown text, first materialize it as a reusable .md artifact with computer_write_file, then pass that artifact to convert_artifact and verify the converted output; never pass raw content to convert_artifact or introduce a separate format-specific converter.",
       "Use completed delivery text only when no reusable artifact can provide the requested content or the user explicitly asks to convert the answer text.",
-      "For a candidateSourceResults entry, its result ref is a formal Plan input. Use its compact summary first and read_conversation_result with that ref for needed content; do not substitute source reacquisition merely because the prior result has source lineage.",
+      "For a candidateSourceResults entry, its result ref is a formal Plan input. Use its compact summary first and read_result with its opaque resultId for needed content; do not substitute source reacquisition merely because the prior result has source lineage.",
       "When the user asks to generate or save a file from a prior answer and no reusable artifact exists, use the latest completed delivery text as the source content instead of restarting source acquisition.",
       "Use uploaded or original sources only when the user explicitly asks to reanalyze, regenerate from source data, or change source-grounded content.",
     ],
@@ -1277,9 +1277,7 @@ function conversationResultInput(task: TaskSpec): NonNullable<NonNullable<TaskSp
   const target = task.turnResolution?.targetResult;
   if (target === undefined || task.turnResolution?.evidenceDemand !== "none") return undefined;
   return task.conversationWorkingSet?.reusableResults?.find((item) =>
-    item.result.runId === target.runId
-    && item.result.sha256 === target.sha256
-    && item.result.characters === target.characters,
+    item.result.resultId === target.resultId,
   );
 }
 

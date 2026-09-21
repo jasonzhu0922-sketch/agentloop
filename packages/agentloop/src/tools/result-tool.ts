@@ -1,12 +1,12 @@
 import { badRequest, forbidden, notFound } from "../shared/errors.ts";
-import type { ToolResultRepository } from "../runtime/tool-result-repository.ts";
+import type { RuntimeResultRepository } from "../runtime/runtime-result-repository.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 
-export const TOOL_RESULT_READER_NAME = "read_tool_result";
+export const RESULT_READER_NAME = "read_result";
 const MAX_RESULT_WINDOW_CHARACTERS = 12_000;
 const MAX_RESULT_ARRAY_ITEMS = 200;
 
-interface ReadToolResultInput {
+interface ReadResultInput {
   readonly resultId: string;
   readonly pointer?: string;
   readonly offset: number;
@@ -15,13 +15,13 @@ interface ReadToolResultInput {
   readonly characterLimit: number;
 }
 
-/** Read a bounded exact window from a Runtime-owned Tool result without paths or hashes. */
-export function createToolResultTool(repository: ToolResultRepository): RuntimeTool<ReadToolResultInput> {
+/** Read a bounded exact window from an authorized Runtime-owned result. */
+export function createResultTool(repository: RuntimeResultRepository): RuntimeTool<ReadResultInput> {
   return {
-    name: TOOL_RESULT_READER_NAME,
+    name: RESULT_READER_NAME,
     description: [
-      "Read exact values from a successful Tool Action through an opaque Runtime-owned toolResultRef.",
-      "Pass resultId from agentloop.toolResultRef/v1; never supply a filesystem path or digest.",
+      "Read exact values from a committed Tool result, an assessed dependency Step result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
+      "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
       "For JSON results, use a JSON Pointer and optional array offset/limit. Omit pointer for a bounded serialized character window.",
     ].join(" "),
     inputSchema: {
@@ -39,11 +39,11 @@ export function createToolResultTool(repository: ToolResultRepository): RuntimeT
     },
     executionMode: "parallel",
     replaySafe: true,
-    parse(input: unknown): ReadToolResultInput {
+    parse(input: unknown): ReadResultInput {
       if (input === null || typeof input !== "object" || Array.isArray(input)) throw badRequest("arguments must be an object");
       const value = input as Record<string, unknown>;
       const resultId = typeof value.resultId === "string" ? value.resultId.trim() : "";
-      if (!/^tr_[0-9a-f-]{36}$/u.test(resultId)) throw badRequest("resultId must be an opaque Runtime Tool result id");
+      if (!/^rr_[0-9a-f-]{36}$/u.test(resultId)) throw badRequest("resultId must be an opaque Runtime result id");
       const pointer = value.pointer === undefined ? undefined : requireString(value.pointer, "pointer");
       return {
         resultId,
@@ -58,48 +58,51 @@ export function createToolResultTool(repository: ToolResultRepository): RuntimeT
       const planId = context.grant.planId;
       const stepId = context.grant.stepId;
       if (planId === undefined || stepId === undefined) {
-        throw forbidden("Tool result access requires a Plan-step-scoped Runtime grant");
+        throw forbidden("Runtime result access requires a Plan-step-scoped Runtime grant");
       }
       const record = await repository.readAuthorized({
         resultId: input.resultId,
         runId: context.grant.runId,
         planId,
         stepId,
+        actorUserId: context.grant.actorUserId,
+        ...(context.grant.conversationId === undefined ? {} : { conversationId: context.grant.conversationId }),
       });
-      if (record === undefined) throw notFound("Tool result");
+      if (record === undefined) throw notFound("Runtime result");
       const source = {
-        toolName: record.toolName,
-        ...(record.resultSchema === undefined ? {} : { resultSchema: record.resultSchema }),
-        characters: record.characters,
-        bytes: record.bytes,
+        kind: record.kind,
+        ...(record.producer.toolName === undefined ? {} : { toolName: record.producer.toolName }),
+        ...(record.payload.resultSchema === undefined ? {} : { resultSchema: record.payload.resultSchema }),
+        characters: record.payload.characters,
+        bytes: record.payload.bytes,
       };
       if (input.pointer === undefined) {
-        if (input.characterOffset > record.content.length) throw badRequest("characterOffset exceeds Tool result length");
-        const content = record.content.slice(input.characterOffset, input.characterOffset + input.characterLimit);
+        if (input.characterOffset > record.payload.content.length) throw badRequest("characterOffset exceeds Runtime result length");
+        const content = record.payload.content.slice(input.characterOffset, input.characterOffset + input.characterLimit);
         return {
-          schema: "agentloop.toolResultRead/v1",
-          sourceToolResultRef: record.ref,
+          schema: "agentloop.resultRead/v1",
+          sourceResultRef: record.ref,
           source,
           characterOffset: input.characterOffset,
           returnedCharacters: content.length,
-          nextCharacterOffset: input.characterOffset + content.length < record.content.length
+          nextCharacterOffset: input.characterOffset + content.length < record.payload.content.length
             ? input.characterOffset + content.length
             : null,
           content,
         };
       }
-      if (record.contentFormat !== "json") throw badRequest("pointer requires a JSON Tool result");
-      const document = JSON.parse(record.content) as unknown;
+      if (record.payload.contentFormat !== "json") throw badRequest("pointer requires a JSON Runtime result");
+      const document = JSON.parse(record.payload.content) as unknown;
       const selected = resolveJsonPointer(document, input.pointer);
       const array = Array.isArray(selected);
       const value = array ? selected.slice(input.offset, input.offset + input.limit) : selected;
       const serialized = JSON.stringify(value);
       if (serialized.length > MAX_RESULT_WINDOW_CHARACTERS) {
-        throw badRequest(`Selected Tool result exceeds ${MAX_RESULT_WINDOW_CHARACTERS} characters; use a narrower pointer or array window`);
+        throw badRequest(`Selected Runtime result exceeds ${MAX_RESULT_WINDOW_CHARACTERS} characters; use a narrower pointer or array window`);
       }
       return {
-        schema: "agentloop.toolResultRead/v1",
-        sourceToolResultRef: record.ref,
+        schema: "agentloop.resultRead/v1",
+        sourceResultRef: record.ref,
         source,
         pointer: input.pointer,
         ...(array ? {

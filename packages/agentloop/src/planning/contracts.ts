@@ -1,6 +1,7 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
+import type { RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
@@ -212,10 +213,9 @@ export interface ConversationArtifactReference {
   readonly path: string;
 }
 
-export interface ConversationResultReference {
-  readonly schema: "agentloop.conversationResultRef/v1";
+export interface ConversationResultReference extends RuntimeResultRef {
+  /** Producer provenance for goal selection; resultId remains the only read identity. */
   readonly runId: string;
-  readonly sha256: string;
   readonly characters: number;
 }
 
@@ -502,6 +502,7 @@ export interface ExecutionPlan {
 export interface ToolEvidence {
   readonly toolCallId: string;
   readonly toolName: string;
+  readonly resultRef?: RuntimeResultRef;
   readonly invocationStatus?: "completed" | "failed" | "rejected";
   readonly operationStatus?: "succeeded" | "failed" | "unknown";
   readonly exitCode?: number | null;
@@ -512,6 +513,8 @@ export interface ToolEvidence {
 
 export interface StepEvidence {
   readonly candidateOutput: string;
+  /** Formal Runtime publication created only after this candidate is assessed. */
+  readonly publishedResult?: RuntimeResultRecord;
   readonly deliveryCandidate?: RuntimeDeliveryCandidate;
   readonly toolCalls: readonly ToolEvidence[];
   readonly modelSteps: number;

@@ -322,15 +322,15 @@ function assertConversationInputBindings(bindings: readonly ConversationInputBin
     if (
       binding.schema !== "agentloop.conversationInputBinding/v1"
       || !["continue_prior", "refine_prior", "correct_prior", "challenge_prior"].includes(binding.relation)
-      || result.schema !== "agentloop.conversationResultRef/v1"
+      || result.schema !== "agentloop.resultRef/v1"
+      || !/^rr_[0-9a-f-]{36}$/u.test(result.resultId)
       || result.runId.trim().length === 0
       || result.runId.length > 120
-      || !/^[a-f0-9]{64}$/u.test(result.sha256)
       || !Number.isInteger(result.characters)
       || result.characters < 1
       || result.characters > 20_000_000
     ) reject("Plan has an invalid prior Outcome input binding");
-    const identity = `${binding.relation}:${result.runId}:${result.sha256}`;
+    const identity = `${binding.relation}:${result.resultId}`;
     if (identities.has(identity)) reject("Plan has duplicate prior Outcome input bindings");
     identities.add(identity);
   }

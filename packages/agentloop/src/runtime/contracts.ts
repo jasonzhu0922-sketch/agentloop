@@ -1,3 +1,5 @@
+import type { RuntimeResultRef } from "./runtime-result.ts";
+
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
 /**
@@ -279,6 +281,7 @@ export interface AgentLoopToolEvidence {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly result: string;
+  readonly resultRef?: RuntimeResultRef;
   /** Invocation transport/dispatch status; distinct from the returned operation result. */
   readonly invocationStatus?: "completed" | "failed" | "rejected";
   /** Semantic result of the invoked operation, including a returned nonzero exitCode. */

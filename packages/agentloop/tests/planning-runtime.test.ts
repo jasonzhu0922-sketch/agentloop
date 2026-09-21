@@ -31,8 +31,10 @@ import {
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
+import { createRuntimeResult } from "../src/runtime/runtime-result.ts";
 import { markActionFailedBeforeEffect } from "../src/runtime/action-effect.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
+import { StepResultCommitter } from "../src/runtime/step-result-committer.ts";
 import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
@@ -3965,11 +3967,11 @@ test("ModelPlanner treats a bound prior artifact as a native transformation, not
 
 test("ModelPlanner treats a bound prior Outcome as a materializable input, not a source-acquisition task", async () => {
   const priorOutput = "已完成的市场分析结论。".repeat(200);
-  const priorSha256 = createHash("sha256").update(priorOutput).digest("hex");
+  const priorResultId = "rr_00000000-0000-4000-8000-000000000020";
   const priorResult = {
-    schema: "agentloop.conversationResultRef/v1" as const,
+    schema: "agentloop.resultRef/v1" as const,
+    resultId: priorResultId,
     runId: "prior-analysis-run",
-    sha256: priorSha256,
     characters: priorOutput.length,
   };
   const planner = new ModelPlanner({
@@ -3977,7 +3979,7 @@ test("ModelPlanner treats a bound prior Outcome as a materializable input, not a
     complete: async (request) => {
       const context = request.runtimeContext?.content ?? "";
       assert.match(context, /candidateSourceResults/);
-      assert.match(context, new RegExp(priorSha256));
+      assert.match(context, new RegExp(priorResultId));
       assert.match(context, /formal Plan input/);
       assert.match(context, /"sourceNeed":"none"/);
       return {
@@ -4019,7 +4021,7 @@ test("ModelPlanner treats a bound prior Outcome as a materializable input, not a
       source: "model_guarded",
     },
     availableSkills: [],
-    availableToolNames: ["computer_write_file", "read_conversation_result"],
+    availableToolNames: ["computer_write_file", "read_result"],
     conversationWorkingSet: {
       schema: "conversation.workset/v1",
       conversationId: "prior-analysis-conversation",
@@ -6788,7 +6790,7 @@ test("legacy interrupted Runs fail terminally with a resumable checkpoint on res
       ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
     `).run(runId, owner.user.id, "create an artifact", Date.now() - 120_000);
     const plans = new PlanRepository(database);
-    const plan = await plans.create(admitPlan({
+    let plan = await plans.create(admitPlan({
       runId,
       proposal: {
         goal: "create an artifact",
@@ -7097,11 +7099,11 @@ test("TerminalCommitter ignores milestone nodes and requires assessments only fo
       availableToolNames: new Set(),
     }));
     plan = await plans.startStep(plan.id, "build");
-    plan = await plans.completeStep(plan.id, "build", "leaf output", {
+    const evidence = {
       candidateOutput: "leaf output",
       toolCalls: [],
       modelSteps: 1,
-    });
+    };
     await plans.saveAssessment({
       id: "assessment-build-1",
       planId: plan.id,
@@ -7114,6 +7116,12 @@ test("TerminalCommitter ignores milestone nodes and requires assessments only fo
       feedback: "",
       createdAt: Date.now(),
     });
+    plan = (await new StepResultCommitter(plans).commit({
+      runId,
+      plan,
+      step: plan.steps.find((candidate) => candidate.id === "build")!,
+      evidence,
+    })).plan;
     const action = await new RuntimeActionRepository(database).requireRecoveryReview({
       runId,
       planId: plan.id,
@@ -7159,11 +7167,11 @@ test("TerminalCommitter delivers approved steps with non-blocking unknown decisi
       availableToolNames: new Set(),
     }));
     plan = await plans.startStep(plan.id, "deliver");
-    plan = await plans.completeStep(plan.id, "deliver", "delivered output", {
+    const evidence = {
       candidateOutput: "delivered output",
       toolCalls: [],
       modelSteps: 1,
-    });
+    };
     await plans.saveAssessment({
       id: "assessment-unverified-decision-1",
       planId: plan.id,
@@ -7188,6 +7196,12 @@ test("TerminalCommitter delivers approved steps with non-blocking unknown decisi
       feedback: "The result is delivered; the user choice could not be independently verified.",
       createdAt: Date.now(),
     });
+    plan = (await new StepResultCommitter(plans).commit({
+      runId,
+      plan,
+      step: plan.steps.find((candidate) => candidate.id === "deliver")!,
+      evidence,
+    })).plan;
 
     await new TerminalCommitter(plans, new RunOutcomeRepository(database))
       .commitCompletedWithCaveats(runId, plan.id, "delivered output", "completed_with_unverified_decision_binding");
@@ -10393,7 +10407,12 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
     const priorRunId = "prior-summary-run";
     const priorPlanId = "prior-summary-plan";
     const priorOutput = "上一轮完成的总结文本。".repeat(900);
-    const priorSha256 = createHash("sha256").update(priorOutput).digest("hex");
+    const priorResult = createRuntimeResult({
+      kind: "run",
+      producer: { runId: priorRunId, planId: priorPlanId },
+      value: priorOutput,
+      publication: { status: "published" },
+    });
     const now = Date.now();
     await database.prepare(`
       INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
@@ -10449,9 +10468,9 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
       now - 8_000,
     );
     await database.prepare(`
-      INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-      VALUES (?, ?, 'completed', ?, 'plan_assessed_and_completed', ?)
-    `).run(priorRunId, priorPlanId, priorOutput, now - 8_000);
+      INSERT INTO run_outcomes(run_id, plan_id, status, output, result_ref, result_json, reason_code, committed_at)
+      VALUES (?, ?, 'completed', ?, ?, ?, 'plan_assessed_and_completed', ?)
+    `).run(priorRunId, priorPlanId, priorOutput, priorResult.ref.resultId, JSON.stringify(priorResult), now - 8_000);
 
     let capturedTask: TaskSpec | undefined;
     let resolverContext = "";
@@ -10496,8 +10515,8 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
               finishReason: "tool_calls",
               toolCalls: [{
                 id: "read-prior-result",
-                name: "read_conversation_result",
-                arguments: { runId: priorRunId, sha256: priorSha256, maxCharacters: 40_000 },
+                name: "read_result",
+                arguments: { resultId: priorResult.ref.resultId, characterLimit: 12_000 },
               }],
             };
           }
@@ -10531,31 +10550,31 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
 
     assert.equal(run.status, "completed");
     assert.equal(capturedTask?.conversationWorkingSet?.reusableArtifacts.length, 0);
-    assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.result.sha256, priorSha256);
+    assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.result.resultId, priorResult.ref.resultId);
     assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.summaryTruncated, true);
     assert.deepEqual(capturedTask?.availableSkills.map((skill) => skill.id), [aihot.id]);
     assert.deepEqual(capturedTask?.selectedSkillRoles, []);
     assert.deepEqual(capturedTask?.continuationSkillIds, [aihot.id]);
     assert.deepEqual(capturedTask?.turnResolution?.targetResult, {
-      schema: "agentloop.conversationResultRef/v1",
+      schema: "agentloop.resultRef/v1",
+      resultId: priorResult.ref.resultId,
       runId: priorRunId,
-      sha256: priorSha256,
       characters: priorOutput.length,
     });
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
     assert.match(resolverContext, /reusableResultCandidates/);
-    assert.doesNotMatch(resolverContext, new RegExp(priorSha256));
+    assert.doesNotMatch(resolverContext, new RegExp(priorResult.ref.resultId));
     assert.doesNotMatch(resolverContext, new RegExp(priorRunId));
     assert.match(executionContext, /planInputBindings/);
-    assert.match(executionContext, new RegExp(priorSha256));
+    assert.match(executionContext, new RegExp(priorResult.ref.resultId));
     assert.equal(resultReadCalls, 1);
     const plan = (await runs.plan(owner.user.id, run.id)).plan;
     assert.deepEqual(plan.inputBindings, [{
       schema: "agentloop.conversationInputBinding/v1",
       result: {
-        schema: "agentloop.conversationResultRef/v1",
+        schema: "agentloop.resultRef/v1",
+        resultId: priorResult.ref.resultId,
         runId: priorRunId,
-        sha256: priorSha256,
         characters: priorOutput.length,
       },
       relation: "refine_prior",
@@ -10581,7 +10600,7 @@ test("RunService retries an ambiguous prior-result follow-up until the model sel
     const secondRunId = "second-completed-result";
     const firstOutput = "First completed analysis.";
     const secondOutput = "Second completed analysis selected by the user follow-up.";
-    const secondSha256 = createHash("sha256").update(secondOutput).digest("hex");
+    let secondResultId = "";
     const now = Date.now();
     await database.prepare(`
       INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
@@ -10597,10 +10616,18 @@ test("RunService retries an ambiguous prior-result follow-up until the model sel
           model_key, status, input, output, error_code, created_at, finished_at
         ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
       `).run(runId, owner.user.id, conversationId, input, output, createdAt, createdAt + 1_000);
+      const outcomeResult = createRuntimeResult({
+        kind: "run",
+        producer: { runId },
+        value: output,
+        publication: { status: "published" },
+        createdAt: createdAt + 1_000,
+      });
+      if (runId === secondRunId) secondResultId = outcomeResult.ref.resultId;
       await database.prepare(`
-        INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-        VALUES (?, NULL, 'completed', ?, 'plan_assessed_and_completed', ?)
-      `).run(runId, output, createdAt + 1_000);
+        INSERT INTO run_outcomes(run_id, plan_id, status, output, result_ref, result_json, reason_code, committed_at)
+        VALUES (?, NULL, 'completed', ?, ?, ?, 'plan_assessed_and_completed', ?)
+      `).run(runId, output, outcomeResult.ref.resultId, JSON.stringify(outcomeResult), createdAt + 1_000);
     }
 
     let resolverCalls = 0;
@@ -10617,7 +10644,7 @@ test("RunService retries an ambiguous prior-result follow-up until the model sel
           assert.match(context, /result_candidate_2/);
           assert.doesNotMatch(context, new RegExp(firstRunId));
           assert.doesNotMatch(context, new RegExp(secondRunId));
-          assert.doesNotMatch(context, new RegExp(secondSha256));
+          assert.doesNotMatch(context, new RegExp(secondResultId));
           if (resolverCalls === 1) {
             return {
               content: "",
@@ -10677,7 +10704,7 @@ test("RunService retries an ambiguous prior-result follow-up until the model sel
     assert.equal(capturedTask?.turnResolution?.relation, "refine_prior");
     assert.equal(capturedTask?.turnResolution?.targetRunId, secondRunId);
     assert.equal(capturedTask?.turnResolution?.targetResult?.runId, secondRunId);
-    assert.equal(capturedTask?.turnResolution?.targetResult?.sha256, secondSha256);
+    assert.equal(capturedTask?.turnResolution?.targetResult?.resultId, secondResultId);
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
   } finally {
     database.close();
@@ -10919,7 +10946,12 @@ test("RunService continues a failed goal while inheriting its completed prior-re
     const resultRunId = "completed-analysis-result";
     const failedRunId = "failed-pdf-goal";
     const priorOutput = "Completed analysis that must remain the PDF content source.";
-    const priorSha256 = createHash("sha256").update(priorOutput).digest("hex");
+    const priorResult = createRuntimeResult({
+      kind: "run",
+      producer: { runId: resultRunId },
+      value: priorOutput,
+      publication: { status: "published" },
+    });
     const now = Date.now();
     await database.prepare(`
       INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
@@ -10932,9 +10964,9 @@ test("RunService continues a failed goal while inheriting its completed prior-re
       ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
     `).run(resultRunId, owner.user.id, conversationId, "分析附件", priorOutput, now - 20_000, now - 18_000);
     await database.prepare(`
-      INSERT INTO run_outcomes(run_id, plan_id, status, output, reason_code, committed_at)
-      VALUES (?, NULL, 'completed', ?, 'plan_assessed_and_completed', ?)
-    `).run(resultRunId, priorOutput, now - 18_000);
+      INSERT INTO run_outcomes(run_id, plan_id, status, output, result_ref, result_json, reason_code, committed_at)
+      VALUES (?, NULL, 'completed', ?, ?, ?, 'plan_assessed_and_completed', ?)
+    `).run(resultRunId, priorOutput, priorResult.ref.resultId, JSON.stringify(priorResult), now - 18_000);
     await database.prepare(`
       INSERT INTO runs(
         id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
@@ -10953,9 +10985,9 @@ test("RunService continues a failed goal while inheriting its completed prior-re
         inputMode: "prior_result",
         targetRunId: resultRunId,
         targetResult: {
-          schema: "agentloop.conversationResultRef/v1",
+          schema: "agentloop.resultRef/v1",
+          resultId: priorResult.ref.resultId,
           runId: resultRunId,
-          sha256: priorSha256,
           characters: priorOutput.length,
         },
         effectiveGoal: "把已完成的分析结果生成 PDF。",
@@ -11010,7 +11042,7 @@ test("RunService continues a failed goal while inheriting its completed prior-re
     assert.equal(capturedTask?.turnResolution?.relation, "continue_prior");
     assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
     assert.equal(capturedTask?.turnResolution?.targetResult?.runId, resultRunId);
-    assert.equal(capturedTask?.turnResolution?.targetResult?.sha256, priorSha256);
+    assert.equal(capturedTask?.turnResolution?.targetResult?.resultId, priorResult.ref.resultId);
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
   } finally {
     database.close();
@@ -14176,7 +14208,7 @@ test("an approved recovery revision can retire an unfinished safe tail step and 
       VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
     `).run(runId, owner.user.id, "produce the requested artifact", Date.now());
     const plans = new PlanRepository(database);
-    const plan = await plans.create(admitPlan({
+    let plan = await plans.create(admitPlan({
       runId,
       proposal: {
         goal: "produce the requested artifact",
@@ -14192,7 +14224,12 @@ test("an approved recovery revision can retire an unfinished safe tail step and 
       criteria: [{ criterionId: "build-done", satisfied: true, rationale: "canonical evidence", evidenceRefs: ["candidateOutput"] }],
       skills: [], evidenceDigest: "build-evidence", feedback: "", createdAt: Date.now(),
     });
-    await plans.completeStep(plan.id, "build", "verified artifact", { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 });
+    plan = (await new StepResultCommitter(plans).commit({
+      runId,
+      plan,
+      step: plan.steps.find((candidate) => candidate.id === "build")!,
+      evidence: { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 },
+    })).plan;
     const actions = new RuntimeActionRepository(database);
     const action = await actions.dispatch({
       runId, planId: plan.id, stepId: "critique-polish", kind: "model_turn", replayPolicy: "safe", deadlineMs: 1_000,
@@ -14239,7 +14276,7 @@ test("a recovery revision may retire a step whose earlier unsafe call was reject
       VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
     `).run(runId, owner.user.id, "produce the requested artifact", Date.now());
     const plans = new PlanRepository(database);
-    const plan = await plans.create(admitPlan({
+    let plan = await plans.create(admitPlan({
       runId,
       proposal: {
         goal: "produce the requested artifact",
@@ -14255,7 +14292,12 @@ test("a recovery revision may retire a step whose earlier unsafe call was reject
       criteria: [{ criterionId: "build-done", satisfied: true, rationale: "canonical evidence", evidenceRefs: ["candidateOutput"] }],
       skills: [], evidenceDigest: "build-evidence", feedback: "", createdAt: Date.now(),
     });
-    await plans.completeStep(plan.id, "build", "verified artifact", { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 });
+    plan = (await new StepResultCommitter(plans).commit({
+      runId,
+      plan,
+      step: plan.steps.find((candidate) => candidate.id === "build")!,
+      evidence: { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 },
+    })).plan;
     const actions = new RuntimeActionRepository(database);
     await assert.rejects(
       () => actions.execute({
@@ -14301,7 +14343,7 @@ test("a recovery revision cannot retire a step with an unsafe Action whose effec
       VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
     `).run(runId, owner.user.id, "produce the requested artifact", Date.now());
     const plans = new PlanRepository(database);
-    const plan = await plans.create(admitPlan({
+    let plan = await plans.create(admitPlan({
       runId,
       proposal: {
         goal: "produce the requested artifact",
@@ -14317,7 +14359,12 @@ test("a recovery revision cannot retire a step with an unsafe Action whose effec
       criteria: [{ criterionId: "build-done", satisfied: true, rationale: "canonical evidence", evidenceRefs: ["candidateOutput"] }],
       skills: [], evidenceDigest: "build-evidence", feedback: "", createdAt: Date.now(),
     });
-    await plans.completeStep(plan.id, "build", "verified artifact", { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 });
+    plan = (await new StepResultCommitter(plans).commit({
+      runId,
+      plan,
+      step: plan.steps.find((candidate) => candidate.id === "build")!,
+      evidence: { candidateOutput: "verified artifact", toolCalls: [], modelSteps: 1 },
+    })).plan;
     const actions = new RuntimeActionRepository(database);
     await assert.rejects(
       () => actions.execute({

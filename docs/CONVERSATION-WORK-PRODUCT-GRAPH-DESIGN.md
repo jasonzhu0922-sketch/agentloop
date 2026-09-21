@@ -1,9 +1,11 @@
 # 会话统一成果图谱与跨 Run 接续方案
 
-版本：v1.0
+版本：v1.1
 日期：2026-09-20
-状态：设计方案，待评审，尚未实施
+状态：长期演进草案；当前已实施的统一 Result 契约见 `UNIFIED-RUNTIME-RESULT-CONTRACT.md`
 范围：AgentLoop Kernel、Planner、Runtime、Assessment、TerminalCommitter、会话上下文及成果存储
+
+> 2026-09-21 决策：当前阶段不创建独立 WorkProduct/Result 数据库或专用结果表。Tool、Step、Run 先统一为 `agentloop.runtimeResult/v1`，并原子落在各自已有的 Action、Plan Step、Run Outcome 权威记录上。本文件中的独立 WorkProduct Graph、生命周期表和历史迁移仅作为后续演进方向，不是当前实现要求，也不得被用来恢复第二套结果协议。
 
 ## 1. 结论摘要
 

@@ -1,4 +1,5 @@
 import type { AgentLoopToolEvidence, ModelMessage, ModelToolCall } from "./contracts.ts";
+import { parseRuntimeResultRef, type RuntimeResultRef } from "./runtime-result.ts";
 import { decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
 import {
   classifyToolOperationOutcome,
@@ -35,6 +36,7 @@ interface AssistantCheckpoint {
 
 interface ToolOutcome {
   readonly content: string;
+  readonly resultRef?: RuntimeResultRef;
   readonly invocationStatus?: ToolInvocationStatus;
   readonly operationStatus?: ToolOperationStatus;
   readonly exitCode?: number | null;
@@ -120,13 +122,15 @@ export function reconstructRecoveryTranscript(input: {
     const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
     if (toolCallId === undefined) continue;
     if (event.type === "tool.completed" && typeof event.data.result === "string") {
-      const content = attachToolResultRef(event.data.result, event.data.toolResultRef);
+      const resultRef = parseRuntimeResultRef(event.data.resultRef);
+      const content = attachResultRef(event.data.result, resultRef);
       const classifiedOperation = classifyToolOperationOutcome(event.data.result);
       const operationStatus = operationStatusFromEvent(event.data.operationStatus)
         ?? (classifiedOperation.exitCode === undefined ? undefined : classifiedOperation.status);
       const operationFailed = operationStatus === "failed" || event.data.isError === true;
       outcomes.set(toolCallId, {
         content,
+        ...(resultRef === undefined ? {} : { resultRef }),
         invocationStatus: event.data.invocationStatus === "completed" ? "completed" : undefined,
         operationStatus,
         ...(typeof event.data.exitCode === "number" || event.data.exitCode === null
@@ -236,6 +240,7 @@ export function reconstructRecoveryTranscript(input: {
           toolCallId: call.id,
           toolName: call.name,
           result: outcome.content,
+          ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
           isError: outcome.isError,
           ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
         });
@@ -270,18 +275,16 @@ export function reconstructRecoveryTranscript(input: {
   };
 }
 
-function attachToolResultRef(content: string, value: unknown): string {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return content;
-  const ref = value as Record<string, unknown>;
-  if (ref.schema !== "agentloop.toolResultRef/v1" || typeof ref.resultId !== "string") return content;
+function attachResultRef(content: string, ref: RuntimeResultRef | undefined): string {
+  if (ref === undefined) return content;
   try {
     const parsed = JSON.parse(content) as unknown;
     if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return JSON.stringify({ ...(parsed as Record<string, unknown>), toolResultRef: ref });
+      return JSON.stringify({ ...(parsed as Record<string, unknown>), resultRef: ref });
     }
-    return JSON.stringify({ schema: "agentloop.toolResultEnvelope/v1", toolResultRef: ref, value: parsed });
+    return JSON.stringify({ schema: "agentloop.resultEnvelope/v1", resultRef: ref, value: parsed });
   } catch {
-    return `${content}\n\n[Runtime ToolResultRef ${JSON.stringify(ref)}]`;
+    return `${content}\n\n[Runtime ResultRef ${JSON.stringify(ref)}]`;
   }
 }
 
@@ -371,6 +374,7 @@ function toolEvidenceFromOutcome(call: ModelToolCall, outcome: ToolOutcome): Age
     toolCallId: call.id,
     toolName: call.name,
     result: outcome.content,
+    ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
     ...(outcome.invocationStatus === undefined ? {} : { invocationStatus: outcome.invocationStatus }),
     ...(outcome.operationStatus === undefined ? {} : { operationStatus: outcome.operationStatus }),
     ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),

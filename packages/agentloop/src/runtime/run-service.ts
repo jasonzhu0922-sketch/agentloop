@@ -67,7 +67,6 @@ import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
-import { ConversationResultRepository } from "../storage/repositories/conversation-result-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
@@ -107,10 +106,12 @@ import {
 } from "../tools/index.ts";
 import type { ToolExecutionPlugin } from "../tools/tool-execution-plugin.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
+import { StepResultCommitter } from "./step-result-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
-import { ToolResultRepository, type ToolResultRef } from "./tool-result-repository.ts";
+import { RuntimeResultRepository } from "./runtime-result-repository.ts";
+import { createRuntimeResult, parseRuntimeResultJson, type RuntimeResultRef } from "./runtime-result.ts";
 import { RunCheckpointRepository, type RunCheckpointRecord } from "./run-checkpoint-repository.ts";
 import { HumanLoopRepository, type HumanLoopRequest, type HumanLoopResponse, type HumanLoopRequirement } from "./human-loop.ts";
 import {
@@ -310,11 +311,11 @@ export class RunService {
   private readonly plans: PlanRepository;
   private readonly sources: SourceRepository;
   private readonly sourceIntake: SourceIntakeService;
-  private readonly conversationResults: ConversationResultRepository;
   private readonly scheduler = new DependencyScheduler();
   private readonly terminal: TerminalCommitter;
+  private readonly stepResults: StepResultCommitter;
   private readonly actions: RuntimeActionRepository;
-  private readonly toolResults: ToolResultRepository;
+  private readonly results: RuntimeResultRepository;
   private readonly checkpoints: RunCheckpointRepository;
   private readonly recovery: RecoveryRepository;
   private readonly humanLoops: HumanLoopRepository;
@@ -375,16 +376,15 @@ export class RunService {
     });
     this.runs = new RunRepository(options.database);
     this.plans = new PlanRepository(options.database);
+    this.stepResults = new StepResultCommitter(this.plans);
     this.sources = new SourceRepository(options.database);
-    this.conversationResults = new ConversationResultRepository(options.database);
     this.actions = new RuntimeActionRepository(options.database);
-    this.toolResults = new ToolResultRepository(options.database);
+    this.results = new RuntimeResultRepository(options.database);
     this.coreTools = createCoreTools({
       executor: computerExecutor,
       driver: options.computerDriver,
       acceptanceService,
-      conversationResults: this.conversationResults,
-      toolResults: this.toolResults,
+      results: this.results,
       pluginTools: options.tools,
     });
     this.sourceIntake = new SourceIntakeService(this.sources, this.workspaceRoot);
@@ -889,12 +889,11 @@ export class RunService {
           reusable: true,
         });
       }
-      if (outcome?.status === "completed" && outcome.output !== undefined && outcome.output.trim().length > 0) {
+      if (outcome?.status === "completed" && outcome.result !== undefined && outcome.output !== undefined && outcome.output.trim().length > 0) {
         const content = outcome.output;
         const result: ConversationResultReference = {
-          schema: "agentloop.conversationResultRef/v1",
+          ...outcome.result.ref,
           runId: run.id,
-          sha256: createHash("sha256").update(content).digest("hex"),
           characters: content.length,
         };
         const summary = truncateWorkingSetText(content, 1_200);
@@ -1084,15 +1083,17 @@ export class RunService {
     reasonCode: string;
     planId?: string;
     output?: string;
+    result?: ReturnType<typeof parseRuntimeResultJson>;
     committedAt: number;
   } | undefined> {
     const row = await this.database.prepare(`
-      SELECT status, reason_code, plan_id, output, committed_at FROM run_outcomes WHERE run_id = ?
+      SELECT status, reason_code, plan_id, output, result_json, committed_at FROM run_outcomes WHERE run_id = ?
     `).get(runId) as {
       status: string;
       reason_code: string;
       plan_id: string | null;
       output: string | null;
+      result_json: string | null;
       committed_at: number;
     } | undefined;
     if (row === undefined) return undefined;
@@ -1101,6 +1102,7 @@ export class RunService {
       reasonCode: row.reason_code,
       ...(row.plan_id === null ? {} : { planId: row.plan_id }),
       ...(row.output === null ? {} : { output: row.output }),
+      ...(row.result_json === null ? {} : { result: parseRuntimeResultJson(row.result_json) }),
       committedAt: row.committed_at,
     };
   }
@@ -2575,7 +2577,7 @@ export class RunService {
         signal: input.signal,
         actionTracker: {
           executeToolCall: async (toolAction, operation) => {
-            let resultRef: ToolResultRef | undefined;
+            let resultRef: RuntimeResultRef | undefined;
             const value = await this.actions.execute({
               runId: input.runId,
               planId: plan.id,
@@ -2589,17 +2591,22 @@ export class RunService {
                 modelStep: toolAction.step,
               },
               resultFailureCode: toolOperationFailureCode,
-              prepareResultRef: async (result, action) => {
-                resultRef = await this.toolResults.prepare({
-                  actionId: action.id,
-                  runId: input.runId,
-                  planId: plan.id,
-                  stepId: activeStep.id,
-                  toolCallId: toolAction.toolCallId,
-                  toolName: toolAction.toolName,
+              prepareResult: async (result, action) => {
+                const runtimeResult = createRuntimeResult({
+                  kind: "tool",
+                  producer: {
+                    actionId: action.id,
+                    runId: input.runId,
+                    planId: plan.id,
+                    stepId: activeStep.id,
+                    toolCallId: toolAction.toolCallId,
+                    toolName: toolAction.toolName,
+                  },
                   value: result,
+                  publication: { status: "committed" },
                 });
-                return resultRef.resultId;
+                resultRef = runtimeResult.ref;
+                return runtimeResult;
               },
             }, operation);
             return { value, ...(resultRef === undefined ? {} : { resultRef }) };
@@ -2802,11 +2809,22 @@ export class RunService {
         modelSteps: result.steps,
         ...(result.completionCaveat === undefined ? {} : { completionCaveat: result.completionCaveat }),
       };
-      plan = await this.plans.completeStep(plan.id, activeStep.id, result.output, evidence);
+      const publication = await this.stepResults.commit({
+        runId: input.runId,
+        plan,
+        step: activeStep,
+        evidence,
+      });
+      plan = publication.plan;
       input.onStepChanged(undefined);
       await input.emit({
         type: "plan.step.completed",
-        data: { planId: plan.id, stepId: activeStep.id, output: result.output },
+        data: {
+          planId: plan.id,
+          stepId: activeStep.id,
+          output: result.output,
+          resultRef: publication.result.ref,
+        },
       });
     }
     return plan;
@@ -7329,18 +7347,18 @@ function conversationArtifactReference(value: unknown): { readonly runId: string
 function conversationResultReference(value: unknown): ConversationResultReference | undefined {
   const record = optionalRecord(value);
   const runId = typeof record.runId === "string" ? record.runId.trim() : "";
-  const sha256 = typeof record.sha256 === "string" ? record.sha256.trim() : "";
+  const resultId = typeof record.resultId === "string" ? record.resultId.trim() : "";
   const characters = record.characters;
   if (
-    record.schema !== "agentloop.conversationResultRef/v1"
+    record.schema !== "agentloop.resultRef/v1"
+    || !/^rr_[0-9a-f-]{36}$/u.test(resultId)
     || runId.length === 0
     || runId.length > 120
-    || !/^[a-f0-9]{64}$/u.test(sha256)
     || !Number.isInteger(characters)
     || (characters as number) < 1
     || (characters as number) > 20_000_000
   ) return undefined;
-  return { schema: "agentloop.conversationResultRef/v1", runId, sha256, characters: characters as number };
+  return { schema: "agentloop.resultRef/v1", resultId, runId, characters: characters as number };
 }
 
 function isConversationTurnMode(value: unknown): value is ConversationTurnResolution["mode"] {

@@ -273,9 +273,9 @@ test("execution context dynamically requires Markdown materialization for bound 
       schema: "agentloop.conversationInputBinding/v1",
       relation: "continue_prior",
       result: {
-        schema: "agentloop.conversationResultRef/v1",
+        schema: "agentloop.resultRef/v1",
+        resultId: "rr_00000000-0000-4000-8000-000000000010",
         runId: "prior-run",
-        sha256: "a".repeat(64),
         characters: 1024,
       },
     }],
@@ -309,7 +309,7 @@ test("execution context dynamically requires Markdown materialization for bound 
   };
 
   assert.equal(directive.schema, "agentloop.boundOutcomeConversion/v1");
-  assert.equal(directive.source, "conversation_result");
+  assert.equal(directive.source, "runtime_result");
   assert.equal(directive.sourceMaterializationFormat, "markdown");
   assert.deepEqual(directive.requiredWorkflow, ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"]);
   assert.match(directive.instruction, /Do not bypass this conversion boundary/);

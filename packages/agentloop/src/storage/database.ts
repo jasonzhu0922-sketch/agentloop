@@ -221,25 +221,6 @@ export class AppDatabase implements SqlConnection {
       CREATE INDEX IF NOT EXISTS runtime_actions_run_idx ON runtime_actions(run_id, created_at);
       CREATE INDEX IF NOT EXISTS runtime_actions_recovery_idx ON runtime_actions(state, lease_until, deadline_at);
 
-      CREATE TABLE IF NOT EXISTS tool_results (
-        id TEXT PRIMARY KEY,
-        action_id TEXT NOT NULL UNIQUE REFERENCES runtime_actions(id) ON DELETE CASCADE,
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
-        step_id TEXT,
-        tool_call_id TEXT NOT NULL,
-        tool_name TEXT NOT NULL,
-        result_schema TEXT,
-        content TEXT NOT NULL,
-        content_format TEXT NOT NULL CHECK(content_format IN ('json', 'text')),
-        characters INTEGER NOT NULL,
-        bytes INTEGER NOT NULL,
-        sha256 TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS tool_results_run_idx ON tool_results(run_id, created_at);
-      CREATE INDEX IF NOT EXISTS tool_results_scope_idx ON tool_results(run_id, plan_id, step_id, created_at);
-
       CREATE TABLE IF NOT EXISTS human_loop_requests (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -381,6 +362,8 @@ export class AppDatabase implements SqlConnection {
         plan_id TEXT REFERENCES plans(id) ON DELETE CASCADE,
         status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'cancelled')),
         output TEXT,
+        result_ref TEXT,
+        result_json TEXT,
         reason_code TEXT NOT NULL,
         committed_at INTEGER NOT NULL
       );
@@ -531,9 +514,17 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
       await this.ensureColumn("skill_compliance_assessments", "decision_bindings_json", "TEXT NOT NULL DEFAULT '[]'");
       await this.ensureColumn("runtime_actions", "effect_state", "TEXT NOT NULL DEFAULT 'unknown'");
+      await this.ensureColumn("run_outcomes", "result_ref", "TEXT");
+      await this.ensureColumn("run_outcomes", "result_json", "TEXT");
       await this.ensureSkillAssessmentProfileConstraint();
     }
     await this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
+    await this.connection.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS runtime_actions_result_ref_idx
+        ON runtime_actions(result_ref) WHERE result_ref IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS run_outcomes_result_ref_idx
+        ON run_outcomes(result_ref) WHERE result_ref IS NOT NULL;
+    `);
   }
 
   private async dropLegacyUserForeignKeys(): Promise<void> {

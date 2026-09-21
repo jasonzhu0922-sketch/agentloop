@@ -11,6 +11,7 @@ import type {
   SkillComplianceAssessment,
   StepEvidence,
 } from "./contracts.ts";
+import { parseRuntimeResult } from "../runtime/runtime-result.ts";
 
 interface PlanRow {
   id: string;
@@ -421,9 +422,9 @@ function parseInputBindings(value: string | undefined): readonly ConversationInp
     }
     const ref = result as Record<string, unknown>;
     if (
-      ref.schema !== "agentloop.conversationResultRef/v1"
+      ref.schema !== "agentloop.resultRef/v1"
+      || typeof ref.resultId !== "string"
       || typeof ref.runId !== "string"
-      || typeof ref.sha256 !== "string"
       || typeof ref.characters !== "number"
     ) {
       throw new Error("Plan has invalid input binding result reference; replan required");
@@ -458,13 +459,32 @@ function toStep(row: StepRow): PlanStep {
     successCriteria: JSON.parse(row.success_criteria_json),
     status: row.status,
     ...(row.output === null ? {} : { output: row.output }),
-    ...(row.evidence_json === null ? {} : { evidence: JSON.parse(row.evidence_json) as StepEvidence }),
+    ...(row.evidence_json === null ? {} : { evidence: parseStepEvidence(row.evidence_json, row.plan_id, row.step_id) }),
     ...(row.error === null ? {} : { error: row.error }),
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.finished_at === null ? {} : { finishedAt: row.finished_at }),
     ...(row.retired_at === null ? {} : { retiredAt: row.retired_at }),
     ...(row.retirement_reason === null ? {} : { retirementReason: row.retirement_reason }),
   };
+}
+
+function parseStepEvidence(value: string, planId: string, stepId: string): StepEvidence {
+  const parsed = JSON.parse(value) as unknown;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Plan step ${stepId} has invalid evidence; recovery required`);
+  }
+  const evidence = parsed as Record<string, unknown>;
+  if (evidence.publishedResult === undefined) return parsed as StepEvidence;
+  const publishedResult = parseRuntimeResult(evidence.publishedResult);
+  if (
+    publishedResult === undefined
+    || publishedResult.kind !== "step"
+    || publishedResult.producer.planId !== planId
+    || publishedResult.producer.stepId !== stepId
+  ) {
+    throw new Error(`Plan step ${stepId} has an invalid published Runtime result; recovery required`);
+  }
+  return { ...evidence, publishedResult } as unknown as StepEvidence;
 }
 
 function samePlanStepDefinition(left: PlanStep, right: PlanStep): boolean {

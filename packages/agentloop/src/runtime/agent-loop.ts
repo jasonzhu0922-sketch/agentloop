@@ -20,7 +20,7 @@ import type {
   RuntimeEventSink,
   RuntimeDeliveryCandidate,
 } from "./contracts.ts";
-import type { ToolResultRef } from "./tool-result-repository.ts";
+import type { RuntimeResultRef } from "./runtime-result.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import type { PreparedToolCall } from "../tools/tool-registry.ts";
 import { ToolRegistry } from "../tools/tool-registry.ts";
@@ -110,7 +110,7 @@ export interface AgentLoopOptions {
       toolName: string;
       replaySafe: boolean;
       timeoutMs?: number;
-    }, operation: () => Promise<T>): Promise<Readonly<{ value: T; resultRef?: ToolResultRef }>>;
+    }, operation: () => Promise<T>): Promise<Readonly<{ value: T; resultRef?: RuntimeResultRef }>>;
   };
   readonly evaluateCandidate?: (
     context: CandidateCompletionContext,
@@ -142,7 +142,7 @@ interface ToolOutcome {
   readonly exitCode?: number | null;
   readonly isError: boolean;
   readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
-  readonly toolResultRef?: ToolResultRef;
+  readonly resultRef?: RuntimeResultRef;
 }
 
 interface StructuredToolCandidate {
@@ -1268,6 +1268,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
         isError: outcome.isError,
         ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
+        ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
       };
       toolEvidence.push(evidence);
       latestToolEvidence.push(evidence);
@@ -2365,7 +2366,7 @@ async function executePrepared(
         isError: operationFailed,
         ...(operationFailed ? { failurePhase: "operation" } : {}),
         ...toolResultCommitSummary(canonicalContent),
-        ...(tracked.resultRef === undefined ? {} : { toolResultRef: tracked.resultRef }),
+        ...(tracked.resultRef === undefined ? {} : { resultRef: tracked.resultRef }),
         ...metrics,
       },
     });
@@ -2376,7 +2377,7 @@ async function executePrepared(
         toolCallId: call.id,
         toolName: call.name,
         result: canonicalContent,
-        ...(tracked.resultRef === undefined ? {} : { toolResultRef: tracked.resultRef }),
+        ...(tracked.resultRef === undefined ? {} : { resultRef: tracked.resultRef }),
         invocationStatus: "completed",
         operationStatus: operationOutcome.status,
         ...(operationOutcome.exitCode === undefined ? {} : { exitCode: operationOutcome.exitCode }),
@@ -2393,7 +2394,7 @@ async function executePrepared(
       ...(operationOutcome.exitCode === undefined ? {} : { exitCode: operationOutcome.exitCode }),
       isError: operationFailed,
       ...(operationFailed ? { failurePhase: "operation" as const } : {}),
-      ...(tracked.resultRef === undefined ? {} : { toolResultRef: tracked.resultRef }),
+      ...(tracked.resultRef === undefined ? {} : { resultRef: tracked.resultRef }),
     };
   } catch (error) {
     const content = publicErrorMessage(error);
@@ -2751,14 +2752,14 @@ function integerValue(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
 }
 
-function serializeToolResult(value: unknown, maximum: number, toolResultRef?: ToolResultRef): string {
-  const visibleValue = toolResultRef === undefined
+function serializeToolResult(value: unknown, maximum: number, resultRef?: RuntimeResultRef): string {
+  const visibleValue = resultRef === undefined
     ? value
     : isPlainRecord(value)
-      ? { ...value, toolResultRef }
+      ? { ...value, resultRef }
       : typeof value === "string"
-        ? `${value}\n\n[Runtime ToolResultRef ${JSON.stringify(toolResultRef)}]`
-        : { schema: "agentloop.toolResultEnvelope/v1", toolResultRef, value };
+        ? `${value}\n\n[Runtime ResultRef ${JSON.stringify(resultRef)}]`
+        : { schema: "agentloop.resultEnvelope/v1", resultRef, value };
   let serialized: string;
   try {
     serialized = typeof visibleValue === "string" ? visibleValue : JSON.stringify(visibleValue);
@@ -2771,7 +2772,7 @@ function serializeToolResult(value: unknown, maximum: number, toolResultRef?: To
   if (compact !== undefined && compact.length <= maximum) return compact;
   const omitted = serialized.length - maximum;
   const digest = createHash("sha256").update(serialized).digest("hex");
-  const refMarker = toolResultRef === undefined ? "" : `\n[Runtime ToolResultRef ${JSON.stringify(toolResultRef)}]`;
+  const refMarker = resultRef === undefined ? "" : `\n[Runtime ResultRef ${JSON.stringify(resultRef)}]`;
   const headCharacters = Math.max(0, maximum - refMarker.length);
   return `${serialized.slice(0, headCharacters)}${refMarker}\n[truncated ${omitted} characters; sha256=${digest}]`;
 }
@@ -2801,7 +2802,7 @@ function compactOversizedStructuredToolResult(value: unknown, serialized: string
     contentSummary: value.contentSummary,
     stdoutRef: value.stdoutRef,
     stderrRef: value.stderrRef,
-    toolResultRef: value.toolResultRef,
+    resultRef: value.resultRef,
     omittedToolResult: {
       reason: "large_tool_result_receipt_preserved",
       originalCharacters: serialized.length,

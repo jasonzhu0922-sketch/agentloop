@@ -70,7 +70,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           instruction: "Use the step execution binding to understand the current objective, evidence contract, and preferred tool families. Choose among currently exposed Run-authorized tools to satisfy that contract.",
           marginalBenefitDecision: "Before every next action, decide whether it has material expected benefit for an unmet current-step success criterion. Prefer the action with the greatest evidence or acceptance gain. Do not act merely to continue the loop: when no authorized action can materially improve the current evidence, directly submit a concise completion candidate with explicit caveats for the remaining gap.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
-          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect planInputBindings, dependencyEvidenceBindings, and conversationReuseContext. A bound prior Outcome is a formal input: use its summary, then read_conversation_result with its immutable ref when more content is needed. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. A prior result's source lineage is provenance, not a reason to reacquire it. When successful scope-matched evidence obtained in the current stage contradicts a dependency, use the current-stage evidence for this stage; preserve the earlier result as provenance and do not re-acquire data solely to reconcile it. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
+          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect planInputBindings, dependencyEvidenceBindings, and conversationReuseContext. A bound prior Outcome is a formal input: use its summary, then read_result with its opaque resultId when more content is needed. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. A prior result's source lineage is provenance, not a reason to reacquire it. When successful scope-matched evidence obtained in the current stage contradicts a dependency, use the current-stage evidence for this stage; preserve the earlier result as provenance and do not re-acquire data solely to reconcile it. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },
         currentPlanStep: {
           id: input.step.id,
@@ -208,7 +208,7 @@ function boundOutcomeConversionDirective(input: {
   readonly taskProfile: TaskProfile;
 }): {
   readonly schema: "agentloop.boundOutcomeConversion/v1";
-  readonly source: "conversation_result";
+  readonly source: "runtime_result";
   readonly sourceMaterializationFormat: "markdown";
   readonly requiredWorkflow: readonly ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"];
   readonly instruction: string;
@@ -226,7 +226,7 @@ function boundOutcomeConversionDirective(input: {
   ) return undefined;
   return {
     schema: "agentloop.boundOutcomeConversion/v1",
-    source: "conversation_result",
+    source: "runtime_result",
     sourceMaterializationFormat: "markdown",
     requiredWorkflow: ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"],
     instruction: "This step transforms a bound prior conversation result. Read the required result content, create one non-empty reusable .md workspace artifact with computer_write_file, convert that exact artifact with convert_artifact to the requested target format, then verify the converted output with verify_artifact_acceptance. Do not bypass this conversion boundary with a custom renderer or direct target-format generator.",
@@ -550,6 +550,9 @@ function buildDependencyEvidenceBindings(
         stepId: dependency.id,
         objective: dependency.objective,
         status: dependency.status,
+        ...(dependency.evidence?.publishedResult === undefined
+          ? {}
+          : { resultRef: dependency.evidence.publishedResult.ref }),
         output: truncateContextText(dependency.output ?? "", DEPENDENCY_OUTPUT_LIMIT),
         ...(requiredKinds.length === 0 ? {} : { requiredEvidenceKinds: requiredKinds }),
         satisfiedEvidenceKinds: summary.satisfiedEvidenceKinds,
@@ -570,7 +573,7 @@ function buildDependencyEvidenceBindings(
   return {
     schema: "agentloop.dependencyEvidenceBindings/v1",
     instruction:
-      "Evaluate these dependency bindings before acquiring new source evidence. Treat satisfied kinds and artifact refs as reusable inputs for the current step; preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
+      "Each completed dependency publishes a formal Runtime result. Treat its resultRef as the authoritative input identity for this step; use read_result when the bounded output projection is insufficient. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
     currentStepId: step.id,
     bindings,
   };
@@ -580,6 +583,7 @@ interface DependencyEvidenceBinding {
   readonly stepId: string;
   readonly objective?: string;
   readonly status: ExecutionPlan["steps"][number]["status"] | "missing";
+  readonly resultRef?: NonNullable<StepEvidence["publishedResult"]>["ref"];
   readonly output: string;
   readonly requiredEvidenceKinds?: readonly EvidenceKind[];
   readonly satisfiedEvidenceKinds: readonly string[];
@@ -677,7 +681,7 @@ function buildConversationReuseContext(
   return {
     schema: "agentloop.conversationReuseContext/v1",
     instruction:
-      "Use prior accepted Outcome results, step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A result contentRef is an immutable, same-conversation reference: use read_conversation_result when the compact summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
+      "Use prior accepted Outcome results, step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A resultRef is an immutable, same-conversation reference: use read_result when the compact summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
     ...(reusableResults.length === 0 ? {} : { reusableResults }),
     reusableArtifacts: workset.reusableArtifacts,
     ...(sourceSummaries.length === 0 ? {} : { sourceSummaries }),
