@@ -43,7 +43,7 @@ import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
-import { renderMarkdown } from "../web/markdown-renderer.js";
+import { renderMarkdown } from "@zhujun/agentloop-artifact-preview";
 import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
 import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
@@ -313,20 +313,27 @@ test("Web leaves conversation classification to the Runtime", async () => {
 });
 
 test("Web uses the shared format-aware preview component instead of text-only artifact output", async () => {
-  const [html, app, server, overrides, overlay, dockerfile] = await Promise.all([
+  const [html, app, server, markdownStyles, overrides, overlay, dockerfile] = await Promise.all([
     readFile(new URL("../web/index.html", import.meta.url), "utf8"),
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../../../packages/agentloop-artifact-preview/markdown.css", import.meta.url), "utf8"),
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
     readFile(new URL("../Dockerfile.runtime-host-overlay", import.meta.url), "utf8"),
     readFile(new URL("../Dockerfile", import.meta.url), "utf8"),
   ]);
   assert.match(html, /artifact-preview\.js/);
-  assert.match(app, /import \{ openArtifactPreview \} from "\.\/artifact-preview\.js"/);
+  assert.match(html, /artifact-markdown\.css/);
+  assert.match(html, /"marked":"\/marked\.js"/);
+  assert.match(app, /import \{ openArtifactPreview, renderMarkdown \} from "\.\/artifact-preview\.js"/);
   assert.match(app, /fetchStructuredPreview/);
   assert.match(app, /fetchBytes/);
   assert.doesNotMatch(app, /function previewText\(/);
   assert.match(server, /packages\/agentloop-artifact-preview\/dist\/index\.js/);
+  assert.match(server, /packages\/agentloop-artifact-preview\/markdown\.css/);
+  assert.match(server, /node_modules\/marked\/lib\/marked\.esm\.js/);
+  assert.match(markdownStyles, /\.md h1,.md h2,.md h3,.md h4,.md h5,.md h6/);
+  assert.match(markdownStyles, /\.md hr/);
   assert.match(overrides, /\.preview-backdrop/);
   assert.match(overrides, /\.preview-slide-canvas/);
   assert.match(overlay, /COPY packages\/agentloop-artifact-preview \.\/packages\/agentloop-artifact-preview/);
@@ -502,11 +509,12 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /checkpoint\/start/);
   assert.match(app, /从检查点启动/);
   assert.doesNotMatch(app, /data-recovery-advance/);
-  assert.match(app, /import \{ renderMarkdown \} from "\.\/markdown-renderer\.js"/);
+  assert.match(app, /import \{ openArtifactPreview, renderMarkdown \} from "\.\/artifact-preview\.js"/);
   assert.match(app, /function toolOutcomeLabel\(tool\)/);
   assert.match(detailProjection, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
   assert.match(app, /\$\{tool\.rejectedCalls\} 次被拒绝/);
   assert.match(overrides, /\.tool-tag\.partial \.tool-status-dot/);
+  assert.match(overrides, /\.live-output-text\.md\s*\{[^}]*line-height:\s*1\.5;[^}]*white-space:\s*normal;/s);
 });
 
 test("completed-message Markdown renders screenshot-style GFM tables as structured HTML", () => {

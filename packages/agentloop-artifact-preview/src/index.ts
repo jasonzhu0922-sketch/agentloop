@@ -1,3 +1,5 @@
+import { Marked, Renderer, type Tokens } from "marked";
+
 export interface PreviewArtifact {
   readonly id: string;
   readonly name: string;
@@ -43,6 +45,58 @@ export interface OpenArtifactPreviewOptions {
 
 export interface ArtifactPreviewDialog {
   close(): void;
+}
+
+const SAFE_LINK_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
+const SAFE_IMAGE_SCHEMES = new Set(["http", "https"]);
+
+class AgentLoopMarkdownRenderer extends Renderer {
+  override html({ text }: Tokens.HTML | Tokens.Tag): string {
+    return escapeHtml(text);
+  }
+
+  override code({ text, lang }: Tokens.Code): string {
+    const language = lang?.trim().split(/\s+/, 1)[0]?.replace(/[^a-z0-9_+-]/gi, "");
+    const languageClass = language ? ` class="language-${escapeHtml(language)}"` : "";
+    return `<pre class="md-code"><code${languageClass}>${escapeHtml(text)}</code></pre>\n`;
+  }
+
+  override codespan({ text }: Tokens.Codespan): string {
+    return `<code class="md-inline">${escapeHtml(text)}</code>`;
+  }
+
+  override table(token: Tokens.Table): string {
+    return `<div class="md-table-wrap">${super.table(token)}</div>\n`;
+  }
+
+  override link(token: Tokens.Link): string {
+    const label = this.parser.parseInline(token.tokens);
+    const href = safeMarkdownUrl(token.href, SAFE_LINK_SCHEMES);
+    if (href === undefined) return label;
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+    return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"${title}>${label}</a>`;
+  }
+
+  override image(token: Tokens.Image): string {
+    const src = safeMarkdownUrl(token.href, SAFE_IMAGE_SCHEMES);
+    if (src === undefined) return escapeHtml(token.text);
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+    return `<img class="md-image" src="${escapeHtml(src)}" alt="${escapeHtml(token.text)}" loading="lazy" decoding="async" referrerpolicy="no-referrer"${title}>`;
+  }
+}
+
+const markdown = new Marked();
+markdown.setOptions({
+  async: false,
+  breaks: false,
+  gfm: true,
+  pedantic: false,
+  renderer: new AgentLoopMarkdownRenderer(),
+});
+
+/** Renders model- or artifact-supplied GFM while escaping embedded HTML. */
+export function renderMarkdown(raw: unknown): string {
+  return markdown.parse(String(raw ?? ""), { async: false });
 }
 
 export function artifactMimeBase(mimeType: string): string {
@@ -169,10 +223,10 @@ export function renderBlobPreview(mode: Exclude<ArtifactPreviewMode, "structured
   return `<object class="preview-frame" data="${safeUrl}" type="application/pdf"></object>`;
 }
 
-export function renderStructuredPreview(preview: StructuredArtifactPreview, renderMarkdown?: (text: string) => string): string {
+export function renderStructuredPreview(preview: StructuredArtifactPreview, markdownRenderer: (text: string) => string = renderMarkdown): string {
   if (preview.kind === "text") {
     const isMarkdown = /markdown/.test(preview.mimeType) || /\.md$/i.test(preview.name);
-    const content = isMarkdown && renderMarkdown ? renderMarkdown(preview.text) : `<pre>${escapeHtml(preview.text)}</pre>`;
+    const content = isMarkdown ? markdownRenderer(preview.text) : `<pre>${escapeHtml(preview.text)}</pre>`;
     return `<div class="preview-text md">${content}${truncatedNotice(preview.truncated)}</div>`;
   }
   if (preview.kind === "docx") {
@@ -271,6 +325,21 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function safeMarkdownUrl(value: string, allowedSchemes: ReadonlySet<string>): string | undefined {
+  const trimmed = value.trim();
+  const protocolProbe = decodeProtocolEntities(trimmed).replace(/[\u0000-\u0020\u007f]/g, "");
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(protocolProbe)?.[1]?.toLowerCase();
+  if (scheme !== undefined && !allowedSchemes.has(scheme)) return undefined;
+  return trimmed;
+}
+
+function decodeProtocolEntities(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);?/gi, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&#([0-9]+);?/g, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 10)))
+    .replace(/&(colon|tab|newline);/gi, (_, entity: string) => ({ colon: ":", tab: "\t", newline: "\n" })[entity.toLowerCase()] ?? "");
 }
 
 function escapeHtml(value: unknown): string {

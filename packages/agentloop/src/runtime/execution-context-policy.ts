@@ -40,6 +40,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(dependencyEvidenceBindings);
   const requiresDerivedAggregation = input.step.evidenceContract?.requiredKinds.includes("derived_aggregation") === true;
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
+  const boundOutcomeConversion = boundOutcomeConversionDirective(input);
   const stepSemanticFrame = deriveStepSemanticFrame({
     step: input.step,
     plan: input.plan,
@@ -81,6 +82,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           ...(input.step.evidenceContract === undefined ? {} : { evidenceContract: input.step.evidenceContract }),
           successCriteria: input.step.successCriteria,
         },
+        ...(boundOutcomeConversion === undefined ? {} : { boundOutcomeConversion }),
         decisionLedger: input.decisionLedger ?? [],
         planInputBindings: input.plan.inputBindings ?? [],
         stepSemanticFrame,
@@ -185,6 +187,49 @@ export function buildStepRuntimeContextSnapshot(input: {
       formatDynamicPromptContext(input.taskProfile),
       formatAvailableSkills(input.skills),
     ].filter(Boolean).join("\n"),
+  };
+}
+
+/**
+ * A completed conversation result is immutable textual input, not a native
+ * document artifact.  When the admitted step has the generic write/convert/
+ * accept capability set, preserve that distinction in the execution prompt:
+ * materialize the text as Markdown first, then use the shared converter.
+ *
+ * This is deliberately derived from persisted Plan bindings and the admitted
+ * Step binding, rather than a broad PDF/Skill heuristic.  It is absent for
+ * ordinary artifact generation, native file transformations, and any step
+ * that lacks the complete conversion/acceptance path.
+ */
+function boundOutcomeConversionDirective(input: {
+  readonly step: ExecutionPlan["steps"][number];
+  readonly plan: ExecutionPlan;
+  readonly requiresFileOutput: boolean;
+  readonly taskProfile: TaskProfile;
+}): {
+  readonly schema: "agentloop.boundOutcomeConversion/v1";
+  readonly source: "conversation_result";
+  readonly sourceMaterializationFormat: "markdown";
+  readonly requiredWorkflow: readonly ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"];
+  readonly instruction: string;
+} | undefined {
+  const resolvedTools = new Set(stepResolvedToolNames(input.step));
+  const needsArtifactAcceptance = input.step.evidenceContract?.requiredKinds.includes("artifact_acceptance") === true;
+  if (
+    (input.plan.inputBindings?.length ?? 0) === 0
+    || !input.requiresFileOutput
+    || input.taskProfile.deliverySurface !== "workspace_artifact"
+    || !needsArtifactAcceptance
+    || !resolvedTools.has("computer_write_file")
+    || !resolvedTools.has("convert_artifact")
+    || !resolvedTools.has("verify_artifact_acceptance")
+  ) return undefined;
+  return {
+    schema: "agentloop.boundOutcomeConversion/v1",
+    source: "conversation_result",
+    sourceMaterializationFormat: "markdown",
+    requiredWorkflow: ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"],
+    instruction: "This step transforms a bound prior conversation result. Read the required result content, create one non-empty reusable .md workspace artifact with computer_write_file, convert that exact artifact with convert_artifact to the requested target format, then verify the converted output with verify_artifact_acceptance. Do not bypass this conversion boundary with a custom renderer or direct target-format generator.",
   };
 }
 

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const sharedPreview = fileURLToPath(new URL("../../../packages/agentloop-artifact-preview/dist/index.js", import.meta.url));
+const sharedMarkdownStyles = fileURLToPath(new URL("../../../packages/agentloop-artifact-preview/markdown.css", import.meta.url));
+const sharedMarked = fileURLToPath(new URL("../../../node_modules/marked/lib/marked.esm.js", import.meta.url));
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.WEB_PORT ?? 5174);
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
@@ -37,6 +39,30 @@ export function createWebServer() {
       } catch {
         response.statusCode = 503;
         response.end("Shared artifact preview has not been built. Run npm run build:artifact-preview first.");
+      }
+      return;
+    }
+    if (pathname === "/marked.js") {
+      try {
+        await stat(sharedMarked);
+        response.statusCode = 200;
+        response.setHeader("content-type", types[".js"]);
+        createReadStream(sharedMarked).pipe(response);
+      } catch {
+        response.statusCode = 503;
+        response.end("Shared Markdown dependency is unavailable. Run npm install first.");
+      }
+      return;
+    }
+    if (pathname === "/artifact-markdown.css") {
+      try {
+        await stat(sharedMarkdownStyles);
+        response.statusCode = 200;
+        response.setHeader("content-type", types[".css"]);
+        createReadStream(sharedMarkdownStyles).pipe(response);
+      } catch {
+        response.statusCode = 503;
+        response.end("Shared Markdown styles are unavailable.");
       }
       return;
     }

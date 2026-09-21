@@ -221,6 +221,25 @@ export class AppDatabase implements SqlConnection {
       CREATE INDEX IF NOT EXISTS runtime_actions_run_idx ON runtime_actions(run_id, created_at);
       CREATE INDEX IF NOT EXISTS runtime_actions_recovery_idx ON runtime_actions(state, lease_until, deadline_at);
 
+      CREATE TABLE IF NOT EXISTS tool_results (
+        id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL UNIQUE REFERENCES runtime_actions(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
+        step_id TEXT,
+        tool_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        result_schema TEXT,
+        content TEXT NOT NULL,
+        content_format TEXT NOT NULL CHECK(content_format IN ('json', 'text')),
+        characters INTEGER NOT NULL,
+        bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS tool_results_run_idx ON tool_results(run_id, created_at);
+      CREATE INDEX IF NOT EXISTS tool_results_scope_idx ON tool_results(run_id, plan_id, step_id, created_at);
+
       CREATE TABLE IF NOT EXISTS human_loop_requests (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

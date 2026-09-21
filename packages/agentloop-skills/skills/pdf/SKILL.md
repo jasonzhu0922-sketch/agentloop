@@ -25,13 +25,20 @@ deliverable. Do not spend the run on open-ended renderer exploration.
 
 Preferred workflow:
 - Read the source document once and identify the output path before writing code.
-- Prefer a deterministic local generator using ReportLab/Platypus when it is
-  available, especially for Chinese/CJK reports. Use the bundled
-  `assets/fonts/NotoSansSC.ttf`, never `fc-list`, `fc-match`, a system-font
-  path, or a downloaded font. The Runtime exposes the read-only package root
-  as `AGENTLOOP_SKILL_ROOT_PDF`; resolve the asset from that environment
-  variable and embed it with ReportLab `TTFont` before creating any visible
-  text styles.
+- When the request transforms an existing artifact or prepared content into a
+  PDF, inspect the currently available tools for a conversion capability that
+  supports the source format and PDF target. Prefer that matching conversion
+  path. If the content exists only in a prior/model response, first materialize
+  it as an appropriate reusable source artifact before looking for a converter.
+- Use a direct local generator only when no matching conversion capability is
+  available, the conversion attempt fails, or the user needs custom layout the
+  available conversion path cannot provide. For direct PDF authoring, prefer a
+  deterministic ReportLab/Platypus generator, especially for Chinese/CJK
+  reports. Use the bundled `assets/fonts/NotoSansSC.ttf`, never `fc-list`,
+  `fc-match`, a system-font path, or a downloaded font. The Runtime exposes the
+  read-only package root as `AGENTLOOP_SKILL_ROOT_PDF`; resolve the asset from
+  that environment variable and embed it with ReportLab `TTFont` before
+  creating any visible text styles.
 - Use WeasyPrint only if `weasyprint --version` succeeds. If it fails because
   libraries such as Pango/Cairo are missing, immediately fall back to ReportLab
   or PyMuPDF. Do not run package-manager installation commands such as

@@ -1,0 +1,91 @@
+.md {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 6px; }
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6 {
+  margin: 12px 0 6px;
+  color: var(--text);
+  line-height: 1.25;
+}
+.md h1 { font-size: 20px; }
+.md h2 { font-size: 18px; }
+.md h3 { font-size: 16px; }
+.md h4 { font-size: 15px; }
+.md h5 { font-size: 14px; }
+.md h6 { color: var(--text-2); font-size: 13px; }
+.md hr {
+  height: 1px;
+  margin: 12px 0;
+  border: 0;
+  background: var(--border);
+}
+.md ul,.md ol { margin: 6px 0; padding-left: 22px; }
+.md ul ul,.md ul ol,.md ol ul,.md ol ol { margin: 2px 0; }
+.md li { margin: 1px 0; }
+.md li > p { margin: 2px 0; }
+.md input[type="checkbox"] {
+  margin: 0 6px 0 0;
+  accent-color: var(--brand);
+}
+.md blockquote {
+  margin: 8px 0;
+  padding: 2px 14px;
+  border-left: 3px solid var(--brand);
+  color: var(--text-2);
+}
+.md blockquote > :last-child { margin-bottom: 0; }
+.md .md-table-wrap {
+  max-width: 100%;
+  overflow: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.md table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.md th,.md td {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  vertical-align: top;
+  text-align: left;
+  word-break: break-word;
+}
+.md th { background: var(--bg-3); color: var(--text); font-weight: 650; }
+.md tr:nth-child(even) td { background: rgba(138, 144, 153, .06); }
+.md .md-code {
+  display: block;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-3);
+  font: 12px/1.45 var(--mono);
+  white-space: pre;
+}
+.md .md-code code { padding: 0; background: transparent; font: inherit; }
+.md .md-inline {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--bg-3);
+  font: .9em/1.4 var(--mono);
+}
+.md a { color: var(--brand); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md del { color: var(--text-2); }
+.md-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px auto;
+  border-radius: 8px;
+}

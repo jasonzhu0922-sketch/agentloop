@@ -244,6 +244,126 @@ test("execution context binds dependency evidence before downstream reacquisitio
   assert.equal(handoff.handoffContract.reusableEvidenceKinds.includes("artifact_acceptance"), true);
 });
 
+test("execution context dynamically requires Markdown materialization for bound Outcome conversions", () => {
+  const conversionStep = planStep({
+    id: "convert-prior-result",
+    kind: "leaf",
+    position: 0,
+    objective: "Convert the prior Markdown analysis to a PDF workspace artifact.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+    evidenceContract: {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      caveatPolicy: "none",
+    },
+    successCriteria: [],
+    status: "pending",
+  });
+  const plan: ExecutionPlan = {
+    id: "plan-bound-result-conversion",
+    runId: "run-bound-result-conversion",
+    version: 1,
+    goal: "Export prior analysis as PDF.",
+    selectedSkillIds: [],
+    inputBindings: [{
+      schema: "agentloop.conversationInputBinding/v1",
+      relation: "continue_prior",
+      result: {
+        schema: "agentloop.conversationResultRef/v1",
+        runId: "prior-run",
+        sha256: "a".repeat(64),
+        characters: 1024,
+      },
+    }],
+    status: "running",
+    steps: [conversionStep],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const snapshot = buildStepRuntimeContextSnapshot({
+    step: conversionStep,
+    plan,
+    skills: [],
+    workspaceRoot: "/workspace",
+    taskProfile: buildTaskProfile({
+      phase: "execution",
+      intent: "execute",
+      artifactKind: "document",
+      deliverySurface: "workspace_artifact",
+      skillBound: false,
+    }),
+    operationProfile: { id: "artifact_build" },
+    requiresFileOutput: true,
+  });
+  const payload = executionContextPayload(snapshot.content);
+  const directive = payload.boundOutcomeConversion as {
+    readonly schema: string;
+    readonly source: string;
+    readonly sourceMaterializationFormat: string;
+    readonly requiredWorkflow: readonly string[];
+    readonly instruction: string;
+  };
+
+  assert.equal(directive.schema, "agentloop.boundOutcomeConversion/v1");
+  assert.equal(directive.source, "conversation_result");
+  assert.equal(directive.sourceMaterializationFormat, "markdown");
+  assert.deepEqual(directive.requiredWorkflow, ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"]);
+  assert.match(directive.instruction, /Do not bypass this conversion boundary/);
+});
+
+test("execution context omits bound Outcome conversion rules outside the conversion contract", () => {
+  const directPdfStep = planStep({
+    id: "generate-pdf",
+    kind: "leaf",
+    position: 0,
+    objective: "Generate a PDF from current source data.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+    evidenceContract: {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      caveatPolicy: "none",
+    },
+    successCriteria: [],
+    status: "pending",
+  });
+  const plan: ExecutionPlan = {
+    id: "plan-direct-pdf",
+    runId: "run-direct-pdf",
+    version: 1,
+    goal: "Generate a PDF.",
+    selectedSkillIds: [],
+    status: "running",
+    steps: [directPdfStep],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
+    step: directPdfStep,
+    plan,
+    skills: [],
+    workspaceRoot: "/workspace",
+    taskProfile: buildTaskProfile({
+      phase: "execution",
+      intent: "execute",
+      artifactKind: "document",
+      deliverySurface: "workspace_artifact",
+      skillBound: false,
+    }),
+    operationProfile: { id: "artifact_build" },
+    requiresFileOutput: true,
+  }).content);
+
+  assert.equal(payload.boundOutcomeConversion, undefined);
+});
+
 test("execution context carries current-to-next handoff for non-terminal steps", () => {
   const extractStep = planStep({
     id: "extract_data",

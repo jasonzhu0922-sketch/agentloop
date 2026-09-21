@@ -283,7 +283,7 @@ test("computer_write_file rejects read-only artifact evidence projections as exe
 test("convert_artifact converts an existing workspace artifact and returns a standard artifact receipt", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-artifact-"));
   try {
-    await fs.writeFile(join(root, "report.md"), "# Report\n\nEvidence body.\n");
+    await fs.writeFile(join(root, "report.md"), "# Report\n\n⚠️ Evidence body.\n");
     const pandoc = await writeExecutableFixture(root, "fake-pandoc.cjs", [
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
@@ -297,8 +297,16 @@ test("convert_artifact converts an existing workspace artifact and returns a sta
     const weasyprint = await writeExecutableFixture(root, "fake-weasyprint.cjs", [
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
+      "const { fileURLToPath } = require('node:url');",
       "const [, , input, output] = process.argv;",
       "const html = fs.readFileSync(input, 'utf8');",
+      "if (!html.includes('[注意] Evidence body.') || html.includes('⚠') || html.includes('️')) process.exit(5);",
+      "const stylesheet = html.match(/href=\"([^\"]+\\.typography\\.css)\"/);",
+      "if (!stylesheet) process.exit(2);",
+      "const cssPath = fileURLToPath(stylesheet[1]);",
+      "const css = fs.readFileSync(cssPath, 'utf8');",
+      "if (!css.includes('AgentLoopNotoSansSC') || !css.includes('table-header-group')) process.exit(3);",
+      "if (!fs.existsSync(cssPath.replace(/\\.typography\\.css$/, '.NotoSansSC.ttf'))) process.exit(4);",
       "fs.writeFileSync(output, '%PDF-1.4\\n% converted ' + Buffer.byteLength(html) + '\\n%%EOF\\n');",
       "",
     ].join("\n"));
@@ -359,6 +367,70 @@ test("convert_artifact converts an existing workspace artifact and returns a sta
       targetFormat: "pdf",
     });
     assert.match(await fs.readFile(join(root, "deliverables", "report.pdf"), "utf8"), /^%PDF-1\.4/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("convert_artifact converts a Markdown artifact to every supported non-PDF target", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-convert-markdown-targets-"));
+  try {
+    await fs.writeFile(join(root, "report.md"), "# Report\n\nReusable Markdown source.\n");
+    const pandoc = await writeExecutableFixture(root, "fake-pandoc.cjs", [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const args = process.argv.slice(2);",
+      "const output = args[args.indexOf('--output') + 1];",
+      "const input = args[args.indexOf('--output') - 1];",
+      "const target = args[args.indexOf('--to') + 1];",
+      "const source = fs.readFileSync(input, 'utf8');",
+      "fs.writeFileSync(output, 'target=' + target + '\\n' + source);",
+      "",
+    ].join("\n"));
+    const registry = new ToolRegistry(createCoreTools({
+      executor: new ComputerExecutor(root, { executableAliases: { pandoc } }),
+    }));
+    const allowed = registry.materialize(grant(["convert_artifact", "verify_artifact_acceptance"]));
+    const definition = allowed.definitions.find((tool) => tool.name === "convert_artifact");
+    assert.match(definition?.description ?? "", /Markdown input artifact can be converted to DOCX, PDF, HTML, normalized Markdown, or plain text/);
+
+    const targets = [
+      { format: "docx", path: "deliverables/report.docx", pandocTarget: "docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+      { format: "html", path: "deliverables/report.html", pandocTarget: "html", mimeType: "text/html; charset=utf-8" },
+      { format: "markdown", path: "deliverables/report-normalized.md", pandocTarget: "gfm", mimeType: "text/markdown; charset=utf-8" },
+      { format: "txt", path: "deliverables/report.txt", pandocTarget: "plain", mimeType: "text/plain; charset=utf-8" },
+    ] as const;
+
+    for (const target of targets) {
+      const prepared = allowed.prepare({
+        id: `convert-markdown-${target.format}`,
+        name: "convert_artifact",
+        arguments: {
+          inputPath: "report.md",
+          outputPath: target.path,
+          targetFormat: target.format,
+        },
+      });
+      const result = await prepared.tool.execute(grantContext(["convert_artifact", "verify_artifact_acceptance"]), prepared.input) as {
+        schema: string;
+        source: { path: string; format: string };
+        output: { path: string; format: string; mimeType: string };
+        engine: string;
+        artifactReceipt: { operation: { sourcePath: string; sourceFormat: string; targetFormat: string } };
+      };
+
+      assert.equal(result.schema, "agentloop.artifactConversion/v1");
+      assert.equal(result.source.path, "report.md");
+      assert.equal(result.source.format, "markdown");
+      assert.equal(result.output.path, target.path);
+      assert.equal(result.output.format, target.format);
+      assert.equal(result.output.mimeType, target.mimeType);
+      assert.equal(result.engine, "pandoc");
+      assert.equal(result.artifactReceipt.operation.sourcePath, "report.md");
+      assert.equal(result.artifactReceipt.operation.sourceFormat, "markdown");
+      assert.equal(result.artifactReceipt.operation.targetFormat, target.format);
+      assert.match(await fs.readFile(join(root, target.path), "utf8"), new RegExp(`^target=${target.pandocTarget}`));
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -473,8 +545,8 @@ test("convert_artifact falls back to lightweight ReportLab PDF generation when W
     const python3 = await writeExecutableFixture(root, "fake-python3.cjs", [
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
-      "const [, , mode, script, input, output, sourceFormat] = process.argv;",
-      "if (mode !== '-c' || !script.includes('STSong-Light') || sourceFormat !== 'html') process.exit(2);",
+      "const [, , mode, script, input, output, sourceFormat, fontPath] = process.argv;",
+      "if (mode !== '-c' || !script.includes('AgentLoopNotoSansSC') || sourceFormat !== 'html' || !fontPath.endsWith('.NotoSansSC.ttf') || !fs.existsSync(fontPath)) process.exit(2);",
       "const html = fs.readFileSync(input, 'utf8');",
       "fs.writeFileSync(output, '%PDF-1.4\\n% reportlab fallback ' + Buffer.byteLength(html) + '\\n%%EOF\\n');",
       "",
@@ -540,6 +612,20 @@ test("convert_artifact validates source and target paths before spawning convert
       }),
       (error: unknown) => hasCode(error, "BAD_REQUEST")
         && String((error as Error).message).includes("outputPath extension"),
+    );
+
+    assert.throws(
+      () => allowed.prepare({
+        id: "raw-markdown-is-not-an-artifact",
+        name: "convert_artifact",
+        arguments: {
+          markdown: "# Report",
+          outputPath: "report.pdf",
+          targetFormat: "pdf",
+        },
+      }),
+      (error: unknown) => hasCode(error, "BAD_REQUEST")
+        && String((error as Error).message).includes("inputPath must be a string"),
     );
 
     const outside = allowed.prepare({

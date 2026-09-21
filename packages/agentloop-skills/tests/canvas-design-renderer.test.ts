@@ -119,6 +119,33 @@ test("canvas-design treats category and mood-only briefs as unresolved visual di
   assert.doesNotMatch(skill, /one candidate has substantially stronger subject or audience evidence/u);
 });
 
+test("canvas-design treats the packaged renderer as a constrained path after preserving the brief", () => {
+  const skill = readFileSync(SKILL, "utf8");
+  const briefContract = skill.indexOf("## Preserve the brief as a design contract");
+  const direction = skill.indexOf("## Find a distinct direction");
+  const renderingPath = skill.indexOf("## Choose the rendering path");
+  const packagedContract = skill.indexOf("## Constrained packaged render contract");
+
+  assert.ok(briefContract >= 0);
+  assert.ok(direction > briefContract);
+  assert.ok(renderingPath > direction);
+  assert.ok(packagedContract > renderingPath);
+  assert.match(skill, /The packaged renderer is a constrained fast path, not the default definition of a poster\./u);
+  assert.match(skill, /Use the packaged renderer only when every condition below is true:/u);
+  assert.match(skill, /If any condition is false or uncertain, use a compact custom renderer\./u);
+  assert.match(skill, /Never delete copy, collapse sections, discard a reserved zone, or change the central metaphor to make the brief fit its schema\./u);
+});
+
+test("canvas-design preserves mandatory content and generic reserved regions through visual inspection", () => {
+  const skill = readFileSync(SKILL, "utf8");
+  assert.match(skill, /mandatoryCopy/u);
+  assert.match(skill, /reservedZones/u);
+  assert.match(skill, /A QR placeholder is one instance of a general reserved region/u);
+  assert.match(skill, /Every `mandatoryCopy` item, `reservedZones` entry, named content section, and recognizable subject must have an explicit destination\./u);
+  assert.match(skill, /every reserved zone exists at the required placement and proportion, remains clear of decorative intrusion/u);
+  assert.match(skill, /Technical artifact acceptance proves that the file exists and decodes\. It does not prove brief coverage, reserved-region preservation, design quality, or diversity\./u);
+});
+
 test("canvas-design keeps subject intent independent from visual form", () => {
   const workspace = mkdtempSync(join(tmpdir(), "agentloop-canvas-design-intent-"));
   try {

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "../md";
 import { artifactPreviewMode, prioritizedArtifacts, usesBlobPreview } from "../artifact-preview";
 import { commandActivities, commandLine, commandSummary, fullCommandLine } from "../command-activity";
 import { executionCapabilities } from "../execution-capabilities";
@@ -29,42 +28,6 @@ describe("executionCapabilities", () => {
       { name: "computer_write_file", calls: 1, status: "rejected" },
       { name: "websearch", calls: 2, status: "failed" },
     ]);
-  });
-});
-
-describe("renderMarkdown", () => {
-  it("renders headings, lists and inline emphasis", () => {
-    const html = renderMarkdown("# 标题\n\n- 项目 A\n- 项目 B\n\n**重点** 与 `code`");
-    expect(html).toContain("<h1>标题</h1>");
-    expect(html).toContain("<ul>");
-    expect(html).toContain("<li>项目 A</li>");
-    expect(html).toContain("<strong>重点</strong>");
-    expect(html).toContain('<code class="md-inline">code</code>');
-  });
-
-  it("escapes HTML and renders blockquote", () => {
-    const html = renderMarkdown("> 引用\n\n<script>alert(1)</script>");
-    expect(html).toContain("<blockquote>引用</blockquote>");
-    expect(html).not.toContain("<script>");
-    expect(html).toContain("&lt;script&gt;");
-  });
-
-  it("renders fenced code blocks", () => {
-    const html = renderMarkdown("```\nconst x = 1;\n```");
-    expect(html).toContain('<pre class="md-code"><code>');
-    expect(html).toContain("const x = 1;");
-  });
-
-  it("renders markdown tables", () => {
-    const html = renderMarkdown([
-      "| API_ID | 中文名 | 状态 |",
-      "|---|---|---|",
-      "| `M_ADS_FACT` | 客商画像-客商代码 | 已发布 |",
-    ].join("\n"));
-    expect(html).toContain("<table>");
-    expect(html).toContain("<th>API_ID</th>");
-    expect(html).toContain('<code class="md-inline">M_ADS_FACT</code>');
-    expect(html).toContain("<td>已发布</td>");
   });
 });
 

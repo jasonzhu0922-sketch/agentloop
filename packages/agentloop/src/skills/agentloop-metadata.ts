@@ -65,6 +65,10 @@ export interface SkillAgentLoopMetadata {
   readonly sourceKinds: readonly SkillAgentLoopSourceKind[];
   readonly qaKinds: readonly SkillAgentLoopQaKind[];
   readonly executionProfiles?: readonly SkillAgentLoopExecutionProfile[];
+  /** Compact domain labels used as optional recall hints, never authorization. */
+  readonly semanticTags?: readonly string[];
+  /** Representative task phrasings shown to semantic planning for low-confidence recall. */
+  readonly intentExamples?: readonly string[];
   /** Evidence emitted by this Skill's source-reading execution interface. */
   readonly producesEvidenceKinds?: readonly SkillAgentLoopProducedEvidenceKind[];
   /** Package names selected with this Skill before Planner invocation. */
@@ -96,6 +100,14 @@ export const SKILL_AGENT_LOOP_METADATA_FIELDS = {
     required: false,
     type: "list",
     values: SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES,
+  },
+  semanticTags: {
+    required: false,
+    type: "list",
+  },
+  intentExamples: {
+    required: false,
+    type: "list",
   },
   producesEvidenceKinds: {
     required: false,

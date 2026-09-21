@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { extname } from "node:path";
+import { copyFile, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import { buildOpaqueArtifactReceipt } from "../runtime/artifact-receipt.ts";
@@ -9,11 +11,15 @@ import type { RuntimeTool, ToolExecutionContext } from "./tool-registry.ts";
 const DEFAULT_CONVERSION_TIMEOUT_MS = 120_000;
 const MIN_CONVERSION_TIMEOUT_MS = 1_000;
 const MAX_CONVERSION_TIMEOUT_MS = 300_000;
+const PDF_TYPOGRAPHY_FONT_FILE = "NotoSansSC.ttf";
+const PDF_TYPOGRAPHY_FONT_PATH = resolve(import.meta.dirname, "..", "assets", "fonts", PDF_TYPOGRAPHY_FONT_FILE);
+const PDF_TYPOGRAPHY_FONT_FAMILY = "AgentLoopNotoSansSC";
 
 const SOURCE_FORMATS = ["auto", "markdown", "html", "docx", "pptx", "txt"] as const;
 const TARGET_FORMATS = ["docx", "pdf", "html", "markdown", "txt"] as const;
 const REPORTLAB_PDF_FALLBACK_SCRIPT = String.raw`
 import html
+import os
 import re
 import sys
 from html.parser import HTMLParser
@@ -22,11 +28,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
-FONT_NAME = "STSong-Light"
-pdfmetrics.registerFont(UnicodeCIDFont(FONT_NAME))
+FONT_NAME = "AgentLoopNotoSansSC"
 
 
 class TextHTMLParser(HTMLParser):
@@ -84,7 +89,10 @@ def clean_inline(text):
     return html.escape(text.strip())
 
 
-def build_pdf(input_path, output_path, source_format):
+def build_pdf(input_path, output_path, source_format, font_path):
+    if not os.path.isfile(font_path):
+        raise FileNotFoundError("Bundled PDF typography font is unavailable: " + font_path)
+    pdfmetrics.registerFont(TTFont(FONT_NAME, font_path))
     styles = {
         "h1": ParagraphStyle("H1", fontName=FONT_NAME, fontSize=18, leading=24, spaceBefore=8, spaceAfter=8),
         "h2": ParagraphStyle("H2", fontName=FONT_NAME, fontSize=15, leading=21, spaceBefore=8, spaceAfter=6),
@@ -123,7 +131,7 @@ def build_pdf(input_path, output_path, source_format):
 
 
 if __name__ == "__main__":
-    build_pdf(sys.argv[1], sys.argv[2], sys.argv[3])
+    build_pdf(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
 `;
 
 // LibreOffice is deliberately not part of the Runtime conversion contract. This
@@ -274,7 +282,10 @@ export function createArtifactConverterTools(executor: ComputerExecutor): Runtim
       "Convert an existing artifact under the workspace root to another document format; requires dangerous-tool consent.",
       "inputPath and outputPath must be relative to the workspace root; absolute paths and @skills/@visible aliases are rejected.",
       "Supported source formats are auto, markdown, html, docx, pptx, and txt. Supported target formats are docx, pdf, html, markdown, and txt.",
+      "A Markdown input artifact can be converted to DOCX, PDF, HTML, normalized Markdown, or plain text through this single conversion contract.",
+      "If the source currently exists only as model-generated Markdown text, first create a .md artifact with computer_write_file, then pass that artifact through inputPath.",
       "PPTX sources currently support PDF output through the portable python-pptx/reportlab renderer; LibreOffice is not required.",
+      "PDF output uses a portable baseline typography profile with an embedded tool-owned CJK font and deterministic page/table CSS; it does not depend on Host font discovery.",
       "PDF output is rendered through an HTML pipeline when possible, avoiding direct LaTeX-dependent Markdown-to-PDF conversion.",
       "The result includes schema agentloop.artifactConversion/v1 and an embedded artifactReceipt for the converted output. After conversion, call verify_artifact_acceptance for the requested target format.",
     ].join(" "),
@@ -348,27 +359,35 @@ async function executeArtifactConversion(
     commands.push({ engine: "python-pptx-reportlab", args: ["-c", "[embedded-pptx-pdf-renderer]", source.path, preparedOutput.path], exitCode: result.exitCode });
     assertCommandSucceeded("python-pptx-reportlab", result);
   } else if (input.targetFormat === "pdf") {
-    const htmlPath = sourceFormat === "html"
-      ? source.path
-      : `.agentloop/conversions/${conversionId(source.path, preparedOutput.path)}.html`;
-    let fallbackInputPath = source.path;
-    let fallbackSourceFormat: ResolvedSourceFormat = sourceFormat;
+    const conversion = pdfConversionPaths(source.path, preparedOutput.path);
+    const htmlPath = conversion.htmlPath;
+    await executor.prepareWritableFile(htmlPath, "create");
     if (sourceFormat !== "html") {
-      await executor.prepareWritableFile(htmlPath, "create");
       const htmlArgs = pandocArgs(source.path, htmlPath, sourceFormat, "html");
       const htmlResult = await executor.runCommand({ command: "pandoc", args: htmlArgs, cwd: ".", timeoutMs: input.timeoutMs, signal });
       commands.push({ engine: "pandoc", args: htmlArgs, exitCode: htmlResult.exitCode });
       assertCommandSucceeded("pandoc", htmlResult);
-      fallbackInputPath = htmlPath;
-      fallbackSourceFormat = "html";
+    } else {
+      const sourceHtml = await executor.readFile(source.path, 20_000_000);
+      if (sourceHtml.truncated) throw new AppError("TOOL_EXECUTION_ERROR", "HTML source is too large for portable PDF conversion", 500);
+      await executor.writeFile(htmlPath, sourceHtml.content, "create");
     }
+    const typography = await materializePdfTypography(executor, conversion);
+    const generatedHtml = await executor.readFile(htmlPath, 20_000_000);
+    if (generatedHtml.truncated) throw new AppError("TOOL_EXECUTION_ERROR", "Generated HTML is too large for portable PDF conversion", 500);
+    await executor.writeFile(htmlPath, injectPdfTypography({
+      html: generatedHtml.content,
+      workspaceRoot: executor.workspaceRoot,
+      cssPath: typography.cssPath,
+      ...(sourceFormat === "html" ? { sourcePath: source.path } : {}),
+    }), "overwrite");
     const pdfArgs = [htmlPath, preparedOutput.path] as const;
     const pdfResult = await runOptionalConversionCommand(executor, "weasyprint", pdfArgs, input.timeoutMs, signal);
     commands.push({ engine: "weasyprint", args: pdfArgs, exitCode: pdfResult?.exitCode ?? null });
     if (pdfResult?.exitCode !== 0) {
-      const fallbackArgs = ["-c", REPORTLAB_PDF_FALLBACK_SCRIPT, fallbackInputPath, preparedOutput.path, fallbackSourceFormat] as const;
+      const fallbackArgs = ["-c", REPORTLAB_PDF_FALLBACK_SCRIPT, htmlPath, preparedOutput.path, "html", typography.fontPath] as const;
       const fallbackResult = await executor.runCommand({ command: "python3", args: fallbackArgs, cwd: ".", timeoutMs: input.timeoutMs, signal });
-      commands.push({ engine: "reportlab-fallback", args: ["-c", "[embedded-reportlab-pdf-fallback]", fallbackInputPath, preparedOutput.path, fallbackSourceFormat], exitCode: fallbackResult.exitCode });
+      commands.push({ engine: "reportlab-fallback", args: ["-c", "[embedded-reportlab-pdf-fallback]", htmlPath, preparedOutput.path, "html", typography.fontPath], exitCode: fallbackResult.exitCode });
       assertCommandSucceeded("reportlab-fallback", fallbackResult);
     }
   } else {
@@ -413,6 +432,114 @@ async function executeArtifactConversion(
 function executorForContext(executor: ComputerExecutor, context: ToolExecutionContext): ComputerExecutor {
   if (context.grant.workspaceRoot !== undefined) return executor.withWorkspaceRoot(context.grant.workspaceRoot);
   return executor;
+}
+
+function pdfConversionPaths(inputPath: string, outputPath: string): {
+  readonly htmlPath: string;
+  readonly cssPath: string;
+  readonly fontPath: string;
+} {
+  const root = `.agentloop/conversions/${conversionId(inputPath, outputPath)}`;
+  return {
+    htmlPath: `${root}.html`,
+    cssPath: `${root}.typography.css`,
+    fontPath: `${root}.${PDF_TYPOGRAPHY_FONT_FILE}`,
+  };
+}
+
+async function materializePdfTypography(
+  executor: ComputerExecutor,
+  paths: { readonly cssPath: string; readonly fontPath: string },
+): Promise<{ readonly cssPath: string; readonly fontPath: string }> {
+  const font = await stat(PDF_TYPOGRAPHY_FONT_PATH).catch(() => undefined);
+  if (font === undefined || !font.isFile() || font.size === 0) {
+    throw new AppError("TOOL_EXECUTION_ERROR", "Bundled PDF typography font is unavailable", 500, {
+      font: PDF_TYPOGRAPHY_FONT_FILE,
+    });
+  }
+  await executor.prepareWritableFile(paths.cssPath, "create");
+  await executor.prepareWritableFile(paths.fontPath, "create");
+  await writeFile(resolve(executor.workspaceRoot, paths.cssPath), portablePdfTypographyCss(basename(paths.fontPath)), {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  try {
+    await copyFile(PDF_TYPOGRAPHY_FONT_PATH, resolve(executor.workspaceRoot, paths.fontPath), 0);
+  } catch (error) {
+    await rm(resolve(executor.workspaceRoot, paths.cssPath), { force: true });
+    throw error;
+  }
+  return paths;
+}
+
+function portablePdfTypographyCss(fontFile: string): string {
+  return [
+    "/* Tool-owned portable document typography. */",
+    "@font-face {",
+    `  font-family: '${PDF_TYPOGRAPHY_FONT_FAMILY}';`,
+    `  src: url('${fontFile}') format('truetype');`,
+    "  font-style: normal;",
+    "  font-weight: 400;",
+    "}",
+    "@page { size: A4; margin: 18mm 17mm 19mm; }",
+    "html { font-size: 10.5pt; }",
+    "body { color: #1f2328; font-family: 'AgentLoopNotoSansSC', sans-serif; font-variant-emoji: text; line-height: 1.62; overflow-wrap: break-word; }",
+    "h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, pre, table { break-inside: avoid; }",
+    "h1, h2, h3, h4, h5, h6 { font-family: 'AgentLoopNotoSansSC', sans-serif; color: #111827; line-height: 1.28; margin: 1.35em 0 0.55em; page-break-after: avoid; }",
+    "h1 { font-size: 22pt; }",
+    "h2 { font-size: 16pt; border-bottom: 0.8pt solid #9ca3af; padding-bottom: 0.24em; }",
+    "h3 { font-size: 12.5pt; }",
+    "p, ul, ol { margin: 0 0 0.8em; }",
+    "ul, ol { padding-left: 1.45em; }",
+    "li + li { margin-top: 0.2em; }",
+    "table { border-collapse: collapse; width: 100%; margin: 0.85em 0 1.15em; font-size: 9.5pt; }",
+    "thead { display: table-header-group; }",
+    "tr { break-inside: avoid; }",
+    "th, td { border: 0.6pt solid #9ca3af; padding: 0.38em 0.52em; text-align: left; vertical-align: top; }",
+    "th { background: #f3f4f6; font-weight: 700; }",
+    "code, pre { font-family: 'AgentLoopNotoSansSC', monospace; font-size: 9pt; }",
+    "pre { white-space: pre-wrap; border: 0.6pt solid #d1d5db; padding: 0.7em; background: #f9fafb; }",
+    "blockquote { border-left: 2.2pt solid #9ca3af; color: #4b5563; margin-left: 0; padding-left: 0.9em; }",
+    "img, svg { max-width: 100%; height: auto; }",
+  ].join("\n");
+}
+
+function injectPdfTypography(input: {
+  readonly html: string;
+  readonly workspaceRoot: string;
+  readonly cssPath: string;
+  readonly sourcePath?: string;
+}): string {
+  const stylesheet = `<link rel="stylesheet" href="${escapeHtmlAttribute(pathToFileURL(resolve(input.workspaceRoot, input.cssPath)).href)}">`;
+  const base = input.sourcePath === undefined
+    ? ""
+    : `<base href="${escapeHtmlAttribute(pathToFileURL(`${resolve(input.workspaceRoot, dirname(input.sourcePath))}/`).href)}">`;
+  const portableText = normalizePortableSymbols(input.html);
+  if (/<\/head\s*>/iu.test(portableText)) return portableText.replace(/<\/head\s*>/iu, `${stylesheet}${base}</head>`);
+  return `<!doctype html><html><head><meta charset="utf-8">${stylesheet}${base}</head><body>${portableText}</body></html>`;
+}
+
+function normalizePortableSymbols(html: string): string {
+  const namedSymbols: Readonly<Record<string, string>> = {
+    "⚠": "[注意]",
+    "✅": "[是]",
+    "❌": "[否]",
+    "❗": "[重要]",
+    "❓": "[疑问]",
+    "📌": "[重点]",
+    "💡": "[提示]",
+  };
+  let normalized = html.replace(/[\uFE0E\uFE0F]/gu, "");
+  for (const [symbol, label] of Object.entries(namedSymbols)) normalized = normalized.replaceAll(symbol, label);
+  // Color emoji fonts are Host-provided and cannot be embedded reliably by the
+  // HTML renderer. Retain a visible, searchable marker instead of accepting a
+  // platform-specific font fallback in the generated PDF.
+  return normalized.replace(/\p{Extended_Pictographic}/gu, "[符号]");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value.replace(/&/gu, "&amp;").replace(/"/gu, "&quot;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
 }
 
 function pandocArgs(

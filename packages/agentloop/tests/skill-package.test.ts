@@ -59,6 +59,11 @@ test("AgentLoop role metadata is parsed from Skill package frontmatter", async (
       "  sourceKinds: []",
       "  executionProfiles:",
       "    - local_script",
+      "  semanticTags:",
+      "    - web-report",
+      "    - source-grounded",
+      "  intentExamples:",
+      "    - Build an HTML report from verified source facts.",
       "  producesEvidenceKinds:",
       "    - source_summary",
       "    - record_counts",
@@ -77,6 +82,8 @@ test("AgentLoop role metadata is parsed from Skill package frontmatter", async (
       sourceKinds: [],
       qaKinds: ["openability"],
       executionProfiles: ["local_script"],
+      semanticTags: ["web-report", "source-grounded"],
+      intentExamples: ["Build an HTML report from verified source facts."],
       producesEvidenceKinds: ["source_summary", "record_counts"],
     });
   } finally {
@@ -146,6 +153,8 @@ test("AgentLoop execution profiles are exposed in the available Skill catalog", 
       sourceKinds: ["api"],
       qaKinds: [],
       executionProfiles: ["local_script"],
+      semanticTags: ["api-catalog"],
+      intentExamples: ["查询某个接口的用途、入参和出参"],
     },
     package: {
       root: "/skills/api-query",
@@ -159,6 +168,9 @@ test("AgentLoop execution profiles are exposed in the available Skill catalog", 
   const context = formatAvailableSkills([skill]);
   assert.match(context, /AgentLoop executionProfiles/);
   assert.match(context, /<agentloop[^>]*execution_profiles="local_script"/);
+  assert.match(context, /<semantic_tags>api-catalog<\/semantic_tags>/);
+  assert.match(context, /<intent_examples>/);
+  assert.match(context, /查询某个接口的用途、入参和出参/);
   assert.doesNotMatch(context, /SECRET BODY/);
 });
 

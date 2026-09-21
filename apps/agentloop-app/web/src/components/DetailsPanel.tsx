@@ -13,7 +13,6 @@ import {
 import { executionCapabilities, type ExecutedToolStatus } from "../lib/execution-capabilities";
 import { fmtBytes, fmtTime, statusLabel } from "../lib/format";
 import { useAgentLoop } from "../state/context";
-import { renderMarkdown } from "../lib/md";
 import { openArtifactPreview } from "@zhujun/agentloop-artifact-preview";
 import type {
   ArtifactPreview,
@@ -395,7 +394,6 @@ export function ArtifactList({
       artifact,
       fetchBytes: () => api.runArtifactBytes(state.token, owningRunId, artifact.id),
       fetchStructuredPreview: async () => (await api.runArtifactPreview(state.token, owningRunId, artifact.id)).preview,
-      renderMarkdown,
     });
   }, [runId, state.token]);
   useEffect(() => {

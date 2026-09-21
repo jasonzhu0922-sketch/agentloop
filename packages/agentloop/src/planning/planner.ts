@@ -150,6 +150,13 @@ const SUBMIT_OUTCOME_PLAN_TOOL = {
   },
 } as const;
 
+type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "admission";
+
+interface PlannerContractRetry {
+  readonly kind: PlannerContractRetryKind;
+  readonly directive: string;
+}
+
 const PLANNING_MAX_OUTPUT_TOKENS = 8_192;
 const STEP_GRANULARITY_GUIDANCE = {
   stepContract: [
@@ -237,6 +244,7 @@ export class ModelPlanner implements Planner {
     let planningTask = task;
     let selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
     let capabilityRecoveryCount = 0;
+    const attemptedContractRepairs = new Set<PlannerContractRetryKind>();
     let lastPlanningError: AppError | undefined;
     await emit?.({
       type: "planning.profile.created",
@@ -293,7 +301,7 @@ export class ModelPlanner implements Planner {
         phase: "planning",
         runtimeContext: planningRuntimeContext(planningTask, turn, runtimeDirective, taskProfile, selectedSkillRoles),
         messages,
-        tools: [SUBMIT_OUTCOME_PLAN_TOOL],
+        tools: [submitOutcomePlanToolForTask(planningTask)],
         toolChoice: { name: SUBMIT_OUTCOME_PLAN_TOOL.name },
         maxOutputTokens: Math.min(PLANNING_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
       };
@@ -346,7 +354,7 @@ export class ModelPlanner implements Planner {
           availableSkills: planningTask.availableSkills,
           availableToolNames: new Set(planningTask.availableToolNames),
           ...(planningTask.availableTools === undefined ? {} : { availableTools: planningTask.availableTools }),
-          ...(planningTask.availableCapabilities === undefined ? {} : { availableCapabilities: planningTask.availableCapabilities }),
+          availableCapabilities: planningCapabilitiesForTask(planningTask),
           ...(planningTask.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: planningTask.requiredToolSourceIds }),
           ...(planningTask.sources === undefined ? {} : { availableUploadedSourceIds: planningTask.sources.map((source) => source.id) }),
           ...(planningTask.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: planningTask.visibleDirectories.map((directory) => directory.id) }),
@@ -400,11 +408,10 @@ export class ModelPlanner implements Planner {
           });
           continue;
         }
-        const retryDirective = turn === 1
-          ? plannerContractRetryDirective(planningError, response, outcomePlanCalls, planningTask.availableToolNames)
-          : undefined;
-        if (retryDirective !== undefined) {
-          runtimeDirective = retryDirective;
+        const contractRetry = plannerContractRetryDirective(planningError, response, outcomePlanCalls, planningTask);
+        if (contractRetry !== undefined && !attemptedContractRepairs.has(contractRetry.kind)) {
+          attemptedContractRepairs.add(contractRetry.kind);
+          runtimeDirective = contractRetry.directive;
           continue;
         }
         throw planningError;
@@ -464,22 +471,28 @@ function plannerContractRetryDirective(
   planningError: AppError,
   response: Awaited<ReturnType<ModelAdapter["complete"]>>,
   outcomePlanCalls: readonly ModelToolCall[],
-  availableToolNames: readonly string[],
-): string | undefined {
+  task: TaskSpec,
+): PlannerContractRetry | undefined {
   if (shouldRetryPlannerEmptyResponse(response)) {
-    return plannerEmptyResponseDirective();
+    return { kind: "empty", directive: plannerEmptyResponseDirective() };
   }
   if (shouldRetryPlannerPlainResponse(response)) {
-    return plannerPlainResponseDirective();
+    return { kind: "plain_text", directive: plannerPlainResponseDirective() };
   }
-  if (shouldRetryPlannerToolContract(response, outcomePlanCalls.length, availableToolNames)) {
-    return plannerToolContractDirective(response);
+  if (shouldRetryPlannerToolContract(response, outcomePlanCalls.length, task.availableToolNames)) {
+    return { kind: "execution_tool", directive: plannerToolContractDirective(response) };
   }
   if (shouldRetryOutcomePlanArgumentsContract(planningError, response, outcomePlanCalls)) {
-    return plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError);
+    return { kind: "arguments", directive: plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError) };
   }
   if (shouldRetryOutcomePlanAdmissionContract(response, outcomePlanCalls)) {
-    return plannerOutcomePlanAdmissionDirective(planningError);
+    return {
+      kind: "admission",
+      directive: plannerOutcomePlanAdmissionDirective(
+        planningError,
+        planningCapabilitiesForTask(task).map((capability) => capability.id),
+      ),
+    };
   }
   return undefined;
 }
@@ -512,13 +525,11 @@ function resolveCapabilityRecovery(
   } catch {
     return undefined;
   }
+  const currentCapabilities = planningCapabilitiesForTask(task);
   const evidenceGaps = resolveCapabilityGaps({
     proposal,
     currentSkills: task.availableSkills,
-    currentCapabilities: task.availableCapabilities
-      ?? (task.availableTools === undefined
-        ? planningCapabilitiesFromToolNames(task.availableToolNames)
-        : planningCapabilitiesFromTools(task.availableTools, task.sources)),
+    currentCapabilities,
     catalog: task.capabilityRecovery,
   });
   const sourceGroundingGap = sourceGroundingRequired && task.turnResolution?.evidenceDemand !== undefined
@@ -534,11 +545,9 @@ function resolveCapabilityRecovery(
   const candidateSkillIds = [...new Set(gaps.flatMap((gap) => gap.candidates.flatMap((candidate) => candidate.requiredSkillIds)))].sort();
   const recoverySkills = task.capabilityRecovery.availableSkills.filter((skill) => candidateSkillIds.includes(skill.id));
   const availableSkills = uniqueSkills([...task.availableSkills, ...recoverySkills]);
-  const existingCapabilityIds = new Set((task.availableCapabilities ?? []).map((capability) => capability.id));
+  const existingCapabilityIds = new Set(currentCapabilities.map((capability) => capability.id));
   const availableCapabilities = [
-    ...(task.availableCapabilities ?? (task.availableTools === undefined
-      ? planningCapabilitiesFromToolNames(task.availableToolNames)
-      : planningCapabilitiesFromTools(task.availableTools, task.sources))),
+    ...currentCapabilities,
     ...task.capabilityRecovery.availableCapabilities.filter((capability) =>
       candidateCapabilityIds.includes(capability.id) && !existingCapabilityIds.has(capability.id)),
   ];
@@ -638,17 +647,22 @@ function plannerToolContractDirective(response: Awaited<ReturnType<ModelAdapter[
     "Your previous planning response attempted tool calls that are not callable in the planning phase.",
     `Attempted tools: ${attemptedTools || "none"}.`,
     "Do not inspect files, read artifacts, run commands, load Skills, or execute any work during planning.",
-    "Submit exactly one submit_outcome_plan call. Put semantic capability IDs in each leaf's requiredCapabilities.",
+    "Submit exactly one submit_outcome_plan call. Put only authorized execution capability IDs from planning_context.capabilityCatalog.allowedIds in each leaf's requiredCapabilities.",
     "For a user-reported defect in a prior artifact, plan a repair leaf that locates the prior artifact, verifies the defect, regenerates or edits the artifact, and records artifact_acceptance evidence.",
   ].join("\n");
 }
 
-function plannerOutcomePlanAdmissionDirective(planningError: AppError): string {
+function plannerOutcomePlanAdmissionDirective(
+  planningError: AppError,
+  allowedCapabilityIds: readonly string[],
+): string {
   return [
     "Your previous submit_outcome_plan call was rejected by Runtime Admission.",
     `Validation error: ${summarizePlanningError(planningError.message)}.`,
     "Submit exactly one corrected submit_outcome_plan call for the same user goal.",
     "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
+    "Treat operation profiles, execution capabilities, evidence kinds, Skills, Tools, and ToolSources as separate namespaces. requiredCapabilities may contain only IDs from the execution capability catalog.",
+    `Authorized execution capability IDs: ${JSON.stringify([...new Set(allowedCapabilityIds)].sort())}.`,
     "For initial execution plans, selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only.",
     "selectedSkillRoles[].skillId and leaves[].skillIds may contain only IDs in planning_context.availableSkillIds. Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds in either Skill field; use leaves[].requiredCapabilities for capabilities. If availableSkillIds is empty, both Skill fields must be empty arrays.",
     "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
@@ -697,6 +711,7 @@ function planningTaskIntent(task: TaskSpec) {
   return {
     ...intent,
     deliverySurface: "workspace_artifact" as const,
+    artifactAction: "modify" as const,
     artifactKind: conversationArtifactKind(target),
     sourceNeed: "none" as const,
     researchPolicy: undefined,
@@ -726,11 +741,13 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     && (taskHasVisibleDataSource(task) || taskHasUploadedDataSource(task));
   const planShape = recovery
     ? "recovery_patch"
-    : dataAnalysisSourceTask
-      ? "fact_then_produce"
-    : artifactKind !== "none" && (sourceNeed === "source_grounded" || sourceNeed === "strict_user_source")
-      ? "fact_then_produce"
-      : "single_leaf";
+    : uploadedArtifactTransformation || priorArtifactTransformation
+      ? "single_leaf"
+      : dataAnalysisSourceTask
+        ? "fact_then_produce"
+        : artifactKind !== "none" && (sourceNeed === "source_grounded" || sourceNeed === "strict_user_source")
+          ? "fact_then_produce"
+          : "single_leaf";
   return buildTaskProfile({
     phase: "planning",
     intent: recovery ? "recover" : "execute",
@@ -743,6 +760,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     riskProfile: inferRiskProfile(task.availableToolNames),
     planShape,
     artifactKind,
+    artifactAction: taskIntent.artifactAction,
     sourceNeed,
     researchPolicy: taskIntent.researchPolicy,
     deliverySurface: taskIntent.deliverySurface,
@@ -795,13 +813,13 @@ function isUploadedArtifactTransformationTask(
     || taskIntent.sourceNeed !== "none"
     || !task.availableToolNames.includes("materialize_source_file")
   ) return false;
+  if (taskIntent.artifactAction !== "modify" && taskIntent.artifactAction !== "transform") return false;
   const objective = planningIntentObjective(task);
-  const genericArtifactReference = taskIntent.signals.action.includes("transform")
+  const genericArtifactReference = taskIntent.artifactAction === "transform"
     || referencesProvidedArtifact(objective);
   const normalizedObjective = objective.toLowerCase();
   return (task.sources ?? []).some((source) =>
     source.status === "ready"
-    && uploadedSourceArtifactKind(source) === taskIntent.artifactKind
     && (
       genericArtifactReference
       || (source.originalName.trim().length > 0 && normalizedObjective.includes(source.originalName.toLowerCase()))
@@ -918,6 +936,7 @@ function planningRuntimeContext(
   }),
   selectedSkillRoles: readonly SelectedSkillRole[] = [],
 ): RuntimeContextSnapshot {
+  const availableCapabilities = planningCapabilitiesForTask(task);
   return {
     id: `${task.runId}:planning:${turn}`,
     phase: "planning",
@@ -926,10 +945,19 @@ function planningRuntimeContext(
       "<planning_context source=\"server\">",
       JSON.stringify({
         availableSkillIds: task.availableSkills.map((skill) => skill.id),
-        availableCapabilities: task.availableCapabilities
-          ?? (task.availableTools === undefined
-            ? planningCapabilitiesFromToolNames(task.availableToolNames)
-            : planningCapabilitiesFromTools(task.availableTools, task.sources)),
+        availableCapabilities,
+        capabilityCatalog: {
+          schema: "agentloop.capabilityCatalog/v1",
+          namespace: "execution_capability",
+          allowedIds: availableCapabilities.map((capability) => capability.id),
+          usage: "Only these IDs may appear in leaves[].requiredCapabilities. Other planning-context identifiers remain in their own namespaces.",
+        },
+        operationProfileCatalog: {
+          schema: "agentloop.operationProfileCatalog/v1",
+          namespace: "operation_profile",
+          classificationOnly: true,
+          ids: taskProfile.operations.map((profile) => profile.id),
+        },
         ...(task.requiredToolSourceIds === undefined || task.requiredToolSourceIds.length === 0
           ? {}
           : { requiredToolSourceIds: task.requiredToolSourceIds }),
@@ -979,7 +1007,7 @@ function planningRuntimeContext(
         outcomePlanContract: {
           schema: "agentloop.outcomePlan/v2",
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
-          capabilityCatalogSemantics: "Capabilities are planning semantics only. Runtime Admission resolves them to execution tools after the Plan is submitted.",
+          capabilityCatalogSemantics: "requiredCapabilities accepts only IDs from capabilityCatalog.allowedIds. Runtime Admission resolves those authorized execution capabilities to tools after the Plan is submitted; identifiers from other planning namespaces are not capabilities.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
           sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete ToolSource, uploaded source, or visible-directory binding; never send sourceConstraint: {}. When present, use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Set unused sourceConstraint ID arrays to null. Never cross these identity namespaces.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
@@ -1008,11 +1036,41 @@ function planningRuntimeContext(
   };
 }
 
-function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile): Record<string, unknown> {
-  const capabilities = task.availableCapabilities
+function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][number] {
+  const allowedCapabilityIds = planningCapabilitiesForTask(task).map((capability) => capability.id).sort();
+  return {
+    ...SUBMIT_OUTCOME_PLAN_TOOL,
+    inputSchema: {
+      ...SUBMIT_OUTCOME_PLAN_TOOL.inputSchema,
+      properties: {
+        ...SUBMIT_OUTCOME_PLAN_TOOL.inputSchema.properties,
+        leaves: {
+          ...SUBMIT_OUTCOME_PLAN_TOOL.inputSchema.properties.leaves,
+          items: {
+            ...OUTCOME_LEAF_SCHEMA,
+            properties: {
+              ...OUTCOME_LEAF_SCHEMA.properties,
+              requiredCapabilities: {
+                type: "array",
+                items: { type: "string", enum: allowedCapabilityIds },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function planningCapabilitiesForTask(task: TaskSpec): readonly PlanningCapability[] {
+  return task.availableCapabilities
     ?? (task.availableTools === undefined
-      ? planningCapabilitiesFromToolNames(task.availableToolNames)
+      ? planningCapabilitiesFromToolNames(task.availableToolNames, task.sources)
       : planningCapabilitiesFromTools(task.availableTools, task.sources));
+}
+
+function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile): Record<string, unknown> {
+  const capabilities = planningCapabilitiesForTask(task);
   const sourceBoundCapabilities = capabilitiesForConcreteTaskSources(task, capabilities);
   const producibleSourceKinds = new Set(sourceBoundCapabilities.flatMap((capability) => capability.produces));
   const sourceKinds = (["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
@@ -1206,6 +1264,7 @@ function buildArtifactFollowupContext(task: TaskSpec): {
       "Prefer an explicitly referenced reusable artifact path or file name from conversationWorkingSet.reusableArtifacts.",
       "For editing an existing artifact in place, use computer_patch_file when available and then verify the patched artifact; do not rewrite the whole file unless the required change cannot be expressed as a unique local patch.",
       "For artifact conversion, use convert_artifact when available; prefer reusable Markdown, HTML, text, document, or PPTX artifacts as the conversion source before completed delivery text. PPTX sources currently convert directly to PDF through the portable PPTX renderer.",
+      "When the requested source exists only as model-generated or completed delivery Markdown text, first materialize it as a reusable .md artifact with computer_write_file, then pass that artifact to convert_artifact and verify the converted output; never pass raw content to convert_artifact or introduce a separate format-specific converter.",
       "Use completed delivery text only when no reusable artifact can provide the requested content or the user explicitly asks to convert the answer text.",
       "For a candidateSourceResults entry, its result ref is a formal Plan input. Use its compact summary first and read_conversation_result with that ref for needed content; do not substitute source reacquisition merely because the prior result has source lineage.",
       "When the user asks to generate or save a file from a prior answer and no reusable artifact exists, use the latest completed delivery text as the source content instead of restarting source acquisition.",

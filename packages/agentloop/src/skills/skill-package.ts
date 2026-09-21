@@ -55,6 +55,8 @@ const SOURCE_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_SOURCE_KIND_VALUES);
 const QA_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_QA_KIND_VALUES);
 const EXECUTION_PROFILE_VALUES = new Set<string>(SKILL_AGENT_LOOP_EXECUTION_PROFILE_VALUES);
 const PRODUCED_EVIDENCE_KIND_VALUES = new Set<string>(SKILL_AGENT_LOOP_PRODUCED_EVIDENCE_KIND_VALUES);
+const MAX_AGENT_LOOP_SEMANTIC_TAGS = 32;
+const MAX_AGENT_LOOP_INTENT_EXAMPLES = 16;
 
 export interface SkillPackageInspection {
   readonly root: string;
@@ -370,17 +372,29 @@ function parseAgentLoopFrontmatter(lines: readonly string[], closing: number): S
     .map((value) => parseAgentLoopQaKind(value));
   const executionProfiles = (fields.get("executionProfiles") ?? [])
     .map((value) => parseAgentLoopExecutionProfile(value));
+  const semanticTags = (fields.get("semanticTags") ?? [])
+    .map((value) => parseAgentLoopSemanticTag(value));
+  const intentExamples = (fields.get("intentExamples") ?? [])
+    .map((value) => parseAgentLoopIntentExample(value));
   const producesEvidenceKinds = (fields.get("producesEvidenceKinds") ?? [])
     .map((value) => parseAgentLoopProducedEvidenceKind(value));
   const requiredSkillNames = (fields.get("requiredSkillNames") ?? [])
     .map((value) => normalizeAgentLoopSkillName(value));
   if (roles.length === 0) throw invalidPackage("agentloop.roles must declare at least one role");
+  if (semanticTags.length > MAX_AGENT_LOOP_SEMANTIC_TAGS) {
+    throw invalidPackage(`agentloop.semanticTags must contain at most ${MAX_AGENT_LOOP_SEMANTIC_TAGS} values`);
+  }
+  if (intentExamples.length > MAX_AGENT_LOOP_INTENT_EXAMPLES) {
+    throw invalidPackage(`agentloop.intentExamples must contain at most ${MAX_AGENT_LOOP_INTENT_EXAMPLES} values`);
+  }
   return {
     roles: unique(roles),
     artifactKinds: unique(artifactKinds),
     sourceKinds: unique(sourceKinds),
     qaKinds: unique(qaKinds),
     ...(executionProfiles.length === 0 ? {} : { executionProfiles: unique(executionProfiles) }),
+    ...(semanticTags.length === 0 ? {} : { semanticTags: unique(semanticTags) }),
+    ...(intentExamples.length === 0 ? {} : { intentExamples: unique(intentExamples) }),
     ...(producesEvidenceKinds.length === 0 ? {} : { producesEvidenceKinds: unique(producesEvidenceKinds) }),
     ...(requiredSkillNames.length === 0 ? {} : { requiredSkillNames: unique(requiredSkillNames) }),
   };
@@ -417,6 +431,18 @@ function parseAgentLoopQaKind(value: string): SkillAgentLoopQaKind {
 function parseAgentLoopExecutionProfile(value: string): SkillAgentLoopExecutionProfile {
   if (EXECUTION_PROFILE_VALUES.has(value)) return value as SkillAgentLoopExecutionProfile;
   throw invalidPackage(`agentloop.executionProfiles contains unsupported execution profile ${value}`);
+}
+
+function parseAgentLoopSemanticTag(value: string): string {
+  return normalizeAgentLoopString(value, "semanticTags");
+}
+
+function parseAgentLoopIntentExample(value: string): string {
+  const normalized = value.trim().replace(/\s+/gu, " ");
+  if (normalized.length === 0 || normalized.length > 500) {
+    throw invalidPackage("agentloop.intentExamples values must contain between 1 and 500 characters");
+  }
+  return normalized;
 }
 
 function parseAgentLoopProducedEvidenceKind(value: string): SkillAgentLoopProducedEvidenceKind {

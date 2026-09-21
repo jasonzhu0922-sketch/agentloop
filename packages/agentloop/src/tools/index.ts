@@ -20,4 +20,5 @@ export { SKILL_LOADER_TOOL_NAME, createSkillLoader, skillExecutionCwd, skillExec
 export { assertNoDuplicateTools, composeRunTools, createCoreTools } from "./compose.ts";
 export { HUMAN_LOOP_TOOL_NAME, createHumanLoopTool } from "./human-loop-tool.ts";
 export { CONVERSATION_RESULT_TOOL_NAME, createConversationResultTool } from "./conversation-result-tool.ts";
+export { TOOL_RESULT_READER_NAME, createToolResultTool } from "./tool-result-tool.ts";
 export type { ComposeRunToolsOptions, CoreToolsOptions } from "./compose.ts";

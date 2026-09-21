@@ -133,6 +133,16 @@ function formatAgentLoopCatalog(skill: PrivateSkill): string[] {
   ];
   return [
     `    <agentloop ${attributes.join(" ")} />`,
+    ...(metadata.semanticTags === undefined || metadata.semanticTags.length === 0
+      ? []
+      : [`    <semantic_tags>${escapeXml(metadata.semanticTags.join(","))}</semantic_tags>`]),
+    ...(metadata.intentExamples === undefined || metadata.intentExamples.length === 0
+      ? []
+      : [
+          "    <intent_examples>",
+          ...metadata.intentExamples.map((example) => `      <example>${escapeXml(example)}</example>`),
+          "    </intent_examples>",
+        ]),
   ];
 }
 

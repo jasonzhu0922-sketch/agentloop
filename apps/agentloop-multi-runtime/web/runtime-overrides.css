@@ -237,6 +237,13 @@
   word-break: break-word;
 }
 
+/* Markdown already encodes line breaks as block elements or <br>. Preserving
+   the renderer's source newlines creates anonymous blank lines between blocks. */
+.live-output-text.md {
+  line-height: 1.5;
+  white-space: normal;
+}
+
 .human-loop-card { display: grid; gap: 9px; padding: 12px; border: 1px solid color-mix(in srgb, var(--brand) 42%, var(--border)); border-radius: 10px; background: var(--brand-soft); color: var(--text-2); }
 .human-loop-card > b { color: var(--text); }
 .human-loop-card p { margin: 0; }
@@ -249,32 +256,6 @@
 .human-loop-confirm { display: flex; gap: 8px; }
 .human-loop-submit { justify-self: start; border: 0; border-radius: 7px; padding: 7px 12px; background: var(--brand); color: #fff; font-weight: 650; cursor: pointer; }
 .human-loop-error { color: var(--bad) !important; }
-
-/* Final model output is trusted only after escaping in the browser renderer;
-   these rules provide a readable Markdown surface without affecting the live
-   plain-text stream. */
-.live-output-text > :first-child,
-.detail-output > :first-child { margin-top: 0; }
-.live-output-text > :last-child,
-.detail-output > :last-child { margin-bottom: 0; }
-.live-output-text p,
-.detail-output p { margin: 0 0 10px; }
-.live-output-text h1,.live-output-text h2,.live-output-text h3,
-.detail-output h1,.detail-output h2,.detail-output h3 { margin: 14px 0 8px; color: var(--text); line-height: 1.35; }
-.live-output-text h1,.detail-output h1 { font-size: 18px; }
-.live-output-text h2,.detail-output h2 { font-size: 16px; }
-.live-output-text h3,.detail-output h3 { font-size: 14px; }
-.live-output-text ul,.live-output-text ol,
-.detail-output ul,.detail-output ol { margin: 0 0 10px; padding-left: 20px; }
-.live-output-text blockquote,.detail-output blockquote { margin: 0 0 10px; padding-left: 10px; border-left: 3px solid var(--brand); color: var(--text-2); }
-.live-output-text .md-inline,.detail-output .md-inline { padding: 1px 4px; border-radius: 4px; background: var(--bg-3); font: .9em/1.4 var(--mono); }
-.live-output-text .md-code,.detail-output .md-code { overflow-x: auto; margin: 0 0 10px; padding: 10px; border-radius: 8px; background: var(--bg-3); font: 12px/1.55 var(--mono); white-space: pre; }
-.live-output-text .md-table-wrap,.detail-output .md-table-wrap { max-width: 100%; overflow-x: auto; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
-.live-output-text .md-table-wrap table,.detail-output .md-table-wrap table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 12px; line-height: 1.5; white-space: normal; }
-.live-output-text .md-table-wrap th,.live-output-text .md-table-wrap td,.detail-output .md-table-wrap th,.detail-output .md-table-wrap td { padding: 8px 10px; border: 1px solid var(--border); vertical-align: top; text-align: left; word-break: break-word; }
-.live-output-text .md-table-wrap th,.detail-output .md-table-wrap th { background: var(--bg-3); color: var(--text); font-weight: 650; }
-.live-output-text .md-table-wrap tr:nth-child(even) td,.detail-output .md-table-wrap tr:nth-child(even) td { background: rgba(138, 144, 153, .06); }
-.live-output-text a,.detail-output a { color: var(--brand); }
 
 .live-reasoning {
   display: grid;

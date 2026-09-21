@@ -58,7 +58,12 @@ export function resolveCapabilityGaps(input: {
     if (missingEvidenceKinds.length === 0) return [];
     const candidates = [...catalogById.values()]
       .filter((capability) => !boundCapabilities.has(capability.id))
-      .filter((capability) => compatibleWithSourceConstraint(capability, step.sourceConstraint))
+      .filter((capability) => compatibleWithSourceConstraint(
+        capability,
+        step.sourceConstraint,
+        boundCapabilities,
+        currentById,
+      ))
       .filter((capability) => missingEvidenceKinds.some((kind) => capability.produces.includes(kind)))
       .map((capability) => ({
         capabilityId: capability.id,
@@ -102,7 +107,12 @@ export function resolveSourceGroundingGap(input: {
   };
 }
 
-function compatibleWithSourceConstraint(capability: PlanningCapability, constraint: SourceConstraint | undefined): boolean {
+function compatibleWithSourceConstraint(
+  capability: PlanningCapability,
+  constraint: SourceConstraint | undefined,
+  boundCapabilities: ReadonlySet<string>,
+  currentById: ReadonlyMap<string, PlanningCapability>,
+): boolean {
   const requiredToolSourceIds = constraint?.requiredToolSourceIds ?? [];
   if (
     requiredToolSourceIds.length > 0
@@ -114,12 +124,22 @@ function compatibleWithSourceConstraint(capability: PlanningCapability, constrai
   // An explicit upload/directory binding is an input-identity constraint, not
   // merely a hint to prefer a related capability.  A provider for a different
   // source namespace cannot repair an evidence gap for that concrete input.
-  if ((constraint?.requiredUploadedSourceIds?.length ?? 0) > 0 && !capability.sourceKinds.includes("uploaded_source")) {
-    return false;
-  }
-  if ((constraint?.requiredVisibleDirectoryIds?.length ?? 0) > 0 && !capability.sourceKinds.includes("visible_directory")) {
-    return false;
-  }
+  const canConsumeBoundWorkspaceProduct = capability.sourceKinds.some((kind) =>
+    kind === "workspace_file" || kind === "generated_artifact"
+  ) && [...boundCapabilities].some((id) => {
+    const produces = currentById.get(id)?.produces ?? [];
+    return produces.includes("structured_extraction_artifact") || produces.includes("artifact_path");
+  });
+  if (
+    (constraint?.requiredUploadedSourceIds?.length ?? 0) > 0
+    && !capability.sourceKinds.includes("uploaded_source")
+    && !canConsumeBoundWorkspaceProduct
+  ) return false;
+  if (
+    (constraint?.requiredVisibleDirectoryIds?.length ?? 0) > 0
+    && !capability.sourceKinds.includes("visible_directory")
+    && !canConsumeBoundWorkspaceProduct
+  ) return false;
   return true;
 }
 

@@ -120,12 +120,13 @@ export function reconstructRecoveryTranscript(input: {
     const toolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
     if (toolCallId === undefined) continue;
     if (event.type === "tool.completed" && typeof event.data.result === "string") {
+      const content = attachToolResultRef(event.data.result, event.data.toolResultRef);
       const classifiedOperation = classifyToolOperationOutcome(event.data.result);
       const operationStatus = operationStatusFromEvent(event.data.operationStatus)
         ?? (classifiedOperation.exitCode === undefined ? undefined : classifiedOperation.status);
       const operationFailed = operationStatus === "failed" || event.data.isError === true;
       outcomes.set(toolCallId, {
-        content: event.data.result,
+        content,
         invocationStatus: event.data.invocationStatus === "completed" ? "completed" : undefined,
         operationStatus,
         ...(typeof event.data.exitCode === "number" || event.data.exitCode === null
@@ -267,6 +268,21 @@ export function reconstructRecoveryTranscript(input: {
       decisionLedger: decisionCommitsFromEvents(scope),
     },
   };
+}
+
+function attachToolResultRef(content: string, value: unknown): string {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return content;
+  const ref = value as Record<string, unknown>;
+  if (ref.schema !== "agentloop.toolResultRef/v1" || typeof ref.resultId !== "string") return content;
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return JSON.stringify({ ...(parsed as Record<string, unknown>), toolResultRef: ref });
+    }
+    return JSON.stringify({ schema: "agentloop.toolResultEnvelope/v1", toolResultRef: ref, value: parsed });
+  } catch {
+    return `${content}\n\n[Runtime ToolResultRef ${JSON.stringify(ref)}]`;
+  }
 }
 
 /**

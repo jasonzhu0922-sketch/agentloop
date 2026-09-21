@@ -110,6 +110,7 @@ import { TerminalCommitter } from "./terminal-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
+import { ToolResultRepository, type ToolResultRef } from "./tool-result-repository.ts";
 import { RunCheckpointRepository, type RunCheckpointRecord } from "./run-checkpoint-repository.ts";
 import { HumanLoopRepository, type HumanLoopRequest, type HumanLoopResponse, type HumanLoopRequirement } from "./human-loop.ts";
 import {
@@ -313,6 +314,7 @@ export class RunService {
   private readonly scheduler = new DependencyScheduler();
   private readonly terminal: TerminalCommitter;
   private readonly actions: RuntimeActionRepository;
+  private readonly toolResults: ToolResultRepository;
   private readonly checkpoints: RunCheckpointRepository;
   private readonly recovery: RecoveryRepository;
   private readonly humanLoops: HumanLoopRepository;
@@ -375,17 +377,19 @@ export class RunService {
     this.plans = new PlanRepository(options.database);
     this.sources = new SourceRepository(options.database);
     this.conversationResults = new ConversationResultRepository(options.database);
+    this.actions = new RuntimeActionRepository(options.database);
+    this.toolResults = new ToolResultRepository(options.database);
     this.coreTools = createCoreTools({
       executor: computerExecutor,
       driver: options.computerDriver,
       acceptanceService,
       conversationResults: this.conversationResults,
+      toolResults: this.toolResults,
       pluginTools: options.tools,
     });
     this.sourceIntake = new SourceIntakeService(this.sources, this.workspaceRoot);
     this.humanLoops = new HumanLoopRepository(options.database);
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
-    this.actions = new RuntimeActionRepository(options.database);
     this.checkpoints = new RunCheckpointRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
     const recoveryEventLogSink: RecoveryEventLogSink = (event) => {
@@ -2394,6 +2398,8 @@ export class RunService {
       const stepGrant = createCapabilityGrant({
         actorUserId: input.actorUserId,
         runId: input.runId,
+        planId: plan.id,
+        stepId: activeStep.id,
         ...(input.rootGrant.conversationId === undefined ? {} : { conversationId: input.rootGrant.conversationId }),
         depth: input.rootGrant.depth,
         ...(input.rootGrant.workspaceRoot === undefined ? {} : { workspaceRoot: input.rootGrant.workspaceRoot }),
@@ -2568,20 +2574,36 @@ export class RunService {
         emit: input.emit,
         signal: input.signal,
         actionTracker: {
-          executeToolCall: (toolAction, operation) => this.actions.execute({
-            runId: input.runId,
-            planId: plan.id,
-            stepId: activeStep.id,
-            kind: "tool_call",
-            replayPolicy: toolAction.replaySafe ? "safe" : "unsafe",
-            deadlineMs: toolAction.timeoutMs ?? 120_000,
-            metadata: {
-              toolCallId: toolAction.toolCallId,
-              toolName: toolAction.toolName,
-              modelStep: toolAction.step,
-            },
-            resultFailureCode: toolOperationFailureCode,
-          }, operation),
+          executeToolCall: async (toolAction, operation) => {
+            let resultRef: ToolResultRef | undefined;
+            const value = await this.actions.execute({
+              runId: input.runId,
+              planId: plan.id,
+              stepId: activeStep.id,
+              kind: "tool_call",
+              replayPolicy: toolAction.replaySafe ? "safe" : "unsafe",
+              deadlineMs: toolAction.timeoutMs ?? 120_000,
+              metadata: {
+                toolCallId: toolAction.toolCallId,
+                toolName: toolAction.toolName,
+                modelStep: toolAction.step,
+              },
+              resultFailureCode: toolOperationFailureCode,
+              prepareResultRef: async (result, action) => {
+                resultRef = await this.toolResults.prepare({
+                  actionId: action.id,
+                  runId: input.runId,
+                  planId: plan.id,
+                  stepId: activeStep.id,
+                  toolCallId: toolAction.toolCallId,
+                  toolName: toolAction.toolName,
+                  value: result,
+                });
+                return resultRef.resultId;
+              },
+            }, operation);
+            return { value, ...(resultRef === undefined ? {} : { resultRef }) };
+          },
         },
         deferFailureReport: true,
         evaluateCandidate: async (candidate) => {
@@ -4470,7 +4492,7 @@ export function selectPlanningSkillRoles(
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
-  const requestedFileFormats = requestedPlanningFileFormats(signal, sources);
+  const requestedFileFormats = requestedPlanningFileFormats(signal);
   const roleEligibleSkills = skills.filter((skill) => {
     const selection = selectFirstRoundSkillRole(
       skill,
@@ -4495,7 +4517,14 @@ export function selectPlanningSkillRoles(
     skill,
     index,
     semanticAffinity: scorePlanningSkillSemanticAffinity(skill, signal, bound.has(skill.id), requestedFileFormats),
-    score: scorePlanningSkill(skill, signal, bound.has(skill.id), sourceKinds, requestedFileFormats),
+    score: scorePlanningSkill(
+      skill,
+      signal,
+      bound.has(skill.id),
+      roleBySkillId.get(skill.id)!.role,
+      sourceKinds,
+      requestedFileFormats,
+    ),
   }));
   // Artifact/source metadata establishes compatibility, not task relevance.
   // When at least one compatible Skill also matches the concrete request,
@@ -4507,11 +4536,23 @@ export function selectPlanningSkillRoles(
   ranked.sort((left, right) => right.score - left.score || left.index - right.index);
   const topScore = ranked[0]?.score ?? 0;
   if (topScore < MIN_PLANNING_SKILL_SCORE) {
-    if (topScore < LOW_CONFIDENCE_PLANNING_SKILL_SCORE) return [];
-    return expandRequiredPlanningSkills(ranked
-      .filter((entry) => entry.score === topScore)
-      .slice(0, LOW_CONFIDENCE_PLANNING_SKILL_LIMIT)
-      .map((entry) => ({ skill: entry.skill, selection: roleBySkillId.get(entry.skill.id)! })), skills);
+    if (topScore < LOW_CONFIDENCE_PLANNING_SKILL_SCORE && isLowInformationPlanningSignal(signal)) return [];
+    // Lexical ranking is a recall aid, not the final semantic authority. When
+    // confidence is low but the request is substantive, expose a bounded set
+    // of role-compatible summaries so the Planner can reason over descriptions
+    // and intent examples. This avoids turning one tokenizer or domain glossary
+    // into an irreversible no-Skill decision.
+    const semanticReviewPool = [...scored]
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .slice(0, MAX_SEMANTIC_REVIEW_SKILLS)
+      .map((entry) => ({
+        skill: entry.skill,
+        selection: {
+          ...roleBySkillId.get(entry.skill.id)!,
+          reason: "Low-confidence lexical recall candidate; Planner must decide semantic relevance from the current goal and Skill intent examples.",
+        },
+      }));
+    return expandRequiredPlanningSkills(semanticReviewPool, skills);
   }
   const secondScore = ranked[1]?.score ?? 0;
   const strongWinner = topScore - secondScore >= STRONG_WINNER_GAP;
@@ -4579,9 +4620,9 @@ function expandRequiredPlanningSkills(
 // close-scoring candidates for the Planner to resolve adjacent disciplines
 // (for example, a web page can need frontend design as well as implementation).
 const MAX_PLANNING_SKILLS = 5;
+const MAX_SEMANTIC_REVIEW_SKILLS = 12;
 const MIN_PLANNING_SKILL_SCORE = 2;
 const LOW_CONFIDENCE_PLANNING_SKILL_SCORE = 1;
-const LOW_CONFIDENCE_PLANNING_SKILL_LIMIT = 2;
 const STRONG_WINNER_GAP = 2;
 
 function selectFirstRoundSkillRole(
@@ -4598,7 +4639,6 @@ function selectFirstRoundSkillRole(
   if (
     roles.has("primary_builder")
     && (explicitlyRequested || matchesRequestedArtifactKind(signal, artifactKinds))
-    && (explicitlyRequested || skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
   ) {
     return {
       skillId: skill.id,
@@ -4672,17 +4712,21 @@ function scorePlanningSkill(
   skill: PrivateSkill,
   signal: string,
   bound: boolean,
+  selectedRole: SelectedSkillRole["role"],
   sourceKinds: ReadonlySet<string>,
   requestedFileFormats: ReadonlySet<string>,
 ): number {
   let score = scorePlanningSkillSemanticAffinity(skill, signal, bound, requestedFileFormats);
-  const text = normalizePlanningSignal(`${skill.name}\n${skill.description}`);
+  const text = planningSkillSemanticText(skill);
   if (requestsArtifactBuild(signal)) {
     if (matchesRequestedArtifactKind(signal, new Set(skill.agentLoop?.artifactKinds ?? []))) score += 4;
     if (isPrimaryArtifactBuilderSkill(text)) score += 3;
     if (isStylingSupportSkill(text) && !explicitStylingRequested(signal)) score -= 4;
   }
-  if (!bound && !exactSkillMention(signal, skill) && sourceKinds.size > 0) {
+  // Source compatibility may rank source providers because their job is to
+  // acquire the bound input. It must never rank a primary builder: the current
+  // goal and requested output own that selection, not the uploaded format.
+  if (selectedRole === "source_provider" && !bound && !exactSkillMention(signal, skill) && sourceKinds.size > 0) {
     const skillSourceKinds = skill.agentLoop?.sourceKinds ?? [];
     if (skillSourceKinds.some((kind) => sourceKinds.has(kind))) {
       score += 3;
@@ -4699,17 +4743,19 @@ function scorePlanningSkillSemanticAffinity(
   bound: boolean,
   requestedFileFormats: ReadonlySet<string>,
 ): number {
-  const text = normalizePlanningSignal(`${skill.name}\n${skill.description}`);
+  const text = planningSkillSemanticText(skill);
   const signalTokens = tokenizePlanningSignal(signal);
   const textTokens = new Set(tokenizePlanningSignal(text));
   let score = bound ? 5 : 0;
   for (const alias of planningSkillAliases(skill)) {
     if (alias.length > 0 && signal.includes(alias)) score += alias.length >= 6 ? 4 : 3;
   }
+  let tokenOverlapScore = 0;
   for (const token of signalTokens) {
     if (!textTokens.has(token)) continue;
-    score += token.length >= 6 ? 2 : 1;
+    tokenOverlapScore += token.length >= 6 ? 2 : 1;
   }
+  score += Math.min(tokenOverlapScore, 8);
   score += scoreCjkSubphrases(signalTokens, textTokens);
   if (exactSkillMention(signal, skill)) score += 8;
   for (const format of requestedFileFormats) {
@@ -4731,16 +4777,10 @@ function scorePlanningSkillSemanticAffinity(
 
 function requestedPlanningFileFormats(
   signal: string,
-  sources: readonly UploadedSourceSummary[],
 ): Set<string> {
   const formats = new Set<string>();
   for (const match of signal.matchAll(/\.([a-z0-9]{2,8})(?=$|[^a-z0-9])/giu)) {
     formats.add(canonicalArtifactFormatFamily(match[1]));
-  }
-  for (const source of sources) {
-    if (source.status !== "ready") continue;
-    const format = canonicalArtifactFormatFamily(source.extension);
-    if (/^[a-z0-9]{2,8}$/u.test(format)) formats.add(format);
   }
   return formats;
 }
@@ -4837,8 +4877,17 @@ function planningSkillAliases(skill: PrivateSkill): string[] {
     skill.name,
     skill.name.replace(/-/g, " "),
     ...extractTriggerAliases(skill.description),
+    ...(skill.agentLoop?.semanticTags ?? []),
   ];
   return [...new Set(aliases.map(normalizePlanningSignal).filter(Boolean))];
+}
+
+function planningSkillSemanticText(skill: PrivateSkill): string {
+  return normalizePlanningSignal([
+    skill.name,
+    skill.description,
+    ...(skill.agentLoop?.semanticTags ?? []),
+  ].join("\n"));
 }
 
 function extractTriggerAliases(description: string): string[] {
@@ -4893,7 +4942,7 @@ function longestCommonCjkSubstringLength(left: string, right: string): number {
 }
 
 function normalizePlanningSignal(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  return value.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 const cjkPlanningStopwords = new Set([
@@ -4912,7 +4961,7 @@ function tokenizePlanningSignal(value: string): string[] {
     "a", "an", "to", "of", "in", "on", "at", "by", "or", "is", "are", "be",
   ]);
   const tokens: string[] = [];
-  for (const rawToken of value.split(/[^a-z0-9\u4e00-\u9fff]+/i)) {
+  for (const rawToken of value.match(/[\u3400-\u9fff]+|[\p{L}\p{N}]+/gu) ?? []) {
     const token = rawToken.trim();
     if (token.length === 0) continue;
     if (/[\u4e00-\u9fff]/.test(token)) {
@@ -4928,6 +4977,7 @@ function tokenizePlanningSignal(value: string): string[] {
 function extractCjkPlanningPhrases(token: string): string[] {
   const phrases: string[] = [];
   for (const run of token.match(/[\u4e00-\u9fff]+/gu) ?? []) {
+    phrases.push(run);
     const words = segmentCjkPlanningWords(run);
     phrases.push(...words);
     for (let start = 0; start < words.length; start += 1) {
@@ -4935,8 +4985,21 @@ function extractCjkPlanningPhrases(token: string): string[] {
         phrases.push(words.slice(start, start + size).join(""));
       }
     }
+    // Intl.Segmenter is intentionally dictionary-light and can split domain
+    // terms into single characters. Character n-grams preserve neutral lexical
+    // evidence without teaching Runtime that any particular term owns a domain.
+    for (let size = 2; size <= 3; size += 1) {
+      for (let start = 0; start + size <= run.length; start += 1) {
+        phrases.push(run.slice(start, start + size));
+      }
+    }
   }
   return [...new Set(phrases.filter(isInformativeCjkPlanningPhrase))];
+}
+
+function isLowInformationPlanningSignal(signal: string): boolean {
+  const compact = signal.replace(/[\s。.!！?？,，;；]+/gu, "");
+  return /^(?:继续|继续处理|接着|接着做|好的?|可以|行|嗯|收到|ok|okay|continue|goon)$/iu.test(compact);
 }
 
 function segmentCjkPlanningWords(run: string): string[] {

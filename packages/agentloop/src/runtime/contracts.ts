@@ -204,6 +204,8 @@ export interface ModelAdapter {
 export interface CapabilityGrant {
   readonly actorUserId: string;
   readonly runId: string;
+  readonly planId?: string;
+  readonly stepId?: string;
   readonly conversationId?: string;
   readonly depth: number;
   readonly workspaceRoot?: string;

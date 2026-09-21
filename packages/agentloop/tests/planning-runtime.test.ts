@@ -18,7 +18,7 @@ import {
 } from "../src/planning/step-execution-binding.ts";
 import { resolveCapabilityGaps } from "../src/planning/capability-resolution.ts";
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
-import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
+import type { ModelAdapter, ModelInvocation, ModelResponse, UploadedSourceSummary } from "../src/runtime/contracts.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
 import { operationProfileCatalogForPlanning } from "../src/runtime/operation-profiles.ts";
 import {
@@ -454,6 +454,88 @@ test("ModelPlanner discovers an authorized evidence producer before rejecting a 
   assert.deepEqual(plan.steps[1]?.evidenceContract?.requiredKinds, ["explicit_caveats"]);
 });
 
+test("ModelPlanner repairs an upload-bound aggregation gap from Admission capability hints", async () => {
+  const sourceId = "src_upload_aggregation_repair";
+  const uploadedExtraction = {
+    id: "uploaded_table_extraction",
+    produces: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const,
+    sourceKinds: ["uploaded_source"] as const,
+    sideEffect: "workspace_write" as const,
+    risk: "low" as const,
+  };
+  const workspaceComputation = {
+    id: "workspace_command_computation",
+    produces: ["derived_aggregation", "explicit_caveats"] as const,
+    sourceKinds: ["workspace_file"] as const,
+    sideEffect: "workspace_write" as const,
+    risk: "medium" as const,
+  };
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 2) {
+        const context = request.runtimeContext?.content ?? "";
+        assert.match(context, /Capability gaps/);
+        assert.match(context, /workspace_command_computation/);
+        assert.match(context, /derived_aggregation/);
+      }
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall(`upload-aggregation-${calls}`, {
+          goal: "Extract the uploaded table and compute the requested distribution.",
+          steps: [{
+            id: "analyze_upload",
+            objective: "Extract the uploaded table and compute a complete category distribution.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: calls === 1
+              ? ["uploaded_table_extraction"]
+              : ["uploaded_table_extraction", "workspace_command_computation"],
+            sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+            evidenceContract: {
+              requiredKinds: ["structured_extraction_artifact", "derived_aggregation", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-upload-aggregation-capability-repair",
+    input: "分析上传的表格并统计各类别分布",
+    availableSkills: [],
+    availableToolNames: ["extract_source_tables", "computer_run_command"],
+    availableCapabilities: [uploadedExtraction],
+    capabilityRecovery: {
+      availableSkills: [],
+      availableCapabilities: [uploadedExtraction, workspaceComputation],
+    },
+    sources: [{
+      id: sourceId,
+      originalName: "评价结果.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 55_248,
+      sha256: "a".repeat(64),
+      status: "ready",
+      chunkCount: 3,
+      truncated: false,
+    }],
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, [
+    "uploaded_table_extraction",
+    "workspace_command_computation",
+  ]);
+});
+
 test("ModelPlanner binds source grounding to the selected API Skill without unrelated recovery capabilities", async () => {
   const apiQuery = skillFixture({
     id: "discovered:api-query",
@@ -747,6 +829,26 @@ test("Task intent treats Chinese summary files as workspace document artifacts",
   assert.equal(intent.artifactKind, "document");
   assert.equal(intent.deliverySurface, "workspace_artifact");
   assert.equal(intent.wantsArtifact, true);
+});
+
+test("Task intent derives a new report from the output clause rather than the referenced input", () => {
+  const intent = classifyTaskIntent({
+    objective: "分析一下这个表格，生成一个评价报告",
+  });
+
+  assert.equal(intent.artifactAction, "create");
+  assert.equal(intent.artifactKind, "document");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
+});
+
+test("Task intent keeps an explicit workbook edit as a spreadsheet modification", () => {
+  const intent = classifyTaskIntent({
+    objective: "修改这个表格的配色和列宽，生成修订版 xlsx",
+  });
+
+  assert.equal(intent.artifactAction, "modify");
+  assert.equal(intent.artifactKind, "spreadsheet");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
 });
 
 test("Task intent preserves file delivery verbs from resolved user constraints", () => {
@@ -1476,6 +1578,104 @@ test("ModelPlanner retries once when submit_outcome_plan arguments are not a JSO
   assert.deepEqual(plan.steps.map((step) => step.id), ["query_api_params"]);
 });
 
+test("ModelPlanner keeps operation profiles and execution capabilities in separate catalog namespaces", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const schema = request.tools[0]?.inputSchema as {
+        readonly properties?: {
+          readonly leaves?: {
+            readonly items?: {
+              readonly properties?: {
+                readonly requiredCapabilities?: {
+                  readonly items?: { readonly enum?: readonly string[] };
+                };
+              };
+            };
+          };
+        };
+      };
+      const allowedCapabilityIds = schema.properties?.leaves?.items?.properties
+        ?.requiredCapabilities?.items?.enum ?? [];
+      assert.equal(allowedCapabilityIds.includes("web_research"), true);
+      assert.equal(allowedCapabilityIds.includes("conversation_delivery"), true);
+      assert.equal(allowedCapabilityIds.includes("content_generation"), false);
+      assert.equal(allowedCapabilityIds.includes("artifact_build"), false);
+      assert.match(request.runtimeContext?.content ?? "", /"namespace":"execution_capability"/);
+      assert.match(request.runtimeContext?.content ?? "", /"namespace":"operation_profile"/);
+
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "string-plan",
+            name: "submit_outcome_plan",
+            arguments: "{\"schema\":\"agentloop.outcomePlan/v2\"}",
+          }],
+        };
+      }
+      if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /arguments were not a JSON object/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("wrong-namespace-plan", {
+            goal: "Research the requested company information.",
+            shape: "single_leaf",
+            steps: [{
+              id: "research_company",
+              objective: "Research the requested company information and return a source-grounded answer.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["content_generation", "conversation_delivery"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+          })],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /separate namespaces/);
+      assert.match(request.runtimeContext?.content ?? "", /Authorized execution capability IDs/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("catalog-bound-plan", {
+          goal: "Research the requested company information.",
+          shape: "single_leaf",
+          steps: [{
+            id: "research_company",
+            objective: "Research the requested company information and return a source-grounded answer.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["web_research", "conversation_delivery"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "source_urls", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-capability-namespace-contract",
+    input: "查询网译软件的工商企业信息",
+    availableSkills: [],
+    availableToolNames: ["websearch", "webfetch"],
+  });
+
+  assert.equal(calls, 3);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["web_research", "conversation_delivery"]);
+});
+
 test("ModelPlanner retries once when Admission rejects an initial support Skill role", async () => {
   let calls = 0;
   const planner = new ModelPlanner({
@@ -1645,6 +1845,173 @@ test("ModelPlanner treats bound uploaded sources as source-grounded artifact inp
   assert.equal(calls, 1);
   assert.deepEqual(plan.steps.map((step) => step.id), ["profile_uploaded_spreadsheet", "produce_html_report"]);
   assert.deepEqual(plan.steps[1].dependencies, ["profile_uploaded_spreadsheet"]);
+});
+
+test("ModelPlanner treats an uploaded workbook as source evidence for a new document report", async () => {
+  let calls = 0;
+  const sourceId = "src_uploaded_evaluation_workbook";
+  const documents = skillFixture({
+    id: "discovered:documents",
+    name: "documents",
+    description: "Create and verify document reports.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"]),
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const runtimeContext = request.runtimeContext?.content ?? "";
+      assert.match(runtimeContext, /"artifactAction":"create"/);
+      assert.match(runtimeContext, /"artifactKind":"document"/);
+      assert.match(runtimeContext, /"sourceNeed":"source_grounded"/);
+      assert.match(runtimeContext, /"planShape":"fact_then_produce"/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("uploaded-workbook-evaluation-report", {
+          goal: "Analyze the uploaded workbook and generate a new evaluation report document.",
+          shape: "fact_then_produce",
+          selectedSkillRoles: [{
+            skillId: documents.id,
+            role: "primary_builder",
+            reason: "The document Skill owns the requested evaluation report.",
+          }],
+          steps: [{
+            id: "extract_evaluation_facts",
+            objective: "Extract the uploaded workbook schema, row counts, and structured evaluation facts.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["uploaded_source_read", "uploaded_table_extraction"],
+            sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+            evidenceContract: {
+              requiredKinds: ["source_summary", "schema_summary", "record_counts", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }, {
+            id: "produce_evaluation_report",
+            objective: "Produce and verify a new evaluation report document from the extracted facts.",
+            dependencies: ["extract_evaluation_facts"],
+            role: "produce",
+            skillIds: [documents.id],
+            requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-uploaded-workbook-evaluation-report",
+    input: "分析一下这个表格，生成一个评价报告",
+    availableSkills: [documents],
+    availableToolNames: [
+      "read_source",
+      "extract_source_tables",
+      "materialize_source_file",
+      "load_skill",
+      "computer_write_file",
+      "verify_artifact_acceptance",
+    ],
+    sources: [{
+      id: sourceId,
+      originalName: "评价结果.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 55_248,
+      sha256: "e".repeat(64),
+      status: "ready",
+      summary: "评价结果.xlsx is a XLSX source with structured evaluation rows.",
+      chunkCount: 3,
+      truncated: false,
+    }],
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(plan.shape, "fact_then_produce");
+  assert.deepEqual(plan.steps.map((step) => step.id), [
+    "extract_evaluation_facts",
+    "produce_evaluation_report",
+  ]);
+  assert.deepEqual(plan.steps[1]?.dependencies, ["extract_evaluation_facts"]);
+});
+
+test("ModelPlanner keeps an explicit uploaded workbook edit in one primary-builder leaf", async () => {
+  const sourceId = "src_uploaded_workbook_edit";
+  const xlsx = skillFixture({
+    id: "discovered:xlsx",
+    name: "xlsx",
+    description: "Create, edit, analyze, and verify spreadsheet artifacts.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["spreadsheet"]),
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      const runtimeContext = request.runtimeContext?.content ?? "";
+      assert.match(runtimeContext, /"artifactAction":"modify"/);
+      assert.match(runtimeContext, /"artifactKind":"spreadsheet"/);
+      assert.match(runtimeContext, /"sourceNeed":"none"/);
+      assert.match(runtimeContext, /"planShape":"single_leaf"/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("uploaded-workbook-native-edit", {
+          goal: "Restyle the uploaded workbook and deliver the revised XLSX.",
+          shape: "single_leaf",
+          selectedSkillRoles: [{
+            skillId: xlsx.id,
+            role: "primary_builder",
+            reason: "The XLSX Skill owns native workbook editing and final acceptance.",
+          }],
+          steps: [{
+            id: "edit_workbook",
+            objective: "Materialize, restyle, and verify the revised workbook.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [xlsx.id],
+            requiredCapabilities: ["skill_instruction_load", "workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-uploaded-workbook-native-edit",
+    input: "修改这个表格的配色和列宽，生成修订版 xlsx",
+    availableSkills: [xlsx],
+    availableToolNames: [
+      "read_source",
+      "materialize_source_file",
+      "load_skill",
+      "computer_write_file",
+      "verify_artifact_acceptance",
+    ],
+    sources: [{
+      id: sourceId,
+      originalName: "评价结果.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      extension: ".xlsx",
+      byteSize: 55_248,
+      sha256: "f".repeat(64),
+      status: "ready",
+      summary: "An editable evaluation workbook.",
+      chunkCount: 3,
+      truncated: false,
+    }],
+  });
+
+  assert.equal(plan.shape, "single_leaf");
+  assert.ok(plan.steps[0]?.requiredCapabilities.includes("uploaded_source_materialization"));
+  assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [sourceId]);
 });
 
 test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analysis replies", async () => {
@@ -2364,6 +2731,63 @@ test("capability recovery does not offer a different source namespace for a boun
     stepId: "read-upload",
     missingEvidenceKinds: ["structured_extraction_artifact"],
     candidates: [],
+  }]);
+});
+
+test("capability recovery can compute over a structured artifact extracted from a bound upload", () => {
+  const sourceId = "src_76767676767676767676767676767676";
+  const proposal: PlanProposal = {
+    goal: "Analyze the authorized upload and derive aggregate evaluation facts.",
+    selectedSkillIds: [],
+    steps: [{
+      id: "analyze-upload",
+      objective: "Extract the upload and compute the required aggregate evaluation facts.",
+      dependencies: [],
+      skillIds: [],
+      role: "fact_acquisition",
+      requiredCapabilities: ["uploaded_table_extraction"],
+      sourceConstraint: { requiredUploadedSourceIds: [sourceId] },
+      evidenceContract: {
+        requiredKinds: ["structured_extraction_artifact", "derived_aggregation"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [{ id: "facts", description: "Derived aggregate facts are available.", source: "planner" }],
+    }],
+  };
+  const uploadedExtraction = {
+    id: "uploaded_table_extraction",
+    produces: ["source_summary", "structured_extraction_artifact"] as const,
+    sourceKinds: ["uploaded_source"] as const,
+    sideEffect: "workspace_write" as const,
+    risk: "low" as const,
+  };
+  const workspaceComputation = {
+    id: "workspace_command_computation",
+    produces: ["derived_aggregation"] as const,
+    sourceKinds: ["workspace_file"] as const,
+    sideEffect: "workspace_write" as const,
+    risk: "medium" as const,
+  };
+
+  const gaps = resolveCapabilityGaps({
+    proposal,
+    currentSkills: [],
+    currentCapabilities: [uploadedExtraction],
+    catalog: {
+      availableSkills: [],
+      availableCapabilities: [uploadedExtraction, workspaceComputation],
+    },
+  });
+
+  assert.deepEqual(gaps, [{
+    stepId: "analyze-upload",
+    missingEvidenceKinds: ["derived_aggregation"],
+    candidates: [{
+      capabilityId: "workspace_command_computation",
+      produces: ["derived_aggregation"],
+      sourceKinds: ["workspace_file"],
+      requiredSkillIds: [],
+    }],
   }]);
 });
 
@@ -4150,6 +4574,86 @@ test("ModelPlanner prefers reusable Markdown artifacts over completed delivery t
   assert.doesNotMatch(observedContext, /"id":"web_research"/);
 });
 
+test("ModelPlanner materializes completed Markdown delivery text before artifact conversion", async () => {
+  let observedContext = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      observedContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("delivery-markdown-to-pdf", {
+          goal: "materialize the completed Markdown answer and convert it to PDF",
+          steps: [{
+            id: "write-markdown",
+            objective: "Write the completed delivery Markdown to a reusable .md artifact.",
+            dependencies: [],
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty"],
+              caveatPolicy: "none",
+            },
+          }, {
+            id: "convert-pdf",
+            objective: "Convert the written Markdown artifact to PDF and verify PDF acceptance.",
+            dependencies: ["write-markdown"],
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    runId: "run-delivery-markdown-to-pdf",
+    input: "把上一轮返回的 Markdown 转成 PDF",
+    availableSkills: [],
+    availableToolNames: ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"],
+    conversationWorkingSet: {
+      schema: "conversation.workset/v1",
+      conversationId: "conversation-delivery-markdown-to-pdf",
+      runCount: 2,
+      planCursors: [{
+        runId: "prior-run",
+        planId: "prior-plan",
+        goal: "Answer with a Markdown report",
+        status: "completed",
+        selectedSkillIds: [],
+        steps: [{
+          id: "answer",
+          position: 0,
+          status: "completed",
+          objective: "Return the report as Markdown.",
+          dependencies: [],
+          skillIds: [],
+          requiredCapabilities: [],
+          output: "# 上轮报告\n\n这是需要转换的 Markdown 内容。",
+        }],
+      }],
+      reusableArtifacts: [],
+      failedBoundaries: [],
+      recommendedCapabilities: {
+        skillIds: [],
+        toolNames: [],
+      },
+    },
+  });
+
+  assert.match(observedContext, /"intent":"convert_artifact"/);
+  assert.match(observedContext, /# 上轮报告/);
+  assert.match(observedContext, /first materialize it as a reusable \.md artifact with computer_write_file/i);
+  assert.match(observedContext, /never pass raw content to convert_artifact/i);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["write-markdown", "convert-pdf"]);
+  assert.deepEqual(plan.steps[1]?.dependencies, ["write-markdown"]);
+});
+
 test("ModelPlanner groups DOC and DOCX when selecting an existing Word artifact for edits", async () => {
   let observedContext = "";
   const planner = new ModelPlanner({
@@ -4753,6 +5257,10 @@ test("ModelPlanner allows source inspection and keeps local report receipt insid
               dependencies: ["inspect_sources"],
               skillIds: [],
               requiredCapabilities: ["workspace_artifact_write", "workspace_file_read"],
+              evidenceContract: {
+                requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request"],
+                caveatPolicy: "none",
+              },
               successCriteria: [{ id: "report-written", description: "The report file is written and local readback confirms it references the inspected source facts." }],
             },
           ],
@@ -5396,6 +5904,44 @@ test("selectPlanningSkills prefers the matching Skill summary and allows no-skil
   assert.deepEqual(none, []);
 });
 
+test("selectPlanningSkillRoles does not let an uploaded workbook choose the primary builder", () => {
+  const documents = skillFixture({
+    id: "documents",
+    name: "writer",
+    description: "",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"], ["document"]),
+  });
+  const xlsx = skillFixture({
+    id: "xlsx",
+    name: "xlsx",
+    description: "Create and edit XLSX workbooks.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["spreadsheet"], ["dataset"]),
+  });
+  const source: UploadedSourceSummary = {
+    id: "src_uploaded_evaluation_workbook",
+    originalName: "评价结果.xlsx",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    extension: ".xlsx",
+    byteSize: 55_248,
+    sha256: "e".repeat(64),
+    status: "ready",
+    chunkCount: 3,
+    truncated: false,
+  };
+
+  const selected = selectPlanningSkillRoles(
+    [xlsx, documents],
+    "分析一下这个表格，生成一个评价报告",
+    [],
+    [source],
+  );
+
+  assert.deepEqual(selected.map((item) => ({
+    id: item.skill.id,
+    role: item.selection.role,
+  })), [{ id: documents.id, role: "primary_builder" }]);
+});
+
 test("selectPlanningSkillRoles expands a selected Skill's declared source-provider companion", () => {
   const analysis = skillFixture({
     id: "steel-analysis",
@@ -5423,6 +5969,105 @@ test("selectPlanningSkillRoles expands a selected Skill's declared source-provid
     { name: "steel-market-analysis", role: "primary_builder", companionForSkillId: undefined },
     { name: "mysql-steel-data", role: "source_provider", companionForSkillId: "steel-analysis" },
   ]);
+});
+
+test("selectPlanningSkillRoles exposes semantic review candidates for an unsegmented Chinese domain request", () => {
+  const analysis = skillFixture({
+    id: "steel-analysis",
+    name: "steel-market-analysis",
+    description: "将可核验的钢材数据库时序转为价格或指标数值结论。",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"], ["content"]),
+      semanticTags: ["steel-market", "commodity-price", "time-series-analysis"],
+      intentExamples: ["查询指定日期、地区、生产企业、牌号和规格对应的钢材价格或指标数值"],
+      requiredSkillNames: ["mysql-steel-data"],
+    },
+  });
+  const mysql = skillFixture({
+    id: "steel-data",
+    name: "mysql-steel-data",
+    description: "读取部署映射的钢材指标目录和原始时序。",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+      semanticTags: ["steel-data", "database-source", "time-series"],
+      intentExamples: ["读取指定钢材指标在明确日期或日期范围内的原始时序记录"],
+    },
+  });
+  const enterprise = skillFixture({
+    id: "enterprise-info",
+    name: "enterprise-info",
+    description: "查询企业工商注册信息、法人和经营范围。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [enterprise, analysis, mysql],
+    "2025 年 11 月 3 日，唐山市河钢 HRB400E Φ8 热轧盘螺工程采购价",
+    [],
+    [],
+    "source_grounded",
+  );
+
+  assert.ok(selected.some((item) => item.skill.id === analysis.id));
+  assert.ok(selected.some((item) => item.skill.id === mysql.id));
+  assert.match(
+    selected.find((item) => item.skill.id === analysis.id)?.selection.reason ?? "",
+    /Low-confidence lexical recall candidate/,
+  );
+});
+
+test("selectPlanningSkillRoles preserves CJK phrases and mixed Unicode identifiers as neutral recall evidence", () => {
+  const matching = skillFixture({
+    id: "matching-catalog",
+    name: "matching-catalog",
+    description: "查询热轧盘螺目录中的 HRB400E 与 Φ8 规格记录。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+  });
+  const unrelated = skillFixture({
+    id: "unrelated-catalog",
+    name: "unrelated-catalog",
+    description: "查询企业组织架构记录。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [unrelated, matching],
+    "读取热轧盘螺 hrb400e φ8 的原始记录",
+    [],
+    [],
+    "source_grounded",
+  );
+
+  assert.deepEqual(selected.map((item) => item.skill.id), [matching.id]);
+});
+
+test("selectPlanningSkillRoles does not make a steel term list the core trigger", () => {
+  const steel = skillFixture({
+    id: "steel-analysis",
+    name: "steel-market-analysis",
+    description: "分析钢材市场价格和指标时序。",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"]),
+      semanticTags: ["steel-market"],
+      intentExamples: ["查询指定日期、地区、生产企业、牌号和规格对应的钢材价格或指标数值"],
+    },
+  });
+  const semiconductor = skillFixture({
+    id: "semiconductor-procurement",
+    name: "semiconductor-procurement",
+    description: "查询芯片和半导体器件的型号、采购价格与供应信息。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [steel, semiconductor],
+    "查询某型号芯片在指定日期的工程采购价",
+    [],
+    [],
+    "source_grounded",
+  );
+
+  assert.deepEqual(selected.map((item) => item.skill.id), [semiconductor.id]);
 });
 
 test("Admission expands a bound source-provider Skill's declared evidence capability before validating the leaf", () => {
@@ -5918,7 +6563,7 @@ test("selectPlanningSkills excludes undeclared and support-only Skills from ordi
   assert.deepEqual(selected.map((skill) => skill.name), ["web-artifacts-builder"]);
 });
 
-test("selectPlanningSkills prefers source-kind compatible HTML builders for uploaded spreadsheets", () => {
+test("selectPlanningSkills uses the requested HTML deliverable rather than the uploaded spreadsheet kind", () => {
   const dashboard = skillFixture({
     id: "dashboard",
     name: "build-dashboard",

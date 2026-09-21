@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AgentLoop Multi Runtime</title>
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/artifact-markdown.css" />
     <link rel="stylesheet" href="/runtime-overrides.css" />
+    <script type="importmap">{"imports":{"marked":"/marked.js"}}</script>
   </head>
   <body>
     <div class="app-shell">
@@ -43,7 +45,7 @@
             <section class="detail-section"><h3>加载的 Skill</h3><div id="details-skills" class="detail-tags"><span class="muted">本轮尚未加载 Skill。</span></div></section>
             <section class="detail-section"><h3>执行的工具</h3><div id="details-tools" class="detail-tags"><span class="muted">本轮尚未调用工具。</span></div></section>
             <section class="detail-section"><h3>命令执行</h3><div id="details-commands" class="command-list"><span class="muted">本轮尚未执行命令。</span></div></section>
-            <section class="detail-section"><h3>最终回复</h3><div id="details-output" class="detail-output"><span class="muted">暂无最终回复。</span></div></section>
+            <section class="detail-section"><h3>最终回复</h3><div id="details-output" class="detail-output md"><span class="muted">暂无最终回复。</span></div></section>
             <section id="artifacts-section" class="detail-section"><h3>产物</h3><div id="details-artifacts" class="artifact-list"><span class="muted">本轮暂无可预览或下载的产物。</span></div></section>
             <section id="plan-section" class="detail-section" hidden><h3>Planner</h3><div id="plan" class="plan-empty">提交任务后显示 Planner。</div></section>
             <section id="events-section" class="detail-section events-section" hidden><h3>SSE 事件流</h3><div id="events" class="events"></div></section>

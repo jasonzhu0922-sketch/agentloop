@@ -5,12 +5,14 @@ import type { UploadedSourceSummary, VisibleDirectoryGrant } from "../runtime/co
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import { SourceRepository } from "../storage/repositories/source-repository.ts";
 import { ConversationResultRepository } from "../storage/repositories/conversation-result-repository.ts";
+import type { ToolResultRepository } from "../runtime/tool-result-repository.ts";
 import { createArtifactConverterTools } from "./artifact-converter.ts";
 import { createComputerTools } from "./computer-tools.ts";
 import { createSkillLoader } from "./skill-loader.ts";
 import { createSourceTools } from "./source-tools.ts";
 import { createHumanLoopTool } from "./human-loop-tool.ts";
 import { createConversationResultTool } from "./conversation-result-tool.ts";
+import { createToolResultTool } from "./tool-result-tool.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 import { createVisibleDirectoryTools } from "./visible-directory-tools.ts";
 
@@ -19,6 +21,7 @@ export interface CoreToolsOptions {
   driver?: ComputerDriver;
   acceptanceService?: ArtifactAcceptanceService;
   conversationResults?: ConversationResultRepository;
+  toolResults?: ToolResultRepository;
   pluginTools?: readonly RuntimeTool<unknown>[];
 }
 
@@ -26,6 +29,7 @@ export function createCoreTools(options: CoreToolsOptions): readonly RuntimeTool
   return [
     createHumanLoopTool(),
     ...(options.conversationResults === undefined ? [] : [createConversationResultTool(options.conversationResults)]),
+    ...(options.toolResults === undefined ? [] : [createToolResultTool(options.toolResults)]),
     ...createComputerTools(options.executor, options.driver, options.acceptanceService),
     ...createArtifactConverterTools(options.executor),
     ...(options.pluginTools ?? []),

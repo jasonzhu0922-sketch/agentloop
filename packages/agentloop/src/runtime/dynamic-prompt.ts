@@ -10,6 +10,7 @@ export type RiskProfile =
   | "dangerous_or_irreversible";
 export type PlanShape = "single_leaf" | "fact_then_produce" | "multi_deliverable" | "pipeline" | "recovery_patch" | "human_blocked";
 export type ArtifactKind = "html" | "document" | "presentation" | "spreadsheet" | "image" | "code" | "none";
+export type ArtifactAction = "none" | "create" | "modify" | "transform";
 export type SourceNeed = "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
 export type DeliverySurface = "conversation" | "workspace_artifact";
 export type ResearchDepth = "opportunistic" | "bounded" | "strict";
@@ -53,6 +54,7 @@ export interface TaskProfile {
   readonly riskProfile?: RiskProfile;
   readonly planShape?: PlanShape;
   readonly artifactKind?: ArtifactKind;
+  readonly artifactAction?: ArtifactAction;
   readonly sourceNeed?: SourceNeed;
   readonly researchPolicy?: ResearchPolicy;
   readonly deliverySurface?: DeliverySurface;
@@ -70,6 +72,7 @@ export function buildTaskProfile(input: {
   readonly riskProfile?: RiskProfile;
   readonly planShape?: PlanShape;
   readonly artifactKind?: ArtifactKind;
+  readonly artifactAction?: ArtifactAction;
   readonly sourceNeed?: SourceNeed;
   readonly researchPolicy?: ResearchPolicy;
   readonly deliverySurface?: DeliverySurface;
@@ -85,6 +88,7 @@ export function buildTaskProfile(input: {
     ...(input.riskProfile === undefined ? {} : { riskProfile: input.riskProfile }),
     ...(input.planShape === undefined ? {} : { planShape: input.planShape }),
     ...(input.artifactKind === undefined ? {} : { artifactKind: input.artifactKind }),
+    ...(input.artifactAction === undefined ? {} : { artifactAction: input.artifactAction }),
     ...(input.sourceNeed === undefined ? {} : { sourceNeed: input.sourceNeed }),
     ...(input.researchPolicy === undefined ? {} : { researchPolicy: input.researchPolicy }),
     ...(input.deliverySurface === undefined ? {} : { deliverySurface: input.deliverySurface }),
@@ -149,6 +153,7 @@ function taskProfileSystemSection(taskProfile: TaskProfile | undefined): string 
     ...(taskProfile.riskProfile === undefined ? {} : { risk: taskProfile.riskProfile }),
     ...(taskProfile.planShape === undefined ? {} : { shape: taskProfile.planShape }),
     ...(taskProfile.artifactKind === undefined ? {} : { artifactKind: taskProfile.artifactKind }),
+    ...(taskProfile.artifactAction === undefined ? {} : { artifactAction: taskProfile.artifactAction }),
     ...(taskProfile.sourceNeed === undefined ? {} : { sourceNeed: taskProfile.sourceNeed }),
     ...(taskProfile.researchPolicy === undefined
       ? {}

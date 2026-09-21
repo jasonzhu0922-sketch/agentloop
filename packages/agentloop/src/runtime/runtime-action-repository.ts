@@ -104,13 +104,16 @@ export class RuntimeActionRepository {
     metadata?: Readonly<Record<string, unknown>>;
     /** A resolved operation may still report a semantic failure, such as a nonzero command exit. */
     resultFailureCode?: (value: unknown) => string | undefined;
+    /** Persist the canonical result before atomically binding its opaque ref to Action success. */
+    prepareResultRef?: (value: T, action: RuntimeActionRecord) => Promise<string>;
   }, operation: () => Promise<T>): Promise<T> {
     const action = await this.dispatch(input);
     try {
       const value = await operation();
       const resultFailureCode = input.resultFailureCode?.(value);
       if (resultFailureCode === undefined) {
-        await this.succeed(action.id, action.fence);
+        const resultRef = await input.prepareResultRef?.(value, action);
+        await this.succeed(action.id, action.fence, resultRef);
       } else {
         await this.fail(action.id, action.fence, resultFailureCode, "unknown");
       }
@@ -411,18 +414,23 @@ export class RuntimeActionRepository {
     return await this.require(actionId);
   }
 
-  private async succeed(actionId: string, fence: number): Promise<void> {
+  private async succeed(actionId: string, fence: number, resultRef?: string): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {
       const row = await this.requireRow(actionId);
       const result = await this.database.prepare(`
         UPDATE runtime_actions
-        SET state = 'succeeded', lease_until = NULL, effect_state = 'applied', revision = revision + 1,
+        SET state = 'succeeded', lease_until = NULL, effect_state = 'applied', result_ref = ?, revision = revision + 1,
             updated_at = ?, closed_at = ?
         WHERE id = ? AND state = 'dispatched' AND fence = ? AND revision = ?
-      `).run(now, now, actionId, fence, row.revision) as { changes: number };
+      `).run(resultRef ?? null, now, now, actionId, fence, row.revision) as { changes: number };
       if (result.changes !== 1) throw new AppError("CONFLICT", "Runtime Action lease was lost before result commit", 409);
-      await this.appendEvent(row.run_id, "action.result_committed", { actionId, fence, effectState: "applied" }, now);
+      await this.appendEvent(row.run_id, "action.result_committed", {
+        actionId,
+        fence,
+        effectState: "applied",
+        ...(resultRef === undefined ? {} : { resultRef }),
+      }, now);
     });
   }
 

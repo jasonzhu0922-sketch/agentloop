@@ -1,9 +1,10 @@
-import type { ArtifactKind, ResearchPolicy, SourceNeed } from "./dynamic-prompt.ts";
+import type { ArtifactAction, ArtifactKind, ResearchPolicy, SourceNeed } from "./dynamic-prompt.ts";
 
 export type DeliverySurface = "conversation" | "workspace_artifact";
 
 export interface TaskIntentClassification {
   readonly deliverySurface: DeliverySurface;
+  readonly artifactAction: ArtifactAction;
   readonly artifactKind: ArtifactKind;
   readonly sourceNeed: SourceNeed;
   readonly researchPolicy?: ResearchPolicy;
@@ -50,10 +51,11 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     answer: matchedConversationAnswerSignals(text),
     source: matchedSourceSignals(text),
   };
-  const artifactKind = detectArtifactKindSignal(text);
+  const artifactAction = inferArtifactAction(text, signals.action);
+  const artifactKind = detectRequestedArtifactKind(text, artifactAction);
   const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
   const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
-  const wantsArtifact = artifactKind !== "none"
+  const wantsArtifact = artifactAction !== "none" && artifactKind !== "none"
     // Tool availability authorizes a possible workspace write, but it never
     // turns a referenced input format into a requested output artifact.
     && signals.action.length > 0
@@ -61,6 +63,7 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
   const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0;
   return {
     deliverySurface: wantsArtifact && !explicitConversationOnly ? "workspace_artifact" : "conversation",
+    artifactAction,
     artifactKind: wantsArtifact ? artifactKind : "none",
     sourceNeed,
     ...(researchPolicy === undefined ? {} : { researchPolicy }),
@@ -82,7 +85,7 @@ export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy 
 }
 
 export function requestedArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
-  const kind = detectArtifactKindSignal(normalize(input));
+  const kind = classifyTaskIntent({ objective: input }).artifactKind;
   return kind === "none" ? new Set() : new Set([kind]);
 }
 
@@ -98,6 +101,35 @@ export function requestsPriorArtifactChange(input: string): boolean {
     ]).length > 0;
 }
 
+function inferArtifactAction(text: string, actionSignals: readonly string[]): ArtifactAction {
+  if (actionSignals.includes("transform")) return "transform";
+  if (actionSignals.includes("repair") || explicitNativeArtifactMutationRequested(text)) return "modify";
+  if (actionSignals.includes("make") || actionSignals.includes("make_zh")) return "create";
+  return "none";
+}
+
+function detectRequestedArtifactKind(text: string, action: ArtifactAction): ArtifactKind {
+  if (action === "none") return "none";
+  if (action === "create") return detectArtifactKindSignal(artifactCreationClause(text));
+  if (action === "transform") {
+    const outputKind = detectArtifactKindSignal(artifactTransformationOutputClause(text));
+    if (outputKind !== "none") return outputKind;
+  }
+  return detectArtifactKindSignal(text);
+}
+
+function artifactCreationClause(text: string): string {
+  const matches = [...text.matchAll(/\b(?:make|create|build|generate|produce|deliver|write|export|design|implement|materialize|form)\b|做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出/giu)];
+  const last = matches.at(-1);
+  return last?.index === undefined ? text : text.slice(last.index);
+}
+
+function artifactTransformationOutputClause(text: string): string {
+  const matches = [...text.matchAll(/\b(?:to|into|as)\b|转成|转为|转换成|转换为|导出为|输出为/giu)];
+  const last = matches.at(-1);
+  return last?.index === undefined ? text : text.slice(last.index + last[0].length);
+}
+
 function detectArtifactKindSignal(text: string): ArtifactKind {
   if (/(?:\b(?:html|web\s?page|webpage|landing\s?page|site|website|frontend|ui)\b|网页|页面|首页|登录页|落地页|站点|网站|前端|界面)/iu.test(text)) return "html";
   if (/(?:pptx?|slides?|deck|presentation|幻灯片|演示文稿|课件)/iu.test(text)) return "presentation";
@@ -105,7 +137,12 @@ function detectArtifactKindSignal(text: string): ArtifactKind {
   if (/(?:xlsx?|excel|spreadsheet|sheet|csv|表格|工作簿)/iu.test(text)) return "spreadsheet";
   if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(text)) return "image";
   if (/(?:code|script|program|app|json|代码|脚本|程序|应用)/iu.test(text)) return "code";
+  if (/(?:\b(?:report|summary|brief|memo|proposal|assessment)\b|报告|总结|简报|备忘录|方案|评估|评价材料)/iu.test(text)) return "document";
   return "none";
+}
+
+function explicitNativeArtifactMutationRequested(value: string): boolean {
+  return /(?:\b(?:edit|modify|update|revise|repair|fix|restyle|redesign|reformat|retouch|crop|resize|replace|remove|delete|insert|append|rename|reorder|sort|filter|apply)\b|修改|更改|改动|改为|改成|调整|优化|修复|更正|美化|重设计|重新排版|改版|替换|删除|移除|新增|添加|插入|重命名|排序|筛选|套用|应用|统一.{0,8}(?:视觉|主题|风格|样式|版式|布局|配色|颜色|字体|背景))/iu.test(value);
 }
 
 function inferSourceNeedFromIntent(text: string): SourceNeed {
@@ -188,10 +225,10 @@ function researchPolicy(
 
 function matchedArtifactActions(text: string): string[] {
   return matchSignals(text, [
-    ["make", /\b(?:make|create|build|generate|produce|deliver|write|export|convert|design|implement|materialize)\b/iu],
-    ["repair", /\b(?:fix|repair|edit|update|correct|regenerate|rebuild|open|inspect|check)\b|修复|修改|更正|重新生成|重做|打开|检查|查看|乱码|不可读|打不开/iu],
-    ["transform", /\b(?:merge|combine|concatenate|join|split|rotate|encrypt|decrypt|watermark|compress|resize|transcode)\b|合并|拼接|拆分|分割|旋转|加密|解密|加水印|压缩|缩放|转码/iu],
-    ["make_zh", /做|制作|创建|生成|产出|输出|交付|写|设计|实现|搭建|构建|导出|转换|转成|转为|转/iu],
+    ["make", /\b(?:make|create|build|generate|produce|deliver|write|export|convert|design|implement|materialize|form)\b/iu],
+    ["repair", /\b(?:fix|repair|edit|update|correct|regenerate|rebuild|open|inspect|check)\b|修复|修改|更改|改动|改为|改成|更正|重新生成|重做|打开|检查|查看|乱码|不可读|打不开/iu],
+    ["transform", /\b(?:convert|merge|combine|concatenate|join|split|rotate|encrypt|decrypt|watermark|compress|resize|transcode)\b|合并|拼接|拆分|分割|旋转|加密|解密|加水印|压缩|缩放|转码|转换|转成|转为/iu],
+    ["make_zh", /做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出|转换|转成|转为|转/iu],
   ]);
 }
 

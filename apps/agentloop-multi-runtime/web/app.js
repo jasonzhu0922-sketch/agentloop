@@ -2,8 +2,7 @@ import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, 
 import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "./assistant-message-presentation.js";
 import { createCoalescedUpdater } from "./live-update-scheduler.js";
 import { persistJson, persistSessions } from "./session-persistence.js";
-import { openArtifactPreview } from "./artifact-preview.js";
-import { renderMarkdown } from "./markdown-renderer.js";
+import { openArtifactPreview, renderMarkdown } from "./artifact-preview.js";
 import { cancellationTarget } from "./cancellation-target.js";
 import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 import { conversationMessagesFromTurns } from "./conversation-history.js";
@@ -734,7 +733,7 @@ function renderMessage(message) {
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text">${output}</div>${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${responseTiming}</div></div></article>`;
 }
 
 async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
@@ -969,7 +968,6 @@ async function previewArtifact(artifactId) {
       if (!response.ok) throw new Error(`无法生成预览（HTTP ${response.status}）`);
       return await response.json();
     },
-    renderMarkdown,
   });
 }
 

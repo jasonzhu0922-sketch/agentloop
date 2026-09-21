@@ -60,6 +60,16 @@ interface PrunedToolResult {
   readonly preview?: string;
   readonly previewCharacters?: number;
   readonly structuredEvidence?: string;
+  readonly toolResultRef?: Readonly<{ schema: "agentloop.toolResultRef/v1"; resultId: string }>;
+}
+
+interface ToolResultCatalogEntry {
+  readonly schema: "agentloop.toolResultCatalogEntry/v1";
+  readonly resultId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly resultSchema?: string;
+  readonly selectors?: readonly Readonly<Record<string, unknown>>[];
 }
 
 const SUMMARY_SYSTEM_PROMPT = [
@@ -130,6 +140,7 @@ export class ContextAssembler {
   private snapshot?: RuntimeContextSnapshot;
   private previousSnapshotId?: string;
   private summary?: string;
+  private toolResultCatalog: readonly ToolResultCatalogEntry[] = [];
 
   constructor(options: {
     runId: string;
@@ -212,6 +223,7 @@ export class ContextAssembler {
     signal?: AbortSignal,
   ): Promise<ContextAssembly> {
     assertClosedToolProtocol(canonicalMessages);
+    this.refreshToolResultCatalog(canonicalMessages);
     const usableInputTokens = this.policy.contextWindowTokens
       - this.policy.outputReserveTokens
       - this.policy.safetyMarginTokens;
@@ -388,6 +400,7 @@ export class ContextAssembler {
       if (!compacted && pruned === undefined) return item;
       const sha256 = pruned?.sha256 ?? digest(item.result);
       const originalCharacters = pruned?.originalCharacters ?? item.result.length;
+      const toolResultRef = pruned?.toolResultRef ?? toolResultRefFromContent(item.result);
       if (pruned?.structuredEvidence !== undefined) {
         return {
           ...item,
@@ -400,6 +413,9 @@ export class ContextAssembler {
           `[Tool result omitted from assessment projection; toolCallId=${item.toolCallId};`,
           `sha256=${sha256}; originalCharacters=${originalCharacters};`,
           `canonical evidence remains persisted${compacted ? `; contextEpoch=${this.contextEpoch}` : ""}]`,
+          ...(toolResultRef === undefined ? [] : [
+            `Exact result remains readable with read_tool_result resultId=${toolResultRef.resultId}.`,
+          ]),
         ].join(" "),
       };
     });
@@ -407,6 +423,37 @@ export class ContextAssembler {
 
   private buildProjection(canonicalMessages: readonly ModelMessage[]): ModelMessage[] {
     return this.buildProjectionFrom(canonicalMessages, this.firstKeptMessageIndex);
+  }
+
+  private refreshToolResultCatalog(canonicalMessages: readonly ModelMessage[]): void {
+    const entries = new Map<string, ToolResultCatalogEntry>();
+    for (const message of canonicalMessages) {
+      if (message.role !== "tool" || message.isError) continue;
+      const value = parseJsonRecord(message.content);
+      const ref = toolResultRefProjection(value?.toolResultRef) ?? toolResultRefFromMarker(message.content);
+      if (ref === undefined) continue;
+      const resultSchema = stringValue(value?.schema);
+      const selectors = message.name === "computer_read_json" && Array.isArray(value?.queries)
+        ? value.queries.slice(0, 24).flatMap((query) => {
+          const record = recordValue(query);
+          if (record === undefined) return [];
+          return [omitUndefinedDeep({ pointer: record.pointer, offset: record.offset, limit: record.limit }) as Record<string, unknown>];
+        })
+        : undefined;
+      entries.set(ref.resultId, {
+        schema: "agentloop.toolResultCatalogEntry/v1",
+        resultId: ref.resultId,
+        toolCallId: message.toolCallId,
+        toolName: message.name,
+        ...(resultSchema === undefined ? {} : { resultSchema }),
+        ...(selectors === undefined || selectors.length === 0 ? {} : { selectors }),
+      });
+    }
+    const next = [...entries.values()].slice(-64);
+    if (JSON.stringify(next) === JSON.stringify(this.toolResultCatalog)) return;
+    this.toolResultCatalog = next;
+    this.contextRevision += 1;
+    this.invalidateSnapshot();
   }
 
   private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
@@ -463,6 +510,7 @@ export class ContextAssembler {
         originalCharacters: message.content.length,
         sha256: digest(message.content),
         reason: "budget",
+        toolResultRef: toolResultRefFromContent(message.content),
       };
       this.prunedToolResults.set(message.toolCallId, record);
       newlyPruned.push(record);
@@ -489,7 +537,10 @@ export class ContextAssembler {
         || isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
-      const structuredEvidence = structuredToolResultProjection(message.name, message.content);
+      const structuredEvidence = preserveToolResultRef(
+        structuredToolResultProjection(message.name, message.content),
+        message.content,
+      );
       if (structuredEvidence !== undefined) {
         const record: PrunedToolResult = {
           toolCallId: message.toolCallId,
@@ -498,6 +549,7 @@ export class ContextAssembler {
           sha256: digest(message.content),
           reason: "structured_tool_result",
           structuredEvidence,
+          toolResultRef: toolResultRefFromContent(message.content),
         };
         this.prunedToolResults.set(message.toolCallId, record);
         newlyProjected.push(record);
@@ -512,6 +564,7 @@ export class ContextAssembler {
         reason: "large_tool_result",
         preview,
         previewCharacters: preview.length,
+        toolResultRef: toolResultRefFromContent(message.content),
       };
       this.prunedToolResults.set(message.toolCallId, record);
       newlyProjected.push(record);
@@ -530,7 +583,10 @@ export class ContextAssembler {
         || isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
-      const structuredEvidence = structuredToolResultProjection(message.name, message.content);
+      const structuredEvidence = preserveToolResultRef(
+        structuredToolResultProjection(message.name, message.content),
+        message.content,
+      );
       if (structuredEvidence === undefined) continue;
       const record: PrunedToolResult = {
         toolCallId: message.toolCallId,
@@ -539,6 +595,7 @@ export class ContextAssembler {
         sha256: digest(message.content),
         reason: "structured_tool_result",
         structuredEvidence,
+        toolResultRef: toolResultRefFromContent(message.content),
       };
       this.prunedToolResults.set(message.toolCallId, record);
       newlyProjected.push(record);
@@ -556,7 +613,10 @@ export class ContextAssembler {
         || message.isError
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
-      const structuredEvidence = structuredToolEvidenceProjection(message.content);
+      const structuredEvidence = preserveToolResultRef(
+        structuredToolEvidenceProjection(message.content),
+        message.content,
+      );
       if (structuredEvidence === undefined) continue;
       const record: PrunedToolResult = {
         toolCallId: message.toolCallId,
@@ -565,6 +625,7 @@ export class ContextAssembler {
         sha256: digest(message.content),
         reason: "structured_evidence",
         structuredEvidence,
+        toolResultRef: toolResultRefFromContent(message.content),
       };
       this.prunedToolResults.set(message.toolCallId, record);
       newlyProjected.push(record);
@@ -853,6 +914,15 @@ export class ContextAssembler {
         JSON.stringify(this.promptProjectionPolicy),
         "</prompt_projection_policy>",
       ]),
+      ...(this.toolResultCatalog.length === 0 ? [] : [
+        "<tool_result_catalog source=\"server\">",
+        JSON.stringify({
+          schema: "agentloop.toolResultCatalog/v1",
+          results: this.toolResultCatalog,
+          readProtocol: "Use read_tool_result with resultId and an optional JSON Pointer/array window. Never provide a path or hash.",
+        }),
+        "</tool_result_catalog>",
+      ]),
       ...(this.runtimeDirective === undefined ? [] : [
         "<runtime_directive>",
         this.runtimeDirective,
@@ -998,11 +1068,17 @@ function serializeForSummary(message: ModelMessage, toolResultLimit: number): st
   if (message.name === "load_skill") {
     return `[Tool result load_skill id=${message.toolCallId}]: Exact Skill body omitted from compaction input; reload after compaction; sha256=${digest(message.content)}; characters=${message.content.length}`;
   }
-  const structuredEvidence = structuredToolEvidenceProjection(message.content);
+  const structuredEvidence = preserveToolResultRef(
+    structuredToolEvidenceProjection(message.content),
+    message.content,
+  );
   if (structuredEvidence !== undefined) {
     return `[Tool evidence receipt ${message.name} id=${message.toolCallId}]: ${structuredToolEvidenceLedger(message.content) ?? structuredEvidence}`;
   }
-  const structuredResult = structuredToolResultProjection(message.name, message.content);
+  const structuredResult = preserveToolResultRef(
+    structuredToolResultProjection(message.name, message.content),
+    message.content,
+  );
   if (structuredResult !== undefined) {
     return `[Tool result ${message.name} id=${message.toolCallId}]: ${structuredResult}`;
   }
@@ -1037,19 +1113,23 @@ function truncateForSummary(value: string, maximum: number): string {
 }
 
 function prunedToolMarker(record: PrunedToolResult): string {
+  const ref = record.toolResultRef === undefined
+    ? undefined
+    : `Runtime Tool result remains exactly readable with read_tool_result({resultId:${JSON.stringify(record.toolResultRef.resultId)}, pointer?, offset?, limit?}); no path or hash is required.`;
   if (record.structuredEvidence !== undefined) {
     const label = record.reason === "structured_tool_result"
       ? "structured projection"
       : "structured evidence";
     return [
       record.structuredEvidence,
+      ...(ref === undefined ? [] : [ref]),
       `[Tool result projected as ${label}; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; sha256=${record.sha256}; canonical event retained]`,
     ].join("\n\n");
   }
   const marker = record.reason === "large_tool_result"
     ? `[Large tool result projected for model context; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; previewCharacters=${record.previewCharacters ?? 0}; sha256=${record.sha256}; canonical event retained]`
     : `[Old tool result removed from model projection; tool=${record.toolName}; toolCallId=${record.toolCallId}; originalCharacters=${record.originalCharacters}; sha256=${record.sha256}; canonical event retained]`;
-  return record.preview === undefined ? marker : `${record.preview}\n\n${marker}`;
+  return [record.preview, ref, marker].filter((value) => value !== undefined).join("\n\n");
 }
 
 function structuredToolEvidenceProjection(content: string): string | undefined {
@@ -1246,14 +1326,15 @@ function structuredToolResultProjection(toolName: string, content: string): stri
   if (toolName === "computer_read_json" && schema === "agentloop.jsonRead/v1") {
     return JSON.stringify(omitUndefinedDeep({
       schema: "agentloop.contextJsonRead/v1",
-      path: value.path, sha256: value.sha256, bytes: value.bytes, root: value.root,
+      toolResultRef: toolResultRefProjection(value.toolResultRef),
+      bytes: value.bytes, root: value.root,
       queries: Array.isArray(value.queries) ? value.queries.map((query) => {
         const record = recordValue(query);
         return record === undefined ? undefined : { ...record, value: undefined, values: undefined };
       }) : undefined,
       caveats: value.caveats,
       valuesOmitted: true,
-      instruction: "JSON values omitted from this projection. Reuse already established facts; for missing details read this path with computer_read_json and a smaller pointer/offset/limit window (at most 12000 serialized characters), or a verified character window with computer_read_file.",
+      instruction: "JSON values are omitted only from this prompt projection, not from Runtime storage. Use read_tool_result with toolResultRef.resultId and the recorded JSON Pointer/offset/limit to recover exact values. Do not replay a path or hash and do not rerun source extraction solely to recover them.",
     }));
   }
   if (schema === "agentloop.paginatedHtmlMaterialization/v1") {
@@ -2074,6 +2155,39 @@ function parseJsonRecord(content: unknown): Record<string, unknown> | undefined 
   } catch {
     return undefined;
   }
+}
+
+function toolResultRefProjection(value: unknown): Readonly<{
+  schema: "agentloop.toolResultRef/v1";
+  resultId: string;
+}> | undefined {
+  const record = recordValue(value);
+  if (record === undefined || record.schema !== "agentloop.toolResultRef/v1") return undefined;
+  const resultId = stringValue(record.resultId);
+  if (resultId === undefined || !/^tr_[0-9a-f-]{36}$/u.test(resultId)) return undefined;
+  return { schema: "agentloop.toolResultRef/v1", resultId };
+}
+
+function toolResultRefFromMarker(content: string): ReturnType<typeof toolResultRefProjection> {
+  const match = /\[Runtime ToolResultRef (\{"schema":"agentloop\.toolResultRef\/v1","resultId":"tr_[0-9a-f-]{36}"\})\]/u.exec(content);
+  if (match?.[1] === undefined) return undefined;
+  try {
+    return toolResultRefProjection(JSON.parse(match[1]));
+  } catch {
+    return undefined;
+  }
+}
+
+function toolResultRefFromContent(content: string): ReturnType<typeof toolResultRefProjection> {
+  return toolResultRefProjection(parseJsonRecord(content)?.toolResultRef) ?? toolResultRefFromMarker(content);
+}
+
+function preserveToolResultRef(projection: string | undefined, canonicalContent: string): string | undefined {
+  if (projection === undefined) return undefined;
+  const ref = toolResultRefFromContent(canonicalContent);
+  if (ref === undefined) return projection;
+  const projected = parseJsonRecord(projection);
+  return projected === undefined ? projection : JSON.stringify({ ...projected, toolResultRef: ref });
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {

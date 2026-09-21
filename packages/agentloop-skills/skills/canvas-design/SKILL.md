@@ -1,6 +1,6 @@
 ---
 name: canvas-design
-description: Create original single-page posters and static visual art as PNG or PDF, with a subject-specific design philosophy and a render direction that materially changes composition, typography, color, and surface language.
+description: Create original single-page posters and static visual art as PNG or PDF, prioritizing brief-specific creative direction and custom composition while using the packaged renderer only for genuinely simple, compatible briefs.
 license: Complete terms in LICENSE.txt
 agentloop:
   roles:
@@ -23,13 +23,32 @@ Create two artifacts:
 
 The philosophy is a design decision, not decorative prose. Its choices must survive into the render spec and the finished image.
 
-## Load the render contract first
+Creativity and truthful expression of the brief take priority over renderer reuse. Design the work first, then select an implementation that can realize it without dropping content, flattening hierarchy, or replacing requested spatial relationships with generic decoration. The packaged renderer is a constrained fast path, not the default definition of a poster. A custom renderer is a normal first-class path, not a failure or last resort.
 
-Before proposing directions, writing the philosophy, or creating a render spec, load the current packaged-renderer schema:
+## Preserve the brief as a design contract
+
+Before proposing directions, extract a compact brief contract containing:
+
+- `mandatoryCopy`: every user-owned phrase that must appear, preserving meaningful grouping and emphasis;
+- `reservedZones`: required clear or replaceable regions such as a QR code, logo, portrait, product screenshot, sponsor block, seal, registration panel, or contact area;
+- `contentStructure`: named sections and their relationships, such as hero, capability list, evidence panel, CTA, and footer;
+- `recognizableSubjects`: people, products, places, objects, or symbols that must be visibly represented;
+- `deliveryConstraints`: size, format, orientation, brand assets, safe margins, and print or screen requirements;
+- `distinctnessConstraints`: references or prior outputs that the new work must preserve, avoid, or materially differ from.
+
+Treat these as acceptance constraints, not optional inspiration. Do not merge several required sections into a generic label list, shorten or omit mandatory copy to fit a renderer, or represent a reserved zone only in the philosophy. A reserved zone must have an explicit placement, size or proportion, clearance rule, and visual treatment in the implementation plan.
+
+Keep this contract renderer-neutral. Do not add a scenario-specific field to a generic renderer merely to satisfy one poster. A QR placeholder is one instance of a general reserved region; the same contract must also work for logos, screenshots, portraits, seals, and other replaceable assets.
+
+## Inspect packaged capability without letting it choose the design
+
+Load the current packaged-renderer schema before assigning its enum values or deciding that it can implement a direction:
 
 `python3 -c "import os,runpy;runpy.run_path(os.path.join(os.environ['AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN'],'scripts','render_static_canvas.py'), run_name='__main__')" --schema`
 
-Treat the returned art-direction values, layout families, composition variants, motif kinds, and topology mappings as the current executable contract. Do not invent enum values and repair them after rendering fails. Use the schema to understand renderer capability, not to choose the aesthetic direction. The renderer does not infer visual direction from the subject, title, labels, industry, mood, or `designIntent`; every render spec must carry an explicit `artDirection`. If a concept cannot be represented by the returned grammar or motifs, choose a custom renderer before writing the spec.
+Treat the returned art-direction values, layout families, composition variants, motif kinds, and topology mappings as the packaged renderer's executable contract. Do not invent enum values and repair them after rendering fails. The schema is a capability inventory, not a menu that limits the candidate directions. The renderer does not infer visual direction from the subject, title, labels, industry, mood, or `designIntent`; every packaged render spec must carry an explicit `artDirection`.
+
+Do not begin by choosing a layout family and then write a philosophy that rationalizes it. Candidate concepts may exceed the packaged grammar. Record those candidates honestly and choose a custom renderer when they are best for the brief.
 
 ## Find a distinct direction
 
@@ -49,7 +68,7 @@ Changing only the movement name, palette, seed, or arrangement of the same lines
 
 The candidate set itself must be diverse. Every pair must differ on at least four axes, including composition topology or central metaphor. When the brief does not fix them, use three different topologies, at least two color strategies, and at least two material languages and image modes. Include one counter-default direction that expresses the subject without the category's familiar palette, glow, geometry, or iconography while preserving the requested tone. A set of three dark technological scenes, three centered monuments, or three variants of the same luminous structure fails this gate.
 
-For each candidate, keep a compact decision record containing its concept, seven axis values exactly as returned by the schema, thumbnail silhouette, supported rendering path, brief evidence, and main tradeoff. Do not write the philosophy or spec until this comparison has produced either an evidence-backed selection or a HIL request. Mentioning three possibilities only in hidden reasoning does not satisfy this gate; preserve the comparison in the HIL options or in the philosophy's design-decision section.
+For each candidate, keep a compact decision record containing its concept, seven axes, thumbnail silhouette, likely rendering path, brief evidence, and main tradeoff. Use packaged enum values when that renderer is a plausible path; describe the axes plainly when a custom renderer better fits the concept. Do not distort a custom concept merely to make every candidate fit packaged enums. Do not write the philosophy or spec until this comparison has produced either an evidence-backed selection or a HIL request. Mentioning three possibilities only in hidden reasoning does not satisfy this gate; preserve the comparison in the HIL options or in the philosophy's design-decision section.
 
 ## Revise a prior poster without cloning its form
 
@@ -75,7 +94,7 @@ Sector, audience, purpose, topic, event type, and mood adjectives never satisfy 
 
 When none of the three explicit bypass conditions applies and two or more candidates remain viable, HIL is required. This is a stop gate: do not write the philosophy, create the spec, render the artwork, or call an artifact-writing tool before the HIL response. For example, a brief that only names an enterprise technology launch and asks for a solemn, grand, technological tone must present three directions through HIL because it still leaves the visual form and metaphor open.
 
-Prefer a single-choice `selection` request containing three coherent directions. Each option must state its metaphor, thumbnail silhouette, material and color character, practical tradeoff, and all seven schema axis values. Validate the option set against the diversity gate before calling HIL. When HIL is required because the brief does not favor a direction, present the options neutrally: do not mark a familiar or genre-default candidate as recommended, preferred, or preselected. Use a `confirmation` request only when there is one evidence-backed interpretation and the user needs to approve or reject it. State exactly which preference is missing, cite the brief and schema result in `evidenceRefs`, and resume with `continue_step`. Once answered, treat the response as authoritative design input and continue the same step without asking again.
+Prefer a single-choice `selection` request containing three coherent directions. Each option must state its metaphor, thumbnail silhouette, material and color character, practical tradeoff, seven axes, and whether it is best served by a custom or packaged renderer. Validate the option set against the diversity gate before calling HIL. Do not hide a stronger custom direction merely because a packaged option is easier to execute. When HIL is required because the brief does not favor a direction, present the options neutrally: do not mark a familiar or genre-default candidate as recommended, preferred, or preselected. Use a `confirmation` request only when there is one evidence-backed interpretation and the user needs to approve or reject it. State exactly which preference is missing, cite the brief and schema result in `evidenceRefs`, and resume with `continue_step`. Once answered, treat the response as authoritative design input and continue the same step without asking again.
 
 Do not use HIL to recover from an invalid spec, unsupported enum, unsupported motif, or render failure. Correct those implementation errors from the loaded schema or use a custom renderer. Do not ask the user to decide every axis independently or to approve a direction already specified by the brief. Do not silently select a genre-default direction merely to avoid HIL.
 
@@ -106,9 +125,23 @@ Text can be quiet, loud, dense, fragmented, monumental, or image-like. Its role 
 
 ## Choose the rendering path
 
-For posters, key art, announcements, and other single-page work, use the packaged renderer when one of its visual grammars can express the selected direction. Use a compact custom renderer when the concept requires photography, detailed illustration, hand lettering, a narrative scene, or another grammar the package cannot honestly represent.
+Choose the rendering path only after the brief contract and visual direction are stable. Default to a custom renderer for brand posters, campaign key art, and other composition-led work where originality, hierarchy, or conversion structure materially affects success.
 
-Do not force a direction through the packaged renderer merely because it is faster. `layoutFamily` describes form; `designIntent` describes subject purpose. They are independent.
+Use the packaged renderer only when every condition below is true:
+
+- the content model is genuinely simple: one title, one subtitle, and no more than eight compact peer labels;
+- there are no reserved zones, CTA panels, contact blocks, logos requiring controlled placement, screenshots, sponsor areas, or other replaceable regions;
+- there are no multiple named sections whose hierarchy or spatial relationship must be preserved;
+- one packaged grammar and its supported motifs directly express the selected metaphor and thumbnail silhouette;
+- all mandatory copy fits the documented fields without shortening, merging, demoting, or converting sections into decorative labels;
+- the requested image treatment does not require photography, detailed illustration, hand lettering, a narrative scene, product UI, or another unsupported grammar;
+- the result can remain distinctive within the chosen grammar rather than merely changing palette, seed, or ornament.
+
+If any condition is false or uncertain, use a compact custom renderer. The burden is to demonstrate packaged-renderer compatibility, not to demonstrate why custom work is exceptional.
+
+Do not force a direction through the packaged renderer merely because it is faster, already available, or easier to validate technically. Never delete copy, collapse sections, discard a reserved zone, or change the central metaphor to make the brief fit its schema. `layoutFamily` describes form; `designIntent` describes subject purpose. They are independent.
+
+For a custom renderer, preserve the same design discipline: materialize the brief contract and selected direction in workspace-owned source, use explicit layout measurements for required regions, verify glyph coverage, and keep the implementation no more specialized than the selected artwork requires. Custom means purpose-built composition, not unstructured improvisation.
 
 The packaged renderer lives at `scripts/render_static_canvas.py`. From a writable workspace, run it through the injected Skill root:
 
@@ -116,9 +149,9 @@ The packaged renderer lives at `scripts/render_static_canvas.py`. From a writabl
 
 Do not pass `@skills/...` or absolute Skill paths as command arguments.
 
-## Packaged render contract
+## Constrained packaged render contract
 
-Write a compact JSON spec. Copy the selected `artDirection` exactly from the philosophy decision into the spec. New specs with a `designIntent` require `artDirection`.
+Use this contract only after the eligibility gate above passes. Write a compact JSON spec and copy the selected `artDirection` exactly from the philosophy decision into it. New specs with a `designIntent` require `artDirection`.
 
 ```json
 {
@@ -167,6 +200,8 @@ These mappings describe geometry, not subject matter. A technology poster can be
 
 Use CJK text directly. Before export, verify that the chosen font covers every visible character. The packaged renderer performs font selection and glyph smoke checks. A custom renderer must fail clearly when it cannot find compatible glyphs; never deliver tofu or replacement boxes.
 
+Before rendering, compare the implementation inputs with the brief contract. Every `mandatoryCopy` item, `reservedZones` entry, named content section, and recognizable subject must have an explicit destination. If the mapping is incomplete, stop and revise the rendering path or implementation; do not render and hope visual inspection will recover the omission.
+
 ## Inspect the result
 
 Inspect the actual image once at full view and once as a small thumbnail. Confirm:
@@ -174,9 +209,12 @@ Inspect the actual image once at full view and once as a small thumbnail. Confir
 - the thumbnail silhouette matches the selected composition topology;
 - material, color, type, and image treatment match `artDirection`;
 - the central metaphor is visible rather than described only in labels;
-- required copy is legible, contained, and free of collisions;
+- every mandatory-copy item is present, legible, correctly grouped, and free of collisions;
+- every reserved zone exists at the required placement and proportion, remains clear of decorative intrusion, and is visibly usable for its intended replacement asset;
+- named sections retain their intended hierarchy and spatial relationships instead of collapsing into a flat label field;
+- recognizable subjects are visibly represented in the promised image mode;
 - the result is meaningfully distinct from relevant earlier posters when those are available.
 
-Technical artifact acceptance proves that the file exists and decodes. It does not prove design quality or diversity. If refinement is needed, change the weak design decision or composition instead of merely adding decoration.
+Technical artifact acceptance proves that the file exists and decodes. It does not prove brief coverage, reserved-region preservation, design quality, or diversity. Do not claim completion until the visual inspection has checked the brief contract. If refinement is needed, change the weak design decision, rendering path, or composition instead of merely adding decoration.
 
 Output the final PNG or PDF alongside the Markdown philosophy. For multiple requested pages, keep one coherent philosophy while varying composition and pacing across pages.

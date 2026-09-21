@@ -4,6 +4,15 @@ AgentLoop contains adapted control-flow and scheduling logic plus an unmodified
 Skill package from the following MIT-licensed projects. References are
 pinned so the provenance of each port or fixture is auditable.
 
+## Noto Sans SC
+
+- Source: Adobe / Google Noto Fonts
+- Included path: `src/assets/fonts/NotoSansSC.ttf`
+- Use: embedded tool-owned baseline typography for portable
+  `convert_artifact` PDF output.
+- License: SIL Open Font License 1.1; full text is retained at
+  `src/assets/fonts/OFL.txt`.
+
 ## PI Agent
 
 - Source: <https://github.com/badlogic/pi-mono>

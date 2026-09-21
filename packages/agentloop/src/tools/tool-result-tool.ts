@@ -1,0 +1,152 @@
+import { badRequest, forbidden, notFound } from "../shared/errors.ts";
+import type { ToolResultRepository } from "../runtime/tool-result-repository.ts";
+import type { RuntimeTool } from "./tool-registry.ts";
+
+export const TOOL_RESULT_READER_NAME = "read_tool_result";
+const MAX_RESULT_WINDOW_CHARACTERS = 12_000;
+const MAX_RESULT_ARRAY_ITEMS = 200;
+
+interface ReadToolResultInput {
+  readonly resultId: string;
+  readonly pointer?: string;
+  readonly offset: number;
+  readonly limit: number;
+  readonly characterOffset: number;
+  readonly characterLimit: number;
+}
+
+/** Read a bounded exact window from a Runtime-owned Tool result without paths or hashes. */
+export function createToolResultTool(repository: ToolResultRepository): RuntimeTool<ReadToolResultInput> {
+  return {
+    name: TOOL_RESULT_READER_NAME,
+    description: [
+      "Read exact values from a successful Tool Action through an opaque Runtime-owned toolResultRef.",
+      "Pass resultId from agentloop.toolResultRef/v1; never supply a filesystem path or digest.",
+      "For JSON results, use a JSON Pointer and optional array offset/limit. Omit pointer for a bounded serialized character window.",
+    ].join(" "),
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["resultId"],
+      properties: {
+        resultId: { type: "string", minLength: 4, maxLength: 120 },
+        pointer: { type: "string", minLength: 1, maxLength: 2_000 },
+        offset: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_ARRAY_ITEMS },
+        characterOffset: { type: "integer", minimum: 0 },
+        characterLimit: { type: "integer", minimum: 1, maximum: MAX_RESULT_WINDOW_CHARACTERS },
+      },
+    },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse(input: unknown): ReadToolResultInput {
+      if (input === null || typeof input !== "object" || Array.isArray(input)) throw badRequest("arguments must be an object");
+      const value = input as Record<string, unknown>;
+      const resultId = typeof value.resultId === "string" ? value.resultId.trim() : "";
+      if (!/^tr_[0-9a-f-]{36}$/u.test(resultId)) throw badRequest("resultId must be an opaque Runtime Tool result id");
+      const pointer = value.pointer === undefined ? undefined : requireString(value.pointer, "pointer");
+      return {
+        resultId,
+        ...(pointer === undefined ? {} : { pointer }),
+        offset: boundedInteger(value.offset, "offset", 0, Number.MAX_SAFE_INTEGER, 0),
+        limit: boundedInteger(value.limit, "limit", 1, MAX_RESULT_ARRAY_ITEMS, 50),
+        characterOffset: boundedInteger(value.characterOffset, "characterOffset", 0, Number.MAX_SAFE_INTEGER, 0),
+        characterLimit: boundedInteger(value.characterLimit, "characterLimit", 1, MAX_RESULT_WINDOW_CHARACTERS, MAX_RESULT_WINDOW_CHARACTERS),
+      };
+    },
+    async execute(context, input) {
+      const planId = context.grant.planId;
+      const stepId = context.grant.stepId;
+      if (planId === undefined || stepId === undefined) {
+        throw forbidden("Tool result access requires a Plan-step-scoped Runtime grant");
+      }
+      const record = await repository.readAuthorized({
+        resultId: input.resultId,
+        runId: context.grant.runId,
+        planId,
+        stepId,
+      });
+      if (record === undefined) throw notFound("Tool result");
+      const source = {
+        toolName: record.toolName,
+        ...(record.resultSchema === undefined ? {} : { resultSchema: record.resultSchema }),
+        characters: record.characters,
+        bytes: record.bytes,
+      };
+      if (input.pointer === undefined) {
+        if (input.characterOffset > record.content.length) throw badRequest("characterOffset exceeds Tool result length");
+        const content = record.content.slice(input.characterOffset, input.characterOffset + input.characterLimit);
+        return {
+          schema: "agentloop.toolResultRead/v1",
+          sourceToolResultRef: record.ref,
+          source,
+          characterOffset: input.characterOffset,
+          returnedCharacters: content.length,
+          nextCharacterOffset: input.characterOffset + content.length < record.content.length
+            ? input.characterOffset + content.length
+            : null,
+          content,
+        };
+      }
+      if (record.contentFormat !== "json") throw badRequest("pointer requires a JSON Tool result");
+      const document = JSON.parse(record.content) as unknown;
+      const selected = resolveJsonPointer(document, input.pointer);
+      const array = Array.isArray(selected);
+      const value = array ? selected.slice(input.offset, input.offset + input.limit) : selected;
+      const serialized = JSON.stringify(value);
+      if (serialized.length > MAX_RESULT_WINDOW_CHARACTERS) {
+        throw badRequest(`Selected Tool result exceeds ${MAX_RESULT_WINDOW_CHARACTERS} characters; use a narrower pointer or array window`);
+      }
+      return {
+        schema: "agentloop.toolResultRead/v1",
+        sourceToolResultRef: record.ref,
+        source,
+        pointer: input.pointer,
+        ...(array ? {
+          offset: input.offset,
+          limit: input.limit,
+          returnedItems: (value as unknown[]).length,
+          totalItems: selected.length,
+          nextOffset: input.offset + (value as unknown[]).length < selected.length
+            ? input.offset + (value as unknown[]).length
+            : null,
+        } : {}),
+        value,
+      };
+    },
+  };
+}
+
+function resolveJsonPointer(document: unknown, pointer: string): unknown {
+  if (pointer === "") return document;
+  if (!pointer.startsWith("/")) throw badRequest("pointer must be a JSON Pointer beginning with /");
+  let current = document;
+  for (const rawToken of pointer.slice(1).split("/")) {
+    const token = rawToken.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9][0-9]*)$/u.test(token)) throw badRequest(`pointer array index is invalid: ${token}`);
+      const index = Number(token);
+      if (index >= current.length) throw badRequest(`pointer array index is out of range: ${token}`);
+      current = current[index];
+      continue;
+    }
+    if (current === null || typeof current !== "object" || !(token in current)) {
+      throw badRequest(`pointer does not exist: ${pointer}`);
+    }
+    current = (current as Record<string, unknown>)[token];
+  }
+  return current;
+}
+
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string" || value.length === 0) throw badRequest(`${name} must be a non-empty string`);
+  return value;
+}
+
+function boundedInteger(value: unknown, name: string, minimum: number, maximum: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw badRequest(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value as number;
+}
