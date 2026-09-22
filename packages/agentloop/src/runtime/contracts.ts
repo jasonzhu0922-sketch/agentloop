@@ -12,7 +12,7 @@ export interface RuntimeContextSnapshot {
   readonly phase: "planning" | "execution" | "assessment" | "compaction";
   readonly content: string;
   readonly supersedesId?: string;
-  /** Server-authored user decisions; informational during execution, enforced only at assessment when exact/required. */
+  /** Server-authored user decisions; exact/required commitments constrain execution and assessment records explicit conflicts. */
   readonly decisionLedger?: readonly import("./decision-ledger.ts").RuntimeDecisionCommit[];
 }
 

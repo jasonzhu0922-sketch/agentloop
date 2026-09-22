@@ -80,6 +80,8 @@ export function formatLoadedSkill(
     "",
     ...metadata,
     "",
+    "Runtime-authoritative Human-in-the-Loop decisions in the execution context are final user choices for their declared scope. Follow their selected option IDs and identity references exactly; do not reinterpret or replace them. If this Skill needs a different choice, request a new structured Human-in-the-Loop decision.",
+    "",
     skill.instructions,
     "</skill_content>",
   ].join("\n");

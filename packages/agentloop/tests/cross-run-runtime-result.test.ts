@@ -53,6 +53,55 @@ test("read_result reads only an explicitly bound completed Outcome in the same c
     assert.equal(read.returnedCharacters, 55);
     assert.equal(read.nextCharacterOffset, 67);
 
+    await database.prepare("UPDATE plans SET input_bindings_json = ? WHERE id = ?").run(JSON.stringify([{
+      schema: "agentloop.conversationInputBinding/v1",
+      result: completed.ref,
+      relation: "continue_prior",
+    }]), "current-plan");
+    await assert.rejects(
+      () => tool.execute({ grant }, tool.parse({ resultId: completed.ref.resultId })),
+      (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+    );
+
+    const publishedStep = createRuntimeResult({
+      kind: "step",
+      producer: { runId: "failed-with-step-result", planId: "failed-plan", stepId: "accepted-step" },
+      value: "accepted step result from a failed run",
+      publication: { status: "published", assessmentRef: "assessment-accepted-step", decision: "approved" },
+      createdAt: now,
+    });
+    await insertPublishedStepResult(database, {
+      owner,
+      conversationId,
+      result: publishedStep,
+      now,
+    });
+    await database.prepare("UPDATE plans SET input_bindings_json = ? WHERE id = ?").run(JSON.stringify([{
+      schema: "agentloop.resultBinding/v1",
+      result: publishedStep.ref,
+      relation: "continue_prior",
+    }]), "current-plan");
+    const resumedStep = await tool.execute({ grant }, tool.parse({ resultId: publishedStep.ref.resultId })) as { content: string };
+    assert.equal(resumedStep.content, "accepted step result from a failed run");
+
+    const unboundPublishedStep = createRuntimeResult({
+      kind: "step",
+      producer: { runId: "failed-with-unbound-step-result", planId: "unbound-step-plan", stepId: "unbound-step" },
+      value: "must not be readable without an explicit binding",
+      publication: { status: "published", assessmentRef: "assessment-unbound-step", decision: "approved" },
+      createdAt: now,
+    });
+    await insertPublishedStepResult(database, {
+      owner,
+      conversationId,
+      result: unboundPublishedStep,
+      now,
+    });
+    await assert.rejects(
+      () => tool.execute({ grant }, tool.parse({ resultId: unboundPublishedStep.ref.resultId })),
+      (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+    );
+
     for (const resultId of [unbound.ref.resultId, failed.ref.resultId, other.ref.resultId]) {
       await assert.rejects(
         () => tool.execute({ grant }, tool.parse({ resultId })),
@@ -93,6 +142,44 @@ async function insertRunOutcome(
   return result;
 }
 
+async function insertPublishedStepResult(database: AppDatabase, input: {
+  owner: string;
+  conversationId: string;
+  result: ReturnType<typeof createRuntimeResult>;
+  now: number;
+}): Promise<void> {
+  await database.prepare(`
+    INSERT INTO runs(id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at, finished_at)
+    VALUES (?, ?, ?, NULL, 0, 0, 'failed', 'failed after accepted step', ?, ?)
+  `).run(input.result.producer.runId, input.owner, input.conversationId, input.now, input.now);
+  await database.prepare(`
+    INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
+    VALUES (?, ?, 1, 'publish accepted step', '[]', '[]', 'failed', ?, ?)
+  `).run(input.result.producer.planId, input.result.producer.runId, input.now, input.now);
+  await database.prepare(`
+    INSERT INTO plan_steps(
+      plan_id, step_id, kind, position, objective, dependencies_json, refinement_state, required_facts_json,
+      skill_ids_json, required_capabilities_json, recommended_tool_names_json, execution_binding_json,
+      success_criteria_json, status, output, evidence_json, started_at, finished_at
+    ) VALUES (?, ?, 'leaf', 0, 'accepted boundary', '[]', 'not_refinable', '[]', '[]', '[]', '[]', ?, '[]', 'completed', ?, ?, ?, ?)
+  `).run(
+    input.result.producer.planId,
+    input.result.producer.stepId,
+    JSON.stringify({
+      schema: "agentloop.stepExecutionBinding/v1",
+      requiredCapabilities: [],
+      resolvedToolNames: [],
+      sourceKinds: [],
+      sideEffect: "none",
+      evidenceKinds: [],
+    }),
+    input.result.payload.content,
+    JSON.stringify({ candidateOutput: input.result.payload.content, publishedResult: input.result, toolCalls: [], modelSteps: 1 }),
+    input.now,
+    input.now,
+  );
+}
+
 async function insertCurrentPlan(database: AppDatabase, input: {
   runId: string;
   planId: string;
@@ -110,8 +197,8 @@ async function insertCurrentPlan(database: AppDatabase, input: {
     INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
     VALUES (?, ?, 1, 'continue prior', '[]', ?, 'running', ?, ?)
   `).run(input.planId, input.runId, JSON.stringify([{
-    schema: "agentloop.conversationInputBinding/v1",
-    result: { schema: "agentloop.resultRef/v1", resultId: input.resultId, runId: "completed-result", characters: 1 },
+    schema: "agentloop.resultBinding/v1",
+    result: { schema: "agentloop.resultRef/v1", resultId: input.resultId },
     relation: "continue_prior",
   }]), input.now, input.now);
   await database.prepare(`

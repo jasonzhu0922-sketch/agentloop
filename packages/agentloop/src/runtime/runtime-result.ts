@@ -2,9 +2,35 @@ import { createHash, randomUUID } from "node:crypto";
 
 export type RuntimeResultKind = "tool" | "step" | "run";
 
+export type RuntimeResultBindingRelation =
+  | "dependency"
+  | "continue_prior"
+  | "refine_prior"
+  | "correct_prior"
+  | "challenge_prior";
+
 export interface RuntimeResultRef {
   readonly schema: "agentloop.resultRef/v1";
   readonly resultId: string;
+}
+
+/** A global declaration that a Plan/Step consumes a Runtime Result. */
+export interface RuntimeResultBinding {
+  readonly schema: "agentloop.resultBinding/v1";
+  readonly result: RuntimeResultRef;
+  readonly relation: RuntimeResultBindingRelation;
+}
+
+export function parseRuntimeResultBinding(value: unknown): RuntimeResultBinding | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const result = parseRuntimeResultRef(record.result);
+  if (
+    record.schema !== "agentloop.resultBinding/v1"
+    || result === undefined
+    || !isRuntimeResultBindingRelation(record.relation)
+  ) return undefined;
+  return { schema: "agentloop.resultBinding/v1", result, relation: record.relation };
 }
 
 export interface RuntimeResultPayload {
@@ -36,6 +62,93 @@ export interface RuntimeResultRecord {
   };
   readonly payload: RuntimeResultPayload;
   readonly createdAt: number;
+}
+
+/** A bounded server view of the same Runtime Result, never a second identity. */
+export interface RuntimeResultCard {
+  readonly schema: "agentloop.resultCard/v1";
+  readonly result: RuntimeResultRef;
+  readonly kind: RuntimeResultKind;
+  readonly producer: RuntimeResultRecord["producer"];
+  readonly summary: string;
+  readonly summaryTruncated: boolean;
+  readonly characters: number;
+  readonly goal: string;
+  readonly artifactPaths: readonly string[];
+  readonly evidenceRefs: readonly string[];
+}
+
+/** A compact execution-context entry that preserves the same Result identity. */
+export interface RuntimeResultContextEntry {
+  readonly schema: "agentloop.resultContextEntry/v1";
+  readonly result: RuntimeResultRef;
+  readonly kind: RuntimeResultKind;
+  readonly producer: RuntimeResultRecord["producer"];
+  readonly resultSchema?: string;
+  readonly selectors?: readonly Readonly<Record<string, unknown>>[];
+}
+
+export function createRuntimeResultCard(input: {
+  readonly result: RuntimeResultRecord;
+  readonly goal: string;
+  readonly summary: string;
+  readonly summaryTruncated: boolean;
+  readonly artifactPaths?: readonly string[];
+  readonly evidenceRefs?: readonly string[];
+}): RuntimeResultCard {
+  return {
+    schema: "agentloop.resultCard/v1",
+    result: input.result.ref,
+    kind: input.result.kind,
+    producer: input.result.producer,
+    goal: input.goal,
+    summary: input.summary,
+    summaryTruncated: input.summaryTruncated,
+    characters: input.result.payload.characters,
+    artifactPaths: Object.freeze([...(input.artifactPaths ?? [])]),
+    evidenceRefs: Object.freeze([...(input.evidenceRefs ?? [])]),
+  };
+}
+
+export function parseRuntimeResultCard(value: unknown): RuntimeResultCard | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const result = parseRuntimeResultRef(record.result);
+  const producer = record.producer;
+  const kind = record.kind;
+  const strings = [record.summary, record.goal];
+  const artifactPaths = record.artifactPaths;
+  const evidenceRefs = record.evidenceRefs;
+  if (
+    record.schema !== "agentloop.resultCard/v1"
+    || result === undefined
+    || !["tool", "step", "run"].includes(String(kind))
+    || producer === null
+    || typeof producer !== "object"
+    || Array.isArray(producer)
+    || !strings.every((item) => typeof item === "string")
+    || typeof record.summaryTruncated !== "boolean"
+    || !Number.isInteger(record.characters)
+    || (record.characters as number) < 0
+    || !Array.isArray(artifactPaths)
+    || !artifactPaths.every((item) => typeof item === "string")
+    || !Array.isArray(evidenceRefs)
+    || !evidenceRefs.every((item) => typeof item === "string")
+  ) return undefined;
+  const producerRecord = producer as Record<string, unknown>;
+  if (typeof producerRecord.runId !== "string" || !optionalStrings(producerRecord, ["planId", "stepId", "actionId", "toolCallId", "toolName"])) return undefined;
+  return {
+    schema: "agentloop.resultCard/v1",
+    result,
+    kind: kind as RuntimeResultKind,
+    producer: producer as RuntimeResultRecord["producer"],
+    summary: record.summary as string,
+    summaryTruncated: record.summaryTruncated as boolean,
+    characters: record.characters as number,
+    goal: record.goal as string,
+    artifactPaths: artifactPaths as string[],
+    evidenceRefs: evidenceRefs as string[],
+  };
 }
 
 export function createRuntimeResult(input: {
@@ -165,6 +278,14 @@ function resultSchema(value: unknown): string | undefined {
 
 function optionalStrings(record: Record<string, unknown>, keys: readonly string[]): boolean {
   return keys.every((key) => record[key] === undefined || typeof record[key] === "string");
+}
+
+function isRuntimeResultBindingRelation(value: unknown): value is RuntimeResultBindingRelation {
+  return value === "dependency"
+    || value === "continue_prior"
+    || value === "refine_prior"
+    || value === "correct_prior"
+    || value === "challenge_prior";
 }
 
 function isJson(value: string): boolean {

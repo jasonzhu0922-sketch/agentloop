@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { ConversationInputBinding, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import type { ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import {
   createStepExecutionBinding,
   unknownUploadedSourceIds,
@@ -74,8 +75,8 @@ export function admitPlan(input: {
   availableVisibleDirectoryIds?: readonly string[];
   /** Accepted evidence canonically bound to the resolved prior Run. */
   reusableEvidenceKinds?: readonly EvidenceKind[];
-  /** Server-validated prior Outcome inputs for this new Plan. */
-  inputBindings?: readonly ConversationInputBinding[];
+  /** Server-validated Runtime Result inputs for this new Plan. */
+  resultBindings?: readonly RuntimeResultBinding[];
   taskIntent?: {
     readonly deliverySurface?: "conversation" | "workspace_artifact";
     readonly artifactKind?: string;
@@ -85,7 +86,7 @@ export function admitPlan(input: {
   now?: number;
 }): ExecutionPlan {
   const { proposal } = input;
-  assertConversationInputBindings(input.inputBindings ?? []);
+  assertRuntimeResultBindings(input.resultBindings ?? []);
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
     reject("Plan must contain between 1 and 100 steps");
   }
@@ -307,7 +308,7 @@ export function admitPlan(input: {
     version: 1,
     goal: proposal.goal,
     selectedSkillIds,
-    ...(input.inputBindings === undefined || input.inputBindings.length === 0 ? {} : { inputBindings: input.inputBindings }),
+    ...(input.resultBindings === undefined || input.resultBindings.length === 0 ? {} : { resultBindings: input.resultBindings }),
     status: "admitted",
     steps: admittedSteps,
     createdAt: now,
@@ -315,23 +316,14 @@ export function admitPlan(input: {
   };
 }
 
-function assertConversationInputBindings(bindings: readonly ConversationInputBinding[]): void {
+function assertRuntimeResultBindings(bindings: readonly RuntimeResultBinding[]): void {
   const identities = new Set<string>();
   for (const binding of bindings) {
-    const result = binding.result;
-    if (
-      binding.schema !== "agentloop.conversationInputBinding/v1"
-      || !["continue_prior", "refine_prior", "correct_prior", "challenge_prior"].includes(binding.relation)
-      || result.schema !== "agentloop.resultRef/v1"
-      || !/^rr_[0-9a-f-]{36}$/u.test(result.resultId)
-      || result.runId.trim().length === 0
-      || result.runId.length > 120
-      || !Number.isInteger(result.characters)
-      || result.characters < 1
-      || result.characters > 20_000_000
-    ) reject("Plan has an invalid prior Outcome input binding");
+    const parsed = parseRuntimeResultBinding(binding);
+    if (parsed === undefined || parsed.relation === "dependency") reject("Plan has an invalid Runtime Result input binding");
+    const result = parsed.result;
     const identity = `${binding.relation}:${result.resultId}`;
-    if (identities.has(identity)) reject("Plan has duplicate prior Outcome input bindings");
+    if (identities.has(identity)) reject("Plan has duplicate Runtime Result input bindings");
     identities.add(identity);
   }
 }

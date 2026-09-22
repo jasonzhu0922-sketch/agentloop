@@ -268,7 +268,7 @@ function deriveEvidenceSources(
 function conversationWorksetRefs(workset: ConversationWorkingSet | undefined): string[] {
   if (workset === undefined) return [];
   return [
-    ...(workset.reusableResults ?? []).map((result) => `result:${result.result.resultId}`),
+    ...(workset.resultCards ?? []).map((result) => `result:${result.result.resultId}`),
     ...workset.reusableArtifacts.map((artifact) => artifact.path),
     ...(workset.evidenceLedger?.sourceSummaries.map((summary) => `${summary.runId}:${summary.stepId}`) ?? []),
   ].slice(0, 20);

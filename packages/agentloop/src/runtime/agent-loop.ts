@@ -667,7 +667,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     // Ported from OpenCode's materialization boundary: each model step gets a
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
-    const grantedMaterialized = options.tools.materialize(options.grant);
+    const grantedMaterialized = options.tools.materialize(options.grant, {
+      decisionLedger: options.runtimeContext?.decisionLedger,
+    });
     const workProductProjection = await workProducts?.project();
     const stepExecutionDecision = stepExecutionStrategy.prepareModelStep({
       modelStep: step,

@@ -82,6 +82,13 @@ export function isCaveatedStepResult(
   if (evidence.completionCaveat?.reason === "deferred_validation") return skippedValidation;
   const processCaveat = assessment.skills.some((skill) => skill.status === "process_caveat");
   if (evidence.completionCaveat?.reason === "process_caveat") return processCaveat;
+  // A Runtime-bound user decision is already authoritative. An explicit
+  // downstream mismatch is delivered as an honest warning and must not be
+  // invalidated by unrelated Skill observation status.
+  const decisionCaveat = assessment.decisionBindings?.some((binding) =>
+    binding.status === "conflict" && !binding.blocking
+  ) === true;
+  if (decisionCaveat) return true;
   const blockingCriterion = assessment.criteria.some((criterion) =>
     criterion.status !== "satisfied"
     && criterion.satisfied !== true
@@ -98,7 +105,6 @@ export function isCaveatedStepResult(
   if (blockingCriterion || blockingDecision || blockingSkill) return false;
   return skippedValidation
     || processCaveat
-    || assessment.decisionBindings?.some((binding) => binding.status !== "satisfied" && !binding.blocking) === true
     || assessment.criteria.some((criterion) =>
       criterion.status !== "satisfied"
       && criterion.satisfied !== true

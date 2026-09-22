@@ -99,9 +99,10 @@ export function decisionSatisfied(commit: RuntimeDecisionCommit, claims: readonl
 }
 
 /**
- * Decision commitments are assessment input, not a second TerminalCommitter
- * policy.  Missing provenance is an honest `unverified` observation; only a
- * demonstrated conflict can block a risk-sensitive step.
+ * A persisted exact/required decision is Runtime authority. Assessment is a
+ * conflict sentinel, not a second proof requirement: an absent downstream
+ * claim cannot weaken the user's already committed selection, while explicit
+ * contradictory evidence remains an honest delivery caveat.
  */
 export function assessDecisionBindings(input: {
   readonly assessment: SkillComplianceAssessment;
@@ -118,47 +119,27 @@ export function assessDecisionBindings(input: {
   );
   if (required.length === 0) return input.assessment;
   const claims = decisionClaimsFromEvidence(input.evidence);
-  const bindings = required.map((commit) => assessBinding(commit, claims, input.assessment.assessmentProfile));
-  const blockingConflict = bindings.some((binding) => binding.blocking && binding.status === "conflict");
+  const bindings = required.map((commit) => assessBinding(commit, claims));
   const observations = bindings
     .filter((binding) => binding.status !== "satisfied")
     .map((binding) => `${binding.decisionId}: ${binding.rationale}`);
   return {
     ...input.assessment,
     decisionBindings: bindings,
-    approved: input.assessment.approved && !blockingConflict,
+    approved: input.assessment.approved,
     evidenceDigest: createHash("sha256")
       .update(`${input.assessment.evidenceDigest}:${bindings.map((binding) => `${binding.decisionId}:${binding.status}`).join(",")}`)
       .digest("hex"),
     feedback: observations.length === 0
       ? input.assessment.feedback
       : [input.assessment.feedback, `Decision-binding observations: ${observations.join(" ")}`].filter(Boolean).join("\n"),
-    ...(blockingConflict
-      ? {
-        failedBoundary: {
-          stepId: input.stepId,
-          missingEvidenceKinds: [],
-          violatedSkillRequirements: ["decision_binding_conflict"],
-          reusableEvidenceRefs: bindings.flatMap((binding) => binding.evidenceRefs),
-          suggestedRepairShape: "ask_user" as const,
-        },
-      }
-      : {}),
   };
 }
 
 function assessBinding(
   commit: RuntimeDecisionCommit,
   claims: readonly RuntimeDecisionClaim[],
-  profile: SkillComplianceAssessment["assessmentProfile"],
 ): DecisionBindingAssessment {
-  const blocking = profile === "risk_sensitive";
-  if (decisionSatisfied(commit, claims)) {
-    return {
-      decisionId: commit.id, status: "satisfied", blocking,
-      rationale: "Observable evidence matches the committed user decision.", evidenceRefs: [commit.id],
-    };
-  }
   const selectedIds = new Set(commit.selectedOptions.map((option) => option.id));
   const selectedRefs = new Set(commit.selectedOptions.flatMap((option) => option.identityRefs ?? []));
   const conflicting = claims.some((claim) => {
@@ -169,13 +150,24 @@ function assessBinding(
     return (claimedIds.length > 0 && !claimedIds.some((id) => selectedIds.has(id)))
       || (claimedRefs.length > 0 && !claimedRefs.some((ref) => selectedRefs.has(ref)));
   });
+  if (conflicting) {
+    return {
+      decisionId: commit.id,
+      status: "conflict",
+      // Preserve the conflict as a visible caveat. Runtime tool-boundary
+      // enforcement gets the first chance to repair the call; if a provider or
+      // external result still reports a mismatch, delivery remains possible
+      // with an explicit warning instead of becoming a second HIL gate.
+      blocking: false,
+      rationale: "Observable evidence conflicts with the committed user decision.",
+      evidenceRefs: [commit.id],
+    };
+  }
   return {
-    decisionId: commit.id,
-    status: conflicting ? "conflict" : "unverified",
-    blocking,
-    rationale: conflicting
-      ? "Observable evidence conflicts with the committed user decision."
-      : "No observable evidence independently confirms the committed user decision.",
+    decisionId: commit.id, status: "satisfied", blocking: false,
+    rationale: decisionSatisfied(commit, claims)
+      ? "Observable evidence matches the committed user decision."
+      : "The Runtime-authoritative user decision requires no duplicate downstream claim.",
     evidenceRefs: [commit.id],
   };
 }

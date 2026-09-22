@@ -14,6 +14,7 @@ import type {
   RuntimeEventSink,
 } from "./contracts.ts";
 import type { PromptProjectionDecision } from "./step-execution-strategy.ts";
+import type { RuntimeResultContextEntry, RuntimeResultRef } from "./runtime-result.ts";
 
 export interface ContextPolicy {
   readonly outputReserveTokens?: number;
@@ -60,16 +61,7 @@ interface PrunedToolResult {
   readonly preview?: string;
   readonly previewCharacters?: number;
   readonly structuredEvidence?: string;
-  readonly resultRef?: Readonly<{ schema: "agentloop.resultRef/v1"; resultId: string }>;
-}
-
-interface ToolResultCatalogEntry {
-  readonly schema: "agentloop.runtimeResultCatalogEntry/v1";
-  readonly resultId: string;
-  readonly toolCallId: string;
-  readonly toolName: string;
-  readonly resultSchema?: string;
-  readonly selectors?: readonly Readonly<Record<string, unknown>>[];
+  readonly resultRef?: RuntimeResultRef;
 }
 
 const SUMMARY_SYSTEM_PROMPT = [
@@ -140,7 +132,7 @@ export class ContextAssembler {
   private snapshot?: RuntimeContextSnapshot;
   private previousSnapshotId?: string;
   private summary?: string;
-  private toolResultCatalog: readonly ToolResultCatalogEntry[] = [];
+  private resultContextEntries: readonly RuntimeResultContextEntry[] = [];
 
   constructor(options: {
     runId: string;
@@ -426,7 +418,7 @@ export class ContextAssembler {
   }
 
   private refreshToolResultCatalog(canonicalMessages: readonly ModelMessage[]): void {
-    const entries = new Map<string, ToolResultCatalogEntry>();
+    const entries = new Map<string, RuntimeResultContextEntry>();
     for (const message of canonicalMessages) {
       if (message.role !== "tool" || message.isError) continue;
       const value = parseJsonRecord(message.content);
@@ -441,17 +433,17 @@ export class ContextAssembler {
         })
         : undefined;
       entries.set(ref.resultId, {
-        schema: "agentloop.runtimeResultCatalogEntry/v1",
-        resultId: ref.resultId,
-        toolCallId: message.toolCallId,
-        toolName: message.name,
+        schema: "agentloop.resultContextEntry/v1",
+        result: ref,
+        kind: "tool",
+        producer: { runId: this.runId, toolCallId: message.toolCallId, toolName: message.name },
         ...(resultSchema === undefined ? {} : { resultSchema }),
         ...(selectors === undefined || selectors.length === 0 ? {} : { selectors }),
       });
     }
     const next = [...entries.values()].slice(-64);
-    if (JSON.stringify(next) === JSON.stringify(this.toolResultCatalog)) return;
-    this.toolResultCatalog = next;
+    if (JSON.stringify(next) === JSON.stringify(this.resultContextEntries)) return;
+    this.resultContextEntries = next;
     this.contextRevision += 1;
     this.invalidateSnapshot();
   }
@@ -914,14 +906,14 @@ export class ContextAssembler {
         JSON.stringify(this.promptProjectionPolicy),
         "</prompt_projection_policy>",
       ]),
-      ...(this.toolResultCatalog.length === 0 ? [] : [
-        "<runtime_result_catalog source=\"server\">",
+      ...(this.resultContextEntries.length === 0 ? [] : [
+        "<runtime_result_context source=\"server\">",
         JSON.stringify({
-          schema: "agentloop.runtimeResultCatalog/v1",
-          results: this.toolResultCatalog,
+          schema: "agentloop.resultContext/v1",
+          results: this.resultContextEntries,
           readProtocol: "Use read_result with resultId and an optional JSON Pointer/array window. Never provide a path or hash.",
         }),
-        "</runtime_result_catalog>",
+        "</runtime_result_context>",
       ]),
       ...(this.runtimeDirective === undefined ? [] : [
         "<runtime_directive>",

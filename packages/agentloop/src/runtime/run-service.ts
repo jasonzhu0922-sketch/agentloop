@@ -10,13 +10,10 @@ import { admitPlan, reusableSourceEvidenceKindsForTurn } from "../planning/admis
 import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import type {
   AssessmentProfileId,
-  ConversationCompletedStepHandoff,
+  ConversationStepContext,
   ConversationEvidenceLedger,
   ConversationFailedBoundary,
-  ConversationInputBinding,
   ConversationOutcomeRelation,
-  ConversationResultReference,
-  ConversationReusableResult,
   ConversationResolvedIntent,
   ConversationReusableArtifact,
   ConversationSourceFact,
@@ -42,6 +39,8 @@ import type {
   TaskSpec,
   ToolEvidence,
 } from "../planning/contracts.ts";
+import type { RuntimeResultBinding, RuntimeResultCard } from "./runtime-result.ts";
+import { createRuntimeResultCard, parseRuntimeResultRef } from "./runtime-result.ts";
 import type {
   PlanAdmissionObservation,
   PlanningExtension,
@@ -76,7 +75,7 @@ import { buildDynamicSystemPrompt, buildTaskProfile, type DynamicPromptProfile, 
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
-import { classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange } from "./task-intent.ts";
+import { classifyTaskIntent, planningSkillRecallInput, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange } from "./task-intent.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -164,8 +163,7 @@ const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
 const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
 const CONVERSATION_WORKING_SET_RESULT_LIMIT = 8;
 const CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT = 8;
-const CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT = 12;
-const CONVERSATION_COMPLETED_STEP_HANDOFF_OUTPUT_CHARACTERS = 3_000;
+const CONVERSATION_STEP_CONTEXT_LIMIT = 12;
 const MAX_COMMAND_OUTPUT_REFERENCE_BYTES = 50 * 1024 * 1024;
 const TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES = 8 * 1024;
 const TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS = 600;
@@ -761,8 +759,8 @@ export class RunService {
     const consideredRuns = allRuns.slice(-CONVERSATION_WORKING_SET_RUN_LIMIT);
     const planCursors: Array<ConversationWorkingSet["planCursors"][number]> = [];
     const reusableArtifacts: ConversationReusableArtifact[] = [];
-    const reusableResults: ConversationReusableResult[] = [];
-    const completedStepHandoffs: ConversationCompletedStepHandoff[] = [];
+    const resultCards: RuntimeResultCard[] = [];
+    const completedStepContexts: ConversationStepContext[] = [];
     const failedBoundaries: ConversationFailedBoundary[] = [];
     const requiredSkillIds = new Set<string>();
     const recommendedCapabilityIds = new Set<string>();
@@ -807,8 +805,8 @@ export class RunService {
         for (const step of plan.steps) {
           const sourceSummary = conversationSourceSummaryFromStep(run.id, plan.id, step);
           if (sourceSummary !== undefined) sourceSummaries.push(sourceSummary);
-          const handoff = conversationCompletedStepHandoff(run.id, plan.id, step);
-          if (handoff !== undefined) completedStepHandoffs.push(handoff);
+          const stepContext = conversationStepContext(run.id, plan.id, step);
+          if (stepContext !== undefined) completedStepContexts.push(stepContext);
         }
         const cursor = {
           runId: run.id,
@@ -829,7 +827,6 @@ export class RunService {
               skillIds: step.skillIds,
               requiredCapabilities: step.requiredCapabilities,
               executionBinding: step.executionBinding,
-              ...(step.output === undefined ? {} : { output: truncateWorkingSetText(step.output, 1_200) }),
               ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
             })),
         };
@@ -889,36 +886,54 @@ export class RunService {
           reusable: true,
         });
       }
-      if (outcome?.status === "completed" && outcome.result !== undefined && outcome.output !== undefined && outcome.output.trim().length > 0) {
-        const content = outcome.output;
-        const result: ConversationResultReference = {
-          ...outcome.result.ref,
-          runId: run.id,
-          characters: content.length,
-        };
+      const publishedRunResult = outcome?.status === "completed" ? outcome.result : undefined;
+      if (publishedRunResult === undefined && plan !== undefined) {
+        for (const step of plan.steps) {
+          const result = step.status === "completed" ? step.evidence?.publishedResult : undefined;
+          if (result === undefined) continue;
+          const content = result.payload.content;
+          const summary = truncateWorkingSetText(content, 1_200);
+          resultCards.push(createRuntimeResultCard({
+            result,
+            goal: truncateWorkingSetText(step.objective, 600),
+            summary,
+            summaryTruncated: summary.length < content.replace(/\s+/g, " ").trim().length,
+            artifactPaths: artifacts
+              .filter((artifact) => artifactSourceForPath(sourceByPath, artifact.path)?.stepId === step.id)
+              .map((artifact) => artifact.path),
+            evidenceRefs: [
+              `run:${run.id}`,
+              `plan:${plan.id}`,
+              `step:${step.id}`,
+              ...(result.publication.assessmentRef === undefined ? [] : [`assessment:${result.publication.assessmentRef}`]),
+            ],
+          }));
+        }
+      }
+      if (publishedRunResult !== undefined) {
+        const content = publishedRunResult.payload.content;
         const summary = truncateWorkingSetText(content, 1_200);
-        reusableResults.push({
-          result,
-          ...(outcome.planId === undefined ? {} : { planId: outcome.planId }),
+        resultCards.push(createRuntimeResultCard({
+          result: publishedRunResult,
           goal: truncateWorkingSetText(plan?.goal ?? run.input, 600),
           summary,
           summaryTruncated: summary.length < content.replace(/\s+/g, " ").trim().length,
           artifactPaths: artifacts.map((artifact) => artifact.path),
           evidenceRefs: [
             `run:${run.id}`,
-            ...(outcome.planId === undefined ? [] : [`plan:${outcome.planId}`]),
+            ...(publishedRunResult.producer.planId === undefined ? [] : [`plan:${publishedRunResult.producer.planId}`]),
           ],
-        });
+        }));
       }
     }
 
     const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
-    const boundedResults = reusableResults.slice(-CONVERSATION_WORKING_SET_RESULT_LIMIT);
+    const boundedResultCards = resultCards.slice(-CONVERSATION_WORKING_SET_RESULT_LIMIT);
     const boundedSourceSummaries = sourceSummaries.slice(-CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT);
-    const boundedStepHandoffs = completedStepHandoffs.slice(-CONVERSATION_COMPLETED_STEP_HANDOFF_LIMIT);
-    for (const handoff of boundedStepHandoffs) {
-      for (const skillId of handoff.skillIds) requiredSkillIds.add(skillId);
-      for (const capability of handoff.requiredCapabilities) recommendedCapabilityIds.add(capability);
+    const boundedStepContexts = completedStepContexts.slice(-CONVERSATION_STEP_CONTEXT_LIMIT);
+    for (const stepContext of boundedStepContexts) {
+      for (const skillId of stepContext.skillIds) requiredSkillIds.add(skillId);
+      for (const capability of stepContext.requiredCapabilities) recommendedCapabilityIds.add(capability);
     }
     for (const artifact of boundedArtifacts) {
       for (const skillId of artifact.sourceSkillIds ?? []) requiredSkillIds.add(skillId);
@@ -938,7 +953,7 @@ export class RunService {
       ...(activeGoal === undefined ? {} : { activeGoal }),
       planCursors,
       ...(resolvedIntents.length === 0 ? {} : { resolvedIntents }),
-      reusableResults: boundedResults,
+      resultCards: boundedResultCards,
       reusableArtifacts: boundedArtifacts,
       failedBoundaries,
       ...(outcomeRelations.length === 0 ? {} : { outcomeRelations }),
@@ -947,7 +962,7 @@ export class RunService {
         capabilityIds: [...recommendedCapabilityIds],
       },
       ...(evidenceLedger === undefined ? {} : { evidenceLedger }),
-      ...(boundedStepHandoffs.length === 0 ? {} : { completedStepHandoffs: boundedStepHandoffs }),
+      ...(boundedStepContexts.length === 0 ? {} : { completedStepContexts: boundedStepContexts }),
       ...(resumeSuggestion === undefined ? {} : { resumeSuggestion }),
     };
   }
@@ -1437,6 +1452,10 @@ export class RunService {
       });
       const output = finalPlanOutput(resumedPlan);
       const reasonCode = await commitCompletedPlan(this.terminal, await this.plans.assessments(resumedPlan.id), resumedPlan, runId, output);
+      // The answered HIL and its recovery review describe the same completed
+      // continuation. Close the review before projecting completion so no
+      // stale recovery state can be mistaken for an outstanding HIL.
+      if (action.kind === "recovery_review") await this.actions.resolveRecoveryReview(action.id);
       await emit({
         type: "terminal.delivery_committed",
         data: { runId, planId: resumedPlan.id, output, reasonCode, recovered: true },
@@ -1461,6 +1480,19 @@ export class RunService {
             sourceToolCallId: error.details?.sourceToolCallId,
             emit,
           });
+          return this.get(actorUserId, runId);
+        }
+        if (error instanceof AppError && error.code === "ASSESSMENT_ERROR") {
+          // A terminal protocol violation is not unanswered user input. Do
+          // not restore the answered-HIL recovery review and mislabel it as a
+          // HIL resume failure.
+          await this.terminal.commitStopped({
+            runId,
+            planId: plan.id,
+            status: "failed",
+            reasonCode: error.code,
+          });
+          await emit({ type: "run.failed", data: { runId, planId: plan.id, code: error.code, message: error.message, recovered: true } });
           return this.get(actorUserId, runId);
         }
         const reason = error instanceof AppError ? error.code : "INTERNAL_ERROR";
@@ -1852,6 +1884,13 @@ export class RunService {
         responseOnly,
         evidenceDemand: turnResolution?.evidenceDemand,
       });
+      const skillRecallInput = planningSkillRecallInput({
+        objective: effectiveGoal === input ? effectiveGoal : `${effectiveGoal}\n${input}`,
+        userConstraints: turnResolution?.userConstraints,
+        evidenceDemand: turnResolution?.evidenceDemand,
+        responseOnly,
+        uploadedSources: availableSources,
+      });
       const admissionTaskIntent = {
         ...taskIntent,
         ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
@@ -1880,12 +1919,10 @@ export class RunService {
           .filter((skillId) => privateSkills.some((skill) => skill.id === skillId));
       const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
-        // Resolver goals carry previous-source provenance so that the Planner
-        // can understand a follow-up. That provenance is not a fresh user
-        // request for the same source Skill. Select this turn's candidates
-        // from the latest user input; retained Skills and handoffs stay in
-        // planning context for genuine continuations.
-        input,
+        // This carries the same resolved goal and user constraints used for
+        // TaskIntent, plus neutral native-upload facts for transforms.  It
+        // does not bind a Skill or let an input format decide an output kind.
+        skillRecallInput,
         [],
         availableSources,
         turnResolution?.evidenceDemand,
@@ -1982,7 +2019,7 @@ export class RunService {
       });
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       let plan: ExecutionPlan;
-      const inputBindings = conversationInputBindingsForTurn(turnResolution);
+      const resultBindings = runtimeResultBindingsForTurn(turnResolution);
       try {
         plan = admitPlan({
           runId,
@@ -1995,7 +2032,7 @@ export class RunService {
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
-          ...(inputBindings.length === 0 ? {} : { inputBindings }),
+          ...(resultBindings.length === 0 ? {} : { resultBindings }),
           taskIntent: admissionTaskIntent,
         });
       } catch (error) {
@@ -2035,7 +2072,7 @@ export class RunService {
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
-          ...(inputBindings.length === 0 ? {} : { inputBindings }),
+          ...(resultBindings.length === 0 ? {} : { resultBindings }),
           taskIntent: admissionTaskIntent,
         });
       }
@@ -3863,13 +3900,12 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-function conversationCompletedStepHandoff(
+function conversationStepContext(
   runId: string,
   planId: string,
   step: ExecutionPlan["steps"][number],
-): ConversationCompletedStepHandoff | undefined {
-  if (step.status !== "completed" || step.output === undefined || step.output.trim().length === 0) return undefined;
-  const output = truncateWorkingSetText(step.output, CONVERSATION_COMPLETED_STEP_HANDOFF_OUTPUT_CHARACTERS);
+): ConversationStepContext | undefined {
+  if (step.status !== "completed") return undefined;
   return {
     runId,
     planId,
@@ -3878,8 +3914,6 @@ function conversationCompletedStepHandoff(
     objective: truncateWorkingSetText(step.objective, 600),
     skillIds: step.skillIds,
     requiredCapabilities: step.requiredCapabilities,
-    output,
-    outputTruncated: output.length < step.output.replace(/\s+/g, " ").trim().length,
   };
 }
 
@@ -5215,11 +5249,6 @@ function completionCaveatReasonCode(
     return "completed_with_decision_binding_conflict";
   }
   if ([...latestByStep.values()].some((assessment) =>
-    assessment.decisionBindings?.some((binding) => binding.status === "unverified" && !binding.blocking)
-  )) {
-    return "completed_with_unverified_decision_binding";
-  }
-  if ([...latestByStep.values()].some((assessment) =>
     assessment.criteria.some((criterion) => (criterion.status === "unverified" || criterion.status === "conflict") && !criterion.blocking)
   )) {
     return "completed_with_unverified_quality";
@@ -6491,6 +6520,7 @@ function buildStepSystemPrompt(
     contractLines: [
       "Work only on the current admitted Plan step.",
       "The runtime owns authorization, persistence, assessment, Plan progression, and terminal completion.",
+      "An answered Human-in-the-Loop selection recorded in decisionLedger is the user's final decision for its scope. Follow it exactly in subsequent reasoning and tool calls; do not reinterpret, replace, or silently broaden it. If it must change, request a new Human-in-the-Loop decision.",
       "Unless the user explicitly requests another language, all user-facing natural-language output must be in Simplified Chinese. Preserve code, commands, paths, API fields, and proper nouns in their original form.",
       "Use loopStepFrame for model-step continuity and planStepHandoffFrame for Plan-step continuity when present; preserve reusable evidence without executing a future stage unless it is explicitly part of the current boundary.",
       "Do not perform work reserved for a pending downstream Plan step unless the current step objective or success criteria explicitly require that same artifact.",
@@ -6943,7 +6973,7 @@ function inheritPriorWorkProductBinding(
 function inheritedResultForRun(
   runId: string,
   workset: ConversationWorkingSet | undefined,
-): ConversationResultReference | undefined {
+): RuntimeResultRef | undefined {
   const intents = new Map((workset?.resolvedIntents ?? []).map((item) => [item.runId, item.resolution]));
   const seen = new Set<string>();
   let currentRunId: string | undefined = runId;
@@ -6989,7 +7019,7 @@ function bindUnambiguousPriorArtifact(
   };
 }
 
-/** A semantic Outcome is a reusable work product just as an artifact is. */
+/** A published Runtime Result remains reusable independently of its producer kind. */
 function bindUnambiguousPriorResult(
   resolution: ConversationTurnResolution,
   input: string,
@@ -6998,21 +7028,22 @@ function bindUnambiguousPriorResult(
   if (resolution.mode !== "execute" || resolution.inputMode === "refresh_sources") return resolution;
   if (resolution.targetResult !== undefined) {
     if (resolution.relation !== "new_goal") return resolution;
+    const selectedCard = workset?.resultCards?.find((item) => item.result.resultId === resolution.targetResult?.resultId);
     return {
       ...resolution,
       relation: "refine_prior",
       inputMode: "prior_result",
-      targetRunId: resolution.targetRunId ?? resolution.targetResult.runId,
+      targetRunId: resolution.targetRunId ?? selectedCard?.producer.runId,
       source: "model_guarded",
     };
   }
   const targetCandidates = resolution.targetRunId === undefined
     ? []
-    : workset?.reusableResults?.filter((item) => item.result.runId === resolution.targetRunId) ?? [];
+    : workset?.resultCards?.filter((item) => item.producer.runId === resolution.targetRunId) ?? [];
   const candidates = targetCandidates.length > 0
     ? targetCandidates
     : referencesPriorConversationResult(input)
-      ? workset?.reusableResults ?? []
+      ? workset?.resultCards ?? []
       : [];
   if (candidates.length !== 1) return resolution;
   const candidate = candidates[0];
@@ -7021,7 +7052,7 @@ function bindUnambiguousPriorResult(
     ...resolution,
     relation: resolution.relation === "new_goal" ? "refine_prior" : resolution.relation,
     inputMode: "prior_result",
-    targetRunId: resolution.targetRunId ?? candidate.result.runId,
+    targetRunId: resolution.targetRunId ?? candidate.producer.runId,
     targetResult: candidate.result,
     source: "model_guarded",
   };
@@ -7033,7 +7064,7 @@ function conversationTurnSemanticFeedback(
   workset: ConversationWorkingSet | undefined,
 ): string | undefined {
   if (!referencesPriorConversationResult(input) || resolution.targetResult !== undefined) return undefined;
-  const candidates = workset?.reusableResults ?? [];
+  const candidates = workset?.resultCards ?? [];
   if (candidates.length === 0) {
     return "The user refers to a prior result, but no completed reusable Outcome is available. Ask the user to clarify or provide the content; do not silently reacquire sources.";
   }
@@ -7047,12 +7078,12 @@ function referencesPriorConversationResult(input: string): boolean {
   return /(?:\b(?:this|that|the\s+above|above|previous|prior|earlier|last|latest)\s+(?:analysis|result|answer|summary|report|content|findings?)\b|\b(?:analysis|result|answer|summary|findings?)\s+from\s+(?:the\s+)?(?:previous|prior|last|earlier)\b|(?:这个|该|上述|前述|之前的|先前的|刚才的|上一轮的?|上轮的?)(?:分析(?:结果)?|结果|结论|回答|总结|报告|内容|材料)|(?:分析结果|上述结论|前述结论).{0,12}(?:生成|制作|导出|转换|转成|保存))/iu.test(input);
 }
 
-function conversationInputBindingsForTurn(
+function runtimeResultBindingsForTurn(
   resolution: ConversationTurnResolution | undefined,
-): readonly ConversationInputBinding[] {
+): readonly RuntimeResultBinding[] {
   if (resolution?.targetResult === undefined || resolution.relation === "new_goal") return [];
   return [{
-    schema: "agentloop.conversationInputBinding/v1",
+    schema: "agentloop.resultBinding/v1",
     result: resolution.targetResult,
     relation: resolution.relation,
   }];
@@ -7127,7 +7158,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
       "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
       "Set inputMode=prior_artifact only when changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
-      "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while resultCandidateId identifies the completed Outcome supplying its content.",
+      "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while resultCandidateId identifies the published Runtime Result supplying its content.",
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceDemand=none. For 'reanalyze the source and make a PDF', use refresh_sources with source-grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
@@ -7224,11 +7255,11 @@ function parseConversationTurnResolution(
 function conversationResultForCandidateId(
   workset: ConversationWorkingSet | undefined,
   candidateId: string,
-): ConversationResultReference | undefined {
+): RuntimeResultRef | undefined {
   const match = /^result_candidate_([1-9][0-9]*)$/u.exec(candidateId);
   if (match === null) return undefined;
   const index = Number(match[1]) - 1;
-  return workset?.reusableResults?.[index]?.result;
+  return workset?.resultCards?.[index]?.result;
 }
 
 function conversationRunIdForGoalCandidate(
@@ -7302,7 +7333,7 @@ function conversationTurnResolutionFromEvents(
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
     const targetRunId = typeof data.targetRunId === "string" ? data.targetRunId.trim() : undefined;
     const targetArtifact = conversationArtifactReference(data.targetArtifact);
-    const targetResult = conversationResultReference(data.targetResult);
+    const targetResult = parseResultReference(data.targetResult);
     const userConstraints = stringArrayField(data.userConstraints).map((item) => item.trim());
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
     if (!isConversationTurnMode(mode) || !isConversationTurnRelation(relation)) return undefined;
@@ -7344,21 +7375,8 @@ function conversationArtifactReference(value: unknown): { readonly runId: string
   return { runId, path };
 }
 
-function conversationResultReference(value: unknown): ConversationResultReference | undefined {
-  const record = optionalRecord(value);
-  const runId = typeof record.runId === "string" ? record.runId.trim() : "";
-  const resultId = typeof record.resultId === "string" ? record.resultId.trim() : "";
-  const characters = record.characters;
-  if (
-    record.schema !== "agentloop.resultRef/v1"
-    || !/^rr_[0-9a-f-]{36}$/u.test(resultId)
-    || runId.length === 0
-    || runId.length > 120
-    || !Number.isInteger(characters)
-    || (characters as number) < 1
-    || (characters as number) > 20_000_000
-  ) return undefined;
-  return { schema: "agentloop.resultRef/v1", resultId, runId, characters: characters as number };
+function parseResultReference(value: unknown): RuntimeResultRef | undefined {
+  return parseRuntimeResultRef(value);
 }
 
 function isConversationTurnMode(value: unknown): value is ConversationTurnResolution["mode"] {
@@ -7479,7 +7497,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
           mimeType: artifact.mimeType,
           bytes: artifact.bytes,
         })),
-        reusableResultCandidates: (workset.reusableResults ?? []).map((item, index) => ({
+        reusableResultCandidates: (workset.resultCards ?? []).map((item, index) => ({
           candidateId: `result_candidate_${index + 1}`,
           goal: item.goal,
           summary: item.summary,
@@ -7529,8 +7547,8 @@ function requiresConversationWorksetExecution(
   if (conversationWorkingSet === undefined) return false;
   if (requestsPriorArtifactChange(input)) return true;
   const hasReusablePriorWork = conversationWorkingSet.reusableArtifacts.length > 0
-    || (conversationWorkingSet.completedStepHandoffs?.length ?? 0) > 0
-    || conversationWorkingSetHasCompletedStepOutput(conversationWorkingSet);
+    || (conversationWorkingSet.completedStepContexts?.length ?? 0) > 0
+    || conversationWorkingSetHasCompletedStepContext(conversationWorkingSet);
   if (!hasReusablePriorWork) return false;
   return classifyTaskIntent({
     objective: input,
@@ -7546,17 +7564,10 @@ function requiresDeterministicConversationExecution(
     || requiresConversationWorksetExecution(input, conversationWorkingSet);
 }
 
-function conversationWorkingSetHasCompletedStepOutput(
+function conversationWorkingSetHasCompletedStepContext(
   conversationWorkingSet: ConversationWorkingSet,
 ): boolean {
-  if ((conversationWorkingSet.completedStepHandoffs?.length ?? 0) > 0) return true;
-  return conversationWorkingSet.planCursors.some((cursor) =>
-    cursor.steps.some((step) =>
-      step.status === "completed"
-      && typeof step.output === "string"
-      && step.output.trim().length > 0
-    )
-  );
+  return (conversationWorkingSet.completedStepContexts?.length ?? 0) > 0;
 }
 
 function hasLocalPathReference(input: string): boolean {

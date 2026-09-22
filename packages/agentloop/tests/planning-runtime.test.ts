@@ -29,9 +29,9 @@ import {
   selectPlanningSkills,
 } from "../src/runtime/run-service.ts";
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
-import { classifyTaskIntent } from "../src/runtime/task-intent.ts";
+import { classifyTaskIntent, planningSkillRecallInput, uploadedSourcePlanningContext } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
-import { createRuntimeResult } from "../src/runtime/runtime-result.ts";
+import { createRuntimeResult, createRuntimeResultCard } from "../src/runtime/runtime-result.ts";
 import { markActionFailedBeforeEffect } from "../src/runtime/action-effect.ts";
 import { TerminalCommitter } from "../src/runtime/terminal-committer.ts";
 import { StepResultCommitter } from "../src/runtime/step-result-committer.ts";
@@ -1047,6 +1047,105 @@ test("ModelPlanner binds uploaded originals and mandatory artifact evidence for 
   assert.equal(assessment.approved, false);
   assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("artifact_path"));
   assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("artifact_acceptance"));
+});
+
+test("ModelPlanner offers a structured native Skill-binding repair instead of repeating an empty PDF transform plan", async () => {
+  let calls = 0;
+  const pdf = skillFixture({
+    id: "discovered:pdf",
+    name: "pdf",
+    description: "Merge and edit PDF files.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"]),
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      assert.match(request.runtimeContext?.content ?? "", /uploadedSourceContext/);
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "unbound-merge",
+            name: "submit_outcome_plan",
+            arguments: {
+              schema: "agentloop.outcomePlan/v2",
+              goal: "Merge uploaded PDFs.",
+              shape: "single_leaf",
+              selectedSkillRoles: [],
+              leaves: [{
+                id: "merge-pdfs",
+                objective: "Merge uploaded PDFs.",
+                dependsOn: [],
+                role: "produce",
+                skillIds: [],
+                requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+              }],
+            },
+          }],
+        };
+      }
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "bound-merge",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Merge uploaded PDFs.",
+            shape: "single_leaf",
+            selectedSkillRoles: [{
+              skillId: pdf.id,
+              role: "primary_builder",
+              reason: "This leaf performs the native PDF merge.",
+            }],
+            leaves: [{
+              id: "merge-pdfs",
+              objective: "Merge uploaded PDFs and deliver one openable PDF.",
+              dependsOn: [],
+              role: "produce",
+              skillIds: [pdf.id],
+              requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+            }],
+          },
+        }],
+      };
+    },
+  });
+  const events: Array<{ type: string; data: Readonly<Record<string, unknown>> }> = [];
+
+  const plan = await planner.plan({
+    runId: "run-pdf-skill-binding-repair",
+    input: "把这三个文件合并一下",
+    availableSkills: [pdf],
+    selectedSkillRoles: [{
+      skillId: pdf.id,
+      role: "primary_builder",
+      reason: "Native PDF transform candidate.",
+    }],
+    availableToolNames: ["materialize_source_file", "computer_run_command", "verify_artifact_acceptance", "load_skill"],
+    sources: ["one.pdf", "two.pdf", "three.pdf"].map((originalName, index) => ({
+      id: `src_repair_pdf_${index}`,
+      originalName,
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100,
+      sha256: `${index}`.repeat(64),
+      status: "ready" as const,
+      chunkCount: 1,
+      truncated: false,
+    })),
+  }, undefined, async (event) => { events.push(event); });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.selectedSkillIds, [pdf.id]);
+  assert.deepEqual(plan.steps[0]?.skillIds, [pdf.id]);
+  assert.deepEqual(
+    events.find((event) => event.type === "planning.skill_binding.repair_offered")?.data.candidateSkillIds,
+    [pdf.id],
+  );
 });
 
 test("ModelPlanner keeps an uploaded PPTX visual transformation in one Skill-owned leaf", async () => {
@@ -3969,10 +4068,16 @@ test("ModelPlanner treats a bound prior Outcome as a materializable input, not a
   const priorOutput = "已完成的市场分析结论。".repeat(200);
   const priorResultId = "rr_00000000-0000-4000-8000-000000000020";
   const priorResult = {
-    schema: "agentloop.resultRef/v1" as const,
-    resultId: priorResultId,
-    runId: "prior-analysis-run",
+    schema: "agentloop.resultCard/v1" as const,
+    result: { schema: "agentloop.resultRef/v1" as const, resultId: priorResultId },
+    kind: "run" as const,
+    producer: { runId: "prior-analysis-run", planId: "prior-analysis-plan" },
+    summary: priorOutput.slice(0, 1_200),
+    summaryTruncated: true,
     characters: priorOutput.length,
+    goal: "完成市场分析",
+    artifactPaths: [],
+    evidenceRefs: ["run:prior-analysis-run", "plan:prior-analysis-plan"],
   };
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
@@ -4013,8 +4118,8 @@ test("ModelPlanner treats a bound prior Outcome as a materializable input, not a
       schema: "agentloop.conversationTurnResolution/v1",
       mode: "execute",
       relation: "refine_prior",
-      targetRunId: priorResult.runId,
-      targetResult: priorResult,
+      targetRunId: priorResult.producer.runId,
+      targetResult: priorResult.result,
       effectiveGoal: "将上一轮分析整理为 PDF 文件。",
       evidenceDemand: "none",
       userConstraints: [],
@@ -4027,22 +4132,14 @@ test("ModelPlanner treats a bound prior Outcome as a materializable input, not a
       conversationId: "prior-analysis-conversation",
       runCount: 1,
       planCursors: [{
-        runId: priorResult.runId,
+        runId: priorResult.producer.runId,
         planId: "prior-analysis-plan",
         goal: "完成市场分析",
         status: "completed",
         selectedSkillIds: [],
         steps: [],
       }],
-      reusableResults: [{
-        result: priorResult,
-        planId: "prior-analysis-plan",
-        goal: "完成市场分析",
-        summary: priorOutput.slice(0, 1_200),
-        summaryTruncated: true,
-        artifactPaths: [],
-        evidenceRefs: ["run:prior-analysis-run", "plan:prior-analysis-plan"],
-      }],
+      resultCards: [priorResult],
       reusableArtifacts: [],
       failedBoundaries: [],
       recommendedCapabilities: { skillIds: [], capabilityIds: [] },
@@ -4480,7 +4577,7 @@ test("ModelPlanner exposes conversation workset facts for follow-up planning", a
   assert.equal(sawWorkingSet, true);
 });
 
-test("ModelPlanner prefers reusable Markdown artifacts over completed delivery text for PDF follow-ups", async () => {
+test("ModelPlanner prefers reusable Markdown artifacts without falling back to output text", async () => {
   let observedContext = "";
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
@@ -4542,7 +4639,6 @@ test("ModelPlanner prefers reusable Markdown artifacts over completed delivery t
           dependencies: [],
           skillIds: [],
           requiredCapabilities: ["workspace_artifact_write"],
-          output: "Completed report summary text. This is only a fallback, not the preferred PDF source.",
         }],
       }],
       reusableArtifacts: [{
@@ -4568,7 +4664,7 @@ test("ModelPlanner prefers reusable Markdown artifacts over completed delivery t
   assert.match(observedContext, /"intent":"convert_artifact"/);
   assert.match(observedContext, /deliverables\/report\.md/);
   assert.match(observedContext, /preferred_artifact_conversion_source/);
-  assert.match(observedContext, /completed delivery text only when no reusable artifact/i);
+  assert.doesNotMatch(observedContext, /fallbackDeliveryText/);
   assert.match(observedContext, /"artifactKind":"document"/);
   assert.match(observedContext, /"deliverySurface":"workspace_artifact"/);
   assert.match(observedContext, /artifact_build/);
@@ -4576,7 +4672,7 @@ test("ModelPlanner prefers reusable Markdown artifacts over completed delivery t
   assert.doesNotMatch(observedContext, /"id":"web_research"/);
 });
 
-test("ModelPlanner materializes completed Markdown delivery text before artifact conversion", async () => {
+test("ModelPlanner materializes a bound Markdown Runtime Result before artifact conversion", async () => {
   let observedContext = "";
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
@@ -4613,9 +4709,34 @@ test("ModelPlanner materializes completed Markdown delivery text before artifact
     },
   });
 
+  const priorResult = createRuntimeResult({
+    kind: "run",
+    producer: { runId: "prior-run", planId: "prior-plan" },
+    value: "# 上轮报告\n\n这是需要转换的 Markdown 内容。",
+    publication: { status: "published" },
+  });
+  const priorCard = createRuntimeResultCard({
+    result: priorResult,
+    goal: "Answer with a Markdown report",
+    summary: priorResult.payload.content,
+    summaryTruncated: false,
+    evidenceRefs: ["run:prior-run", "plan:prior-plan"],
+  });
   const plan = await planner.plan({
     runId: "run-delivery-markdown-to-pdf",
     input: "把上一轮返回的 Markdown 转成 PDF",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "refine_prior",
+      inputMode: "prior_result",
+      targetRunId: "prior-run",
+      targetResult: priorResult.ref,
+      effectiveGoal: "把上一轮返回的 Markdown 转成 PDF",
+      evidenceDemand: "none",
+      userConstraints: [],
+      source: "model_guarded",
+    },
     availableSkills: [],
     availableToolNames: ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"],
     conversationWorkingSet: {
@@ -4636,9 +4757,9 @@ test("ModelPlanner materializes completed Markdown delivery text before artifact
           dependencies: [],
           skillIds: [],
           requiredCapabilities: [],
-          output: "# 上轮报告\n\n这是需要转换的 Markdown 内容。",
         }],
       }],
+      resultCards: [priorCard],
       reusableArtifacts: [],
       failedBoundaries: [],
       recommendedCapabilities: {
@@ -4719,7 +4840,7 @@ test("ModelPlanner groups DOC and DOCX when selecting an existing Word artifact 
   assert.match(observedContext, /requested_existing_artifact_format/);
 });
 
-test("ModelPlanner exposes completed delivery text for follow-up file creation without reusable artifacts", async () => {
+test("ModelPlanner does not promote output-only legacy text to a formal Result", async () => {
   let observedContext = "";
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
@@ -4732,7 +4853,7 @@ test("ModelPlanner exposes completed delivery text for follow-up file creation w
             goal: "write the prior summary as a Markdown file",
             steps: [{
               id: "write-summary-file",
-              objective: "Create a Markdown summary file from the latest completed delivery text and verify the artifact receipt.",
+            objective: "Create a Markdown summary file from a formally bound Runtime Result and verify the artifact receipt.",
               dependencies: [],
               skillIds: [],
               requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
@@ -4769,7 +4890,6 @@ test("ModelPlanner exposes completed delivery text for follow-up file creation w
           dependencies: [],
           skillIds: [],
           requiredCapabilities: ["visible_directory_read"],
-          output: "上轮总结文本：五层架构、外部 Coding Agent 接入、分阶段落地。",
         }],
       }],
       reusableArtifacts: [],
@@ -4781,10 +4901,8 @@ test("ModelPlanner exposes completed delivery text for follow-up file creation w
     },
   });
 
-  assert.match(observedContext, /agentloop\.artifactFollowup\/v1/);
-  assert.match(observedContext, /"intent":"create_file_from_delivery_text"/);
-  assert.match(observedContext, /上轮总结文本/);
-  assert.match(observedContext, /latest completed delivery text/i);
+  assert.doesNotMatch(observedContext, /agentloop\.artifactFollowup\/v1/);
+  assert.doesNotMatch(observedContext, /上轮总结文本/);
   assert.match(observedContext, /"artifactKind":"document"/);
   assert.match(observedContext, /"deliverySurface":"workspace_artifact"/);
   assert.match(observedContext, /artifact_build/);
@@ -5944,6 +6062,100 @@ test("selectPlanningSkillRoles does not let an uploaded workbook choose the prim
   })), [{ id: documents.id, role: "primary_builder" }]);
 });
 
+test("native uploaded PDF transform recall carries resolved task semantics to the PDF Skill", () => {
+  const pdf = skillFixture({
+    id: "pdf",
+    name: "pdf",
+    description: "Combine, merge, split, and edit PDF files.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"]),
+  });
+  const docx = skillFixture({
+    id: "docx",
+    name: "docx",
+    description: "Create and edit Word documents.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"]),
+  });
+  const sources: UploadedSourceSummary[] = ["one.pdf", "two.pdf", "three.pdf"].map((originalName, index) => ({
+    id: `src_pdf_${index}`,
+    originalName,
+    mimeType: "application/pdf",
+    extension: ".pdf",
+    byteSize: 100,
+    sha256: `${index}`.repeat(64),
+    status: "ready",
+    chunkCount: 1,
+    truncated: false,
+  }));
+  const recallInput = planningSkillRecallInput({
+    objective: "把这三个文件合并一下",
+    uploadedSources: sources,
+  });
+
+  const selected = selectPlanningSkillRoles([docx, pdf], recallInput, [], sources);
+
+  assert.deepEqual(selected.map((item) => item.skill.id), [pdf.id]);
+});
+
+test("uploaded formats do not turn information extraction into native artifact work", () => {
+  const source: UploadedSourceSummary = {
+    id: "src_pdf_extraction",
+    originalName: "input.pdf",
+    mimeType: "application/pdf",
+    extension: ".pdf",
+    byteSize: 100,
+    sha256: "f".repeat(64),
+    status: "ready",
+    chunkCount: 1,
+    truncated: false,
+  };
+  const recallInput = planningSkillRecallInput({
+    objective: "提取这份文件的文字并总结重点",
+    uploadedSources: [source],
+  });
+
+  assert.equal(classifyTaskIntent({ objective: "提取这份文件的文字并总结重点" }).artifactAction, "none");
+  assert.doesNotMatch(recallInput, /uploaded_native_artifact_context/);
+});
+
+test("Planner receives bounded attachment count, status, and format facts without output-format inference", () => {
+  const context = uploadedSourcePlanningContext([
+    {
+      id: "src_one",
+      originalName: "one.pdf",
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100,
+      sha256: "1".repeat(64),
+      status: "ready",
+      chunkCount: 1,
+      truncated: false,
+    },
+    {
+      id: "src_two",
+      originalName: "two.pdf",
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100,
+      sha256: "2".repeat(64),
+      status: "unreadable",
+      chunkCount: 0,
+      truncated: false,
+    },
+  ]);
+
+  assert.equal(context.totalCount, 2);
+  assert.equal(context.readyCount, 1);
+  assert.deepEqual(context.statusCounts, { ready: 1, unreadable: 1 });
+  assert.deepEqual(context.formats[0], {
+    family: "pdf",
+    extensions: [".pdf"],
+    mimeTypes: ["application/pdf"],
+    count: 1,
+  });
+  assert.equal(context.formatSemantics, "input_evidence_only");
+  assert.equal(context.allReadyInputsSameFormat, true);
+});
+
 test("selectPlanningSkillRoles expands a selected Skill's declared source-provider companion", () => {
   const analysis = skillFixture({
     id: "steel-analysis",
@@ -6243,7 +6455,7 @@ test("ModelPlanner lets the LLM decide a Skill continuation from history and can
       const context = request.runtimeContext?.content ?? "";
       assert.match(context, /continuationSkillIds/);
       assert.match(context, /enterprise-info/);
-      assert.match(context, /completedStepHandoffs/);
+      assert.match(context, /completedStepContexts/);
       assert.match(context, /do not infer continuation from a keyword alone/);
       return {
         content: "",
@@ -6296,15 +6508,13 @@ test("ModelPlanner lets the LLM decide a Skill continuation from history and can
       reusableArtifacts: [],
       failedBoundaries: [],
       recommendedCapabilities: { skillIds: [enterpriseInfo.id], capabilityIds: ["skill_instruction_load", "web_research"] },
-      completedStepHandoffs: [{
+      completedStepContexts: [{
         runId: "run-enterprise-first",
         planId: "plan-enterprise-first",
         stepId: "lookup",
         objective: "查询宝武共享的企业基本信息",
         skillIds: [enterpriseInfo.id],
         requiredCapabilities: ["skill_instruction_load", "web_research"],
-        output: "已查询宝武共享服务有限公司华中分公司。",
-        outputTruncated: false,
       }],
     },
   });
@@ -7130,7 +7340,7 @@ test("TerminalCommitter ignores milestone nodes and requires assessments only fo
   }
 });
 
-test("TerminalCommitter delivers approved steps with non-blocking unknown decision evidence as a caveat", async () => {
+test("TerminalCommitter does not turn legacy unverified decision evidence into a caveated completion", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const owner = testOwner();
@@ -7191,12 +7401,12 @@ test("TerminalCommitter delivers approved steps with non-blocking unknown decisi
     })).plan;
 
     await new TerminalCommitter(plans, new RunOutcomeRepository(database))
-      .commitCompletedWithCaveats(runId, plan.id, "delivered output", "completed_with_unverified_decision_binding");
+      .commitCompleted(runId, plan.id, "delivered output");
 
     const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
       .get(runId) as { status: string; reason_code: string };
     assert.equal(outcome.status, "completed");
-    assert.equal(outcome.reason_code, "completed_with_unverified_decision_binding");
+    assert.equal(outcome.reason_code, "plan_assessed_and_completed");
   } finally {
     database.close();
   }
@@ -10126,6 +10336,13 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
       now - 8_000,
       now - 7_000,
     );
+    const acceptedExtractResult = createRuntimeResult({
+      kind: "step",
+      producer: { runId: priorRunId, planId: priorPlanId, stepId: "extract" },
+      value: "Created reusable source outline at artifacts/content.md.",
+      publication: { status: "published", assessmentRef: "assessment-extract", decision: "approved" },
+      createdAt: now - 7_000,
+    });
     await database.prepare("UPDATE plan_steps SET evidence_json = ? WHERE plan_id = ? AND step_id = 'extract'").run(
       JSON.stringify({
         candidateOutput: JSON.stringify({
@@ -10139,6 +10356,7 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
           missingOrUnverified: ["具体市场规模仍待进一步核验"],
           recommendedNextStep: "produce_deck",
         }),
+        publishedResult: acceptedExtractResult,
         toolCalls: [],
         modelSteps: 1,
       }),
@@ -10336,16 +10554,17 @@ test("RunService builds a cross-turn conversation workset from prior persisted f
     assert.equal(workset?.evidenceLedger?.sourceSummaries[0]?.stepId, "extract");
     assert.equal(workset?.evidenceLedger?.sourceSummaries[0]?.facts[0]?.claim.includes("企业培训场景"), true);
     assert.equal(workset?.evidenceLedger?.sourceSummaries[0]?.facts[0]?.sourceRefs[0]?.url, "https://source.test/training");
+    assert.equal(workset?.resultCards?.[0]?.result.resultId, acceptedExtractResult.ref.resultId);
+    assert.equal(workset?.resultCards?.[0]?.kind, "step");
+    assert.equal(workset?.resultCards?.[0]?.producer.stepId, "extract");
     assert.match(executionRuntimeContext, /conversationEvidenceLedger/);
     assert.match(executionRuntimeContext, /企业培训场景/);
-    const extractHandoff = workset?.completedStepHandoffs?.find((handoff) => handoff.stepId === "extract");
+    const extractHandoff = workset?.completedStepContexts?.find((handoff) => handoff.stepId === "extract");
     assert.equal(extractHandoff?.runId, priorRunId);
-    assert.equal(extractHandoff?.output, "Created reusable source outline at artifacts/content.md.");
-    assert.equal(extractHandoff?.outputTruncated, false);
     assert.deepEqual(extractHandoff?.skillIds, [skill.id]);
     assert.equal(extractHandoff?.requiredCapabilities.includes("skill_instruction_load"), true);
     assert.match(executionRuntimeContext, /conversationReuseContext/);
-    assert.match(executionRuntimeContext, /completedStepHandoffs/);
+    assert.match(executionRuntimeContext, /completedStepContexts/);
     assert.match(executionRuntimeContext, /Created reusable source outline/);
     assert.ok(executionRuntimeContext.length < 20_000);
     assert.deepEqual(workset?.recommendedCapabilities.skillIds, [skill.id]);
@@ -10539,33 +10758,23 @@ test("RunService binds a prior Outcome as a formal input for follow-up file crea
 
     assert.equal(run.status, "completed");
     assert.equal(capturedTask?.conversationWorkingSet?.reusableArtifacts.length, 0);
-    assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.result.resultId, priorResult.ref.resultId);
-    assert.equal(capturedTask?.conversationWorkingSet?.reusableResults?.[0]?.summaryTruncated, true);
+    assert.equal(capturedTask?.conversationWorkingSet?.resultCards?.[0]?.result.resultId, priorResult.ref.resultId);
+    assert.equal(capturedTask?.conversationWorkingSet?.resultCards?.[0]?.summaryTruncated, true);
     assert.deepEqual(capturedTask?.availableSkills.map((skill) => skill.id), [aihot.id]);
     assert.deepEqual(capturedTask?.selectedSkillRoles, []);
     assert.deepEqual(capturedTask?.continuationSkillIds, [aihot.id]);
-    assert.deepEqual(capturedTask?.turnResolution?.targetResult, {
-      schema: "agentloop.resultRef/v1",
-      resultId: priorResult.ref.resultId,
-      runId: priorRunId,
-      characters: priorOutput.length,
-    });
+    assert.deepEqual(capturedTask?.turnResolution?.targetResult, priorResult.ref);
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
     assert.match(resolverContext, /reusableResultCandidates/);
     assert.doesNotMatch(resolverContext, new RegExp(priorResult.ref.resultId));
     assert.doesNotMatch(resolverContext, new RegExp(priorRunId));
-    assert.match(executionContext, /planInputBindings/);
+    assert.match(executionContext, /resultBindings/);
     assert.match(executionContext, new RegExp(priorResult.ref.resultId));
     assert.equal(resultReadCalls, 1);
     const plan = (await runs.plan(owner.user.id, run.id)).plan;
-    assert.deepEqual(plan.inputBindings, [{
-      schema: "agentloop.conversationInputBinding/v1",
-      result: {
-        schema: "agentloop.resultRef/v1",
-        resultId: priorResult.ref.resultId,
-        runId: priorRunId,
-        characters: priorOutput.length,
-      },
+    assert.deepEqual(plan.resultBindings, [{
+      schema: "agentloop.resultBinding/v1",
+      result: priorResult.ref,
       relation: "refine_prior",
     }]);
     const resolved = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.turn.resolved");
@@ -10692,7 +10901,6 @@ test("RunService retries an ambiguous prior-result follow-up until the model sel
     assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
     assert.equal(capturedTask?.turnResolution?.relation, "refine_prior");
     assert.equal(capturedTask?.turnResolution?.targetRunId, secondRunId);
-    assert.equal(capturedTask?.turnResolution?.targetResult?.runId, secondRunId);
     assert.equal(capturedTask?.turnResolution?.targetResult?.resultId, secondResultId);
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
   } finally {
@@ -10973,12 +11181,7 @@ test("RunService continues a failed goal while inheriting its completed prior-re
         relation: "refine_prior",
         inputMode: "prior_result",
         targetRunId: resultRunId,
-        targetResult: {
-          schema: "agentloop.resultRef/v1",
-          resultId: priorResult.ref.resultId,
-          runId: resultRunId,
-          characters: priorOutput.length,
-        },
+        targetResult: priorResult.ref,
         effectiveGoal: "把已完成的分析结果生成 PDF。",
         evidenceDemand: "none",
         userConstraints: ["生成 PDF"],
@@ -11030,7 +11233,6 @@ test("RunService continues a failed goal while inheriting its completed prior-re
     assert.equal(capturedTask?.turnResolution?.targetRunId, failedRunId);
     assert.equal(capturedTask?.turnResolution?.relation, "continue_prior");
     assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
-    assert.equal(capturedTask?.turnResolution?.targetResult?.runId, resultRunId);
     assert.equal(capturedTask?.turnResolution?.targetResult?.resultId, priorResult.ref.resultId);
     assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
   } finally {
@@ -14662,6 +14864,63 @@ test("a resumed Step persists a subsequent Human-in-the-Loop request", async () 
     assert.equal(events.filter((event) => event.type === "run.waiting_user").length, 2);
     assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
     assert.ok(eventLines.some((line) => line.includes("event=recovery.resume_started")));
+  } finally {
+    database.close();
+  }
+});
+
+test("an answered HIL resumes to normal completion and closes its linked recovery review", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    let executionTurns = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async () => {
+        executionTurns += 1;
+        if (executionTurns === 1) {
+          return {
+            content: "", finishReason: "tool_calls",
+            toolCalls: [{
+              id: "choose-subject", name: "request_human_loop",
+              arguments: {
+                kind: "selection", title: "Choose subject", prompt: "Select a subject.",
+                rationale: "The subject must be selected by the user.", evidenceRefs: [],
+                responseSchema: {
+                  type: "select", minSelections: 1, maxSelections: 1,
+                  options: [{ id: "chosen", label: "Chosen", identityRefs: ["subject-chosen"] }],
+                },
+                resume: { mode: "continue_step" },
+              },
+            }],
+          };
+        }
+        return { content: "已按用户选择完成。", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database, skills, modelFactory: () => model,
+      plannerFactory: () => singleStepTestPlanner(), assessorFactory: () => approvingTestAssessor(),
+    });
+    const initial = await runs.execute(owner.user.id, "Select a subject and finish.");
+    const request = await runs.currentHumanLoop(owner.user.id, initial.id);
+    assert.ok(request);
+    await runs.respondHumanLoop(owner.user.id, initial.id, request.id, ["chosen"], request.revision);
+
+    const deadline = Date.now() + 1_000;
+    let completed = await runs.get(owner.user.id, initial.id);
+    while (completed.status === "running" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      completed = await runs.get(owner.user.id, initial.id);
+    }
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.output, "已按用户选择完成。");
+    const action = await database.prepare("SELECT state FROM runtime_actions WHERE run_id = ? AND kind = 'recovery_review'")
+      .get(initial.id) as { state: string } | undefined;
+    assert.equal(action?.state, "succeeded");
+    assert.equal((await runs.recoveryForRun(owner.user.id, initial.id)).state, undefined);
+    assert.equal((await runs.events(owner.user.id, initial.id)).some((event) => event.type === "human_loop.resume_failed"), false);
   } finally {
     database.close();
   }

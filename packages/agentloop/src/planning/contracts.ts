@@ -1,7 +1,7 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
-import type { RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
+import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
@@ -196,12 +196,12 @@ export interface ConversationTurnResolution {
    */
   readonly targetArtifact?: ConversationArtifactReference;
   /**
-   * Server-validated identity of a completed prior Outcome whose semantic
+   * Server-validated identity of a published prior Runtime Result whose semantic
    * result is an input to this Run. This input owner may differ from
    * targetRunId: a turn can continue a failed goal while consuming the
-   * completed Outcome that originally supplied that goal's content.
+   * published Result that originally supplied that goal's content.
    */
-  readonly targetResult?: ConversationResultReference;
+  readonly targetResult?: RuntimeResultRef;
   readonly effectiveGoal: string;
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
@@ -211,19 +211,6 @@ export interface ConversationTurnResolution {
 export interface ConversationArtifactReference {
   readonly runId: string;
   readonly path: string;
-}
-
-export interface ConversationResultReference extends RuntimeResultRef {
-  /** Producer provenance for goal selection; resultId remains the only read identity. */
-  readonly runId: string;
-  readonly characters: number;
-}
-
-/** A persisted, Plan-owned declaration that a prior accepted Outcome is input. */
-export interface ConversationInputBinding {
-  readonly schema: "agentloop.conversationInputBinding/v1";
-  readonly result: ConversationResultReference;
-  readonly relation: "continue_prior" | "refine_prior" | "correct_prior" | "challenge_prior";
 }
 
 export interface PlanningExtensionContext {
@@ -253,18 +240,14 @@ export interface ConversationWorkingSet {
   readonly planCursors: readonly ConversationPlanCursor[];
   /** Canonical turn intents persisted by prior Runs, keyed by their owning Run. */
   readonly resolvedIntents?: readonly ConversationResolvedIntent[];
+  /** Process and capability lineage for completed steps; never result content. */
+  readonly completedStepContexts?: readonly ConversationStepContext[];
   /**
-   * Bounded, accepted step outputs retained independently of a Run's terminal
-   * output.  A failed Run can have useful completed predecessors even though
-   * its own `runs.output` is empty.
+   * Active formal Runtime Results. A completed Run contributes its Run Result;
+   * a Run without a published Run Result contributes its already-published
+   * Step Results. Cards are bounded views of the same Result identity.
    */
-  readonly completedStepHandoffs?: readonly ConversationCompletedStepHandoff[];
-  /**
-   * Completed terminal Outcomes are semantic work products, independently of
-   * whether they also emitted a workspace artifact. Their compact projection
-   * is for planning; contentRef can retrieve the immutable full text on demand.
-   */
-  readonly reusableResults?: readonly ConversationReusableResult[];
+  readonly resultCards?: readonly RuntimeResultCard[];
   readonly reusableArtifacts: readonly ConversationReusableArtifact[];
   readonly failedBoundaries: readonly ConversationFailedBoundary[];
   /** Append-only semantic links; historical terminal records remain immutable. */
@@ -272,16 +255,6 @@ export interface ConversationWorkingSet {
   readonly recommendedCapabilities: ConversationRecommendedCapabilities;
   readonly evidenceLedger?: ConversationEvidenceLedger;
   readonly resumeSuggestion?: string;
-}
-
-export interface ConversationReusableResult {
-  readonly result: ConversationResultReference;
-  readonly planId?: string;
-  readonly goal: string;
-  readonly summary: string;
-  readonly summaryTruncated: boolean;
-  readonly artifactPaths: readonly string[];
-  readonly evidenceRefs: readonly string[];
 }
 
 export interface ConversationResolvedIntent {
@@ -355,11 +328,10 @@ export interface ConversationPlanStepCursor {
   readonly skillIds: readonly string[];
   readonly requiredCapabilities: readonly string[];
   readonly executionBinding: StepExecutionBinding;
-  readonly output?: string;
   readonly error?: string;
 }
 
-export interface ConversationCompletedStepHandoff {
+export interface ConversationStepContext {
   readonly runId: string;
   readonly planId: string;
   readonly stepId: string;
@@ -371,8 +343,6 @@ export interface ConversationCompletedStepHandoff {
    */
   readonly skillIds: readonly string[];
   readonly requiredCapabilities: readonly string[];
-  readonly output: string;
-  readonly outputTruncated: boolean;
 }
 
 export interface ConversationReusableArtifact {
@@ -491,8 +461,8 @@ export interface ExecutionPlan {
   readonly version: number;
   readonly goal: string;
   readonly selectedSkillIds: readonly string[];
-  /** Explicit, persisted prior-Outcome inputs selected for this Plan. */
-  readonly inputBindings?: readonly ConversationInputBinding[];
+  /** Explicit, persisted Runtime Result inputs selected for this Plan. */
+  readonly resultBindings?: readonly RuntimeResultBinding[];
   readonly status: PlanStatus;
   readonly steps: readonly PlanStep[];
   readonly createdAt: number;

@@ -634,6 +634,10 @@ function render() {
     assistant.planOpen = assistant.planOpen !== true;
     render();
   }));
+  document.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", () => {
+    const message = messages.find((item) => item.id === button.dataset.copyMessage);
+    if (message) void copyConversationMessage(message, button);
+  }));
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
   document.querySelectorAll("[data-human-loop-option]").forEach((input) => input.addEventListener("change", () => {
     rememberHumanLoopSelection(
@@ -705,7 +709,7 @@ function renderMessage(message) {
   if (message.role === "user") {
     const attachments = Array.isArray(message.attachments) ? message.attachments : (message.files || []).map((name) => ({ originalName: name }));
     const askedAt = formatMessageTime(message.createdAt);
-    return `<article class="msg user"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${attachments.length ? `<div class="msg-source-row" aria-label="本轮上传文件">${attachments.map(renderAttachmentChip).join("")}</div>` : ""}<div class="msg-text">${escapeHtml(message.text)}</div>${askedAt ? `<div class="message-timing user-timing">提问于 ${askedAt}</div>` : ""}</div></div></article>`;
+    return `<article class="msg user"><div class="msg-body"><div class="msg-bubble"><div class="msg-role">你</div>${attachments.length ? `<div class="msg-source-row" aria-label="本轮上传文件">${attachments.map(renderAttachmentChip).join("")}</div>` : ""}<div class="msg-text">${escapeHtml(message.text)}</div>${renderMessageFooter(message, askedAt ? `提问于 ${askedAt}` : "", "提问")}</div></div></article>`;
   }
   const presentation = assistantMessagePresentation(message.status);
   const isSelected = selectedAssistantMessage(activeConversation())?.id === message.id;
@@ -728,12 +732,61 @@ function renderMessage(message) {
   const stateIcon = presentation.icon;
   const completedAt = formatMessageTime(message.completedAt);
   const duration = formatConversationDuration(message.createdAt, message.completedAt);
-  const responseTiming = completedAt ? `<div class="message-timing assistant-timing">回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}</div>` : "";
+  const responseTiming = renderMessageFooter(message, completedAt ? `回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}` : "", "回答");
   const hasPlan = plan.length;
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
   return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${responseTiming}</div></div></article>`;
+}
+
+function renderMessageFooter(message, timing, kind) {
+  const label = `复制${kind}`;
+  return `<div class="message-footer">${timing ? `<div class="message-timing">${timing}</div>` : ""}<button type="button" class="message-copy" data-copy-message="${escapeHtml(message.id)}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg></button></div>`;
+}
+
+async function copyConversationMessage(message, button) {
+  const text = typeof message?.text === "string" ? message.text : "";
+  const kind = message?.role === "user" ? "提问" : "回答";
+  if (!text) { setStatus(`暂无可复制的${kind}内容`, "error"); return; }
+  try {
+    await copyText(text);
+    showCopyFeedback(button, kind);
+    setStatus(`已复制${kind}`, "ok");
+  } catch {
+    setStatus(`复制${kind}失败，请检查浏览器权限`, "error");
+  }
+}
+
+function showCopyFeedback(button, kind) {
+  if (!(button instanceof HTMLButtonElement)) return;
+  if (button.copyFeedbackTimer) window.clearTimeout(button.copyFeedbackTimer);
+  button.classList.add("copied");
+  button.setAttribute("aria-label", `已复制${kind}`);
+  button.title = `已复制${kind}`;
+  button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>';
+  button.copyFeedbackTimer = window.setTimeout(() => {
+    button.classList.remove("copied");
+    button.setAttribute("aria-label", `复制${kind}`);
+    button.title = `复制${kind}`;
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>';
+  }, 1600);
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard copy was rejected");
 }
 
 async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {

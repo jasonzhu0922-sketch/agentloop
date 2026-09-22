@@ -1,5 +1,5 @@
 import type { SqlConnection } from "../storage/connection.ts";
-import { parseRuntimeResult, parseRuntimeResultJson, type RuntimeResultRecord } from "./runtime-result.ts";
+import { parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultJson, type RuntimeResultRecord } from "./runtime-result.ts";
 
 interface ActionResultRow {
   readonly metadata_json: string;
@@ -8,6 +8,11 @@ interface ActionResultRow {
 interface StepResultRow {
   readonly step_id: string;
   readonly evidence_json: string | null;
+}
+
+interface BoundStepResultRow extends StepResultRow {
+  readonly plan_id: string;
+  readonly run_id: string;
 }
 
 /**
@@ -87,7 +92,28 @@ export class RuntimeResultRepository {
     const result = outcome?.result_json === null || outcome?.result_json === undefined
       ? undefined
       : parseRuntimeResultJson(outcome.result_json);
-    return result?.kind === "run" ? result : undefined;
+    if (result?.kind === "run") return result;
+
+    const stepCandidates = await this.database.prepare(`
+      SELECT steps.step_id, steps.evidence_json, plans.id AS plan_id, plans.run_id
+      FROM plan_steps AS steps
+      JOIN plans ON plans.id = steps.plan_id
+      JOIN runs ON runs.id = plans.run_id
+      WHERE steps.status = 'completed'
+        AND runs.owner_user_id = ?
+        AND runs.conversation_id = ?
+    `).all(input.actorUserId, input.conversationId) as unknown as BoundStepResultRow[];
+    for (const candidate of stepCandidates) {
+      const stepResult = resultFromEvidence(candidate.evidence_json);
+      if (
+        stepResult?.kind === "step"
+        && stepResult.ref.resultId === input.resultId
+        && stepResult.producer.runId === candidate.run_id
+        && stepResult.producer.planId === candidate.plan_id
+        && stepResult.producer.stepId === candidate.step_id
+      ) return stepResult;
+    }
+    return undefined;
   }
 }
 
@@ -127,12 +153,10 @@ function hasBoundResult(value: string | undefined, resultId: string): boolean {
   if (value === undefined) return false;
   const parsed = parseJson(value);
   return Array.isArray(parsed) && parsed.some((binding) => {
-    if (binding === null || typeof binding !== "object" || Array.isArray(binding)) return false;
-    const result = (binding as Record<string, unknown>).result;
-    return result !== null
-      && typeof result === "object"
-      && !Array.isArray(result)
-      && (result as Record<string, unknown>).resultId === resultId;
+    const parsedBinding = parseRuntimeResultBinding(binding);
+    return parsedBinding !== undefined
+      && parsedBinding.relation !== "dependency"
+      && parsedBinding.result.resultId === resultId;
   });
 }
 

@@ -10,7 +10,13 @@ import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { reconstructRecoveryTranscript } from "../src/runtime/recovery-transcript.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { RuntimeResultRepository } from "../src/runtime/runtime-result-repository.ts";
-import { createRuntimeResult, parseRuntimeResult, type RuntimeResultRef } from "../src/runtime/runtime-result.ts";
+import {
+  createRuntimeResult,
+  parseRuntimeResult,
+  parseRuntimeResultBinding,
+  parseRuntimeResultCard,
+  type RuntimeResultRef,
+} from "../src/runtime/runtime-result.ts";
 import { StepResultCommitter } from "../src/runtime/step-result-committer.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
@@ -22,6 +28,38 @@ import { singleStepTestPlanner, testOwner } from "./runtime-test-helpers.ts";
 const runId = "tool-result-ref-run";
 const planId = "tool-result-ref-plan";
 const stepId = "inspect-values";
+
+test("Result bindings and context cards preserve one global Result identity", () => {
+  const ref = { schema: "agentloop.resultRef/v1" as const, resultId: "rr_00000000-0000-4000-8000-000000000099" };
+  assert.deepEqual(parseRuntimeResultBinding({
+    schema: "agentloop.resultBinding/v1",
+    result: ref,
+    relation: "dependency",
+  }), {
+    schema: "agentloop.resultBinding/v1",
+    result: ref,
+    relation: "dependency",
+  });
+  assert.equal(parseRuntimeResultBinding({
+    schema: "agentloop.conversationInputBinding/v1",
+    result: ref,
+    relation: "continue_prior",
+  }), undefined);
+
+  const card = {
+    schema: "agentloop.resultCard/v1",
+    result: ref,
+    kind: "step",
+    producer: { runId: "producer-run", planId: "producer-plan", stepId: "producer-step" },
+    goal: "Produce the assessed result",
+    summary: "bounded summary",
+    summaryTruncated: false,
+    characters: 15,
+    artifactPaths: [],
+    evidenceRefs: ["assessment:approved"],
+  };
+  assert.deepEqual(parseRuntimeResultCard(card), card);
+});
 
 async function seedRun(database: AppDatabase): Promise<void> {
   const owner = testOwner();
@@ -287,7 +325,7 @@ test("recovery reconstructs the model-visible ref from canonical Tool result plu
   assert.deepEqual(JSON.parse(result.content).resultRef, ref);
 });
 
-test("consumed and compacted structured reads keep a deterministic Tool result catalog even when the summary omits it", async () => {
+test("consumed and compacted structured reads keep the canonical Result context even when the summary omits it", async () => {
   const ref = { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-4000-8000-000000000002" } as const;
   const messages: ModelMessage[] = [
     { role: "user", content: "inspect records" },
@@ -332,7 +370,7 @@ test("consumed and compacted structured reads keep a deterministic Tool result c
   });
   const assembly = await context.assemble(messages, []);
   assert.ok(summaryCalls > 0);
-  assert.match(assembly.runtimeContext.content, /agentloop\.runtimeResultCatalog\/v1/);
+  assert.match(assembly.runtimeContext.content, /agentloop\.resultContext\/v1/);
   assert.match(assembly.runtimeContext.content, new RegExp(ref.resultId));
   assert.match(assembly.runtimeContext.content, /read_result/);
   assert.doesNotMatch(assembly.runtimeContext.content, /\.agentloop\/content-refs/);

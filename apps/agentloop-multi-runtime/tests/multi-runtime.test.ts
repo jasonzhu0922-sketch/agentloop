@@ -801,6 +801,11 @@ test("Web persists question and terminal-response timing for the conversation st
   assert.match(app, /回答结束于 \$\{completedAt\}/);
   assert.match(app, /耗时 \$\{duration\}/);
   assert.match(app, /提问于 \$\{askedAt\}/);
+  assert.match(app, /data-copy-message=/);
+  assert.match(app, /function copyConversationMessage\(message, button\)/);
+  assert.match(app, /navigator\.clipboard\?\.writeText/);
+  assert.match(app, /function showCopyFeedback\(button, kind\)/);
+  assert.match(app, /button\.classList\.add\("copied"\)/);
   assert.match(overrides, /\.message-timing/);
 });
 

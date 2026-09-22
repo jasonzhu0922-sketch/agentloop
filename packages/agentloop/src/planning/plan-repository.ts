@@ -3,7 +3,6 @@ import { notFound } from "../shared/errors.ts";
 import type {
   AssessmentMethod,
   AssessmentProfileId,
-  ConversationInputBinding,
   ExecutionPlan,
   PlanStatus,
   PlanStep,
@@ -11,7 +10,8 @@ import type {
   SkillComplianceAssessment,
   StepEvidence,
 } from "./contracts.ts";
-import { parseRuntimeResult } from "../runtime/runtime-result.ts";
+import { parseRuntimeResult, parseRuntimeResultBinding } from "../runtime/runtime-result.ts";
+import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
 
 interface PlanRow {
   id: string;
@@ -78,7 +78,7 @@ export class PlanRepository {
         plan.version,
         plan.goal,
         JSON.stringify(plan.selectedSkillIds),
-        JSON.stringify(plan.inputBindings ?? []),
+        JSON.stringify(plan.resultBindings ?? []),
         plan.status,
         plan.createdAt,
         plan.updatedAt,
@@ -347,7 +347,7 @@ export class PlanRepository {
       version: row.version,
       goal: row.goal,
       selectedSkillIds: JSON.parse(row.selected_skill_ids_json),
-      inputBindings: parseInputBindings(row.input_bindings_json),
+      resultBindings: parseResultBindings(row.input_bindings_json),
       status: row.status,
       steps: steps.map(toStep),
       createdAt: row.created_at,
@@ -359,7 +359,7 @@ export class PlanRepository {
     const proposal = {
       goal: plan.goal,
       selectedSkillIds: plan.selectedSkillIds,
-      inputBindings: plan.inputBindings ?? [],
+      resultBindings: plan.resultBindings ?? [],
       steps: plan.steps.map((step) => ({
         id: step.id,
         kind: step.kind,
@@ -401,7 +401,7 @@ function parseAssessmentMethod(value: string | undefined): AssessmentMethod {
   return value === "rule" || value === "model" ? value : "model";
 }
 
-function parseInputBindings(value: string | undefined): readonly ConversationInputBinding[] {
+function parseResultBindings(value: string | undefined): readonly RuntimeResultBinding[] {
   if (value === undefined) return [];
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed)) throw new Error("Plan has invalid input bindings; replan required");
@@ -409,27 +409,11 @@ function parseInputBindings(value: string | undefined): readonly ConversationInp
     if (binding === null || typeof binding !== "object" || Array.isArray(binding)) {
       throw new Error("Plan has invalid input binding; replan required");
     }
-    const item = binding as Record<string, unknown>;
-    const result = item.result;
-    if (
-      item.schema !== "agentloop.conversationInputBinding/v1"
-      || !["continue_prior", "refine_prior", "correct_prior", "challenge_prior"].includes(String(item.relation))
-      || result === null
-      || typeof result !== "object"
-      || Array.isArray(result)
-    ) {
+    const parsedBinding = parseRuntimeResultBinding(binding);
+    if (parsedBinding === undefined || parsedBinding.relation === "dependency") {
       throw new Error("Plan has invalid input binding; replan required");
     }
-    const ref = result as Record<string, unknown>;
-    if (
-      ref.schema !== "agentloop.resultRef/v1"
-      || typeof ref.resultId !== "string"
-      || typeof ref.runId !== "string"
-      || typeof ref.characters !== "number"
-    ) {
-      throw new Error("Plan has invalid input binding result reference; replan required");
-    }
-    return binding as ConversationInputBinding;
+    return parsedBinding;
   });
 }
 

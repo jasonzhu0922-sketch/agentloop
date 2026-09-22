@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { createDecisionCommit } from "../src/runtime/decision-ledger.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { SimpleCommandSafetyPlugin } from "../src/tools/simple-command-safety-plugin.ts";
 import { ToolRegistry, type RuntimeTool } from "../src/tools/tool-registry.ts";
@@ -61,5 +62,37 @@ test("a failing execution plugin fails closed", async () => {
     assert.equal(error.code, "TOOL_POLICY_DENIED");
     return true;
   });
+  assert.equal(executions.count, 0);
+});
+
+test("a Tool-declared identity binding rejects a conflicting HIL decision before its effect", () => {
+  const executions = { count: 0 };
+  const tool: RuntimeTool<{ identity: string }> = {
+    name: "lookup_subject",
+    description: "lookup", inputSchema: { type: "object" }, executionMode: "parallel", replaySafe: true,
+    decisionBinding: { identityRefFields: ["identity"] },
+    parse: (input) => input as { identity: string },
+    execute: async () => { executions.count += 1; return {}; },
+  };
+  const scopedGrant = createCapabilityGrant({
+    actorUserId: "user", runId: "run", planId: "plan", stepId: "step", depth: 0,
+    allowedToolNames: ["lookup_subject"], allowedSkillIds: [],
+  });
+  const decision = createDecisionCommit({
+    requestId: "request", requestRevision: 1, planId: "plan", stepId: "step",
+    selectedOptions: [{ id: "chosen", label: "Chosen", identityRefs: ["identity-chosen"] }],
+  });
+  const registry = new ToolRegistry([tool]);
+  assert.throws(
+    () => registry.materialize(scopedGrant, { decisionLedger: [decision] }).prepare({
+      id: "call", name: "lookup_subject", arguments: { identity: "identity-other" },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AppError);
+      assert.equal(error.code, "TOOL_POLICY_DENIED");
+      assert.equal(error.details?.policyCode, "decision_binding_conflict");
+      return true;
+    },
+  );
   assert.equal(executions.count, 0);
 });

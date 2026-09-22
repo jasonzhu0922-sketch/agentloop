@@ -1,4 +1,6 @@
 import type { ArtifactAction, ArtifactKind, ResearchPolicy, SourceNeed } from "./dynamic-prompt.ts";
+import type { UploadedSourceSummary } from "./contracts.ts";
+import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 
 export type DeliverySurface = "conversation" | "workspace_artifact";
 
@@ -37,6 +39,96 @@ export interface TaskIntentInput {
    * consumers must not upgrade it by re-reading model-authored objectives.
    */
   readonly evidenceDemand?: SourceNeed;
+}
+
+export interface UploadedSourcePlanningContext {
+  readonly schema: "agentloop.uploadedSourcePlanningContext/v1";
+  readonly totalCount: number;
+  readonly readyCount: number;
+  readonly statusCounts: Readonly<Record<string, number>>;
+  readonly formats: readonly {
+    readonly family: string;
+    readonly extensions: readonly string[];
+    readonly mimeTypes: readonly string[];
+    readonly count: number;
+  }[];
+  readonly names: readonly string[];
+  readonly namesTruncated: boolean;
+  readonly allReadyInputsSameFormat: boolean;
+  readonly formatSemantics: "input_evidence_only";
+}
+
+export function uploadedSourcePlanningContext(
+  sources: readonly UploadedSourceSummary[],
+): UploadedSourcePlanningContext {
+  const statusCounts = new Map<string, number>();
+  const formats = new Map<string, { extensions: Set<string>; mimeTypes: Set<string>; count: number }>();
+  const names = sources.slice(0, 12).map((source) => source.originalName);
+  for (const source of sources) {
+    statusCounts.set(source.status, (statusCounts.get(source.status) ?? 0) + 1);
+    if (source.status !== "ready") continue;
+    const extension = source.extension.trim().toLowerCase();
+    const mimeType = source.mimeType.trim().toLowerCase();
+    const family = sourceFormatFamily(extension, mimeType);
+    const current = formats.get(family) ?? { extensions: new Set<string>(), mimeTypes: new Set<string>(), count: 0 };
+    if (extension.length > 0) current.extensions.add(extension);
+    if (mimeType.length > 0) current.mimeTypes.add(mimeType);
+    current.count += 1;
+    formats.set(family, current);
+  }
+  return {
+    schema: "agentloop.uploadedSourcePlanningContext/v1",
+    totalCount: sources.length,
+    readyCount: sources.filter((source) => source.status === "ready").length,
+    statusCounts: Object.fromEntries(statusCounts),
+    formats: [...formats.entries()].map(([family, value]) => ({
+      family,
+      extensions: [...value.extensions].sort(),
+      mimeTypes: [...value.mimeTypes].sort(),
+      count: value.count,
+    })),
+    names,
+    namesTruncated: sources.length > names.length,
+    allReadyInputsSameFormat: formats.size === 1 && sources.some((source) => source.status === "ready"),
+    formatSemantics: "input_evidence_only",
+  };
+}
+
+function sourceFormatFamily(extension: string, mimeType: string): string {
+  if (extension.length > 0) return canonicalArtifactFormatFamily(extension);
+  if (mimeType.includes("pdf")) return "pdf";
+  if (mimeType.includes("wordprocessingml") || mimeType.includes("msword")) return "word";
+  if (mimeType.includes("presentationml") || mimeType.includes("powerpoint")) return "pptx";
+  if (mimeType.includes("spreadsheetml") || mimeType.includes("excel")) return "xlsx";
+  if (mimeType.includes("html")) return "html";
+  return mimeType || "unknown";
+}
+
+/**
+ * A neutral, runtime-owned view of the user turn for Skill recall.  Uploaded
+ * filenames and formats are evidence about the operation's input boundary,
+ * not a request to produce a file of that same format.  They are exposed only
+ * for native modify/transform work, where the original bytes must be owned by
+ * a compatible format Skill.
+ */
+export function planningSkillRecallInput(input: TaskIntentInput & {
+  readonly uploadedSources?: readonly UploadedSourceSummary[];
+}): string {
+  const objective = [
+    input.objective,
+    ...(input.userConstraints ?? []),
+    ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
+  ].map((value) => value.trim()).filter(Boolean).join("\n");
+  const intent = classifyTaskIntent({ ...input, objective, userConstraints: undefined, successCriteria: undefined });
+  if (intent.artifactAction !== "modify" && intent.artifactAction !== "transform") return objective;
+  const sources = (input.uploadedSources ?? []).filter((source) => source.status === "ready");
+  if (sources.length === 0) return objective;
+  return [
+    objective,
+    "<uploaded_native_artifact_context>",
+    JSON.stringify(uploadedSourcePlanningContext(input.uploadedSources ?? [])),
+    "</uploaded_native_artifact_context>",
+  ].join("\n");
 }
 
 export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassification {

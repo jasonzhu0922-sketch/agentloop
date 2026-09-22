@@ -107,8 +107,17 @@ export type {
 } from "./runtime/process-artifacts.ts";
 export { RuntimeActionRepository } from "./runtime/runtime-action-repository.ts";
 export { RuntimeResultRepository } from "./runtime/runtime-result-repository.ts";
-export { createRuntimeResult, parseRuntimeResult, parseRuntimeResultJson, parseRuntimeResultRef } from "./runtime/runtime-result.ts";
-export type { RuntimeResultKind, RuntimeResultPayload, RuntimeResultRecord, RuntimeResultRef } from "./runtime/runtime-result.ts";
+export { createRuntimeResult, createRuntimeResultCard, parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultCard, parseRuntimeResultJson, parseRuntimeResultRef } from "./runtime/runtime-result.ts";
+export type {
+  RuntimeResultBinding,
+  RuntimeResultBindingRelation,
+  RuntimeResultCard,
+  RuntimeResultContextEntry,
+  RuntimeResultKind,
+  RuntimeResultPayload,
+  RuntimeResultRecord,
+  RuntimeResultRef,
+} from "./runtime/runtime-result.ts";
 export { StepResultCommitter } from "./runtime/step-result-committer.ts";
 export { markActionFailedBeforeEffect } from "./runtime/action-effect.ts";
 export type {

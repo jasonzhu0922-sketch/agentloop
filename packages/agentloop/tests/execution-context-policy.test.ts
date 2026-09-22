@@ -167,9 +167,9 @@ test("execution context binds dependency evidence before downstream reacquisitio
     requiresFileOutput: true,
   });
   const payload = executionContextPayload(snapshot.content);
-  const bindings = payload.dependencyEvidenceBindings as {
+  const bindings = payload.stepDependencyContexts as {
     readonly schema: string;
-    readonly bindings: readonly [{
+    readonly dependencies: readonly [{
       readonly stepId: string;
       readonly satisfiedEvidenceKinds: readonly string[];
       readonly missingRequiredEvidenceKinds: readonly string[];
@@ -182,20 +182,21 @@ test("execution context binds dependency evidence before downstream reacquisitio
     }];
   };
 
-  assert.equal(bindings.schema, "agentloop.dependencyEvidenceBindings/v1");
-  assert.equal(bindings.bindings[0]?.stepId, "inspect_data");
-  assert.equal(bindings.bindings[0]?.satisfiedEvidenceKinds.includes("source_summary"), true);
-  assert.equal(bindings.bindings[0]?.satisfiedEvidenceKinds.includes("artifact_path"), true);
-  assert.equal(bindings.bindings[0]?.missingRequiredEvidenceKinds.includes("source_summary"), false);
-  assert.equal(bindings.bindings[0]?.toolEvidence.some((item) =>
+  assert.equal(bindings.schema, "agentloop.stepDependencyContexts/v1");
+  assert.equal(bindings.dependencies[0]?.stepId, "inspect_data");
+  assert.equal("output" in (bindings.dependencies[0] as object), false);
+  assert.equal(bindings.dependencies[0]?.satisfiedEvidenceKinds.includes("source_summary"), true);
+  assert.equal(bindings.dependencies[0]?.satisfiedEvidenceKinds.includes("artifact_path"), true);
+  assert.equal(bindings.dependencies[0]?.missingRequiredEvidenceKinds.includes("source_summary"), false);
+  assert.equal(bindings.dependencies[0]?.toolEvidence.some((item) =>
     item.toolName === "visible_index_directory"
     && item.resultSchemas.includes("agentloop.sourceSummary/v1")
   ), true);
-  assert.equal(bindings.bindings[0]?.toolEvidence.some((item) =>
+  assert.equal(bindings.dependencies[0]?.toolEvidence.some((item) =>
     item.toolName === "computer_run_command"
     && item.preview.includes("summary_data.json")
   ), true);
-  assert.equal(bindings.bindings[0]?.toolEvidence.some((item) =>
+  assert.equal(bindings.dependencies[0]?.toolEvidence.some((item) =>
     item.artifacts?.some((artifact) => artifact.path === "data_inspection_report.md") === true
   ), true);
   assert.match(payload.toolSelectionPolicy.beforeAcquiringEvidence, /Reuse existing satisfied receipts/);
@@ -231,7 +232,7 @@ test("execution context binds dependency evidence before downstream reacquisitio
     };
     readonly handoffContract: {
       readonly reusableEvidenceKinds: readonly string[];
-      readonly reusableOutputPolicy: string;
+      readonly resultPublicationPolicy: string;
       readonly nextStepBoundary?: string;
       readonly forbiddenMoves: readonly string[];
     };
@@ -269,14 +270,12 @@ test("execution context dynamically requires Markdown materialization for bound 
     version: 1,
     goal: "Export prior analysis as PDF.",
     selectedSkillIds: [],
-    inputBindings: [{
-      schema: "agentloop.conversationInputBinding/v1",
+    resultBindings: [{
+      schema: "agentloop.resultBinding/v1",
       relation: "continue_prior",
       result: {
         schema: "agentloop.resultRef/v1",
         resultId: "rr_00000000-0000-4000-8000-000000000010",
-        runId: "prior-run",
-        characters: 1024,
       },
     }],
     status: "running",
@@ -437,7 +436,7 @@ test("execution context carries current-to-next handoff for non-terminal steps",
     };
     readonly handoffContract: {
       readonly reusableEvidenceKinds: readonly string[];
-      readonly reusableOutputPolicy: string;
+      readonly resultPublicationPolicy: string;
       readonly currentStepBoundary: string;
       readonly nextStepBoundary: string;
       readonly forbiddenMoves: readonly string[];
@@ -590,9 +589,9 @@ test("execution context prefers structured JSON reads for table extraction artif
   assert.match(payload.toolSelectionPolicy.beforeAcquiringEvidence, /current-stage evidence for this stage/i);
   assert.match(payload.stageEvidencePrecedence, /dependency evidence is input, not a veto/i);
   assert.match(payload.stageEvidencePrecedence, /do not re-fetch or revalidate solely to reconcile/i);
-  assert.match((payload.dependencyEvidenceBindings as { readonly instruction: string }).instruction, /current step resolves a conflict/i);
-  const bindings = payload.dependencyEvidenceBindings as {
-    readonly bindings: readonly Array<{
+  assert.match((payload.stepDependencyContexts as { readonly instruction: string }).instruction, /current step resolves a conflict/i);
+  const bindings = payload.stepDependencyContexts as {
+    readonly dependencies: readonly Array<{
       readonly toolEvidence: readonly Array<{
         readonly artifacts?: readonly Array<{
           readonly path: string;
@@ -602,8 +601,8 @@ test("execution context prefers structured JSON reads for table extraction artif
       }>;
     }>;
   };
-  assert.equal(bindings.bindings[0]?.toolEvidence[0]?.artifacts?.[0]?.schema, "agentloop.tableExtractionArtifact/v1");
-  assert.equal(bindings.bindings[0]?.toolEvidence[0]?.artifacts?.[0]?.manifest?.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+  assert.equal(bindings.dependencies[0]?.toolEvidence[0]?.artifacts?.[0]?.schema, "agentloop.tableExtractionArtifact/v1");
+  assert.equal(bindings.dependencies[0]?.toolEvidence[0]?.artifacts?.[0]?.manifest?.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
 });
 
 test("step semantic frame classifies visible directory analysis as source acquisition", () => {
@@ -801,12 +800,12 @@ test("dependency evidence binding keeps missing source summary explicit", () => 
     operationProfile: { id: "produce" },
     requiresFileOutput: true,
   }).content);
-  const binding = (payload.dependencyEvidenceBindings as {
-    readonly bindings: readonly [{
+  const binding = (payload.stepDependencyContexts as {
+    readonly dependencies: readonly [{
       readonly missingRequiredEvidenceKinds: readonly string[];
       readonly completionCaveat?: { readonly reason: string };
     }];
-  }).bindings[0];
+  }).dependencies[0];
 
   assert.equal(binding?.missingRequiredEvidenceKinds.includes("source_summary"), true);
   assert.equal(binding?.completionCaveat?.reason, "repair_limit");

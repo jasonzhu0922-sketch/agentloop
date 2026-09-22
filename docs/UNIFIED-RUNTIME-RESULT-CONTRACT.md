@@ -1,8 +1,8 @@
 # AgentLoop 统一 Runtime Result 契约
 
-版本：v1.0
-日期：2026-09-21
-状态：已实现第一阶段
+版本：v1.1
+日期：2026-09-22
+状态：已实现全局语义收敛阶段
 范围：Tool Action、Plan Step、Run Outcome、上下文压缩、恢复、跨 Step 与跨 Run 读取
 
 ## 1. 核心结论
@@ -69,9 +69,51 @@ interface RuntimeResultRecord {
   };
   readonly createdAt: number;
 }
+
+interface RuntimeResultBinding {
+  readonly schema: "agentloop.resultBinding/v1";
+  readonly result: RuntimeResultRef;
+  readonly relation:
+    | "dependency"
+    | "continue_prior"
+    | "refine_prior"
+    | "correct_prior"
+    | "challenge_prior";
+}
+
+interface RuntimeResultCard {
+  readonly schema: "agentloop.resultCard/v1";
+  readonly result: RuntimeResultRef;
+  readonly kind: "tool" | "step" | "run";
+  readonly producer: RuntimeResultRecord["producer"];
+  readonly summary: string;
+  readonly summaryTruncated: boolean;
+  readonly characters: number;
+  readonly goal: string;
+  readonly artifactPaths: readonly string[];
+  readonly evidenceRefs: readonly string[];
+}
 ```
 
 `resultId` 是模型可见的唯一读取身份。`sha256` 只由 Runtime 计算并用于内部完整性校验；模型不提交、不回放 hash，也不能用路径、Run ID 或摘要替代 ResultRef。
+
+`RuntimeResultBinding` 是全局唯一的 Result 消费关系。Step 依赖和跨 Run 接续不再拥有各自的 binding schema；两者只通过 `relation` 表达消费语义。
+
+`RuntimeResultCard` 是 Runtime 对同一 Result 的有界服务端视图，不创建第二个结果身份，不拥有独立内容，也不能作为读取授权。它只在 WorkingSet 和规划上下文中提供可发现性；Resolver 选中候选后，Turn Resolution 立即收敛回 `RuntimeResultRef`，随后直接形成 `RuntimeResultBinding`，不会把 Card 持久化成第二种权威状态。
+
+压缩后的执行上下文使用 `agentloop.resultContext/v1`，其中每个 `RuntimeResultContextEntry` 仍携带完整 `RuntimeResultRef`、同一 kind 和 producer。它替代旧的 Tool-only `runtimeResultCatalog`，不再维护只含裸 `resultId` 的第二套目录身份。
+
+代码中不再存在 Conversation 专属 Result 类型。以下名称已经退出当前契约：
+
+- `ConversationResultReference`
+- `ConversationReusableResult`
+- `ConversationInputBinding`
+- `completedStepHandoffs`
+- `reusableResults`
+
+`ConversationStepContext` 只描述步骤过程上下文，不是 Result，不能替代 `RuntimeResultRecord`、`RuntimeResultRef` 或 `RuntimeResultBinding`。
+
+`plan_steps.output`、`runs.output` 和 `run_outcomes.output` 仍可作为 UI、审计和终端交付的展示投影，但它们不是 Result 身份，也不是跨 Step/Run 的正式输入。下游只能通过 `RuntimeResultBinding` 携带的 `RuntimeResultRef` 调用 `read_result` 获取正式内容。`StepContext`、Plan cursor 和 WorkingSet 不携带 Step Result 正文；摘要也不能被提升为正式结果。
 
 ## 3. 发布状态与所有权
 
@@ -113,7 +155,7 @@ candidate output
 
 只有 `TerminalCommitter` 可以发布 `kind = run` 的 RuntimeResult。它要求每个 active leaf Step 都已完成并拥有正式 Step Result，然后把 leaf Step ResultRefs 作为 Run Result 的 `inputs`。
 
-`runs.output` 与 `run_outcomes.output` 目前仍作为兼容展示投影保留，但正式结果身份与完整正文来自 `run_outcomes.result_ref/result_json`。
+`runs.output` 与 `run_outcomes.output` 目前仍作为展示投影保留，但正式结果身份与完整正文来自 `run_outcomes.result_ref/result_json`。它们不能被 Planner、Resolver 或 downstream Step 当作输入来源。
 
 ## 4. 下游消费链
 
@@ -123,22 +165,26 @@ candidate output
 Tool Result
   -> Assessment
   -> Step Result
-  -> dependencyEvidenceBindings.resultRef
+  -> resultBinding(relation=dependency)
   -> downstream Step
   -> read_result(resultId)
   -> downstream Step Result.inputs
 ```
 
-下游 Step 不依赖上游 prose、摘要或 `plan_steps.output` 猜测输入身份。上下文只暴露 Runtime 创建的 ResultRef；内容过长或被压缩时，ResultRef 仍保留并可按窗口读取。
+下游 Step 不依赖上游 prose、摘要或 `plan_steps.output` 猜测输入身份。上下文只暴露 Runtime 创建的 ResultRef；内容过长或被压缩时，ResultRef 仍保留并可按窗口读取。若依赖 Step 尚未发布 Result，不能用它的 output 字段、handoff 文本或 WorkingSet 摘要替代发布。
+
+执行上下文统一暴露 `resultBindings`：Plan 绑定与 Step 依赖绑定使用完全相同的对象。`stepDependencyContexts` 只携带目标、证据状态和有界 Tool evidence 等过程信息，其中的正式结果关系仍然是 `RuntimeResultBinding`，不再创建 `dependencyEvidenceBinding` 结果语义。
 
 跨 Run 链：
 
 ```text
-completed Run Result
+published Step Result or completed Run Result
   -> Resolver 选择 opaque candidate
   -> persisted Plan input binding
   -> read_result authorization
 ```
+
+WorkingSet 的 active Result 选择遵循同一成果链：完成 Run 已发布 Run Result 时，Run Result 作为聚合成果覆盖其 leaf Step Results；Run 尚未发布正式 Run Result（例如后续 Step 失败）时，已经通过 Assessment 发布的 Step Results 仍进入同一 `RuntimeResultCard` 候选集合，并可被后续 Plan 用同一个 `RuntimeResultBinding` 显式消费。这不是 Step/Run 两套复用协议，而是同一 Result 图上的发布与聚合关系。
 
 跨 Run 读取必须同时满足：
 
@@ -157,6 +203,7 @@ completed Run Result
 - `read_conversation_result`
 - `agentloop.toolResultRef/v1`
 - `agentloop.conversationResultRef/v1`
+- `agentloop.conversationInputBinding/v1`
 
 统一入口：
 
@@ -208,7 +255,11 @@ RuntimeResult 读取时重新验证：
 - Step 2 可以读取 Step 1 的正式 ResultRef；
 - Step 2 的正式 Result inputs 包含 Step 1 ResultRef；
 - Run Result 只聚合正式 leaf Step Results；
-- 跨 Run 读取要求显式绑定、同 owner、同 conversation 和 completed Outcome；
+- 跨 Run 读取要求显式绑定、同 owner、同 conversation 和已发布正式 Result；
+- Plan 输入和 Step 依赖统一使用 `agentloop.resultBinding/v1`；
+- WorkingSet 和 Planner 使用 `RuntimeResultCard` 发现结果；Turn Resolution、Plan 和 execution context 使用同一个 `RuntimeResultRef`/`RuntimeResultBinding` 消费结果；
+- ResultRef、ResultBinding、ResultCard 的解析校验集中在 Runtime Result 模块；
+- 失败 Run 中已经发布的 Step Result 可进入同一跨 Run 绑定和 `read_result` 授权链；
 - 模型读取协议不再包含 hash 或文件路径；
 - 代码不再拥有专用 Tool Result/Conversation Result repository 和 reader。
 
@@ -218,7 +269,6 @@ RuntimeResult 读取时重新验证：
 
 - 多产品 Step Result；
 - Result 生命周期折叠、归档和清除；
-- 跨失败 Run 直接绑定已发布 Step Result；
 - Artifact/事实/交付的更细粒度产品角色；
 - 全量历史 Outcome 的一次性正式 Result 回填。
 

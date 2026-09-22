@@ -7,6 +7,8 @@
 
 > 2026-09-21 决策：当前阶段不创建独立 WorkProduct/Result 数据库或专用结果表。Tool、Step、Run 先统一为 `agentloop.runtimeResult/v1`，并原子落在各自已有的 Action、Plan Step、Run Outcome 权威记录上。本文件中的独立 WorkProduct Graph、生命周期表和历史迁移仅作为后续演进方向，不是当前实现要求，也不得被用来恢复第二套结果协议。
 
+> 2026-09-22 收敛：当前代码已取消 Conversation 专属 Result/Binding 类型。本文后续出现的 `ConversationResultReference`、`ConversationInputBinding`、`reusableResults`、`completedStepHandoffs` 等名称只用于记录旧问题和迁移背景，不代表当前接口。当前唯一身份是 `RuntimeResultRef`，唯一消费关系是 `RuntimeResultBinding`，WorkingSet 使用 `RuntimeResultCard` 提供同一 Result 的有界视图；`ConversationStepContext` 不是 Result。
+
 ## 1. 结论摘要
 
 本方案将会话中的所有可复用、可交付、可审计成果统一为一张不可变的 `Conversation Work Product Graph`。

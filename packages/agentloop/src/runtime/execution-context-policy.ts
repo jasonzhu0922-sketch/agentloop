@@ -14,6 +14,7 @@ import type {
   VisibleDirectoryGrant,
 } from "./contracts.ts";
 import type { RuntimeDecisionCommit } from "./decision-ledger.ts";
+import type { RuntimeResultBinding } from "./runtime-result.ts";
 
 export function buildStepRuntimeContextSnapshot(input: {
   readonly step: ExecutionPlan["steps"][number];
@@ -36,8 +37,9 @@ export function buildStepRuntimeContextSnapshot(input: {
   const usesWebTools = stepHasSourceKind(input.step, "web");
   const usesVisibleDirectoryTools = stepHasSourceKind(input.step, "visible_directory");
   const usesSourceTools = stepHasSourceKind(input.step, "uploaded_source");
-  const dependencyEvidenceBindings = buildDependencyEvidenceBindings(input.step, input.plan);
-  const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(dependencyEvidenceBindings);
+  const stepDependencyContexts = buildStepDependencyContexts(input.step, input.plan);
+  const resultBindings = collectResultBindings(input.plan.resultBindings ?? [], stepDependencyContexts);
+  const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(stepDependencyContexts);
   const requiresDerivedAggregation = input.step.evidenceContract?.requiredKinds.includes("derived_aggregation") === true;
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
   const boundOutcomeConversion = boundOutcomeConversionDirective(input);
@@ -70,7 +72,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           instruction: "Use the step execution binding to understand the current objective, evidence contract, and preferred tool families. Choose among currently exposed Run-authorized tools to satisfy that contract.",
           marginalBenefitDecision: "Before every next action, decide whether it has material expected benefit for an unmet current-step success criterion. Prefer the action with the greatest evidence or acceptance gain. Do not act merely to continue the loop: when no authorized action can materially improve the current evidence, directly submit a concise completion candidate with explicit caveats for the remaining gap.",
           beforeWritingCustomCode: "Before writing a script or custom code to create, convert, inspect, or verify an artifact, check whether an exposed purpose-built Tool or loaded Skill workflow already handles that operation.",
-          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect planInputBindings, dependencyEvidenceBindings, and conversationReuseContext. A bound prior Outcome is a formal input: use its summary, then read_result with its opaque resultId when more content is needed. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. A prior result's source lineage is provenance, not a reason to reacquire it. When successful scope-matched evidence obtained in the current stage contradicts a dependency, use the current-stage evidence for this stage; preserve the earlier result as provenance and do not re-acquire data solely to reconcile it. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
+          beforeAcquiringEvidence: "Before searching, listing directories, reading source files, or re-running extraction, inspect resultBindings, stepDependencyContexts, and conversationReuseContext. Every Tool, Step, and Run result uses the same Runtime Result identity; relation=dependency and cross-Run continuation relations differ only in how the current step consumes that identity. Use available summaries first, then read_result with the opaque resultId when more content is needed. Reuse existing satisfied receipts, source summaries, and artifact references first; acquire new evidence only for missing, stale, unresolved conflicts, or explicitly refreshed requirements. A prior result's source lineage is provenance, not a reason to reacquire it. When successful scope-matched current-stage evidence conflicts with a dependency, use the current-stage evidence for this stage and preserve the dependency as provenance. When several missing facts are independent, batch the reads/searches/queries in the same turn instead of fetching one fact, waiting for assessment, and then fetching the next.",
         },
         currentPlanStep: {
           id: input.step.id,
@@ -83,8 +85,12 @@ export function buildStepRuntimeContextSnapshot(input: {
           successCriteria: input.step.successCriteria,
         },
         ...(boundOutcomeConversion === undefined ? {} : { boundOutcomeConversion }),
+        decisionAuthority: {
+          instruction: "Every exact/required decisionLedger entry is a Runtime-authoritative user choice. Preserve its selected option IDs and identity references in downstream work. A changed choice requires a new Human-in-the-Loop request; do not substitute a related entity, option, or interpretation.",
+          conflicts: "If an exposed Tool declares identity or option binding fields, the Runtime rejects contradictory values before its effect and returns repair feedback. An explicit contradiction that survives in external evidence is retained as a delivery caveat, not treated as a missing HIL response.",
+        },
         decisionLedger: input.decisionLedger ?? [],
-        planInputBindings: input.plan.inputBindings ?? [],
+        resultBindings,
         stepSemanticFrame,
         planStepHandoffFrame,
         downstreamPlanSteps: input.plan.steps
@@ -102,12 +108,8 @@ export function buildStepRuntimeContextSnapshot(input: {
             executionBinding: item.executionBinding,
             successCriteria: item.successCriteria,
           })),
-        dependencyOutputs: input.step.dependencies.map((dependencyId) => {
-          const dependency = input.plan.steps.find((item) => item.id === dependencyId);
-          return { stepId: dependencyId, output: dependency?.output ?? "" };
-        }),
-        ...(dependencyEvidenceBindings === undefined ? {} : { dependencyEvidenceBindings }),
-        ...(input.operationProfile.id === "data_analysis" && dependencyEvidenceBindings !== undefined
+        ...(stepDependencyContexts === undefined ? {} : { stepDependencyContexts }),
+        ...(input.operationProfile.id === "data_analysis" && stepDependencyContexts !== undefined
           ? {
             stageEvidencePrecedence:
               "For multi-stage data analysis, dependency evidence is input, not a veto over this stage. If this stage obtains successful evidence with a comparable scope that conflicts with a prior-stage result, use this stage's evidence as authoritative for the current conclusion. Preserve the prior result as provenance and disclose a material conflict, but do not re-fetch or revalidate solely to reconcile the two. Escalate only for an explicit user verification request, an evidence gap, failed/incomplete current evidence, or a Runtime high-risk gate.",
@@ -116,7 +118,7 @@ export function buildStepRuntimeContextSnapshot(input: {
         ...(hasStructuredJsonArtifactDependencies
           ? {
             structuredArtifactConsumptionDiscipline:
-              "Dependency evidence includes durable structured JSON artifacts. First inspect artifact schema and any manifest in dependencyEvidenceBindings; for agentloop.tableExtractionArtifact/v1, use the manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
+              "A dependency result includes durable structured JSON artifacts. First inspect artifact schema and any manifest in stepDependencyContexts; for agentloop.tableExtractionArtifact/v1, use the manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
           }
           : {}),
         ...(requiresDerivedAggregation
@@ -191,7 +193,7 @@ export function buildStepRuntimeContextSnapshot(input: {
 }
 
 /**
- * A completed conversation result is immutable textual input, not a native
+ * A completed Runtime result is immutable textual input, not a native
  * document artifact.  When the admitted step has the generic write/convert/
  * accept capability set, preserve that distinction in the execution prompt:
  * materialize the text as Markdown first, then use the shared converter.
@@ -216,7 +218,7 @@ function boundOutcomeConversionDirective(input: {
   const resolvedTools = new Set(stepResolvedToolNames(input.step));
   const needsArtifactAcceptance = input.step.evidenceContract?.requiredKinds.includes("artifact_acceptance") === true;
   if (
-    (input.plan.inputBindings?.length ?? 0) === 0
+    (input.plan.resultBindings?.length ?? 0) === 0
     || !input.requiresFileOutput
     || input.taskProfile.deliverySurface !== "workspace_artifact"
     || !needsArtifactAcceptance
@@ -229,7 +231,7 @@ function boundOutcomeConversionDirective(input: {
     source: "runtime_result",
     sourceMaterializationFormat: "markdown",
     requiredWorkflow: ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"],
-    instruction: "This step transforms a bound prior conversation result. Read the required result content, create one non-empty reusable .md workspace artifact with computer_write_file, convert that exact artifact with convert_artifact to the requested target format, then verify the converted output with verify_artifact_acceptance. Do not bypass this conversion boundary with a custom renderer or direct target-format generator.",
+    instruction: "This step transforms a bound prior Runtime result. Read the required result content, create one non-empty reusable .md workspace artifact with computer_write_file, convert that exact artifact with convert_artifact to the requested target format, then verify the converted output with verify_artifact_acceptance. Do not bypass this conversion boundary with a custom renderer or direct target-format generator.",
   };
 }
 
@@ -250,7 +252,7 @@ function buildPlanStepHandoffFrame(
       };
       readonly handoffContract: {
         readonly reusableEvidenceKinds: readonly EvidenceKind[];
-        readonly reusableOutputPolicy: string;
+        readonly resultPublicationPolicy: string;
         readonly currentStepBoundary: string;
         readonly nextStepBoundary: string;
         readonly forbiddenMoves: readonly string[];
@@ -264,7 +266,7 @@ function buildPlanStepHandoffFrame(
       readonly currentStep: StepHandoffStep;
       readonly handoffContract: {
         readonly reusableEvidenceKinds: readonly EvidenceKind[];
-        readonly reusableOutputPolicy: string;
+        readonly resultPublicationPolicy: string;
         readonly currentStepBoundary: string;
         readonly forbiddenMoves: readonly string[];
       };
@@ -282,8 +284,8 @@ function buildPlanStepHandoffFrame(
       currentStep,
       handoffContract: {
         reusableEvidenceKinds,
-        reusableOutputPolicy:
-          "Summarize only evidence needed to prove the current step complete; do not invent a downstream handoff.",
+        resultPublicationPolicy:
+          "Submit only the candidate and evidence needed for Assessment to publish the current Step Result; do not invent a downstream handoff.",
         currentStepBoundary: summarizeCurrentStepBoundary(frame),
         forbiddenMoves: [
           "do not invent a downstream step or handoff target when no next active Plan stage exists",
@@ -297,13 +299,13 @@ function buildPlanStepHandoffFrame(
     mode: "current_to_next",
     currentStepId: step.id,
     instruction:
-      "Complete only the current step, and make its output/evidence reusable by the next Plan stage. Do not execute the next stage.",
+      "Complete only the current step so Assessment can publish one formal Step Result for the next Plan stage. Do not execute the next stage.",
     currentStep,
     nextStage,
     handoffContract: {
       reusableEvidenceKinds,
-      reusableOutputPolicy:
-        "The completion candidate should name reusable evidence, artifact paths, summaries, caveats, and missing facts that the next stage can consume without repeating this step.",
+      resultPublicationPolicy:
+        "The completion candidate should name reusable evidence, artifact paths, summaries, caveats, and missing facts so Assessment can publish one Step Result that the next stage consumes through ResultBinding.",
       currentStepBoundary: summarizeCurrentStepBoundary(frame),
       nextStepBoundary:
         "The next stage is context for semantic continuity only; its objective and evidence contract must not be completed during the current step unless explicitly required by the current step.",
@@ -385,7 +387,7 @@ function requiredInputsFromCurrentStep(
   next: ExecutionPlan["steps"][number],
 ): string[] {
   const result = new Set<string>();
-  if (next.dependencies.includes(current.id)) result.add("current step completion output");
+  if (next.dependencies.includes(current.id)) result.add("published Runtime Result");
   const currentKinds = new Set(current.evidenceContract?.requiredKinds ?? []);
   const nextKinds = new Set(next.evidenceContract?.requiredKinds ?? []);
   for (const kind of currentKinds) {
@@ -517,25 +519,24 @@ function skillArtifactWorkflowDiscipline(
   };
 }
 
-function buildDependencyEvidenceBindings(
+function buildStepDependencyContexts(
   step: ExecutionPlan["steps"][number],
   plan: ExecutionPlan,
 ):
   | {
-      readonly schema: "agentloop.dependencyEvidenceBindings/v1";
+      readonly schema: "agentloop.stepDependencyContexts/v1";
       readonly instruction: string;
       readonly currentStepId: string;
-      readonly bindings: readonly DependencyEvidenceBinding[];
+      readonly dependencies: readonly StepDependencyContext[];
     }
   | undefined {
   if (step.dependencies.length === 0) return undefined;
   const bindings = step.dependencies
-    .map((dependencyId): DependencyEvidenceBinding | undefined => {
+    .map((dependencyId): StepDependencyContext | undefined => {
       const dependency = plan.steps.find((item) => item.id === dependencyId);
       if (dependency === undefined) return {
         stepId: dependencyId,
         status: "missing",
-        output: "",
         satisfiedEvidenceKinds: [],
         caveatedEvidenceKinds: [],
         failedEvidenceKinds: [],
@@ -550,10 +551,13 @@ function buildDependencyEvidenceBindings(
         stepId: dependency.id,
         objective: dependency.objective,
         status: dependency.status,
-        ...(dependency.evidence?.publishedResult === undefined
-          ? {}
-          : { resultRef: dependency.evidence.publishedResult.ref }),
-        output: truncateContextText(dependency.output ?? "", DEPENDENCY_OUTPUT_LIMIT),
+        ...(dependency.evidence?.publishedResult === undefined ? {} : {
+          resultBinding: {
+            schema: "agentloop.resultBinding/v1",
+            result: dependency.evidence.publishedResult.ref,
+            relation: "dependency",
+          },
+        }),
         ...(requiredKinds.length === 0 ? {} : { requiredEvidenceKinds: requiredKinds }),
         satisfiedEvidenceKinds: summary.satisfiedEvidenceKinds,
         caveatedEvidenceKinds: summary.caveatedEvidenceKinds,
@@ -568,23 +572,22 @@ function buildDependencyEvidenceBindings(
         toolEvidence: summary.toolEvidence,
       };
     })
-    .filter((binding): binding is DependencyEvidenceBinding => binding !== undefined);
+    .filter((binding): binding is StepDependencyContext => binding !== undefined);
   if (bindings.length === 0) return undefined;
   return {
-    schema: "agentloop.dependencyEvidenceBindings/v1",
+    schema: "agentloop.stepDependencyContexts/v1",
     instruction:
-      "Each completed dependency publishes a formal Runtime result. Treat its resultRef as the authoritative input identity for this step; use read_result when the bounded output projection is insufficient. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
+      "Each completed dependency publishes a formal Runtime result and binds it with relation=dependency. Treat the binding's ResultRef as the authoritative input identity for this step; use read_result when the bounded output projection is insufficient. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
     currentStepId: step.id,
-    bindings,
+    dependencies: bindings,
   };
 }
 
-interface DependencyEvidenceBinding {
+interface StepDependencyContext {
   readonly stepId: string;
   readonly objective?: string;
   readonly status: ExecutionPlan["steps"][number]["status"] | "missing";
-  readonly resultRef?: NonNullable<StepEvidence["publishedResult"]>["ref"];
-  readonly output: string;
+  readonly resultBinding?: RuntimeResultBinding;
   readonly requiredEvidenceKinds?: readonly EvidenceKind[];
   readonly satisfiedEvidenceKinds: readonly string[];
   readonly caveatedEvidenceKinds: readonly string[];
@@ -593,6 +596,25 @@ interface DependencyEvidenceBinding {
   readonly completionCaveat?: StepEvidence["completionCaveat"];
   readonly sourceSummaryCandidate?: unknown;
   readonly toolEvidence: readonly ProjectedToolEvidence[];
+}
+
+function collectResultBindings(
+  planBindings: readonly RuntimeResultBinding[],
+  stepDependencyContexts: ReturnType<typeof buildStepDependencyContexts>,
+): readonly RuntimeResultBinding[] {
+  const bindings = [
+    ...planBindings,
+    ...(stepDependencyContexts?.dependencies.flatMap((dependency) =>
+      dependency.resultBinding === undefined ? [] : [dependency.resultBinding]
+    ) ?? []),
+  ];
+  const seen = new Set<string>();
+  return bindings.filter((binding) => {
+    const key = `${binding.relation}:${binding.result.resultId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 interface ProjectedToolEvidence {
@@ -667,25 +689,25 @@ function buildConversationReuseContext(
   | {
       readonly schema: "agentloop.conversationReuseContext/v1";
       readonly instruction: string;
-      readonly reusableResults?: NonNullable<ConversationWorkingSet["reusableResults"]>;
+      readonly resultCards?: NonNullable<ConversationWorkingSet["resultCards"]>;
       readonly reusableArtifacts: ConversationWorkingSet["reusableArtifacts"];
       readonly sourceSummaries?: NonNullable<ConversationWorkingSet["evidenceLedger"]>["sourceSummaries"];
-      readonly completedStepHandoffs?: NonNullable<ConversationWorkingSet["completedStepHandoffs"]>;
+      readonly completedStepContexts?: NonNullable<ConversationWorkingSet["completedStepContexts"]>;
     }
   | undefined {
   if (workset === undefined) return undefined;
-  const reusableResults = workset.reusableResults ?? [];
+  const resultCards = workset.resultCards ?? [];
   const sourceSummaries = workset.evidenceLedger?.sourceSummaries ?? [];
-  const completedStepHandoffs = workset.completedStepHandoffs ?? [];
-  if (reusableResults.length === 0 && workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepHandoffs.length === 0) return undefined;
+  const completedStepContexts = workset.completedStepContexts ?? [];
+  if (resultCards.length === 0 && workset.reusableArtifacts.length === 0 && sourceSummaries.length === 0 && completedStepContexts.length === 0) return undefined;
   return {
     schema: "agentloop.conversationReuseContext/v1",
     instruction:
-      "Use prior accepted Outcome results, step handoffs, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A resultRef is an immutable, same-conversation reference: use read_result when the compact summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. A handoff with outputTruncated=true is a bounded summary, not permission to invent omitted details.",
-    ...(reusableResults.length === 0 ? {} : { reusableResults }),
+      "Use prior accepted Runtime results, step contexts, conversation artifacts, and source summaries as reusable context before re-running equivalent acquisition. A ResultRef is an immutable Runtime identity: use read_result when the compact ResultCard summary is insufficient. Re-read or regenerate source material only when the current user request requires freshness, stricter verification, missing facts, or unresolved conflict. A prior result's source lineage is provenance, not an automatic instruction to reacquire it. Step contexts describe completed process boundaries and capability lineage only; they contain no result content and cannot substitute for a ResultBinding.",
+    ...(resultCards.length === 0 ? {} : { resultCards }),
     reusableArtifacts: workset.reusableArtifacts,
     ...(sourceSummaries.length === 0 ? {} : { sourceSummaries }),
-    ...(completedStepHandoffs.length === 0 ? {} : { completedStepHandoffs }),
+    ...(completedStepContexts.length === 0 ? {} : { completedStepContexts }),
   };
 }
 
@@ -780,9 +802,9 @@ function addArtifactRef(value: unknown, artifacts: ProjectedArtifactRef[]): void
 }
 
 function hasStructuredJsonArtifacts(
-  bindings: ReturnType<typeof buildDependencyEvidenceBindings>,
+  bindings: ReturnType<typeof buildStepDependencyContexts>,
 ): boolean {
-  return bindings?.bindings.some((binding) =>
+  return bindings?.dependencies.some((binding) =>
     binding.toolEvidence.some((evidence) =>
       evidence.resultSchemas.includes("agentloop.visibleTableExtraction/v1")
       || evidence.resultSchemas.includes("agentloop.tableExtractionArtifact/v1")
@@ -873,7 +895,6 @@ const ARTIFACT_RUNTIME_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "artifact_acceptance",
 ]);
 
-const DEPENDENCY_OUTPUT_LIMIT = 1_200;
 const DEPENDENCY_TOOL_EVIDENCE_LIMIT = 12;
 const DEPENDENCY_TOOL_PREVIEW_LIMIT = 900;
 const DEPENDENCY_SOURCE_REF_LIMIT = 12;
