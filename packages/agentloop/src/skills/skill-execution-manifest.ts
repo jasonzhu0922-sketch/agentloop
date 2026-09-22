@@ -9,12 +9,19 @@ export interface SkillExecutionInput {
   readonly required: boolean;
 }
 
+export interface SkillExecutionDecisionBinding {
+  readonly labelInputs?: readonly string[];
+  readonly identityRefInputs?: readonly string[];
+  readonly selectedOptionIdInputs?: readonly string[];
+}
+
 export interface SkillExecutionAction {
   readonly id: string;
   readonly description: string;
   readonly inputs: readonly SkillExecutionInput[];
   readonly args: readonly string[];
   readonly result: string;
+  readonly decisionBinding?: SkillExecutionDecisionBinding;
 }
 
 export interface SkillExecutionEntrypoint {
@@ -82,7 +89,40 @@ function parseAction(value: unknown): SkillExecutionAction {
     }
   }
   const result = text(action.result, "Skill executor action result", 500);
-  return { id, description, inputs, args, result };
+  const decisionBinding = parseDecisionBinding(action.decisionBinding, inputs, id);
+  return { id, description, inputs, args, result, ...(decisionBinding === undefined ? {} : { decisionBinding }) };
+}
+
+function parseDecisionBinding(
+  value: unknown,
+  inputs: readonly SkillExecutionInput[],
+  actionId: string,
+): SkillExecutionDecisionBinding | undefined {
+  if (value === undefined) return undefined;
+  const binding = record(value, `Skill executor action ${actionId} decisionBinding`);
+  const inputNames = new Set(inputs.map((input) => input.name));
+  const parseNames = (field: string): readonly string[] | undefined => {
+    if (binding[field] === undefined) return undefined;
+    const names = array(binding[field], `Skill executor action ${actionId} decisionBinding.${field}`, 1, 16)
+      .map((name) => identifier(name, `Skill executor action ${actionId} decision binding input`));
+    if (names.some((name) => !inputNames.has(name))) {
+      throw new Error(`Skill executor action ${actionId} decision binding references an undeclared input`);
+    }
+    if (new Set(names).size !== names.length) {
+      throw new Error(`Skill executor action ${actionId} decision binding inputs must be unique`);
+    }
+    return names;
+  };
+  const labelInputs = parseNames("labelInputs");
+  const identityRefInputs = parseNames("identityRefInputs");
+  const selectedOptionIdInputs = parseNames("selectedOptionIdInputs");
+  const parsed = {
+    ...(labelInputs === undefined ? {} : { labelInputs }),
+    ...(identityRefInputs === undefined ? {} : { identityRefInputs }),
+    ...(selectedOptionIdInputs === undefined ? {} : { selectedOptionIdInputs }),
+  };
+  if (Object.keys(parsed).length === 0) throw new Error(`Skill executor action ${actionId} decisionBinding must declare at least one input`);
+  return parsed;
 }
 
 function parseInput(value: unknown): SkillExecutionInput {

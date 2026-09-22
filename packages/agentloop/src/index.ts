@@ -68,6 +68,8 @@ export { runAgentLoop } from "./runtime/agent-loop.ts";
 export { resolveCapabilityGaps, resolveSourceGroundingGap } from "./planning/capability-resolution.ts";
 export type { CapabilityGap, CapabilityGapCandidate } from "./planning/capability-resolution.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";
+export { resolveOperationBindings } from "./runtime/decision-binding.ts";
+export type { ResolvedOperationBinding } from "./runtime/decision-binding.ts";
 export type * from "./runtime/contracts.ts";
 export {
   createStepExecutionStrategyProfile,

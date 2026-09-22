@@ -62,6 +62,7 @@ import {
   stepUsesTool,
 } from "../planning/step-execution-binding.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
+import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
@@ -129,6 +130,7 @@ import {
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
 import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
+import { resolveOperationBindings } from "./decision-binding.ts";
 import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
@@ -2422,6 +2424,23 @@ export class RunService {
       });
       const stepSkillIds = stepSkills.map((skill) => skill.id);
       const skillExecutionRoots = skillExecutionRootsForSkills(stepSkills);
+      const recovery = input.initialRecovery?.stepId === activeStep.id ? input.initialRecovery : undefined;
+      const decisionLedger = input.decisionLedger
+        ?? (isRecord(recovery?.facts) && Array.isArray(recovery.facts.decisionLedger)
+          ? recovery.facts.decisionLedger as RuntimeDecisionCommit[]
+          : []);
+      const skillManifests = new Map<string, Awaited<ReturnType<typeof readSkillExecutionManifest>>>();
+      for (const skill of stepSkills) {
+        if (skill.package === undefined) continue;
+        skillManifests.set(skill.id, await readSkillExecutionManifest(skill.package.root));
+      }
+      const resolvedOperationBindings = resolveOperationBindings({
+        skills: stepSkills,
+        manifests: skillManifests,
+        decisionLedger,
+        planId: plan.id,
+        stepId: activeStep.id,
+      });
       // The Run grant is the execution authorization boundary. A Plan leaf
       // describes the current objective and its evidence contract, but must
       // not revoke a Tool that the user already authorized for the Run.
@@ -2445,6 +2464,7 @@ export class RunService {
         visibleDirectories: stepVisibleDirectories,
         uploadedSources: stepSources,
         skillExecutionRoots,
+        resolvedOperationBindings,
         allowedToolNames: stepAllowedToolNames,
         allowedSkillIds: stepSkillIds,
       });
@@ -2471,11 +2491,6 @@ export class RunService {
       let assessmentAttempt = (await this.plans.assessments(plan.id))
         .filter((assessment) => assessment.stepId === activeStep.id).length;
       const assessedCandidates = new Map<string, SkillComplianceAssessment>();
-      const recovery = input.initialRecovery?.stepId === activeStep.id ? input.initialRecovery : undefined;
-      const decisionLedger = input.decisionLedger
-        ?? (isRecord(recovery?.facts) && Array.isArray(recovery.facts.decisionLedger)
-          ? recovery.facts.decisionLedger as RuntimeDecisionCommit[]
-          : []);
       const fileOutputStep = (stepAllowsSkillFileOutput(activeStep)
         && stepSkills.some((skill) => skillRequiresFileOutput(skill)))
         || stepRequiresFileOutput(activeStep);
@@ -2556,6 +2571,7 @@ export class RunService {
             stepTaskProfile,
             input.conversationWorkingSet,
             decisionLedger,
+            resolvedOperationBindings,
           )
           : buildRecoveredStepRuntimeContext(
             activeStep,
@@ -2569,6 +2585,7 @@ export class RunService {
             stepTaskProfile,
             input.conversationWorkingSet,
             decisionLedger,
+            resolvedOperationBindings,
           ),
         input: input.input,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
@@ -6544,6 +6561,7 @@ function buildStepRuntimeContext(
   taskProfile: TaskProfile = executionTaskProfileForStep(step, skills),
   conversationWorkingSet?: ConversationWorkingSet,
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
+  resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const operationProfile = taskProfile.operations[0] ?? executionOperationProfile({
     objective: step.objective,
@@ -6564,6 +6582,7 @@ function buildStepRuntimeContext(
     requiresFileOutput: stepRequiresFileOutput(step),
     conversationWorkingSet,
     decisionLedger,
+    resolvedOperationBindings,
   });
 }
 
@@ -6579,6 +6598,7 @@ function buildRecoveredStepRuntimeContext(
   taskProfile: TaskProfile = executionTaskProfileForStep(step, skills),
   conversationWorkingSet?: ConversationWorkingSet,
   decisionLedger: readonly RuntimeDecisionCommit[] = [],
+  resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[] = [],
 ): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const base = buildStepRuntimeContext(
     step,
@@ -6591,6 +6611,7 @@ function buildRecoveredStepRuntimeContext(
     taskProfile,
     conversationWorkingSet,
     decisionLedger,
+    resolvedOperationBindings,
   );
   return {
     ...base,

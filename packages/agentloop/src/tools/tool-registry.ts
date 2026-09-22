@@ -118,6 +118,7 @@ export class ToolRegistry {
           throw badRequest(`Invalid arguments for ${call.name}`);
         }
         assertDecisionBinding(tool, input, grant, options.decisionLedger ?? []);
+        assertResolvedOperationBinding(tool, input, grant);
         const execute = async (context: ToolExecutionContext): Promise<unknown> => {
           try {
             for (const plugin of this.plugins) {
@@ -169,6 +170,39 @@ export class ToolRegistry {
         };
       },
     };
+  }
+}
+
+function assertResolvedOperationBinding(
+  tool: RuntimeTool<unknown>,
+  input: unknown,
+  grant: CapabilityGrant,
+): void {
+  if (tool.name !== "computer_run_command" || input === null || typeof input !== "object" || Array.isArray(input)) return;
+  const record = input as Record<string, unknown>;
+  const command = record.command;
+  const args = record.args;
+  if (typeof command !== "string" || !Array.isArray(args) || args.some((arg) => typeof arg !== "string")) return;
+  for (const binding of grant.resolvedOperationBindings ?? []) {
+    if (binding.command !== command || record.cwd !== binding.cwd) continue;
+    const staticConstraints = binding.argumentConstraints.filter((constraint) =>
+      constraint.value === "--action" || constraint.value === binding.actionId || constraint.value.endsWith(".py")
+    );
+    if (!staticConstraints.every((constraint) => args[constraint.index] === constraint.value)) continue;
+    const mismatch = binding.argumentConstraints.find((constraint) => args[constraint.index] !== constraint.value);
+    if (mismatch === undefined) continue;
+    throw new AppError(
+      "TOOL_POLICY_DENIED",
+      `Tool ${tool.name} arguments conflict with committed user decision ${binding.decisionId}`,
+      403,
+      {
+        toolName: tool.name,
+        decisionId: binding.decisionId,
+        policyCode: "resolved_operation_binding_conflict",
+        operationId: `${binding.skillName}:${binding.executorId}:${binding.actionId}`,
+        argumentIndex: mismatch.index,
+      },
+    );
   }
 }
 

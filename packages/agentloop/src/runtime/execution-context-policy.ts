@@ -14,6 +14,7 @@ import type {
   VisibleDirectoryGrant,
 } from "./contracts.ts";
 import type { RuntimeDecisionCommit } from "./decision-ledger.ts";
+import type { ResolvedOperationBinding } from "./decision-binding.ts";
 import type { RuntimeResultBinding } from "./runtime-result.ts";
 
 export function buildStepRuntimeContextSnapshot(input: {
@@ -29,6 +30,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   readonly requiresFileOutput: boolean;
   readonly conversationWorkingSet?: ConversationWorkingSet;
   readonly decisionLedger?: readonly RuntimeDecisionCommit[];
+  readonly resolvedOperationBindings?: readonly ResolvedOperationBinding[];
 }): Omit<RuntimeContextSnapshot, "id" | "supersedesId"> {
   const visibleDirectories = input.visibleDirectories ?? [];
   const sources = input.sources ?? [];
@@ -64,6 +66,7 @@ export function buildStepRuntimeContextSnapshot(input: {
   return {
     phase: "execution",
     ...(input.decisionLedger === undefined || input.decisionLedger.length === 0 ? {} : { decisionLedger: input.decisionLedger }),
+    ...(input.resolvedOperationBindings === undefined || input.resolvedOperationBindings.length === 0 ? {} : { resolvedOperationBindings: input.resolvedOperationBindings }),
     content: [
       "<execution_context source=\"server\">",
       JSON.stringify({
@@ -90,6 +93,7 @@ export function buildStepRuntimeContextSnapshot(input: {
           conflicts: "If an exposed Tool declares identity or option binding fields, the Runtime rejects contradictory values before its effect and returns repair feedback. An explicit contradiction that survives in external evidence is retained as a delivery caveat, not treated as a missing HIL response.",
         },
         decisionLedger: input.decisionLedger ?? [],
+        resolvedOperationBindings: input.resolvedOperationBindings ?? [],
         resultBindings,
         stepSemanticFrame,
         planStepHandoffFrame,

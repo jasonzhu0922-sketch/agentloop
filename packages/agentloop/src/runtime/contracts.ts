@@ -14,6 +14,8 @@ export interface RuntimeContextSnapshot {
   readonly supersedesId?: string;
   /** Server-authored user decisions; exact/required commitments constrain execution and assessment records explicit conflicts. */
   readonly decisionLedger?: readonly import("./decision-ledger.ts").RuntimeDecisionCommit[];
+  /** Server-authored operation inputs compiled from Skill manifests and exact decisions. */
+  readonly resolvedOperationBindings?: readonly import("./decision-binding.ts").ResolvedOperationBinding[];
 }
 
 export interface RuntimeDeliveryCandidateEvidenceKinds {
@@ -214,6 +216,8 @@ export interface CapabilityGrant {
   readonly visibleDirectories: readonly VisibleDirectoryGrant[];
   readonly uploadedSources: readonly UploadedSourceSummary[];
   readonly skillExecutionRoots: readonly SkillExecutionRootGrant[];
+  /** Runtime-compiled, immutable inputs for a Skill operation following an exact HIL selection. */
+  readonly resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[];
   readonly allowedToolNames: ReadonlySet<string>;
   readonly allowedSkillIds: ReadonlySet<string>;
 }
