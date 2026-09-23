@@ -27,28 +27,24 @@
           <div class="crumb">会话 / <b id="conversation-title">新对话</b></div>
           <div class="topbar-right"><span id="runtime-status" class="status-pill"><i class="status-dot"></i> 未配置模型</span></div>
         </header>
-        <div class="workspace">
+        <div id="workspace" class="workspace">
           <section class="conversation">
             <div id="conversation-scroll" class="conversation-scroll"><div id="empty-state" class="empty-state"><div class="empty-logo">A</div><h2>我能帮你做什么？</h2><p class="empty-sub">我可以在不同 Runtime Host 上执行任务，并通过 Planner、Step Agent Loop 和工具链给出可核验的结果。</p><p class="empty-hint">在下方输入任务，我会先制定计划、执行，并在完成后给出结果。你可以在同一个对话里继续提出后续要求。</p><div class="suggestions"><button type="button" class="suggestion" data-suggest="帮我写一份清晰的项目周报">帮我写一份清晰的项目周报</button><button type="button" class="suggestion" data-suggest="把这段内容整理成要点">把这段内容整理成要点</button><button type="button" class="suggestion" data-suggest="检查并修复这段代码的问题">检查并修复这段代码的问题</button></div></div><div id="messages" class="messages"></div></div>
             <form id="composer" class="composer">
               <div class="composer-box">
-                <textarea id="input" class="composer-input" rows="1" placeholder="给 AgentLoop 一个任务……（Enter 发送，Shift+Enter 换行）"></textarea>
+                <textarea id="input" class="composer-input" rows="1" placeholder="给 AgentLoop 一个任务……（⌘/Ctrl + Enter 发送，Enter 换行）"></textarea>
                 <div id="pending-attachments" class="source-row" aria-label="本次上传文件" hidden></div>
-                <div class="composer-tools"><div class="composer-bar"><button type="button" class="dir-picker-btn" disabled title="云端 Multi Runtime 不暴露本地目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select"><option value="">使用 Runtime 默认模型</option></select></label><label class="chip runtime-chip">Runtime<select id="runtime"><option value="">自动</option></select></label><span class="composer-hint">Enter 发送 · Shift+Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="cancel" class="stop-btn" type="button" disabled>■</button><button id="submit" class="send-btn" type="submit">↑</button></div></div>
+                <div class="composer-tools"><div class="composer-bar"><button type="button" class="dir-picker-btn" disabled title="云端 Multi Runtime 不暴露本地目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select"><option value="">使用 Runtime 默认模型</option></select></label><label class="chip runtime-chip">Runtime<select id="runtime"><option value="">自动</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送 · Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="cancel" class="stop-btn" type="button" disabled>■</button><button id="submit" class="send-btn" type="submit">↑</button></div></div>
               </div>
             </form>
           </section>
-          <aside class="details">
-            <div class="details-head"><span id="details-title">执行详情</span><span id="event-count" class="muted">0 events</span></div>
-            <section class="detail-section"><h3>当前任务</h3><p id="details-task" class="detail-value">选择或启动一个对话</p><p class="detail-meta">Runtime：<span id="details-runtime">自动分配</span></p></section>
-            <div id="details-loading" class="detail-loading" hidden></div>
-            <section class="detail-section"><h3>加载的 Skill</h3><div id="details-skills" class="detail-tags"><span class="muted">本轮尚未加载 Skill。</span></div></section>
-            <section class="detail-section"><h3>执行的工具</h3><div id="details-tools" class="detail-tags"><span class="muted">本轮尚未调用工具。</span></div></section>
-            <section class="detail-section"><h3>命令执行</h3><div id="details-commands" class="command-list"><span class="muted">本轮尚未执行命令。</span></div></section>
-            <section class="detail-section"><h3>最终回复</h3><div id="details-output" class="detail-output md"><span class="muted">暂无最终回复。</span></div></section>
-            <section id="artifacts-section" class="detail-section"><h3>产物</h3><div id="details-artifacts" class="artifact-list"><span class="muted">本轮暂无可预览或下载的产物。</span></div></section>
-            <section id="plan-section" class="detail-section" hidden><h3>Planner</h3><div id="plan" class="plan-empty">提交任务后显示 Planner。</div></section>
-            <section id="events-section" class="detail-section events-section" hidden><h3>SSE 事件流</h3><div id="events" class="events"></div></section>
+          <div id="workspace-resizer" class="workspace-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="720" aria-valuenow="360" aria-label="调整对话流和产物区宽度" title="拖动调整对话流和产物区宽度"><span aria-hidden="true"></span></div>
+          <aside class="details artifact-workspace" aria-label="产物预览区">
+            <div class="details-head"><div><strong id="artifact-title">产物预览</strong><small id="artifact-subtitle">选择回复中的产物进行预览</small></div><div class="artifact-head-actions"><button id="artifact-fullscreen" class="artifact-head-button" type="button" hidden>大预览</button><button id="artifact-panel-close" class="artifact-head-button quiet" type="button" aria-label="隐藏产物区">×</button></div></div>
+            <section id="artifacts-section" class="artifact-workspace-body">
+              <div id="artifact-inline-preview" class="artifact-inline-preview" hidden></div>
+              <div id="artifact-empty" class="artifact-empty"><span class="artifact-empty-icon" aria-hidden="true">▧</span><strong>暂无展开的产物</strong><p>完成任务后，可从 AI 回复下方选择产物并在此处预览。</p></div>
+            </section>
           </aside>
         </div>
       </main>

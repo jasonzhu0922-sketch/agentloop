@@ -5,6 +5,16 @@ export interface ComposerInputElement {
   readonly style: { height: string; overflowY: string };
 }
 
+export interface ComposerKeydownEvent {
+  readonly key: string;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
+  readonly shiftKey?: boolean;
+  readonly isComposing?: boolean;
+}
+
+export function shouldSubmitComposerOnKeydown(event: ComposerKeydownEvent): boolean;
+
 export function composerInputHeight(scrollHeight: number, lineHeight: number): number;
 
 export function autoResizeComposerInput(

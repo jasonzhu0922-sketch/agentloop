@@ -82,6 +82,7 @@ function compactMessage(message, tier) {
     reasoning: string(value.reasoning, tier.messageText),
     status: string(value.status, tier.text),
     error: string(value.error, tier.messageText),
+    partialText: string(value.partialText, tier.messageText),
     assignmentId: string(value.assignmentId, tier.text),
     runtimeId: string(value.runtimeId, tier.text),
     completedAt: number(value.completedAt),

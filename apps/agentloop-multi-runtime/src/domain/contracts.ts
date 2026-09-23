@@ -43,6 +43,11 @@ export interface RuntimeRunStatus {
   readonly remoteRunId: string;
   readonly status: "running" | "completed" | "failed" | "cancelled";
   readonly output?: string;
+  /**
+   * A Host-approved explanation for a failed Run. This is deliberately
+   * separate from `output`, whose meaning is otherwise runtime-internal.
+   */
+  readonly partialOutput?: string;
   readonly errorCode?: string;
   /** User-observable terminal failure text projected from the Host Run event. */
   readonly errorMessage?: string;

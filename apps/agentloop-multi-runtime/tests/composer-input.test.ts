@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAX_COMPOSER_LINES, autoResizeComposerInput, composerInputHeight, resetComposerInput } from "../web/composer-input.js";
+import { MAX_COMPOSER_LINES, autoResizeComposerInput, composerInputHeight, resetComposerInput, shouldSubmitComposerOnKeydown } from "../web/composer-input.js";
+
+test("composer only submits on an explicit modifier-plus-Enter shortcut", () => {
+  assert.equal(shouldSubmitComposerOnKeydown({ key: "Enter" }), false);
+  assert.equal(shouldSubmitComposerOnKeydown({ key: "Enter", shiftKey: true }), false);
+  assert.equal(shouldSubmitComposerOnKeydown({ key: "Enter", ctrlKey: true }), true);
+  assert.equal(shouldSubmitComposerOnKeydown({ key: "Enter", metaKey: true }), true);
+  assert.equal(shouldSubmitComposerOnKeydown({ key: "Enter", ctrlKey: true, isComposing: true }), false);
+  assert.equal(shouldSubmitComposerOnKeydown({ key: "a", ctrlKey: true }), false);
+});
 
 test("composer input grows with content but stops at three lines", () => {
   assert.equal(MAX_COMPOSER_LINES, 3);

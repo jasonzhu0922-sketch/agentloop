@@ -46,6 +46,10 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       remoteRunId: run.id,
       status: run.status,
       ...(run.output === undefined ? {} : { output: run.output }),
+      // Failed AgentLoop Runs persist a dedicated, user-facing failure report
+      // as their output. Label it here at the Host/UI boundary rather than
+      // asking the browser to infer safety from a generic Runtime field.
+      ...(run.status === "failed" && hasText(run.output) ? { partialOutput: run.output } : {}),
       ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
       ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
       ...(this.runs.processArtifacts === undefined ? {} : { artifacts: await this.runs.processArtifacts(ownerUserId, remoteRunId) }),
@@ -100,7 +104,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     if (this.runs.events === undefined) throw new TypeError("runtime event query is not configured");
     return (await this.runs.events(ownerUserId, remoteRunId))
       .filter((event) => event.seq > afterSeq)
-      .map((event) => ({ seq: event.seq, type: event.type, data: event.data, createdAt: event.createdAt }));
+      .map((event) => projectTerminalEvent(event));
   }
 
   async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<CommandOutputContent> {
@@ -232,6 +236,26 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       release();
     }
   }
+}
+
+/**
+ * Runtime failure reports are authored by the Runtime's final reporting turn.
+ * Preserve the raw `output` for execution evidence, and issue the explicit
+ * `partialOutput` presentation field for clients. This also upgrades old,
+ * persisted terminal events when they are replayed from the Host.
+ */
+function projectTerminalEvent(event: { readonly seq: number; readonly type: string; readonly data: Readonly<Record<string, unknown>>; readonly createdAt: number }): RuntimeRunEvent {
+  const output = event.type === "run.failed" && hasText(event.data.output) ? event.data.output : undefined;
+  return {
+    seq: event.seq,
+    type: event.type,
+    data: output === undefined || hasText(event.data.partialOutput) ? event.data : { ...event.data, partialOutput: output },
+    createdAt: event.createdAt,
+  };
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 export class RuntimeHostCapacityError extends Error {}

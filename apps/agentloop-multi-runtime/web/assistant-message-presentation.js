@@ -1,7 +1,7 @@
 const PRESENTATIONS = {
   running: { isLive: true, label: "执行中", icon: "", cardClass: "", emptyText: "" },
   completed: { isLive: false, label: "已完成", icon: "✓", cardClass: "completed", emptyText: "任务已完成，未返回文本内容。" },
-  failed: { isLive: false, label: "未完成", icon: "!", cardClass: "failed", emptyText: "Run 失败" },
+  failed: { isLive: false, label: "结果说明", icon: "i", cardClass: "failed", emptyText: "本次未能形成可提交的最终结果。" },
   cancelled: { isLive: false, label: "已取消", icon: "×", cardClass: "cancelled", emptyText: "任务已取消" },
 };
 

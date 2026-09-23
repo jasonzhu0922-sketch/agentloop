@@ -3,20 +3,31 @@ import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "./ass
 import { createCoalescedUpdater } from "./live-update-scheduler.js";
 import { persistJson, persistSessions } from "./session-persistence.js";
 import { openArtifactPreview, renderMarkdown } from "./artifact-preview.js";
+import { artifactPreviewMode, renderBlobPreview, renderStructuredPreview } from "./artifact-preview.js";
+import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "./artifact-display.js";
 import { cancellationTarget } from "./cancellation-target.js";
 import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 import { conversationMessagesFromTurns } from "./conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./execution-detail-projection.js";
 import { observeAssignment } from "./assignment-stream.js";
-import { autoResizeComposerInput, resetComposerInput } from "./composer-input.js";
+import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from "./composer-input.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "agentloop.multi-runtime.sessions.v1";
 const IDENTITY_KEY = "agentloop.multi-runtime.identity.v1";
+const WORKSPACE_WIDTH_KEY = "agentloop.multi-runtime.artifact-width.v1";
 const MAX_PENDING_ATTACHMENTS = 20;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const CONVERSATION_PAGE_SIZE = 30;
+const ARTIFACT_PRODUCING_TOOLS = new Set([
+  "computer_write_file",
+  "computer_patch_file",
+  "computer_run_command",
+  "convert_artifact",
+  "materialize_paginated_html",
+  "verify_artifact_acceptance",
+]);
 const recoveredSessions = sortSessions(loadSessions());
 let sessions = [];
 let activeId;
@@ -30,6 +41,11 @@ const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
 const hydratedDetailAssignmentIds = new Set();
 let commandDetailSelection;
+let inlineArtifactPreview;
+let inlineArtifactPreviewUrl;
+let artifactPanelOpen = false;
+let artifactPanelWidth = loadArtifactPanelWidth();
+let resizeState;
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
 loadIdentity();
@@ -40,13 +56,18 @@ render();
 document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; autoResizeComposerInput($("input")); $("input").focus(); }));
 $("theme-toggle")?.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "" : "dark"; });
 
-$("new-chat").addEventListener("click", () => { activeId = newConversation().id; render(); $("input").focus(); });
+$("new-chat").addEventListener("click", () => { activeId = newConversation().id; resetArtifactWorkspace(); render(); $("input").focus(); });
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void submit(); });
 $("cancel").addEventListener("click", () => void cancelActive());
 $("upload-file").addEventListener("click", () => $("attachment").click());
 $("attachment").addEventListener("change", () => void uploadAttachments($("attachment").files));
+$("workspace-resizer").addEventListener("pointerdown", beginWorkspaceResize);
+$("workspace-resizer").addEventListener("keydown", handleWorkspaceResizeKeydown);
+$("workspace-resizer").addEventListener("dblclick", resetArtifactPanelWidth);
+$("artifact-panel-close").addEventListener("click", () => { resetArtifactWorkspace(); render(); });
+$("artifact-fullscreen").addEventListener("click", () => void openSelectedArtifactFullscreen());
 $("input").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
+  if (shouldSubmitComposerOnKeydown(event)) { event.preventDefault(); void submit(); }
 });
 $("input").addEventListener("input", () => autoResizeComposerInput($("input")));
 $("user-id").addEventListener("change", reloadConversationsForIdentity);
@@ -83,6 +104,73 @@ function loadSessions() {
 }
 function loadIdentity() { try { const value = JSON.parse(localStorage.getItem(IDENTITY_KEY) || "{}"); if (value.tenantId) $("tenant-id").value = value.tenantId; if (value.userId) $("user-id").value = value.userId; } catch {} }
 function saveIdentity() { persistJson(localStorage, IDENTITY_KEY, { tenantId: $("tenant-id").value.trim(), userId: $("user-id").value.trim() }); }
+
+function loadArtifactPanelWidth() {
+  const stored = Number(localStorage.getItem(WORKSPACE_WIDTH_KEY));
+  return Number.isFinite(stored) ? stored : 360;
+}
+
+function artifactPanelWidthBounds() {
+  const workspace = $("workspace");
+  const available = workspace?.getBoundingClientRect().width || window.innerWidth;
+  return { min: 300, max: Math.max(420, Math.min(720, available * 0.62)), leftMin: 460 };
+}
+
+function clampArtifactPanelWidth(value) {
+  const bounds = artifactPanelWidthBounds();
+  const maxByLeft = Math.max(bounds.min, (($("workspace")?.getBoundingClientRect().width || window.innerWidth) - bounds.leftMin - 12));
+  return Math.round(Math.min(Math.max(value, bounds.min), Math.min(bounds.max, maxByLeft)));
+}
+
+function applyArtifactPanelWidth() {
+  artifactPanelWidth = clampArtifactPanelWidth(artifactPanelWidth);
+  $("workspace")?.style.setProperty("--artifact-width", `${artifactPanelWidth}px`);
+  const resizer = $("workspace-resizer");
+  resizer?.setAttribute("aria-valuenow", String(artifactPanelWidth));
+}
+
+function beginWorkspaceResize(event) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  artifactPanelWidth = clampArtifactPanelWidth(artifactPanelWidth);
+  resizeState = { startX: event.clientX, startWidth: artifactPanelWidth };
+  document.body.classList.add("workspace-resizing");
+  document.addEventListener("pointermove", updateWorkspaceResize);
+  document.addEventListener("pointerup", finishWorkspaceResize, { once: true });
+  document.addEventListener("pointercancel", finishWorkspaceResize, { once: true });
+}
+
+function updateWorkspaceResize(event) {
+  if (!resizeState) return;
+  artifactPanelWidth = clampArtifactPanelWidth(resizeState.startWidth + resizeState.startX - event.clientX);
+  applyArtifactPanelWidth();
+}
+
+function finishWorkspaceResize() {
+  if (!resizeState) return;
+  resizeState = undefined;
+  document.body.classList.remove("workspace-resizing");
+  document.removeEventListener("pointermove", updateWorkspaceResize);
+  persistJson(localStorage, WORKSPACE_WIDTH_KEY, artifactPanelWidth);
+  render();
+}
+
+function handleWorkspaceResizeKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const bounds = artifactPanelWidthBounds();
+  artifactPanelWidth = event.key === "Home" ? bounds.max : event.key === "End" ? bounds.min : artifactPanelWidth + (event.key === "ArrowLeft" ? 24 : -24);
+  applyArtifactPanelWidth();
+  persistJson(localStorage, WORKSPACE_WIDTH_KEY, artifactPanelWidth);
+  render();
+}
+
+function resetArtifactPanelWidth() {
+  artifactPanelWidth = 360;
+  applyArtifactPanelWidth();
+  persistJson(localStorage, WORKSPACE_WIDTH_KEY, artifactPanelWidth);
+  render();
+}
 
 function reloadConversationsForIdentity() {
   saveIdentity();
@@ -169,6 +257,7 @@ function finiteNumber(value, fallback) { return typeof value === "number" && Num
 async function selectConversation(conversationId) {
   const conversation = sessions.find((item) => item.id === conversationId);
   if (!conversation) return;
+  resetArtifactWorkspace();
   activeId = conversation.id;
   render();
   void reconcilePersistedRuns();
@@ -212,6 +301,15 @@ async function selectConversation(conversationId) {
   }
 }
 
+function resetArtifactWorkspace() {
+  artifactPanelOpen = false;
+  inlineArtifactPreview = undefined;
+  if (inlineArtifactPreviewUrl) {
+    URL.revokeObjectURL(inlineArtifactPreviewUrl);
+    inlineArtifactPreviewUrl = undefined;
+  }
+}
+
 async function hydratePersistedAssistant(assistant, tenantId, userId, includeCommandEvidence = false) {
   let runLoaded = false;
   try {
@@ -226,7 +324,9 @@ async function hydratePersistedAssistant(assistant, tenantId, userId, includeCom
   } catch {}
   const eventsLoaded = await replayPersistedRunEvents(assistant, tenantId, userId);
   if (!runLoaded && !eventsLoaded) throw new Error("无法读取该轮的 Runtime Run");
-  if (assistant.status !== "running") await refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId);
+  // Artifact projection is independent from terminal Run status: a generated
+  // product must survive reconnects and remain visible while the Run is live.
+  await refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId);
   if (assistant.status === "running") await refreshHumanLoop(assistant.assignmentId, assistant, tenantId, userId);
   if (includeCommandEvidence) await hydrateCommandEvidence(assistant, tenantId, userId);
 }
@@ -273,8 +373,11 @@ function applyRecoveredRunState(assistant, run) {
   assistant.error = undefined;
   if (run.status === "completed" && typeof run.output === "string") assistant.text = run.output;
   if (run.status === "failed") {
-    assistant.error = recoveredFailureMessage(run) || assistant.error || assistant.text || "Run 失败";
-    assistant.text = typeof run.output === "string" && run.output.trim() ? run.output : assistant.error;
+    assistant.error = recoveredFailureMessage(run) || assistant.error || "本次未能形成可提交的最终结果，以下说明可供参考。";
+    // Only the Host's explicit projection is eligible for this user-facing
+    // section; never infer it from the generic Runtime `output` field here.
+    if (typeof run.partialOutput === "string" && run.partialOutput.trim()) assistant.partialText = run.partialOutput;
+    assistant.text = "";
   }
   assistant.reasoning = "";
   assistant.recovery = undefined;
@@ -285,12 +388,23 @@ function applyRecoveredRunState(assistant, run) {
 }
 
 function recoveredFailureMessage(run) {
-  const message = typeof run?.errorMessage === "string" ? run.errorMessage : "";
-  if (run?.errorCode === "RUN_LIMIT_EXCEEDED") {
-    return message ? `执行轮次已耗尽：${message}` : "执行轮次已耗尽，任务未能在预算内完成。";
+  switch (run?.errorCode) {
+    case "RUN_LIMIT_EXCEEDED":
+      return "本次处理时间较长，暂未形成最终结果；以下说明可供参考。";
+    case "STEP_NOT_COMPLETED":
+      return "本次结果尚未完成最终确认，以下说明可供参考。";
+    case "ASSESSMENT_ERROR":
+      return "系统正在核对结果，暂未形成最终结论；以下说明可供参考。";
+    case "MODEL_ERROR":
+      return "本次处理暂时未能完成，以下说明可供参考。";
+    case "TOOL_EXECUTION_ERROR":
+      return "部分处理未能继续完成，以下说明可供参考。";
+    case "TOOL_POLICY_DENIED":
+    case "FORBIDDEN":
+      return "当前内容需要更多权限才能继续处理，以下说明可供参考。";
+    default:
+      return "本次未能形成可提交的最终结果，以下说明可供参考。";
   }
-  if (message) return message;
-  return typeof run?.errorCode === "string" ? `Run 失败：${run.errorCode}` : "";
 }
 
 async function replayPersistedRunEvents(assistant, tenantId, userId) {
@@ -545,6 +659,9 @@ function onEvent(event, conversation, assistant) {
   const terminal = projectAssistantEvent(assistant, event);
   assistant.events = mergeRuntimeEvents(assistant.events, [event]);
   setVolatile(assistant, "detailEvents", mergeDetailEvents(assistant.detailEvents, [event]));
+  if (assistant.assignmentId && isArtifactProjectionEvent(event)) {
+    void refreshArtifacts(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim());
+  }
   if (terminal) { assistant.connection = undefined; completeAssistantMessage(assistant, event); }
   conversation.updatedAt = Math.max(finiteNumber(conversation.updatedAt, 0), finiteNumber(event.createdAt, 0));
   if (event.type === "run.waiting_user" && assistant.assignmentId) {
@@ -554,6 +671,21 @@ function onEvent(event, conversation, assistant) {
   if (terminal) { liveUpdates.flush(); setStatus(event.type === "run.completed" ? "已完成" : event.type === "run.cancelled" ? "已停止" : "执行失败", assistant.status === "completed" ? "ok" : "error"); return true; }
   liveUpdates.request();
   return false;
+}
+
+function isArtifactProjectionEvent(event) {
+  if (event?.type === "candidate.approved" || event?.type === "plan.step.completed" || event?.type === "terminal.delivery_committed" || event?.type === "run.completed") return true;
+  if (event?.type !== "tool.completed") return false;
+  const toolName = String(event.data?.toolName || "");
+  if (!ARTIFACT_PRODUCING_TOOLS.has(toolName)) return false;
+  if (toolName !== "computer_run_command") return true;
+  try {
+    const result = JSON.parse(typeof event.data?.result === "string" ? event.data.result : "{}");
+    return (Array.isArray(result?.fileChanges) && result.fileChanges.some((change) => change?.changeType !== "deleted"))
+      || (typeof result?.stdout === "string" && /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx)\b/iu.test(result.stdout));
+  } catch {
+    return false;
+  }
 }
 
 async function refreshArtifacts(assignmentId, assistant, tenantId, userId) {
@@ -606,6 +738,8 @@ async function cancelActive() {
 
 function render() {
   const conversation = activeConversation(); if (!conversation) return;
+  applyArtifactPanelWidth();
+  $("workspace")?.classList.toggle("artifact-open", artifactPanelOpen && inlineArtifactPreview !== undefined);
   const conversationScroll = $("conversation-scroll");
   const followConversation = renderedConversationId !== conversation.id || isNearBottom(conversationScroll);
   const previousReasoning = document.querySelector(".reasoning-body");
@@ -634,6 +768,20 @@ function render() {
     assistant.planOpen = assistant.planOpen !== true;
     render();
   }));
+  document.querySelectorAll("[data-trace-toggle]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const assistant = messages.find((message) => message.id === button.dataset.traceToggle);
+    if (!assistant) return;
+    assistant.traceOpen = assistant.traceOpen !== true;
+    render();
+  }));
+  document.querySelectorAll("[data-other-artifacts-toggle]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const assistant = messages.find((message) => message.id === button.dataset.otherArtifactsToggle);
+    if (!assistant) return;
+    assistant.otherArtifactsOpen = assistant.otherArtifactsOpen !== true;
+    render();
+  }));
   document.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", () => {
     const message = messages.find((item) => item.id === button.dataset.copyMessage);
     if (message) void copyConversationMessage(message, button);
@@ -656,12 +804,21 @@ function render() {
   $("cancel").disabled = !cancelTarget.canCancel || (cancelTarget.assignmentId !== undefined && cancellingAssignmentIds.has(cancelTarget.assignmentId));
   $("upload-file").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
   renderPendingAttachments(conversation);
-  const detailEvents = selectedAssistant?.detailEvents || selectedAssistant?.events || [];
-  const turnNumber = assistantTurnNumber(messages, selectedAssistant);
-  $("details-title").textContent = selectedAssistant ? `执行详情 · 第 ${turnNumber} 轮` : "执行详情";
-  $("plan-section").hidden = !(selectedAssistant?.plan?.length);
-  $("events-section").hidden = !detailEvents.length;
-  renderPlan(projectPlanStatuses(selectedAssistant?.plan || [], detailEvents, selectedAssistant?.status)); renderEvents(detailEvents); renderDetails(conversation, selectedAssistant);
+  renderArtifacts(selectedAssistant);
+  document.querySelectorAll("[data-artifact-card]").forEach((card) => card.addEventListener("click", (event) => {
+    if (event.target.closest("button, a, input, select, textarea")) return;
+    if (card.dataset.artifactPreviewable === "false") return;
+    event.stopPropagation();
+    void previewArtifact(card.dataset.artifactCard, card.dataset.artifactAssistant);
+  }));
+  document.querySelectorAll("[data-artifact-download]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void downloadArtifact(button.dataset.artifactDownload, button.dataset.artifactAssistant);
+  }));
+  document.querySelectorAll("[data-artifact-preview]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void previewArtifact(button.dataset.artifactPreview, button.dataset.artifactAssistant);
+  }));
   conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, conversationScroll.scrollTop);
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
@@ -726,7 +883,7 @@ function renderMessage(message) {
   const projectedOutput = `${interimOutput}${humanLoop}${recovery}`;
   const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(presentation.emptyText)}</span>`;
   const output = message.status === "failed"
-    ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.text && message.text !== message.error ? `<div class="partial-result"><strong>阶段性结果（任务未完成）</strong>${renderMarkdown(message.text)}</div>` : ""}${recovery}`
+    ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.partialText ? `<div class="partial-result"><strong>本次处理说明</strong>${renderMarkdown(message.partialText)}</div>` : ""}${recovery}`
     : projectedOutput || emptyOutput;
   const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : presentation.label;
   const stateIcon = presentation.icon;
@@ -737,7 +894,167 @@ function renderMessage(message) {
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${responseTiming}</div></div></article>`;
+  const executionTrace = renderExecutionTrace(message);
+  const liveEventIndicator = renderLiveEventIndicator(message);
+  const inlineArtifacts = renderInlineArtifacts(message);
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${liveEventIndicator}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+}
+
+function renderInlineArtifacts(assistant) {
+  if (!assistant) return "";
+  const artifacts = [...(Array.isArray(assistant.artifacts) ? assistant.artifacts : [])]
+    .filter((artifact) => artifact && typeof artifact.id === "string" && !isExecutionLogArtifact(artifact))
+    .sort((left, right) => (left.role === "final" ? -1 : 0) - (right.role === "final" ? -1 : 0));
+  const finalArtifacts = artifacts.filter(isFinalDeliveryArtifact);
+  const otherArtifacts = artifacts.filter((artifact) => !isFinalDeliveryArtifact(artifact));
+  const events = assistant.detailEvents || assistant.events || [];
+  const skills = executionActivities(events, assistant.commandEvidence).skills.filter((skill) => ["completed", "bound", "selected"].includes(skill.status));
+  if (!finalArtifacts.length && !otherArtifacts.length && !skills.length) return "";
+  const failed = assistant.status === "failed";
+  const artifactBlock = finalArtifacts.length ? `<div class="inline-artifacts-head"><span>${failed ? "已生成文件" : "最终产物"}</span><small>${failed ? "尚未完成最终验收" : `${finalArtifacts.length} 个文件`}</small></div><div class="artifact-list">${finalArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>` : "";
+  const generatedBlock = assistant.status !== "completed" && otherArtifacts.length
+    ? `<div class="inline-artifacts-head"><span>已生成产物</span><small>${failed ? "本轮部分结果" : `${otherArtifacts.length} 个文件`}</small></div><div class="artifact-list">${otherArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>`
+    : "";
+  const otherBlock = assistant.status === "completed" && otherArtifacts.length ? `<button type="button" class="other-artifacts-toggle" data-other-artifacts-toggle="${escapeHtml(assistant.id)}" aria-expanded="${assistant.otherArtifactsOpen === true}">${assistant.otherArtifactsOpen === true ? "收起其他产物" : `查看其他产物 ${otherArtifacts.length} 个`}<span aria-hidden="true">⌄</span></button>${assistant.otherArtifactsOpen === true ? `<div class="artifact-list other-artifacts-list">${otherArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>` : ""}` : "";
+  const skillBlock = skills.length ? `<div class="inline-skill-summary"><span>本轮加载 Skill</span><div class="inline-skill-list">${skills.map((skill) => `<span class="inline-skill-chip">${escapeHtml(skill.name)}</span>`).join("")}</div></div>` : "";
+  return `<section class="inline-artifacts" aria-label="本轮产物和 Skill">${artifactBlock}${generatedBlock}${otherBlock}${skillBlock}</section>`;
+}
+
+function renderArtifactCard(artifact, assistantId, assistantStatus = "completed") {
+  const previewLabel = artifact.previewable === false ? "预览不可用" : "预览";
+  const extension = String(artifact.name || artifact.path || "").split(".").pop()?.toUpperCase() || "FILE";
+  const label = artifact.role === "final" ? "最终" : assistantStatus !== "completed" ? "已生成" : "过程";
+  return `<article class="artifact-card" data-artifact-card="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" data-artifact-previewable="${artifact.previewable === false ? "false" : "true"}"><div class="artifact-file-icon">${escapeHtml(extension.slice(0, 4))}</div><div class="artifact-card-main"><div class="artifact-head"><strong>${escapeHtml(artifact.name || artifact.path)}</strong><span class="artifact-role ${escapeHtml(artifact.role || "process")}">${label}</span></div><div class="artifact-meta">${escapeHtml(artifact.mimeType || "文件")} · ${formatBytes(artifact.bytes)}${artifact.previewable ? " · 可预览" : ""}</div></div><div class="artifact-actions"><button type="button" data-artifact-preview="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}" ${artifact.previewable === false ? "disabled" : ""}>${previewLabel}</button><button type="button" data-artifact-download="${escapeHtml(artifact.id)}" data-artifact-assistant="${escapeHtml(assistantId)}">下载</button></div></article>`;
+}
+
+function renderExecutionTrace(message) {
+  const events = Array.isArray(message.detailEvents) && message.detailEvents.length ? message.detailEvents : (message.events || []);
+  const activities = executionActivities(events, message.commandEvidence);
+  const items = executionTraceItems(events, activities);
+  if (!items.length) return "";
+  const tools = items.filter((item) => item.kind === "tool");
+  const latestTool = tools.filter((item) => item.active).at(-1) || tools.at(-1);
+  const traceId = `trace-${message.id}`;
+  const expanded = message.traceOpen === true;
+  const rows = expanded && tools.length > 1 ? `<div class="execution-trace-list" id="${traceId}">${[...tools].reverse().map(renderExecutionTraceItem).join("")}</div>` : "";
+  const toolBlock = latestTool ? `<div class="execution-tools" aria-label="工具执行"><div class="execution-trace-head"><div class="execution-trace-latest">${renderExecutionTraceItem(latestTool, true)}</div>${tools.length > 1 ? `<button type="button" class="execution-trace-toggle" data-trace-toggle="${escapeHtml(message.id)}" aria-expanded="${expanded}" aria-controls="${traceId}">${expanded ? "收起工具" : `查看工具 ${tools.length} 次`}<span aria-hidden="true">⌄</span></button>` : ""}</div>${rows}</div>` : "";
+  return `<section class="execution-trace ${expanded ? "open" : ""}" aria-label="本轮工具执行状态">${toolBlock}</section>`;
+}
+
+function renderLiveEventIndicator(message) {
+  const events = Array.isArray(message?.detailEvents) && message.detailEvents.length ? message.detailEvents : (message?.events || []);
+  const latest = events.at(-1);
+  const seq = numberValue(latest?.seq);
+  const type = stringValue(latest?.type);
+  if (seq === undefined && !type) return "";
+  const running = ["running", "waiting"].includes(message?.status);
+  return `<span class="live-event-indicator ${running ? "active" : ""}" data-event-seq="${escapeHtml(seq ?? "?")}" title="最新运行事件"><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">#${escapeHtml(seq ?? "?")}</span><small>${escapeHtml(type ? eventTypeLabel(type) : "runtime event")}</small></span>`;
+}
+
+function executionTraceItems(events, activities) {
+  const commandsById = new Map(activities.commands.map((command) => [command.id, command]));
+  const toolItems = new Map();
+  const items = [];
+  for (const [index, event] of (Array.isArray(events) ? events : []).entries()) {
+    const data = recordValue(event?.data) || {};
+    const type = stringValue(event?.type) || "runtime.event";
+    const toolCallId = stringValue(data.toolCallId);
+    const command = toolCallId ? commandsById.get(toolCallId) : undefined;
+    const toolName = stringValue(data.toolName) || stringValue(data.name);
+    const args = recordValue(data.arguments);
+    if (toolCallId && toolName && (type.startsWith("tool.") || type === "assistant.tool_call.committed")) {
+      const key = toolCallId || `tool-${index}`;
+      const previous = toolItems.get(key);
+      const item = previous || { id: key, seq: numberValue(event?.seq) ?? index, kind: "tool", active: false, title: toolName, parameters: "主要参数：-", result: "结果：等待执行" };
+      item.seq = Math.max(item.seq, numberValue(event?.seq) ?? index);
+      item.active = ["assistant.tool_call.committed", "tool.planned", "tool.effect_pending", "tool.dispatched"].includes(type);
+      if (!previous || args) {
+        item.title = toolName === "computer_run_command" ? stringValue(args?.command) || "computer_run_command" : toolName;
+        item.parameters = `主要参数：${toolParameters(toolName, args)}`;
+      }
+      item.result = `结果：${toolResult(toolName, event, command)}`;
+      toolItems.set(key, item);
+      continue;
+    }
+    const seq = numberValue(event?.seq) ?? index;
+    items.push({ id: `${seq}-${index}`, seq, kind: "event", title: `#${seq} · ${eventTypeLabel(type)}`, parameters: "", result: "" });
+  }
+  items.push(...toolItems.values());
+  return items.map((item) => {
+    const { title, parameters, result, kind, seq, id, active } = item;
+    return { id, seq, kind, title, detail: parameters, result, active };
+  }).sort((left, right) => left.seq - right.seq);
+}
+
+function eventTypeLabel(type) {
+  return type.replaceAll(".", " ");
+}
+
+function toolParameters(toolName, args) {
+  if (!args) return "-";
+  if (toolName === "computer_run_command") {
+    const command = stringValue(args.command) || "?";
+    const commandArgs = Array.isArray(args.args) ? args.args.map((value) => String(value)).filter((value) => value !== "").join(" ") : "";
+    return traceClip(`${command}${commandArgs ? ` ${commandArgs}` : ""}`, 120);
+  }
+  const entries = Object.entries(args).filter(([key]) => !["input", "content", "body"].includes(key));
+  if (!entries.length) return "-";
+  return traceClip(entries.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`).join(" · "), 120);
+}
+
+function toolResult(toolName, event, command) {
+  const type = stringValue(event?.type) || "";
+  if (type === "tool.dispatched" || type === "tool.effect_pending") return "执行中";
+  if (type === "tool.rejected") return traceClip(stringValue(event?.data?.reason) || "被拒绝", 120);
+  if (type === "tool.failed") return traceClip(stringValue(event?.data?.error) || "执行失败", 120);
+  if (command) {
+    const status = commandTraceStatus(command);
+    const output = command.status === "completed" && (command.stdout || command.stderr) ? traceClip(command.stdout || command.stderr, 80) : "";
+    return output ? `${status} · ${output}` : status;
+  }
+  if (type === "tool.completed") {
+    const result = recordValue(traceParseResult(event?.data?.result));
+    if (result?.exitCode !== undefined) return result.exitCode === 0 ? "执行成功" : `退出码 ${result.exitCode}`;
+    return "已完成";
+  }
+  return "等待执行";
+}
+
+function renderExecutionTraceItem(item, latest = false) {
+  const result = item.result ? `<small class="execution-trace-result">${escapeHtml(item.result)}</small>` : "";
+  return `<div class="execution-trace-item ${escapeHtml(item.kind)} ${latest ? "latest" : ""}"><span class="execution-trace-dot ${escapeHtml(item.kind)}"></span><span class="execution-trace-copy"><strong>${escapeHtml(item.title)}</strong>${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}${result}</span>${item.kind === "event" ? "" : `<span class="execution-trace-seq">#${escapeHtml(item.seq)}</span>`}</div>`;
+}
+
+function commandTraceStatus(command) {
+  if (command.status === "running") return "执行中";
+  if (command.status === "completed") return command.exitCode === undefined ? "已完成" : `已完成 · 退出码 ${command.exitCode}`;
+  if (command.status === "failed") return command.error || "执行失败";
+  if (command.status === "rejected") return command.error || "被拒绝";
+  return "等待执行";
+}
+
+function traceEventDetail(event) {
+  const data = recordValue(event?.data) || {};
+  if (stringValue(data.stepId)) return `step ${data.stepId}`;
+  if (stringValue(data.message)) return data.message;
+  if (stringValue(data.error)) return data.error;
+  return "Runtime 流式事件";
+}
+
+function traceClip(value, limit) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+}
+
+function traceParseResult(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function renderMessageFooter(message, timing, kind) {
@@ -946,82 +1263,90 @@ function renderAttachmentChip(attachment, removable = false) {
   const remove = removable && typeof attachment?.id === "string" ? `<button type="button" data-remove-attachment="${escapeHtml(attachment.id)}" aria-label="移除 ${escapeHtml(name)}">×</button>` : "";
   return `<span class="source-chip ${removable ? "" : "msg-source-chip"}" title="${escapeHtml(name)}"><span class="file-icon" aria-hidden="true"><span></span></span><span>${escapeHtml(name)}</span>${size}${remove}</span>`;
 }
-function renderPlan(steps) { if (!steps.length) { $("plan").className = "details-empty"; $("plan").textContent = "提交任务后显示 Planner。"; return; } $("plan").className = "plan-card"; $("plan").innerHTML = `<div class="plan-head"><span class="plan-title">Planner</span><span class="plan-goal">当前执行计划</span></div><ol class="plan-steps">${steps.map((step, index) => `<li class="plan-step"><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><div class="step-main"><span class="step-obj">${escapeHtml(step.objective || step.id || `步骤 ${index + 1}`)}</span><span class="step-meta">${step.dependencies?.length ? `依赖：${step.dependencies.map(escapeHtml).join("、")}` : "无前置依赖"}</span></div><span class="step-state">${planStepLabel(step.status)}</span></li>`).join("")}</ol>`; }
-function renderEvents(events) { $("event-count").textContent = `${events.length} events`; $("events").innerHTML = `<div class="event-list">${[...events].reverse().map((event) => `<div class="event"><span class="event-seq">#${event.seq}</span><span class="event-type">${escapeHtml(event.type)}</span></div>`).join("")}</div>`; }
-function renderDetails(conversation, assistant) {
-  const hasMessage = Boolean(assistant);
-  $("details-task").textContent = hasMessage ? assistantTaskText(conversation, assistant) : "选择或启动一个对话";
-  $("details-runtime").textContent = assistant?.runtimeId || "自动分配";
-  const events = assistant?.detailEvents || assistant?.events || [];
-  const activities = executionActivities(events, assistant?.commandEvidence);
-  if (commandDetailSelection && commandDetailSelection.assistantId !== assistant?.id) commandDetailSelection = undefined;
-  $("details-skills").innerHTML = activities.skills.length ? activities.skills.map(renderSkillActivity).join("") : `<span class="muted">本轮尚未加载 Skill。</span>`;
-  $("details-tools").innerHTML = activities.tools.length ? activities.tools.map(renderToolActivity).join("") : `<span class="muted">本轮尚未调用工具。</span>`;
-  $("details-commands").innerHTML = activities.commands.length ? activities.commands.map(renderCommandActivity).join("") : `<span class="muted">本轮尚未执行命令。</span>`;
-  $("details-output").innerHTML = assistant?.text ? (assistant.status === "completed" ? renderMarkdown(assistant.text) : formatText(assistant.text)) : `<span class="muted">暂无最终回复。</span>`;
-  $("details-loading").hidden = !assistant?.detailsLoading && !assistant?.detailsError;
-  $("details-loading").textContent = assistant?.detailsLoading ? "正在加载该轮完整执行证据…" : assistant?.detailsError ? `详情加载失败：${assistant.detailsError}` : "";
-  const commandById = new Map(activities.commands.map((command) => [command.id, command]));
-  document.querySelectorAll("[data-command-detail]").forEach((card) => {
-    const command = commandById.get(card.dataset.commandDetail);
-    if (!command) return;
-    const open = () => openCommandDetail(command, assistant?.id);
-    card.addEventListener("click", open);
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        open();
-      }
-    });
-  });
-  renderCommandDetailModal(activities.commands);
-  renderArtifacts(assistant);
-}
-
-function assistantTaskText(conversation, assistant) {
-  const messages = conversation?.messages || [];
-  const index = messages.findIndex((message) => message.id === assistant?.id);
-  for (let cursor = index - 1; cursor >= 0; cursor -= 1) if (messages[cursor]?.role === "user") return messages[cursor].text || conversation.title;
-  return conversation.title;
-}
-
 function renderArtifacts(assistant) {
   const artifacts = Array.isArray(assistant?.artifacts) ? assistant.artifacts : [];
-  $("details-artifacts").innerHTML = artifacts.length
-    ? artifacts.map((artifact) => `<article class="artifact-card"><div class="artifact-head"><strong>${escapeHtml(artifact.name || artifact.path)}</strong><span class="artifact-role ${escapeHtml(artifact.role || "process")}">${artifact.role === "final" ? "最终" : "过程"}</span></div><div class="artifact-meta">${escapeHtml(artifact.mimeType || "文件")} · ${formatBytes(artifact.bytes)}${artifact.previewable ? " · 可预览" : ""}</div><div class="artifact-actions"><button type="button" data-artifact-download="${escapeHtml(artifact.id)}">下载</button><button type="button" data-artifact-preview="${escapeHtml(artifact.id)}">预览</button></div></article>`).join("")
-    : `<span class="muted">本轮暂无可预览或下载的产物。</span>`;
-  document.querySelectorAll("[data-artifact-download]").forEach((button) => button.addEventListener("click", () => void downloadArtifact(button.dataset.artifactDownload)));
-  document.querySelectorAll("[data-artifact-preview]").forEach((button) => button.addEventListener("click", () => void previewArtifact(button.dataset.artifactPreview)));
+  const selected = inlineArtifactPreview && inlineArtifactPreview.assistantId === assistant?.id
+    ? artifacts.find((artifact) => artifact.id === inlineArtifactPreview.artifactId)
+    : undefined;
+  $("artifact-title").textContent = selected ? selected.name || selected.path || "产物预览" : "产物预览";
+  $("artifact-subtitle").textContent = selected ? `${selected.mimeType || "文件"} · ${formatBytes(selected.bytes)}` : artifacts.length ? `本轮有 ${artifacts.length} 个产物` : "选择回复中的产物进行预览";
+  $("artifact-fullscreen").hidden = !selected;
+  const previewHost = $("artifact-inline-preview");
+  const emptyHost = $("artifact-empty");
+  if (!previewHost || !emptyHost) return;
+  if (!inlineArtifactPreview || inlineArtifactPreview.assistantId !== assistant?.id || !artifacts.some((artifact) => artifact.id === inlineArtifactPreview.artifactId)) {
+    previewHost.hidden = true;
+    previewHost.innerHTML = "";
+    emptyHost.hidden = true;
+    return;
+  }
+  previewHost.hidden = false;
+  previewHost.innerHTML = inlineArtifactPreview.loading ? `<div class="artifact-inline-loading">正在生成预览…</div>` : (inlineArtifactPreview.html || `<div class="artifact-inline-loading">暂无预览内容</div>`);
+  emptyHost.hidden = true;
 }
 
-async function downloadArtifact(artifactId) {
-  const assistant = selectedAssistantMessage(activeConversation());
+async function openSelectedArtifactFullscreen() {
+  const conversation = activeConversation();
+  const assistant = (conversation?.messages || []).find((message) => message.role === "assistant" && message.id === inlineArtifactPreview?.assistantId)
+    || selectedAssistantMessage(conversation);
+  const artifactId = inlineArtifactPreview?.artifactId;
+  const artifact = (assistant?.artifacts || []).find((item) => item.id === artifactId);
+  if (!assistant?.assignmentId || !artifact) return;
+  const headers = () => ({ "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() });
+  const endpoint = (suffix = "") => `${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifact.id)}${suffix}`;
+  openArtifactPreview({
+    artifact,
+    fetchBytes: () => fetchBytes(endpoint, headers).then((response) => response.blob()),
+    fetchStructuredPreview: () => fetchStructuredPreview(endpoint, headers),
+  });
+}
+
+async function downloadArtifact(artifactId, assistantId) {
+  const assistant = (activeConversation()?.messages || []).find((message) => message.role === "assistant" && message.id === assistantId) || selectedAssistantMessage(activeConversation());
   if (!assistant?.assignmentId) return;
   const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifactId)}`, { headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } });
   if (!response.ok) return;
   const blob = await response.blob(); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = response.headers.get("content-disposition")?.split("filename*=UTF-8''")[1] ? decodeURIComponent(response.headers.get("content-disposition").split("filename*=UTF-8''")[1]) : "artifact"; link.click(); URL.revokeObjectURL(link.href);
 }
 
-async function previewArtifact(artifactId) {
-  const assistant = selectedAssistantMessage(activeConversation());
+async function previewArtifact(artifactId, assistantId) {
+  const assistant = (activeConversation()?.messages || []).find((message) => message.role === "assistant" && message.id === assistantId) || selectedAssistantMessage(activeConversation());
   if (!assistant?.assignmentId) return;
   const artifact = (assistant.artifacts || []).find((item) => item.id === artifactId);
-  if (!artifact) return;
+  if (!artifact || artifact.previewable === false) return;
   const headers = () => ({ "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() });
   const endpoint = (suffix = "") => `${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifactId)}${suffix}`;
-  openArtifactPreview({
-    artifact,
-    fetchBytes: async () => {
-      const response = await fetch(endpoint(), { headers: headers() });
-      if (!response.ok) throw new Error(`无法读取产物（HTTP ${response.status}）`);
-      return await response.blob();
-    },
-    fetchStructuredPreview: async () => {
-      const response = await fetch(endpoint("/preview"), { headers: headers() });
-      if (!response.ok) throw new Error(`无法生成预览（HTTP ${response.status}）`);
-      return await response.json();
-    },
-  });
+  artifactPanelOpen = true;
+  inlineArtifactPreview = { assistantId: assistant.id, artifactId, loading: true };
+  render();
+  try {
+    const mode = artifactPreviewMode(artifact);
+    let html;
+    if (mode === "structured") {
+      html = renderStructuredPreview(await fetchStructuredPreview(endpoint, headers), renderMarkdown);
+    } else {
+      const response = await fetchBytes(endpoint, headers);
+      if (inlineArtifactPreviewUrl) URL.revokeObjectURL(inlineArtifactPreviewUrl);
+      inlineArtifactPreviewUrl = URL.createObjectURL(await response.blob());
+      html = renderBlobPreview(mode, inlineArtifactPreviewUrl, artifact.name || artifact.path || "产物");
+    }
+    inlineArtifactPreview = { assistantId: assistant.id, artifactId, html };
+  } catch (error) {
+    inlineArtifactPreview = { assistantId: assistant.id, artifactId, html: `<div class="artifact-inline-error">${escapeHtml(error instanceof Error ? error.message : "无法生成预览")}</div>` };
+  }
+  render();
+}
+
+async function fetchBytes(endpoint, headers) {
+  const response = await fetch(endpoint(), { headers: headers() });
+  if (!response.ok) throw new Error(`无法读取产物（HTTP ${response.status}）`);
+  return response;
+}
+
+async function fetchStructuredPreview(endpoint, headers) {
+  const response = await fetch(endpoint("/preview"), { headers: headers() });
+  if (!response.ok) throw new Error(`无法生成预览（HTTP ${response.status}）`);
+  return await response.json();
 }
 
 function renderToolActivity(tool) {

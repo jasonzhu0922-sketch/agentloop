@@ -47,6 +47,7 @@ import { renderMarkdown } from "@zhujun/agentloop-artifact-preview";
 import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
 import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
+import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "../web/artifact-display.js";
 import { commandToolCallIds, executionActivities } from "../web/execution-detail-projection.js";
 import {
   LOCAL_MARKITDOWN_VERSION,
@@ -341,6 +342,50 @@ test("Web uses the shared format-aware preview component instead of text-only ar
   assert.match(dockerfile, /FROM runtime-host AS local-runtime/);
 });
 
+test("Web keeps execution evidence collapsed and attaches final artifacts to the assistant reply", async () => {
+  const [app, html, overrides] = await Promise.all([
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /function renderExecutionTrace\(message\)/);
+  assert.match(app, /classList\.toggle\("artifact-open"/);
+  assert.match(app, /artifactPanelOpen = true/);
+  assert.match(app, /data-trace-toggle/);
+  assert.match(app, /查看工具 \$\{tools\.length\} 次/);
+  assert.match(app, /function renderInlineArtifacts\(assistant\)/);
+  assert.doesNotMatch(app, /function renderInlineArtifacts\(assistant\)\s*\{\s*if \(!assistant \|\| assistant\.status !== "completed"\) return "";/);
+  assert.match(app, /const generatedBlock = assistant\.status !== "completed"/);
+  assert.match(app, /已生成产物/);
+  assert.match(app, /isArtifactProjectionEvent\(event\)/);
+  assert.match(app, /function openSelectedArtifactFullscreen\(\)/);
+  assert.match(app, /artifact-panel-close/);
+  assert.match(app, /inline-skill-summary/);
+  assert.match(app, /function renderArtifactCard\(artifact, assistantId(?:, assistantStatus(?: = "completed")?)?\)/);
+  assert.match(app, /data-other-artifacts-toggle/);
+  assert.match(app, /查看其他产物/);
+  assert.match(app, /data-artifact-assistant/);
+  assert.match(app, /function fetchStructuredPreview\(endpoint, headers\)/);
+  assert.match(html, /id="artifact-inline-preview"/);
+  assert.match(html, /id="artifact-fullscreen"/);
+  assert.match(overrides, /\.execution-trace-list/);
+  assert.match(overrides, /\.artifact-inline-preview/);
+});
+
+test("Web excludes command stdout and stderr captures from artifact cards", () => {
+  const finalArtifact = { role: "final", name: "report.pdf", path: "deliveries/report.pdf" };
+  const stdoutCapture = { role: "final", name: "run.stdout.txt", path: ".agentloop/tool-results/run.stdout.txt" };
+  const stderrCapture = { role: "final", name: "run.stderr.txt", path: ".agentloop/tool-results/run.stderr.txt" };
+
+  assert.equal(isFinalDeliveryArtifact(finalArtifact), true);
+  assert.equal(isExecutionLogArtifact(finalArtifact), false);
+  assert.equal(isExecutionLogArtifact(stdoutCapture), true);
+  assert.equal(isExecutionLogArtifact(stderrCapture), true);
+  assert.equal(isFinalDeliveryArtifact(stdoutCapture), false);
+  assert.equal(isFinalDeliveryArtifact(stderrCapture), false);
+  assert.equal(isExecutionLogArtifact({ role: "process", name: "report.pdf", path: "deliveries/report.pdf" }), false);
+});
+
 test("Runtime Hosts load only an explicit built-in step execution profile", async () => {
   const configured = parseStepExecutionStrategyProfileConfig(JSON.stringify({
     schema: "agentloop.stepExecutionStrategyConfig/v1",
@@ -382,13 +427,33 @@ test("execution details reserve the side panel for observable execution evidence
   ]);
   assert.doesNotMatch(html, /details-reasoning|<h3>模型思考<\/h3>/);
   assert.doesNotMatch(app, /details-reasoning/);
-  assert.match(html, /id="details-skills"/);
+  assert.match(html, /aria-label="产物预览区"/);
+  assert.match(html, /id="artifact-inline-preview"/);
+  assert.doesNotMatch(html, /id="details-skills"|id="details-tools"|id="details-commands"|id="events-section"/);
   assert.match(app, /const reasoning = isLive && message\.reasoning/);
   assert.match(app, /assistant\.reasoning = ""/);
+  assert.match(app, /function renderExecutionTrace\(message\)/);
   assert.match(app, /class="live-step-toggle"/);
   assert.match(app, /data-plan-toggle/);
   assert.doesNotMatch(app, /class="turn-planner"/);
   assert.doesNotMatch(overrides, /\.turn-planner/);
+});
+
+test("Web renders live tool and script execution as three compact rows and keeps ordinary events terse", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const overrides = await readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8");
+  assert.match(app, /item\.title/);
+  assert.match(app, /主要参数：/);
+  assert.match(app, /结果：/);
+  assert.match(app, /#\$\{seq\} · \$\{eventTypeLabel\(type\)\}/);
+  assert.match(app, /toolResult\(toolName, event, command\)/);
+  assert.match(app, /toolParameters\(toolName, args\)/);
+  assert.match(app, /tools\.filter\(\(item\) => item\.active\)/);
+  assert.match(app, /class="execution-tools"/);
+  assert.match(app, /function renderLiveEventIndicator\(message\)/);
+  assert.match(app, /class="live-event-indicator/);
+  assert.match(overrides, /\.execution-trace-copy \.execution-trace-result/);
+  assert.match(overrides, /\.live-event-indicator\.active \.live-event-number/);
 });
 
 test("execution details preserve loaded Skills and complete command evidence per tool call", () => {
@@ -482,7 +547,7 @@ test("live thought and conversation scroll only follow readers who remain near t
   assert.match(overrides, /\.reasoning-body\s*\{[^}]*max-height:\s*min\(240px, 36vh\);[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);
 });
 
-test("execution-details pane owns overflow instead of flex-shrinking long artifact sections", async () => {
+test("artifact preview pane owns height and overflow instead of fixed-height previews", async () => {
   const [baseStyles, overrides] = await Promise.all([
     readFile(new URL("../web/styles.css", import.meta.url), "utf8"),
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
@@ -490,8 +555,11 @@ test("execution-details pane owns overflow instead of flex-shrinking long artifa
   assert.match(baseStyles, /\.workspace\{flex:1;min-height:0;display:grid/);
   assert.match(overrides, /\.app-shell\s*\{\s*grid-template-rows:\s*minmax\(0, 1fr\)/);
   assert.match(overrides, /\.main,\s*\.workspace,\s*\.details\s*\{\s*min-height:\s*0/);
-  assert.match(overrides, /\.details\s*\{\s*display:\s*block;\s*overflow-y:\s*auto/);
-  assert.doesNotMatch(overrides, /\.details\s*\{\s*display:\s*flex/);
+  assert.match(overrides, /\.artifact-workspace\s*\{\s*display:\s*flex;\s*flex-direction:\s*column;\s*min-height:\s*0;\s*overflow:\s*hidden/);
+  assert.match(overrides, /\.artifact-workspace-body\s*\{\s*flex:\s*1 1 auto;\s*min-height:\s*0;\s*height:\s*auto;\s*display:\s*flex;\s*flex-direction:\s*column;\s*overflow:\s*auto/);
+  assert.match(overrides, /\.artifact-inline-preview\s*\{\s*flex:\s*1 1 auto;[^}]*height:\s*auto;[^}]*min-height:\s*0/);
+  assert.match(overrides, /\.artifact-inline-preview \.preview-body\s*\{[^}]*max-height:\s*none/);
+  assert.match(overrides, /\.artifact-inline-preview \.preview-frame\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0/);
 });
 
 test("Web projects durable Plan transitions, formats final Markdown, and preserves mixed tool outcomes", async () => {
@@ -924,6 +992,47 @@ test("Runtime Host imports resources once and reuses its dispatch key", async ()
   });
 });
 
+test("Runtime Host explicitly projects an approved failure report for user presentation", async () => {
+  const report = "任务未完成，以下为已确认的处理说明。\n\n已整理可供参考的部分结果。";
+  const host = new AgentLoopRuntimeHost({
+    async ensureConversation() {},
+    async startConversation() { return { id: "failed-run" } as never; },
+    async get() { return { id: "failed-run", status: "failed", output: report, errorCode: "STEP_NOT_COMPLETED" } as never; },
+    async events() {
+      return [{
+        seq: 4,
+        type: "run.failed",
+        data: { code: "STEP_NOT_COMPLETED", message: "internal failure detail", output: report },
+        createdAt: 400,
+      }];
+    },
+  }, { async importForRun() { return []; } });
+  const envelope: RuntimeDispatchEnvelope = {
+    schema: "agentloop.runtimeDispatch/v1",
+    assignmentId: "assignment-failed-report",
+    dispatchKey: "dispatch-failed-report",
+    subject: { tenantId: "tenant", userId: "user" },
+    conversationId: "conversation",
+    input: "summarize the attachment",
+    allowDangerousTools: false,
+    resourceRefs: [],
+  };
+  await host.dispatch(envelope);
+  assert.deepEqual(await host.getRun("failed-run"), {
+    remoteRunId: "failed-run",
+    status: "failed",
+    output: report,
+    partialOutput: report,
+    errorCode: "STEP_NOT_COMPLETED",
+  });
+  assert.deepEqual(await host.events("failed-run", 0), [{
+    seq: 4,
+    type: "run.failed",
+    data: { code: "STEP_NOT_COMPLETED", message: "internal failure detail", output: report, partialOutput: report },
+    createdAt: 400,
+  }]);
+});
+
 test("resource importer stops unsupported Sources before they can be bound to a Run", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -1233,8 +1342,9 @@ test("Router preserves Host round-limit failures for browser replay and recovery
   };
   assert.equal(projectAssistantEvent(assistant, observed?.events[0] as unknown as Record<string, unknown>), true);
   assert.equal(assistant.status, "failed");
-  assert.match(assistant.error ?? "", /执行轮次已耗尽/);
-  assert.match(assistant.text, /12-step limit/);
+  assert.equal(assistant.error, "本次处理时间较长，暂未形成最终结果；以下说明可供参考。");
+  assert.equal(assistant.text, "");
+  assert.doesNotMatch(assistant.error ?? "", /12-step limit|required evidence remained missing/);
   await database.close();
 });
 
