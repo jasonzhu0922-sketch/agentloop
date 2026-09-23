@@ -91,12 +91,6 @@ export function admitPlan(input: {
     reject("Plan must contain between 1 and 100 steps");
   }
   const recoveryPlan = proposal.shape === "recovery_patch";
-  const invalidRoleSelections = (proposal.selectedSkillRoles ?? []).filter((selection) =>
-    !recoveryPlan && (selection.role === "support" || selection.role === "qa")
-  );
-  if (invalidRoleSelections.length > 0) {
-    reject(`Initial OutcomePlan cannot expose support/qa Skill roles (${invalidRoleSelections.map((selection) => selection.skillId).join(", ")})`);
-  }
   const availableSkills = buildSkillReferenceMap(input.availableSkills);
   const selectedSkillIds = proposal.selectedSkillIds.map((skillReference) => {
     const skill = availableSkills.get(skillReference);

@@ -1858,65 +1858,36 @@ test("ModelPlanner keeps operation profiles and execution capabilities in separa
   assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["web_research", "conversation_delivery"]);
 });
 
-test("ModelPlanner retries once when Admission rejects an initial support Skill role", async () => {
+test("ModelPlanner admits an initial support Skill role when its leaf binds it", async () => {
   let calls = 0;
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
       calls += 1;
-      if (calls === 1) {
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [submitOutcomePlanToolCall("invalid-support-role", {
-            goal: "Build an HTML report from the uploaded spreadsheet.",
-            shape: "single_leaf",
-            selectedSkillRoles: [
-              {
-                skillId: "discovered:build-dashboard",
-                role: "primary_builder",
-                reason: "Dashboard builder owns the executable artifact.",
-              },
-              {
-                skillId: "discovered:web-artifacts-builder",
-                role: "support",
-                reason: "Use as optional HTML conventions.",
-              },
-            ],
-            steps: [{
-              id: "produce_report",
-              objective: "Read the uploaded spreadsheet and produce an accepted HTML report.",
-              dependencies: [],
-              role: "produce",
-              skillIds: ["discovered:build-dashboard"],
-              requiredCapabilities: ["uploaded_source_read", "workspace_artifact_write", "artifact_acceptance"],
-              evidenceContract: {
-                requiredKinds: ["source_summary", "artifact_path", "artifact_non_empty", "artifact_acceptance"],
-                caveatPolicy: "mark_unverified_facts",
-              },
-            }],
-          })],
-        };
-      }
-      assert.match(request.runtimeContext?.content ?? "", /rejected by Runtime Admission/);
-      assert.match(request.runtimeContext?.content ?? "", /support and qa roles are recovery-only/);
       return {
         content: "",
         finishReason: "tool_calls",
-        toolCalls: [submitOutcomePlanToolCall("valid-initial-plan", {
+        toolCalls: [submitOutcomePlanToolCall("initial-plan-with-support", {
           goal: "Build an HTML report from the uploaded spreadsheet.",
           shape: "single_leaf",
-          selectedSkillRoles: [{
-            skillId: "discovered:build-dashboard",
-            role: "primary_builder",
-            reason: "Dashboard builder owns the executable artifact.",
-          }],
+          selectedSkillRoles: [
+            {
+              skillId: "discovered:build-dashboard",
+              role: "primary_builder",
+              reason: "Dashboard builder owns the executable artifact.",
+            },
+            {
+              skillId: "discovered:web-artifacts-builder",
+              role: "support",
+              reason: "Theme and presentation conventions are executed in the same artifact leaf.",
+            },
+          ],
           steps: [{
             id: "produce_report",
             objective: "Read the uploaded spreadsheet and produce an accepted HTML report.",
             dependencies: [],
             role: "produce",
-            skillIds: ["discovered:build-dashboard"],
+            skillIds: ["discovered:build-dashboard", "discovered:web-artifacts-builder"],
             requiredCapabilities: ["uploaded_source_read", "workspace_artifact_write", "artifact_acceptance"],
             evidenceContract: {
               requiredKinds: ["source_summary", "artifact_path", "artifact_non_empty", "artifact_acceptance"],
@@ -1935,7 +1906,7 @@ test("ModelPlanner retries once when Admission rejects an initial support Skill 
   const htmlBuilder = skillFixture({
     id: "discovered:web-artifacts-builder",
     name: "web-artifacts-builder",
-    agentLoop: agentLoopMetadata(["primary_builder"], ["html"]),
+    agentLoop: agentLoopMetadata(["support"], ["html"]),
   });
 
   const plan = await planner.plan({
@@ -1946,9 +1917,9 @@ test("ModelPlanner retries once when Admission rejects an initial support Skill 
     availableToolNames: ["read_source", "load_skill", "computer_write_file", "verify_artifact_acceptance"],
   });
 
-  assert.equal(calls, 2);
-  assert.deepEqual(plan.selectedSkillIds, ["discovered:build-dashboard"]);
-  assert.deepEqual(plan.steps[0].skillIds, ["discovered:build-dashboard"]);
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.selectedSkillIds, ["discovered:build-dashboard", "discovered:web-artifacts-builder"]);
+  assert.deepEqual(plan.steps[0].skillIds, ["discovered:build-dashboard", "discovered:web-artifacts-builder"]);
 });
 
 test("ModelPlanner treats bound uploaded sources as source-grounded artifact input", async () => {

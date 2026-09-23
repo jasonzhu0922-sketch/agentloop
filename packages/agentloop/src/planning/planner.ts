@@ -697,7 +697,7 @@ function plannerOutcomePlanAdmissionDirective(
     "Do not execute work, call execution tools, load Skills, or declare completion during planning.",
     "Treat operation profiles, execution capabilities, evidence kinds, Skills, Tools, and ToolSources as separate namespaces. requiredCapabilities may contain only IDs from the execution capability catalog.",
     `Authorized execution capability IDs: ${JSON.stringify([...new Set(allowedCapabilityIds)].sort())}.`,
-    "For initial execution plans, selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only.",
+    "A Skill's role describes its responsibility, not whether it may be selected initially. Every selected Skill, including support or qa, must be bound to and executed by a concrete leaf.",
     "selectedSkillRoles[].skillId and leaves[].skillIds may contain only IDs in planning_context.availableSkillIds. Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds in either Skill field; use leaves[].requiredCapabilities for capabilities. If availableSkillIds is empty, both Skill fields must be empty arrays.",
     "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
@@ -1016,7 +1016,7 @@ function planningRuntimeContext(
             "do not submit plan patches",
             "do not create QA or repair leaves unless TaskProfile.planShape is recovery_patch",
             "candidateSkillRoles are suggestions only; do not copy them into selectedSkillRoles unless a concrete leaf binds and executes that Skill",
-            "initial selectedSkillRoles may use only primary_builder or source_provider; support and qa roles are recovery-only",
+            "initial selectedSkillRoles may use any declared role when the Skill is bound to and executed by a concrete leaf",
             "every initially selected Skill, regardless of role, must be bound to a concrete leaf that uses it",
           ],
         },
@@ -1372,16 +1372,6 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
     throw new AppError(
       "PLANNING_ERROR",
       "Initial OutcomePlan cannot contain repair leaves unless TaskProfile.planShape is recovery_patch",
-      422,
-    );
-  }
-  const invalidRoleSkills = (proposal.selectedSkillRoles ?? []).filter((selection) =>
-    !recoveryPlan && (selection.role === "support" || selection.role === "qa")
-  );
-  if (invalidRoleSkills.length > 0) {
-    throw new AppError(
-      "PLANNING_ERROR",
-      `Initial OutcomePlan cannot expose support/qa Skill roles (${invalidRoleSkills.map((selection) => selection.skillId).join(", ")})`,
       422,
     );
   }
