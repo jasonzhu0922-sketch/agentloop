@@ -44,6 +44,34 @@ test("escapes extracted content and uses the shared renderer for Markdown previe
   assert.doesNotMatch(markdown, /####|<p>---<\/p>/);
 });
 
+test("renders DOCX/v2 blocks with page geometry, run styles, lists, and tables", () => {
+  const markup = renderStructuredPreview({
+    kind: "docx",
+    name: "report.docx",
+    paragraphs: [],
+    truncated: false,
+    schema: "agentloop.docxPreview/v2",
+    page: { widthTwips: 12240, heightTwips: 15840, marginsTwips: { top: 1440, right: 1440, bottom: 1440, left: 1440 } },
+    blocks: [
+      { type: "paragraph", style: "Heading1", alignment: "center", runs: [{ text: "季度报告", bold: true, fontSizeHalfPoints: 32 }] },
+      { type: "paragraph", numbering: { level: 0, ordered: false }, runs: [{ text: "关键结论", italic: true }] },
+      { type: "table", rows: [{ cells: [{ blocks: [{ type: "paragraph", runs: [{ text: "指标" }] }] }, { blocks: [{ type: "paragraph", runs: [{ text: "结果" }] }] }] }] },
+    ],
+  });
+  assert.match(markup, /preview-docx-page/);
+  assert.match(markup, /--docx-page-width:816px/);
+  assert.match(markup, /font-weight:700/);
+  assert.match(markup, /preview-docx-marker/);
+  assert.match(markup, /preview-docx-table/);
+});
+
+test("DOCX preview keeps a visible fallback when structured page data is incomplete", () => {
+  const markup = renderStructuredPreview({ kind: "docx", name: "legacy.docx", paragraphs: ["正文"], truncated: false, schema: "agentloop.docxPreview/v2", blocks: [], page: undefined });
+  assert.match(markup, /preview-docx-page/);
+  assert.match(markup, /正文/);
+  assert.match(markup, /--docx-page-width:793\.7333333333333px/);
+});
+
 test("renders complete GFM structures instead of exposing Markdown tags", () => {
   const markup = renderMarkdown([
     "#### 四级标题",

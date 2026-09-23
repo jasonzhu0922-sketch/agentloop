@@ -12,10 +12,56 @@ export type ArtifactPreviewMode = "html" | "image" | "pdf" | "structured";
 
 export type StructuredArtifactPreview =
   | { readonly kind: "text"; readonly name: string; readonly mimeType: string; readonly text: string; readonly truncated: boolean }
-  | { readonly kind: "docx"; readonly name: string; readonly paragraphs: readonly string[]; readonly truncated: boolean }
+  | { readonly kind: "docx"; readonly name: string; readonly paragraphs: readonly string[]; readonly truncated: boolean; readonly schema?: "agentloop.docxPreview/v2"; readonly page?: DocxPreviewPage; readonly blocks?: readonly DocxPreviewBlock[] }
   | { readonly kind: "xlsx"; readonly name: string; readonly sheets: readonly { readonly name: string; readonly rows: readonly (readonly string[])[]; readonly truncated: boolean }[]; readonly truncated?: boolean }
   | { readonly kind: "pptx"; readonly name: string; readonly slideCount: number; readonly width: number; readonly height: number; readonly slides: readonly PptxPreviewSlide[]; readonly truncated: boolean }
   | { readonly kind: "binary"; readonly name: string; readonly mimeType: string };
+
+export interface DocxPreviewPage {
+  readonly widthTwips: number;
+  readonly heightTwips: number;
+  readonly marginsTwips: { readonly top: number; readonly right: number; readonly bottom: number; readonly left: number };
+}
+
+export type DocxPreviewBlock = DocxPreviewParagraph | DocxPreviewTable | DocxPreviewImage;
+
+export interface DocxPreviewParagraph {
+  readonly type: "paragraph";
+  readonly style?: string;
+  readonly alignment?: "left" | "center" | "right" | "justify";
+  readonly indentLeftTwips?: number;
+  readonly indentRightTwips?: number;
+  readonly firstLineTwips?: number;
+  readonly spaceBeforeTwips?: number;
+  readonly spaceAfterTwips?: number;
+  readonly lineTwips?: number;
+  readonly numbering?: { readonly level: number; readonly ordered: boolean };
+  readonly runs: readonly DocxPreviewRun[];
+}
+
+export interface DocxPreviewRun {
+  readonly text: string;
+  readonly bold?: boolean;
+  readonly italic?: boolean;
+  readonly underline?: boolean;
+  readonly strike?: boolean;
+  readonly color?: string;
+  readonly fontSizeHalfPoints?: number;
+  readonly fontFamily?: string;
+}
+
+export interface DocxPreviewTable {
+  readonly type: "table";
+  readonly rows: readonly { readonly cells: readonly { readonly blocks: readonly DocxPreviewBlock[] }[] }[];
+}
+
+export interface DocxPreviewImage {
+  readonly type: "image";
+  readonly src: string;
+  readonly alt?: string;
+  readonly widthEmu?: number;
+  readonly heightEmu?: number;
+}
 
 export interface PptxPreviewSlide {
   readonly index: number;
@@ -230,6 +276,7 @@ export function renderStructuredPreview(preview: StructuredArtifactPreview, mark
     return `<div class="preview-text md">${content}${truncatedNotice(preview.truncated)}</div>`;
   }
   if (preview.kind === "docx") {
+    if (preview.schema === "agentloop.docxPreview/v2" || preview.blocks?.length) return renderDocxPreview(preview);
     const paragraphs = preview.paragraphs.length > 0
       ? preview.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")
       : '<p class="muted">该 DOCX 没有可抽取的正文段落。</p>';
@@ -243,6 +290,71 @@ export function renderStructuredPreview(preview: StructuredArtifactPreview, mark
   }
   if (preview.kind === "pptx") return renderPptxPreview(preview);
   return '<div class="preview-empty">该文件类型暂不能内嵌展示，请下载查看完整文件。</div>';
+}
+
+export function renderDocxPreview(preview: Extract<StructuredArtifactPreview, { kind: "docx" }>): string {
+  const page = normalizeDocxPage(preview.page);
+  const blocks = preview.blocks?.length ? preview.blocks : preview.paragraphs.map((text) => ({ type: "paragraph" as const, runs: [{ text }] }));
+  const body = blocks.map(renderDocxBlock).join("") || '<p class="muted">该 DOCX 没有可抽取的正文内容。</p>';
+  return `<div class="preview-docx-pages" style="--docx-page-width:${twipsToCss(page.widthTwips)};--docx-page-height:${twipsToCss(page.heightTwips)};--docx-page-top:${twipsToCss(page.marginsTwips.top)};--docx-page-right:${twipsToCss(page.marginsTwips.right)};--docx-page-bottom:${twipsToCss(page.marginsTwips.bottom)};--docx-page-left:${twipsToCss(page.marginsTwips.left)}"><article class="preview-docx-page">${body}</article>${truncatedNotice(preview.truncated)}</div>`;
+}
+
+function normalizeDocxPage(page: DocxPreviewPage | undefined): DocxPreviewPage {
+  const finitePositive = (value: unknown, fallback: number): number => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+  const margins = page?.marginsTwips;
+  return {
+    widthTwips: finitePositive(page?.widthTwips, 11906),
+    heightTwips: finitePositive(page?.heightTwips, 16838),
+    marginsTwips: {
+      top: finitePositive(margins?.top, 1440),
+      right: finitePositive(margins?.right, 1440),
+      bottom: finitePositive(margins?.bottom, 1440),
+      left: finitePositive(margins?.left, 1440),
+    },
+  };
+}
+
+function renderDocxBlock(block: DocxPreviewBlock): string {
+  if (block.type === "table") {
+    return `<table class="preview-docx-table"><tbody>${block.rows.map((row) => `<tr>${row.cells.map((cell) => `<td>${cell.blocks.map(renderDocxBlock).join("")}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  }
+  if (block.type === "image") {
+    const dimensions = `${block.widthEmu ? ` width="${Math.max(1, Math.round(block.widthEmu / 9525))}"` : ""}${block.heightEmu ? ` height="${Math.max(1, Math.round(block.heightEmu / 9525))}"` : ""}`;
+    return `<img class="preview-docx-image" src="${escapeHtml(block.src)}" alt="${escapeHtml(block.alt ?? "")}"${dimensions} loading="lazy" />`;
+  }
+  const style = [
+    block.alignment ? `text-align:${block.alignment}` : "",
+    block.indentLeftTwips ? `margin-left:${twipsToCss(block.indentLeftTwips)}` : "",
+    block.indentRightTwips ? `margin-right:${twipsToCss(block.indentRightTwips)}` : "",
+    block.firstLineTwips ? `text-indent:${twipsToCss(block.firstLineTwips)}` : "",
+    block.spaceBeforeTwips ? `margin-top:${twipsToCss(block.spaceBeforeTwips)}` : "",
+    block.spaceAfterTwips === undefined ? "" : `margin-bottom:${twipsToCss(block.spaceAfterTwips)}`,
+    block.lineTwips ? `line-height:${Math.max(1, block.lineTwips / 240)}` : "",
+  ].filter(Boolean).join(";");
+  const marker = block.numbering ? `<span class="preview-docx-marker">${block.numbering.ordered ? "1." : "•"}</span>` : "";
+  const className = block.style ? ` class="preview-docx-paragraph style-${escapeHtml(block.style)}"` : ' class="preview-docx-paragraph"';
+  return `<p${className}${style ? ` style="${style}"` : ""}>${marker}${block.runs.map(renderDocxRun).join("")}</p>`;
+}
+
+function renderDocxRun(run: DocxPreviewRun): string {
+  const style = [
+    run.bold ? "font-weight:700" : "",
+    run.italic ? "font-style:italic" : "",
+    run.underline ? "text-decoration:underline" : "",
+    run.strike ? "text-decoration:line-through" : "",
+    run.color ? `color:#${run.color.replace(/^#/, "")}` : "",
+    run.fontSizeHalfPoints ? `font-size:${run.fontSizeHalfPoints / 2}pt` : "",
+    run.fontFamily ? `font-family:${escapeCssFontFamily(run.fontFamily)}` : "",
+  ].filter(Boolean).join(";");
+  return `<span${style ? ` style="${style}"` : ""}>${escapeHtml(run.text).replace(/\n/g, "<br />")}</span>`;
+}
+
+function twipsToCss(value: number): string {
+  return `${Math.max(0, value) / 15}px`;
+}
+
+function escapeCssFontFamily(value: string): string {
+  return `'${value.replace(/['\\]/g, "")}'`;
 }
 
 const EMU_PER_POINT = 12_700;

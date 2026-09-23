@@ -20,11 +20,50 @@ A `.docx` is a ZIP archive of XML files. Choose your approach by task:
 
 | Task | Approach |
 |---|---|
-| **Create** a new document | Write a `docx` (npm) script — see gotchas below |
+| **Create** a new document | Prefer the bundled `scripts/build_report.cjs` with a `agentloop.docxReportSpec/v1` JSON spec |
 | **Edit** an existing document | `unzip` → edit `word/document.xml` → `zip` (docx-js cannot open existing files) |
 | **Read** content | `pandoc -t markdown file.docx` |
 
 > Script paths below are relative to this skill's directory.
+
+## Bounded report generation
+
+For ordinary reports, do not write a bespoke multi-hundred-line `docx` script in
+the task workspace. Write a small JSON spec containing the report content and
+call the bundled builder:
+
+```bash
+node scripts/build_report.cjs /absolute/path/report-spec.json /absolute/path/report.docx
+```
+
+The builder owns DOCX layout invariants: DXA table widths, equal-width
+fallbacks, heading/list construction, bounded row/column counts, and structural
+input validation. The model/Skill owns the report's facts, wording, and table
+semantics. Use a custom script only for document features not expressible by
+the spec, and validate that script before spending additional repair turns.
+
+Minimal spec shape:
+
+```json
+{
+  "schema": "agentloop.docxReportSpec/v1",
+  "title": "Report title",
+  "outputPath": "/absolute/path/report.docx",
+  "sections": [{
+    "heading": "Summary",
+    "paragraphs": ["..."],
+    "tables": [{
+      "columns": [{"header": "Metric", "width": 0.4}, {"header": "Value", "width": 0.6}],
+      "rows": [["Count", "60"]]
+    }]
+  }]
+}
+```
+
+Widths may be fractions summing to `1`, percentages summing to `100`, or DXA
+integers summing to the builder's table width. They are normalized to DXA before
+calling `docx` so a model cannot accidentally emit the known PERCENTAGE table
+failure.
 
 ## Creating with docx-js — gotchas
 
