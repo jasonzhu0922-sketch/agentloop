@@ -1,6 +1,7 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
+import type { StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 
@@ -112,6 +113,11 @@ export interface TaskSpec {
    * independently reinterpreting an elliptical follow-up.
    */
   readonly turnResolution?: ConversationTurnResolution;
+  /**
+   * Canonical Runtime-owned interpretation shared by Skill recall, Planner,
+   * and Admission. Planning without it is an invalid Runtime invocation.
+   */
+  readonly taskUnderstanding: StructuredTaskUnderstanding;
   readonly availableSkills: readonly PrivateSkill[];
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   /**
@@ -590,6 +596,7 @@ export interface StepAssessmentInput {
   readonly holisticSourceContractMismatch?: boolean;
   readonly attempt: number;
   readonly decisionLedger?: readonly import("../runtime/decision-ledger.ts").RuntimeDecisionCommit[];
+  readonly workflowEvidenceActions?: readonly import("../runtime/tool-progress-policy.ts").RuntimeWorkflowEvidenceAction[];
 }
 
 export interface StepAssessor {

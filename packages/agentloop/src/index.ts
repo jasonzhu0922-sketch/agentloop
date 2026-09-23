@@ -104,6 +104,11 @@ export type {
   ProcessArtifact,
   ProcessArtifactPreview,
   ProcessArtifactRole,
+  DocxPreviewBlock,
+  DocxPreviewImage,
+  DocxPreviewParagraph,
+  DocxPreviewRun,
+  DocxPreviewTable,
   PptxPreviewElement,
   PptxPreviewTextRun,
 } from "./runtime/process-artifacts.ts";

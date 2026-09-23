@@ -22,7 +22,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
     description: [
       "Read exact values from a committed Tool result, an assessed dependency Step result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
-      "For JSON results, use a JSON Pointer and optional array offset/limit. Omit pointer for a bounded serialized character window.",
+      "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window.",
     ].join(" "),
     inputSchema: {
       type: "object",
@@ -39,6 +39,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
     },
     executionMode: "parallel",
     replaySafe: true,
+    publishesRuntimeResult: false,
     parse(input: unknown): ReadResultInput {
       if (input === null || typeof input !== "object" || Array.isArray(input)) throw badRequest("arguments must be an object");
       const value = input as Record<string, unknown>;
@@ -93,9 +94,20 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       }
       if (record.payload.contentFormat !== "json") throw badRequest("pointer requires a JSON Runtime result");
       const document = JSON.parse(record.payload.content) as unknown;
-      const selected = resolveJsonPointer(document, input.pointer);
-      const array = Array.isArray(selected);
-      const value = array ? selected.slice(input.offset, input.offset + input.limit) : selected;
+      let selected: unknown;
+      try {
+        selected = resolveJsonPointer(document, input.pointer);
+      } catch (error) {
+        if (error instanceof Error && /pointer does not exist/u.test(error.message)) {
+          throw jsonResultPointerDiagnostic(document, input.pointer);
+        }
+        throw error;
+      }
+      const selectedArray = Array.isArray(selected) ? selected : undefined;
+      const array = selectedArray !== undefined;
+      const value = selectedArray === undefined
+        ? selected
+        : selectedArray.slice(input.offset, input.offset + input.limit);
       const serialized = JSON.stringify(value);
       if (serialized.length > MAX_RESULT_WINDOW_CHARACTERS) {
         throw badRequest(`Selected Runtime result exceeds ${MAX_RESULT_WINDOW_CHARACTERS} characters; use a narrower pointer or array window`);
@@ -109,8 +121,8 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
           offset: input.offset,
           limit: input.limit,
           returnedItems: (value as unknown[]).length,
-          totalItems: selected.length,
-          nextOffset: input.offset + (value as unknown[]).length < selected.length
+          totalItems: selectedArray.length,
+          nextOffset: input.offset + (value as unknown[]).length < selectedArray.length
             ? input.offset + (value as unknown[]).length
             : null,
         } : {}),
@@ -139,6 +151,41 @@ function resolveJsonPointer(document: unknown, pointer: string): unknown {
     current = (current as Record<string, unknown>)[token];
   }
   return current;
+}
+
+/**
+ * A computer_read_json result has two pointer namespaces: the source pointer
+ * addresses the original JSON file, while read_result must address the
+ * persisted result envelope. Keep that distinction explicit instead of
+ * silently translating arbitrary pointers.
+ */
+function jsonResultPointerDiagnostic(document: unknown, pointer: string) {
+  if (!isRecord(document) || document.schema !== "agentloop.jsonRead/v1" || !Array.isArray(document.queries)) {
+    return badRequest(`pointer does not exist: ${pointer}`);
+  }
+  const queries = document.queries.filter(isRecord);
+  const pairs = queries.slice(0, 8).map((query, index) => {
+    const sourcePointer = typeof query.pointer === "string" ? query.pointer : "?";
+    return `${sourcePointer} -> /queries/${index}/value`;
+  });
+  const matchingIndex = queries.findIndex((query) => query.pointer === pointer);
+  if (matchingIndex >= 0) {
+    return badRequest(
+      `pointer does not exist in the Runtime result envelope: ${pointer}; this is a sourcePointer. Use resultPointer /queries/${matchingIndex}/value with read_result, or call computer_read_json with the sourcePointer directly`,
+      { namespace: "runtime_result_envelope", sourcePointer: pointer, resultPointer: `/queries/${matchingIndex}/value` },
+    );
+  }
+  const singleQueryHint = queries.length === 1 && (pointer === "/value" || pointer === "/result")
+    ? " For this single query, the exact value is at /queries/0/value."
+    : "";
+  return badRequest(
+    `pointer does not exist in the Runtime result envelope: ${pointer}; read_result uses /queries/<index>/value, not the source JSON pointer.${singleQueryHint} Available sourcePointer -> resultPointer pairs: ${pairs.join("; ") || "none"}`,
+    { namespace: "runtime_result_envelope", availablePointers: pairs },
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function requireString(value: unknown, name: string): string {

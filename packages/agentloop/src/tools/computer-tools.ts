@@ -234,7 +234,7 @@ export function createComputerTools(
       description: [
         "Read structured data from a JSON file under the configured workspace root or an authorized read-only @skills/<skill-name> root.",
         "Use this for durable JSON artifacts such as .agentloop/table-extractions/*.json before falling back to computer_search_text or line-window computer_read_file.",
-        "queries are JSON Pointer selectors; omit queries to get a compact profile. For array targets, offset is 0-indexed and limit returns a bounded window.",
+        "queries are source JSON Pointer selectors; omit queries to get a compact profile. Each returned query also includes a resultPointer rooted in this persisted result envelope for follow-up read_result calls. For array targets, offset is 0-indexed and limit returns a bounded window.",
         "The result includes schema, path, sha256, root profile, selected values, source pointers, counts, and caveats without interpreting business semantics.",
       ].join(" "),
       inputSchema: objectSchema(["path"], {
@@ -282,7 +282,7 @@ export function createComputerTools(
         }
         const queries = input.queries ?? [];
         const caveats: string[] = [];
-        const results = queries.map((query) => readJsonPointer(document, query, caveats));
+        const results = queries.map((query, index) => readJsonPointer(document, query, caveats, index));
         return {
           schema: "agentloop.jsonRead/v1",
           path: file.resolvedPath ?? input.path,
@@ -678,7 +678,7 @@ export function createComputerTools(
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
-        "For a reusable derived aggregation from workspace data, provide computationInputs with source paths only. Runtime captures the live hashes; callers must not pass or reproduce hashes. On success, stdout must be one agentloop.commandComputation/v1 JSON document with matching input paths and a non-empty facts object; Runtime then binds a generic command-computation receipt. Do not self-issue an evidenceReceipt for this purpose.",
+        "For a declared Skill workflow action with an immutable evidence input, pass that exact workspace input path in computationInputs. Runtime captures the live hash and binds the package action identity to its stdout receipt; do not self-issue a Runtime receipt. For an unbound reusable derived aggregation, stdout must instead be one agentloop.commandComputation/v1 JSON document with matching input paths and a non-empty facts object.",
         `timeoutMs is optional, defaults to ${DEFAULT_COMMAND_TIMEOUT_MS}, and must be between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS}.`,
       ].join(" "),
       inputSchema: objectSchema(["command", "args"], {
@@ -702,7 +702,7 @@ export function createComputerTools(
       executionMode: "exclusive",
       replaySafe: false,
       preflight: async (context, value) => executorForContext(executor, context).preflightRunCommand(
-        value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> },
+        withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
       ),
       parse: (value) => {
         const record = requireRecord(value, "computer_run_command arguments");
@@ -719,7 +719,7 @@ export function createComputerTools(
         };
       },
       execute: async (context, value) => executorForContext(executor, context).runCommand({
-        ...(value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
+        ...withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
         signal: context.signal,
       }),
     },
@@ -777,6 +777,39 @@ function commandComputationInputs(value: unknown): Array<{ path: string }> {
     seen.add(path);
     return { path };
   });
+}
+
+/**
+ * Runtime, never the caller, decides whether this invocation is the exact
+ * declared package action allowed to publish workflow evidence.
+ */
+function withWorkflowEvidenceBinding(
+  context: ToolExecutionContext,
+  value: { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> },
+): typeof value & { workflowEvidenceBinding?: { skillId: string; skillName: string; executorId: string; actionId: string; producesEvidenceKinds: readonly string[] } } {
+  const binding = (context.grant.workflowEvidenceBindings ?? []).find((candidate) => {
+    if (candidate.command !== value.command || candidate.cwd !== value.cwd) return false;
+    if (value.args.length !== candidate.argumentTemplates.length) return false;
+    if (!candidate.argumentTemplates.every((template, index) => {
+      if (!/^\{\{[^}]+\}\}$/u.test(template)) return value.args[index] === template;
+      return index === 0 || candidate.evidenceInputArgumentIndexes.includes(index);
+    })) return false;
+    const boundInputPaths = candidate.evidenceInputArgumentIndexes.map((index) => value.args[index]!);
+    return boundInputPaths.length > 0
+      && value.computationInputs !== undefined
+      && boundInputPaths.length === value.computationInputs.length
+      && boundInputPaths.every((path, index) => path === value.computationInputs![index]!.path);
+  });
+  return binding === undefined ? value : {
+    ...value,
+    workflowEvidenceBinding: {
+      skillId: binding.skillId,
+      skillName: binding.skillName,
+      executorId: binding.executorId,
+      actionId: binding.actionId,
+      producesEvidenceKinds: binding.producesEvidenceKinds,
+    },
+  };
 }
 
 function optionalPositiveInteger(value: unknown, field: string): number | undefined {
@@ -838,7 +871,11 @@ function parseJsonReadQueries(value: unknown): JsonReadQuery[] | undefined {
   });
 }
 
-function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: string[]): {
+function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: string[], queryIndex: number): {
+  /** Pointer into the persisted agentloop.jsonRead/v1 result envelope. */
+  readonly resultPointer: string;
+  /** Pointer into the source JSON document read from `path`. */
+  readonly sourcePointer: string;
   readonly pointer: string;
   readonly found: boolean;
   readonly summary?: JsonValueSummary;
@@ -850,7 +887,13 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
   readonly sourceRange?: string;
 } {
   const selected = selectJsonPointer(document, query.pointer);
-  if (!selected.found) return { pointer: query.pointer, found: false };
+  const resultPointer = `/queries/${queryIndex}/value`;
+  if (!selected.found) return {
+    pointer: query.pointer,
+    sourcePointer: query.pointer,
+    resultPointer,
+    found: false,
+  };
   const value = selected.value;
   if (Array.isArray(value)) {
     const offset = query.offset ?? 0;
@@ -861,6 +904,8 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
     }
     return {
       pointer: query.pointer,
+      sourcePointer: query.pointer,
+      resultPointer,
       found: true,
       summary: summarizeJsonValue(value),
       value: window,
@@ -873,6 +918,8 @@ function readJsonPointer(document: unknown, query: JsonReadQuery, caveats: strin
   }
   return {
     pointer: query.pointer,
+    sourcePointer: query.pointer,
+    resultPointer,
     found: true,
     summary: summarizeJsonValue(value),
     value: boundJsonValue(value, caveats, query.pointer || "/"),

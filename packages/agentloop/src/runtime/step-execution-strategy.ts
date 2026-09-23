@@ -93,6 +93,7 @@ export interface LoopStepFrame {
 
 export interface CompactLoopEvidenceState {
   readonly nextAction: RuntimeStepEvidenceState["nextAction"];
+  readonly requiredWorkflowAction?: RuntimeStepEvidenceState["requiredWorkflowAction"];
   readonly missingRequiredEvidenceKinds: readonly string[];
   readonly pendingCandidateEvidenceKinds: readonly string[];
   readonly missingToolEvidenceKinds: readonly string[];
@@ -586,6 +587,7 @@ const EVIDENCE_PRODUCING_TOOL_NAMES = new Set([
 function compactLoopEvidenceState(state: RuntimeStepEvidenceState): CompactLoopEvidenceState {
   return {
     nextAction: state.nextAction,
+    ...(state.requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction: state.requiredWorkflowAction }),
     missingRequiredEvidenceKinds: state.missingRequiredEvidenceKinds,
     pendingCandidateEvidenceKinds: state.pendingCandidateEvidenceKinds,
     missingToolEvidenceKinds: state.missingToolEvidenceKinds,

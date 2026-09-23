@@ -99,9 +99,12 @@ function formatExecutionEntrypoints(entrypoints: readonly SkillExecutionEntrypoi
       ...entrypoint.actions.flatMap((action) => [
         `    <action id="${escapeXml(action.id)}">`,
         `      <description>${escapeXml(action.description)}</description>`,
-        ...action.inputs.map((input) => `      <input name="${escapeXml(input.name)}" required="${input.required}">${escapeXml(input.description)}</input>`),
+        ...action.inputs.map((input) => `      <input name="${escapeXml(input.name)}" required="${input.required}"${input.evidenceInput === undefined ? "" : ` evidence_input="${input.evidenceInput}"`}>${escapeXml(input.description)}</input>`),
         `      <args>${escapeXml(action.args.join(" "))}</args>`,
         `      <result>${escapeXml(action.result)}</result>`,
+        ...(action.producesEvidenceKinds.length === 0
+          ? []
+          : [`      <produces_evidence_kinds>${escapeXml(action.producesEvidenceKinds.join(","))}</produces_evidence_kinds>`]),
         "    </action>",
       ]),
       "  </executor>",

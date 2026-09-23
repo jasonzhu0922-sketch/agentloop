@@ -10,6 +10,10 @@ export interface RuntimeToolProgressPolicy {
   readonly schema: "agentloop.runtimeToolProgressPolicy/v1";
   readonly requiredEvidenceKinds: readonly string[];
   readonly expectedArtifactKind?: string;
+  /** A requested file must be authored after any declared Skill workflow fact it consumes. */
+  readonly artifactDeliveryRequired?: boolean;
+  /** Package-owned action declarations whose outputs are prerequisite evidence for this leaf. */
+  readonly workflowEvidenceActions: readonly RuntimeWorkflowEvidenceAction[];
   readonly autoCompleteFromEvidence?: boolean;
   readonly maxExploratoryPrimarySteps: number;
   readonly maxExploratoryGraceSteps: number;
@@ -18,6 +22,16 @@ export interface RuntimeToolProgressPolicy {
   readonly evidenceProducingToolNames: readonly string[];
   readonly repairDirective: string;
   readonly diagnosticRepairDirective: string;
+}
+
+export interface RuntimeWorkflowEvidenceAction {
+  readonly skillName: string;
+  readonly executorId: string;
+  readonly actionId: string;
+  readonly command: string;
+  readonly script: string;
+  readonly args: readonly string[];
+  readonly producesEvidenceKinds: readonly string[];
 }
 
 export interface RuntimeToolProgressState {
@@ -117,6 +131,7 @@ export interface RuntimeStepEvidenceState {
   readonly recentActionableDiagnostic: boolean;
   readonly recentPatchPreconditionFailure: boolean;
   readonly nextAction: RuntimeStepNextAction;
+  readonly requiredWorkflowAction?: RuntimeWorkflowEvidenceAction;
   readonly evidenceProducingToolNames: readonly string[];
   readonly exploratoryToolNames: readonly string[];
   readonly instruction: string;
@@ -205,6 +220,7 @@ export function deriveRuntimeStepEvidenceState(input: {
     policy,
   });
   const evidenceProducingToolNames = evidenceProducingToolsForAction(nextAction, policy);
+  const requiredWorkflowAction = pendingWorkflowEvidenceAction(policy, new Set(missingRequiredEvidenceKinds));
   return {
     schema: "agentloop.runtimeStepEvidenceState/v1",
     requiredEvidenceKinds: policy.requiredEvidenceKinds,
@@ -220,6 +236,7 @@ export function deriveRuntimeStepEvidenceState(input: {
     recentActionableDiagnostic,
     recentPatchPreconditionFailure,
     nextAction,
+    ...(requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction }),
     evidenceProducingToolNames,
     exploratoryToolNames: recentPatchPreconditionFailure
       ? policy.exploratoryToolNames.filter((name) => PATCH_REBASE_READ_TOOL_NAMES.has(name))
@@ -230,6 +247,7 @@ export function deriveRuntimeStepEvidenceState(input: {
       recentActionableDiagnostic,
       recentPatchPreconditionFailure,
       evidenceProducingToolNames,
+      ...(requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction }),
     }),
   };
 }
@@ -248,6 +266,8 @@ export function runtimeStepToolProgressPolicy(
   requiredEvidenceKinds: readonly string[],
   options: {
     readonly expectedArtifactKind?: string;
+    readonly artifactDeliveryRequired?: boolean;
+    readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
     readonly scope?: "artifact" | "source" | "generic";
     readonly additionalExploratoryToolNames?: readonly string[];
     readonly additionalEvidenceProducingToolNames?: readonly string[];
@@ -265,6 +285,8 @@ export function runtimeStepToolProgressPolicy(
     // correctly.
     requiredEvidenceKinds: observableRequiredEvidenceKinds,
     ...(options.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: options.expectedArtifactKind }),
+    ...(options.artifactDeliveryRequired === true ? { artifactDeliveryRequired: true } : {}),
+    workflowEvidenceActions: Object.freeze([...(options.workflowEvidenceActions ?? [])]),
     autoCompleteFromEvidence: observableRequiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
     maxExploratoryPrimarySteps: scope === "source" ? 8 : 3,
     maxExploratoryGraceSteps: scope === "source" ? 3 : 2,
@@ -393,12 +415,23 @@ function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
   const failed = new Set<string>();
   for (const item of evidence) {
     for (const parsed of runtimeEvidenceRecordsFromToolResult(item.result)) {
+      if (!trustedWorkflowEvidenceRecord(item, parsed)) continue;
       collectEvidenceKindsFromRecord(parsed, { satisfied, caveated, failed });
       collectEvidenceKindsFromRecord(asRecord(parsed.artifactReceipt), { satisfied, caveated, failed });
-      collectEvidenceKindsFromRecord(asRecord(parsed.evidenceReceipt), { satisfied, caveated, failed });
+      const workflow = asRecord(parsed.workflowEvidenceReceipt);
+      if (workflow === undefined || trustedWorkflowEvidenceRecord(item, workflow)) {
+        collectEvidenceKindsFromRecord(asRecord(parsed.evidenceReceipt), { satisfied, caveated, failed });
+        collectEvidenceKindsFromRecord(workflow, { satisfied, caveated, failed });
+      }
     }
   }
   return { satisfied, caveated, failed };
+}
+
+function trustedWorkflowEvidenceRecord(item: AgentLoopToolEvidence, record: Record<string, unknown>): boolean {
+  const workflow = record.schema === "agentloop.skillWorkflowEvidenceReceipt/v1"
+    || asRecord(record.workflowEvidenceReceipt)?.schema === "agentloop.skillWorkflowEvidenceReceipt/v1";
+  return !workflow || item.toolName === "computer_run_command";
 }
 
 function collectPolicyEvidenceKinds(
@@ -410,6 +443,23 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
+  // A package-declared workflow kind is not a generic string claim. Once a
+  // leaf declares its producer, accept that kind only from Runtime's bound
+  // action receipt; an arbitrary Skill-root command may still expose ordinary
+  // content/evidence but cannot impersonate the declared workflow.
+  const declaredWorkflowKinds = new Set(policy.workflowEvidenceActions.flatMap((action) => action.producesEvidenceKinds));
+  for (const kind of declaredWorkflowKinds) {
+    evidenceKinds.satisfied.delete(kind);
+    evidenceKinds.caveated.delete(kind);
+    evidenceKinds.failed.delete(kind);
+  }
+  for (const item of evidence) {
+    for (const kind of declaredWorkflowKinds) {
+      if (toolEvidenceSatisfiesDeclaredWorkflowAction(item, policy.workflowEvidenceActions, new Set([kind]))) {
+        evidenceKinds.satisfied.add(kind);
+      }
+    }
+  }
   const workProduct = classifyWorkProduct(evidence, policy, evidenceKinds);
   if (workProduct.status === "process_artifact_available") {
     for (const kind of NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS) {
@@ -505,13 +555,24 @@ function classifyWorkProduct(
       .filter((artifact) => WORK_PRODUCT_TOOL_NAMES.has(artifact.sourceTool))
     : [];
   const acceptanceRequired = policy.requiredEvidenceKinds.includes("artifact_acceptance");
-  const deliverableArtifacts = acceptanceRequired
+  const prerequisiteArtifactOrderSatisfied = artifactPrerequisiteOrderSatisfied(evidence, policy);
+  const acceptanceEligibleArtifacts = acceptanceRequired
     ? artifacts.filter((artifact) => isAcceptanceDeliverableArtifact(artifact, policy))
     : artifacts;
-  const processArtifacts = acceptanceRequired
-    ? artifacts.filter((artifact) => !isAcceptanceDeliverableArtifact(artifact, policy))
+  // A report written before a required Skill workflow fact is a process
+  // artifact.  File-format validation can still inspect it, but cannot turn
+  // it into delivery proof after the fact: author a new report from the
+  // completed workflow result and validate that revision instead.
+  const deliverableArtifacts = prerequisiteArtifactOrderSatisfied
+    ? acceptanceEligibleArtifacts
     : [];
-  const acceptanceSatisfied = acceptanceRequired
+  const processArtifacts = prerequisiteArtifactOrderSatisfied
+    ? acceptanceRequired
+      ? artifacts.filter((artifact) => !isAcceptanceDeliverableArtifact(artifact, policy))
+      : []
+    : artifacts;
+  const acceptanceSatisfied = prerequisiteArtifactOrderSatisfied
+    && acceptanceRequired
     && evidenceKinds.satisfied.has("artifact_acceptance")
     && !evidenceKinds.failed.has("artifact_acceptance");
   const status: RuntimeStepWorkProductStatus = deliverableArtifacts.length > 0 && acceptanceSatisfied
@@ -529,6 +590,47 @@ function classifyWorkProduct(
     deliverableArtifacts,
     processArtifacts,
   };
+}
+
+function artifactPrerequisiteOrderSatisfied(
+  evidence: readonly AgentLoopToolEvidence[],
+  policy: RuntimeToolProgressPolicy,
+): boolean {
+  if (policy.artifactDeliveryRequired !== true || policy.workflowEvidenceActions.length === 0) return true;
+  const requiredKinds = new Set(policy.requiredEvidenceKinds);
+  const prerequisiteKinds = new Set(policy.workflowEvidenceActions
+    .flatMap((action) => action.producesEvidenceKinds)
+    .filter((kind) => requiredKinds.has(kind)));
+  if (prerequisiteKinds.size === 0) return true;
+  const lastPrerequisiteIndex = evidence.reduce((last, item, index) =>
+    item.isError || !toolEvidenceSatisfiesDeclaredWorkflowAction(item, policy.workflowEvidenceActions, prerequisiteKinds) ? last : index,
+  -1);
+  if (lastPrerequisiteIndex < 0) return false;
+  return evidence.slice(lastPrerequisiteIndex + 1).some((item) =>
+    !item.isError
+    && WORK_PRODUCT_TOOL_NAMES.has(item.toolName)
+    && artifactRefFromEvidence(item) !== undefined
+    && item.toolName !== "verify_artifact_acceptance"
+  );
+}
+
+function toolEvidenceSatisfiesDeclaredWorkflowAction(
+  evidence: AgentLoopToolEvidence,
+  actions: readonly RuntimeWorkflowEvidenceAction[],
+  kinds: ReadonlySet<string>,
+): boolean {
+  if (evidence.toolName !== "computer_run_command") return false;
+  return runtimeEvidenceRecordsFromToolResult(evidence.result).some((record) => {
+    if (record.schema !== "agentloop.skillWorkflowEvidenceReceipt/v1") return false;
+    const skill = asRecord(record.skill);
+    const receiptKinds = runtimeEvidenceKindArrays(record).satisfied;
+    return actions.some((action) =>
+      skill?.skillName === action.skillName
+      && skill.executorId === action.executorId
+      && skill.actionId === action.actionId
+      && action.producesEvidenceKinds.some((kind) => kinds.has(kind) && receiptKinds.includes(kind))
+    );
+  });
 }
 
 function isAcceptanceDeliverableArtifact(
@@ -626,6 +728,8 @@ function nextActionForEvidenceGap(input: {
 }): RuntimeStepNextAction {
   const missing = new Set(input.missingRequiredEvidenceKinds);
   const satisfied = new Set(input.satisfiedEvidenceKinds);
+  const prerequisiteAction = pendingWorkflowEvidenceAction(input.policy, missing);
+  if (prerequisiteAction !== undefined) return "produce_required_evidence";
   if (input.failedEvidenceKinds.length > 0 && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
   }
@@ -717,6 +821,15 @@ function evidenceProducingToolsForAction(
   }
 }
 
+function pendingWorkflowEvidenceAction(
+  policy: RuntimeToolProgressPolicy,
+  missing: ReadonlySet<string>,
+): RuntimeWorkflowEvidenceAction | undefined {
+  return policy.workflowEvidenceActions.find((action) =>
+    action.producesEvidenceKinds.some((kind) => missing.has(kind))
+  );
+}
+
 function hasArtifactProducer(policy: RuntimeToolProgressPolicy): boolean {
   return hasAnyTool(policy, [
     "computer_patch_file",
@@ -745,6 +858,7 @@ function instructionForStepState(input: {
   readonly recentActionableDiagnostic: boolean;
   readonly recentPatchPreconditionFailure: boolean;
   readonly evidenceProducingToolNames: readonly string[];
+  readonly requiredWorkflowAction?: RuntimeWorkflowEvidenceAction;
 }): string {
   const lines = [
     "This current-step semantic state is advisory context for choosing a tool; it does not restrict otherwise authorized tools.",
@@ -752,6 +866,11 @@ function instructionForStepState(input: {
   ];
   if (input.workProduct.expectedArtifactKind !== undefined) {
     lines.push(`The requested final artifact kind is ${input.workProduct.expectedArtifactKind}.`);
+  }
+  if (input.requiredWorkflowAction !== undefined) {
+    const action = input.requiredWorkflowAction;
+    lines.push(`Run the declared Skill workflow action ${action.skillName}/${action.actionId} before authoring or accepting a deliverable that depends on ${action.producesEvidenceKinds.join(", ")}.`);
+    lines.push(`Invoke ${action.command} ${action.script} ${action.args.join(" ")} from the ${action.skillName} Skill command root, with the exact persisted upstream artifact as its declared input.`);
   }
   if (input.recentPatchPreconditionFailure) {
     lines.push("The last patch failed because its patch precondition did not match the current file.");

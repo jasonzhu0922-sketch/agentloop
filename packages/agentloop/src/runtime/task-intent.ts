@@ -41,6 +41,50 @@ export interface TaskIntentInput {
   readonly evidenceDemand?: SourceNeed;
 }
 
+export type StructuredTaskOperation =
+  | "answer"
+  | "lookup"
+  | "analysis"
+  | "create_artifact"
+  | "transform_artifact"
+  | "composite";
+
+export type StructuredTaskStage = "acquire" | "analyze" | "transform" | "produce" | "deliver";
+
+export type StructuredTaskOperationProfile =
+  | "data_analysis"
+  | "content_generation"
+  | "code_change"
+  | "web_research"
+  | "artifact_build"
+  | "direct_answer";
+
+export interface StructuredTaskUnderstanding {
+  readonly schema: "agentloop.taskUnderstanding/v1";
+  readonly normalizedObjective: string;
+  readonly operation: StructuredTaskOperation;
+  readonly subject: {
+    readonly text: string;
+    readonly terms: readonly string[];
+    readonly dates: readonly string[];
+    readonly identifiers: readonly string[];
+  };
+  readonly evidence: {
+    readonly need: SourceNeed;
+    readonly uploadedInput: boolean;
+    readonly sourceKinds: readonly string[];
+  };
+  readonly deliverable: {
+    readonly action: ArtifactAction;
+    readonly kind: ArtifactKind;
+    readonly surface: DeliverySurface;
+  };
+  readonly workflow: readonly StructuredTaskStage[];
+  readonly operationProfiles: readonly StructuredTaskOperationProfile[];
+  readonly constraints: readonly string[];
+  readonly intent: TaskIntentClassification;
+}
+
 export interface UploadedSourcePlanningContext {
   readonly schema: "agentloop.uploadedSourcePlanningContext/v1";
   readonly totalCount: number;
@@ -104,33 +148,6 @@ function sourceFormatFamily(extension: string, mimeType: string): string {
   return mimeType || "unknown";
 }
 
-/**
- * A neutral, runtime-owned view of the user turn for Skill recall.  Uploaded
- * filenames and formats are evidence about the operation's input boundary,
- * not a request to produce a file of that same format.  They are exposed only
- * for native modify/transform work, where the original bytes must be owned by
- * a compatible format Skill.
- */
-export function planningSkillRecallInput(input: TaskIntentInput & {
-  readonly uploadedSources?: readonly UploadedSourceSummary[];
-}): string {
-  const objective = [
-    input.objective,
-    ...(input.userConstraints ?? []),
-    ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
-  ].map((value) => value.trim()).filter(Boolean).join("\n");
-  const intent = classifyTaskIntent({ ...input, objective, userConstraints: undefined, successCriteria: undefined });
-  if (intent.artifactAction !== "modify" && intent.artifactAction !== "transform") return objective;
-  const sources = (input.uploadedSources ?? []).filter((source) => source.status === "ready");
-  if (sources.length === 0) return objective;
-  return [
-    objective,
-    "<uploaded_native_artifact_context>",
-    JSON.stringify(uploadedSourcePlanningContext(input.uploadedSources ?? [])),
-    "</uploaded_native_artifact_context>",
-  ].join("\n");
-}
-
 export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassification {
   const text = normalize([
     input.objective,
@@ -163,6 +180,138 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     wantsConversationAnswer: explicitConversationOnly || !wantsArtifact,
     signals,
   };
+}
+
+/** Canonical Runtime-owned interpretation shared by Skill recall and Planner. */
+export function understandTask(input: TaskIntentInput & {
+  readonly uploadedSources?: readonly UploadedSourceSummary[];
+  readonly targetArtifactKind?: Exclude<ArtifactKind, "none">;
+}): StructuredTaskUnderstanding {
+  const normalizedObjective = normalize([
+    input.objective,
+    ...(input.userConstraints ?? []),
+    ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
+  ].join("\n"));
+  const classifiedIntent = classifyTaskIntent(input);
+  const intent = input.targetArtifactKind === undefined
+    ? classifiedIntent
+    : {
+      ...classifiedIntent,
+      deliverySurface: "workspace_artifact" as const,
+      artifactAction: "modify" as const,
+      artifactKind: input.targetArtifactKind,
+      sourceNeed: "none" as const,
+      researchPolicy: undefined,
+      wantsArtifact: true,
+      wantsConversationAnswer: false,
+    };
+  const uploadedSources = input.uploadedSources ?? [];
+  const readySources = uploadedSources.filter((source) => source.status === "ready");
+  const operation = structuredTaskOperation(intent, normalizedObjective, readySources.length > 0);
+  const workflow: StructuredTaskStage[] = [];
+  if (intent.sourceNeed !== "none") workflow.push("acquire");
+  if (operation === "analysis" || operation === "composite") workflow.push("analyze");
+  if (operation === "transform_artifact") workflow.push("transform");
+  if (intent.wantsArtifact) workflow.push("produce");
+  if (workflow.length > 0 || intent.wantsConversationAnswer) workflow.push("deliver");
+  return {
+    schema: "agentloop.taskUnderstanding/v1",
+    normalizedObjective,
+    operation,
+    subject: {
+      text: structuredSubjectText(normalizedObjective),
+      terms: structuredSubjectTerms(normalizedObjective),
+      dates: [...normalizedObjective.matchAll(/\b\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?/gu)].map((match) => match[0]),
+      identifiers: [...new Set([
+        ...(normalizedObjective.match(/[A-Za-z]{2,}[A-Za-z0-9-]*/gu) ?? []).filter((value) => /\d/.test(value) || /^[A-Z]{2,}$/u.test(value)),
+        ...(normalizedObjective.match(/(?:Φ|φ|Ф)\s*\d+(?:\.\d+)?/gu) ?? []),
+      ])],
+    },
+    evidence: {
+      need: intent.sourceNeed,
+      uploadedInput: readySources.length > 0,
+      sourceKinds: [...new Set(readySources.map((source) => source.extension || source.mimeType).filter(Boolean))],
+    },
+    deliverable: {
+      action: intent.artifactAction,
+      kind: intent.artifactKind,
+      surface: intent.deliverySurface,
+    },
+    workflow: [...new Set(workflow)],
+    operationProfiles: structuredOperationProfiles(intent, operation, normalizedObjective),
+    constraints: [...(input.userConstraints ?? [])],
+    intent,
+  };
+}
+
+function structuredOperationProfiles(
+  intent: TaskIntentClassification,
+  operation: StructuredTaskOperation,
+  objective: string,
+): readonly StructuredTaskOperationProfile[] {
+  const profiles = new Set<StructuredTaskOperationProfile>();
+  if (operation === "analysis" || operation === "composite") profiles.add("data_analysis");
+  if (intent.sourceNeed !== "none") profiles.add("web_research");
+  // API is a common subject identifier in factual lookup requests.  Source
+  // grounding owns that work surface; it must not become a code-change task
+  // merely because the subject happens to contain the token "API".
+  if (intent.sourceNeed === "none" && /(?:\b(?:code|repo|repository|test|bug|fix|implement|refactor|compile|typescript|javascript|python|api|config|runtime|module)\b|代码|仓库|测试|修复|实现|重构|编译|接口|配置|模块)/iu.test(objective)) {
+    profiles.add("code_change");
+  }
+  if (intent.deliverySurface === "workspace_artifact") profiles.add("artifact_build");
+  if (profiles.size === 0 && /(?:\b(?:draft|rewrite|summari[sz]e|translate|compose|copy|brief|report|document|markdown|memo|email|proposal|story|article)\b|撰写|改写|总结|翻译|文案|简报|报告|文档|邮件|方案|材料)/iu.test(objective)) {
+    profiles.add("content_generation");
+  }
+  if (profiles.size === 0) profiles.add("direct_answer");
+  return [...profiles];
+}
+
+export function artifactKindForReference(input: {
+  readonly path: string;
+  readonly name?: string;
+  readonly mimeType?: string;
+}): Exclude<ArtifactKind, "none"> {
+  const signal = `${input.path} ${input.name ?? ""} ${input.mimeType ?? ""}`.toLowerCase();
+  if (/(?:\.pptx?\b|powerpoint|presentationml)/u.test(signal)) return "presentation";
+  if (/(?:\.xlsx?\b|\.xlsm\b|spreadsheetml|\bexcel\b|\.csv\b)/u.test(signal)) return "spreadsheet";
+  if (/(?:\.html?\b|text\/html)/u.test(signal)) return "html";
+  if (/(?:\.png\b|\.jpe?g\b|\.webp\b|\.gif\b|\.svg\b|image\/)/u.test(signal)) return "image";
+  if (/(?:\.js\b|\.ts\b|\.py\b|\.json\b|\.yaml?\b|text\/x-)/u.test(signal)) return "code";
+  return "document";
+}
+
+function structuredTaskOperation(
+  intent: TaskIntentClassification,
+  objective: string,
+  uploadedInput: boolean,
+): StructuredTaskOperation {
+  if (intent.artifactAction === "transform" || (intent.artifactAction === "modify" && uploadedInput)) return "transform_artifact";
+  if (intent.wantsArtifact && intent.sourceNeed !== "none") return "composite";
+  if (intent.wantsArtifact) return "create_artifact";
+  if (intent.sourceNeed !== "none") {
+    return /(?:分析|评估|比较|走势|趋势|统计|汇总|总结|analy[sz]|compare|trend|summar)/iu.test(objective)
+      ? "analysis"
+      : "lookup";
+  }
+  return "answer";
+}
+
+function structuredSubjectText(value: string): string {
+  const withoutUploadContext = value.trim();
+  const deliveryBoundary = /(?:[，,。；;]|\b)(?:并\s*)?(?:输出|生成|创建|制作|交付|给出|produce|generate|create|deliver)/iu.exec(withoutUploadContext);
+  const subject = deliveryBoundary?.index === undefined
+    ? withoutUploadContext
+    : withoutUploadContext.slice(0, deliveryBoundary.index);
+  return subject
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function structuredSubjectTerms(value: string): readonly string[] {
+  return [...new Set((structuredSubjectText(value).match(/[\u3400-\u9fff]+|[\p{L}\p{N}]+/gu) ?? [])
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1)
+    .slice(0, 32))];
 }
 
 export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy | undefined {
@@ -202,12 +351,31 @@ function inferArtifactAction(text: string, actionSignals: readonly string[]): Ar
 
 function detectRequestedArtifactKind(text: string, action: ArtifactAction): ArtifactKind {
   if (action === "none") return "none";
-  if (action === "create") return detectArtifactKindSignal(artifactCreationClause(text));
+  if (action === "create") {
+    // The resolved goal may contain a later generic constraint such as
+    // “输出完整报告” after an earlier explicit “输出 HTML 报告”. Looking
+    // only after the last creation verb would erase the requested format and
+    // let a broad document Skill win. An explicit format anywhere in a
+    // create request is output evidence; input-format ownership is handled
+    // separately by native transform logic.
+    const explicitKind = explicitArtifactFormatKind(text);
+    return explicitKind !== "none" ? explicitKind : detectArtifactKindSignal(artifactCreationClause(text));
+  }
   if (action === "transform") {
     const outputKind = detectArtifactKindSignal(artifactTransformationOutputClause(text));
     if (outputKind !== "none") return outputKind;
   }
   return detectArtifactKindSignal(text);
+}
+
+function explicitArtifactFormatKind(text: string): ArtifactKind {
+  if (/(?:\bhtml\b|网页|页面|站点|网站|前端|界面)/iu.test(text)) return "html";
+  if (/(?:\bpptx?\b|\bslides?\b|\bdeck\b|演示文稿|幻灯片|课件)/iu.test(text)) return "presentation";
+  if (/(?:\bpdf\b|\bdocx?\b|\bword\b|\bmarkdown\b|\bmd\b|\btxt\b)/iu.test(text)) return "document";
+  if (/(?:\bxlsx?\b|\bexcel\b|\bspreadsheet\b|\bcsv\b)/iu.test(text)) return "spreadsheet";
+  if (/(?:\bpng\b|\bjpe?g\b|\bwebp\b|\bimage\b|\bposter\b|海报|图片|图像)/iu.test(text)) return "image";
+  if (/(?:\bjson\b|代码|脚本|程序|应用)/iu.test(text)) return "code";
+  return "none";
 }
 
 function artifactCreationClause(text: string): string {
@@ -238,6 +406,9 @@ function explicitNativeArtifactMutationRequested(value: string): boolean {
 }
 
 function inferSourceNeedFromIntent(text: string): SourceNeed {
+  if (/(?:\bapi\b|接口|入参|出参|参数|数据表|工商|法定代表人|统一社会信用代码|注册资本|经营范围)/iu.test(text)) {
+    return "source_grounded";
+  }
   if (/(?:strict source|official source|authoritative|标准全文|官方|权威|严格来源|精确条款|逐条核验)/iu.test(text)) {
     return "strict_user_source";
   }

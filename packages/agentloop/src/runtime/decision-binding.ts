@@ -22,6 +22,61 @@ export interface ResolvedOperationBinding {
 }
 
 /**
+ * An immutable authorization for a package action that publishes a declared
+ * workflow fact.  Unlike a decision binding, this contains no business
+ * interpretation and applies even when no HIL choice exists.
+ */
+export interface SkillWorkflowEvidenceBinding {
+  readonly schema: "agentloop.skillWorkflowEvidenceBinding/v1";
+  readonly skillId: string;
+  readonly skillName: string;
+  readonly executorId: string;
+  readonly actionId: string;
+  readonly command: string;
+  readonly cwd: string;
+  readonly script: string;
+  readonly argumentTemplates: readonly string[];
+  readonly evidenceInputArgumentIndexes: readonly number[];
+  readonly producesEvidenceKinds: readonly string[];
+}
+
+/**
+ * Compile package-owned workflow declarations into a Run grant. Runtime uses
+ * this only to authenticate invocation identity and immutable input lineage;
+ * the package continues to own the calculation and result schema.
+ */
+export function resolveSkillWorkflowEvidenceBindings(input: {
+  readonly skills: readonly PrivateSkill[];
+  readonly manifests: ReadonlyMap<string, readonly SkillExecutionEntrypoint[]>;
+}): readonly SkillWorkflowEvidenceBinding[] {
+  const bindings: SkillWorkflowEvidenceBinding[] = [];
+  for (const skill of input.skills) {
+    for (const entrypoint of input.manifests.get(skill.id) ?? []) {
+      for (const action of entrypoint.actions) {
+        if (action.producesEvidenceKinds.length === 0) continue;
+        const evidenceInputArgumentIndexes = action.inputs.flatMap((entry) => entry.evidenceInput === undefined
+          ? []
+          : action.args.map((argument, index) => argument === `{{${entry.name}}}` ? index + 1 : -1).filter((index) => index >= 0));
+        bindings.push(Object.freeze({
+          schema: "agentloop.skillWorkflowEvidenceBinding/v1",
+          skillId: skill.id,
+          skillName: skill.name,
+          executorId: entrypoint.id,
+          actionId: action.id,
+          command: entrypoint.command,
+          cwd: `@skills/${skill.name}`,
+          script: entrypoint.script,
+          argumentTemplates: Object.freeze([entrypoint.script, ...action.args]),
+          evidenceInputArgumentIndexes: Object.freeze(evidenceInputArgumentIndexes),
+          producesEvidenceKinds: Object.freeze([...action.producesEvidenceKinds]),
+        }));
+      }
+    }
+  }
+  return Object.freeze(bindings);
+}
+
+/**
  * Compile package-owned operation metadata and a Runtime-authoritative choice
  * into immutable command constraints. This is deliberately generic: Skills
  * declare which operation inputs carry the selected label/identity/option;

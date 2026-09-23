@@ -6,7 +6,7 @@ import { skillExecutionRootEnvName } from "../tools/skill-loader.ts";
 import type { DynamicPromptProfile, TaskProfile } from "./dynamic-prompt.ts";
 import { formatDynamicPromptContext } from "./dynamic-prompt.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
-import { runtimeStepToolProgressPolicy, type RuntimeToolProgressPolicy } from "./tool-progress-policy.ts";
+import { runtimeStepToolProgressPolicy, type RuntimeToolProgressPolicy, type RuntimeWorkflowEvidenceAction } from "./tool-progress-policy.ts";
 import type {
   RuntimeContextSnapshot,
   SkillExecutionRootGrant,
@@ -475,11 +475,14 @@ export function buildStepToolProgressPolicy(input: {
   readonly step: ExecutionPlan["steps"][number];
   readonly requiresFileOutput: boolean;
   readonly taskProfile?: TaskProfile;
+  readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
 }): RuntimeToolProgressPolicy | undefined {
   const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
   if (!input.requiresFileOutput && !stepRequiresRuntimeEvidenceProgress(requiredKinds)) return undefined;
   return runtimeStepToolProgressPolicy(requiredKinds, {
     expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
+    artifactDeliveryRequired: input.requiresFileOutput,
+    workflowEvidenceActions: input.workflowEvidenceActions,
     scope: stepRequiresArtifactEvidence(input.step)
       ? "artifact"
       : stepRequiresSourceEvidence(requiredKinds) ? "source" : "generic",

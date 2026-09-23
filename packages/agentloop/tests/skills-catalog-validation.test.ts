@@ -186,6 +186,7 @@ test("a package execution manifest exposes an action interface without putting c
           inputs: [{ name: "name", description: "A company name or clue.", required: true }],
           args: ["--action", "search", "--name", "{{name}}"],
           result: "Candidate companies.",
+          producesEvidenceKinds: ["source_summary"],
         }],
       }],
     }), "utf8");
@@ -212,6 +213,7 @@ test("a package execution manifest exposes an action interface without putting c
     assert.match(loaded, /<skill_execution_entrypoints>/);
     assert.match(loaded, /command="python3" script="scripts\/company\.py"/);
     assert.match(loaded, /<args>--action search --name \{\{name\}\}<\/args>/);
+    assert.match(loaded, /<produces_evidence_kinds>source_summary<\/produces_evidence_kinds>/);
     assert.doesNotMatch("Use registry facts and ask for confirmation when identities are ambiguous.", /--action|python3|scripts\//);
   } finally {
     await fs.rm(workspace, { recursive: true, force: true });

@@ -104,6 +104,15 @@ interface CommandComputationArtifact {
   readonly caveats: readonly string[];
 }
 
+/** Runtime-supplied identity for a declared package workflow action. */
+interface SkillWorkflowEvidenceBinding {
+  readonly skillId: string;
+  readonly skillName: string;
+  readonly executorId: string;
+  readonly actionId: string;
+  readonly producesEvidenceKinds: readonly string[];
+}
+
 interface DirectoryFieldProfile {
   readonly field: string;
   readonly observed: number;
@@ -1392,6 +1401,7 @@ export class ComputerExecutor {
     cwd: string;
     timeoutMs: number;
     computationInputs?: readonly CommandComputationInput[];
+    workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
     signal?: AbortSignal;
   }): Promise<{
     exitCode: number | null;
@@ -1406,6 +1416,7 @@ export class ComputerExecutor {
     timedOut: boolean;
     evidenceReceipt?: Record<string, unknown>;
     computationReceipt?: Record<string, unknown>;
+    workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
     }> {
     await this.preflightRunCommand(input);
@@ -1418,6 +1429,7 @@ export class ComputerExecutor {
     cwd: string;
     timeoutMs: number;
     computationInputs?: readonly CommandComputationInput[];
+    workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
   }): Promise<void> {
     if (!EXECUTABLE_NAME_PATTERN.test(input.command)) {
       throw badRequest("command must be an executable name without shell syntax or path separators");
@@ -1439,6 +1451,7 @@ export class ComputerExecutor {
     cwd: string;
     timeoutMs: number;
     computationInputs?: readonly CommandComputationInput[];
+    workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
     signal?: AbortSignal;
   }): Promise<{
     exitCode: number | null;
@@ -1453,6 +1466,7 @@ export class ComputerExecutor {
     timedOut: boolean;
     evidenceReceipt?: Record<string, unknown>;
     computationReceipt?: Record<string, unknown>;
+    workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
   }> {
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
@@ -1540,6 +1554,17 @@ export class ComputerExecutor {
               stdout: stdout.toString("utf8"),
               stdoutRef: stdoutProjection.reference,
             });
+            const workflowEvidence = await this.bindSkillWorkflowEvidence({
+              binding: input.workflowEvidenceBinding,
+              inputs: computationInputs,
+              command: input.command,
+              args: input.args,
+              exitCode,
+              signal,
+              truncated,
+              stdout: stdout.toString("utf8"),
+              stdoutRef: stdoutProjection.reference,
+            });
             resolvePromise({
               exitCode,
               signal,
@@ -1554,6 +1579,7 @@ export class ComputerExecutor {
               ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
               ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
               ...(computationEvidence.error === undefined ? {} : { computationEvidenceError: computationEvidence.error }),
+              ...(workflowEvidence === undefined ? {} : { workflowEvidenceReceipt: workflowEvidence }),
             });
           } catch (error) {
             rejectPromise(error);
@@ -1635,6 +1661,61 @@ export class ComputerExecutor {
           caveated: artifact.caveats.length > 0 ? ["explicit_caveats"] : [],
           failed: [],
         },
+      },
+    };
+  }
+
+  /**
+   * Bind a package-produced receipt to the exact Run-authorized action that
+   * emitted it.  Runtime verifies identity, invocation and byte lineage only;
+   * it intentionally does not interpret the package's domain facts.
+   */
+  private async bindSkillWorkflowEvidence(input: {
+    readonly binding?: SkillWorkflowEvidenceBinding;
+    readonly inputs: readonly CapturedCommandComputationInput[];
+    readonly command: string;
+    readonly args: readonly string[];
+    readonly exitCode: number | null;
+    readonly signal: string | null;
+    readonly truncated: boolean;
+    readonly stdout: string;
+    readonly stdoutRef?: CommandOutputReference;
+  }): Promise<Record<string, unknown> | undefined> {
+    if (input.binding === undefined || input.exitCode !== 0 || input.signal !== null || input.truncated) return undefined;
+    for (const source of input.inputs) {
+      const resolved = await this.resolveReadablePath(source.path);
+      if (await sha256File(resolved.absolutePath) !== source.sha256) return undefined;
+    }
+    const reported = extractStdoutEvidenceReceipt(input.stdout);
+    const reportedKinds = reported === undefined || !isPlainRecord(reported.evidenceKinds)
+      ? []
+      : Array.isArray(reported.evidenceKinds.satisfied)
+        ? reported.evidenceKinds.satisfied.filter((kind): kind is string => typeof kind === "string")
+        : [];
+    if (!input.binding.producesEvidenceKinds.every((kind) => reportedKinds.includes(kind))) return undefined;
+    const output = {
+      stream: "stdout",
+      sha256: createHash("sha256").update(input.stdout).digest("hex"),
+      bytes: Buffer.byteLength(input.stdout),
+      ...(input.stdoutRef === undefined ? {} : { path: input.stdoutRef.path }),
+    };
+    const material = JSON.stringify({ binding: input.binding, inputs: input.inputs, output, command: input.command, args: input.args });
+    return {
+      schema: "agentloop.skillWorkflowEvidenceReceipt/v1",
+      receiptId: createHash("sha256").update(material).digest("hex"),
+      sourceType: "skill_workflow_action",
+      skill: {
+        skillId: input.binding.skillId,
+        skillName: input.binding.skillName,
+        executorId: input.binding.executorId,
+        actionId: input.binding.actionId,
+      },
+      sourceRefs: input.inputs,
+      output,
+      evidenceKinds: {
+        satisfied: input.binding.producesEvidenceKinds,
+        caveated: [],
+        failed: [],
       },
     };
   }

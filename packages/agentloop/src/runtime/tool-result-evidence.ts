@@ -4,6 +4,7 @@ const RUNTIME_EVIDENCE_SCHEMAS = new Set([
   "agentloop.sourceSummary/v1",
   "agentloop.toolEvidenceReceipt/v1",
   "agentloop.commandComputationReceipt/v1",
+  "agentloop.skillWorkflowEvidenceReceipt/v1",
   "agentloop.commandOutputProjection/v1",
 ]);
 
@@ -21,6 +22,8 @@ export function runtimeEvidenceRecordsFromToolResult(result: string): readonly R
   if (artifactReceipt !== undefined && hasRuntimeEvidenceSchema(artifactReceipt)) records.push(artifactReceipt);
   const computationReceipt = recordValue(parsed.computationReceipt);
   if (computationReceipt !== undefined && hasRuntimeEvidenceSchema(computationReceipt)) records.push(computationReceipt);
+  const workflowEvidenceReceipt = recordValue(parsed.workflowEvidenceReceipt);
+  if (workflowEvidenceReceipt !== undefined && hasRuntimeEvidenceSchema(workflowEvidenceReceipt)) records.push(workflowEvidenceReceipt);
   if (Array.isArray(parsed.artifactReceipts)) {
     for (const value of parsed.artifactReceipts) {
       const receipt = recordValue(value);
@@ -30,7 +33,7 @@ export function runtimeEvidenceRecordsFromToolResult(result: string): readonly R
   const stdout = stringValue(parsed.stdout);
   if (stdout !== undefined) {
     const stdoutRecord = parseJsonRecord(stdout);
-    if (stdoutRecord !== undefined && (hasRuntimeEvidenceSchema(stdoutRecord) || recordValue(stdoutRecord.decisionClaim) !== undefined)) {
+    if (stdoutRecord !== undefined && ((hasRuntimeEvidenceSchema(stdoutRecord) && stdoutRecord.schema !== "agentloop.skillWorkflowEvidenceReceipt/v1") || recordValue(stdoutRecord.decisionClaim) !== undefined)) {
       records.push(stdoutRecord);
     }
   }

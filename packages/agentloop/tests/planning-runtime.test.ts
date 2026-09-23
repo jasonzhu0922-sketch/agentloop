@@ -29,7 +29,7 @@ import {
   selectPlanningSkills,
 } from "../src/runtime/run-service.ts";
 import { createStepExecutionStrategyProfile } from "../src/runtime/step-execution-strategy.ts";
-import { classifyTaskIntent, planningSkillRecallInput, uploadedSourcePlanningContext } from "../src/runtime/task-intent.ts";
+import { artifactKindForReference, classifyTaskIntent, understandTask, uploadedSourcePlanningContext } from "../src/runtime/task-intent.ts";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { createRuntimeResult, createRuntimeResultCard } from "../src/runtime/runtime-result.ts";
 import { markActionFailedBeforeEffect } from "../src/runtime/action-effect.ts";
@@ -48,6 +48,36 @@ import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOw
 type LegacyPlanStepFixture = Omit<PlanProposal["steps"][number], "successCriteria"> & {
   readonly successCriteria?: readonly { readonly id: string; readonly description: string; readonly source?: "task" | "planner" }[];
 };
+
+/** Direct Planner fixtures model the same Runtime-owned boundary as a Run. */
+function plannerTestTaskUnderstanding(task: {
+  readonly input: string;
+  readonly turnResolution?: TaskSpec["turnResolution"];
+  readonly availableToolNames: readonly string[];
+  readonly availableSkills: readonly PrivateSkill[];
+  readonly responseOnly?: boolean;
+  readonly sources?: readonly UploadedSourceSummary[];
+  readonly conversationWorkingSet?: ConversationWorkingSet;
+}) {
+  const effectiveGoal = task.turnResolution?.effectiveGoal ?? task.input;
+  const target = task.turnResolution?.targetArtifact === undefined
+    ? undefined
+    : task.conversationWorkingSet?.reusableArtifacts.find((artifact) =>
+      artifact.reusable
+      && artifact.runId === task.turnResolution!.targetArtifact!.runId
+      && artifact.path === task.turnResolution!.targetArtifact!.path,
+    );
+  return understandTask({
+    objective: effectiveGoal === task.input ? effectiveGoal : `${effectiveGoal}\n${task.input}`,
+    userConstraints: task.turnResolution?.userConstraints,
+    toolNames: task.availableToolNames,
+    skillNames: task.availableSkills.map((skill) => skill.name),
+    responseOnly: task.responseOnly,
+    evidenceDemand: task.turnResolution?.evidenceDemand,
+    uploadedSources: task.sources,
+    ...(target === undefined ? {} : { targetArtifactKind: artifactKindForReference(target) }),
+  });
+}
 
 test("default file-producing step budget is 32 primary turns plus 12 convergence turns", () => {
   assert.equal(DEFAULT_MAX_STEPS, 32);
@@ -174,6 +204,7 @@ test("ModelPlanner fails closed after one bounded prose contract retry", async (
   const planner = new ModelPlanner(new StaticModel({ content: "Here is a markdown plan", toolCalls: [], finishReason: "stop" }));
   await assert.rejects(
     () => planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "run-1",
       input: "do work",
       availableSkills: [],
@@ -235,6 +266,7 @@ test("ModelPlanner retries once when the planning model returns ordinary text", 
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-plain-planning-response",
     input: "这些形象要用绘图的方式，不要单纯用文字",
     availableSkills: [],
@@ -280,6 +312,7 @@ test("ModelPlanner retries once when the planning model returns an empty respons
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-empty-planning-response",
     input: "帮我生成一张国庆庆祝海报",
     availableSkills: [],
@@ -348,6 +381,7 @@ test("ModelPlanner corrects a capability mistakenly submitted as a Skill", async
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-capability-not-skill",
     input: "Summarize the uploaded source.",
     availableSkills: [],
@@ -438,6 +472,7 @@ test("ModelPlanner discovers an authorized evidence producer before rejecting a 
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-capability-gap-recovery",
     input: "Prepare design directions for human review.",
     availableSkills: [hil],
@@ -509,6 +544,7 @@ test("ModelPlanner repairs an upload-bound aggregation gap from Admission capabi
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-upload-aggregation-capability-repair",
     input: "分析上传的表格并统计各类别分布",
     availableSkills: [],
@@ -592,6 +628,7 @@ test("ModelPlanner binds source grounding to the selected API Skill without unre
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-api-source-grounding-recovery",
     input: "查询宝武数据中台中关于差旅用车的 API 信息",
     turnResolution: {
@@ -687,6 +724,7 @@ test("ModelPlanner discovers a source producer for a plan-level lookup grounding
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-source-grounding-capability-recovery",
     input: "Find today's AI news.",
     availableSkills: [],
@@ -794,6 +832,7 @@ test("ModelPlanner preserves bounded multi-gap capability recovery", async () =>
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-capability-gap-recovery-twice",
     input: "Prepare a grounded schema-backed answer.",
     availableSkills: [],
@@ -841,6 +880,38 @@ test("Task intent derives a new report from the output clause rather than the re
   assert.equal(intent.artifactAction, "create");
   assert.equal(intent.artifactKind, "document");
   assert.equal(intent.deliverySurface, "workspace_artifact");
+});
+
+test("Task intent preserves an explicit HTML output format when a later constraint says only output a report", () => {
+  const intent = classifyTaskIntent({
+    objective: "分析钢材价格走势，输出 HTML 格式的分析报告。需要具体的日期和价格数据。",
+    userConstraints: ["以 HTML 格式输出完整报告", "数据来源需明确可验证"],
+    evidenceDemand: "source_grounded",
+  });
+
+  assert.equal(intent.artifactAction, "create");
+  assert.equal(intent.artifactKind, "html");
+  assert.equal(intent.wantsArtifact, true);
+});
+
+test("structured task understanding preserves subject, evidence, deliverable, and workflow before Planner", () => {
+  const understanding = understandTask({
+    objective: "分析 2025 年 11 月 3 日至 12 月 4 日，唐山市河钢 HRB400E Φ8 热轧盘螺工程采购价走势，并输出 HTML 格式的分析报告",
+    userConstraints: ["需要具体日期-价格数据", "数据来源需明确可验证"],
+    evidenceDemand: "source_grounded",
+  });
+
+  assert.equal(understanding.schema, "agentloop.taskUnderstanding/v1");
+  assert.equal(understanding.operation, "composite");
+  assert.equal(understanding.deliverable.kind, "html");
+  assert.equal(understanding.evidence.need, "source_grounded");
+  assert.doesNotMatch(understanding.subject.text, /html/i);
+  assert.doesNotMatch(understanding.subject.text, /报告/);
+  assert.ok(understanding.subject.terms.some((term) => term.includes("钢材") || term.includes("钢")));
+  assert.ok(understanding.subject.identifiers.includes("hrb400e"));
+  assert.ok(understanding.subject.identifiers.some((value) => value.includes("φ8")));
+  assert.deepEqual(understanding.workflow, ["acquire", "analyze", "produce", "deliver"]);
+  assert.deepEqual(understanding.operationProfiles, ["data_analysis", "web_research", "artifact_build"]);
 });
 
 test("Task intent keeps an explicit workbook edit as a spreadsheet modification", () => {
@@ -924,6 +995,7 @@ test("ModelPlanner treats an all-null optional sourceConstraint as absent", asyn
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-null-source-constraint",
     input: "Provide the requested answer.",
     availableSkills: [],
@@ -979,6 +1051,7 @@ test("ModelPlanner binds uploaded originals and mandatory artifact evidence for 
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-uploaded-pdf-merge",
     input: "帮我合并pdf",
     availableSkills: [],
@@ -1005,6 +1078,7 @@ test("ModelPlanner binds uploaded originals and mandatory artifact evidence for 
     "format_matches_request",
     "delivery_receipt",
     "artifact_acceptance",
+    "artifact_openable",
   ]);
   const admitted = admitPlan({
     runId: "run-uploaded-pdf-merge",
@@ -1117,6 +1191,7 @@ test("ModelPlanner offers a structured native Skill-binding repair instead of re
   const events: Array<{ type: string; data: Readonly<Record<string, unknown>> }> = [];
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-pdf-skill-binding-repair",
     input: "把这三个文件合并一下",
     availableSkills: [pdf],
@@ -1234,6 +1309,7 @@ test("ModelPlanner keeps an uploaded PPTX visual transformation in one Skill-own
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-uploaded-pptx-theme",
     input: "请为这份PPT生成统一视觉主题",
     availableSkills: [pptx],
@@ -1311,6 +1387,7 @@ test("ModelPlanner admits a recovered uploaded PPTX transformation as one primar
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-recovered-uploaded-pptx",
     input: "继续，尽快生成目标文件",
     turnResolution: {
@@ -1399,6 +1476,7 @@ test("ModelPlanner admits an uploaded HTML reading plan without inventing a work
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-read-uploaded-html",
     input: "阅读这个 html",
     availableSkills: [],
@@ -1599,6 +1677,7 @@ test("ModelPlanner retries once when the planning model attempts execution tools
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-tool-contract-retry",
     input: "这个 excel 文件里面中文全是乱码",
     availableSkills: [],
@@ -1663,6 +1742,7 @@ test("ModelPlanner retries once when submit_outcome_plan arguments are not a JSO
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-arguments-contract-retry",
     input: "查询宝武集团数据中台中合同备案 API 的参数信息",
     availableSkills: [skill],
@@ -1767,6 +1847,7 @@ test("ModelPlanner keeps operation profiles and execution capabilities in separa
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-capability-namespace-contract",
     input: "查询网译软件的工商企业信息",
     availableSkills: [],
@@ -1858,6 +1939,7 @@ test("ModelPlanner retries once when Admission rejects an initial support Skill 
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-admission-contract-retry",
     input: "把这个 excel 的场景清单生成一份 html 格式的报告",
     availableSkills: [dashboard, htmlBuilder],
@@ -1925,6 +2007,7 @@ test("ModelPlanner treats bound uploaded sources as source-grounded artifact inp
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-uploaded-source-fact-then-produce",
     input: "把这个 excel 的场景清单生成一份 html 格式的报告",
     availableSkills: [dashboard],
@@ -2007,6 +2090,7 @@ test("ModelPlanner treats an uploaded workbook as source evidence for a new docu
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-uploaded-workbook-evaluation-report",
     input: "分析一下这个表格，生成一个评价报告",
     availableSkills: [documents],
@@ -2086,6 +2170,7 @@ test("ModelPlanner keeps an explicit uploaded workbook edit in one primary-build
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-uploaded-workbook-native-edit",
     input: "修改这个表格的配色和列宽，生成修订版 xlsx",
     availableSkills: [xlsx],
@@ -2165,6 +2250,7 @@ test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analys
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-visible-spreadsheet-analysis-fact-then-produce",
     input: "帮我分析一下这里面的绩效评价情况，直接在对话里回答就行",
     availableSkills: [],
@@ -2219,6 +2305,7 @@ test("ModelPlanner requires derived aggregation evidence for a structured depend
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-structured-aggregation-contract",
     input: "统计这个表里每位责任人的任务数量，谁最多、谁最少？",
     availableSkills: [],
@@ -2278,6 +2365,7 @@ test("ModelPlanner canonicalizes duplicate names in the set-valued Tool capabili
     }],
   }));
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-1",
     input: "build",
     availableSkills: [],
@@ -2314,6 +2402,7 @@ test("ModelPlanner normalizes a missing fixed OutcomePlan schema discriminator",
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-missing-schema",
     input: "总结差旅报支方面的知识，形成一份差旅报支常识性说明报告",
     availableSkills: [],
@@ -2350,6 +2439,7 @@ test("ModelPlanner canonicalizes an empty optional source constraint to absence"
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-empty-optional-source-constraint",
     input: "Analyze the configured market data.",
     availableSkills: [],
@@ -2389,6 +2479,7 @@ test("ModelPlanner still rejects an incorrect OutcomePlan schema discriminator",
 
   await assert.rejects(
     () => planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "run-wrong-schema",
       input: "write report",
       availableSkills: [],
@@ -2421,6 +2512,7 @@ test("ModelPlanner accepts aggregate artifact_acceptance evidence contracts", as
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-artifact-acceptance",
     input: "生成 html-ppt 并验收",
     availableSkills: [],
@@ -2429,12 +2521,12 @@ test("ModelPlanner accepts aggregate artifact_acceptance evidence contracts", as
 
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
   assert.deepEqual(plan.steps[0].evidenceContract, {
-    requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+    requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request", "delivery_receipt", "artifact_openable"],
     caveatPolicy: "none",
   });
   assert.deepEqual(
     plan.steps[0].successCriteria.map((criterion) => criterion.id),
-    ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request", "delivery_receipt", "artifact_openable"],
   );
 });
 
@@ -2463,6 +2555,7 @@ test("ModelPlanner accepts ordinary delivery leaves without an evidence contract
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-ordinary-delivery",
     input: "Explain the design trade-off",
     availableSkills: [],
@@ -2500,6 +2593,7 @@ test("ModelPlanner accepts null for strict-schema optional leaf objects", async 
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-strict-null-optionals",
     input: "Explain the design trade-off",
     availableSkills: [],
@@ -2562,6 +2656,7 @@ test("ToolSource capability categories and explicit source constraints stay host
   });
 
   const proposal = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "source-bound-route",
     input: "请调用高德 MCP 查询路线",
     availableSkills: [],
@@ -3019,6 +3114,7 @@ test("ModelPlanner keeps Skill-owned QA evidence out of generic evidence contrac
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-skill-owned-qa-evidence",
     input: "分析目录下面的 xlsx 数据，形成 markdown 报告",
     availableSkills: [],
@@ -3028,7 +3124,7 @@ test("ModelPlanner keeps Skill-owned QA evidence out of generic evidence contrac
   assert.equal(calls, 1);
   assert.doesNotMatch(planningContext, /"basic_navigation"/);
   assert.deepEqual(plan.steps[0].evidenceContract, {
-    requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+    requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request", "delivery_receipt", "artifact_openable"],
     caveatPolicy: "none",
   });
 });
@@ -3060,6 +3156,41 @@ test("Plan admission adds artifact acceptance Tool for concrete artifact receipt
 
   assert.deepEqual(admitted.steps[0].requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
   assert.deepEqual(admitted.steps[0].executionBinding.resolvedToolNames, ["computer_write_file", "verify_artifact_acceptance"]);
+});
+
+test("Plan admission makes Runtime acceptance non-optional for a workspace artifact producer", () => {
+  const proposal: PlanProposal = {
+    goal: "create an HTML report",
+    selectedSkillIds: [],
+    steps: [{
+      id: "write-report",
+      objective: "Create the requested HTML report in the workspace.",
+      dependencies: [],
+      role: "produce",
+      skillIds: [],
+      requiredCapabilities: ["workspace_artifact_write"],
+      successCriteria: [{ id: "artifact_path", description: "The report path is recorded.", source: "planner" }],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-workspace-artifact-acceptance-required",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["computer_write_file", "verify_artifact_acceptance"]),
+    taskIntent: { deliverySurface: "workspace_artifact", artifactKind: "html" },
+  });
+
+  assert.deepEqual(admitted.steps[0].evidenceContract, {
+    requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance", "artifact_openable"],
+    caveatPolicy: "none",
+  });
+  assert.deepEqual(admitted.steps[0].successCriteria.map((criterion) => criterion.id), [
+    "artifact_path",
+    "artifact_acceptance",
+    "artifact_openable",
+  ]);
+  assert.equal(admitted.steps[0].requiredCapabilities.includes("artifact_acceptance"), true);
 });
 
 test("Plan admission normalizes Skill-owned QA evidence out of Runtime evidence contracts", () => {
@@ -3370,6 +3501,7 @@ test("ModelPlanner accepts paginated HTML materialization as a file-producing ar
   }));
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-paginated-html-materializer-plan",
     input: "帮我做一个培训材料，html-ppt 格式",
     availableSkills: [],
@@ -3378,7 +3510,7 @@ test("ModelPlanner accepts paginated HTML materialization as a file-producing ar
 
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
   assert.deepEqual(plan.steps[0].evidenceContract, {
-    requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+    requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request", "delivery_receipt", "artifact_openable"],
     caveatPolicy: "none",
   });
 });
@@ -3412,6 +3544,7 @@ test("ModelPlanner does not make materialized page specs the generic HTML artifa
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-ordinary-html-page",
     input: "做一个活动宣传网页",
     availableSkills: [],
@@ -3588,6 +3721,7 @@ test("ModelPlanner admits tool-backed direct answers with incidental file wordin
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-direct-answer-tools-planner",
     input: "Use the lookup tool to answer my question directly.",
     availableSkills: [],
@@ -3623,6 +3757,7 @@ test("ModelPlanner caps the planning model output budget", async () => {
     },
   });
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-1",
     input: "build",
     availableSkills: [],
@@ -3657,6 +3792,7 @@ test("ModelPlanner keeps stable planning system prompt compact", async () => {
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-compact-planner-prompt",
     input: "answer briefly",
     availableSkills: [],
@@ -3702,6 +3838,7 @@ test("ModelPlanner exposes operation profiles for source-level step shaping", as
     },
   });
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "operation-profile-plan",
     input: "分析 1.xlsx 并生成报告",
     availableSkills: [],
@@ -3736,6 +3873,7 @@ test("ModelPlanner does not infer web research merely because web tools are avai
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "operation-profile-available-web-tools",
     input: "生成一个 markdown 文件吧",
     availableSkills: [],
@@ -3789,6 +3927,7 @@ test("ModelPlanner injects research policy only for source-grounded planning", a
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "operation-profile-research-policy",
     input: "请检索互联网公开资料，制作 DCMM 四级培训 PPTX，无法核验的内容标注边界。",
     availableSkills: [],
@@ -3855,6 +3994,7 @@ test("ModelPlanner enforces Resolver-declared source grounding for a first-round
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "first-round-external-fact-resolution",
     input: "宝武集团 2526 工程是什么？",
     turnResolution: {
@@ -3919,6 +4059,7 @@ test("ModelPlanner admits a grounded artifact continuation from target-bound pri
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-grounded-markdown-continuation",
     input: "你把内容生成一份可读的 markdown 文件",
     turnResolution: {
@@ -4006,6 +4147,7 @@ test("ModelPlanner treats a bound prior artifact as a native transformation, not
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "transform-prior-pdf",
     input: "把这个 PDF 的目录页去掉。",
     turnResolution: {
@@ -4112,6 +4254,7 @@ test("ModelPlanner treats a bound prior Outcome as a materializable input, not a
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "materialize-prior-analysis",
     input: "把这个分析生成 PDF 文件",
     turnResolution: {
@@ -4261,6 +4404,7 @@ test("ModelPlanner does not merge an unrelated active goal into a resolved new g
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "resolved-independent-new-goal",
     input: "这个外部项目是什么？",
     turnResolution: {
@@ -4327,6 +4471,7 @@ test("ModelPlanner classifies designed pages as observable artifact delivery int
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "operation-profile-designed-page-artifact",
     input: "设计一个足球世界杯的登录首页。",
     availableSkills: [],
@@ -4363,6 +4508,7 @@ test("ModelPlanner rejects text-only plans for requested observable artifacts", 
 
   await assert.rejects(
     () => planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "operation-profile-designed-page-text-only-rejected",
       input: "设计一个足球世界杯的登录首页。",
       availableSkills: [],
@@ -4372,6 +4518,7 @@ test("ModelPlanner rejects text-only plans for requested observable artifacts", 
   );
   await assert.rejects(
     () => planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "operation-profile-designed-page-text-only-without-producer-rejected",
       input: "设计一个足球世界杯的登录首页。",
       availableSkills: [],
@@ -4431,6 +4578,7 @@ test("ModelPlanner repairs a Human-in-the-Loop-only terminal artifact plan", asy
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "hil-artifact-plan-repair",
     input: "Create a poster, ask me to choose a visual direction, then generate the final PNG.",
     availableSkills: [canvas],
@@ -4473,6 +4621,7 @@ test("ModelPlanner keeps executable Skill tasks out of direct-answer-only planni
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-skill-profile-plan",
     input: "做一个品牌首页",
     availableSkills: [skill],
@@ -4513,6 +4662,7 @@ test("ModelPlanner exposes conversation workset facts for follow-up planning", a
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-followup-plan",
     input: "基于上面的成果继续推进",
     availableSkills: [],
@@ -4605,6 +4755,7 @@ test("ModelPlanner prefers reusable Markdown artifacts without falling back to o
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-followup-markdown-to-pdf",
     input: "把上一轮 markdown 导出 pdf",
     availableSkills: [],
@@ -4723,6 +4874,7 @@ test("ModelPlanner materializes a bound Markdown Runtime Result before artifact 
     evidenceRefs: ["run:prior-run", "plan:prior-plan"],
   });
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-delivery-markdown-to-pdf",
     input: "把上一轮返回的 Markdown 转成 PDF",
     turnResolution: {
@@ -4805,6 +4957,7 @@ test("ModelPlanner groups DOC and DOCX when selecting an existing Word artifact 
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-followup-word-family",
     input: "把上一轮 Word 文档中的名字改掉，仍输出 doc 文件",
     availableSkills: [],
@@ -4868,6 +5021,7 @@ test("ModelPlanner does not promote output-only legacy text to a formal Result",
   });
 
   await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-followup-delivery-text-to-file",
     input: "你倒是生成一个总结文件啊",
     availableSkills: [],
@@ -4945,6 +5099,7 @@ test("ModelPlanner treats empty conversation workspace as context instead of Pla
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-empty-workspace-plan",
     input: "做一个活动宣传网页",
     availableSkills: [],
@@ -5000,6 +5155,7 @@ test("ModelPlanner accepts artifact delivery receipts in an empty conversation w
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-empty-workspace-artifact-delivery",
     input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
     availableSkills: [skill],
@@ -5066,6 +5222,7 @@ test("ModelPlanner keeps ordinary planning light without adding explicit QA tail
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-small-steps-first",
     input: "总结此前分析过程，生成可复用 analyze_scenario.py 并验证",
     availableSkills: [],
@@ -5116,6 +5273,7 @@ test("ModelPlanner rejects default QA and repair tails for ordinary artifact tas
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-heavy-qa-tail",
     input: "生成一张演唱会海报",
     availableSkills: [],
@@ -5182,6 +5340,7 @@ test("ModelPlanner accepts delivery leaves with core file receipt evidence", asy
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-dcmm-html-ppt-plan",
     input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
     availableSkills: [skill],
@@ -5260,6 +5419,7 @@ test("ModelPlanner accepts first-round factual artifact plans with conditional s
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-dcmm-first-round-conditional-sources",
     input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
     availableSkills: [skill],
@@ -5338,6 +5498,7 @@ test("ModelPlanner drops unrequested optional enhancement success criteria witho
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-dcmm-optional-enhancements",
     input: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
     availableSkills: [skill],
@@ -5389,6 +5550,7 @@ test("ModelPlanner allows source inspection and keeps local report receipt insid
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-source-inspection-not-tail",
     input: "基于这些资料写一份报告",
     availableSkills: [],
@@ -5641,6 +5803,7 @@ test("ModelPlanner fails closed when a model submits legacy submit_plan", async 
 
   await assert.rejects(
     () => planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "run-legacy-submit-plan",
       input: "总结此前分析过程，生成可复用 analyze_scenario.py 并验证",
       availableSkills: [],
@@ -5684,6 +5847,7 @@ test("ModelPlanner admits repair leaves only for recovery-shaped OutcomePlans", 
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-recovery-finalization-boundaries",
     input: "修正 PPT 质量问题，重新生成并终检",
     conversationWorkingSet: {
@@ -5741,6 +5905,7 @@ test("ModelPlanner rejects non-recovery repair leaves after one admission correc
 
   await assert.rejects(
     () => planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "run-invalid-initial-repair",
       input: "分析 xlsx 并生成报告",
       availableSkills: [],
@@ -5782,6 +5947,7 @@ test("ModelPlanner accepts a broad artifact leaf instead of requesting patch rep
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-broad-artifact-leaf",
     input: "分析 xlsx 并生成报告",
     availableSkills: [],
@@ -5926,6 +6092,7 @@ test("ModelPlanner creates response-only conversational Plans without a planning
     },
   });
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "reply-only",
     input: "Which Skill did you use?",
     availableSkills: [skillFixture({ id: "pptx", name: "pptx" })],
@@ -6011,14 +6178,14 @@ test("selectPlanningSkills prefers the matching Skill summary and allows no-skil
 
   const selected = selectPlanningSkills(
     [algorithmic, unrelated, canvas, frontend],
-    "Use frontend-design only for this live validation",
+    understandTask({ objective: "Use frontend-design only for this live validation" }),
     [],
   );
   assert.deepEqual(selected.map((skill) => skill.name), ["frontend-design"]);
 
   const none = selectPlanningSkills(
     [algorithmic, unrelated],
-    "继续",
+    understandTask({ objective: "继续" }),
     [],
   );
   assert.deepEqual(none, []);
@@ -6051,7 +6218,7 @@ test("selectPlanningSkillRoles does not let an uploaded workbook choose the prim
 
   const selected = selectPlanningSkillRoles(
     [xlsx, documents],
-    "分析一下这个表格，生成一个评价报告",
+    understandTask({ objective: "分析一下这个表格，生成一个评价报告", uploadedSources: [source] }),
     [],
     [source],
   );
@@ -6086,17 +6253,17 @@ test("native uploaded PDF transform recall carries resolved task semantics to th
     chunkCount: 1,
     truncated: false,
   }));
-  const recallInput = planningSkillRecallInput({
+  const understanding = understandTask({
     objective: "把这三个文件合并一下",
     uploadedSources: sources,
   });
 
-  const selected = selectPlanningSkillRoles([docx, pdf], recallInput, [], sources);
+  const selected = selectPlanningSkillRoles([docx, pdf], understanding, [], sources);
 
   assert.deepEqual(selected.map((item) => item.skill.id), [pdf.id]);
 });
 
-test("uploaded formats do not turn information extraction into native artifact work", () => {
+test("structured task understanding does not turn uploaded formats into native artifact work", () => {
   const source: UploadedSourceSummary = {
     id: "src_pdf_extraction",
     originalName: "input.pdf",
@@ -6108,13 +6275,15 @@ test("uploaded formats do not turn information extraction into native artifact w
     chunkCount: 1,
     truncated: false,
   };
-  const recallInput = planningSkillRecallInput({
+  const understanding = understandTask({
     objective: "提取这份文件的文字并总结重点",
     uploadedSources: [source],
   });
 
   assert.equal(classifyTaskIntent({ objective: "提取这份文件的文字并总结重点" }).artifactAction, "none");
-  assert.doesNotMatch(recallInput, /uploaded_native_artifact_context/);
+  assert.equal(understanding.operation, "answer");
+  assert.equal(understanding.evidence.uploadedInput, true);
+  assert.equal(understanding.deliverable.action, "none");
 });
 
 test("Planner receives bounded attachment count, status, and format facts without output-format inference", () => {
@@ -6173,7 +6342,7 @@ test("selectPlanningSkillRoles expands a selected Skill's declared source-provid
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"], ["local_script"]),
   });
 
-  const selected = selectPlanningSkillRoles([analysis, mysql], "分析唐山热轧盘螺价格走势", []);
+  const selected = selectPlanningSkillRoles([analysis, mysql], understandTask({ objective: "分析唐山热轧盘螺价格走势" }), []);
 
   assert.deepEqual(selected.map((item) => ({
     name: item.skill.name,
@@ -6216,10 +6385,12 @@ test("selectPlanningSkillRoles exposes semantic review candidates for an unsegme
 
   const selected = selectPlanningSkillRoles(
     [enterprise, analysis, mysql],
-    "2025 年 11 月 3 日，唐山市河钢 HRB400E Φ8 热轧盘螺工程采购价",
+    understandTask({
+      objective: "2025 年 11 月 3 日，唐山市河钢 HRB400E Φ8 热轧盘螺工程采购价",
+      evidenceDemand: "source_grounded",
+    }),
     [],
     [],
-    "source_grounded",
   );
 
   assert.ok(selected.some((item) => item.skill.id === analysis.id));
@@ -6228,6 +6399,142 @@ test("selectPlanningSkillRoles exposes semantic review candidates for an unsegme
     selected.find((item) => item.skill.id === analysis.id)?.selection.reason ?? "",
     /Low-confidence lexical recall candidate/,
   );
+});
+
+test("selectPlanningSkillRoles keeps a source-grounded domain analysis candidate when HTML delivery is also requested", () => {
+  const dashboard = skillFixture({
+    id: "dashboard",
+    name: "build-dashboard",
+    description: "Build an interactive HTML dashboard with charts and tables.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"], ["dataset"]),
+  });
+  const analysis = skillFixture({
+    id: "steel-analysis",
+    name: "steel-market-analysis",
+    description: "将可核验的钢材数据库时序转为趋势、区间、比较或风险分析。",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"], ["content"]),
+      semanticTags: ["steel-market", "commodity-price", "time-series-analysis"],
+      intentExamples: ["查询指定日期、地区、生产企业、牌号和规格对应的钢材价格或指标数值"],
+      requiredSkillNames: ["mysql-steel-data"],
+    },
+  });
+  const mysql = skillFixture({
+    id: "steel-data",
+    name: "mysql-steel-data",
+    description: "读取部署映射的钢材指标目录和原始时序。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [dashboard, analysis, mysql],
+    understandTask({
+      objective: "分析 2025 年 11 月 3 日至 12 月 4 日，唐山市河钢 HRB400E Φ8 热轧盘螺工程采购价走势，并生成 HTML 格式的分析报告",
+      evidenceDemand: "source_grounded",
+    }),
+    [],
+    [],
+  );
+
+  assert.ok(selected.some((item) => item.skill.id === dashboard.id));
+  assert.ok(selected.some((item) => item.skill.id === analysis.id));
+  assert.equal(selected.find((item) => item.skill.id === mysql.id)?.companionForSkillId, analysis.id);
+});
+
+test("selectPlanningSkillRoles does not let DOCX input context displace a semantic HTML assessment Skill", () => {
+  const docx = skillFixture({
+    id: "docx",
+    name: "docx",
+    description: "Create, read, edit, and manipulate Word documents.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"], ["document"]),
+  });
+  const cityCarbon = skillFixture({
+    id: "city-carbon",
+    name: "city-carbon-ai-assessment",
+    description: "用于城市碳评估、项目碳排放评估、低碳评分、优化建议和评估报告。",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document", "none"], ["document", "rubric"]),
+  });
+  const dashboard = skillFixture({
+    id: "dashboard",
+    name: "build-dashboard",
+    description: "Build an interactive HTML dashboard with charts and tables.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"], ["dataset"]),
+  });
+  const source: UploadedSourceSummary = {
+    id: "src_project",
+    originalName: "qingpu-low-carbon-project-materials.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: ".docx",
+    byteSize: 43_842,
+    sha256: "c".repeat(64),
+    status: "ready",
+    chunkCount: 1,
+    truncated: false,
+  };
+  const understanding = understandTask({
+    objective: "评估这个项目的碳排放情况并提出优化建议，并生成 HTML 格式的最终报告",
+    uploadedSources: [source],
+    evidenceDemand: "source_grounded",
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [docx, dashboard, cityCarbon],
+    understanding,
+    [],
+    [source],
+  );
+
+  assert.ok(selected.some((item) => item.skill.id === cityCarbon.id));
+  assert.ok(selected.some((item) => item.skill.id === dashboard.id));
+  assert.ok(!selected.some((item) => item.skill.id === docx.id));
+});
+
+test("selectPlanningSkillRoles prefers the concrete steel domain over a generic assessment Skill for a steel HTML report", () => {
+  const steel = skillFixture({
+    id: "steel-analysis",
+    name: "steel-market-analysis",
+    description: "将可核验的钢材数据库时序转为趋势、区间、比较或风险分析。",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"], ["content"]),
+      semanticTags: ["steel-market", "commodity-price", "time-series-analysis"],
+      requiredSkillNames: ["mysql-steel-data"],
+    },
+  });
+  const mysql = skillFixture({
+    id: "steel-data",
+    name: "mysql-steel-data",
+    description: "读取部署映射的钢材指标目录和原始时序。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+  });
+  const city = skillFixture({
+    id: "city-carbon",
+    name: "city-carbon-ai-assessment",
+    description: "用于城市碳评估、项目碳排放评估、低碳评分、优化建议和评估报告。",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document", "none"], ["document", "rubric"]),
+  });
+  const dashboard = skillFixture({
+    id: "dashboard",
+    name: "build-dashboard",
+    description: "Build an interactive HTML dashboard with charts and tables.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["html"], ["dataset"]),
+  });
+  const understanding = understandTask({
+    objective: "分析钢材价格走势，输出 HTML 格式的分析报告。需要具体的日期和价格数据。",
+    userConstraints: ["以 HTML 格式输出完整报告", "数据来源需明确可验证"],
+    evidenceDemand: "source_grounded",
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [city, dashboard, steel, mysql],
+    understanding,
+    [],
+    [],
+  );
+
+  assert.ok(selected.some((item) => item.skill.id === steel.id));
+  assert.ok(selected.some((item) => item.skill.id === dashboard.id));
+  assert.equal(selected.find((item) => item.skill.id === mysql.id)?.companionForSkillId, steel.id);
+  assert.ok(!selected.some((item) => item.skill.id === city.id));
 });
 
 test("selectPlanningSkillRoles preserves CJK phrases and mixed Unicode identifiers as neutral recall evidence", () => {
@@ -6246,10 +6553,9 @@ test("selectPlanningSkillRoles preserves CJK phrases and mixed Unicode identifie
 
   const selected = selectPlanningSkillRoles(
     [unrelated, matching],
-    "读取热轧盘螺 hrb400e φ8 的原始记录",
+    understandTask({ objective: "读取热轧盘螺 hrb400e φ8 的原始记录", evidenceDemand: "source_grounded" }),
     [],
     [],
-    "source_grounded",
   );
 
   assert.deepEqual(selected.map((item) => item.skill.id), [matching.id]);
@@ -6275,10 +6581,9 @@ test("selectPlanningSkillRoles does not make a steel term list the core trigger"
 
   const selected = selectPlanningSkillRoles(
     [steel, semiconductor],
-    "查询某型号芯片在指定日期的工程采购价",
+    understandTask({ objective: "查询某型号芯片在指定日期的工程采购价", evidenceDemand: "source_grounded" }),
     [],
     [],
-    "source_grounded",
   );
 
   assert.deepEqual(selected.map((item) => item.skill.id), [semiconductor.id]);
@@ -6365,14 +6670,14 @@ test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and su
 
   const naturalLanguageSelected = selectPlanningSkills(
     [dashboard, apiQuery],
-    "了解合同备案相关的 API 信息",
+    understandTask({ objective: "了解合同备案相关的 API 信息" }),
     [],
   );
   assert.deepEqual(naturalLanguageSelected.map((skill) => skill.name), ["api-query"]);
 
   const aliasSelected = selectPlanningSkills(
     [dashboard, apiQuery],
-    "查接口涉及哪些表",
+    understandTask({ objective: "查接口涉及哪些表" }),
     [],
   );
   assert.deepEqual(aliasSelected.map((skill) => skill.name), ["api-query"]);
@@ -6387,7 +6692,7 @@ test("selectPlanningSkills recalls an API source-provider Skill for Chinese para
   });
   const selected = selectPlanningSkills(
     [apiQuery],
-    "查询宝武集团数据中台中合同备案 API 的参数信息",
+    understandTask({ objective: "查询宝武集团数据中台中合同备案 API 的参数信息" }),
     [],
   );
 
@@ -6404,7 +6709,7 @@ test("selectPlanningSkills recalls a Chinese source-provider Skill for an enterp
 
   const selected = selectPlanningSkills(
     [enterpriseInfo],
-    "查询宝武共享服务有限公司的工商信息和法定代表人",
+    understandTask({ objective: "查询宝武共享服务有限公司的工商信息和法定代表人" }),
     [],
   );
 
@@ -6424,12 +6729,12 @@ test("selectPlanningSkills retains a completed source-provider binding as a mult
   // completed-step context to decide whether this ambiguous turn is a follow-up.
   const continuationCandidates = selectPlanningSkills(
     [enterpriseInfo],
-    "再看看华东分公司的情况",
+    understandTask({ objective: "再看看华东分公司的情况" }),
     [enterpriseInfo.id],
   );
   const unrelatedCandidates = selectPlanningSkills(
     [enterpriseInfo],
-    "再看看华东分公司的情况",
+    understandTask({ objective: "再看看华东分公司的情况" }),
     [],
   );
 
@@ -6486,6 +6791,7 @@ test("ModelPlanner lets the LLM decide a Skill continuation from history and can
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-enterprise-followup",
     input: "再看看华东分公司的情况",
     conversationHistory: [
@@ -6532,7 +6838,7 @@ test("selectPlanningSkills selects a source-provider for current Chinese news wi
   });
 
   for (const request of ["今天有什么 AI 热点新闻", "近一周有哪些 AI 热点新闻"]) {
-    const selected = selectPlanningSkills([aihot], request, []);
+    const selected = selectPlanningSkills([aihot], understandTask({ objective: request }), []);
     assert.deepEqual(selected.map((skill) => skill.name), ["aihot"]);
   }
 });
@@ -6594,6 +6900,7 @@ test("ModelPlanner treats unrelated source-provider prefilter results as candida
   });
 
   const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "generic-web-source-candidates",
     input: "查证宝武集团 2526 工程的真实含义、背景和内容，基于可靠公开来源提供准确信息。",
     turnResolution: {
@@ -6651,7 +6958,7 @@ test("selectPlanningSkills routes legacy Word find-and-replace to the checked-in
 
   const selected = selectPlanningSkills(
     [cityCarbonAssessment, reviewContract, docx],
-    "在疗休养回执2026.doc文件中，将原文中出现的所有名字朱俊改为朱韵之",
+    understandTask({ objective: "在疗休养回执2026.doc文件中，将原文中出现的所有名字朱俊改为朱韵之" }),
     [],
     [source],
   );
@@ -6673,7 +6980,7 @@ test("selectPlanningSkills keeps explicitly bound Skills ahead of generic task w
 
   const selected = selectPlanningSkills(
     [pptx, algorithmic, frontend],
-    "Validate this existing Skill without creating a new Skill.",
+    understandTask({ objective: "Validate this existing Skill without creating a new Skill." }),
     [frontend.id],
   );
 
@@ -6696,7 +7003,7 @@ test("selectPlanningSkills treats spreadsheet repair feedback as an xlsx task", 
 
   const selected = selectPlanningSkills(
     [docx, xlsx],
-    "这个 excel 文件里面中文全是乱码",
+    understandTask({ objective: "这个 excel 文件里面中文全是乱码" }),
     [],
   );
 
@@ -6725,7 +7032,7 @@ test("selectPlanningSkills prefers artifact builders over styling support for HT
 
   const selected = selectPlanningSkills(
     [theme, presentation, webArtifacts],
-    "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的",
+    understandTask({ objective: "帮我做一个 DCMM 4 评级的培训材料，html-ppt 格式的" }),
     [],
   );
 
@@ -6755,7 +7062,7 @@ test("selectPlanningSkills excludes undeclared and support-only Skills from ordi
 
   const selected = selectPlanningSkills(
     [undeclared, theme, webArtifacts],
-    "做一个 DCMM 4 评级培训材料，html-ppt 格式",
+    understandTask({ objective: "做一个 DCMM 4 评级培训材料，html-ppt 格式" }),
     [],
   );
 
@@ -6778,7 +7085,7 @@ test("selectPlanningSkills uses the requested HTML deliverable rather than the u
 
   const selected = selectPlanningSkills(
     [projectAssessment, dashboard],
-    "帮我阅读分析这儿 excel，然后形成一份 html 格式的详细场景分析报告",
+    understandTask({ objective: "帮我阅读分析这儿 excel，然后形成一份 html 格式的详细场景分析报告" }),
     [],
     [{
       id: "src_uploaded",
@@ -6833,6 +7140,7 @@ test("ModelPlanner fails closed on invalid OutcomePlan structure after one admis
   };
   await assert.rejects(
     () => new ModelPlanner(model).plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "run-1",
       input: "build",
       availableSkills: [],
@@ -6880,6 +7188,7 @@ test("ModelPlanner selects Skills from the catalog and submits a Plan without lo
     },
   };
   const plan = await new ModelPlanner(model).plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-1",
     input: "materialize and verify",
     availableSkills: [skill],
@@ -6921,6 +7230,7 @@ test("ModelPlanner keeps optional refinement out of the terminal Plan scope", as
     },
   };
   const plan = await new ModelPlanner(model).plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-1",
     input: "Create a steel company homepage",
     availableSkills: [],
@@ -6961,6 +7271,7 @@ test("ModelPlanner rejects pure Skill activation leaves after one admission corr
 
   await assert.rejects(
     () => new ModelPlanner(model).plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
       runId: "run-1",
       input: "Design a poster",
       availableSkills: [skill],
@@ -10089,7 +10400,7 @@ test("Skill-bound artifact execution context carries workspace and evidence disc
 
     assert.equal(run.status, "completed");
     assert.match(executionRuntimeContext, /agentloop\.skillArtifactWorkflowDiscipline\/v1/);
-    assert.match(executionRuntimeContext, /"evidenceContract":\{"requiredKinds":\["artifact_path","artifact_non_empty","artifact_acceptance"\]/);
+    assert.match(executionRuntimeContext, /"evidenceContract":\{"requiredKinds":\["artifact_path","artifact_non_empty","artifact_acceptance","format_matches_request","artifact_openable"\]/);
     assert.match(executionRuntimeContext, /invoke its package entrypoint directly with relative script arguments/);
     assert.match(executionRuntimeContext, /every writable argument such as --workspace, --output, --outdir/);
     assert.doesNotMatch(executionRuntimeContext, /cannot be used as a command cwd/);
@@ -10951,7 +11262,14 @@ test("RunService skips conversation intent classifier for deterministic artifact
 
     assert.equal(run.status, "completed");
     assert.equal(capturedTask?.responseOnly, undefined);
-    assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+    assert.equal(capturedTask?.taskUnderstanding.schema, "agentloop.taskUnderstanding/v1");
+    assert.equal(capturedTask?.taskUnderstanding.deliverable.kind, "image");
+    const events = await runs.events(owner.user.id, run.id);
+    assert.deepEqual(events.find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+    assert.deepEqual(
+      events.find((event) => event.type === "planning.task.understood")?.data,
+      capturedTask?.taskUnderstanding,
+    );
   } finally {
     database.close();
   }

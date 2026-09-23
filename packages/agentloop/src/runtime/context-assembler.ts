@@ -911,7 +911,7 @@ export class ContextAssembler {
         JSON.stringify({
           schema: "agentloop.resultContext/v1",
           results: this.resultContextEntries,
-          readProtocol: "Use read_result with resultId and an optional JSON Pointer/array window. Never provide a path or hash.",
+          readProtocol: "Use read_result with resultId and an optional pointer rooted in the persisted result envelope plus an array window. For agentloop.jsonRead/v1 use query.resultPointer, not query.sourcePointer. Never provide a path or hash.",
         }),
         "</runtime_result_context>",
       ]),
@@ -1326,7 +1326,7 @@ function structuredToolResultProjection(toolName: string, content: string): stri
       }) : undefined,
       caveats: value.caveats,
       valuesOmitted: true,
-      instruction: "JSON values are omitted only from this prompt projection, not from Runtime storage. Use read_result with resultRef.resultId and the recorded JSON Pointer/offset/limit to recover exact values. Do not replay a path or hash and do not rerun source extraction solely to recover them.",
+      instruction: "JSON values are omitted only from this prompt projection, not from Runtime storage. For agentloop.jsonRead/v1, use each query's resultPointer (for example /queries/0/value) with read_result and its resultRef.resultId; the query's sourcePointer is for computer_read_json and must not be passed to read_result. Do not replay a path or hash and do not rerun source extraction solely to recover them.",
     }));
   }
   if (schema === "agentloop.paginatedHtmlMaterialization/v1") {

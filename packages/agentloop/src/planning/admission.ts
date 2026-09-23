@@ -111,6 +111,7 @@ export function admitPlan(input: {
   const stepIds = proposal.steps.map((step) => step.id);
   assertUnique(stepIds, "step IDs");
   const stepIdSet = new Set(stepIds);
+  const dependedOnStepIds = new Set(proposal.steps.flatMap((step) => step.dependencies));
   const selectedSet = new Set(selectedSkillIds);
   const selectedRoleBySkillId = new Map<string, string>();
   for (const selection of proposal.selectedSkillRoles ?? []) {
@@ -157,7 +158,7 @@ export function admitPlan(input: {
       reject(`Initial OutcomePlan cannot contain repair leaf ${step.id}`);
     }
     if (step.evidenceContract !== undefined) assertEvidenceContract(step.id, step.evidenceContract);
-    const evidenceContract = normalizeEvidenceContract(step.evidenceContract);
+    let evidenceContract = normalizeEvidenceContract(step.evidenceContract);
     if (step.dependencies.includes(step.id)) reject(`Step ${step.id} cannot depend on itself`);
     for (const dependency of step.dependencies) {
       if (!stepIdSet.has(dependency)) reject(`Step ${step.id} has unknown dependency ${dependency}`);
@@ -186,6 +187,14 @@ export function admitPlan(input: {
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
       );
     }
+    const artifactAcceptanceAvailable = input.availableToolNames.has("verify_artifact_acceptance");
+    evidenceContract = normalizeWorkspaceArtifactEvidenceContract({
+      contract: evidenceContract,
+      terminalLeaf: kind === "leaf" && !dependedOnStepIds.has(step.id),
+      fileProducingStep,
+      taskIntent: input.taskIntent,
+      artifactAcceptanceAvailable,
+    });
     const requiredCapabilities = new Set(step.requiredCapabilities);
     if (kind === "leaf" && stepSkillIds.length > 0) requiredCapabilities.add("skill_instruction_load");
     // Artifact delivery observations are a single receipt family. A planner
@@ -196,12 +205,20 @@ export function admitPlan(input: {
     if (
       kind === "leaf"
       && evidenceContract?.requiredKinds.some((kind) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind))
-      && input.availableToolNames.has("verify_artifact_acceptance")
+      && artifactAcceptanceAvailable
     ) {
       requiredCapabilities.add("artifact_acceptance");
     }
-    const completionEvidenceContract = normalizeCompletionEvidenceContract(step.role, evidenceContract, input.taskIntent);
-    const completionCriteria = normalizeCompletionSuccessCriteria(step.role, step.successCriteria, input.taskIntent);
+    const completionEvidenceContract = normalizeCompletionEvidenceContract(
+      step.role,
+      evidenceContract,
+      input.taskIntent,
+      fileProducingStep && artifactAcceptanceAvailable,
+    );
+    const completionCriteria = ensureArtifactDeliverySuccessCriteria(
+      normalizeCompletionSuccessCriteria(step.role, step.successCriteria, input.taskIntent),
+      completionEvidenceContract,
+    );
     normalizeCompletionCapabilities(step.role, requiredCapabilities, input.taskIntent);
     const criteria: SuccessCriterion[] = [...completionCriteria];
     for (const skillId of stepSkillIds) {
@@ -538,10 +555,46 @@ function normalizeEvidenceContract(contract: EvidenceContract | undefined): Evid
   return { ...contract, requiredKinds };
 }
 
+/**
+ * Extension and legacy planners can bypass ModelPlanner's proposal
+ * normalization. Admission is therefore the final common boundary that turns
+ * a requested workspace artifact into an observable delivery contract rather
+ * than a text-only terminal leaf. This is format-neutral: the acceptance Tool
+ * selects the applicable profile from the produced artifact.
+ */
+function normalizeWorkspaceArtifactEvidenceContract(input: {
+  readonly contract: EvidenceContract | undefined;
+  readonly terminalLeaf: boolean;
+  readonly fileProducingStep: boolean;
+  readonly taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined;
+  readonly artifactAcceptanceAvailable: boolean;
+}): EvidenceContract | undefined {
+  if (
+    !input.terminalLeaf
+    || !input.fileProducingStep
+    || input.taskIntent?.deliverySurface !== "workspace_artifact"
+    || input.taskIntent.artifactKind === undefined
+    || input.taskIntent.artifactKind === "none"
+  ) return input.contract;
+  return {
+    requiredKinds: uniqueEvidenceKindList([
+      ...(input.contract?.requiredKinds ?? []),
+      "artifact_path",
+      "artifact_non_empty",
+      "format_matches_request",
+      ...(input.artifactAcceptanceAvailable
+        ? ["artifact_acceptance" as const, "artifact_openable" as const]
+        : []),
+    ]),
+    caveatPolicy: input.contract?.caveatPolicy ?? "none",
+  };
+}
+
 function normalizeCompletionEvidenceContract(
   role: PlanProposal["steps"][number]["role"],
   contract: EvidenceContract | undefined,
   taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
+  requireArtifactAcceptance: boolean,
 ): EvidenceContract | undefined {
   // Evidence contracts are explicit semantic requirements, not a generic
   // delivery protocol. Runtime records every delivery and Tool result for
@@ -551,7 +604,47 @@ function normalizeCompletionEvidenceContract(
     const requiredKinds = contract.requiredKinds.filter((kind) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind));
     return requiredKinds.length === 0 ? undefined : { ...contract, requiredKinds };
   }
-  return contract;
+  if (!requireArtifactAcceptance || taskIntent?.deliverySurface !== "workspace_artifact") return contract;
+  return {
+    ...contract,
+    requiredKinds: uniqueEvidenceKindList([
+      ...contract.requiredKinds,
+      "artifact_acceptance",
+      "artifact_openable",
+    ]),
+  };
+}
+
+/**
+ * The evidence contract is the authority for completion, but recording its
+ * Runtime-owned terminal checks as criteria keeps Assessment feedback and
+ * recovery focused on the missing receipt rather than on model prose.
+ */
+function ensureArtifactDeliverySuccessCriteria(
+  criteria: readonly SuccessCriterion[],
+  contract: EvidenceContract | undefined,
+): readonly SuccessCriterion[] {
+  if (contract === undefined) return criteria;
+  const requiredTerminalKinds = contract.requiredKinds.filter((kind) =>
+    kind === "artifact_acceptance" || kind === "artifact_openable",
+  );
+  if (requiredTerminalKinds.length === 0) return criteria;
+  const byId = new Map(criteria.map((criterion) => [criterion.id, criterion]));
+  for (const kind of requiredTerminalKinds) {
+    if (byId.has(kind)) continue;
+    byId.set(kind, {
+      id: kind,
+      description: kind === "artifact_acceptance"
+        ? "The final artifact has an accepted or caveated Runtime acceptance receipt."
+        : "The final artifact can be opened by the applicable Runtime acceptance check.",
+      source: "planner",
+    });
+  }
+  return [...byId.values()];
+}
+
+function uniqueEvidenceKindList(values: readonly EvidenceKind[]): EvidenceKind[] {
+  return [...new Set(values)];
 }
 
 function normalizeCompletionSuccessCriteria(

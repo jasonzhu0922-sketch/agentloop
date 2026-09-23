@@ -218,6 +218,8 @@ export interface CapabilityGrant {
   readonly skillExecutionRoots: readonly SkillExecutionRootGrant[];
   /** Runtime-compiled, immutable inputs for a Skill operation following an exact HIL selection. */
   readonly resolvedOperationBindings: readonly import("./decision-binding.ts").ResolvedOperationBinding[];
+  /** Declared package actions Runtime may authenticate as workflow evidence producers. */
+  readonly workflowEvidenceBindings?: readonly import("./decision-binding.ts").SkillWorkflowEvidenceBinding[];
   readonly allowedToolNames: ReadonlySet<string>;
   readonly allowedSkillIds: ReadonlySet<string>;
 }

@@ -9,9 +9,14 @@ const MAX_PREVIEW_TEXT_CHARS = 80_000;
 const MAX_PREVIEW_ROWS = 80;
 const MAX_PREVIEW_COLUMNS = 24;
 const MAX_PREVIEW_SLIDES = 60;
+const MAX_PREVIEW_IMAGES = 24;
+const MAX_PREVIEW_IMAGE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_PPTX_WIDTH = 12_192_000;
 const DEFAULT_PPTX_HEIGHT = 6_858_000;
 const COMMAND_ARTIFACT_EXTENSION_PATTERN = /(?:^|[\s'"(])([^\s'"),:;]+?\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx))(?=$|[\s'"),:;])/giu;
+const GENERATED_SOURCE_EXTENSIONS = new Set([
+  ".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ps1", ".py", ".sh", ".ts", ".tsx", ".zsh",
+]);
 
 export interface ProcessArtifact {
   readonly runId: string;
@@ -49,6 +54,13 @@ export type ProcessArtifactPreview =
     readonly name: string;
     readonly paragraphs: readonly string[];
     readonly truncated: boolean;
+    readonly schema?: "agentloop.docxPreview/v2";
+    readonly page?: {
+      readonly widthTwips: number;
+      readonly heightTwips: number;
+      readonly marginsTwips: { readonly top: number; readonly right: number; readonly bottom: number; readonly left: number };
+    };
+    readonly blocks?: readonly DocxPreviewBlock[];
   }
   | {
     readonly kind: "xlsx";
@@ -79,6 +91,42 @@ export type ProcessArtifactPreview =
     readonly name: string;
     readonly mimeType: string;
   };
+
+export type DocxPreviewBlock = DocxPreviewParagraph | DocxPreviewTable | DocxPreviewImage;
+export interface DocxPreviewParagraph {
+  readonly type: "paragraph";
+  readonly style?: string;
+  readonly alignment?: "left" | "center" | "right" | "justify";
+  readonly indentLeftTwips?: number;
+  readonly indentRightTwips?: number;
+  readonly firstLineTwips?: number;
+  readonly spaceBeforeTwips?: number;
+  readonly spaceAfterTwips?: number;
+  readonly lineTwips?: number;
+  readonly numbering?: { readonly level: number; readonly ordered: boolean };
+  readonly runs: readonly DocxPreviewRun[];
+}
+export interface DocxPreviewRun {
+  readonly text: string;
+  readonly bold?: boolean;
+  readonly italic?: boolean;
+  readonly underline?: boolean;
+  readonly strike?: boolean;
+  readonly color?: string;
+  readonly fontSizeHalfPoints?: number;
+  readonly fontFamily?: string;
+}
+export interface DocxPreviewTable {
+  readonly type: "table";
+  readonly rows: readonly { readonly cells: readonly { readonly blocks: readonly DocxPreviewBlock[] }[] }[];
+}
+export interface DocxPreviewImage {
+  readonly type: "image";
+  readonly src: string;
+  readonly alt?: string;
+  readonly widthEmu?: number;
+  readonly heightEmu?: number;
+}
 
 export type PptxPreviewElement =
   | {
@@ -117,12 +165,15 @@ export async function collectProcessArtifacts(input: {
   readonly workspaceRoot: string;
   readonly runCreatedAt: number;
   readonly events: readonly StoredRunEvent[];
+  /** Promote observed user-facing files once the conversation candidate was approved. */
+  readonly promoteProducedArtifacts?: boolean;
 }): Promise<ProcessArtifact[]> {
   const candidates = collectCandidatePaths(input.events);
   const finalPaths = await collectFinalArtifactPaths({
     workspaceRoot: input.workspaceRoot,
     runCreatedAt: input.runCreatedAt,
     events: input.events,
+    promoteProducedArtifacts: input.promoteProducedArtifacts === true,
   });
   const artifacts = new Map<string, ProcessArtifact>();
   for (const candidate of candidates) {
@@ -209,6 +260,12 @@ export function artifactId(runId: string, path: string): string {
   return createHash("sha256").update(`${runId}\0${path}`).digest("hex");
 }
 
+/** Command stream captures are execution evidence, not workspace artifacts. */
+export function isExecutionLogPath(path: string): boolean {
+  const basename = path.trim().replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() || "";
+  return basename.endsWith("stdout.txt") || basename.endsWith("stderr.txt");
+}
+
 function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
   path: string;
   sourceTool: ArtifactSourceTool;
@@ -237,18 +294,28 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
       if (!candidates.has(path)) candidates.set(path, toolName);
     }
   }
-  return [...candidates.entries()].map(([path, sourceTool]) => ({ path, sourceTool }));
+  return [...candidates.entries()]
+    .filter(([path]) => !isExecutionLogPath(path))
+    .map(([path, sourceTool]) => ({ path, sourceTool }));
 }
 
 async function collectFinalArtifactPaths(input: {
   readonly workspaceRoot: string;
   readonly runCreatedAt: number;
   readonly events: readonly StoredRunEvent[];
+  readonly promoteProducedArtifacts: boolean;
 }): Promise<Set<string>> {
   const paths = new Set<string>();
   for (const rawPath of collectAcceptedArtifactPaths(input.events)) {
     const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, rawPath);
     if (file !== undefined) paths.add(file.path);
+  }
+  if (input.promoteProducedArtifacts) {
+    for (const candidate of collectCandidatePaths(input.events)) {
+      if (isGeneratedSourcePath(candidate.path)) continue;
+      const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, candidate.path);
+      if (file !== undefined) paths.add(file.path);
+    }
   }
   return paths;
 }
@@ -262,7 +329,7 @@ function collectAcceptedArtifactPaths(events: readonly StoredRunEvent[]): string
     if (result === undefined || !isAcceptedArtifactAcceptanceResult(result)) continue;
     const artifact = recordValue(result.artifact);
     const path = stringValue(artifact?.path) ?? stringValue(artifact?.requestedPath) ?? stringValue(result.path);
-    if (path !== undefined && path.length > 0 && !path.includes("\0")) paths.add(path);
+    if (path !== undefined && path.length > 0 && !path.includes("\0") && !isExecutionLogPath(path)) paths.add(path);
   }
   return [...paths];
 }
@@ -275,6 +342,14 @@ function isAcceptedArtifactAcceptanceResult(result: Readonly<Record<string, unkn
   if (failed.includes("artifact_acceptance")) return false;
   const verdict = stringValue(result.verdict);
   return satisfied.includes("artifact_acceptance") || verdict === "accepted" || verdict === "caveated";
+}
+
+function isGeneratedSourcePath(path: string): boolean {
+  const normalized = path.trim().toLowerCase().replaceAll("\\", "/");
+  const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+  if (basename === "makefile" || basename === "dockerfile") return true;
+  const dot = basename.lastIndexOf(".");
+  return dot > 0 && GENERATED_SOURCE_EXTENSIONS.has(basename.slice(dot));
 }
 
 function parseResult(value: unknown): Record<string, unknown> | undefined {
@@ -397,10 +472,11 @@ function isTextPreview(mimeType: string, extension: string): boolean {
   return extension === "md" || extension === "txt" || extension === "csv" || extension === "json" || extension === "html" || extension === "htm";
 }
 
-function previewDocx(content: Buffer): { paragraphs: readonly string[]; truncated: boolean } {
+function previewDocx(content: Buffer): { paragraphs: readonly string[]; truncated: boolean; schema: "agentloop.docxPreview/v2"; page: DocxPreviewPage; blocks: readonly DocxPreviewBlock[] } {
   const files = readZipEntries(content);
+  const binaryFiles = readZipBinaryEntries(content);
   const documentXml = files.get("word/document.xml");
-  if (documentXml === undefined) return { paragraphs: [], truncated: false };
+  if (documentXml === undefined) return { paragraphs: [], truncated: false, schema: "agentloop.docxPreview/v2", page: defaultDocxPage(), blocks: [] };
   const paragraphs = [...documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
     .map((match) => xmlTextFromWordParagraph(match[0]))
     .filter((text) => text.length > 0);
@@ -412,7 +488,137 @@ function previewDocx(content: Buffer): { paragraphs: readonly string[]; truncate
     selected.push(paragraph);
     chars += paragraph.length + 1;
   }
-  return { paragraphs: selected, truncated };
+  const orderedByNumId = parseDocxNumbering(files.get("word/numbering.xml") ?? "");
+  const relationships = parseDocxRelationships(files.get("word/_rels/document.xml.rels") ?? "");
+  return { paragraphs: selected, truncated, schema: "agentloop.docxPreview/v2", page: parseDocxPage(documentXml), blocks: parseDocxBlocks(documentXml, orderedByNumId, relationships, binaryFiles) };
+}
+
+interface DocxPreviewPage {
+  readonly widthTwips: number;
+  readonly heightTwips: number;
+  readonly marginsTwips: { readonly top: number; readonly right: number; readonly bottom: number; readonly left: number };
+}
+
+function defaultDocxPage(): DocxPreviewPage {
+  return { widthTwips: 11906, heightTwips: 16838, marginsTwips: { top: 1440, right: 1440, bottom: 1440, left: 1440 } };
+}
+
+function parseDocxPage(xml: string): DocxPreviewPage {
+  const section = [...xml.matchAll(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g)].at(-1)?.[0] ?? "";
+  const size = /<w:pgSz\b([^>]*)\/>/.exec(section)?.[1] ?? "";
+  const margin = /<w:pgMar\b([^>]*)\/>/.exec(section)?.[1] ?? "";
+  return {
+    widthTwips: Number(xmlAttribute(size, "w:w")) || 11906,
+    heightTwips: Number(xmlAttribute(size, "w:h")) || 16838,
+    marginsTwips: { top: Number(xmlAttribute(margin, "w:top")) || 1440, right: Number(xmlAttribute(margin, "w:right")) || 1440, bottom: Number(xmlAttribute(margin, "w:bottom")) || 1440, left: Number(xmlAttribute(margin, "w:left")) || 1440 },
+  };
+}
+
+function xmlAttribute(attrs: string, name: string): string | undefined {
+  return new RegExp(`(?:^|\\s)${name.replace(":", "\\:")}="([^"]*)"`).exec(attrs)?.[1];
+}
+
+function parseDocxBlocks(xml: string, orderedByNumId: ReadonlyMap<number, boolean> = new Map(), relationships: ReadonlyMap<string, string> = new Map(), binaryFiles: ReadonlyMap<string, Buffer> = new Map()): DocxPreviewBlock[] {
+  const body = /<w:body\b[\s\S]*?<\/w:body>/.exec(xml)?.[0] ?? xml;
+  const blocks: DocxPreviewBlock[] = [];
+  for (const match of body.matchAll(/<w:tbl\b[\s\S]*?<\/w:tbl>|<w:p\b[\s\S]*?<\/w:p>/g)) {
+    const block = match[0] ?? "";
+    if (block.startsWith("<w:tbl")) blocks.push(parseDocxTable(block, orderedByNumId, relationships, binaryFiles));
+    else {
+      const paragraph = parseDocxParagraph(block, orderedByNumId);
+      if (paragraph.runs.length > 0) blocks.push(paragraph);
+      blocks.push(...parseDocxImages(block, relationships, binaryFiles));
+    }
+  }
+  return blocks;
+}
+
+function parseDocxTable(xml: string, orderedByNumId: ReadonlyMap<number, boolean>, relationships: ReadonlyMap<string, string>, binaryFiles: ReadonlyMap<string, Buffer>): DocxPreviewTable {
+  const rows = [...xml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)].map((rowMatch) => ({
+    cells: [...(rowMatch[0] ?? "").matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)].map((cellMatch) => ({ blocks: parseDocxBlocks(cellMatch[0] ?? "", orderedByNumId, relationships, binaryFiles) })),
+  }));
+  return { type: "table", rows };
+}
+
+function parseDocxImages(xml: string, relationships: ReadonlyMap<string, string>, binaryFiles: ReadonlyMap<string, Buffer>): DocxPreviewImage[] {
+  const images: DocxPreviewImage[] = [];
+  for (const match of xml.matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+    if (images.length >= MAX_PREVIEW_IMAGES) break;
+    const drawing = match[0] ?? "";
+    const relationshipId = /<(?:a:|pic:)?blip\b[^>]*\br:embed="([^"]+)"/.exec(drawing)?.[1];
+    const target = relationshipId === undefined ? undefined : relationships.get(relationshipId);
+    const data = target === undefined ? undefined : binaryFiles.get(target);
+    if (data === undefined || data.length === 0 || data.length > MAX_PREVIEW_IMAGE_BYTES) continue;
+    const extension = target?.split(".").pop()?.toLowerCase() ?? "png";
+    const mime = extension === "jpg" || extension === "jpeg" ? "image/jpeg" : extension === "gif" ? "image/gif" : extension === "svg" ? "image/svg+xml" : "image/png";
+    const extent = /<wp:extent\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/.exec(drawing);
+    images.push({ type: "image", src: `data:${mime};base64,${data.toString("base64")}`, ...(extent?.[1] === undefined ? {} : { widthEmu: Number(extent[1]) }), ...(extent?.[2] === undefined ? {} : { heightEmu: Number(extent[2]) }) });
+  }
+  return images;
+}
+
+function parseDocxRelationships(xml: string): Map<string, string> {
+  const relationships = new Map<string, string>();
+  for (const match of xml.matchAll(/<Relationship\b([^>]*)\/>/g)) {
+    const attrs = match[1] ?? "";
+    const id = /\bId="([^"]+)"/.exec(attrs)?.[1];
+    const target = /\bTarget="([^"]+)"/.exec(attrs)?.[1];
+    if (id === undefined || target === undefined || !/^(?:media\/|\.\.\/media\/)/.test(target)) continue;
+    relationships.set(id, target.startsWith("../") ? `word/${target.slice(3)}` : `word/${target}`);
+  }
+  return relationships;
+}
+
+function parseDocxParagraph(xml: string, orderedByNumId: ReadonlyMap<number, boolean>): DocxPreviewParagraph {
+  const props = /<w:pPr\b[\s\S]*?<\/w:pPr>/.exec(xml)?.[0] ?? "";
+  const alignmentValue = /<w:jc\b[^>]*\bw:val="(\w+)"/.exec(props)?.[1];
+  const alignment = alignmentValue === "center" || alignmentValue === "right" || alignmentValue === "both" || alignmentValue === "justify" ? (alignmentValue === "both" ? "justify" : alignmentValue) : undefined;
+  const indent = /<w:ind\b([^>]*)\/>/.exec(props)?.[1] ?? "";
+  const spacing = /<w:spacing\b([^>]*)\/>/.exec(props)?.[1] ?? "";
+  const numbering = /<w:numPr\b[\s\S]*?<w:ilvl\b[^>]*\bw:val="(\d+)"[\s\S]*?<w:numId\b[^>]*\bw:val="(\d+)"/.exec(props);
+  const style = /<w:pStyle\b[^>]*\bw:val="([^"]+)"/.exec(props)?.[1];
+  const runs = [...xml.matchAll(/<w:r\b[\s\S]*?<\/w:r>/g)].map((match) => parseDocxRun(match[0] ?? "")).filter((run) => run.text.length > 0);
+  return {
+    type: "paragraph",
+    ...(style === undefined ? {} : { style }),
+    ...(alignment === undefined ? {} : { alignment }),
+    ...optionalNumber(indent, "w:left", "indentLeftTwips"),
+    ...optionalNumber(indent, "w:right", "indentRightTwips"),
+    ...optionalNumber(indent, "w:firstLine", "firstLineTwips"),
+    ...optionalNumber(spacing, "w:before", "spaceBeforeTwips"),
+    ...optionalNumber(spacing, "w:after", "spaceAfterTwips"),
+    ...optionalNumber(spacing, "w:line", "lineTwips"),
+    ...(numbering === null ? {} : { numbering: { level: Number(numbering[1]) || 0, ordered: orderedByNumId.get(Number(numbering[2])) ?? false } }),
+    runs,
+  };
+}
+
+function parseDocxNumbering(xml: string): Map<number, boolean> {
+  const abstractFormats = new Map<number, boolean>();
+  for (const match of xml.matchAll(/<w:abstractNum\b[^>]*\bw:abstractNumId="(\d+)"[\s\S]*?<\/w:abstractNum>/g)) {
+    abstractFormats.set(Number(match[1]), !/<w:numFmt\b[^>]*\bw:val="(?:bullet|picture)"/.test(match[0] ?? ""));
+  }
+  const formats = new Map<number, boolean>();
+  for (const match of xml.matchAll(/<w:num\b[^>]*\bw:numId="(\d+)"[\s\S]*?<\/w:num>/g)) {
+    const abstractId = Number(/<w:abstractNumId\b[^>]*\bw:val="(\d+)"/.exec(match[0] ?? "")?.[1]);
+    const ordered = abstractFormats.get(abstractId);
+    if (ordered !== undefined) formats.set(Number(match[1]), ordered);
+  }
+  return formats;
+}
+
+function parseDocxRun(xml: string): DocxPreviewRun {
+  const props = /<w:rPr\b[\s\S]*?<\/w:rPr>/.exec(xml)?.[0] ?? "";
+  const text = [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>/g)].map((match) => match[0].startsWith("<w:tab") ? "\t" : match[0].startsWith("<w:br") ? "\n" : decodeXml(match[1] ?? "")).join("");
+  const color = /<w:color\b[^>]*\bw:val="([0-9A-Fa-f]{6})"/.exec(props)?.[1];
+  const fontFamily = /<w:rFonts\b[^>]*\bw:eastAsia="([^"]+)"/.exec(props)?.[1] ?? /<w:rFonts\b[^>]*\bw:ascii="([^"]+)"/.exec(props)?.[1];
+  const size = Number(/<w:sz\b[^>]*\bw:val="(\d+)"/.exec(props)?.[1]);
+  return { text, ...(props.includes("<w:b") ? { bold: true } : {}), ...(props.includes("<w:i") ? { italic: true } : {}), ...(props.includes("<w:u") ? { underline: true } : {}), ...(props.includes("<w:strike") ? { strike: true } : {}), ...(color === undefined ? {} : { color }), ...(Number.isFinite(size) && size > 0 ? { fontSizeHalfPoints: size } : {}), ...(fontFamily === undefined ? {} : { fontFamily }) };
+}
+
+function optionalNumber(attrs: string, name: string, key: string): Record<string, number> {
+  const value = Number(new RegExp(`\\b${name}="(-?\\d+)"`).exec(attrs)?.[1]);
+  return Number.isFinite(value) ? { [key]: value } : {};
 }
 
 function previewXlsx(content: Buffer): readonly {
@@ -540,6 +746,30 @@ function readZipEntries(content: Buffer): Map<string, string> {
     const name = content.subarray(offset + 46, offset + 46 + fileNameLength).toString("utf8");
     const data = readZipFileData(content, localHeaderOffset, compression, compressedSize, uncompressedSize);
     if (data !== undefined) entries.set(name, data.toString("utf8"));
+    offset += 46 + fileNameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
+function readZipBinaryEntries(content: Buffer): Map<string, Buffer> {
+  const entries = new Map<string, Buffer>();
+  const eocd = findEndOfCentralDirectory(content);
+  if (eocd < 0) return entries;
+  const centralDirectorySize = content.readUInt32LE(eocd + 12);
+  const centralDirectoryOffset = content.readUInt32LE(eocd + 16);
+  let offset = centralDirectoryOffset;
+  const end = centralDirectoryOffset + centralDirectorySize;
+  while (offset + 46 <= end && content.readUInt32LE(offset) === 0x02014b50) {
+    const compression = content.readUInt16LE(offset + 10);
+    const compressedSize = content.readUInt32LE(offset + 20);
+    const uncompressedSize = content.readUInt32LE(offset + 24);
+    const fileNameLength = content.readUInt16LE(offset + 28);
+    const extraLength = content.readUInt16LE(offset + 30);
+    const commentLength = content.readUInt16LE(offset + 32);
+    const localHeaderOffset = content.readUInt32LE(offset + 42);
+    const name = content.subarray(offset + 46, offset + 46 + fileNameLength).toString("utf8");
+    const data = readZipFileData(content, localHeaderOffset, compression, compressedSize, uncompressedSize);
+    if (data !== undefined) entries.set(name, data);
     offset += 46 + fileNameLength + extraLength + commentLength;
   }
   return entries;

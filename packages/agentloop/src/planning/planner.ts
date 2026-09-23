@@ -3,8 +3,8 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { requireRecord, requireString, requireStringArray } from "../shared/validation.ts";
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
-import { inferOperationProfile, operationProfileCatalogForPlanning } from "../runtime/operation-profiles.ts";
-import { classifyTaskIntent, uploadedSourcePlanningContext } from "../runtime/task-intent.ts";
+import { operationProfileCatalogForPlanning, operationProfilesForTaskUnderstanding } from "../runtime/operation-profiles.ts";
+import { uploadedSourcePlanningContext, type TaskIntentClassification } from "../runtime/task-intent.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type {
@@ -264,6 +264,7 @@ export class ModelPlanner implements Planner {
         "You are the Planner for a Plan-first Runtime.",
         "Return exactly one submit_outcome_plan tool call; do not execute work, call other tools, or declare completion.",
         "Use only supplied context facts, capability catalog entries, and Skill catalog entries.",
+        "Treat taskUnderstanding as the canonical structured interpretation for operation, subject, evidence, deliverable, and workflow; do not re-infer those boundaries from attachment filenames or generic report wording.",
       ],
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
@@ -728,46 +729,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 }
 
 function planningTaskIntent(task: TaskSpec) {
-  const intent = classifyTaskIntent({
-    objective: planningIntentObjective(task),
-    toolNames: task.availableToolNames,
-    skillNames: task.availableSkills.map((skill) => skill.name),
-    responseOnly: task.responseOnly,
-    evidenceDemand: task.turnResolution?.evidenceDemand,
-    userConstraints: task.turnResolution?.userConstraints,
-  });
-  const target = conversationArtifactTransformationTarget(task);
-  if (target === undefined) {
-    // The user owns whether this is file work: input formats never turn an
-    // extraction/summarization request into a transform.  Once the user's
-    // wording explicitly asks to modify or transform provided files, Runtime
-    // may require a workspace result without claiming an output format.
-    if (
-      (intent.artifactAction === "modify" || intent.artifactAction === "transform")
-      && (task.sources ?? []).some((source) => source.status === "ready")
-    ) {
-      return {
-        ...intent,
-        deliverySurface: "workspace_artifact" as const,
-        wantsArtifact: true,
-        wantsConversationAnswer: false,
-      };
-    }
-    return intent;
-  }
-  // A server-validated reusable artifact is an explicit workspace deliverable
-  // target. Its format, rather than a lossy paraphrase of the latest turn,
-  // owns the native transformation boundary.
-  return {
-    ...intent,
-    deliverySurface: "workspace_artifact" as const,
-    artifactAction: "modify" as const,
-    artifactKind: conversationArtifactKind(target),
-    sourceNeed: "none" as const,
-    researchPolicy: undefined,
-    wantsArtifact: true,
-    wantsConversationAnswer: false,
-  };
+  return task.taskUnderstanding.intent;
 }
 
 function planningTaskProfile(task: TaskSpec): TaskProfile {
@@ -819,14 +781,6 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
   });
 }
 
-function inferArtifactKind(input: string): NonNullable<TaskProfile["artifactKind"]> {
-  return classifyTaskIntent({ objective: input }).artifactKind;
-}
-
-function inferSourceNeed(input: string): NonNullable<TaskProfile["sourceNeed"]> {
-  return classifyTaskIntent({ objective: input }).sourceNeed;
-}
-
 function taskHasVisibleDataSource(task: TaskSpec): boolean {
   return (task.visibleDirectories?.length ?? 0) > 0
     && task.availableToolNames.some((name) =>
@@ -855,7 +809,7 @@ function taskHasUploadedDataSource(task: TaskSpec): boolean {
  */
 function isUploadedArtifactTransformationTask(
   task: TaskSpec,
-  taskIntent: ReturnType<typeof classifyTaskIntent>,
+  taskIntent: TaskIntentClassification,
 ): boolean {
   if (
     taskIntent.deliverySurface !== "workspace_artifact"
@@ -1003,6 +957,7 @@ function planningRuntimeContext(
           ? {}
           : { requiredToolSourceIds: task.requiredToolSourceIds }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
+        taskUnderstanding: task.taskUnderstanding,
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
         uploadedSourceContext: uploadedSourcePlanningContext(task.sources ?? []),
@@ -1156,8 +1111,8 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
       },
       finalProduceOrDeliverLeaf: {
         requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
-        recommendedWhenAvailable: ["artifact_acceptance", "artifact_openable"],
-        note: "For requested file/media artifacts, final delivery must be backed by observable artifact evidence; final prose alone is not enough.",
+        requiredWhenAvailable: ["artifact_acceptance", "artifact_openable"],
+        note: "For requested file/media artifacts, final delivery must be backed by observable artifact evidence. When the Runtime exposes artifact acceptance, its receipt is required before final prose can be delivered.",
       },
     };
   }
@@ -1188,36 +1143,7 @@ function capabilitiesForConcreteTaskSources(
 }
 
 function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationProfileCatalogForPlanning> {
-  const catalog = operationProfileCatalogForPlanning();
-  const artifactFollowup = buildArtifactFollowupContext(task);
-  const objective = planningIntentObjective(task);
-  const taskIntent = planningTaskIntent(task);
-  const selected = inferOperationProfile({
-    objective,
-    successCriteria: [],
-    toolNames: [],
-    skillNames: task.availableSkills.map((skill) => skill.name),
-  });
-  const selectedIds = new Set([selected.id]);
-  if (artifactFollowup !== undefined && taskIntent.sourceNeed === "none") {
-    selectedIds.clear();
-    selectedIds.add("artifact_build");
-  } else if (taskIntent.deliverySurface === "workspace_artifact") {
-    selectedIds.delete("direct_answer");
-    selectedIds.add("artifact_build");
-  }
-  if (artifactFollowup === undefined && taskIntent.sourceNeed !== "none") {
-    selectedIds.delete("direct_answer");
-    selectedIds.add("web_research");
-  }
-  const hasSkillExecutionSurface = task.availableSkills.length > 0
-    || (task.conversationWorkingSet?.recommendedCapabilities.skillIds.length ?? 0) > 0;
-  if (selected.id === "direct_answer" && hasSkillExecutionSurface) {
-    selectedIds.delete("direct_answer");
-    selectedIds.add("content_generation");
-    selectedIds.add("artifact_build");
-  }
-  return catalog.filter((profile) => selectedIds.has(profile.id));
+  return operationProfilesForTaskUnderstanding(task.taskUnderstanding);
 }
 
 function artifactFollowupContextField(task: TaskSpec): { readonly artifactFollowup?: ReturnType<typeof buildArtifactFollowupContext> } {
@@ -1559,9 +1485,9 @@ function normalizeUploadedSourceTransformationStep(
 
 /**
  * A user-requested file cannot converge through prose. Runtime-owned artifact
- * evidence is mandatory when the planning model omits the evidence contract
- * on the terminal producer. An explicit Planner-authored contract remains
- * authoritative, including when it is intentionally weak.
+ * evidence is mandatory at the terminal producer. The Planner may add
+ * task-specific requirements, but cannot weaken the Runtime-owned minimum
+ * delivery receipt for a requested workspace artifact.
  */
 function normalizeWorkspaceArtifactTerminalStep(
   step: PlanStepProposal,
@@ -1575,7 +1501,6 @@ function normalizeWorkspaceArtifactTerminalStep(
     || taskProfile.artifactKind === "none"
     || !terminalStepIds.has(step.id)
     || step.role === "fact_acquisition"
-    || step.evidenceContract !== undefined
   ) return step;
   const runtimeRequiredKinds: EvidenceKind[] = [
     "artifact_path",
@@ -1583,10 +1508,11 @@ function normalizeWorkspaceArtifactTerminalStep(
     "format_matches_request",
     "delivery_receipt",
     ...(task.availableToolNames.includes("verify_artifact_acceptance")
-      ? ["artifact_acceptance" as const]
+      ? ["artifact_acceptance" as const, "artifact_openable" as const]
       : []),
   ];
   const requiredKinds = uniqueEvidenceKinds([
+    ...(step.evidenceContract?.requiredKinds ?? []),
     ...runtimeRequiredKinds,
   ]);
   const existingCriteria = new Map(step.successCriteria.map((criterion) => [criterion.id, criterion]));
@@ -1603,7 +1529,7 @@ function normalizeWorkspaceArtifactTerminalStep(
     ...step,
     evidenceContract: {
       requiredKinds,
-      caveatPolicy: "none",
+      caveatPolicy: step.evidenceContract?.caveatPolicy ?? "none",
     },
     successCriteria: [...existingCriteria.values()],
   };

@@ -7,6 +7,12 @@ export interface SkillExecutionInput {
   readonly name: string;
   readonly description: string;
   readonly required: boolean;
+  /**
+   * A path-valued input whose bytes must be captured by Runtime when this
+   * action publishes workflow evidence.  This is provenance, not a domain
+   * schema: the Skill still owns how it interprets those bytes.
+   */
+  readonly evidenceInput?: "immutable_workspace_artifact";
 }
 
 export interface SkillExecutionDecisionBinding {
@@ -21,6 +27,12 @@ export interface SkillExecutionAction {
   readonly inputs: readonly SkillExecutionInput[];
   readonly args: readonly string[];
   readonly result: string;
+  /**
+   * Runtime-neutral evidence vocabulary published by this package action.
+   * The package owns the computation and the result schema; Runtime only uses
+   * this declaration to order a bound workflow before a dependent delivery.
+   */
+  readonly producesEvidenceKinds: readonly string[];
   readonly decisionBinding?: SkillExecutionDecisionBinding;
 }
 
@@ -88,9 +100,41 @@ function parseAction(value: unknown): SkillExecutionAction {
       throw new Error(`Skill executor action ${id} does not use declared input ${input.name}`);
     }
   }
+  for (const input of inputs.filter((entry) => entry.evidenceInput !== undefined)) {
+    if (!args.includes(`{{${input.name}}}`)) {
+      throw new Error(`Skill executor action ${id} evidenceInput ${input.name} must occupy one complete argument`);
+    }
+  }
   const result = text(action.result, "Skill executor action result", 500);
+  const producesEvidenceKinds = optionalEvidenceKinds(action.producesEvidenceKinds, id);
   const decisionBinding = parseDecisionBinding(action.decisionBinding, inputs, id);
-  return { id, description, inputs, args, result, ...(decisionBinding === undefined ? {} : { decisionBinding }) };
+  return {
+    id,
+    description,
+    inputs,
+    args,
+    result,
+    producesEvidenceKinds,
+    ...(decisionBinding === undefined ? {} : { decisionBinding }),
+  };
+}
+
+function optionalEvidenceKinds(value: unknown, actionId: string): readonly string[] {
+  if (value === undefined) return [];
+  const kinds = array(value, `Skill executor action ${actionId} producesEvidenceKinds`, 1, 32)
+    .map((kind) => evidenceKind(kind, `Skill executor action ${actionId} evidence kind`));
+  if (new Set(kinds).size !== kinds.length) {
+    throw new Error(`Skill executor action ${actionId} producesEvidenceKinds must be unique`);
+  }
+  return kinds;
+}
+
+function evidenceKind(value: unknown, label: string): string {
+  const normalized = text(value, label, 80);
+  if (!/^[a-z][a-z0-9_-]*$/u.test(normalized)) {
+    throw new Error(`${label} must use lowercase identifier syntax`);
+  }
+  return normalized;
 }
 
 function parseDecisionBinding(
@@ -128,10 +172,18 @@ function parseDecisionBinding(
 function parseInput(value: unknown): SkillExecutionInput {
   const input = record(value, "Skill executor action input");
   if (typeof input.required !== "boolean") throw new Error("Skill executor action input required must be boolean");
+  const evidenceInput = input.evidenceInput;
+  if (evidenceInput !== undefined && evidenceInput !== "immutable_workspace_artifact") {
+    throw new Error("Skill executor action input evidenceInput must be immutable_workspace_artifact");
+  }
+  if (evidenceInput !== undefined && input.required !== true) {
+    throw new Error("Skill executor action evidenceInput must be required");
+  }
   return {
     name: identifier(input.name, "Skill executor action input name"),
     description: text(input.description, "Skill executor action input description", 300),
     required: input.required,
+    ...(evidenceInput === undefined ? {} : { evidenceInput }),
   };
 }
 

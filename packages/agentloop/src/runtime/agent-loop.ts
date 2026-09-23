@@ -109,6 +109,7 @@ export interface AgentLoopOptions {
       toolCallId: string;
       toolName: string;
       replaySafe: boolean;
+      publishesRuntimeResult: boolean;
       timeoutMs?: number;
     }, operation: () => Promise<T>): Promise<Readonly<{ value: T; resultRef?: RuntimeResultRef }>>;
   };
@@ -1403,7 +1404,52 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     previousPrepareRejectionSignature = undefined;
     consecutivePrepareRejectionSteps = 0;
 
+    const evidenceCompletionCandidate = options.evaluateCandidate === undefined
+      ? undefined
+      : deriveEvidenceCompletionCandidate({
+        policy: options.progressPolicy,
+        evidence: toolEvidence,
+        latestEvidence: latestToolEvidence,
+        userInput: options.input,
+      });
+    // Once the requested artifact has an accepted Runtime receipt, it is the
+    // delivery boundary. A prior source Tool's deliveryCandidate remains useful
+    // source material, but must not replace the verified file with a Markdown
+    // or prose projection at TerminalCommitter.
+    if (
+      evidenceCompletionCandidate !== undefined
+      && evidenceCompletionCandidateHasAcceptedArtifact(options.progressPolicy, toolEvidence)
+    ) {
+      await emit({
+        type: "candidate.evidence_completion_detected",
+        data: {
+          step,
+          requiredEvidenceKinds: evidenceCompletionCandidate.requiredEvidenceKinds,
+          satisfiedEvidenceKinds: evidenceCompletionCandidate.satisfiedEvidenceKinds,
+          caveatedEvidenceKinds: evidenceCompletionCandidate.caveatedEvidenceKinds,
+          sourceToolCallIds: evidenceCompletionCandidate.sourceToolCallIds,
+          artifacts: evidenceCompletionCandidate.artifacts,
+        },
+      });
+      const completion = await evaluateToolBackedCandidate({
+        step,
+        output: evidenceCompletionCandidate.output,
+        projectedToolEvidence: toolEvidence,
+        stepSemanticFrame: options.stepSemanticFrame,
+        rejectionDirective: "Runtime evidence completion candidate was rejected. Repair this step using the available evidence.",
+      });
+      if (completion !== undefined) return completion;
+      continue;
+    }
+
+    // A structured source Tool may return a concise user-facing candidate,
+    // but that result is source evidence rather than a substitute for a
+    // separately requested work product. Do not repeatedly assess an
+    // API/catalog result while the Step still requires a file write, format
+    // check, or artifact-acceptance receipt: that would consume the
+    // candidate-repair budget before the progress policy can finish delivery.
     const structuredCandidates = options.evaluateCandidate === undefined
+      || structuredCandidateIsBlockedByPendingArtifactEvidence(options.progressPolicy, toolEvidence)
       ? undefined
       : selectStructuredToolCandidate(toolEvidence);
     if (structuredCandidates?.directCandidate !== undefined) {
@@ -1457,14 +1503,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       continue;
     }
 
-    const evidenceCompletionCandidate = options.evaluateCandidate === undefined
-      ? undefined
-      : deriveEvidenceCompletionCandidate({
-        policy: options.progressPolicy,
-        evidence: toolEvidence,
-        latestEvidence: latestToolEvidence,
-        userInput: options.input,
-      });
     if (evidenceCompletionCandidate !== undefined) {
       await emit({
         type: "candidate.evidence_completion_detected",
@@ -1783,6 +1821,35 @@ function selectStructuredToolCandidate(
       : mergedCandidate === undefined ? {} : { directCandidate: mergedCandidate }),
     observations,
   };
+}
+
+const STRUCTURED_CANDIDATE_BLOCKING_ARTIFACT_EVIDENCE_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+]);
+
+function evidenceCompletionCandidateHasAcceptedArtifact(
+  policy: RuntimeToolProgressPolicy | undefined,
+  evidence: readonly AgentLoopToolEvidence[],
+): boolean {
+  if (policy === undefined) return false;
+  const evidenceState = deriveRuntimeStepEvidenceState({ policy, evidence });
+  return evidenceState?.workProduct.acceptanceRequired === true
+    && evidenceState.workProduct.status === "accepted";
+}
+
+function structuredCandidateIsBlockedByPendingArtifactEvidence(
+  policy: RuntimeToolProgressPolicy | undefined,
+  evidence: readonly AgentLoopToolEvidence[],
+): boolean {
+  if (policy === undefined) return false;
+  const evidenceState = deriveRuntimeStepEvidenceState({ policy, evidence });
+  return evidenceState?.missingToolEvidenceKinds.some((kind) =>
+    STRUCTURED_CANDIDATE_BLOCKING_ARTIFACT_EVIDENCE_KINDS.has(kind)
+  ) === true;
 }
 
 function candidateRecordsFromToolResult(result: string): ReadonlyArray<Record<string, unknown>> {
@@ -2348,6 +2415,7 @@ async function executePrepared(
         toolCallId: call.id,
         toolName: call.name,
         replaySafe: tool.replaySafe,
+        publishesRuntimeResult: tool.publishesRuntimeResult !== false,
         timeoutMs: tool.timeoutMs,
       }, execute);
     const value = tracked.value;

@@ -44,6 +44,12 @@ export interface RuntimeTool<TInput = unknown> {
   readonly inputSchema: JsonSchema;
   readonly executionMode: "parallel" | "exclusive";
   readonly replaySafe: boolean;
+  /**
+   * Whether a successful call creates a new immutable Runtime Result. Tools
+   * that only observe a previously identified Result keep their audit Action
+   * but must not mint a second Result identity for that observation.
+   */
+  readonly publishesRuntimeResult?: boolean;
   /** Upper bound for one Tool execution, used by the Runtime Action deadline. */
   readonly timeoutMs?: number;
   readonly maxResultCharacters?: number;

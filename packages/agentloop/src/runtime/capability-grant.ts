@@ -52,6 +52,7 @@ export function createCapabilityGrant(input: {
   uploadedSources?: CapabilityGrant["uploadedSources"];
   skillExecutionRoots?: CapabilityGrant["skillExecutionRoots"];
   resolvedOperationBindings?: CapabilityGrant["resolvedOperationBindings"];
+  workflowEvidenceBindings?: CapabilityGrant["workflowEvidenceBindings"];
   allowedToolNames: Iterable<string>;
   allowedSkillIds: Iterable<string>;
 }): CapabilityGrant {
@@ -67,6 +68,7 @@ export function createCapabilityGrant(input: {
     uploadedSources: Object.freeze([...(input.uploadedSources ?? [])]),
     skillExecutionRoots: Object.freeze([...(input.skillExecutionRoots ?? [])]),
     resolvedOperationBindings: Object.freeze([...(input.resolvedOperationBindings ?? [])]),
+    workflowEvidenceBindings: Object.freeze([...(input.workflowEvidenceBindings ?? [])]),
     allowedToolNames: new ImmutableStringSet(input.allowedToolNames),
     allowedSkillIds: new ImmutableStringSet(input.allowedSkillIds),
   });

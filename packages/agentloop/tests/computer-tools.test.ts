@@ -116,6 +116,8 @@ test("computer_read_json returns structured pointer windows for durable artifact
     assert.equal(result.root.properties.files.length, 1);
     assert.deepEqual(result.queries[0], {
       pointer: "/schema",
+      sourcePointer: "/schema",
+      resultPointer: "/queries/0/value",
       found: true,
       summary: { type: "string" },
       value: "agentloop.visibleTableExtraction/v1",
@@ -123,6 +125,8 @@ test("computer_read_json returns structured pointer windows for durable artifact
     });
     assert.equal(result.queries[1]?.returned, 1);
     assert.equal(result.queries[1]?.totalItems, 2);
+    assert.equal(result.queries[1]?.sourcePointer, "/files/0/sheets/0/records");
+    assert.equal(result.queries[1]?.resultPointer, "/queries/1/value");
     assert.equal(result.queries[1]?.sourceRange, "/files/0/sheets/0/records[1:2]");
     assert.deepEqual(result.queries[1]?.value, [{ row: 3, values: { Name: "Bob", Score: 82 } }]);
     assert.match(result.caveats.join("\n"), /returned 1 of 2 array items/);

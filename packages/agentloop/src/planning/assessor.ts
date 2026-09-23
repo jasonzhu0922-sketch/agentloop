@@ -299,11 +299,11 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const receipts = runtimeObservableReceipts(input.evidence.toolCalls);
     const requiredKinds = runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []);
     const requiredKindsSatisfied = requiredKinds.every((kind) =>
-      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate)
+      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions)
     );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
       const satisfied = nonEmpty
-        && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate);
+        && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions);
       return {
         criterionId: criterion.id,
         satisfied,
@@ -343,6 +343,7 @@ interface RuntimeObservableReceipt {
   readonly satisfied: ReadonlySet<string>;
   readonly failed: ReadonlySet<string>;
   readonly caveatsRecorded: boolean;
+  readonly workflowAction?: { readonly skillName: string; readonly executorId: string; readonly actionId: string };
 }
 
 /**
@@ -378,6 +379,9 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
   for (const toolCall of toolCalls) {
     if (toolCall.isError) continue;
     for (const parsed of runtimeEvidenceRecordsFromToolResult(toolCall.result)) {
+      const workflowRecord = parsed.schema === "agentloop.skillWorkflowEvidenceReceipt/v1"
+        || parseToolResultObject(parsed.workflowEvidenceReceipt)?.schema === "agentloop.skillWorkflowEvidenceReceipt/v1";
+      if (workflowRecord && toolCall.toolName !== "computer_run_command") continue;
       const topLevelSchema = typeof parsed.schema === "string" ? parsed.schema : undefined;
       const nestedReceipt = parseToolResultObject(parsed.evidenceReceipt)
         ?? parseToolResultObject(parsed.artifactReceipt);
@@ -400,10 +404,22 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
         caveatsRecorded: Array.isArray((nestedReceipt ?? parsed).caveats)
           || evidenceKinds.satisfied.includes("explicit_caveats")
           || evidenceKinds.caveated.includes("explicit_caveats"),
+        ...(schema === "agentloop.skillWorkflowEvidenceReceipt/v1" && workflowActionFromRecord(parsed) !== undefined
+          ? { workflowAction: workflowActionFromRecord(parsed) }
+          : {}),
       });
     }
   }
   return receipts;
+}
+
+function workflowActionFromRecord(record: Record<string, unknown>): RuntimeObservableReceipt["workflowAction"] | undefined {
+  const skill = parseToolResultObject(record.skill);
+  if (skill === undefined) return undefined;
+  const skillName = typeof skill.skillName === "string" ? skill.skillName : undefined;
+  const executorId = typeof skill.executorId === "string" ? skill.executorId : undefined;
+  const actionId = typeof skill.actionId === "string" ? skill.actionId : undefined;
+  return skillName === undefined || executorId === undefined || actionId === undefined ? undefined : { skillName, executorId, actionId };
 }
 
 function criterionSatisfiedByEvidenceGate(
@@ -413,11 +429,12 @@ function criterionSatisfiedByEvidenceGate(
   receipts: readonly RuntimeObservableReceipt[],
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
+  workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
 ): boolean {
   // Semantic caveat evidence must not inherit an unrelated source/artifact
   // failure (nor automatically pass when all other operation receipts pass).
-  if (criterionId === "explicit_caveats") return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate);
-  if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate);
+  if (criterionId === "explicit_caveats") return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions);
+  if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
 }
@@ -427,6 +444,7 @@ function evidenceKindSatisfiedByGate(
   receipts: readonly RuntimeObservableReceipt[],
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
+  workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
 ): boolean {
   if (kind === "explicit_caveats") {
     // This proves only that limitations were recorded, not that the model's
@@ -447,6 +465,14 @@ function evidenceKindSatisfiedByGate(
       )
       && acceptance.failed.size === 0;
   }
+  const declaredActions = (workflowEvidenceActions ?? []).filter((action) => action.producesEvidenceKinds.includes(kind));
+  if (declaredActions.length > 0) {
+    return receipts.some((receipt) => !receipt.failed.has(kind)
+      && receipt.schema === "agentloop.skillWorkflowEvidenceReceipt/v1"
+      && receipt.satisfied.has(kind)
+      && receipt.workflowAction !== undefined
+      && declaredActions.some((action) => action.skillName === receipt.workflowAction!.skillName && action.executorId === receipt.workflowAction!.executorId && action.actionId === receipt.workflowAction!.actionId));
+  }
   return receipts.some((receipt) => {
     if (receipt.failed.has(kind)) return false;
     return receipt.satisfied.has(kind);
@@ -458,7 +484,8 @@ function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
     || schema === "agentloop.artifactReceipt/v1"
     || schema === "agentloop.sourceSummary/v1"
     || schema === "agentloop.toolEvidenceReceipt/v1"
-    || schema === "agentloop.commandComputationReceipt/v1";
+    || schema === "agentloop.commandComputationReceipt/v1"
+    || schema === "agentloop.skillWorkflowEvidenceReceipt/v1";
 }
 
 /**

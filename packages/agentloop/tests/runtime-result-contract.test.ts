@@ -149,6 +149,26 @@ test("successful Tool Actions atomically bind a unified opaque result ref and au
     assert.equal(JSON.stringify(prepared.input).includes("sha256"), false);
     assert.equal(JSON.stringify(prepared.input).includes(".agentloop"), false);
 
+    const wrongNamespace = reader.prepare({
+      id: "recover-source-pointer",
+      name: "read_result",
+      arguments: { resultId: ref.resultId, pointer: "/records" },
+    });
+    await assert.rejects(
+      () => wrongNamespace.tool.execute({ grant: createCapabilityGrant({
+        actorUserId: testOwner().user.id,
+        runId,
+        planId,
+        stepId,
+        depth: 0,
+        allowedToolNames: ["read_result"],
+        allowedSkillIds: [],
+      }) }, wrongNamespace.input),
+      (error: unknown) => error instanceof AppError
+        && error.message.includes("this is a sourcePointer")
+        && error.message.includes("/queries/0/value"),
+    );
+
     const wrongStep = await results.readAuthorized({ resultId: ref.resultId, runId, planId, stepId: "other-step" });
     assert.equal(wrongStep, undefined, "an opaque ref must not cross the granted Plan step");
   } finally {
@@ -292,6 +312,74 @@ test("RunService gives every successful Tool Action a persisted ref and emits it
     );
     assert.equal((completed?.data.resultRef as { resultId?: string } | undefined)?.resultId, action?.resultRef);
     assert.equal(JSON.parse(String(completed?.data.result)).resultRef, undefined);
+  } finally {
+    await database.close();
+  }
+});
+
+test("RunService records read_result as an audited observation without publishing a derived Runtime Result", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const skills = new SkillService(database);
+    const sourceTool: RuntimeTool<unknown> = {
+      name: "produce_values",
+      description: "Produce one reusable structured result",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (input) => input,
+      execute: async () => ({ schema: "example.values/v1", values: [3, 5, 8] }),
+    };
+    let calls = 0;
+    const runs = new RunService({
+      database,
+      skills,
+      tools: [sourceTool],
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => ({
+        assess: async (input) => ({
+          id: "assessment", planId: input.planId, stepId: input.step.id, attempt: input.attempt,
+          assessmentProfile: input.assessmentProfile, assessmentMethod: "model" as const, approved: true,
+          criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: true, evidenceRefs: ["result"] })),
+          skills: [], evidenceDigest: "result-read", feedback: "approved", createdAt: Date.now(),
+        }),
+      }),
+      modelFactory: () => ({
+        limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+        complete: async (input) => {
+          calls += 1;
+          if (calls === 1) return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "produce", name: "produce_values", arguments: {} }] };
+          if (calls === 2) {
+            const produced = input.messages.findLast((message) => message.role === "tool" && message.name === "produce_values");
+            assert.ok(produced && produced.role === "tool");
+            const sourceRef = (JSON.parse(produced.content) as { resultRef?: RuntimeResultRef }).resultRef;
+            assert.ok(sourceRef);
+            return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "read", name: "read_result", arguments: { resultId: sourceRef.resultId } }] };
+          }
+          const observed = input.messages.findLast((message) => message.role === "tool" && message.name === "read_result");
+          assert.ok(observed && observed.role === "tool");
+          const read = JSON.parse(observed.content) as { sourceResultRef?: RuntimeResultRef; resultRef?: RuntimeResultRef; content?: string };
+          assert.ok(read.sourceResultRef);
+          assert.equal(read.resultRef, undefined, "a Result observation must not publish a derived ResultRef");
+          assert.match(read.content ?? "", /example\.values\/v1/);
+          return { content: "values read", finishReason: "stop" as const, toolCalls: [] };
+        },
+      }),
+      maxSteps: 3,
+    });
+    const run = await runs.execute(owner.user.id, "read produced values");
+    assert.equal(run.status, "completed");
+    const actions = await runs.actionsForRun(owner.user.id, run.id);
+    const produced = actions.find((action) => action.metadata.toolName === "produce_values");
+    const read = actions.find((action) => action.metadata.toolName === "read_result");
+    assert.match(produced?.resultRef ?? "", /^rr_/u);
+    assert.equal(read?.state, "succeeded");
+    assert.equal(read?.resultRef, undefined);
+    const readCommitted = (await runs.events(owner.user.id, run.id)).find((event) =>
+      event.type === "tool.completed" && event.data.toolCallId === "read"
+    );
+    assert.equal(readCommitted?.data.resultRef, undefined);
   } finally {
     await database.close();
   }

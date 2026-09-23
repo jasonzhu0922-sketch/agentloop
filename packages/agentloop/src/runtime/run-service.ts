@@ -76,7 +76,7 @@ import { buildDynamicSystemPrompt, buildTaskProfile, type DynamicPromptProfile, 
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
-import { classifyTaskIntent, planningSkillRecallInput, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange } from "./task-intent.ts";
+import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type StructuredTaskUnderstanding } from "./task-intent.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -130,7 +130,7 @@ import {
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
 import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
-import { resolveOperationBindings } from "./decision-binding.ts";
+import { resolveOperationBindings, resolveSkillWorkflowEvidenceBindings } from "./decision-binding.ts";
 import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
@@ -864,6 +864,7 @@ export class RunService {
         workspaceRoot: this.runWorkspaceRoot(toRunRecord(run)),
         runCreatedAt: run.created_at,
         events,
+        promoteProducedArtifacts: conversationCandidateApproved(events),
       });
       for (const artifact of artifacts) {
         const source = artifactSourceForPath(sourceByPath, artifact.path);
@@ -1125,18 +1126,21 @@ export class RunService {
   }
 
   /**
-   * Process artifacts are derived from this Run's successful tool receipts and
-   * revalidated inside the workspace. They are observable work-in-progress,
-   * never a substitute for a completed Plan or approved Assessment.
+   * Conversation artifacts are derived from this Run's successful tool
+   * receipts and revalidated inside the workspace. Once the conversation
+   * candidate is approved, user-facing files are projected as final products;
+   * Run Outcome remains a separate control-plane status.
    */
   async processArtifacts(actorUserId: string, runId: string): Promise<ProcessArtifact[]> {
     const run = await this.get(actorUserId, runId);
     const workspaceRoot = this.runWorkspaceRoot(run);
+    const events = await this.events(actorUserId, runId);
     return collectProcessArtifacts({
       runId,
       workspaceRoot,
       runCreatedAt: run.createdAt,
-      events: await this.events(actorUserId, runId),
+      events,
+      promoteProducedArtifacts: conversationCandidateApproved(events),
     });
   }
 
@@ -1875,7 +1879,14 @@ export class RunService {
           executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)
         );
       const effectiveGoal = turnResolution?.effectiveGoal ?? input;
-      const taskIntent = classifyTaskIntent({
+      const targetArtifact = turnResolution?.targetArtifact === undefined
+        ? undefined
+        : conversationWorkingSet?.reusableArtifacts.find((artifact) =>
+          artifact.reusable
+          && artifact.runId === turnResolution.targetArtifact!.runId
+          && artifact.path === turnResolution.targetArtifact!.path,
+        );
+      const taskUnderstanding = understandTask({
         // The resolver supplies a self-contained goal, while the immutable
         // latest user input preserves delivery verbs that a paraphrase may
         // weaken (for example, "generate a Markdown file" -> "present as Markdown").
@@ -1883,16 +1894,14 @@ export class RunService {
         userConstraints: turnResolution?.userConstraints,
         toolNames: allowedToolNames,
         skillNames: privateSkills.map((skill) => skill.name),
-        responseOnly,
-        evidenceDemand: turnResolution?.evidenceDemand,
-      });
-      const skillRecallInput = planningSkillRecallInput({
-        objective: effectiveGoal === input ? effectiveGoal : `${effectiveGoal}\n${input}`,
-        userConstraints: turnResolution?.userConstraints,
         evidenceDemand: turnResolution?.evidenceDemand,
         responseOnly,
         uploadedSources: availableSources,
+        ...(targetArtifact === undefined ? {} : {
+          targetArtifactKind: artifactKindForReference(targetArtifact),
+        }),
       });
+      const taskIntent = taskUnderstanding.intent;
       const admissionTaskIntent = {
         ...taskIntent,
         ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
@@ -1921,13 +1930,9 @@ export class RunService {
           .filter((skillId) => privateSkills.some((skill) => skill.id === skillId));
       const planningSkillRoles = responseOnly ? [] : selectPlanningSkillRoles(
         privateSkills,
-        // This carries the same resolved goal and user constraints used for
-        // TaskIntent, plus neutral native-upload facts for transforms.  It
-        // does not bind a Skill or let an input format decide an output kind.
-        skillRecallInput,
+        taskUnderstanding,
         [],
         availableSources,
-        turnResolution?.evidenceDemand,
       );
       const planningSkills = [...new Map([
         ...planningSkillRoles.map((item) => [item.skill.id, item.skill] as const),
@@ -1936,6 +1941,10 @@ export class RunService {
           .map((skill) => [skill.id, skill] as const),
       ]).values()];
       if (!responseOnly) {
+        await emit({
+          type: "planning.task.understood",
+          data: taskUnderstanding as unknown as Readonly<Record<string, unknown>>,
+        });
         await emit({
           type: "planning.skills.selected",
           data: {
@@ -1961,6 +1970,7 @@ export class RunService {
         runId,
         input,
         ...(turnResolution === undefined ? {} : { turnResolution }),
+        taskUnderstanding,
         availableSkills: planningSkills,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
@@ -2441,6 +2451,15 @@ export class RunService {
         planId: plan.id,
         stepId: activeStep.id,
       });
+      const workflowEvidenceActions = skillWorkflowEvidenceActions({
+        skills: stepSkills,
+        manifests: skillManifests,
+        requiredEvidenceKinds: activeStep.evidenceContract?.requiredKinds ?? [],
+      });
+      const workflowEvidenceBindings = resolveSkillWorkflowEvidenceBindings({
+        skills: stepSkills,
+        manifests: skillManifests,
+      });
       // The Run grant is the execution authorization boundary. A Plan leaf
       // describes the current objective and its evidence contract, but must
       // not revoke a Tool that the user already authorized for the Run.
@@ -2465,6 +2484,7 @@ export class RunService {
         uploadedSources: stepSources,
         skillExecutionRoots,
         resolvedOperationBindings,
+        workflowEvidenceBindings,
         allowedToolNames: stepAllowedToolNames,
         allowedSkillIds: stepSkillIds,
       });
@@ -2514,6 +2534,7 @@ export class RunService {
         step: activeStep,
         requiresFileOutput: fileOutputStep,
         taskProfile: stepTaskProfile,
+        workflowEvidenceActions,
       });
       // A delivery leaf may be deliberately tool-free: its direct dependency
       // already acquired the source facts (including an empty-result receipt).
@@ -2630,9 +2651,10 @@ export class RunService {
         emit: input.emit,
         signal: input.signal,
         actionTracker: {
-          executeToolCall: async (toolAction, operation) => {
+          executeToolCall: async <T>(toolAction, operation) => {
             let resultRef: RuntimeResultRef | undefined;
-            const value = await this.actions.execute({
+            const publishesRuntimeResult = toolAction.publishesRuntimeResult;
+            const value = await this.actions.execute<T>({
               runId: input.runId,
               planId: plan.id,
               stepId: activeStep.id,
@@ -2645,7 +2667,7 @@ export class RunService {
                 modelStep: toolAction.step,
               },
               resultFailureCode: toolOperationFailureCode,
-              prepareResult: async (result, action) => {
+              ...(publishesRuntimeResult ? { prepareResult: async (result, action) => {
                 const runtimeResult = createRuntimeResult({
                   kind: "tool",
                   producer: {
@@ -2661,7 +2683,7 @@ export class RunService {
                 });
                 resultRef = runtimeResult.ref;
                 return runtimeResult;
-              },
+              } } : {}),
             }, operation);
             return { value, ...(resultRef === undefined ? {} : { resultRef }) };
           },
@@ -2790,6 +2812,7 @@ export class RunService {
             ...(holisticSourceContractMismatch ? { holisticSourceContractMismatch: true } : {}),
             attempt: assessmentAttempt,
             decisionLedger,
+            workflowEvidenceActions,
           }, input.signal, input.emit);
           const assessed = useProfiledRuleAssessor
             ? await this.actions.execute({
@@ -2922,7 +2945,16 @@ export class RunService {
       availableSkills: privateSkills,
       availableToolNames,
       availableTools: availableToolSummaries,
-      availableCapabilities: planningCapabilitiesFromTools(availableToolSummaries, sources),
+      // Recovery revisions retain the current Plan's selected Skills. Their
+      // source-provider capabilities must be reconstructed alongside Tool
+      // capabilities, or a repair leaf can be rejected as requiring an
+      // "unknown" capability that its original admitted Step used.
+      availableCapabilities: planningCapabilitiesForAdmittedProposal(
+        input.decision.planRevision,
+        privateSkills,
+        availableToolSummaries,
+        sources,
+      ),
       availableUploadedSourceIds: sources.map((source) => source.id),
       availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
       taskIntent,
@@ -4068,6 +4100,15 @@ function artifactPathsFromToolResult(toolName: string | undefined, result: Reado
   ].map(normalizeArtifactPath);
 }
 
+/**
+ * A user-visible completion candidate is the conversation product boundary.
+ * Once it is approved, observed non-source files are final products even when
+ * the step did not invoke the optional artifact-acceptance tool separately.
+ */
+function conversationCandidateApproved(events: readonly StoredRunEvent[]): boolean {
+  return events.some((event) => event.type === "candidate.approved");
+}
+
 function buildResumeSuggestion(
   activeGoal: ConversationWorkingSet["activeGoal"] | undefined,
   planCursors: ConversationWorkingSet["planCursors"],
@@ -4511,11 +4552,16 @@ function bindRequiredSkillCompanions(
 
 export function selectPlanningSkills(
   skills: readonly PrivateSkill[],
-  taskInput: string,
+  understanding: StructuredTaskUnderstanding,
   boundSkillIds: readonly string[],
   sources: readonly UploadedSourceSummary[] = [],
 ): PrivateSkill[] {
-  return selectPlanningSkillRoles(skills, taskInput, boundSkillIds, sources).map((item) => item.skill);
+  return selectPlanningSkillRoles(
+    skills,
+    understanding,
+    boundSkillIds,
+    sources,
+  ).map((item) => item.skill);
 }
 
 /**
@@ -4539,34 +4585,36 @@ function planningCapabilitiesForAdmittedProposal(
 
 export function selectPlanningSkillRoles(
   skills: readonly PrivateSkill[],
-  taskInput: string,
+  understanding: StructuredTaskUnderstanding,
   boundSkillIds: readonly string[],
   sources: readonly UploadedSourceSummary[] = [],
-  evidenceDemand?: ConversationTurnResolution["evidenceDemand"],
 ): PlanningSkillRoleSelection[] {
   if (skills.length === 0) return [];
   // The latest turn still drives ordinary relevance, but a Skill canonically
   // bound by an accepted prior step must remain available as a *candidate*.
   // The Planner LLM receives the full history and working set and decides
   // whether this turn actually continues that prior work.
-  const signal = normalizePlanningSignal(taskInput);
+  // Subject semantics decides domain relevance. Deliverable format is a
+  // separate field below and must not make a generic report Skill appear more
+  // relevant than the Skill that owns the requested analysis.
+  const signal = normalizePlanningSignal(understanding.subject.text);
+  // Uploaded native-artifact context is Planner evidence about inputs.  Do
+  // not let its filename or format masquerade as the requested deliverable
+  // when deciding which primary builder owns the output boundary.
+  const artifactSignal = normalizePlanningSignal(planningArtifactSignal(understanding.normalizedObjective));
   // Skill relevance must use the same semantic intent classifier as planning.
   // A current-news request is source work even when it does not literally say
   // "source", "research", or "lookup".
-  const sourceWorkRequested = requestsSourceWork(signal)
-    || classifyTaskIntent({
-      objective: taskInput,
-      ...(evidenceDemand === undefined ? {} : { evidenceDemand }),
-    }).sourceNeed !== "none";
+  const sourceWorkRequested = understanding.evidence.need !== "none";
   const roleBySkillId = new Map<string, SelectedSkillRole>();
   const bound = new Set(boundSkillIds);
   const sourceKinds = sourceKindsFromUploadedSources(sources);
-  const requestedFileFormats = requestedPlanningFileFormats(signal);
+  const requestedFileFormats = requestedPlanningFileFormats(artifactSignal);
   const roleEligibleSkills = skills.filter((skill) => {
     const selection = selectFirstRoundSkillRole(
       skill,
-      signal,
-      exactSkillMention(signal, skill) || bound.has(skill.id),
+      artifactSignal,
+      exactSkillMention(artifactSignal, skill) || bound.has(skill.id),
       sourceKinds,
       sourceWorkRequested,
     );
@@ -4575,7 +4623,7 @@ export function selectPlanningSkillRoles(
     return true;
   });
   if (roleEligibleSkills.length === 0) return [];
-  const exactMatches = roleEligibleSkills.filter((skill) => exactSkillMention(signal, skill));
+  const exactMatches = roleEligibleSkills.filter((skill) => exactSkillMention(artifactSignal, skill));
   if (exactMatches.length > 0) {
     return expandRequiredPlanningSkills(exactMatches.slice(0, MAX_PLANNING_SKILLS).map((skill) => ({
       skill,
@@ -4628,7 +4676,54 @@ export function selectPlanningSkillRoles(
   const candidates = ranked.filter((entry) => entry.score >= Math.max(MIN_PLANNING_SKILL_SCORE, topScore - 1));
   let selected = (strongWinner ? ranked.slice(0, 1) : candidates)
     .slice(0, MAX_PLANNING_SKILLS);
-  if (requestsArtifactBuild(signal) && !explicitStylingRequested(signal)) {
+  // A source-grounded analysis that also asks for a file has two independent
+  // work surfaces: the domain analysis and artifact delivery. A
+  // `primary_builder` with `artifactKinds: ["none"]` owns the former, so do
+  // not let the requested file type exclude it before Planner can compose
+  // the leaves. It still needs concrete semantic affinity; this does not
+  // turn every no-artifact Skill into a candidate for every report.
+  const domainAnalysisCandidate = requestsArtifactBuild(artifactSignal) && sourceWorkRequested
+    ? scored
+      .filter((entry) => {
+        const metadata = entry.skill.agentLoop;
+        return roleBySkillId.get(entry.skill.id)?.role === "primary_builder"
+          && metadata?.artifactKinds.includes("none") === true
+          && entry.semanticAffinity > 0;
+      })
+      .sort((left, right) => right.score - left.score || left.index - right.index)[0]
+    : undefined;
+  const outputArtifactCandidate = requestsArtifactBuild(artifactSignal)
+    ? scored
+      .filter((entry) => matchesRequestedArtifactKind(
+        artifactSignal,
+        new Set(entry.skill.agentLoop?.artifactKinds ?? []),
+      ))
+      .sort((left, right) => right.score - left.score || left.index - right.index)[0]
+    : undefined;
+  // Preserve both required work surfaces without exceeding the bounded
+  // candidate budget. The lowest-ranked incidental candidate gives way to a
+  // missing domain-analysis or output-artifact owner.
+  const requiredSurfaceCandidates = [domainAnalysisCandidate, outputArtifactCandidate]
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
+    .filter((entry, index, entries) => entries.findIndex((other) => other.skill.id === entry.skill.id) === index);
+  if (requiredSurfaceCandidates.length > 0) {
+    const requiredIds = new Set(requiredSurfaceCandidates.map((entry) => entry.skill.id));
+    selected = [
+      ...selected.filter((entry) => !requiredIds.has(entry.skill.id)).slice(0, MAX_PLANNING_SKILLS - requiredSurfaceCandidates.length),
+      ...requiredSurfaceCandidates,
+    ];
+    const domainId = domainAnalysisCandidate?.skill.id;
+    const outputId = outputArtifactCandidate?.skill.id;
+    selected = selected.filter((entry) => {
+      if (roleBySkillId.get(entry.skill.id)?.role !== "primary_builder") return true;
+      if (entry.skill.id === domainId || entry.skill.id === outputId) return true;
+      return matchesRequestedArtifactKind(
+        artifactSignal,
+        new Set(entry.skill.agentLoop?.artifactKinds ?? []),
+      );
+    });
+  }
+  if (requestsArtifactBuild(artifactSignal) && !explicitStylingRequested(artifactSignal)) {
     const hasPrimaryBuilder = selected.some((entry) => {
       const text = normalizePlanningSignal(`${entry.skill.name}\n${entry.skill.description}`);
       return !isStylingSupportSurface(text) && isPrimaryArtifactBuilderSkill(text);
@@ -4664,7 +4759,23 @@ function expandRequiredPlanningSkills(
       if (companion === undefined) {
         throw new TypeError(`Skill ${item.skill.name} requires unavailable Skill ${name}`);
       }
-      if (selected.has(companion.id)) continue;
+      const existing = selected.get(companion.id);
+      if (existing !== undefined) {
+        // A source provider may also have been broadly eligible for the task.
+        // Its declared domain dependency is the stronger ownership relation;
+        // retain the one catalog entry but record that it serves this Skill.
+        if (existing.companionForSkillId === undefined) {
+          selected.set(companion.id, {
+            ...existing,
+            selection: {
+              ...existing.selection,
+              reason: `Required by selected Skill ${item.skill.name}.`,
+            },
+            companionForSkillId: item.skill.id,
+          });
+        }
+        continue;
+      }
       const role = companion.agentLoop?.roles.includes("source_provider") === true
         ? "source_provider"
         : "primary_builder";
@@ -4707,7 +4818,16 @@ function selectFirstRoundSkillRole(
   const artifactKinds = new Set(metadata.artifactKinds);
   if (
     roles.has("primary_builder")
-    && (explicitlyRequested || matchesRequestedArtifactKind(signal, artifactKinds))
+    && (
+      explicitlyRequested
+      || matchesRequestedArtifactKind(signal, artifactKinds)
+      // A format-specific native transformation can select its input owner
+      // even when the prompt does not repeat the output format.
+      || (isNativeArtifactTransformation(signal) && skillSourceKindsCompatible(metadata.sourceKinds, sourceKinds))
+      // A non-artifact primary builder can own source-grounded domain work
+      // that feeds a separately selected artifact builder.
+      || (artifactKinds.has("none") && sourceWorkRequested)
+    )
   ) {
     return {
       skillId: skill.id,
@@ -4743,6 +4863,14 @@ function selectFirstRoundSkillRole(
     };
   }
   return undefined;
+}
+
+function planningArtifactSignal(taskInput: string): string {
+  return taskInput.trim();
+}
+
+function isNativeArtifactTransformation(signal: string): boolean {
+  return classifyTaskIntent({ objective: signal }).artifactAction === "transform";
 }
 
 function matchesRequestedArtifactKind(signal: string, artifactKinds: ReadonlySet<string>): boolean {
@@ -6349,6 +6477,35 @@ function hasTableArtifactCoverageEvidence(toolCalls: readonly ToolEvidence[]): b
     });
     return fullCoverage && kinds?.has("table_coverage") === true;
   });
+}
+
+/**
+ * Package manifests own their domain result contract.  Runtime projects only
+ * the neutral fact that a declared action can satisfy a currently-required
+ * evidence kind, so a delivery leaf can schedule that action before it writes
+ * a report without knowing any domain workflow names or result schemas.
+ */
+function skillWorkflowEvidenceActions(input: {
+  readonly skills: readonly PrivateSkill[];
+  readonly manifests: ReadonlyMap<string, Awaited<ReturnType<typeof readSkillExecutionManifest>>>;
+  readonly requiredEvidenceKinds: readonly string[];
+}): readonly import("./tool-progress-policy.ts").RuntimeWorkflowEvidenceAction[] {
+  const required = new Set(input.requiredEvidenceKinds);
+  return input.skills.flatMap((skill) =>
+    (input.manifests.get(skill.id) ?? []).flatMap((entrypoint) =>
+      entrypoint.actions
+        .filter((action) => action.producesEvidenceKinds.some((kind) => required.has(kind)))
+        .map((action) => ({
+          skillName: skill.name,
+          executorId: entrypoint.id,
+          actionId: action.id,
+          command: entrypoint.command,
+          script: entrypoint.script,
+          args: action.args,
+          producesEvidenceKinds: action.producesEvidenceKinds,
+        })),
+    ),
+  );
 }
 
 function receiptKinds(receipt: Record<string, unknown>): ReadonlySet<string> {

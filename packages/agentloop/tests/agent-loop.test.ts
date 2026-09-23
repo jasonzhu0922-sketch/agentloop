@@ -939,6 +939,212 @@ test("structured tool candidates go directly to assessment without a final model
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
+test("structured source candidates wait for required artifact acceptance evidence", async () => {
+  let modelCalls = 0;
+  let assessmentCalls = 0;
+  const delivery = "员工画像标签人员查询 API has countNum and sql inputs.";
+  const lookup: RuntimeTool<unknown> = {
+    name: "lookup_api",
+    description: "Return structured API lookup evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({
+      schema: "api_catalog_result/v1",
+      deliveryCandidate: { output: delivery },
+      evidenceReceipt: {
+        schema: "agentloop.toolEvidenceReceipt/v1",
+        evidenceKinds: { satisfied: ["source_summary"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const write: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write the requested report",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => JSON.stringify({
+      path: "employee-profile-api.html",
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path: "employee-profile-api.html", kind: "html" },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const verify: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the report",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => JSON.stringify({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifact: { path: "employee-profile-api.html", kind: "html" },
+      verdict: "accepted",
+      evidenceKinds: {
+        satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+        caveated: [],
+        failed: [],
+      },
+    }),
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "lookup", name: "lookup_api", arguments: {} }] };
+      }
+      if (modelCalls === 2) {
+        assert.equal(runtimeStepSemanticState(request.runtimeContext?.content ?? "").nextAction, "produce_artifact");
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "employee-profile-api.html", content: "<html></html>" } }] };
+      }
+      assert.equal(runtimeStepSemanticState(request.runtimeContext?.content ?? "").nextAction, "verify_existing_artifact");
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "verify", name: "verify_artifact_acceptance", arguments: { artifactPath: "employee-profile-api.html" } }] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["lookup_api", "computer_write_file", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Query the API, create the requested HTML report, and verify it.",
+    input: "query the employee profile API and create an HTML report",
+    model,
+    tools: new ToolRegistry([lookup, write, verify]),
+    grant,
+    maxSteps: 3,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["source_summary", "artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+      { expectedArtifactKind: "html" },
+    ),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assessmentCalls += 1;
+      assert.match(candidate.output, /employee-profile-api\.html/);
+      assert.doesNotMatch(candidate.output, /countNum and sql inputs/);
+      assert.equal(candidate.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance"), true);
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /employee-profile-api\.html/);
+  assert.equal(modelCalls, 3);
+  assert.equal(assessmentCalls, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.evidence_completion_detected").length, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 0);
+});
+
+test("a declared Skill workflow fact must precede the accepted artifact that consumes it", async () => {
+  let modelCalls = 0;
+  let artifactWrites = 0;
+  const raw = receiptTool("acquire_raw", ["source_summary", "record_counts"]);
+  const analyze: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Run the declared Skill analysis workflow",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({
+      workflowEvidenceReceipt: {
+        schema: "agentloop.skillWorkflowEvidenceReceipt/v1",
+        skill: { skillName: "series-analysis", executorId: "python-analysis", actionId: "analyze-series" },
+        evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const report: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write report",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      artifactWrites += 1;
+      return {
+        path: "trend.html",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "trend.html", kind: "html", bytes: 16 },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+        },
+      };
+    },
+  };
+  const verify: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify report",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifact: { path: "trend.html", kind: "html" },
+      verdict: "accepted",
+      evidenceKinds: { satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"], caveated: [], failed: [] },
+    }),
+  };
+  const policy = runtimeStepToolProgressPolicy([
+    "source_summary", "record_counts", "derived_aggregation", "artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request",
+  ], {
+    scope: "artifact",
+    expectedArtifactKind: "html",
+    artifactDeliveryRequired: true,
+    workflowEvidenceActions: [{
+      skillName: "series-analysis",
+      executorId: "python-analysis",
+      actionId: "analyze-series",
+      command: "python3",
+      script: "scripts/analyze.py",
+      args: ["--input-file", "{{input-file}}"],
+      producesEvidenceKinds: ["derived_aggregation"],
+    }],
+    additionalEvidenceProducingToolNames: ["acquire_raw", "write_draft", "computer_run_command", "write_report"],
+  });
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      modelCalls += 1;
+      const state = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
+      if (modelCalls === 1) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "raw", name: "acquire_raw", arguments: {} }] };
+      if (modelCalls === 2) return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "draft", name: "computer_write_file", arguments: {} }] };
+      if (modelCalls === 3) {
+        assert.equal(state.nextAction, "produce_required_evidence");
+        assert.equal(state.requiredWorkflowAction?.actionId, "analyze-series");
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "analyze", name: "computer_run_command", arguments: {} }] };
+      }
+      if (modelCalls === 4) {
+        assert.equal(state.workProduct.status, "process_artifact_available");
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "report", name: "computer_write_file", arguments: {} }] };
+      }
+      assert.equal(state.nextAction, "verify_existing_artifact");
+      return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "verify", name: "verify_artifact_acceptance", arguments: {} }] };
+    },
+  };
+  const result = await runAgentLoop({
+    runId: "workflow-order",
+    systemPrompt: "Analyze data and write an HTML report.",
+    input: "Analyze the time series and create HTML.",
+    model,
+    tools: new ToolRegistry([raw, analyze, report, verify]),
+    grant: makeGrant(["acquire_raw", "computer_write_file", "computer_run_command", "verify_artifact_acceptance"]),
+    maxSteps: 5,
+    progressPolicy: policy,
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /trend\.html/);
+  assert.equal(modelCalls, 5);
+  assert.equal(artifactWrites, 2);
+});
+
 test("structured stdout candidates from command-style tools go directly to assessment", async () => {
   let executions = 0;
   let assessmentCalls = 0;
@@ -5211,6 +5417,43 @@ function numberTool(
   };
 }
 
+function receiptTool(name: string, satisfied: readonly string[]): RuntimeTool<unknown> {
+  return {
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({
+      schema: "agentloop.testReceipt/v1",
+      evidenceReceipt: {
+        schema: "agentloop.toolEvidenceReceipt/v1",
+        evidenceKinds: { satisfied, caveated: [], failed: [] },
+      },
+    }),
+  };
+}
+
+function artifactTool(name: string, path: string): RuntimeTool<unknown> {
+  return {
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      path,
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path, kind: "html", bytes: 16 },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+}
+
 function runtimeStepSemanticState(content: string): {
   readonly schema: string;
   readonly missingRequiredEvidenceKinds: readonly string[];
@@ -5222,6 +5465,7 @@ function runtimeStepSemanticState(content: string): {
   readonly nextAction: string;
   readonly evidenceProducingToolNames: readonly string[];
   readonly exploratoryToolNames: readonly string[];
+  readonly requiredWorkflowAction?: { readonly actionId: string };
 } {
   const match = content.match(/<runtime_step_semantic_state>\n(.*?)\n<\/runtime_step_semantic_state>/s);
   if (match?.[1] !== undefined) {
@@ -5234,6 +5478,7 @@ function runtimeStepSemanticState(content: string): {
       readonly nextAction: string;
       readonly evidenceProducingToolNames: readonly string[];
       readonly exploratoryToolNames: readonly string[];
+      readonly requiredWorkflowAction?: { readonly actionId: string };
     };
   }
   const frameMatch = content.match(/<loop_step_frame source="server">\n(.*?)\n<\/loop_step_frame>/s);
@@ -5267,6 +5512,9 @@ function runtimeStepSemanticState(content: string): {
     nextAction: frame.currentEvidenceState.nextAction,
     evidenceProducingToolNames: frame.currentEvidenceState.evidenceProducingToolNames,
     exploratoryToolNames: frame.currentEvidenceState.exploratoryToolNames,
+    ...(frame.currentEvidenceState.requiredWorkflowAction === undefined
+      ? {}
+      : { requiredWorkflowAction: frame.currentEvidenceState.requiredWorkflowAction }),
   } as {
     readonly schema: string;
     readonly missingRequiredEvidenceKinds: readonly string[];
@@ -5276,6 +5524,7 @@ function runtimeStepSemanticState(content: string): {
     readonly nextAction: string;
     readonly evidenceProducingToolNames: readonly string[];
     readonly exploratoryToolNames: readonly string[];
+    readonly requiredWorkflowAction?: { readonly actionId: string };
   };
 }
 

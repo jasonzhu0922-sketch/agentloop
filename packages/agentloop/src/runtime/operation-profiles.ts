@@ -1,5 +1,5 @@
 import type { SuccessCriterion } from "../planning/contracts.ts";
-import { classifyTaskIntent } from "./task-intent.ts";
+import { classifyTaskIntent, type StructuredTaskUnderstanding } from "./task-intent.ts";
 
 export type OperationProfileId =
   | "data_analysis"
@@ -178,6 +178,14 @@ export function operationProfileCatalogForPlanning(): readonly Pick<
     planningRules: profile.planningRules,
     successEvidence: profile.successEvidence,
   }));
+}
+
+/** Planner consumes the Runtime-owned task understanding rather than parsing the request again. */
+export function operationProfilesForTaskUnderstanding(
+  understanding: StructuredTaskUnderstanding,
+): ReturnType<typeof operationProfileCatalogForPlanning> {
+  const selected = new Set(understanding.operationProfiles);
+  return operationProfileCatalogForPlanning().filter((item) => selected.has(item.id));
 }
 
 export function inferOperationProfile(input: OperationProfileInput): OperationProfile {
