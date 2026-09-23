@@ -20,6 +20,26 @@ const JSZip = require("jszip") as {
   };
 };
 
+function blankBackgroundPdf(): Buffer {
+  const stream = "0.97 0.98 0.99 rg 75 75 450 650 re f";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+  ];
+  const head = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  let body = "";
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(head + body));
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const startXref = Buffer.byteLength(head + body);
+  const xref = ["xref", `0 ${objects.length + 1}`, "0000000000 65535 f ", ...offsets.map((offset) => `${offset.toString().padStart(10, "0")} 00000 n `)].join("\n");
+  return Buffer.from(`${head}${body}${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF\n`);
+}
+
 test("read_source returns uploaded chunk content with receipt coverage and explicit caveats", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -301,6 +321,27 @@ test("XLSX source preview keeps sparse physical columns as JSON rows", async () 
     assert.doesNotMatch(preview, /2,王乙茜,连接器迁移适配/);
   } finally {
     await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("source intake rejects a PDF containing only a page background without persisting it", async () => {
+  const database = new AppDatabase(":memory:");
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-empty-pdf-upload-"));
+  try {
+    const repository = new SourceRepository(database);
+    const intake = new SourceIntakeService(repository, workspace);
+    await assert.rejects(
+      () => intake.upload({
+        ownerUserId: testOwner().user.id,
+        originalName: "空白.pdf",
+        content: blankBackgroundPdf(),
+      }),
+      /文件「空白\.pdf」上传失败：未检测到可用内容。/,
+    );
+    assert.equal((await repository.listForConversation(testOwner().user.id, "unused-conversation")).length, 0);
+  } finally {
+    database.close();
     await fs.rm(workspace, { recursive: true, force: true });
   }
 });

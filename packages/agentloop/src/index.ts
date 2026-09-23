@@ -157,6 +157,7 @@ export type {
   RuntimeDecisionOption,
 } from "./runtime/decision-ledger.ts";
 export { RunService } from "./runtime/run-service.ts";
+export { assertUploadedSourceContent } from "./runtime/source-intake-service.ts";
 export { RunCheckpointRepository } from "./runtime/run-checkpoint-repository.ts";
 export type { RunCheckpointRecord } from "./runtime/run-checkpoint-repository.ts";
 export type {

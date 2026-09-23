@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
-import type { CommandOutputContent, HumanLoopRequest, HumanLoopResponse, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
+import { assertUploadedSourceContent, type CommandOutputContent, type HumanLoopRequest, type HumanLoopResponse, type RecoveryDetail, type ToolArgumentsContent } from "@zhujun/agentloop";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 
@@ -97,13 +97,16 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         const body = await readJson(request);
         const identity = identityFromRequest(body, request.headers["x-tenant-id"], request.headers["x-user-id"]);
         const value = record(body, "request body");
+        const originalName = stringValue(value.originalName, "originalName");
+        const content = base64(value.contentBase64, "contentBase64");
+        await assertUploadedSourceContent({ originalName, content });
         return json(response, 201, {
           attachment: await options.attachments.upload({
             ...identity,
             conversationId: stringValue(value.conversationId, "conversationId"),
-            originalName: stringValue(value.originalName, "originalName"),
+            originalName,
             mediaType: optionalString(value.mediaType) ?? "application/octet-stream",
-            content: base64(value.contentBase64, "contentBase64"),
+            content,
           }),
         });
       }

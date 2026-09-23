@@ -36,6 +36,13 @@ export class SourceIntakeService {
     const mimeType = input.mimeType?.trim() || "application/octet-stream";
     const byteSize = input.content.byteLength;
     if (byteSize <= 0) throw badRequest("Uploaded file is empty");
+    const extraction = await extractText({
+      originalName,
+      extension,
+      content: input.content,
+      byteSize,
+    });
+    assertUploadHasUsableContent(originalName, extraction);
     const now = Date.now();
     const id = `src_${randomUUID().replaceAll("-", "")}`;
     const sha256 = createHash("sha256").update(input.content).digest("hex");
@@ -50,12 +57,6 @@ export class SourceIntakeService {
     const storagePath = join(directory, "original");
     await fs.writeFile(storagePath, input.content, { flag: "wx" });
 
-    const extraction = await extractText({
-      originalName,
-      extension,
-      content: input.content,
-      byteSize,
-    });
     const row = await this.repository.insertSource({
       id,
       ownerUserId: input.ownerUserId,
@@ -88,6 +89,26 @@ export class SourceIntakeService {
       chunkCount,
     };
   }
+}
+
+/**
+ * Applies the same content-readiness contract before a Router stores a
+ * portable attachment.  This prevents a rejected source from surviving in a
+ * pending attachment list and failing only after a Runtime Host is selected.
+ */
+export async function assertUploadedSourceContent(input: {
+  readonly originalName: string;
+  readonly content: Buffer;
+}): Promise<void> {
+  const originalName = safeOriginalName(input.originalName);
+  if (input.content.byteLength <= 0) throw badRequest(`文件「${originalName}」上传失败：文件为空。`);
+  const extraction = await extractText({
+    originalName,
+    extension: extname(originalName).toLowerCase(),
+    content: input.content,
+    byteSize: input.content.byteLength,
+  });
+  assertUploadHasUsableContent(originalName, extraction);
 }
 
 interface ExtractionResult {
@@ -126,6 +147,15 @@ async function extractText(input: {
   const decoded = await decodeSourceText(input);
   if (decoded.ok === false) return decoded.error;
   const text = decoded.text;
+  if (text.trim() === "") {
+    return {
+      status: "unreadable",
+      text: "",
+      truncated: false,
+      errorCode: "content_empty",
+      errorMessage: "Uploaded file contains no usable content",
+    };
+  }
   const truncated = text.length > MAX_EXTRACTED_CHARACTERS;
   const extracted = truncated ? text.slice(0, MAX_EXTRACTED_CHARACTERS) : text;
   return {
@@ -134,6 +164,12 @@ async function extractText(input: {
     summary: summarizeText(input.originalName, input.extension, extracted, truncated),
     truncated,
   };
+}
+
+function assertUploadHasUsableContent(originalName: string, extraction: ExtractionResult): void {
+  if (extraction.errorCode === "content_empty") {
+    throw badRequest(`文件「${originalName}」上传失败：未检测到可用内容。`);
+  }
 }
 
 type DecodeSourceResult =
@@ -161,12 +197,45 @@ async function decodeSourceText(input: {
     if (input.extension === ".json") text = JSON.stringify(JSON.parse(text), null, 2);
     return { ok: true, text };
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : `Could not extract ${input.originalName}`;
+    if (containsNoExtractableContent(errorMessage) && (input.extension !== ".pdf" || !pdfHasVisibleContent(input.content))) {
+      return extractionError("unreadable", "content_empty", "Uploaded file contains no usable content");
+    }
     return extractionError(
       "unreadable",
       extractionErrorCode(input.extension),
-      error instanceof Error ? error.message : `Could not extract ${input.originalName}`,
+      errorMessage,
     );
   }
+}
+
+function containsNoExtractableContent(message: string): boolean {
+  return /contains no extractable (?:text|body text|sheet text|wordml text)/iu.test(message);
+}
+
+/**
+ * Text extraction alone cannot distinguish a blank PDF from a scanned or
+ * diagram PDF.  Reject only the former at upload time; files with visible
+ * image, text, or vector paint operations retain their existing intake path.
+ */
+function pdfHasVisibleContent(content: Buffer): boolean {
+  const objects = readPdfObjects(content);
+  if (objects.some((object) => /\/Subtype\s*\/Image\b/u.test(object.dictionary))) return true;
+  const streams = objects
+    .filter((object) => object.stream !== undefined)
+    .map((object) => decodePdfStream(object.dictionary, object.stream!));
+  if (streams.some((stream) => /\b(?:Tj|TJ|['"])\b/u.test(stream))) return true;
+  if (streams.some((stream) => /\b(?:Do|sh)\b/u.test(stream))) return true;
+
+  // A single solid rectangle is commonly a page background.  Vector-only
+  // documents need either a non-rectangular path or more than one paint color
+  // before they count as usable visual content.
+  return streams.some((stream) => {
+    if (!/\b(?:S|s|f\*?|F|B\*?|b\*?)\b/u.test(stream)) return false;
+    if (/\b(?:m|l|c|v|y|h)\b/u.test(stream)) return true;
+    const colors = new Set([...stream.matchAll(/(?:^|\s)(?:\d*\.?\d+\s+){0,3}(?:g|G|rg|RG|k|K)\b/g)].map((match) => match[0].trim()));
+    return colors.size > 1;
+  });
 }
 
 async function extractPdfTextWithPdftotext(content: Buffer): Promise<string | undefined> {

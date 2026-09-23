@@ -67,6 +67,45 @@ test("HTTP upload creates an owned uploaded source without exposing file paths",
   }
 });
 
+test("HTTP upload rejects a structurally valid PDF with only a blank page background", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-source-upload-empty-pdf-"));
+  const database = new AppDatabase(":memory:");
+  const auth = new AuthService(database);
+  const skills = new SkillService(database);
+  const runs = new RunService({
+    database,
+    skills,
+    workspaceRoot: workspace,
+    modelFactory: () => { throw new Error("model is not used"); },
+  });
+  const server = createAgentLoopServer({ auth, skills, runs, batches: new BatchService(database, runs) });
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const registered = await postJson<{ token: string }>(baseUrl, "/v1/auth/register", undefined, {
+      email: "empty-pdf-upload@example.com",
+      password: "empty pdf upload secure password",
+    });
+    const form = new FormData();
+    form.append("file", new Blob([blankBackgroundPdf()], { type: "application/pdf" }), "空白.pdf");
+    const uploaded = await fetch(`${baseUrl}/v1/uploads`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${registered.token}` },
+      body: form,
+    });
+    const body = await uploaded.json() as { error?: { code?: string; message?: string } };
+    assert.equal(uploaded.status, 400);
+    assert.equal(body.error?.code, "BAD_REQUEST");
+    assert.equal(body.error?.message, "文件「空白.pdf」上传失败：未检测到可用内容。");
+    const sourceCount = await database.prepare("SELECT COUNT(*) AS count FROM sources").get<{ count: number }>();
+    assert.equal(sourceCount?.count, 0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("source intake extracts HTML, PDF, DOC, DOCX, XLSX, and PPTX uploads into readable chunks", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-source-intake-formats-"));
   const database = new AppDatabase(":memory:");
@@ -159,6 +198,26 @@ function minimalPdf(text: string): Buffer {
   for (const offset of offsets.slice(1)) pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
   pdf += `trailer << /Root 1 0 R /Size ${objects.length + 1} >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
   return Buffer.from(pdf, "latin1");
+}
+
+function blankBackgroundPdf(): Buffer {
+  const stream = "0.97 0.98 0.99 rg 75 75 450 650 re f";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+  ];
+  const head = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  let body = "";
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(head + body));
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const startXref = Buffer.byteLength(head + body);
+  const xref = ["xref", `0 ${objects.length + 1}`, "0000000000 65535 f ", ...offsets.map((offset) => `${offset.toString().padStart(10, "0")} 00000 n `)].join("\n");
+  return Buffer.from(`${head}${body}${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF\n`);
 }
 
 function minimalDocx(text: string): Buffer {
