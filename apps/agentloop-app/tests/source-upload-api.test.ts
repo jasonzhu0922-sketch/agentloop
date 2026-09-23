@@ -87,7 +87,7 @@ test("HTTP upload rejects a structurally valid PDF with only a blank page backgr
       password: "empty pdf upload secure password",
     });
     const form = new FormData();
-    form.append("file", new Blob([new Uint8Array(blankBackgroundPdf())], { type: "application/pdf" }), "空白.pdf");
+    form.append("file", new Blob([blankBackgroundPdf()], { type: "application/pdf" }), "空白.pdf");
     const uploaded = await fetch(`${baseUrl}/v1/uploads`, {
       method: "POST",
       headers: { authorization: `Bearer ${registered.token}` },
