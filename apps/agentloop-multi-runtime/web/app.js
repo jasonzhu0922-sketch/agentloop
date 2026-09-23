@@ -916,7 +916,8 @@ function renderInlineArtifacts(assistant) {
     ? `<div class="inline-artifacts-head"><span>已生成产物</span><small>${failed ? "本轮部分结果" : `${otherArtifacts.length} 个文件`}</small></div><div class="artifact-list">${otherArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>`
     : "";
   const otherBlock = assistant.status === "completed" && otherArtifacts.length ? `<button type="button" class="other-artifacts-toggle" data-other-artifacts-toggle="${escapeHtml(assistant.id)}" aria-expanded="${assistant.otherArtifactsOpen === true}">${assistant.otherArtifactsOpen === true ? "收起其他产物" : `查看其他产物 ${otherArtifacts.length} 个`}<span aria-hidden="true">⌄</span></button>${assistant.otherArtifactsOpen === true ? `<div class="artifact-list other-artifacts-list">${otherArtifacts.map((artifact) => renderArtifactCard(artifact, assistant.id, assistant.status)).join("")}</div>` : ""}` : "";
-  const skillBlock = skills.length ? `<div class="inline-skill-summary"><span>本轮加载 Skill</span><div class="inline-skill-list">${skills.map((skill) => `<span class="inline-skill-chip">${escapeHtml(skill.name)}</span>`).join("")}</div></div>` : "";
+  const skillStatus = (skill) => skill.status === "completed" ? "已加载" : skill.status === "bound" ? "已绑定" : "已选择";
+  const skillBlock = skills.length ? `<div class="inline-skill-summary"><span>本轮 Skill 状态</span><div class="inline-skill-list">${skills.map((skill) => `<span class="inline-skill-chip">${escapeHtml(skill.name)} · ${skillStatus(skill)}</span>`).join("")}</div></div>` : "";
   return `<section class="inline-artifacts" aria-label="本轮产物和 Skill">${artifactBlock}${generatedBlock}${otherBlock}${skillBlock}</section>`;
 }
 

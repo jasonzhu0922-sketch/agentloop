@@ -361,6 +361,8 @@ test("Web keeps execution evidence collapsed and attaches final artifacts to the
   assert.match(app, /function openSelectedArtifactFullscreen\(\)/);
   assert.match(app, /artifact-panel-close/);
   assert.match(app, /inline-skill-summary/);
+  assert.match(app, /本轮 Skill 状态/);
+  assert.match(app, /skillStatus/);
   assert.match(app, /function renderArtifactCard\(artifact, assistantId(?:, assistantStatus(?: = "completed")?)?\)/);
   assert.match(app, /data-other-artifacts-toggle/);
   assert.match(app, /查看其他产物/);
