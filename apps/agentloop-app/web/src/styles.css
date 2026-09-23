@@ -39,7 +39,7 @@
 .main-grid{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 360px}
 .conversation{min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .conversation-scroll{flex:1;min-height:0;overflow-y:auto;scroll-behavior:smooth}
-.messages{max-width:820px;margin:0 auto;display:grid;align-content:start;gap:18px;padding:28px 22px 40px}
+.messages{width:100%;display:grid;align-content:start;gap:18px;padding:28px 60px 40px}
 
 /* ---- messages ---- */
 .msg{display:flex;gap:12px}.msg.user{justify-content:flex-end}
@@ -79,8 +79,8 @@
 .suggestions{display:flex;flex-wrap:wrap;gap:9px;justify-content:center}.suggestion{border:1px solid var(--border);border-radius:999px;padding:9px 15px;background:var(--bg-2);color:var(--text-2);font-size:13px;transition:border .15s var(--ease),color .15s var(--ease)}.suggestion:hover{border-color:var(--brand);color:var(--brand)}
 
 /* composer */
-.composer{padding:14px 22px 18px;border-top:1px solid var(--border);background:var(--bg-2)}
-.composer-box{max-width:820px;margin:0 auto;border:1px solid var(--border-2);border-radius:20px;background:var(--bg);padding:12px 14px;display:flex;flex-direction:column;gap:10px;transition:border .15s var(--ease),box-shadow .15s var(--ease)}
+.composer{padding:14px 60px 18px;border-top:1px solid var(--border);background:var(--bg-2)}
+.composer-box{width:100%;border:1px solid var(--border-2);border-radius:20px;background:var(--bg);padding:12px 14px;display:flex;flex-direction:column;gap:10px;transition:border .15s var(--ease),box-shadow .15s var(--ease)}
 .composer-box:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
 .composer-input{width:100%;border:0;background:transparent;resize:none;outline:none;color:var(--text);font-size:15px;line-height:1.5;max-height:220px}
 .composer-input::placeholder{color:var(--text-3)}
