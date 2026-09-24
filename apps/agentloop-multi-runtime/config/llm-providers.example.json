@@ -16,6 +16,19 @@
       "runtimeContextPlacement": "system",
       "reasoningSummary": "auto",
       "protocol": "responses"
+    },
+    "my-provider": {
+      "kind": "openai-compatible",
+      "baseUrl": "http://api.deepseek.com/v1",
+      "protocol": "chat-completions",
+      "apiKeyEnv": "MY_LLM_API_KEY",
+      "defaultModel": "deepseek-v4-pro",
+      "contextWindowTokens": 128000,
+      "maxOutputTokens": 16384,
+      "timeoutMs": 300000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
+      "toolChoiceMode": "constrained-as-auto"
     }
   },
   "models": {
@@ -24,7 +37,35 @@
       "providerModel": "gpt-5.6-terra",
       "displayName": "GPT-5.6 Terra",
       "protocol": "responses",
-      "reasoningSummary": "auto"
+      "reasoningEffort": "none"
+    },
+    "deepseek-v4-pro": {
+      "providerKey": "my-provider",
+      "providerModel": "deepseek-v4-pro",
+      "displayName": "DeepSeek v4 Pro",
+      "maxOutputTokens": 16384,
+      "thinkingMode": "enabled",
+      "thinkingEffort": "medium",
+      "reasoningVisibility": "hidden"
+    },
+    "deepseek-v4-flash": {
+      "providerKey": "my-provider",
+      "providerModel": "deepseek-v4-flash",
+      "displayName": "DeepSeek v4 Flash",
+      "maxOutputTokens": 16384,
+      "toolChoiceMode": "named-as-required",
+      "thinkingMode": "enabled",
+      "thinkingEffort": "medium",
+      "reasoningVisibility": "hidden"
+    },
+    "deepseek-v4-flash-local": {
+      "providerKey": "my-provider",
+      "providerModel": "DeepSeek-V4-flash",
+      "displayName": "DeepSeek v4 Flash Local",
+      "chatTemplateKwargs": {
+        "thinking": true
+      },
+      "reasoningVisibility": "hidden"
     }
   }
 }

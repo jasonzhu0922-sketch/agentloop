@@ -43,7 +43,10 @@
       "providerKey": "my-provider",
       "providerModel": "deepseek-v4-flash",
       "displayName": "DeepSeek v4 Flash",
-      "maxOutputTokens": 8192
+      "maxOutputTokens": 8192,
+      "thinkingMode": "enabled",
+      "thinkingEffort": "low",
+      "planningThinkingMode": "enabled"
     },
     "gpt-5.6": {
       "providerKey": "openai",

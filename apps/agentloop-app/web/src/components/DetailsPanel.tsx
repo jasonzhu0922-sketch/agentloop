@@ -460,7 +460,8 @@ export function ArtifactLinks({
 
 function artifactSourceLabel(sourceTool: ProcessArtifact["sourceTool"]): string {
   if (sourceTool === "computer_write_file") return "文件写入";
-  if (sourceTool === "materialize_paginated_html") return "页面生成";
+  if (sourceTool === "computer_patch_file") return "文件更新";
+  if (sourceTool === "convert_artifact") return "文件转换";
   return "命令输出";
 }
 

@@ -150,7 +150,7 @@ test("process artifacts deduplicate candidates that resolve to the same workspac
   }
 });
 
-test("process artifacts include paginated HTML materializer output", async () => {
+test("process artifacts include written HTML output", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-materializer-artifacts-"));
   try {
     const createdAt = Date.now();
@@ -166,21 +166,16 @@ test("process artifacts include paginated HTML materializer output", async () =>
         type: "tool.completed",
         createdAt,
         data: {
-          toolName: "materialize_paginated_html",
+        toolName: "computer_write_file",
           result: JSON.stringify({
-            schema: "agentloop.paginatedHtmlMaterialization/v1",
-            artifactKind: "html",
-            renderMode: "slides",
-            acceptanceProfile: "html_ppt",
             path: "deliverables/deck.html",
-            pageCount: 1,
           }),
         },
       }],
     });
 
     assert.deepEqual(artifacts.map((artifact) => artifact.path), ["deliverables/deck.html"]);
-    assert.equal(artifacts[0].sourceTool, "materialize_paginated_html");
+    assert.equal(artifacts[0].sourceTool, "computer_write_file");
     assert.equal(artifacts[0].mimeType, "text/html; charset=utf-8");
     assert.equal(artifacts[0].previewable, true);
   } finally {
@@ -473,6 +468,7 @@ test("process artifact preview extracts docx paragraphs, xlsx rows, and pptx sli
         name: "weekly.docx",
         bytes: (await fs.stat(docxPath)).size,
         mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        role: "final",
         sourceTool: "computer_write_file",
         previewable: true,
       },
@@ -486,6 +482,7 @@ test("process artifact preview extracts docx paragraphs, xlsx rows, and pptx sli
         name: "plan.xlsx",
         bytes: (await fs.stat(xlsxPath)).size,
         mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        role: "final",
         sourceTool: "computer_write_file",
         previewable: true,
       },
@@ -499,6 +496,7 @@ test("process artifact preview extracts docx paragraphs, xlsx rows, and pptx sli
         name: "deck.pptx",
         bytes: (await fs.stat(pptxPath)).size,
         mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        role: "final",
         sourceTool: "computer_write_file",
         previewable: true,
       },

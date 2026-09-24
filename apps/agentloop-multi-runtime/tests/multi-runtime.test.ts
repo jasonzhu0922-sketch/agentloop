@@ -374,6 +374,16 @@ test("Web keeps execution evidence collapsed and attaches final artifacts to the
   assert.match(overrides, /\.artifact-inline-preview/);
 });
 
+test("Web keeps an earlier reply's artifact preview selected while a newer turn is active", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.match(app, /renderArtifacts\(\);/);
+  assert.match(app, /function renderArtifacts\(\) \{/);
+  assert.match(app, /const previewAssistant = inlineArtifactPreview/);
+  assert.match(app, /message\.id === inlineArtifactPreview\.assistantId/);
+  assert.match(app, /const assistant = previewAssistant \|\| selectedAssistant/);
+  assert.doesNotMatch(app, /renderArtifacts\(selectedAssistant\)/);
+});
+
 test("Web excludes command stdout and stderr captures from artifact cards", () => {
   const finalArtifact = { role: "final", name: "report.pdf", path: "deliveries/report.pdf" };
   const stdoutCapture = { role: "final", name: "run.stdout.txt", path: ".agentloop/tool-results/run.stdout.txt" };

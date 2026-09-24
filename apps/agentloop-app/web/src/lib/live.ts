@@ -333,12 +333,6 @@ function toolProgressView(toolName: string, argumentsValue: unknown): { readonly
   if (toolName === "computer_run_command") {
     return commandProgressView(args);
   }
-  if (toolName === "materialize_paginated_html") {
-    return {
-      title: "正在生成分页文档",
-      detail: "按结构化页面规格生成可检查的 HTML 文件。",
-    };
-  }
   if (toolName === "convert_artifact") {
     return {
       title: "正在转换文件格式",

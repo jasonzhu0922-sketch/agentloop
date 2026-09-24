@@ -173,7 +173,7 @@ export interface ProcessArtifact {
   readonly bytes: number;
   readonly mimeType: string;
   readonly role?: "final" | "process";
-  readonly sourceTool: "computer_write_file" | "computer_run_command" | "materialize_paginated_html";
+  readonly sourceTool: "computer_write_file" | "computer_patch_file" | "computer_run_command" | "convert_artifact";
   readonly previewable: boolean;
 }
 

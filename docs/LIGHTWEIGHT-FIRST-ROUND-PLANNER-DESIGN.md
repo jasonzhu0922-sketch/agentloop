@@ -459,7 +459,7 @@ OutcomePlan：
       "dependsOn": ["research_dcmm_level4"],
       "role": "produce",
       "skillIds": ["discovered:web-artifacts-builder"],
-      "recommendedToolNames": ["load_skill", "materialize_paginated_html", "verify_artifact_acceptance"],
+      "recommendedToolNames": ["load_skill", "computer_write_file", "verify_artifact_acceptance"],
       "evidenceContract": {
         "requiredKinds": [
           "artifact_path",

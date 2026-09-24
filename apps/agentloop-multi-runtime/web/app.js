@@ -25,7 +25,6 @@ const ARTIFACT_PRODUCING_TOOLS = new Set([
   "computer_patch_file",
   "computer_run_command",
   "convert_artifact",
-  "materialize_paginated_html",
   "verify_artifact_acceptance",
 ]);
 const recoveredSessions = sortSessions(loadSessions());
@@ -804,7 +803,10 @@ function render() {
   $("cancel").disabled = !cancelTarget.canCancel || (cancelTarget.assignmentId !== undefined && cancellingAssignmentIds.has(cancelTarget.assignmentId));
   $("upload-file").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
   renderPendingAttachments(conversation);
-  renderArtifacts(selectedAssistant);
+  // The artifact pane has its own selection: while a new turn is running the
+  // user can still preview a product from any earlier assistant reply. Do not
+  // let the conversation's current (usually latest) selection hide that pane.
+  renderArtifacts();
   document.querySelectorAll("[data-artifact-card]").forEach((card) => card.addEventListener("click", (event) => {
     if (event.target.closest("button, a, input, select, textarea")) return;
     if (card.dataset.artifactPreviewable === "false") return;
@@ -1264,7 +1266,14 @@ function renderAttachmentChip(attachment, removable = false) {
   const remove = removable && typeof attachment?.id === "string" ? `<button type="button" data-remove-attachment="${escapeHtml(attachment.id)}" aria-label="移除 ${escapeHtml(name)}">×</button>` : "";
   return `<span class="source-chip ${removable ? "" : "msg-source-chip"}" title="${escapeHtml(name)}"><span class="file-icon" aria-hidden="true"><span></span></span><span>${escapeHtml(name)}</span>${size}${remove}</span>`;
 }
-function renderArtifacts(assistant) {
+function renderArtifacts() {
+  const conversation = activeConversation();
+  const messages = conversation?.messages || [];
+  const selectedAssistant = selectedAssistantMessage(conversation, messages);
+  const previewAssistant = inlineArtifactPreview
+    ? messages.find((message) => message.role === "assistant" && message.id === inlineArtifactPreview.assistantId)
+    : undefined;
+  const assistant = previewAssistant || selectedAssistant;
   const artifacts = Array.isArray(assistant?.artifacts) ? assistant.artifacts : [];
   const selected = inlineArtifactPreview && inlineArtifactPreview.assistantId === assistant?.id
     ? artifacts.find((artifact) => artifact.id === inlineArtifactPreview.artifactId)
