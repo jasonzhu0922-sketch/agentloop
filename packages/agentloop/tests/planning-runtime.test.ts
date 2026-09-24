@@ -1063,6 +1063,17 @@ test("structured task understanding keeps source work stable when only the reque
   assert.deepEqual(html.operationProfiles, markdown.operationProfiles);
 });
 
+test("structured task understanding excludes a delivery format from source subject semantics", () => {
+  const understanding = understandTask({
+    objective: "查询宝武资源的工商企业信息，最后落成一个 PDF 文件",
+    evidenceDemand: "source_grounded",
+  });
+
+  assert.equal(understanding.format, "pdf");
+  assert.match(understanding.subject.text, /宝武资源.*工商企业信息/);
+  assert.doesNotMatch(understanding.subject.text, /pdf|文件/i);
+});
+
 test("Task intent keeps an explicit workbook edit as a spreadsheet modification", () => {
   const intent = classifyTaskIntent({
     objective: "修改这个表格的配色和列宽，生成修订版 xlsx",
@@ -1487,6 +1498,62 @@ test("ModelPlanner parses typed uploaded-source bindings into the internal sourc
   assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [sourceId]);
   assert.equal(plan.steps[0]?.sourceConstraint?.requiredToolSourceIds, undefined);
   assert.equal(plan.steps[0]?.sourceConstraint?.requiredVisibleDirectoryIds, undefined);
+});
+
+test("ModelPlanner merges repeated typed bindings within one source namespace", async () => {
+  const sourceIds = [
+    "src_ffffffffffffffffffffffffffffffff",
+    "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  ];
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("split-upload-bindings", {
+        goal: "Review the uploaded materials.",
+        steps: [{
+          id: "review-uploaded-materials",
+          objective: "Review the uploaded materials.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["uploaded_source_read"],
+          sourceConstraint: {
+            bindings: sourceIds.map((id) => ({ kind: "uploaded_source" as const, ids: [id] })),
+          },
+        }],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-repeated-upload-source-bindings",
+    input: "评审上传材料",
+    availableSkills: [],
+    availableToolNames: ["read_source"],
+    availableCapabilities: [{
+      id: "uploaded_source_read",
+      produces: ["source_summary"],
+      sourceKinds: ["uploaded_source"],
+      sideEffect: "none",
+      risk: "low",
+    }],
+    sources: sourceIds.map((id, index) => ({
+      id,
+      originalName: `input-${index + 1}.pdf`,
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100,
+      sha256: `${index + 1}`.repeat(64),
+      status: "ready" as const,
+      chunkCount: 1,
+      truncated: false,
+    })),
+  });
+
+  assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, sourceIds);
 });
 
 test("ModelPlanner identifies a Skill ID in sourceConstraint before generic ToolSource validation", async () => {
@@ -6901,6 +6968,35 @@ test("selectPlanningSkillRoles keeps a source-grounded domain analysis candidate
   assert.ok(selected.some((item) => item.skill.id === dashboard.id));
   assert.ok(selected.some((item) => item.skill.id === analysis.id));
   assert.equal(selected.find((item) => item.skill.id === mysql.id)?.companionForSkillId, analysis.id);
+});
+
+test("selectPlanningSkillRoles keeps a domain source provider across document delivery formats", () => {
+  const enterpriseInfo = skillFixture({
+    id: "enterprise-info",
+    name: "enterprise-info",
+    description: "查询中国大陆企业工商注册信息、企业详情、统一社会信用代码、法人、注册资本和经营范围。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+  const pdf = skillFixture({
+    id: "pdf",
+    name: "pdf",
+    description: "Create and export PDF documents.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"]),
+  });
+  const outputFormats = ["PDF", "HTML", "Markdown"] as const;
+
+  for (const format of outputFormats) {
+    const selected = selectPlanningSkillRoles(
+      [enterpriseInfo, pdf],
+      understandTask({
+        objective: `查询宝武资源的工商企业信息，最后落成一个 ${format} 文件`,
+        evidenceDemand: "source_grounded",
+      }),
+      [],
+    );
+
+    assert.ok(selected.some((item) => item.skill.id === enterpriseInfo.id), format);
+  }
 });
 
 test("selectPlanningSkillRoles does not let DOCX input context displace a semantic HTML assessment Skill", () => {

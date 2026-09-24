@@ -2181,6 +2181,10 @@ function parseSourceConstraintBindings(value: unknown, index: number): {
   if (!Array.isArray(value) || value.length > 3) {
     throw badRequest(`leaves[${index}].sourceConstraint.bindings must be an array with at most 3 entries`);
   }
+  // A namespace is represented once in the canonical SourceConstraint, but
+  // model-produced plans may naturally split several resources of the same
+  // kind across multiple bindings. Union those IDs here instead of turning a
+  // semantically unambiguous request into a planning failure.
   const byKind = new Map<string, string[]>();
   for (const [bindingIndex, item] of value.entries()) {
     const binding = requireRecord(item, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}]`);
@@ -2188,10 +2192,8 @@ function parseSourceConstraintBindings(value: unknown, index: number): {
     if (kind !== "tool_source" && kind !== "uploaded_source" && kind !== "visible_directory") {
       throw badRequest(`leaves[${index}].sourceConstraint.bindings[${bindingIndex}].kind is invalid`);
     }
-    if (byKind.has(kind)) {
-      throw badRequest(`leaves[${index}].sourceConstraint.bindings must not repeat kind ${kind}`);
-    }
-    byKind.set(kind, semanticSourceIds(binding.ids, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}].ids`, 20));
+    const ids = semanticSourceIds(binding.ids, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}].ids`, 20);
+    byKind.set(kind, [...new Set([...(byKind.get(kind) ?? []), ...ids])]);
   }
   return {
     toolSourceIds: byKind.get("tool_source") ?? [],

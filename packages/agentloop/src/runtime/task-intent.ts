@@ -229,15 +229,19 @@ export function understandTask(input: TaskIntentInput & {
   if (intent.wantsArtifact) workflow.push("produce");
   if (workflow.length > 0 || intent.wantsConversationAnswer) workflow.push("deliver");
   const outputFormat = structuredOutputFormat(formatInput);
+  const task = structuredTaskText(displayObjective, intent);
   return {
     schema: "agentloop.taskUnderstanding/v1",
-    task: structuredTaskText(displayObjective, intent),
+    task,
     ...(outputFormat === undefined ? {} : { format: outputFormat }),
     normalizedObjective,
     operation,
     subject: {
-      text: structuredSubjectText(normalizedObjective),
-      terms: structuredSubjectTerms(normalizedObjective),
+      // Source/domain recall is defined by the business task. The complete
+      // normalized objective remains available for delivery planning, but an
+      // output format must not leak into a source-provider's semantic signal.
+      text: structuredSubjectText(task),
+      terms: structuredSubjectTerms(task),
       dates: [...normalizedObjective.matchAll(/\b\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?/gu)].map((match) => match[0]),
       identifiers: [...new Set([
         ...(normalizedObjective.match(/[A-Za-z]{2,}[A-Za-z0-9-]*/gu) ?? []).filter((value) => /\d/.test(value) || /^[A-Z]{2,}$/u.test(value)),
@@ -351,7 +355,7 @@ function structuredTaskOperation(
 
 function structuredSubjectText(value: string): string {
   const withoutUploadContext = value.trim();
-  const deliveryBoundary = /(?:[，,。；;]|\b)(?:并\s*)?(?:输出|生成|创建|制作|交付|给出|produce|generate|create|deliver)/iu.exec(withoutUploadContext);
+  const deliveryBoundary = /(?:[，,。；;]|\b)(?:(?:并|最后)\s*)?(?:输出|生成|创建|制作|交付|给出|落成|produce|generate|create|deliver)/iu.exec(withoutUploadContext);
   const subject = deliveryBoundary?.index === undefined
     ? withoutUploadContext
     : withoutUploadContext.slice(0, deliveryBoundary.index);

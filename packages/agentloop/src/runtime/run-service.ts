@@ -4612,10 +4612,14 @@ export function selectPlanningSkillRoles(
   // separate field below and must not make a generic report Skill appear more
   // relevant than the Skill that owns the requested analysis.
   const signal = normalizePlanningSignal(understanding.subject.text);
-  // Uploaded native-artifact context is Planner evidence about inputs.  Do
-  // not let its filename or format masquerade as the requested deliverable
-  // when deciding which primary builder owns the output boundary.
-  const artifactSignal = normalizePlanningSignal(planningArtifactSignal(understanding.normalizedObjective));
+  // The output surface owns format selection. `task` has already removed
+  // presentation format wording, so combining it with the dedicated format
+  // field preserves artifact recall without handing that format to domain or
+  // source-provider matching.
+  const artifactSignal = normalizePlanningSignal([
+    planningArtifactSignal(understanding.task),
+    understanding.format,
+  ].filter((value): value is string => value !== undefined && value.length > 0).join("\n"));
   // Skill relevance must use the same semantic intent classifier as planning.
   // A current-news request is source work even when it does not literally say
   // "source", "research", or "lookup".
@@ -4637,8 +4641,14 @@ export function selectPlanningSkillRoles(
     return true;
   });
   if (roleEligibleSkills.length === 0) return [];
-  const exactMatches = roleEligibleSkills.filter((skill) => exactSkillMention(artifactSignal, skill));
-  if (exactMatches.length > 0) {
+  const exactMatches = roleEligibleSkills.filter((skill) => exactSkillMention(
+    roleBySkillId.get(skill.id)?.role === "source_provider" ? signal : artifactSignal,
+    skill,
+ ));
+  // An explicit source/domain task can legitimately have an exact artifact
+  // Skill name in its delivery clause (for example, "... as PDF"). Do not
+  // let that delivery-only match bypass the independent source surface.
+  if (exactMatches.length > 0 && !sourceWorkRequested) {
     return expandRequiredPlanningSkills(exactMatches.slice(0, MAX_PLANNING_SKILLS).map((skill) => ({
       skill,
       selection: roleBySkillId.get(skill.id)!,
@@ -4647,7 +4657,12 @@ export function selectPlanningSkillRoles(
   const scored = roleEligibleSkills.map((skill, index) => ({
     skill,
     index,
-    semanticAffinity: scorePlanningSkillSemanticAffinity(skill, signal, bound.has(skill.id), requestedFileFormats),
+    semanticAffinity: scorePlanningSkillSemanticAffinity(
+      skill,
+      signal,
+      bound.has(skill.id),
+      roleBySkillId.get(skill.id)?.role === "source_provider" ? new Set() : requestedFileFormats,
+    ),
     score: scorePlanningSkill(
       skill,
       signal,
@@ -4706,6 +4721,11 @@ export function selectPlanningSkillRoles(
       })
       .sort((left, right) => right.score - left.score || left.index - right.index)[0]
     : undefined;
+  const domainSourceCandidate = sourceWorkRequested
+    ? scored
+      .filter((entry) => roleBySkillId.get(entry.skill.id)?.role === "source_provider" && entry.semanticAffinity > 0)
+      .sort((left, right) => right.semanticAffinity - left.semanticAffinity || right.score - left.score || left.index - right.index)[0]
+    : undefined;
   const outputArtifactCandidate = requestsArtifactBuild(artifactSignal)
     ? scored
       .filter((entry) => matchesRequestedArtifactKind(
@@ -4717,7 +4737,7 @@ export function selectPlanningSkillRoles(
   // Preserve both required work surfaces without exceeding the bounded
   // candidate budget. The lowest-ranked incidental candidate gives way to a
   // missing domain-analysis or output-artifact owner.
-  const requiredSurfaceCandidates = [domainAnalysisCandidate, outputArtifactCandidate]
+  const requiredSurfaceCandidates = [domainAnalysisCandidate, domainSourceCandidate, outputArtifactCandidate]
     .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
     .filter((entry, index, entries) => entries.findIndex((other) => other.skill.id === entry.skill.id) === index);
   if (requiredSurfaceCandidates.length > 0) {
@@ -4927,7 +4947,8 @@ function scorePlanningSkill(
   sourceKinds: ReadonlySet<string>,
   requestedFileFormats: ReadonlySet<string>,
 ): number {
-  let score = scorePlanningSkillSemanticAffinity(skill, signal, bound, requestedFileFormats);
+  const semanticFormats = selectedRole === "source_provider" ? new Set<string>() : requestedFileFormats;
+  let score = scorePlanningSkillSemanticAffinity(skill, signal, bound, semanticFormats);
   const text = planningSkillSemanticText(skill);
   if (requestsArtifactBuild(signal)) {
     if (matchesRequestedArtifactKind(signal, new Set(skill.agentLoop?.artifactKinds ?? []))) score += 4;
