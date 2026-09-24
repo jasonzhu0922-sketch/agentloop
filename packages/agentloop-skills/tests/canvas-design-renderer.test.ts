@@ -9,6 +9,8 @@ import test from "node:test";
 const PACKAGE_ROOT = resolve(import.meta.dirname, "..");
 const RENDERER = resolve(PACKAGE_ROOT, "skills", "canvas-design", "scripts", "render_static_canvas.py");
 const SKILL = resolve(PACKAGE_ROOT, "skills", "canvas-design", "SKILL.md");
+const WORKFLOW = resolve(PACKAGE_ROOT, "skills", "canvas-design", "scripts", "canvas_workflow.py");
+const EXECUTORS = resolve(PACKAGE_ROOT, "skills", "canvas-design", "agentloop.executors.json");
 
 const NETWORK_DIRECTION = {
   concept: "Shared services appear as a constellation of accountable signals",
@@ -144,6 +146,59 @@ test("canvas-design preserves mandatory content and generic reserved regions thr
   assert.match(skill, /Every `mandatoryCopy` item, `reservedZones` entry, named content section, and recognizable subject must have an explicit destination\./u);
   assert.match(skill, /every reserved zone exists at the required placement and proportion, remains clear of decorative intrusion/u);
   assert.match(skill, /Technical artifact acceptance proves that the file exists and decodes\. It does not prove brief coverage, reserved-region preservation, design quality, or diversity\./u);
+  assert.match(skill, /## Production execution architecture/u);
+  assert.match(skill, /Do not write a complete custom image renderer for ordinary posters\./u);
+});
+
+test("canvas-design production workflow persists font preflight, design validation, render, and inspection", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "agentloop-canvas-production-"));
+  try {
+    const executors = JSON.parse(readFileSync(EXECUTORS, "utf8")) as { executors: Array<{ actions: Array<{ id: string }> }> };
+    assert.deepEqual(executors.executors[0]?.actions.map((action) => action.id), ["preflight", "validate-design", "render", "inspect"]);
+    const profilePath = join(workspace, "canvas-runtime-profile.json");
+    const preflight = spawnSync("python3", [WORKFLOW, "preflight", "--report", profilePath], { encoding: "utf8" });
+    assert.equal(preflight.status, 0, preflight.stderr);
+    const profile = JSON.parse(readFileSync(profilePath, "utf8")) as { schema: string; fontRoles: { "cjk-visible-copy": { packageAsset: string; glyphCoverage: string } } };
+    assert.equal(profile.schema, "agentloop.canvasRuntimeProfile/v1");
+    assert.deepEqual(profile.fontRoles["cjk-visible-copy"], {
+      packageAsset: "assets/fonts/NotoSansSC.ttf",
+      sha256: sha256(resolve(PACKAGE_ROOT, "skills", "canvas-design", "assets", "fonts", "NotoSansSC.ttf")),
+      name: profile.fontRoles["cjk-visible-copy"].name,
+      glyphCoverage: "smoke-passed",
+    });
+
+    const documentPath = join(workspace, "design.json");
+    writeFileSync(documentPath, JSON.stringify({
+      schema: "agentloop.canvasDesignDocument/v1",
+      output: { path: "poster.png" },
+      canvas: { width: 900, height: 1200 },
+      artDirection: EDITORIAL_DIRECTION,
+      briefContract: {
+        mandatoryCopy: ["城市智能服务", "技术回到日常"],
+        copyDestinations: [
+          { copy: "城市智能服务", sectionId: "hero", field: "title" },
+          { copy: "技术回到日常", sectionId: "hero", field: "copy" },
+        ],
+        reservedZones: [{ id: "replaceable-mark", label: "品牌 / 二维码预留区", rect: { x: 0.68, y: 0.74, width: 0.2, height: 0.14 }, clearance: 0.02 }],
+      },
+      sections: [
+        { id: "hero", kind: "hero", rect: { x: 0.08, y: 0.08, width: 0.72, height: 0.22 }, title: "城市智能服务", copy: "技术回到日常" },
+        { id: "capabilities", kind: "content", rect: { x: 0.08, y: 0.58, width: 0.56, height: 0.24 }, title: "核心能力", items: ["连接", "协同", "行动"] },
+      ],
+      visualMotifs: [{ kind: "building", label: "城市" }],
+      seed: 19,
+    }), "utf8");
+    for (const action of ["validate", "render", "inspect"]) {
+      const result = spawnSync("python3", [WORKFLOW, action, documentPath], { encoding: "utf8" });
+      assert.equal(result.status, 0, `${action}: ${result.stderr}`);
+    }
+    const inspection = JSON.parse(spawnSync("python3", [WORKFLOW, "inspect", documentPath], { encoding: "utf8" }).stdout) as { schema: string; image: { width: number; height: number } };
+    assert.equal(inspection.schema, "agentloop.canvasDesignInspection/v1");
+    assert.deepEqual(inspection.image, { format: "PNG", width: 900, height: 1200, openable: true });
+    assert.ok(readFileSync(join(workspace, "poster.png")).length > 0);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("canvas-design keeps subject intent independent from visual form", () => {
@@ -304,9 +359,9 @@ test("canvas-design variants alter the primary composition in every non-monument
     ] as const;
     for (const [family, firstVariant, secondVariant] of cases) {
       const base = {
-        title: "Visible Systems",
-        subtitle: "One subject, different spatial decisions",
-        movement: "Divergent Form",
+        title: "形",
+        subtitle: "",
+        movement: "",
         artDirection: DIRECTION_BY_FAMILY[family],
         layoutFamily: family,
         palette: {
@@ -318,7 +373,7 @@ test("canvas-design variants alter the primary composition in every non-monument
           text: "#171917",
           mutedText: "#5f5c54",
         },
-        labels: ["Context", "People", "Action", "Memory"],
+        labels: [],
         texture: 0,
         density: 0.62,
         seed: 410,
@@ -401,6 +456,12 @@ test("canvas-design renderer accepts the documented low texture range", () => {
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test("canvas-design renderer uses its bundled CJK font instead of host font discovery", () => {
+  const source = readFileSync(RENDERER, "utf8");
+  assert.match(source, /assets" \/ "fonts" \/ "NotoSansSC\.ttf/u);
+  assert.match(source, /bundled canvas CJK font cannot render requested visible text/u);
 });
 
 type RenderReceipt = {

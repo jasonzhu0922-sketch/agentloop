@@ -454,6 +454,12 @@ def draw_signal_field(
     text, muted = hex_color(palette["text"]), hex_color(palette["mutedText"])
     if composition_variant == "cartographic":
         draw_metadata(draw, width, height, palette, movement, "CARTOGRAPHIC SIGNAL", latin_font, mono_font)
+        draw.polygon(
+            [(int(width * 0.10), int(height * 0.30)), (int(width * 0.54), int(height * 0.22)), (int(width * 0.89), int(height * 0.42)), (int(width * 0.76), int(height * 0.78)), (int(width * 0.29), int(height * 0.84)), (int(width * 0.12), int(height * 0.62))],
+            fill=secondary + (38,),
+            outline=primary + (165,),
+            width=max(3, width // 420),
+        )
         for x in range(int(width * 0.10), int(width * 0.94), max(36, width // 12)):
             draw.line((x, int(height * 0.22), x, int(height * 0.86)), fill=muted + (42,), width=1)
         for y in range(int(height * 0.22), int(height * 0.87), max(44, height // 18)):
@@ -1222,6 +1228,14 @@ def packaged_font(name: str, size: int) -> ImageFont.ImageFont:
 
 def font_for_text(text: str, size: int, prefer_cjk: bool = False) -> ImageFont.ImageFont:
     needs_cjk = prefer_cjk or contains_cjk(text)
+    if needs_cjk:
+        bundled_cjk = Path(os.environ.get("AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN", Path(__file__).resolve().parents[1])) / "assets" / "fonts" / "NotoSansSC.ttf"
+        if not bundled_cjk.is_file():
+            raise RuntimeError(f"bundled canvas CJK font is unavailable: {bundled_cjk}")
+        font = ImageFont.truetype(str(bundled_cjk), size)
+        if glyph_smoke_check(font, text):
+            return font
+        raise RuntimeError("bundled canvas CJK font cannot render requested visible text")
     candidates = []
     if needs_cjk:
         candidates.extend(system_cjk_font_candidates())

@@ -143,6 +143,22 @@ Do not force a direction through the packaged renderer merely because it is fast
 
 For a custom renderer, preserve the same design discipline: materialize the brief contract and selected direction in workspace-owned source, use explicit layout measurements for required regions, verify glyph coverage, and keep the implementation no more specialized than the selected artwork requires. Custom means purpose-built composition, not unstructured improvisation.
 
+## Production execution architecture
+
+Use the package-owned `canvas-production` executor actions exposed by `load_skill` as the normal production path. This is a persistent workflow, not a suggestion to author a full Pillow program in model output.
+
+Execute the following phases in order:
+
+1. Run `preflight` once and persist its `canvas-runtime-profile.json`. Reuse the package-owned `assets/fonts/NotoSansSC.ttf` CJK-safe font profile; do not write ad-hoc font probes, scan arbitrary system directories, or install a font library during a normal canvas task. If that asset is unavailable or cannot render the requested visible text, report the package/runtime failure rather than silently substituting a host font.
+2. Write one compact `agentloop.canvasDesignDocument/v1` JSON document in the workspace. It is the durable handoff between design and production. It contains `briefContract`, `artDirection`, normalized `sections`, `visualMotifs`, canvas settings, and a relative PNG `output.path`.
+3. Run `validate-design` on that exact document. Repair the document when validation fails; do not bypass it by changing a renderer or flattening the brief.
+4. Run `render` on the validated document. The package scaffold owns CJK font selection, base composition, section geometry, reserved-region treatment, PNG export, and structural render receipt.
+5. Run `inspect`, then inspect the actual image at full size and thumbnail size. Finally call the Runtime artifact-acceptance tool when it is available.
+
+The document's `sections` use normalized rectangles `{x,y,width,height}` in the 0–1 canvas coordinate space. Every mandatory copy item must appear exactly once in `briefContract.copyDestinations`, which names its rendered `sectionId` and field (`title`, `copy`, or `items`); every reserved zone must contain `id`, `label`, `rect`, and optional `clearance`. The scaffold deliberately treats a QR block, logo, portrait, screenshot, seal, and contact region as the same generic reserved-zone contract.
+
+Do not write a complete custom image renderer for ordinary posters. The production scaffold is the implementation boundary. If a future brief genuinely needs an unsupported image operation, preserve this document and add a narrowly scoped package capability rather than reconstructing fonts, layout, export, and acceptance in a task workspace.
+
 The packaged renderer lives at `scripts/render_static_canvas.py`. From a writable workspace, run it through the injected Skill root:
 
 `python3 -c "import os,runpy;runpy.run_path(os.path.join(os.environ['AGENTLOOP_SKILL_ROOT_CANVAS_DESIGN'],'scripts','render_static_canvas.py'), run_name='__main__')" spec.json`

@@ -1,0 +1,71 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "canvas-production",
+      "description": "Produce a static canvas from a persisted design document through a package-owned preflight, validation, render, and inspection workflow. The model supplies design decisions as data; it does not author a full renderer.",
+      "command": "python3",
+      "script": "scripts/canvas_workflow.py",
+      "actions": [
+        {
+          "id": "preflight",
+          "description": "Record Pillow availability and a CJK-safe font profile once before authoring a canvas design document.",
+          "inputs": [
+            {
+              "name": "report-path",
+              "description": "Absolute workspace path for canvas-runtime-profile.json.",
+              "required": true
+            }
+          ],
+          "args": ["preflight", "--report", "{{report-path}}"],
+          "result": "An agentloop.canvasRuntimeProfile/v1 report with the reusable font and renderer readiness facts."
+        },
+        {
+          "id": "validate-design",
+          "description": "Validate the persisted canvas design document before rendering. It checks the brief contract, normalized layout regions, explicit art direction, and output path.",
+          "inputs": [
+            {
+              "name": "design-path",
+              "description": "Absolute workspace path of the agentloop.canvasDesignDocument/v1 JSON document.",
+              "required": true,
+              "evidenceInput": "immutable_workspace_artifact"
+            }
+          ],
+          "args": ["validate", "{{design-path}}"],
+          "result": "An agentloop.canvasDesignDocumentValidation/v1 receipt.",
+          "producesEvidenceKinds": ["canvas_design_document"]
+        },
+        {
+          "id": "render",
+          "description": "Render the validated document with the package-owned canvas scaffold. It writes the document-declared PNG and reports artifact facts; use this instead of writing a whole Pillow renderer.",
+          "inputs": [
+            {
+              "name": "design-path",
+              "description": "Absolute workspace path of the validated agentloop.canvasDesignDocument/v1 JSON document.",
+              "required": true,
+              "evidenceInput": "immutable_workspace_artifact"
+            }
+          ],
+          "args": ["render", "{{design-path}}"],
+          "result": "An agentloop.canvasDesignProductionReceipt/v1 receipt with the PNG path, dimensions, font profile, and brief-contract mapping.",
+          "producesEvidenceKinds": ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_openable"]
+        },
+        {
+          "id": "inspect",
+          "description": "Inspect the rendered PNG against the persisted document: image decode, dimensions, mandatory-copy mapping, section regions, and clear reserved zones. It is not a substitute for final visual review.",
+          "inputs": [
+            {
+              "name": "design-path",
+              "description": "Absolute workspace path of the agentloop.canvasDesignDocument/v1 JSON document used to render the image.",
+              "required": true,
+              "evidenceInput": "immutable_workspace_artifact"
+            }
+          ],
+          "args": ["inspect", "{{design-path}}"],
+          "result": "An agentloop.canvasDesignInspection/v1 report with structural image and brief-contract facts.",
+          "producesEvidenceKinds": ["canvas_visual_contract"]
+        }
+      ]
+    }
+  ]
+}
