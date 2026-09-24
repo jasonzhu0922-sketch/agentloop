@@ -32,10 +32,12 @@ To apply consistent, professional styling to presentation slide decks, use this 
 
 To apply styling to a slide deck or other artifact:
 
-1. **Show the theme showcase**: Display the `theme-showcase.pdf` file to allow users to see all available themes visually. Do not make any modifications to it; simply show the file for viewing.
-2. **Ask for their choice**: Ask which theme to apply to the deck
-3. **Wait for selection**: Get explicit confirmation about the chosen theme
-4. **Apply the theme**: Once a theme has been chosen, apply the selected theme's colors and fonts to the deck/artifact
+1. **Show the theme showcase**: Make `theme-showcase.pdf` available for the user to inspect. Do not modify it.
+2. **Persist the choice as HIL**: Before applying a theme or creating a themed final artifact, call `request_human_loop`; a sentence in assistant output such as “please confirm” or “choose a theme” is never a substitute. This is a stop gate: do not apply a palette/font pairing, write the final deck/artifact, or claim delivery until the HIL response is received.
+3. **Use a typed selection request for packaged themes**: use `kind: "selection"`, `responseSchema.type: "select"`, one required selection, and an option for every applicable packaged theme. Each option must name the theme and summarize its palette, typography, and practical tradeoff. Bind the showcase or theme-definition tool-result references in `evidenceRefs`, and use `resume.mode: "continue_step"`.
+4. **Apply the selected theme**: After the response, read only the corresponding theme definition and apply its colors and fonts consistently throughout the deck/artifact.
+
+Never infer a selection from a user silence, from a model preference, or from a sector convention. If the user has already explicitly named one of the packaged themes, that selection is authoritative and no selection HIL is needed.
 
 ## Themes Available
 
@@ -68,4 +70,7 @@ After a preferred theme is selected:
 4. Maintain the theme's visual identity across all slides
 
 ## Create your Own Theme
-To handle cases where none of the existing themes work for an artifact, create a custom theme. Based on provided inputs, generate a new theme similar to the ones above. Give the theme a similar name describing what the font/color combinations represent. Use any basic description provided to choose appropriate colors/fonts. After generating the theme, show it for review and verification. Following that, apply the theme as described above.
+
+To handle cases where none of the existing themes work for an artifact, create a custom theme. Based on provided inputs, generate a new theme similar to the ones above. Give the theme a similar name describing what the font/color combinations represent. Use any basic description provided to choose appropriate colors/fonts.
+
+After producing the custom theme specification, request its approval with `request_human_loop` before applying it or creating the themed final artifact. Use `kind: "confirmation"`, `responseSchema.type: "confirm"`, `resume.mode: "continue_step"`, and bind the custom-theme specification result in `evidenceRefs`. The confirmation prompt must identify the proposed name, palette, and fonts. Do not render “please confirm” as ordinary assistant prose and then continue as if it were a HIL. On acceptance, apply that exact approved specification; on rejection, use the rejection feedback to revise the theme and request a new confirmation rather than silently substituting another theme.
