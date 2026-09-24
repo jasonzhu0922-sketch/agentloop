@@ -2,6 +2,7 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 import {
   parseJsonRecord,
+  canonicalArtifactAcceptanceVerdict,
   runtimeEvidenceKindArrays,
   runtimeEvidenceRecordsFromToolResult,
 } from "./tool-result-evidence.ts";
@@ -216,6 +217,7 @@ export function deriveRuntimeStepEvidenceState(input: {
     missingRequiredEvidenceKinds,
     satisfiedEvidenceKinds: [...evidenceKinds.satisfied],
     failedEvidenceKinds: [...evidenceKinds.failed],
+    recentActionableDiagnostic,
     workProduct,
     policy,
   });
@@ -317,7 +319,6 @@ export function runtimeStepToolProgressPolicy(
       "computer_summarize_table_artifact",
       "convert_artifact",
       "extract_source_tables",
-      "materialize_paginated_html",
       "visible_extract_tables",
       "verify_artifact_acceptance",
       ...(options.additionalEvidenceProducingToolNames ?? []),
@@ -404,6 +405,16 @@ const NON_DELIVERABLE_ARTIFACT_EVIDENCE_KINDS = new Set([
   "artifact_openable",
   "format_matches_request",
 ]);
+const ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS = new Set([
+  "artifact_acceptance",
+  "artifact_openable",
+  "format_matches_request",
+]);
+const ARTIFACT_ACCEPTANCE_RECEIPT_KINDS = new Set([
+  "artifact_path",
+  "artifact_non_empty",
+  ...ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS,
+]);
 
 function collectEvidenceKinds(evidence: readonly AgentLoopToolEvidence[]): {
   readonly satisfied: Set<string>;
@@ -443,11 +454,22 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
-  // A package-declared workflow kind is not a generic string claim. Once a
-  // leaf declares its producer, accept that kind only from Runtime's bound
-  // action receipt; an arbitrary Skill-root command may still expose ordinary
-  // content/evidence but cannot impersonate the declared workflow.
-  const declaredWorkflowKinds = new Set(policy.workflowEvidenceActions.flatMap((action) => action.producesEvidenceKinds));
+  const latestArtifactIndex = evidence.reduce((last, item, index) =>
+    item.toolName !== "verify_artifact_acceptance" && !item.isError && artifactRefFromEvidence(item) !== undefined
+      ? index
+      : last,
+  -1);
+  if (latestArtifactIndex >= 0) {
+    for (const kind of ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS) evidenceKinds.failed.delete(kind);
+  }
+  // A package-declared action is an authenticated producer for its workflow
+  // facts; it is not a claim that every artifact fact in the Step must be
+  // produced by that action.  Runtime's accepted artifact receipt remains the
+  // neutral authority for its own path/non-empty/format/openability facts,
+  // including when an authorized custom renderer created the file.
+  const declaredWorkflowKinds = new Set(policy.workflowEvidenceActions
+    .flatMap((action) => action.producesEvidenceKinds)
+    .filter((kind) => !ARTIFACT_ACCEPTANCE_RECEIPT_KINDS.has(kind)));
   for (const kind of declaredWorkflowKinds) {
     evidenceKinds.satisfied.delete(kind);
     evidenceKinds.caveated.delete(kind);
@@ -517,18 +539,21 @@ function collectKnownArtifacts(evidence: readonly AgentLoopToolEvidence[]): Runt
           ?? stringField(artifact, "path")
           ?? stringField(asRecord(parsed.output), "path");
         if (path === undefined) continue;
+        const previous = byPath.get(path);
         byPath.set(path, {
           path,
           sourceTool: item.toolName,
           toolCallId: item.toolCallId,
-          bytes: numberField(parsed, "bytes") ?? numberField(artifact, "bytes"),
-          sha256: stringField(parsed, "sha256") ?? stringField(artifact, "sha256"),
+          bytes: numberField(parsed, "bytes") ?? numberField(artifact, "bytes") ?? previous?.bytes,
+          sha256: stringField(parsed, "sha256") ?? stringField(artifact, "sha256") ?? previous?.sha256,
           artifactKind: stringField(parsed, "artifactKind")
             ?? stringField(parsed, "kind")
             ?? stringField(artifact, "artifactKind")
-            ?? stringField(artifact, "kind"),
+            ?? stringField(artifact, "kind")
+            ?? previous?.artifactKind,
           acceptanceProfile: stringField(parsed, "acceptanceProfile")
-            ?? stringField(artifact, "acceptanceProfile"),
+            ?? stringField(artifact, "acceptanceProfile")
+            ?? previous?.acceptanceProfile,
         });
       }
     }
@@ -541,6 +566,7 @@ function classifyWorkProduct(
   policy: RuntimeToolProgressPolicy,
   evidenceKinds: {
     readonly satisfied: ReadonlySet<string>;
+    readonly caveated: ReadonlySet<string>;
     readonly failed: ReadonlySet<string>;
   },
 ): RuntimeStepWorkProductState {
@@ -573,7 +599,7 @@ function classifyWorkProduct(
     : artifacts;
   const acceptanceSatisfied = prerequisiteArtifactOrderSatisfied
     && acceptanceRequired
-    && evidenceKinds.satisfied.has("artifact_acceptance")
+    && (evidenceKinds.satisfied.has("artifact_acceptance") || evidenceKinds.caveated.has("artifact_acceptance"))
     && !evidenceKinds.failed.has("artifact_acceptance");
   const status: RuntimeStepWorkProductStatus = deliverableArtifacts.length > 0 && acceptanceSatisfied
     ? "accepted"
@@ -638,7 +664,7 @@ function isAcceptanceDeliverableArtifact(
   policy: RuntimeToolProgressPolicy,
 ): boolean {
   if (artifact.acceptanceProfile !== undefined) return true;
-  if (artifact.sourceTool === "convert_artifact" || artifact.sourceTool === "materialize_paginated_html") return true;
+  if (artifact.sourceTool === "convert_artifact") return true;
   if (policy.expectedArtifactKind !== undefined) {
     if (artifact.artifactKind !== undefined) return artifactKindMatchesExpected(artifact.artifactKind, policy.expectedArtifactKind);
     return artifactPathMatchesExpectedKind(artifact.path, policy.expectedArtifactKind);
@@ -723,6 +749,7 @@ function nextActionForEvidenceGap(input: {
   readonly missingRequiredEvidenceKinds: readonly string[];
   readonly satisfiedEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
+  readonly recentActionableDiagnostic?: boolean;
   readonly workProduct: RuntimeStepWorkProductState;
   readonly policy: RuntimeToolProgressPolicy;
 }): RuntimeStepNextAction {
@@ -730,7 +757,7 @@ function nextActionForEvidenceGap(input: {
   const satisfied = new Set(input.satisfiedEvidenceKinds);
   const prerequisiteAction = pendingWorkflowEvidenceAction(input.policy, missing);
   if (prerequisiteAction !== undefined) return "produce_required_evidence";
-  if (input.failedEvidenceKinds.length > 0 && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
+  if (input.recentActionableDiagnostic === true && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
   }
   // A source/script artifact already produced for this leaf is current work
@@ -803,7 +830,6 @@ function evidenceProducingToolsForAction(
         || name === "computer_write_file"
         || name === "computer_run_command"
         || name === "convert_artifact"
-        || name === "materialize_paginated_html"
       );
     case "verify_existing_artifact":
       return tools.filter((name) => name === "verify_artifact_acceptance");
@@ -836,7 +862,6 @@ function hasArtifactProducer(policy: RuntimeToolProgressPolicy): boolean {
     "computer_write_file",
     "computer_run_command",
     "convert_artifact",
-    "materialize_paginated_html",
   ]);
 }
 
@@ -1061,7 +1086,6 @@ const WORK_PRODUCT_TOOL_NAMES = new Set([
   "computer_patch_file",
   "computer_run_command",
   "convert_artifact",
-  "materialize_paginated_html",
   "verify_artifact_acceptance",
 ]);
 
@@ -1268,6 +1292,14 @@ function isPatchPreconditionDiagnostic(result: string): boolean {
 
 function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {
   const text = toolEvidenceText(evidence);
+  if (evidence.toolName === "verify_artifact_acceptance") {
+    const verdicts = runtimeEvidenceRecordsFromToolResult(evidence.result)
+      .map((record) => canonicalArtifactAcceptanceVerdict(record))
+      .filter((verdict): verdict is string => verdict !== undefined);
+    if (verdicts.some((verdict) => verdict === "rejected")) return true;
+    if (verdicts.some((verdict) => verdict === "accepted" || verdict === "caveated")) return false;
+    if (!evidence.isError) return false;
+  }
   if (text.length === 0) return false;
   const hasDiagnostic =
     evidence.isError

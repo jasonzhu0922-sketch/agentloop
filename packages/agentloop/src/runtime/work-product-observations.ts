@@ -288,7 +288,7 @@ export function deriveWorkProductObservations(input: {
 }
 
 const FILE_METADATA_TOOLS = new Set(["computer_read_json", "materialize_source_file"]);
-const RECEIPT_TOOLS = new Set(["computer_write_file", "computer_patch_file", "convert_artifact", "materialize_paginated_html"]);
+const RECEIPT_TOOLS = new Set(["computer_write_file", "computer_patch_file", "convert_artifact"]);
 
 function operationStatus(evidence: AgentLoopToolEvidence, result: Record<string, unknown> | undefined): WorkProductObservation["operationStatus"] {
   if (evidence.isError || evidence.operationStatus === "failed" || evidence.invocationStatus === "failed"

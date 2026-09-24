@@ -198,6 +198,7 @@ export interface HostRunProjection {
     readonly reasonCode: string;
     readonly planId?: string;
     readonly output?: string;
+    readonly deliveryReceipt?: import("./contracts.ts").RuntimeDeliveryReceipt;
     readonly committedAt: number;
   };
   readonly plan: {
@@ -585,6 +586,7 @@ export class RunService {
           reasonCode: outcome.reasonCode,
           ...(outcome.planId === undefined ? {} : { planId: outcome.planId }),
           ...(outcome.output === undefined ? {} : { output: outcome.output }),
+          ...(outcome.deliveryReceipt === undefined ? {} : { deliveryReceipt: outcome.deliveryReceipt }),
           committedAt: outcome.committedAt,
         },
       }),
@@ -1102,6 +1104,7 @@ export class RunService {
     planId?: string;
     output?: string;
     result?: ReturnType<typeof parseRuntimeResultJson>;
+    deliveryReceipt?: import("./contracts.ts").RuntimeDeliveryReceipt;
     committedAt: number;
   } | undefined> {
     const row = await this.database.prepare(`
@@ -1115,12 +1118,16 @@ export class RunService {
       committed_at: number;
     } | undefined;
     if (row === undefined) return undefined;
+    const deliveryReceipt = row.status === "completed"
+      ? await this.results.readDeliveryReceiptForRun(runId)
+      : undefined;
     return {
       status: row.status,
       reasonCode: row.reason_code,
       ...(row.plan_id === null ? {} : { planId: row.plan_id }),
       ...(row.output === null ? {} : { output: row.output }),
       ...(row.result_json === null ? {} : { result: parseRuntimeResultJson(row.result_json) }),
+      ...(deliveryReceipt === undefined ? {} : { deliveryReceipt }),
       committedAt: row.committed_at,
     };
   }
@@ -3532,9 +3539,16 @@ function shouldLogRunEvent(type: string): boolean {
   return TERMINAL_EVENT_TYPES.has(type);
 }
 
-/** The run event API intentionally exposes provider reasoning content to its owner. */
+/**
+ * Remove Runtime-only provider continuation state from every client-facing
+ * event path (history, SSE, Host relay).  The raw stored event remains
+ * available to recovery-transcript.ts, which is the only consumer that needs
+ * DeepSeek's opaque `reasoning_content` for the next provider turn.
+ */
 function publicRunEvent(event: StoredRunEvent): StoredRunEvent {
-  return event;
+  if (!("privateReasoningContent" in event.data)) return event;
+  const { privateReasoningContent: _privateReasoningContent, ...data } = event.data;
+  return { ...event, data };
 }
 
 function formatRunEventLogLine(runId: string, seq: number, event: RuntimeEvent, createdAt: number): string {
@@ -4080,7 +4094,7 @@ function artifactSourceForPath(
 
 function artifactPathsFromToolResult(toolName: string | undefined, result: Readonly<Record<string, unknown>> | undefined): string[] {
   if (result === undefined) return [];
-  if (toolName === "computer_write_file" || toolName === "computer_patch_file" || toolName === "materialize_paginated_html") {
+  if (toolName === "computer_write_file" || toolName === "computer_patch_file") {
     const path = typeof result.path === "string" ? result.path : undefined;
     return path === undefined ? [] : [normalizeArtifactPath(path)];
   }
@@ -5217,6 +5231,7 @@ function isInformativeCjkPlanningPhrase(phrase: string): boolean {
 class ActionTrackedModel implements ModelAdapter {
   readonly limits: ModelAdapter["limits"];
   readonly operationTimeoutMs: number;
+  readonly reasoningVisibility: "visible" | "hidden" | undefined;
   private readonly model: ModelAdapter;
   private readonly actions: RuntimeActionRepository;
   private readonly runId: string;
@@ -5234,6 +5249,7 @@ class ActionTrackedModel implements ModelAdapter {
     this.scope = scope;
     this.limits = model.limits;
     this.operationTimeoutMs = model.operationTimeoutMs ?? 120_000;
+    this.reasoningVisibility = model.reasoningVisibility;
   }
 
   estimateInputTokens(invocation: ModelInvocation): number | undefined {
@@ -5366,18 +5382,25 @@ async function commitCompletedPlan(
   return reasonCode;
 }
 
-function completionCaveatReasonCode(
+export function completionCaveatReasonCode(
   plan: ExecutionPlan,
   assessments: readonly SkillComplianceAssessment[],
 ): string | undefined {
-  if (plan.steps.some((step) => step.evidence?.completionCaveat?.reason === "repair_limit")) {
+  // TerminalCommitter evaluates only executable (non-retired) leaf steps.
+  // Keep reason selection on that same authority set so a caveat left on a
+  // retired step cannot force a caveated commit after a repair leaf succeeds.
+  const activeSteps = activeLeafSteps(plan);
+  const activeStepIds = new Set(activeSteps.map((step) => step.id));
+  if (activeSteps.some((step) => step.evidence?.completionCaveat?.reason === "repair_limit")) {
     return "completed_with_repair_limit_caveat";
   }
-  if (plan.steps.some((step) => step.evidence?.completionCaveat?.reason === "evidence_boundary")) {
+  if (activeSteps.some((step) => step.evidence?.completionCaveat?.reason === "evidence_boundary")) {
     return "completed_with_evidence_boundary";
   }
   const latestByStep = new Map<string, SkillComplianceAssessment>();
-  for (const assessment of assessments) latestByStep.set(assessment.stepId, assessment);
+  for (const assessment of assessments) {
+    if (activeStepIds.has(assessment.stepId)) latestByStep.set(assessment.stepId, assessment);
+  }
   if ([...latestByStep.values()].some((assessment) =>
     assessment.skills.some((skill) => skill.status === "process_caveat")
   )) {
@@ -5571,7 +5594,7 @@ function stepRequiresFileOutput(step: ExecutionPlan["steps"][number]): boolean {
   if (step.role === "fact_acquisition") return false;
   return artifactExtensionsRequiredByStep(step).size > 0
     || stepUsesTool(step, (name) =>
-      name === "computer_write_file" || name === "computer_patch_file" || name === "computer_run_command" || name === "materialize_paginated_html"
+      name === "computer_write_file" || name === "computer_patch_file" || name === "computer_run_command"
     );
 }
 
@@ -5748,7 +5771,7 @@ function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number])
     || /(?:验证|校验|检查|审查|终检|验收|质量|对比|问题清单)/u.test(text);
   if (!productionIntent && verificationIntent) return false;
   const productionTool = stepUsesTool(step, (name) =>
-    name === "computer_write_file" || name === "computer_patch_file" || name === "materialize_paginated_html" || name === "convert_artifact"
+    name === "computer_write_file" || name === "computer_patch_file" || name === "convert_artifact"
   );
   if (productionTool) return true;
   if (!productionIntent) return false;
@@ -5783,14 +5806,13 @@ function artifactExtensionsProducedByEvidence(evidence: readonly AgentLoopToolEv
     if (
       item.toolName !== "computer_write_file"
       && item.toolName !== "computer_patch_file"
-      && item.toolName !== "materialize_paginated_html"
       && item.toolName !== "convert_artifact"
       && item.toolName !== "computer_list_directory"
       && item.toolName !== "computer_run_command"
     ) continue;
     const parsed = parseToolResult(item.result);
     if (
-      (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file" || item.toolName === "materialize_paginated_html")
+      (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file")
       && isPlainRecord(parsed)
       && typeof parsed.path === "string"
     ) {

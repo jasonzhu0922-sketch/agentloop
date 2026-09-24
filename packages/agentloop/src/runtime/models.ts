@@ -33,6 +33,18 @@ export interface OpenAICompatibleModelOptions {
   readonly runtimeContextPlacement?: RuntimeContextPlacement;
   /** Request a public reasoning summary from Responses-compatible models. */
   readonly reasoningSummary?: "auto";
+  /** Control reasoning effort for Responses-compatible models. */
+  readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  /** Control thinking for Chat Completions providers that expose DeepSeek's thinking extension. */
+  readonly thinkingMode?: "enabled" | "disabled";
+  /** Optional DeepSeek Chat Completions reasoning effort when thinking is enabled. */
+  readonly thinkingEffort?: "low" | "medium" | "high";
+  /** Whether provider reasoning may be projected into Runtime events. */
+  readonly reasoningVisibility?: "visible" | "hidden";
+  /** Override Chat Completions thinking for formal OutcomePlan requests only. */
+  readonly planningThinkingMode?: "enabled" | "disabled";
+  /** Server-configured OpenAI Chat Completions template extensions. */
+  readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   /** Optional server-authored reporter invoked before each retry attempt. */
   readonly onRetry?: ModelRetryReporter;
 }
@@ -126,6 +138,7 @@ interface ModelResponseBudget {
 export class OpenAICompatibleModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
   readonly operationTimeoutMs: number;
+  readonly reasoningVisibility: "visible" | "hidden";
   private readonly endpoint: URL;
   private readonly apiKey: string;
   private readonly model: string;
@@ -135,6 +148,11 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto";
+  private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  private readonly thinkingMode?: "enabled" | "disabled";
+  private readonly thinkingEffort?: "low" | "medium" | "high";
+  private readonly planningThinkingMode?: "enabled" | "disabled";
+  private readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -161,11 +179,17 @@ export class OpenAICompatibleModel implements ModelAdapter {
     };
     this.timeoutMs = options.timeoutMs ?? 120_000;
     this.operationTimeoutMs = streamOperationTimeoutMs(this.timeoutMs);
+    this.reasoningVisibility = options.reasoningVisibility ?? "visible";
     this.maxAttempts = options.maxAttempts ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 250;
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
+    this.reasoningEffort = options.reasoningEffort;
+    this.thinkingMode = options.thinkingMode;
+    this.thinkingEffort = options.thinkingEffort;
+    this.planningThinkingMode = options.planningThinkingMode;
+    this.chatTemplateKwargs = options.chatTemplateKwargs;
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -185,6 +209,35 @@ export class OpenAICompatibleModel implements ModelAdapter {
     }
     if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto") {
       throw new TypeError("reasoning summary must be auto");
+    }
+    if (
+      this.reasoningEffort !== undefined
+      && this.reasoningEffort !== "none"
+      && this.reasoningEffort !== "low"
+      && this.reasoningEffort !== "medium"
+      && this.reasoningEffort !== "high"
+    ) {
+      throw new TypeError("reasoning effort must be none, low, medium, or high");
+    }
+    if (this.thinkingMode !== undefined && this.thinkingMode !== "enabled" && this.thinkingMode !== "disabled") {
+      throw new TypeError("thinking mode must be enabled or disabled");
+    }
+    if (
+      this.thinkingEffort !== undefined
+      && this.thinkingEffort !== "low"
+      && this.thinkingEffort !== "medium"
+      && this.thinkingEffort !== "high"
+    ) {
+      throw new TypeError("thinking effort must be low, medium, or high");
+    }
+    if (this.thinkingEffort !== undefined && this.thinkingMode === "disabled") {
+      throw new TypeError("thinking effort cannot be set when thinking mode is disabled");
+    }
+    if (this.reasoningVisibility !== "visible" && this.reasoningVisibility !== "hidden") {
+      throw new TypeError("reasoning visibility must be visible or hidden");
+    }
+    if (this.planningThinkingMode !== undefined && this.planningThinkingMode !== "enabled" && this.planningThinkingMode !== "disabled") {
+      throw new TypeError("planning thinking mode must be enabled or disabled");
     }
   }
 
@@ -393,11 +446,21 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const toolChoice = invocation.tools.length === 0
       ? undefined
       : toProviderToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
+    const thinkingMode = invocation.plannerRequest && this.planningThinkingMode !== undefined
+      ? this.planningThinkingMode
+      : this.thinkingMode;
     const body = JSON.stringify({
       model: this.model,
       messages: prompt.messages,
       tools: providerTools,
       ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+      ...(thinkingMode === undefined && this.thinkingEffort === undefined
+        ? {}
+        : {
+            ...(thinkingMode === undefined ? {} : { thinking: { type: thinkingMode } }),
+            ...(this.thinkingEffort === undefined ? {} : { reasoning_effort: this.thinkingEffort }),
+          }),
+      ...(this.chatTemplateKwargs === undefined ? {} : { chat_template_kwargs: this.chatTemplateKwargs }),
       max_tokens: Math.min(invocation.maxOutputTokens ?? this.limits.maxOutputTokens, this.limits.maxOutputTokens),
       ...(stream ? { stream: true } : {}),
     });
@@ -572,6 +635,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
 export class ResponsesModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
   readonly operationTimeoutMs: number;
+  readonly reasoningVisibility: "visible" | "hidden";
   private readonly endpoint: URL;
   private readonly apiKey: string;
   private readonly model: string;
@@ -581,6 +645,7 @@ export class ResponsesModel implements ModelAdapter {
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto";
+  private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -607,11 +672,13 @@ export class ResponsesModel implements ModelAdapter {
     };
     this.timeoutMs = options.timeoutMs ?? 120_000;
     this.operationTimeoutMs = streamOperationTimeoutMs(this.timeoutMs);
+    this.reasoningVisibility = options.reasoningVisibility ?? "visible";
     this.maxAttempts = options.maxAttempts ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 250;
     this.toolChoiceMode = options.toolChoiceMode ?? "native";
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
+    this.reasoningEffort = options.reasoningEffort;
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -631,6 +698,18 @@ export class ResponsesModel implements ModelAdapter {
     }
     if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto") {
       throw new TypeError("reasoning summary must be auto");
+    }
+    if (
+      this.reasoningEffort !== undefined
+      && this.reasoningEffort !== "none"
+      && this.reasoningEffort !== "low"
+      && this.reasoningEffort !== "medium"
+      && this.reasoningEffort !== "high"
+    ) {
+      throw new TypeError("reasoning effort must be none, low, medium, or high");
+    }
+    if (this.reasoningVisibility !== "visible" && this.reasoningVisibility !== "hidden") {
+      throw new TypeError("reasoning visibility must be visible or hidden");
     }
   }
 
@@ -748,7 +827,14 @@ export class ResponsesModel implements ModelAdapter {
       input,
       tools: providerTools,
       ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
-      ...(this.reasoningSummary === undefined ? {} : { reasoning: { summary: this.reasoningSummary } }),
+      ...(this.reasoningSummary === undefined && this.reasoningEffort === undefined
+        ? {}
+        : {
+            reasoning: {
+              ...(this.reasoningSummary === undefined ? {} : { summary: this.reasoningSummary }),
+              ...(this.reasoningEffort === undefined ? {} : { effort: this.reasoningEffort }),
+            },
+          }),
       max_output_tokens: Math.min(
         invocation.maxOutputTokens ?? this.limits.maxOutputTokens,
         this.limits.maxOutputTokens,

@@ -1,5 +1,6 @@
 import type { SqlConnection } from "../storage/connection.ts";
 import { parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultJson, type RuntimeResultRecord } from "./runtime-result.ts";
+import type { RuntimeDeliveryReceipt } from "./contracts.ts";
 
 interface ActionResultRow {
   readonly metadata_json: string;
@@ -28,6 +29,46 @@ export class RuntimeResultRepository {
 
   constructor(database: SqlConnection) {
     this.database = database;
+  }
+
+  /** Read a completed Run's delivery receipt through its canonical Result refs. */
+  async readDeliveryReceiptForRun(runId: string): Promise<RuntimeDeliveryReceipt | undefined> {
+    const outcome = await this.database.prepare(`
+      SELECT result_json
+      FROM run_outcomes
+      WHERE run_id = ? AND status = 'completed'
+    `).get(runId) as { result_json: string | null } | undefined;
+    const runResult = outcome?.result_json === null || outcome?.result_json === undefined
+      ? undefined
+      : parseRuntimeResultJson(outcome.result_json);
+    if (
+      runResult?.kind !== "run"
+      || runResult.publication.status !== "published"
+      || runResult.producer.runId !== runId
+    ) return undefined;
+
+    const inputResultIds = new Set(runResult.inputs.map((input) => input.resultId));
+    const steps = await this.database.prepare(`
+      SELECT steps.evidence_json
+      FROM plan_steps AS steps
+      JOIN plans ON plans.id = steps.plan_id
+      WHERE plans.run_id = ? AND steps.status = 'completed'
+      ORDER BY steps.position ASC
+    `).all(runId) as unknown as StepResultRow[];
+    let receipt: RuntimeDeliveryReceipt | undefined;
+    for (const step of steps) {
+      const evidence = parseRecord(step.evidence_json);
+      const publishedResult = parseRuntimeResult(evidence?.publishedResult);
+      if (
+        publishedResult?.kind !== "step"
+        || !inputResultIds.has(publishedResult.ref.resultId)
+        || publishedResult.producer.runId !== runId
+      ) continue;
+      const candidate = parseRecord(evidence?.deliveryCandidate);
+      const parsedReceipt = parseDeliveryReceipt(candidate?.deliveryReceipt);
+      if (parsedReceipt !== undefined) receipt = parsedReceipt;
+    }
+    return receipt;
   }
 
   async readAuthorized(input: {
@@ -129,15 +170,40 @@ function resultFromEvidence(value: string | null): RuntimeResultRecord | undefin
   return parseRuntimeResult(evidence?.publishedResult);
 }
 
-function parseRecord(value: string): Record<string, unknown> | undefined {
+function parseRecord(value: unknown): Record<string, unknown> | undefined {
   try {
-    const parsed = JSON.parse(value) as unknown;
+    const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
       : undefined;
   } catch {
     return undefined;
   }
+}
+
+function parseDeliveryReceipt(value: unknown): RuntimeDeliveryReceipt | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const artifact = record.artifact;
+  if (
+    record.schema !== "agentloop.runtimeDeliveryReceipt/v1"
+    || (record.verdict !== "accepted" && record.verdict !== "caveated")
+    || !Array.isArray(record.caveats)
+    || !record.caveats.every((item) => typeof item === "string")
+    || typeof record.sourceToolCallId !== "string"
+    || artifact === null
+    || typeof artifact !== "object"
+    || Array.isArray(artifact)
+  ) return undefined;
+  const artifactRecord = artifact as Record<string, unknown>;
+  if (
+    typeof artifactRecord.path !== "string"
+    || artifactRecord.path.trim().length === 0
+    || (artifactRecord.bytes !== undefined && !(typeof artifactRecord.bytes === "number" && Number.isFinite(artifactRecord.bytes)))
+    || (artifactRecord.sha256 !== undefined && typeof artifactRecord.sha256 !== "string")
+    || (artifactRecord.kind !== undefined && typeof artifactRecord.kind !== "string")
+  ) return undefined;
+  return record as unknown as RuntimeDeliveryReceipt;
 }
 
 function parseStringArray(value: string): string[] {

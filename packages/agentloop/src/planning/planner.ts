@@ -7,6 +7,7 @@ import { operationProfileCatalogForPlanning, operationProfilesForTaskUnderstandi
 import { uploadedSourcePlanningContext, type TaskIntentClassification } from "../runtime/task-intent.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
+import type { PrivateSkill } from "../skills/skill-service.ts";
 import type {
   CaveatPolicy,
   ConversationReusableArtifact,
@@ -23,7 +24,7 @@ import type {
 } from "./contracts.ts";
 import { admitPlan, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
 import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
-import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools } from "./step-execution-binding.ts";
+import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
 
 const EVIDENCE_KIND_VALUES = [
@@ -90,11 +91,21 @@ const OUTCOME_LEAF_SCHEMA = {
     sourceConstraint: {
       type: ["object", "null"],
       additionalProperties: false,
-      required: ["requiredToolSourceIds", "requiredUploadedSourceIds", "requiredVisibleDirectoryIds"],
+      required: ["bindings"],
       properties: {
-        requiredToolSourceIds: { type: ["array", "null"], minItems: 1, items: { type: "string" } },
-        requiredUploadedSourceIds: { type: ["array", "null"], minItems: 1, items: { type: "string" } },
-        requiredVisibleDirectoryIds: { type: ["array", "null"], minItems: 1, items: { type: "string" } },
+        bindings: {
+          type: "array",
+          maxItems: 3,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["kind", "ids"],
+            properties: {
+              kind: { type: "string", enum: ["tool_source", "uploaded_source", "visible_directory"] },
+              ids: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1 } },
+            },
+          },
+        },
       },
     },
     evidenceContract: {
@@ -150,7 +161,7 @@ const SUBMIT_OUTCOME_PLAN_TOOL = {
   },
 } as const;
 
-type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "native_skill_binding" | "admission";
+type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "source_constraint_arguments" | "native_skill_binding" | "source_namespace" | "source_provider_contract" | "admission";
 
 interface PlannerContractRetry {
   readonly kind: PlannerContractRetryKind;
@@ -301,6 +312,7 @@ export class ModelPlanner implements Planner {
         runId: task.runId,
         systemPrompt,
         phase: "planning",
+        plannerRequest: true,
         runtimeContext: planningRuntimeContext(planningTask, turn, runtimeDirective, taskProfile, selectedSkillRoles),
         messages,
         tools: [submitOutcomePlanToolForTask(planningTask)],
@@ -308,13 +320,14 @@ export class ModelPlanner implements Planner {
         maxOutputTokens: Math.min(PLANNING_MAX_OUTPUT_TOKENS, this.model.limits.maxOutputTokens),
       };
       const response = emit === undefined
-        ? await this.model.complete(invocation, signal)
+        ? withoutReasoningContent(await this.model.complete(invocation, signal))
         : await completeWithStreaming({
           model: this.model,
           invocation,
           emit,
           signal,
           base: { phase: "planning", turn },
+          suppressReasoningContent: true,
         });
       const outcomePlanCalls = response.toolCalls.filter((call) => call.name === SUBMIT_OUTCOME_PLAN_TOOL.name);
       await emit?.({
@@ -392,7 +405,10 @@ export class ModelPlanner implements Planner {
             planningTurn: turn,
           },
         });
-        const resolution = capabilityRecoveryCount < MAX_CAPABILITY_RECOVERIES && isCapabilityRecoveryFailure(planningError)
+        const sourceProviderViolations = boundSourceProviderContractViolations(planningTask, outcomePlanCalls);
+        const resolution = capabilityRecoveryCount < MAX_CAPABILITY_RECOVERIES
+          && isCapabilityRecoveryFailure(planningError)
+          && sourceProviderViolations.length === 0
           ? resolveCapabilityRecovery(planningTask, outcomePlanCalls, isSourceGroundingFailure(planningError))
           : undefined;
         if (resolution !== undefined) {
@@ -410,7 +426,9 @@ export class ModelPlanner implements Planner {
           });
           continue;
         }
-        const contractRetry = plannerContractRetryDirective(planningError, response, outcomePlanCalls, planningTask);
+        const contractRetry = sourceProviderViolations.length > 0
+          ? { kind: "source_provider_contract" as const, directive: sourceProviderContractDirective(planningError, sourceProviderViolations) }
+          : plannerContractRetryDirective(planningError, response, outcomePlanCalls, planningTask);
         if (contractRetry !== undefined && !attemptedContractRepairs.has(contractRetry.kind)) {
           attemptedContractRepairs.add(contractRetry.kind);
           runtimeDirective = contractRetry.directive;
@@ -430,6 +448,13 @@ export class ModelPlanner implements Planner {
     }
     throw lastPlanningError ?? new AppError("PLANNING_ERROR", "Planner did not produce an OutcomePlan", 422);
   }
+}
+
+/** Planner reasoning is an internal provider continuation, never user-facing output. */
+function withoutReasoningContent(response: import("../runtime/contracts.ts").ModelResponse): import("../runtime/contracts.ts").ModelResponse {
+  if (response.reasoningContent === undefined) return response;
+  const { reasoningContent: _reasoningContent, ...withoutReasoning } = response;
+  return withoutReasoning;
 }
 
 function responseOnlyPlan(input: string): PlanProposal {
@@ -496,8 +521,20 @@ function plannerContractRetryDirective(
   if (shouldRetryOutcomePlanArgumentsContract(planningError, response, outcomePlanCalls)) {
     return { kind: "arguments", directive: plannerOutcomePlanArgumentsDirective(outcomePlanCalls[0], planningError) };
   }
+  if (isSourceConstraintArgumentFailure(planningError)) {
+    return {
+      kind: "source_constraint_arguments",
+      directive: plannerSourceConstraintArgumentDirective(planningError, task),
+    };
+  }
   const nativeSkillBinding = nativeTransformationSkillBindingRepair(planningError, task);
   if (nativeSkillBinding !== undefined) return nativeSkillBinding;
+  if (isSourceConstraintNamespaceFailure(planningError)) {
+    return {
+      kind: "source_namespace",
+      directive: plannerSourceConstraintNamespaceDirective(planningError, task),
+    };
+  }
   if (shouldRetryOutcomePlanAdmissionContract(response, outcomePlanCalls)) {
     return {
       kind: "admission",
@@ -508,6 +545,48 @@ function plannerContractRetryDirective(
     };
   }
   return undefined;
+}
+
+function isSourceConstraintArgumentFailure(error: AppError): boolean {
+  return /sourceConstraint\.(bindings\[\d+\]\.ids|requiredToolSourceIds|requiredUploadedSourceIds|requiredVisibleDirectoryIds)\[\d+\] must contain at least 1 characters/.test(error.message);
+}
+
+function plannerSourceConstraintArgumentDirective(planningError: AppError, task: TaskSpec): string {
+  const uploadedSourceIds = (task.sources ?? []).map((source) => source.id);
+  const visibleDirectoryIds = (task.visibleDirectories ?? []).map((directory) => directory.id);
+  const toolSourceIds = (task.availableTools ?? [])
+    .flatMap((tool) => tool.source === undefined ? [] : [tool.source.id]);
+  return [
+    "Your previous submit_outcome_plan call contained an invalid empty sourceConstraint ID.",
+    `Validation error: ${summarizePlanningError(planningError.message)}.`,
+    "Submit exactly one corrected submit_outcome_plan call for the same user goal.",
+    "Never use an empty string in sourceConstraint.bindings[].ids. Omit sourceConstraint when no resource binding is needed.",
+    "Use kind=tool_source only for registered ToolSource IDs, kind=uploaded_source only for uploaded source IDs, and kind=visible_directory only for visible directory IDs. Do not use Skill IDs in any sourceConstraint binding.",
+    `Authorized uploaded source IDs: ${JSON.stringify([...new Set(uploadedSourceIds)].sort())}.`,
+    `Authorized ToolSource IDs: ${JSON.stringify([...new Set(toolSourceIds)].sort())}.`,
+    `Authorized visible directory IDs: ${JSON.stringify([...new Set(visibleDirectoryIds)].sort())}.`,
+  ].join("\n");
+}
+
+function isSourceConstraintNamespaceFailure(error: AppError): boolean {
+  return /sourceConstraint namespaces|mixes uploaded source IDs|mixes ToolSource IDs|uses Skill ID\(s\) in sourceConstraint/.test(error.message);
+}
+
+function plannerSourceConstraintNamespaceDirective(planningError: AppError, task: TaskSpec): string {
+  const uploadedSourceIds = (task.sources ?? []).map((source) => source.id);
+  const visibleDirectoryIds = (task.visibleDirectories ?? []).map((directory) => directory.id);
+  const toolSourceIds = (task.availableTools ?? [])
+    .flatMap((tool) => tool.source === undefined ? [] : [tool.source.id]);
+  return [
+    "Your previous submit_outcome_plan call was rejected because sourceConstraint IDs crossed resource namespaces.",
+    `Validation error: ${summarizePlanningError(planningError.message)}.`,
+    "Submit exactly one corrected submit_outcome_plan call for the same user goal.",
+    "A Skill is not a ToolSource, uploaded file, or visible directory. Bind Skills through skillIds and source-provider capabilities. In sourceConstraint.bindings, use kind=uploaded_source only for uploaded file IDs, kind=tool_source only for registered ToolSource IDs, and kind=visible_directory only for visible directory IDs.",
+    "Do not copy one ID into more than one binding kind. Omit sourceConstraint when no binding is needed.",
+    `Authorized uploaded source IDs: ${JSON.stringify([...new Set(uploadedSourceIds)].sort())}.`,
+    `Authorized ToolSource IDs: ${JSON.stringify([...new Set(toolSourceIds)].sort())}.`,
+    `Authorized visible directory IDs: ${JSON.stringify([...new Set(visibleDirectoryIds)].sort())}.`,
+  ].join("\n");
 }
 
 function nativeTransformationSkillBindingRepair(
@@ -538,6 +617,62 @@ function isCapabilityRecoveryFailure(error: AppError): boolean {
 
 function isSourceGroundingFailure(error: AppError): boolean {
   return /must bind a capability that produces required source-grounding evidence/.test(error.message);
+}
+
+/**
+ * A bound source-provider owns its source workflow and evidence interface.
+ * If a proposal asks that same leaf for an undeclared observable kind, the
+ * proposal is contradictory; it is not evidence that another source must be
+ * discovered.  Keeping this distinction before capability recovery prevents
+ * generic kinds such as schema_summary from silently switching API, web, or
+ * database provenance.
+ */
+function boundSourceProviderContractViolations(
+  task: TaskSpec,
+  outcomePlanCalls: readonly ModelToolCall[],
+): readonly { readonly stepId: string; readonly skillIds: readonly string[]; readonly allowedKinds: readonly EvidenceKind[]; readonly invalidKinds: readonly EvidenceKind[] }[] {
+  if (outcomePlanCalls.length !== 1) return [];
+  let proposal: PlanProposal;
+  try {
+    proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
+  } catch {
+    return [];
+  }
+  const skillById = new Map(task.availableSkills.map((skill) => [skill.id, skill]));
+  return proposal.steps.flatMap((step) => {
+    const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
+    if (requiredKinds.length === 0) return [];
+    const providerKinds: Set<EvidenceKind> = new Set(step.skillIds.flatMap((skillId) => {
+      const metadata = skillById.get(skillId)?.agentLoop;
+      return metadata?.roles.includes("source_provider") ? metadata.producesEvidenceKinds ?? [] : [];
+    }));
+    if (providerKinds.size === 0) return [];
+    const invalidKinds = requiredKinds.filter((kind) => runtimeProducedEvidenceKind(kind) && !providerKinds.has(kind));
+    return invalidKinds.length === 0 ? [] : [{
+      stepId: step.id,
+      skillIds: step.skillIds.filter((skillId) => skillById.get(skillId)?.agentLoop?.roles.includes("source_provider") === true),
+      allowedKinds: [...providerKinds].sort() as EvidenceKind[],
+      invalidKinds,
+    }];
+  });
+}
+
+function runtimeProducedEvidenceKind(kind: EvidenceKind): boolean {
+  return kind !== "source_summary" && kind !== "source_urls" && kind !== "explicit_caveats" && kind !== "delivery_receipt";
+}
+
+function sourceProviderContractDirective(
+  planningError: AppError,
+  violations: readonly { readonly stepId: string; readonly skillIds: readonly string[]; readonly allowedKinds: readonly EvidenceKind[]; readonly invalidKinds: readonly EvidenceKind[] }[],
+): string {
+  return [
+    "Your previous OutcomePlan assigned evidence to a source-provider leaf that the bound source Skill does not declare.",
+    `Validation error: ${summarizePlanningError(planningError.message)}.`,
+    "This is a leaf contract error, not a missing-source problem. Do not add another source Skill or capability to compensate.",
+    "Keep source-provider evidence within that source Skill's declared interface. A requested Markdown/file output belongs only on the dependent produce leaf through artifact evidence; it does not require a structured-extraction receipt from the source leaf.",
+    `Violations: ${JSON.stringify(violations)}.`,
+    "Submit exactly one corrected submit_outcome_plan call for the same goal.",
+  ].join("\n");
 }
 
 function resolveCapabilityRecovery(
@@ -958,8 +1093,18 @@ function planningRuntimeContext(
           : { requiredToolSourceIds: task.requiredToolSourceIds }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
         taskUnderstanding: task.taskUnderstanding,
+        planningTask: {
+          schema: "agentloop.planningTask/v1",
+          task: task.taskUnderstanding.task,
+          ...(task.taskUnderstanding.format === undefined ? {} : { format: task.taskUnderstanding.format }),
+          evidence: task.taskUnderstanding.evidence,
+          deliverable: task.taskUnderstanding.deliverable,
+          constraints: task.taskUnderstanding.constraints,
+          instruction: "Use task for business work and format only for final delivery. Never let output format select or redefine the source/domain Skill.",
+        },
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
+        sourceBindingIdentityPolicy: sourceBindingIdentityPolicy(task),
         uploadedSourceContext: uploadedSourcePlanningContext(task.sources ?? []),
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
         ...(task.turnResolution === undefined ? {} : { turnResolution: task.turnResolution }),
@@ -1006,11 +1151,11 @@ function planningRuntimeContext(
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
           capabilityCatalogSemantics: "requiredCapabilities accepts only IDs from capabilityCatalog.allowedIds. Runtime Admission resolves those authorized execution capabilities to tools after the Plan is submitted; identifiers from other planning namespaces are not capabilities.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
-          sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete ToolSource, uploaded source, or visible-directory binding; never send sourceConstraint: {}. When present, use requiredToolSourceIds only for host-registered ToolSources and bind every requiredToolSourceIds item through a leaf.sourceConstraint. Use requiredUploadedSourceIds only for concrete IDs listed in sources when the leaf reads those uploads. Use requiredVisibleDirectoryIds only for IDs listed in visibleDirectories when the leaf invokes visible_* tools with rootId. Set unused sourceConstraint ID arrays to null. Never cross these identity namespaces.",
+          sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete resource binding. When present, submit sourceConstraint.bindings only: every item has one kind and non-empty ids. kind=tool_source is only for host-registered ToolSource IDs; kind=uploaded_source is only for concrete IDs listed in sources; kind=visible_directory is only for IDs listed in visibleDirectories. Do not submit empty placeholder IDs, Skill IDs, or one ID under more than one kind.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
-          evidenceContractPolicy: evidenceContractPolicyForTask(task, taskProfile),
+          evidenceContractPolicy: evidenceContractPolicyForTask(task, taskProfile, selectedSkillRoles),
           firstRoundRules: [
             "submit exactly one OutcomePlan",
             "do not submit plan patches",
@@ -1066,9 +1211,13 @@ function planningCapabilitiesForTask(task: TaskSpec): readonly PlanningCapabilit
       : planningCapabilitiesFromTools(task.availableTools, task.sources));
 }
 
-function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile): Record<string, unknown> {
+function evidenceContractPolicyForTask(
+  task: TaskSpec,
+  taskProfile: TaskProfile,
+  selectedSkillRoles: readonly SelectedSkillRole[],
+): Record<string, unknown> {
   const capabilities = planningCapabilitiesForTask(task);
-  const sourceBoundCapabilities = capabilitiesForConcreteTaskSources(task, capabilities);
+  const sourceBoundCapabilities = capabilitiesForSelectedSourceProviders(task, capabilities, selectedSkillRoles);
   const producibleSourceKinds = new Set(sourceBoundCapabilities.flatMap((capability) => capability.produces));
   const sourceKinds = (["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
     .filter((kind) => producibleSourceKinds.has(kind));
@@ -1088,10 +1237,10 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
       principle: "Evidence contracts follow the semantic delivery surface. Source evidence, final conversation delivery, and workspace artifact delivery are separate evidence families.",
       finalDeliverySurface: "conversation",
       sourceFactAcquisition: {
-        useWhen: "the task has visible directories, uploaded files, bulk data, or source-grounded analysis requirements",
+        useWhen: "the task has a source-grounded request or concrete source input",
         recommendedRequiredKinds: sourceKinds,
         ...(requiresSourceEvidence ? { requiredKinds: requiredSourceKinds } : {}),
-        note: "Use structured extraction artifacts for reusable data evidence, but do not treat that source artifact as the final user deliverable.",
+        note: "Select only evidence kinds declared by the source-provider bound to this acquisition leaf. Do not infer structured extraction from a later conversation or file deliverable.",
       },
       finalProduceOrDeliverLeaf: {
         defaultRequiredKinds: [],
@@ -1106,8 +1255,9 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
       principle: "Evidence contracts follow the semantic delivery surface. Source evidence, final conversation delivery, and workspace artifact delivery are separate evidence families.",
       finalDeliverySurface: "workspace_artifact",
       sourceFactAcquisition: {
-        useWhen: "the requested artifact depends on visible directories, uploaded files, bulk data, or source-grounded analysis requirements",
+        useWhen: "the requested artifact depends on source-grounded facts or concrete source input",
         recommendedRequiredKinds: sourceKinds,
+        note: "The acquisition leaf uses only its bound source-provider interface. A Markdown/document output belongs to the dependent produce leaf and does not upgrade source evidence requirements.",
       },
       finalProduceOrDeliverLeaf: {
         requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
@@ -1131,10 +1281,21 @@ function evidenceContractPolicyForTask(task: TaskSpec, taskProfile: TaskProfile)
  * workspace reader whose only valid input is an artifact from an earlier
  * operation.  Admission remains the authoritative fail-closed check.
  */
-function capabilitiesForConcreteTaskSources(
+function capabilitiesForSelectedSourceProviders(
   task: TaskSpec,
   capabilities: readonly PlanningCapability[],
+  selectedSkillRoles: readonly SelectedSkillRole[],
 ): readonly PlanningCapability[] {
+  const selectedSourceSkillIds = new Set(selectedSkillRoles
+    .filter((role) => role.role === "source_provider")
+    .map((role) => role.skillId));
+  const selectedSourceCapabilities = task.availableSkills
+    .filter((skill) => selectedSourceSkillIds.has(skill.id) && skill.agentLoop?.roles.includes("source_provider"))
+    .flatMap((skill) => skill.agentLoop!.sourceKinds.map((sourceKind) => skillSourceProviderCapabilityId(skill.id, sourceKind)));
+  if (selectedSourceCapabilities.length > 0) {
+    const selectedIds = new Set(selectedSourceCapabilities);
+    return capabilities.filter((capability) => selectedIds.has(capability.id));
+  }
   const sourceKinds = new Set<PlanningCapability["sourceKinds"][number]>();
   if ((task.sources?.length ?? 0) > 0) sourceKinds.add("uploaded_source");
   if ((task.visibleDirectories?.length ?? 0) > 0) sourceKinds.add("visible_directory");
@@ -1415,7 +1576,15 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
     const sourcePolicyNormalized = normalizeProgressiveSourceContract(sourceMaterializationNormalized, taskProfile);
     const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
     const artifactNormalized = normalizeWorkspaceArtifactTerminalStep(deliveryNormalized, terminalStepIds, taskProfile, task);
-    if (artifactNormalized.evidenceContract !== undefined) return artifactNormalized;
+    if (artifactNormalized.evidenceContract !== undefined) {
+      return {
+        ...artifactNormalized,
+        successCriteria: artifactNormalized.successCriteria.map((criterion) => ({
+          ...criterion,
+          blocking: criterion.blocking ?? criterionBlockingByGoal(criterion.id, artifactNormalized, task, taskProfile),
+        })),
+      };
+    }
     const coreCriteria = artifactNormalized.successCriteria.filter((criterion) =>
       !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
     );
@@ -1431,7 +1600,95 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
   });
   return {
     ...proposal,
-    steps: normalizedSteps.map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task)),
+    steps: normalizedSteps
+      .map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task))
+      .map((step) => normalizeSkillIdentityResourceBindings(step, task)),
+  };
+}
+
+/**
+ * Evidence kinds describe useful observations; only goal-critical observations
+ * should block completion. Keep this decision at Plan normalization so the
+ * same explicit blocking policy is persisted for execution and assessment.
+ */
+function criterionBlockingByGoal(
+  kind: string,
+  step: PlanStepProposal,
+  task: TaskSpec,
+  taskProfile: TaskProfile,
+): boolean {
+  if (kind === "explicit_caveats") return false;
+  if (kind === "derived_aggregation") {
+    // Structured aggregation normalization below upgrades this to a blocking
+    // criterion only when the admitted Plan actually has that dependency.
+    return /(?:group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|合计|占比)/iu.test(
+      `${task.input}\n${step.objective}`,
+    );
+  }
+  if (kind === "artifact_acceptance" || kind === "artifact_openable") {
+    return explicitStrictQualityRequested(task.input);
+  }
+  if (kind === "source_summary" || kind === "source_urls") {
+    return step.role === "fact_acquisition" || taskProfile.sourceNeed === "strict_user_source";
+  }
+  return true;
+}
+
+/**
+ * A Skill's human name is not a ToolSource identity.  Low-reasoning models
+ * often copy a source-provider Skill name (for example `aihot`) into the
+ * resource binding after reading a description that mentions that Skill's
+ * API.  Remove only that invalid cross-namespace binding when the Host has
+ * not registered the same string as a real ToolSource; the Skill/provider
+ * capability remains bound through `skillIds` and `requiredCapabilities`.
+ */
+function normalizeSkillIdentityResourceBindings(
+  step: PlanStepProposal,
+  task: TaskSpec,
+): PlanStepProposal {
+  const constraint = step.sourceConstraint;
+  if (constraint?.requiredToolSourceIds === undefined || constraint.requiredToolSourceIds.length === 0) return step;
+  const registeredToolSources = new Set((task.availableTools ?? [])
+    .flatMap((tool) => tool.source === undefined ? [] : [tool.source.id]));
+  const skillByName = new Map<string, PrivateSkill>(task.availableSkills.map((skill) => [skill.name, skill]));
+  const boundSkillIds = new Set(step.skillIds);
+  const invalidSkillBindings = new Set(
+    constraint.requiredToolSourceIds.filter((id) => {
+      if (registeredToolSources.has(id)) return false;
+      // Preserve the explicit Skill-ID path for Admission diagnostics. The
+      // low-reasoning failure this repair targets is the human Skill *name*
+      // copied from prose into a ToolSource field.
+      const skill = skillByName.get(id);
+      return skill !== undefined && boundSkillIds.has(skill.id);
+    }),
+  );
+  if (invalidSkillBindings.size === 0) return step;
+  const requiredToolSourceIds = constraint.requiredToolSourceIds.filter((id) => !invalidSkillBindings.has(id));
+  const sourceConstraint = {
+    ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+    ...(constraint.requiredUploadedSourceIds === undefined ? {} : { requiredUploadedSourceIds: constraint.requiredUploadedSourceIds }),
+    ...(constraint.requiredVisibleDirectoryIds === undefined ? {} : { requiredVisibleDirectoryIds: constraint.requiredVisibleDirectoryIds }),
+  };
+  return {
+    ...step,
+    ...(Object.keys(sourceConstraint).length === 0 ? { sourceConstraint: undefined } : { sourceConstraint }),
+  };
+}
+
+function sourceBindingIdentityPolicy(task: TaskSpec): Record<string, unknown> {
+  const registered = (task.availableTools ?? [])
+    .flatMap((tool) => tool.source === undefined ? [] : [{ id: tool.source.id, aliases: tool.source.aliases ?? [] }]);
+  const skillNames = task.availableSkills.map((skill) => skill.name);
+  return {
+    schema: "agentloop.sourceBindingIdentityPolicy/v1",
+    toolSourceRule: "Only registered ToolSource IDs or aliases may appear under kind=tool_source.",
+    skillRule: "Skill IDs/names and Skill-owned API domains are not ToolSources; bind them through skillIds plus skill_source_provider capabilities.",
+    registeredToolSources: registered,
+    skillNames,
+    examples: {
+      validSkillProvider: "skillIds=[discovered:aihot], requiredCapabilities=[skill_source_provider.api.discovered:aihot], sourceConstraint omitted",
+      invalidSkillBinding: "sourceConstraint.bindings=[{kind:tool_source,ids:[aihot]}]",
+    },
   };
 }
 
@@ -1589,6 +1846,7 @@ function normalizeStructuredAggregationLeaf(
       id: kind,
       description: evidenceCriterionDescription(kind, caveatPolicy),
       source: "planner" as const,
+      blocking: kind === "derived_aggregation" ? true : kind === "explicit_caveats" ? false : undefined,
     })),
   };
 }
@@ -1901,21 +2159,69 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
 function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
   const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
   if (Object.keys(record).length === 0) return undefined;
-  const requiredToolSourceIds = record.requiredToolSourceIds === undefined || record.requiredToolSourceIds === null
-    ? []
-    : canonicalStringSet(record.requiredToolSourceIds, `leaves[${index}].sourceConstraint.requiredToolSourceIds`, 20);
-  const requiredUploadedSourceIds = record.requiredUploadedSourceIds === undefined || record.requiredUploadedSourceIds === null
-    ? []
-    : canonicalStringSet(record.requiredUploadedSourceIds, `leaves[${index}].sourceConstraint.requiredUploadedSourceIds`, 20);
-  const requiredVisibleDirectoryIds = record.requiredVisibleDirectoryIds === undefined || record.requiredVisibleDirectoryIds === null
-    ? []
-    : canonicalStringSet(record.requiredVisibleDirectoryIds, `leaves[${index}].sourceConstraint.requiredVisibleDirectoryIds`, 20);
+  const bindings = record.bindings === undefined
+    ? parseLegacySourceConstraintBindings(record, index)
+    : parseSourceConstraintBindings(record.bindings, index);
+  const requiredToolSourceIds = bindings.toolSourceIds;
+  const requiredUploadedSourceIds = bindings.uploadedSourceIds;
+  const requiredVisibleDirectoryIds = bindings.visibleDirectoryIds;
   if (requiredToolSourceIds.length === 0 && requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) return undefined;
   return {
     ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
     ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
     ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
   };
+}
+
+function parseSourceConstraintBindings(value: unknown, index: number): {
+  readonly toolSourceIds: readonly string[];
+  readonly uploadedSourceIds: readonly string[];
+  readonly visibleDirectoryIds: readonly string[];
+} {
+  if (!Array.isArray(value) || value.length > 3) {
+    throw badRequest(`leaves[${index}].sourceConstraint.bindings must be an array with at most 3 entries`);
+  }
+  const byKind = new Map<string, string[]>();
+  for (const [bindingIndex, item] of value.entries()) {
+    const binding = requireRecord(item, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}]`);
+    const kind = requireString(binding.kind, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}].kind`, { max: 64 });
+    if (kind !== "tool_source" && kind !== "uploaded_source" && kind !== "visible_directory") {
+      throw badRequest(`leaves[${index}].sourceConstraint.bindings[${bindingIndex}].kind is invalid`);
+    }
+    if (byKind.has(kind)) {
+      throw badRequest(`leaves[${index}].sourceConstraint.bindings must not repeat kind ${kind}`);
+    }
+    byKind.set(kind, semanticSourceIds(binding.ids, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}].ids`, 20));
+  }
+  return {
+    toolSourceIds: byKind.get("tool_source") ?? [],
+    uploadedSourceIds: byKind.get("uploaded_source") ?? [],
+    visibleDirectoryIds: byKind.get("visible_directory") ?? [],
+  };
+}
+
+function parseLegacySourceConstraintBindings(record: Record<string, unknown>, index: number): {
+  readonly toolSourceIds: readonly string[];
+  readonly uploadedSourceIds: readonly string[];
+  readonly visibleDirectoryIds: readonly string[];
+} {
+  return {
+    toolSourceIds: semanticSourceIds(record.requiredToolSourceIds, `leaves[${index}].sourceConstraint.requiredToolSourceIds`, 20),
+    uploadedSourceIds: semanticSourceIds(record.requiredUploadedSourceIds, `leaves[${index}].sourceConstraint.requiredUploadedSourceIds`, 20),
+    visibleDirectoryIds: semanticSourceIds(record.requiredVisibleDirectoryIds, `leaves[${index}].sourceConstraint.requiredVisibleDirectoryIds`, 20),
+  };
+}
+
+function semanticSourceIds(value: unknown, label: string, maximum: number): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw badRequest(`${label} must be an array with at most ${maximum} entries`);
+  }
+  const ids = value.map((item, itemIndex) => {
+    if (typeof item !== "string") throw badRequest(`${label}[${itemIndex}] must be a string`);
+    return item.trim();
+  }).filter((item) => item.length > 0);
+  return [...new Set(ids)];
 }
 
 function parseOutcomeLeafRole(value: unknown, index: number): OutcomeLeafRole {

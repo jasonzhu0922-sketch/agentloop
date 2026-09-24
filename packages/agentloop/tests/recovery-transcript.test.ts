@@ -139,6 +139,30 @@ test("recovery preserves committed provider reasoning continuation", () => {
   });
 });
 
+test("recovery restores hidden provider reasoning from the private checkpoint field", () => {
+  const transcript = reconstructRecoveryTranscript({
+    userInput: "resume the tool call",
+    stepId: "step-1",
+    events: events(
+      ["plan.step.started", { stepId: "step-1" }],
+      ["assistant.committed", {
+        step: 1,
+        content: "",
+        finishReason: "tool_calls",
+        privateReasoningContent: "opaque-hidden-thinking-state",
+        toolCalls: [{ id: "call-1", name: "read_file", arguments: { path: "a.txt" } }],
+      }],
+      ["tool.completed", { step: 1, toolCallId: "call-1", toolName: "read_file", result: "hello" }],
+    ),
+  });
+
+  assert.equal(transcript.messages[1]?.role, "assistant");
+  assert.equal(
+    (transcript.messages[1] as { reasoningContent?: string } | undefined)?.reasoningContent,
+    "opaque-hidden-thinking-state",
+  );
+});
+
 test("recovery preserves tool failure phase for prepare and execute failures", () => {
   const transcript = reconstructRecoveryTranscript({
     userInput: "do the thing",

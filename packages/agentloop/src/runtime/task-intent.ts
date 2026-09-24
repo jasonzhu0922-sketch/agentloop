@@ -61,6 +61,10 @@ export type StructuredTaskOperationProfile =
 
 export interface StructuredTaskUnderstanding {
   readonly schema: "agentloop.taskUnderstanding/v1";
+  /** Business task with delivery-format wording removed. */
+  readonly task: string;
+  /** Explicit requested output format, kept separate from the business task. */
+  readonly format?: string;
   readonly normalizedObjective: string;
   readonly operation: StructuredTaskOperation;
   readonly subject: {
@@ -187,10 +191,20 @@ export function understandTask(input: TaskIntentInput & {
   readonly uploadedSources?: readonly UploadedSourceSummary[];
   readonly targetArtifactKind?: Exclude<ArtifactKind, "none">;
 }): StructuredTaskUnderstanding {
-  const normalizedObjective = normalize([
-    input.objective,
+  const rawObjective = input.objective;
+  const normalizedInput = [
+    rawObjective,
     ...(input.userConstraints ?? []),
     ...(input.successCriteria ?? []).flatMap((criterion) => [criterion.id, criterion.description]),
+  ].join("\n");
+  const normalizedObjective = normalize(normalizedInput);
+  // Keep the business objective separate from constraints and success
+  // criteria. Those remain available in their own structured fields below;
+  // they must not silently become part of the Planner's task description.
+  const displayObjective = normalizePreservingCase(rawObjective);
+  const formatInput = normalizePreservingCase([
+    rawObjective,
+    ...(input.userConstraints ?? []),
   ].join("\n"));
   const classifiedIntent = classifyTaskIntent(input);
   const intent = input.targetArtifactKind === undefined
@@ -214,8 +228,11 @@ export function understandTask(input: TaskIntentInput & {
   if (operation === "transform_artifact") workflow.push("transform");
   if (intent.wantsArtifact) workflow.push("produce");
   if (workflow.length > 0 || intent.wantsConversationAnswer) workflow.push("deliver");
+  const outputFormat = structuredOutputFormat(formatInput);
   return {
     schema: "agentloop.taskUnderstanding/v1",
+    task: structuredTaskText(displayObjective, intent),
+    ...(outputFormat === undefined ? {} : { format: outputFormat }),
     normalizedObjective,
     operation,
     subject: {
@@ -242,6 +259,42 @@ export function understandTask(input: TaskIntentInput & {
     constraints: [...(input.userConstraints ?? [])],
     intent,
   };
+}
+
+function structuredTaskText(value: string, intent: TaskIntentClassification): string {
+  // Keep the complete business-action wording.  `subject` is intentionally a
+  // narrower classifier field, but the Planner task must retain verbs such as
+  // “生成/形成报告”; otherwise the output-format split would also erase the
+  // requested business outcome.
+  let task = value.trim();
+  // Keep the requested operation/deliverable in the task, but remove only the
+  // output-format clause. Format is a delivery constraint, never a business
+  // subject or source-provider signal.
+  task = task
+    .replace(/(?:用|以)\s*(?:html?|markdown|md|pdf|docx?|word|txt|xlsx?|excel|csv|pptx?|powerpoint)\s*(?:格式|format)?/giu, "")
+    .replace(/(?:格式(?:为|是)|format(?:ted)?\s*(?:as|is))\s*(?:html?|markdown|md|pdf|docx?|word|txt|xlsx?|excel|csv|pptx?|powerpoint)/giu, "")
+    // Also remove a bare format token from clauses such as “生成 Markdown
+    // 报告”.  The report remains part of the business task; only the output
+    // representation is projected into `format`.
+    .replace(/\b(?:html?|markdown|md|pdf|docx?|word|txt|xlsx?|excel|csv|pptx?|powerpoint)\b/giu, "")
+    .replace(/格式/gu, "")
+    .replace(/(输出|生成|创建|制作)\s*的/gu, "$1 ")
+    .replace(/[，,、]\s*(?:用|以)\s*$/giu, "")
+    .replace(/[，,、]\s*[，,、]/gu, "，")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
+  return task.length > 0 ? task : (intent.wantsArtifact ? "形成用户请求的交付物" : value.trim());
+}
+
+function structuredOutputFormat(value: string): string | undefined {
+  if (/\bhtml?\b|网页|页面|网站/iu.test(value)) return "html";
+  if (/\bmarkdown\b|\bmd\b/iu.test(value)) return "markdown";
+  if (/\bpdf\b/iu.test(value)) return "pdf";
+  if (/\bdocx?\b|\bword\b/iu.test(value)) return "docx";
+  if (/\btxt\b|纯文本/iu.test(value)) return "txt";
+  if (/\bxlsx?\b|\bexcel\b|\bcsv\b/iu.test(value)) return "spreadsheet";
+  if (/\bpptx?\b|\bpowerpoint\b|演示文稿|幻灯片/iu.test(value)) return "presentation";
+  return undefined;
 }
 
 function structuredOperationProfiles(
@@ -544,4 +597,8 @@ function matchSignals(text: string, patterns: readonly [string, RegExp][]): stri
 
 function normalize(value: string): string {
   return value.toLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+function normalizePreservingCase(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
 }

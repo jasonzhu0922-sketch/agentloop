@@ -298,12 +298,19 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
       .map((toolCall) => toolCall.toolCallId);
     const receipts = runtimeObservableReceipts(input.evidence.toolCalls);
     const requiredKinds = runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []);
-    const requiredKindsSatisfied = requiredKinds.every((kind) =>
+    const blockingKinds = new Set(input.step.successCriteria
+      .filter((criterion) => criterion.blocking !== false)
+      .map((criterion) => criterion.id));
+    const requiredKindsSatisfied = requiredKinds
+      .filter((kind) => blockingKinds.has(kind))
+      .every((kind) =>
       evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions)
-    );
+      );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
-      const satisfied = nonEmpty
-        && criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions);
+      const evidenceSatisfied = criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions);
+      const candidateRequired = criterion.blocking !== false
+        && !isEvidenceCriterion(criterion.id);
+      const satisfied = evidenceSatisfied && (nonEmpty || !candidateRequired);
       return {
         criterionId: criterion.id,
         satisfied,
@@ -311,7 +318,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
           ? "The completion candidate and required observable Runtime operations satisfy the principle assessment gate."
           : rejectedEvidenceGateRationale(nonEmpty, receipts,
             requiredKinds.includes(criterion.id) || criterion.id === "explicit_caveats" ? [criterion.id] : requiredKinds,
-            successfulToolRefs, deliveryCandidate),
+            successfulToolRefs, deliveryCandidate, candidateRequired),
         evidenceRefs: satisfied
           ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId), ...(deliveryCandidate?.sourceToolCallIds ?? [])]
           : successfulToolRefs,
@@ -398,7 +405,9 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
         toolCallId: toolCall.toolCallId,
         schema,
         verdict: canonicalArtifactAcceptanceVerdict(parsed),
-        ...(schema === "agentloop.artifactAcceptance/v1" ? { artifactPath: artifactPathFromRecord(parsed) } : {}),
+        ...(schema === "agentloop.artifactAcceptance/v1" || schema === "agentloop.artifactReceipt/v1"
+          ? { artifactPath: artifactPathFromRecord(nestedReceipt ?? parsed) }
+          : {}),
         satisfied: new Set(evidenceKinds.satisfied),
         failed: new Set(evidenceKinds.failed),
         caveatsRecorded: Array.isArray((nestedReceipt ?? parsed).caveats)
@@ -433,8 +442,7 @@ function criterionSatisfiedByEvidenceGate(
 ): boolean {
   // Semantic caveat evidence must not inherit an unrelated source/artifact
   // failure (nor automatically pass when all other operation receipts pass).
-  if (criterionId === "explicit_caveats") return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions);
-  if (requiredKinds.includes(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions);
+  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
 }
@@ -452,8 +460,14 @@ function evidenceKindSatisfiedByGate(
     return receipts.some((receipt) => !receipt.failed.has(kind) && receipt.caveatsRecorded);
   }
   if (kind === "delivery_receipt") {
-    return candidate?.deliveryReceipt !== undefined
+    const candidateReceipt = candidate?.deliveryReceipt !== undefined
       && successfulToolRefs.includes(candidate.deliveryReceipt.sourceToolCallId);
+    return candidateReceipt || receipts.some((receipt) =>
+        (receipt.schema === "agentloop.artifactReceipt/v1" || receipt.schema === "agentloop.artifactAcceptance/v1")
+        && receipt.artifactPath !== undefined
+        && !receipt.failed.has("artifact_path")
+        && !receipt.failed.has("artifact_non_empty"),
+      );
   }
   if (kind === "artifact_acceptance") {
     const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate);
@@ -464,6 +478,22 @@ function evidenceKindSatisfiedByGate(
         || acceptance.satisfied.has("artifact_acceptance")
       )
       && acceptance.failed.size === 0;
+  }
+  // Artifact acceptance is a Runtime-owned, aggregate observation.  A Skill
+  // manifest may advertise an action that can produce an artifact fact, but
+  // that declaration is a capability inventory rather than a Plan commitment
+  // to that action.  Do not let it erase the neutral facts carried by an
+  // accepted acceptance receipt from a custom or other authorized renderer.
+  // Non-artifact workflow facts remain authenticated against their declared
+  // package action below.
+  if (isArtifactAcceptanceEvidenceKind(kind)) {
+    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate);
+    if (
+      acceptance !== undefined
+      && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
+      && acceptance.satisfied.has(kind)
+      && !acceptance.failed.has(kind)
+    ) return true;
   }
   const declaredActions = (workflowEvidenceActions ?? []).filter((action) => action.producesEvidenceKinds.includes(kind));
   if (declaredActions.length > 0) {
@@ -477,6 +507,13 @@ function evidenceKindSatisfiedByGate(
     if (receipt.failed.has(kind)) return false;
     return receipt.satisfied.has(kind);
   });
+}
+
+function isArtifactAcceptanceEvidenceKind(kind: string): boolean {
+  return kind === "artifact_path"
+    || kind === "artifact_non_empty"
+    || kind === "artifact_openable"
+    || kind === "format_matches_request";
 }
 
 function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
@@ -519,13 +556,18 @@ function rejectedEvidenceGateRationale(
   requiredKinds: readonly string[],
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
+  candidateRequired = true,
 ): string {
-  if (!nonEmpty) return "The candidate output is empty.";
+  if (!nonEmpty && candidateRequired) return "The candidate output is empty.";
   if (successfulToolRefs.length === 0) return "No successful Runtime operation is available.";
   if (receipts.length === 0 && requiredKinds.length > 0) return "No observable Runtime artifact or acceptance receipt is available for the principle assessment gate.";
   const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, candidate));
   if (missing.length > 0) return `No bound observable evidence confirms: ${missing.join(", ")}. This does not establish that the underlying content or operation is absent.`;
   return "The observable Runtime operations do not satisfy the principle assessment gate.";
+}
+
+function isEvidenceCriterion(criterionId: string): boolean {
+  return criterionId === "explicit_caveats" || RUNTIME_OBSERVABLE_GATE_KINDS.has(criterionId);
 }
 
 function parseToolResultObject(value: unknown): Record<string, unknown> | undefined {
@@ -595,7 +637,9 @@ function buildAssessment(
   const hasCaveatedSkill = skills.some((item) =>
     item.status === "skipped_unavailable" || item.status === "process_caveat"
   );
-  const approved = input.evidence.candidateOutput.trim().length > 0
+  const hasUserVisibleDelivery = input.evidence.candidateOutput.trim().length > 0
+    || hasArtifactDeliveryEvidence(input);
+  const approved = hasUserVisibleDelivery
     && classifiedCriteria.every((item) => item.satisfied || item.blocking !== true);
   const derivedFailedBoundary = approved
     ? undefined
@@ -617,6 +661,16 @@ function buildAssessment(
     ...(derivedFailedBoundary === undefined ? {} : { failedBoundary: derivedFailedBoundary }),
     createdAt: Date.now(),
   };
+}
+
+function hasArtifactDeliveryEvidence(input: StepAssessmentInput): boolean {
+  return input.evidence.toolCalls.some((toolCall) => {
+    if (toolCall.isError) return false;
+    return runtimeObservableReceipts([toolCall]).some((receipt) =>
+      receipt.schema === "agentloop.artifactReceipt/v1"
+      || receipt.schema === "agentloop.artifactAcceptance/v1",
+    );
+  });
 }
 
 function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAssessment): CriterionAssessment {

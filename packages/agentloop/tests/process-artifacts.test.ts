@@ -33,7 +33,7 @@ test("process artifacts mark accepted artifacts as final and leave candidates as
         result: JSON.stringify({ path: "draft.html", bytes: 31 }),
       }),
       event(3, "tool.completed", {
-        toolName: "materialize_paginated_html",
+        toolName: "computer_write_file",
         result: JSON.stringify({ path: "final.html", bytes: 31 }),
       }),
       event(4, "tool.completed", {
@@ -79,7 +79,7 @@ test("process artifacts mark accepted artifacts as final and leave candidates as
     assert.equal(draft?.role, "process");
     assert.equal(draft?.sourceTool, "computer_write_file");
     assert.equal(final?.role, "final");
-    assert.equal(final?.sourceTool, "materialize_paginated_html");
+    assert.equal(final?.sourceTool, "computer_write_file");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

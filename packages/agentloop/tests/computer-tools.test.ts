@@ -217,7 +217,6 @@ test("dangerous computer tools remain unavailable until the Run grant explicitly
     const denied = registry.materialize(grant([]));
     assert.equal(denied.definitions.some((tool) => tool.name === "computer_patch_file"), false);
     assert.equal(denied.definitions.some((tool) => tool.name === "computer_write_file"), false);
-    assert.equal(denied.definitions.some((tool) => tool.name === "materialize_paginated_html"), false);
     assert.throws(
       () => denied.prepare({
         id: "patch-1",
@@ -228,20 +227,6 @@ test("dangerous computer tools remain unavailable until the Run grant explicitly
     );
     assert.throws(
       () => denied.prepare({ id: "write-1", name: "computer_write_file", arguments: { path: "x", content: "x" } }),
-      (error: unknown) => hasCode(error, "FORBIDDEN"),
-    );
-    assert.throws(
-      () => denied.prepare({
-        id: "materialize-1",
-        name: "materialize_paginated_html",
-        arguments: {
-          path: "deck.html",
-          title: "Deck",
-          renderMode: "slides",
-          acceptanceProfile: "html_ppt",
-          pages: [{ title: "Intro" }],
-        },
-      }),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
     );
     const allowed = registry.materialize(grant(["computer_write_file"]));
@@ -661,169 +646,19 @@ test("convert_artifact validates source and target paths before spawning convert
   }
 });
 
-test("materialize_paginated_html writes structured paginated HTML and exposes acceptance-ready evidence", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-html-ppt-materialize-"));
+test("computer_write_file remains the general HTML delivery path", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-html-write-"));
   try {
     const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
-    const allowed = registry.materialize(grant(["materialize_paginated_html", "verify_artifact_acceptance"]));
-    const definition = allowed.definitions.find((tool) => tool.name === "materialize_paginated_html");
-    assert.match(definition?.description ?? "", /structured page specification/);
-    assert.match(definition?.description ?? "", /verify_artifact_acceptance/);
-
-    const pageSpec = {
-      path: "deliverables/dcmm-training.html",
-      title: "DCMM 4 评级培训",
-      subtitle: "能力建设案例",
-      renderMode: "slides",
-      acceptanceProfile: "html_ppt",
-      theme: { accent: "#0f766e", background: "#edf2ef", text: "#10201c", surface: "#fffdf8" },
-      pages: [
-        {
-          eyebrow: "Case",
-          title: "从目标到证据",
-          subtitle: "围绕任务拆解、执行和验收形成闭环。",
-          bullets: ["明确评级目标", "沉淀过程证据", "统一交付验收"],
-          sourceRefs: ["DCMM training brief"],
-        },
-        {
-          title: "执行节奏",
-          body: "用结构化规格驱动 HTML-PPT 物化，减少大段 HTML 在模型和工具之间往返。",
-          callout: "最终仍以 artifact_acceptance 作为交付证据。",
-        },
-      ],
-    };
-    const materialize = allowed.prepare({
-      id: "materialize-deck",
-      name: "materialize_paginated_html",
-      arguments: pageSpec,
+    const allowed = registry.materialize(grant(["computer_write_file", "verify_artifact_acceptance"]));
+    assert.equal(allowed.definitions.some((tool) => tool.name === "materialize_paginated_html"), false);
+    const write = allowed.prepare({
+      id: "write-deck",
+      name: "computer_write_file",
+      arguments: { path: "deliverables/deck.html", content: "<!doctype html><section class=\"slide\"><h1>Deck</h1></section>" },
     });
-
-    const result = await materialize.tool.execute(grantContext(["materialize_paginated_html", "verify_artifact_acceptance"]), materialize.input) as {
-      schema: string;
-      artifactKind: string;
-      renderMode: string;
-      acceptanceProfile: string;
-      path: string;
-      bytes: number;
-      sha256: string;
-      pageCount: number;
-      specSha256: string;
-      inspection: {
-        sha256: string;
-        outline: Array<{ line: number; text: string }>;
-        sampleRanges: Array<{ startLine: number; endLine: number; content: string; truncated: boolean }>;
-      };
-      artifactReceipt: {
-        schema: string;
-        sourceTool: string;
-        artifact: { path: string; artifactKind: string; acceptanceProfile: string; pageCount: number; sha256: string };
-        inspection: { sampleRangeCount: number };
-        canonicalEvidence: { fullInspectionInToolResult: boolean };
-      };
-    };
-
-    assert.equal(result.schema, "agentloop.paginatedHtmlMaterialization/v1");
-    assert.equal(result.artifactKind, "html");
-    assert.equal(result.renderMode, "slides");
-    assert.equal(result.acceptanceProfile, "html_ppt");
-    assert.equal(result.path, "deliverables/dcmm-training.html");
-    assert.equal(result.pageCount, 2);
-    assert.equal(result.sha256, result.inspection.sha256);
-    assert.match(result.specSha256, /^[0-9a-f]{64}$/);
-    assert.ok(result.bytes > JSON.stringify(pageSpec).length);
-    assert.equal(result.artifactReceipt.schema, "agentloop.artifactReceipt/v1");
-    assert.equal(result.artifactReceipt.sourceTool, "materialize_paginated_html");
-    assert.equal(result.artifactReceipt.artifact.path, "deliverables/dcmm-training.html");
-    assert.equal(result.artifactReceipt.artifact.artifactKind, "html");
-    assert.equal(result.artifactReceipt.artifact.acceptanceProfile, "html_ppt");
-    assert.equal(result.artifactReceipt.artifact.pageCount, 2);
-    assert.equal(result.artifactReceipt.artifact.sha256, result.sha256);
-    assert.equal(result.artifactReceipt.inspection.sampleRangeCount, result.inspection.sampleRanges.length);
-    assert.equal(result.artifactReceipt.canonicalEvidence.fullInspectionInToolResult, true);
-
-    const html = await fs.readFile(join(root, "deliverables", "dcmm-training.html"), "utf8");
-    assert.match(html, /<section class="slide" data-slide="1"/);
-    assert.match(html, /DCMM 4 评级培训/);
-    assert.match(html, /function nextSlide/);
-
-    const accept = allowed.prepare({
-      id: "accept-materialized-deck",
-      name: "verify_artifact_acceptance",
-      arguments: { artifactPath: "deliverables/dcmm-training.html", profileId: "html_ppt" },
-    });
-    const acceptance = await accept.tool.execute(grantContext(["materialize_paginated_html", "verify_artifact_acceptance"]), accept.input) as {
-      verdict: string;
-      evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
-      checks: Array<{ id: string; status: string; evidence: Record<string, unknown>; diagnostics?: string }>;
-    };
-
-    assert.equal(acceptance.verdict, "caveated");
-    assert.deepEqual(acceptance.evidenceKinds.failed, []);
-    assert.ok(acceptance.evidenceKinds.satisfied.includes("artifact_acceptance"));
-    assert.ok(acceptance.evidenceKinds.satisfied.includes("format_matches_request"));
-    assert.equal(check(acceptance, "slide_structure")?.status, "passed");
-    assert.deepEqual(check(acceptance, "slide_structure")?.evidence.slideCount, 2);
-    assert.equal(check(acceptance, "static_navigation_signals")?.status, "passed");
-
-    const htmlAccept = allowed.prepare({
-      id: "accept-materialized-html",
-      name: "verify_artifact_acceptance",
-      arguments: {
-        artifactPath: "deliverables/dcmm-training.html",
-        profileId: "html",
-        checks: ["browser-openable paginated HTML with page navigation (pageCount=2)"],
-      },
-    });
-    const htmlAcceptance = await htmlAccept.tool.execute(grantContext(["materialize_paginated_html", "verify_artifact_acceptance"]), htmlAccept.input) as {
-      evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
-      checks: Array<{ id: string; status: string; evidence: Record<string, unknown>; diagnostics?: string }>;
-    };
-
-    assert.deepEqual(htmlAcceptance.evidenceKinds.failed, []);
-    assert.ok(htmlAcceptance.evidenceKinds.satisfied.includes("basic_navigation"));
-    assert.equal(check(htmlAcceptance, "basic_navigation")?.status, "passed");
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test("materialize_paginated_html rejects invalid page specs before writing files", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-html-ppt-invalid-"));
-  try {
-    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(root)));
-    const allowed = registry.materialize(grant(["materialize_paginated_html"]));
-    assert.throws(
-      () => allowed.prepare({
-        id: "invalid-theme",
-        name: "materialize_paginated_html",
-        arguments: {
-          path: "deck.html",
-          title: "Deck",
-          renderMode: "slides",
-          acceptanceProfile: "html_ppt",
-          theme: { accent: "teal" },
-          pages: [{ title: "Intro" }],
-        },
-      }),
-      (error: unknown) => hasCode(error, "BAD_REQUEST"),
-    );
-    assert.throws(
-      () => allowed.prepare({
-        id: "too-many-pages",
-        name: "materialize_paginated_html",
-        arguments: {
-          path: "deck.html",
-          title: "Deck",
-          renderMode: "slides",
-          acceptanceProfile: "html_ppt",
-          pages: Array.from({ length: 81 }, (_, index) => ({ title: `Page ${index + 1}` })),
-        },
-      }),
-      (error: unknown) => hasCode(error, "BAD_REQUEST"),
-    );
-    await assert.rejects(() => fs.stat(join(root, "deck.html")), (error: unknown) =>
-      error instanceof Error && "code" in error && (error as { code: unknown }).code === "ENOENT"
-    );
+    const result = await write.tool.execute(grantContext(["computer_write_file", "verify_artifact_acceptance"]), write.input) as { artifactReceipt: { sourceTool: string } };
+    assert.equal(result.artifactReceipt.sourceTool, "computer_write_file");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -611,15 +611,7 @@ test("artifact receipts that satisfy required evidence complete without a final 
           toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "report.html" } }],
         };
       }
-      if (modelCalls === 2) {
-        assert.equal(request.tools.some((tool) => tool.name === "verify_artifact_acceptance"), true);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "verify-report", name: "verify_artifact_acceptance", arguments: { artifactPath: "report.html" } }],
-        };
-      }
-      throw new Error("Runtime should complete from receipts without a final convergence model turn");
+      throw new Error("Runtime should complete from receipts without a second model turn");
     },
   };
   const events: RuntimeEvent[] = [];
@@ -641,7 +633,7 @@ test("artifact receipts that satisfy required evidence complete without a final 
       assert.doesNotMatch(candidate.output, /Runtime evidence satisfies the current step evidence contract/);
       assert.doesNotMatch(candidate.output, /Evidence tool calls/);
       assert.equal(candidate.toolEvidence.some((item) => item.toolCallId === "write-report"), true);
-      assert.equal(candidate.toolEvidence.some((item) => item.toolCallId === "verify-report"), true);
+      assert.equal(candidate.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance"), true);
       return { approved: true, feedback: "" };
     },
   });
@@ -652,10 +644,103 @@ test("artifact receipts that satisfy required evidence complete without a final 
   assert.doesNotMatch(result.output, /Evidence tool calls/);
   assert.equal(writeExecutions, 1);
   assert.equal(verifyExecutions, 1);
-  assert.equal(modelCalls, 2);
+  assert.equal(modelCalls, 1);
   assert.equal(events.filter((event) => event.type === "candidate.evidence_completion_detected").length, 1);
   assert.equal(events.filter((event) => event.type === "loop.convergence_queued").length, 0);
   assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 0);
+  assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
+});
+
+test("Runtime returns control for a concrete acceptance diagnostic so the model can repair", async () => {
+  let modelCalls = 0;
+  let writeExecutions = 0;
+  let verifyExecutions = 0;
+  const write: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write the HTML artifact",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => {
+      writeExecutions += 1;
+      return {
+        path: "report.html",
+        bytes: 32,
+        sha256: `html-${writeExecutions}`,
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "report.html", kind: "html", bytes: 32, sha256: `html-${writeExecutions}` },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+        },
+      };
+    },
+  };
+  const verify: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the HTML artifact",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      verifyExecutions += 1;
+      if (verifyExecutions === 1) {
+        return {
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "report.html", kind: "html" },
+          verdict: "rejected",
+          evidenceKinds: { satisfied: [], caveated: [], failed: ["artifact_acceptance", "format_matches_request"] },
+          diagnostics: [{ path: "report.html", rule: "html_parse", suggestedFix: "close the missing body tag" }],
+        };
+      }
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "report.html", kind: "html" },
+        verdict: "accepted",
+        evidenceKinds: { satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"], caveated: [], failed: [] },
+      };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write-1", name: "computer_write_file", arguments: { path: "report.html" } }] };
+      }
+      if (modelCalls === 2) {
+        assert.equal(runtimeStepSemanticState(request.runtimeContext?.content ?? "").nextAction, "repair_artifact_source");
+        assert.match(request.runtimeContext?.content ?? "", /html_parse/);
+        assert.match(request.runtimeContext?.content ?? "", /close the missing body tag/);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write-2", name: "computer_write_file", arguments: { path: "report.html", mode: "overwrite" } }] };
+      }
+      return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const result = await runAgentLoop({
+    runId: "acceptance-repair",
+    systemPrompt: "Create and verify an HTML artifact.",
+    input: "create report.html",
+    model,
+    tools: new ToolRegistry([write, verify]),
+    grant: makeGrant(["computer_write_file", "verify_artifact_acceptance"]),
+    maxSteps: 4,
+    progressPolicy: artifactStepToolProgressPolicy(["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"], { expectedArtifactKind: "html" }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => ({
+      approved: candidate.toolEvidence.some((item) => item.toolName === "verify_artifact_acceptance" && item.result.includes('"verdict":"accepted"')),
+      feedback: "",
+    }),
+  });
+
+  assert.match(result.output, /report\.html/);
+  assert.equal(modelCalls, 2);
+  assert.equal(writeExecutions, 2);
+  assert.equal(verifyExecutions, 2);
+  assert.deepEqual(result.toolEvidence.filter((item) => item.toolName === "computer_read_file"), []);
+  assert.equal(events.filter((event) => event.type === "runtime.artifact_acceptance.scheduled").length, 2);
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
@@ -1033,7 +1118,7 @@ test("structured source candidates wait for required artifact acceptance evidenc
   });
 
   assert.match(result.output, /employee-profile-api\.html/);
-  assert.equal(modelCalls, 3);
+  assert.equal(modelCalls, 2);
   assert.equal(assessmentCalls, 1);
   assert.equal(events.filter((event) => event.type === "candidate.evidence_completion_detected").length, 1);
   assert.equal(events.filter((event) => event.type === "candidate.structured_tool_detected").length, 0);
@@ -1141,7 +1226,7 @@ test("a declared Skill workflow fact must precede the accepted artifact that con
   });
 
   assert.match(result.output, /trend\.html/);
-  assert.equal(modelCalls, 5);
+  assert.equal(modelCalls, 4);
   assert.equal(artifactWrites, 2);
 });
 
@@ -1488,6 +1573,73 @@ test("an empty completion candidate is repaired within the same budgeted step", 
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
   assert.equal(events.filter((event) => event.type === "step.started").length, 2);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("an empty candidate during artifact execution keeps the delivery tools available", async () => {
+  const calls: string[] = [];
+  const writeSpec: RuntimeTool<unknown> = {
+    name: "write_spec",
+    description: "Write the source spec for the requested artifact.",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({ path: "deck-spec.json", processArtifact: true }),
+  };
+  const buildArtifact: RuntimeTool<unknown> = {
+    name: "build_artifact",
+    description: "Build the requested PPTX artifact and return its receipt.",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      schema: "agentloop.artifactReceipt/v1",
+      artifact: { path: "deck.pptx", bytes: 1234, kind: "pptx" },
+      evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "format_matches_request"] },
+    }),
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls.push(String(calls.length + 1));
+      if (calls.length === 1) {
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write", name: "write_spec", arguments: {} }] };
+      }
+      if (calls.length === 2) {
+        return { content: "", finishReason: "stop", toolCalls: [] };
+      }
+      if (calls.length === 3) {
+        assert.ok(request.tools.some((tool) => tool.name === "build_artifact"));
+        assert.match(request.runtimeContext?.content ?? "", /runtime_delivery_action_required/);
+        assert.match(request.runtimeContext?.content ?? "", /probe, temporary spec, or intermediate process artifact/);
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "build", name: "build_artifact", arguments: {} }] };
+      }
+      return { content: "已生成并交付 deck.pptx。", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["write_spec", "build_artifact"]);
+  const events: RuntimeEvent[] = [];
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Build and deliver the requested PPTX artifact.",
+    input: "生成一个 PPTX",
+    model,
+    tools: new ToolRegistry([writeSpec, buildArtifact]),
+    grant,
+    maxSteps: 4,
+    stepSemanticFrame: {
+      completionBoundary: ["artifact_path", "artifact_non_empty", "format_matches_request"],
+      evidenceMode: "produce_without_external_evidence",
+      phaseRole: "delivery",
+    },
+    progressPolicy: runtimeStepToolProgressPolicy(["artifact_path", "artifact_non_empty", "format_matches_request"]),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "已生成并交付 deck.pptx。");
+  assert.deepEqual(calls, ["1", "2", "3", "4"]);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
 });
 
 test("a length-truncated completion candidate receives bounded repair grace", async () => {
@@ -2409,39 +2561,10 @@ test("artifact progress policy advises verification after artifact evidence with
         };
       }
       if (calls === 2) {
-        const runtimeContext = request.runtimeContext?.content ?? "";
-        const semanticState = runtimeStepSemanticState(runtimeContext);
-        assert.equal(semanticState.schema, "agentloop.runtimeStepEvidenceState/v1");
-        assert.equal(semanticState.nextAction, "verify_existing_artifact");
-        assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["report.html"]);
-        assert.equal(semanticState.missingRequiredEvidenceKinds.includes("artifact_acceptance"), true);
-        assert.deepEqual(semanticState.evidenceProducingToolNames, ["verify_artifact_acceptance"]);
-        assert.deepEqual(semanticState.exploratoryToolNames, []);
-        assert.match(runtimeContext, /Prefer verifying the artifact next; avoid rereading it solely to decide whether verification is needed\./);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "read-report",
-            name: "computer_read_file",
-            arguments: { path: "report.html" },
-          }],
-        };
-      }
-      if (calls === 3) {
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_acceptance_hint/);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "verify-report",
-            name: "verify_artifact_acceptance",
-            arguments: { artifactPath: "report.html" },
-          }],
-        };
-      }
-      assert.deepEqual(request.tools, []);
+        assert.deepEqual(request.tools, []);
       return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
+      }
+      throw new Error(`unexpected model call ${calls}`);
     },
   };
   const events: RuntimeEvent[] = [];
@@ -2464,10 +2587,8 @@ test("artifact progress policy advises verification after artifact evidence with
   });
 
   assert.equal(result.output, "report.html accepted");
-  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "read", "verify"]);
-  assert.equal(events.some((event) =>
-    event.type === "tool.rejected" && event.data.toolCallId === "read-report"
-  ), false);
+  assert.deepEqual(executions.map((entry) => entry.split(":", 1)[0]), ["write", "verify"]);
+  assert.equal(events.some((event) => event.type === "runtime.artifact_acceptance.scheduled"), true);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
@@ -2525,16 +2646,11 @@ test("artifact execution keeps multi-tool provider choice auto while Runtime evi
         };
       }
       if (calls === 2) {
-        assert.equal(request.toolChoice, "auto");
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "verify-poster", name: "verify_artifact_acceptance", arguments: { artifactPath: "poster.png" } }],
-        };
+        assert.equal(request.toolChoice, undefined);
+        assert.deepEqual(request.tools, []);
+        return { content: "Done and verified for the current step.\nArtifact: poster.png.", finishReason: "stop", toolCalls: [] };
       }
-      assert.equal(request.toolChoice, undefined);
-      assert.deepEqual(request.tools, []);
-      return { content: "Done and verified for the current step.\nArtifact: poster.png.", finishReason: "stop", toolCalls: [] };
+      throw new Error(`unexpected model call ${calls}`);
     },
   };
   const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
@@ -2689,17 +2805,9 @@ test("artifact progress policy treats generated build scripts as source until a 
       }
       if (calls === 4) {
         const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
-        assert.equal(semanticState.nextAction, "verify_existing_artifact");
+        assert.equal(semanticState.nextAction, "submit_completion_candidate");
         assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["report.html"]);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{
-            id: "verify-report",
-            name: "verify_artifact_acceptance",
-            arguments: { artifactPath: "report.html", artifactKind: "html" },
-          }],
-        };
+        return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
       }
       return { content: "report.html accepted", finishReason: "stop", toolCalls: [] };
     },
@@ -2882,13 +2990,9 @@ test("artifact progress policy treats mismatched typed intermediates as source u
       }
       if (calls === 5) {
         const semanticState = runtimeStepSemanticState(request.runtimeContext?.content ?? "");
-        assert.equal(semanticState.nextAction, "verify_existing_artifact");
+        assert.equal(semanticState.nextAction, "submit_completion_candidate");
         assert.deepEqual(semanticState.knownArtifacts.map((artifact) => artifact.path), ["poster.png"]);
-        return {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "verify-poster", name: "verify_artifact_acceptance", arguments: { artifactPath: "poster.png", artifactKind: "image" } }],
-        };
+        return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
     },

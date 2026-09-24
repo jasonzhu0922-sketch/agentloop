@@ -579,7 +579,6 @@ const EVIDENCE_PRODUCING_TOOL_NAMES = new Set([
   "computer_run_command",
   "convert_artifact",
   "extract_source_tables",
-  "materialize_paginated_html",
   "visible_extract_tables",
   "verify_artifact_acceptance",
 ]);

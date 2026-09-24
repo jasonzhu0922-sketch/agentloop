@@ -1329,9 +1329,6 @@ function structuredToolResultProjection(toolName: string, content: string): stri
       instruction: "JSON values are omitted only from this prompt projection, not from Runtime storage. For agentloop.jsonRead/v1, use each query's resultPointer (for example /queries/0/value) with read_result and its resultRef.resultId; the query's sourcePointer is for computer_read_json and must not be passed to read_result. Do not replay a path or hash and do not rerun source extraction solely to recover them.",
     }));
   }
-  if (schema === "agentloop.paginatedHtmlMaterialization/v1") {
-    return paginatedHtmlMaterializationProjection(value);
-  }
   if (schema === "agentloop.artifactAcceptance/v1") {
     return artifactAcceptanceProjection(value);
   }
@@ -1439,7 +1436,7 @@ function hasArtifactEvidenceBoundary(
     if (value === undefined) continue;
     if (recordValue(value.artifactReceipt) !== undefined) return true;
     const schema = stringValue(value.schema);
-    if (schema === "agentloop.artifactAcceptance/v1" || schema === "agentloop.paginatedHtmlMaterialization/v1") {
+    if (schema === "agentloop.artifactAcceptance/v1") {
       return true;
     }
     if (
@@ -1538,38 +1535,6 @@ function committedWriteContinuity(sourceTool: string, artifactPath: string): Rec
     artifactPath,
     contentState: "omitted_from_model_context",
   };
-}
-
-function paginatedHtmlMaterializationProjection(value: Record<string, unknown>): string | undefined {
-  const path = stringValue(value.path);
-  if (path === undefined) return undefined;
-  const inspection = recordValue(value.inspection);
-  const projection = {
-    schema: CONTEXT_ARTIFACT_PROJECTION_SCHEMA,
-    sourceSchema: stringValue(value.schema),
-    artifact: {
-      path,
-      artifactKind: stringValue(value.artifactKind),
-      renderMode: stringValue(value.renderMode),
-      acceptanceProfile: stringValue(value.acceptanceProfile),
-      pageCount: numberValue(value.pageCount),
-      bytes: numberValue(value.bytes),
-      characters: numberValue(value.characters),
-      totalLines: numberValue(value.totalLines),
-      sha256: stringValue(value.sha256),
-      specSha256: stringValue(value.specSha256),
-    },
-    inspection: inspection === undefined ? undefined : {
-      sha256: stringValue(inspection.sha256),
-      characters: numberValue(inspection.characters),
-      totalLines: numberValue(inspection.totalLines),
-      outline: compactArray(inspection.outline, 12),
-      outlineTruncated: booleanValue(inspection.outlineTruncated),
-      sampleRangeCount: Array.isArray(inspection.sampleRanges) ? inspection.sampleRanges.length : undefined,
-    },
-    instruction: "Use this artifact receipt for generated file facts. Treat the path as evidence, not as permission to reread the same artifact; if acceptance is still missing, verify the artifact instead.",
-  };
-  return JSON.stringify(omitUndefinedDeep(projection));
 }
 
 function writtenArtifactProjection(value: Record<string, unknown>, toolName: string): string | undefined {

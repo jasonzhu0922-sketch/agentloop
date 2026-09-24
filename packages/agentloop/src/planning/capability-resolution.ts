@@ -63,6 +63,7 @@ export function resolveCapabilityGaps(input: {
         step.sourceConstraint,
         boundCapabilities,
         currentById,
+        boundSourceProviderKinds(step, input.currentSkills, currentById),
       ))
       .filter((capability) => missingEvidenceKinds.some((kind) => capability.produces.includes(kind)))
       .map((capability) => ({
@@ -112,6 +113,7 @@ function compatibleWithSourceConstraint(
   constraint: SourceConstraint | undefined,
   boundCapabilities: ReadonlySet<string>,
   currentById: ReadonlyMap<string, PlanningCapability>,
+  boundSourceProviderKinds: ReadonlySet<string>,
 ): boolean {
   const requiredToolSourceIds = constraint?.requiredToolSourceIds ?? [];
   if (
@@ -140,7 +142,40 @@ function compatibleWithSourceConstraint(
     && !capability.sourceKinds.includes("visible_directory")
     && !canConsumeBoundWorkspaceProduct
   ) return false;
+  // A selected source-provider owns the source identity for its leaf.  An
+  // evidence-contract mistake must not turn an API lookup into a database
+  // acquisition (or the reverse) merely because another provider advertises a
+  // missing generic evidence kind.  Workspace products remain compatible only
+  // after the bound source workflow has already produced a reusable artifact.
+  if (
+    boundSourceProviderKinds.size > 0
+    && !capability.sourceKinds.some((kind) => boundSourceProviderKinds.has(kind))
+    && !canConsumeBoundWorkspaceProduct
+  ) return false;
   return true;
+}
+
+function boundSourceProviderKinds(
+  step: PlanProposal["steps"][number],
+  skills: readonly PrivateSkill[],
+  currentById: ReadonlyMap<string, PlanningCapability>,
+): ReadonlySet<string> {
+  const selectedSkillIds = new Set(step.skillIds);
+  const kinds = new Set<string>();
+  for (const skill of skills) {
+    if (!selectedSkillIds.has(skill.id)) continue;
+    const metadata = skill.agentLoop;
+    if (!metadata?.roles.includes("source_provider")) continue;
+    for (const kind of metadata.sourceKinds) kinds.add(kind);
+  }
+  // Recovery callers may not carry a resolved Skill object, but the bound
+  // source-provider capability is still authoritative enough to preserve its
+  // namespace.
+  for (const capabilityId of step.requiredCapabilities) {
+    if (!capabilityId.startsWith("skill_source_provider.")) continue;
+    for (const kind of currentById.get(capabilityId)?.sourceKinds ?? []) kinds.add(kind);
+  }
+  return kinds;
 }
 
 function sourceProviderSkillsByCapability(skills: readonly PrivateSkill[]): ReadonlyMap<string, readonly string[]> {

@@ -18,7 +18,6 @@ import {
 } from "./step-execution-binding.ts";
 
 const FILE_PRODUCER_TOOL_NAMES = new Set([
-  "materialize_paginated_html",
   "computer_patch_file",
   "computer_write_file",
   "computer_run_command",
@@ -133,6 +132,17 @@ export function admitPlan(input: {
     assertUnique(constrainedToolSourceIds, `required ToolSources for step ${step.id}`);
     assertUnique(constrainedUploadedSourceIds, `required uploaded sources for step ${step.id}`);
     assertUnique(constrainedVisibleDirectoryIds, `required visible directories for step ${step.id}`);
+    assertSourceConstraintNamespaces({
+      stepId: step.id,
+      requiredToolSourceIds: constrainedToolSourceIds,
+      requiredUploadedSourceIds: constrainedUploadedSourceIds,
+      requiredVisibleDirectoryIds: constrainedVisibleDirectoryIds,
+      availableToolSourceIds: new Set((input.availableTools ?? []).flatMap((tool) => tool.source === undefined ? [] : [tool.source.id])),
+      availableUploadedSourceIds: new Set(input.availableUploadedSourceIds ?? []),
+      availableVisibleDirectoryIds: new Set(input.availableVisibleDirectoryIds ?? []),
+      availableSkillIds: new Set(input.availableSkills.map((skill) => skill.id)),
+      availableSkillNames: new Set(input.availableSkills.map((skill) => skill.name)),
+    });
     const unknownToolSources = unknownToolSourceIds(constrainedToolSourceIds, input.availableTools ?? []);
     if (unknownToolSources.length > 0) {
       reject(`Step ${step.id} requires unavailable ToolSource(s): ${unknownToolSources.join(", ")}`);
@@ -214,7 +224,10 @@ export function admitPlan(input: {
       completionEvidenceContract,
     );
     normalizeCompletionCapabilities(step.role, requiredCapabilities, input.taskIntent);
-    const criteria: SuccessCriterion[] = [...completionCriteria];
+    const criteria: SuccessCriterion[] = completionCriteria.map((criterion) => ({
+      ...criterion,
+      blocking: criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, input.taskIntent),
+    }));
     for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
       const skill = availableSkills.get(skillId);
@@ -287,6 +300,7 @@ export function admitPlan(input: {
     assertEvidenceContractIsProducible({
       stepId: step.id,
       evidenceContract: step.evidenceContract,
+      successCriteria: step.successCriteria,
       requiredCapabilities: step.executionBinding.requiredCapabilities,
       availableCapabilities,
     });
@@ -325,6 +339,45 @@ export function admitPlan(input: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function assertSourceConstraintNamespaces(input: {
+  readonly stepId: string;
+  readonly requiredToolSourceIds: readonly string[];
+  readonly requiredUploadedSourceIds: readonly string[];
+  readonly requiredVisibleDirectoryIds: readonly string[];
+  readonly availableToolSourceIds: ReadonlySet<string>;
+  readonly availableUploadedSourceIds: ReadonlySet<string>;
+  readonly availableVisibleDirectoryIds: ReadonlySet<string>;
+  readonly availableSkillIds: ReadonlySet<string>;
+  readonly availableSkillNames: ReadonlySet<string>;
+}): void {
+  const uploaded = new Set(input.requiredUploadedSourceIds);
+  const toolSources = new Set(input.requiredToolSourceIds);
+  const visibleDirectories = new Set(input.requiredVisibleDirectoryIds);
+  const uploadedInToolSources = [...toolSources].filter((id) => uploaded.has(id) || input.availableUploadedSourceIds.has(id));
+  const uploadedInDirectories = [...visibleDirectories].filter((id) => uploaded.has(id) || input.availableUploadedSourceIds.has(id));
+  const toolSourceInUploads = [...uploaded].filter((id) => toolSources.has(id) || input.availableToolSourceIds.has(id));
+  const toolSourceInDirectories = [...visibleDirectories].filter((id) => toolSources.has(id) || input.availableToolSourceIds.has(id));
+  const directoryInUploads = [...uploaded].filter((id) => visibleDirectories.has(id) || input.availableVisibleDirectoryIds.has(id));
+  const directoryInToolSources = [...toolSources].filter((id) => visibleDirectories.has(id) || input.availableVisibleDirectoryIds.has(id));
+  const skillIdentities = [...new Set([
+    ...input.requiredToolSourceIds,
+    ...input.requiredUploadedSourceIds,
+    ...input.requiredVisibleDirectoryIds,
+  ])].filter((id) => input.availableSkillIds.has(id) || input.availableSkillNames.has(id));
+  if (skillIdentities.length > 0) {
+    reject(`Step ${input.stepId} uses Skill ID(s) or Skill name(s) in sourceConstraint: ${skillIdentities.join(", ")}; bind Skills through skillIds and source-provider capabilities, not resource IDs`);
+  }
+  if (uploadedInToolSources.length > 0 || toolSourceInUploads.length > 0) {
+    reject(`Step ${input.stepId} mixes uploaded source IDs with required ToolSource IDs; bind uploaded files only through requiredUploadedSourceIds`);
+  }
+  if (uploadedInDirectories.length > 0 || directoryInUploads.length > 0) {
+    reject(`Step ${input.stepId} mixes uploaded source IDs with required visible directory IDs; bind uploaded files only through requiredUploadedSourceIds`);
+  }
+  if (toolSourceInDirectories.length > 0 || directoryInToolSources.length > 0) {
+    reject(`Step ${input.stepId} mixes ToolSource IDs with visible directory IDs; keep sourceConstraint namespaces separate`);
+  }
 }
 
 function assertRuntimeResultBindings(bindings: readonly RuntimeResultBinding[]): void {
@@ -520,14 +573,20 @@ function assertEvidenceContract(stepId: string, contract: EvidenceContract): voi
 function assertEvidenceContractIsProducible(input: {
   readonly stepId: string;
   readonly evidenceContract?: EvidenceContract;
+  readonly successCriteria: readonly SuccessCriterion[];
   readonly requiredCapabilities: readonly string[];
   readonly availableCapabilities: readonly PlanningCapability[];
 }): void {
   if (input.evidenceContract === undefined) return;
   const capabilityById = new Map(input.availableCapabilities.map((capability) => [capability.id, capability]));
   const produced = new Set(input.requiredCapabilities.flatMap((id) => capabilityById.get(id)?.produces ?? []));
+  const blockingKinds = new Set(input.successCriteria
+    .filter((criterion) => criterion.blocking !== false)
+    .map((criterion) => criterion.id));
   const unavailable = input.evidenceContract.requiredKinds.filter((kind) =>
-    TOOL_PRODUCED_EVIDENCE_KINDS.has(kind) && !produced.has(kind),
+    TOOL_PRODUCED_EVIDENCE_KINDS.has(kind)
+    && blockingKinds.has(kind)
+    && !produced.has(kind),
   );
   if (unavailable.length > 0) {
     reject(
@@ -666,6 +725,26 @@ function normalizeCompletionCapabilities(
   capabilities.delete("workspace_artifact_write");
   capabilities.delete("artifact_acceptance");
   if (!capabilities.has("conversation_delivery")) capabilities.add("conversation_delivery");
+}
+
+function criterionBlocksCompletion(
+  criterionId: string,
+  step: PlanProposal["steps"][number],
+  taskIntent: {
+    readonly deliverySurface?: "conversation" | "workspace_artifact";
+    readonly artifactKind?: string;
+    readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
+  } | undefined,
+): boolean {
+  if (criterionId === "explicit_caveats") return false;
+  if (criterionId === "derived_aggregation") {
+    return /(?:group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|合计|占比)/iu.test(step.objective);
+  }
+  if (criterionId === "artifact_acceptance" || criterionId === "artifact_openable") return false;
+  if (criterionId === "source_summary" || criterionId === "source_urls") {
+    return step.role === "fact_acquisition" || taskIntent?.sourceNeed === "strict_user_source";
+  }
+  return true;
 }
 
 function assertParentTree(steps: readonly PlanStep[]): void {

@@ -31,10 +31,9 @@ export interface ProcessArtifact {
 }
 
 export type ProcessArtifactRole = "final" | "process";
-type ArtifactSourceTool = "computer_write_file" | "computer_patch_file" | "computer_run_command" | "materialize_paginated_html" | "convert_artifact";
+type ArtifactSourceTool = "computer_write_file" | "computer_patch_file" | "computer_run_command" | "convert_artifact";
 
 function sourceToolPriority(sourceTool: ArtifactSourceTool): number {
-  if (sourceTool === "materialize_paginated_html") return 0;
   if (sourceTool === "convert_artifact") return 1;
   if (sourceTool === "computer_patch_file") return 2;
   if (sourceTool === "computer_write_file") return 2;
@@ -275,7 +274,7 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
     if (event.type !== "tool.completed") continue;
     const toolName = typeof event.data.toolName === "string" ? event.data.toolName : "";
     const result = parseResult(event.data.result);
-    if (toolName === "computer_write_file" || toolName === "computer_patch_file" || toolName === "materialize_paginated_html") {
+    if (toolName === "computer_write_file" || toolName === "computer_patch_file") {
       const path = result !== undefined && typeof result.path === "string" ? result.path : undefined;
       if (path !== undefined && isSafeRelativePath(path)) candidates.set(path, toolName);
       continue;

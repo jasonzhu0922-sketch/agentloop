@@ -915,7 +915,6 @@ function planStep(step: Omit<PlanStep, "executionBinding">): PlanStep {
         "computer_write_file",
         "computer_patch_file",
         "computer_run_command",
-        "materialize_paginated_html",
         "convert_artifact",
         "verify_artifact_acceptance",
         "load_skill",

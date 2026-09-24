@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
+import { completeWithStreaming } from "../src/runtime/model-streaming.ts";
 
 test("OpenAI-compatible adapter maps server-configured requests and tool calls", async () => {
   const originalFetch = globalThis.fetch;
@@ -62,6 +63,167 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
     assert.deepEqual(result.toolCalls[0].arguments, { query: "status" });
     assert.equal(result.finishReason, "tool_calls");
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 3 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("planning streaming can keep provider reasoning internal", async () => {
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const model = new OpenAICompatibleModel({
+    baseUrl: "https://models.example.test/v1",
+    apiKey: "server-secret",
+    model: "deepseek-v4-flash",
+    contextWindowTokens: 128_000,
+    maxOutputTokens: 8_192,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response([
+    'data: {"choices":[{"delta":{"reasoning_content":"private thought"},"finish_reason":null}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n',
+  ].join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+  try {
+    const response = await completeWithStreaming({
+      model,
+      invocation: {
+        runId: "planner-private-reasoning",
+        systemPrompt: "System",
+        phase: "planning",
+        plannerRequest: true,
+        messages: [],
+        tools: [],
+      },
+      emit: (event) => { events.push(event as { type: string; data?: Record<string, unknown> }); },
+      base: { phase: "planning", turn: 1 },
+      suppressReasoningContent: true,
+    });
+    assert.equal(response.reasoningContent, undefined);
+    assert.equal(events.some((event) => event.type === "assistant.streaming" && event.data?.reasoningContent !== undefined), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("hidden reasoning visibility suppresses reasoning from every streamed phase", async () => {
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const model = new OpenAICompatibleModel({
+    baseUrl: "https://models.example.test/v1",
+    apiKey: "server-secret",
+    model: "deepseek-v4-flash",
+    contextWindowTokens: 128_000,
+    maxOutputTokens: 8_192,
+    reasoningVisibility: "hidden",
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response([
+    'data: {"choices":[{"delta":{"reasoning_content":"private thought"},"finish_reason":null}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n',
+  ].join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+  try {
+    const response = await completeWithStreaming({
+      model,
+      invocation: { runId: "hidden-execution-reasoning", systemPrompt: "System", phase: "execution", messages: [], tools: [] },
+      emit: (event) => { events.push(event as { type: string; data?: Record<string, unknown> }); },
+      base: { phase: "execution", step: 1 },
+    });
+    // Visibility only controls public events. Keep the opaque DeepSeek state so
+    // the next Chat Completions turn can include it in its internal transcript.
+    assert.equal(response.reasoningContent, "private thought");
+    assert.equal(events.some((event) => event.type === "assistant.streaming" && event.data?.reasoningContent !== undefined), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter enables configured thinking only for formal Planner requests", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "OK" } }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "deepseek-v4-flash",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      thinkingMode: "disabled",
+      planningThinkingMode: "enabled",
+    });
+    await model.complete({
+      runId: "thinking-execution",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Reply only: OK" }],
+      tools: [],
+    });
+    await model.complete({
+      runId: "thinking-planner",
+      systemPrompt: "System",
+      phase: "planning",
+      plannerRequest: true,
+      messages: [{ role: "user", content: "Submit the plan" }],
+      tools: [],
+    });
+    assert.deepEqual(bodies[0]?.thinking, { type: "disabled" });
+    assert.deepEqual(bodies[1]?.thinking, { type: "enabled" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter sends configured DeepSeek thinking effort", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "323" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "deepseek-v4-flash",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      thinkingMode: "enabled",
+      thinkingEffort: "low",
+    });
+    await model.complete({ runId: "thinking-low", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
+    assert.deepEqual(capturedBody?.thinking, { type: "enabled" });
+    assert.equal(capturedBody?.reasoning_effort, "low");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter sends server-configured chat template kwargs", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "OK" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1", apiKey: "server-secret", model: "configured-local-model",
+      contextWindowTokens: 128_000, maxOutputTokens: 8_192,
+      chatTemplateKwargs: { thinking: true, parser: { mode: "reasoning" } },
+    });
+    await model.complete({ runId: "template-kwargs", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
+    assert.deepEqual(capturedBody?.chat_template_kwargs, { thinking: true, parser: { mode: "reasoning" } });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1691,6 +1853,38 @@ test("Responses adapter requests and streams the provider reasoning summary", as
     assert.deepEqual(capturedBody?.reasoning, { summary: "auto" });
     assert.deepEqual(deltas, ["先检查输入", "，再生成结果。"]);
     assert.equal(result.reasoningContent, "先检查输入，再生成结果。");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter can disable reasoning without requesting a summary", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse([
+      'data: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}]}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6-terra",
+      contextWindowTokens: 400_000,
+      maxOutputTokens: 8_192,
+      reasoningEffort: "none",
+    });
+    await model.streamComplete!({
+      runId: "responses-reasoning-disabled",
+      systemPrompt: "System instructions",
+      phase: "execution",
+      messages: [{ role: "user", content: "Reply only: OK" }],
+      tools: [],
+    }, async () => undefined);
+    assert.deepEqual(capturedBody?.reasoning, { effort: "none" });
   } finally {
     globalThis.fetch = originalFetch;
   }

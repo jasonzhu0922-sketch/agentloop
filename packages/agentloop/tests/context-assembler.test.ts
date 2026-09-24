@@ -536,16 +536,10 @@ test("ContextAssembler projects large directory listings as structured counts", 
   assert.doesNotMatch(projected, /very-long-directory-entry-349/);
 });
 
-test("ContextAssembler projects artifact materialization receipts before raw inspection enters context", async () => {
+test("ContextAssembler projects generic written artifact receipts before raw inspection enters context", async () => {
   const events: RuntimeEvent[] = [];
   const rawHtmlSample = "<!doctype html>\n" + "<section>raw generated html sample</section>\n".repeat(80);
   const toolResult = JSON.stringify({
-    schema: "agentloop.paginatedHtmlMaterialization/v1",
-    artifactKind: "html",
-    renderMode: "slides",
-    acceptanceProfile: "html_ppt",
-    pageCount: 19,
-    specSha256: "spec-hash",
     path: "dcmm4-training.html",
     bytes: 26_318,
     sha256: "artifact-hash",
@@ -561,19 +555,14 @@ test("ContextAssembler projects artifact materialization receipts before raw ins
     },
     artifactReceipt: {
       schema: "agentloop.artifactReceipt/v1",
-      receiptId: "artifact:materialized",
-      sourceTool: "materialize_paginated_html",
+      receiptId: "artifact:written",
+      sourceTool: "computer_write_file",
       artifact: {
         path: "dcmm4-training.html",
-        artifactKind: "html",
-        renderMode: "slides",
-        acceptanceProfile: "html_ppt",
-        pageCount: 19,
         bytes: 26_318,
         characters: 19_357,
         totalLines: 358,
         sha256: "artifact-hash",
-        specSha256: "spec-hash",
       },
       inspection: {
         sha256: "artifact-hash",
@@ -601,26 +590,22 @@ test("ContextAssembler projects artifact materialization receipts before raw ins
   });
 
   const assembly = await assembler.assemble([
-    { role: "assistant", content: "", toolCalls: [{ id: "materialize", name: "materialize_paginated_html", arguments: { path: "dcmm4-training.html" } }] },
-    { role: "tool", toolCallId: "materialize", name: "materialize_paginated_html", content: toolResult, isError: false },
+    { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "dcmm4-training.html" } }] },
+    { role: "tool", toolCallId: "write", name: "computer_write_file", content: toolResult, isError: false },
   ], []);
-  const projected = assembly.messages.find((message) => message.role === "tool")?.content ?? "";
-  const projection = JSON.parse(projected.split("\n\n")[0]) as {
+  const projected = assembly.messages.find((message) => message.role === "assistant")?.content ?? "";
+  const serializedRecord = projected.match(/<runtime_evidence_record[^>]*>\n([\s\S]+)\n<\/runtime_evidence_record>/)?.[1];
+  assert.ok(serializedRecord);
+  const projection = JSON.parse(serializedRecord) as {
     schema: string;
-    artifactReceipt: {
-      receiptId: string;
-      artifact: { path: string; pageCount: number; sha256: string };
-      inspection: { sampleRangeCount: number };
-    };
+    toolName: string;
+    artifact: { path: string; sha256: string };
   };
 
-  assert.equal(projection.schema, "agentloop.contextArtifactProjection/v1");
-  assert.equal(projection.artifactReceipt.receiptId, "artifact:materialized");
-  assert.equal(projection.artifactReceipt.artifact.path, "dcmm4-training.html");
-  assert.equal(projection.artifactReceipt.artifact.pageCount, 19);
-  assert.equal(projection.artifactReceipt.artifact.sha256, "artifact-hash");
-  assert.equal(projection.artifactReceipt.inspection.sampleRangeCount, 1);
-  assert.match(projected, /structured projection/);
+  assert.equal(projection.schema, "agentloop.committedToolHistory/v1");
+  assert.equal(projection.toolName, "computer_write_file");
+  assert.equal(projection.artifact.path, "dcmm4-training.html");
+  assert.equal(projection.artifact.sha256, "artifact-hash");
   assert.doesNotMatch(projected, /raw generated html sample/);
   assert.equal(events.some((event) => event.type === "context.tool_outputs_projected" && event.data.reason === "structured_tool_result"), true);
 });

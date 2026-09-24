@@ -179,6 +179,143 @@ test("the provider registry routes user-visible model keys through server-owned 
   }
 });
 
+test("the provider registry inherits planner-only thinking for the selected chat model", async () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "deepseek",
+      defaultModelKey: "official-flash",
+      providers: {
+        deepseek: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "DEEPSEEK_API_KEY",
+          defaultModel: "deepseek-v4-flash",
+        },
+      },
+      models: {
+        "official-flash": {
+          providerKey: "deepseek",
+          providerModel: "deepseek-v4-flash",
+          thinkingMode: "disabled",
+          planningThinkingMode: "enabled",
+        },
+        "local-flash": {
+          providerKey: "deepseek",
+          providerModel: "DeepSeek-V4-flash",
+        },
+      },
+    }),
+    DEEPSEEK_API_KEY: "deepseek-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "OK" } }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const invocation = { runId: "thinking-registry", systemPrompt: "System", phase: "execution" as const, messages: [], tools: [] };
+    await registry.create("official-flash").complete(invocation);
+    await registry.create("official-flash").complete({ ...invocation, phase: "planning", plannerRequest: true });
+    await registry.create("local-flash").complete(invocation);
+    assert.deepEqual(bodies[0]?.thinking, { type: "disabled" });
+    assert.deepEqual(bodies[1]?.thinking, { type: "enabled" });
+    assert.equal(bodies[2]?.thinking, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the provider registry forwards model chat template kwargs over provider defaults", async () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "gateway",
+      defaultModelKey: "local-flash",
+      providers: {
+        gateway: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "GATEWAY_API_KEY",
+          defaultModel: "fallback",
+          chatTemplateKwargs: { thinking: false, providerDefault: true },
+        },
+      },
+      models: {
+        "local-flash": {
+          providerKey: "gateway",
+          providerModel: "DeepSeek-V4-flash",
+          chatTemplateKwargs: { thinking: true },
+        },
+      },
+    }),
+    GATEWAY_API_KEY: "gateway-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "OK" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    await registry.create().complete({ runId: "template-kwargs-registry", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
+    assert.deepEqual(capturedBody?.chat_template_kwargs, { thinking: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the provider registry passes a Responses reasoning effort only to the selected Responses model", async () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "gateway",
+      defaultModelKey: "terra",
+      providers: {
+        gateway: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "GATEWAY_API_KEY",
+          defaultModel: "gpt-5.6-terra",
+          protocol: "responses",
+        },
+      },
+      models: {
+        terra: {
+          providerKey: "gateway",
+          providerModel: "gpt-5.6-terra",
+          reasoningEffort: "none",
+        },
+      },
+    }),
+    GATEWAY_API_KEY: "gateway-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await registry.create().complete({
+      runId: "responses-reasoning-registry",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Reply only: OK" }],
+      tools: [],
+    });
+    assert.deepEqual(capturedBody?.reasoning, { effort: "none" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("the provider registry routes GPT5.6 through the Responses protocol", async () => {
   const registry = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({

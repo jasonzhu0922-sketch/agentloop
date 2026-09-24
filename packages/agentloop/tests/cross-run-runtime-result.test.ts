@@ -113,6 +113,91 @@ test("read_result reads only an explicitly bound completed Outcome in the same c
   }
 });
 
+test("delivery receipt is projected from the canonical Run Result input chain", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const now = Date.now();
+    const runId = "receipt-run";
+    const planId = "receipt-plan";
+    const stepId = "receipt-step";
+    const stepResult = createRuntimeResult({
+      kind: "step",
+      producer: { runId, planId, stepId },
+      value: "accepted artifact",
+      publication: { status: "published", assessmentRef: "receipt-assessment", decision: "approved" },
+      createdAt: now,
+    });
+    const runResult = createRuntimeResult({
+      kind: "run",
+      producer: { runId, planId },
+      value: "completed",
+      inputs: [stepResult.ref],
+      publication: { status: "published" },
+      createdAt: now,
+    });
+    // Simulate an older database that still has the abandoned projection
+    // column. The canonical accessor must remain independent of it.
+    await database.prepare("ALTER TABLE run_outcomes ADD COLUMN delivery_receipt_json TEXT").run();
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at, finished_at)
+      VALUES (?, 'receipt-owner', NULL, 0, 0, 'completed', 'produce artifact', ?, ?)
+    `).run(runId, now, now);
+    await database.prepare(`
+      INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
+      VALUES (?, ?, 1, 'produce artifact', '[]', '[]', 'completed', ?, ?)
+    `).run(planId, runId, now, now);
+    await database.prepare(`
+      INSERT INTO plan_steps(
+        plan_id, step_id, kind, position, objective, dependencies_json, refinement_state, required_facts_json,
+        skill_ids_json, required_capabilities_json, recommended_tool_names_json, execution_binding_json,
+        success_criteria_json, status, output, evidence_json, started_at, finished_at
+      ) VALUES (?, ?, 'leaf', 0, 'produce artifact', '[]', 'not_refinable', '[]', '[]', '[]', '[]', ?, '[]', 'completed', ?, ?, ?, ?)
+    `).run(
+      planId,
+      stepId,
+      JSON.stringify({ schema: "agentloop.stepExecutionBinding/v1", requiredCapabilities: [], resolvedToolNames: [], sourceKinds: [], sideEffect: "none", evidenceKinds: ["delivery_receipt"] }),
+      stepResult.payload.content,
+      JSON.stringify({
+        candidateOutput: stepResult.payload.content,
+        deliveryCandidate: {
+          schema: "agentloop.runtimeDeliveryCandidate/v1",
+          output: stepResult.payload.content,
+          caveats: [],
+          evidenceKinds: { satisfied: ["delivery_receipt"], caveated: [], failed: [] },
+          sourceToolCallIds: ["acceptance-call"],
+          deliveryReceipt: {
+            schema: "agentloop.runtimeDeliveryReceipt/v1",
+            artifact: { path: "artifact.html", bytes: 42, sha256: "a".repeat(64), kind: "html" },
+            verdict: "accepted",
+            caveats: [],
+            sourceToolCallId: "acceptance-call",
+          },
+        },
+        publishedResult: stepResult,
+        toolCalls: [],
+        modelSteps: 1,
+      }),
+      now,
+      now,
+    );
+    await database.prepare(`
+      INSERT INTO run_outcomes(run_id, plan_id, status, output, result_ref, result_json, reason_code, committed_at)
+      VALUES (?, ?, 'completed', 'completed', ?, ?, 'plan_assessed_and_completed', ?)
+    `).run(runId, planId, runResult.ref.resultId, JSON.stringify(runResult), now);
+
+    const receipt = await new RuntimeResultRepository(database).readDeliveryReceiptForRun(runId);
+    assert.deepEqual(receipt, {
+      schema: "agentloop.runtimeDeliveryReceipt/v1",
+      artifact: { path: "artifact.html", bytes: 42, sha256: "a".repeat(64), kind: "html" },
+      verdict: "accepted",
+      caveats: [],
+      sourceToolCallId: "acceptance-call",
+    });
+  } finally {
+    await database.close();
+  }
+});
+
 async function insertRunOutcome(
   database: AppDatabase,
   input: { runId: string; owner: string; conversationId: string; status: "completed" | "failed"; output: string; now: number },

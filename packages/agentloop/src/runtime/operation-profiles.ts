@@ -125,7 +125,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
       "Success criteria must name the required artifact type and observable delivery evidence.",
       "When the user requests an artifact format, treat its minimum usable shape as core evidence: openable/readable output, requested type, workspace path, and non-empty receipt.",
       "For browser-presentable, presentation-style, or document-like artifacts, basic openability and requested format/type are core delivery evidence; navigation, interaction, visual polish, and browser checks are Skill-owned QA or tool signals unless the user or loaded Skill explicitly requires them.",
-      "Do not force a structured page-spec producer for generic HTML artifacts. Plan only the requested artifact boundary; the loaded Skill or execution Tool choice decides whether the artifact is custom code, a standalone file, or an explicitly paginated materialization.",
+      "Do not force a particular HTML implementation. Plan only the requested artifact boundary; the loaded Skill and general-purpose file-production tools determine the authored HTML/CSS/JS implementation.",
       "Prefer one aggregate artifact_acceptance evidence object over separate QA leaves when the available Tool catalog exposes verify_artifact_acceptance.",
       "When the requested artifact transforms uploaded original files rather than their extracted text, require uploaded_source_materialization on the producing leaf and bind the concrete uploaded source IDs.",
       "Keep an uploaded artifact's native inspection, transformation, format-Skill workflow, repair, and acceptance in the same primary-builder leaf; source-summary leaves are only for independently reusable facts consumed by a different deliverable.",
@@ -135,7 +135,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     executionRules: [
       "Establish the output path and expected format before producing the artifact.",
       "For merge, split, rotate, convert, archive, or other original-file operations, call materialize_source_file for each authorized uploaded operand and use only its returned relative workspace path; read_source text is not a substitute for original bytes.",
-      "Use materialize_paginated_html only when the current step explicitly asks for paginated HTML, HTML-PPT, slide/training material, or another page-by-page artifact that fits its structured page spec. For ordinary standalone HTML, distinctive visual pages, apps, dashboards, or custom interactions, use the appropriate code/file production path.",
+      "Produce HTML artifacts through the general-purpose code/file production path, whether they are paginated, presentation-style, interactive, or standalone pages.",
       "After generation, record existence, size, and any format evidence required by the current leaf or loaded Skill contract.",
       "When verify_artifact_acceptance is available, call it once for the final artifact and preserve its checks, verdict, satisfied evidence kinds, failed evidence kinds, and explicit skipped_unavailable caveats.",
       "After artifact acceptance satisfies the required evidence, do not reread generated files merely to restate paths, hashes, size, or format facts already present in receipts.",

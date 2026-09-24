@@ -88,9 +88,17 @@ export function reconstructRecoveryTranscript(input: {
     if (event.type === "assistant.committed") {
       const content = typeof event.data.content === "string" ? event.data.content : "";
       const toolCalls = asToolCalls(event.data.toolCalls);
-      const reasoningContent = typeof event.data.reasoningContent === "string" && event.data.reasoningContent.length > 0
-        ? event.data.reasoningContent
+      // Hidden-model reasoning is persisted as private continuation state. Keep
+      // the legacy public field for resumes of Runs created before this switch.
+      const privateReasoningContent = typeof event.data.privateReasoningContent === "string"
+        && event.data.privateReasoningContent.length > 0
+        ? event.data.privateReasoningContent
         : undefined;
+      const reasoningContent = privateReasoningContent ?? (
+        typeof event.data.reasoningContent === "string" && event.data.reasoningContent.length > 0
+          ? event.data.reasoningContent
+          : undefined
+      );
       const finishReason = typeof event.data.finishReason === "string" ? event.data.finishReason : undefined;
       const providerReplayableToolCallIds = Array.isArray(event.data.providerReplayableToolCallIds)
         ? event.data.providerReplayableToolCallIds.filter((value): value is string => typeof value === "string")

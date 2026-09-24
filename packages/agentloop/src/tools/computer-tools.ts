@@ -7,7 +7,6 @@ import { ArtifactAcceptanceService, type ArtifactAcceptanceKind } from "../accep
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
 import type { PatchFileInput, WriteFileMode } from "../computer/computer-executor.ts";
-import { parsePaginatedHtmlMaterializeInput, renderPaginatedHtml } from "./paginated-html-materializer.ts";
 import { CONTENT_REFERENCE_WINDOW_CHARACTERS } from "../runtime/content-reference.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
@@ -28,7 +27,6 @@ const TABLE_ARTIFACT_AGGREGATION_MAX_GROUPS = 500;
 
 export const DANGEROUS_COMPUTER_TOOL_NAMES = new Set([
   "convert_artifact",
-  "materialize_paginated_html",
   "computer_patch_file",
   "computer_write_file",
   "computer_run_command",
@@ -452,8 +450,7 @@ export function createComputerTools(
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
         "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file, so create the first chunk with mode=create.",
-        "For explicitly paginated HTML, HTML-PPT, or browser slide decks that fit a compact page spec, use materialize_paginated_html instead of streaming the full generated document here.",
-        "For ordinary standalone HTML, custom visual pages, dashboards, apps, or interactions, this Tool may write the authored HTML/CSS/JS file directly.",
+        "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
         "For other very large content, prefer reusable scripts or several smaller append calls over one oversized call so each content argument stays within the output budget.",
         "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
         "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
@@ -575,91 +572,6 @@ export function createComputerTools(
             replacementCount: receipt.replacements,
             beforeSha256: receipt.before.sha256,
             afterSha256: receipt.after.sha256,
-          }),
-        };
-      },
-    },
-    {
-      name: "materialize_paginated_html",
-      description: [
-        "Create or overwrite a browser-presentable paginated HTML file under the workspace root from a compact structured page specification; requires dangerous-tool consent.",
-        "Use only for explicit paginated reports, HTML-PPT, slide decks, training materials, and page-by-page artifacts where each page can be represented as title/subtitle/body/bullets/callout/sourceRefs.",
-        "Do not use for ordinary standalone HTML, distinctive visual pages, dashboards, apps, or custom interactions that require authored markup, CSS, or JavaScript beyond the page spec.",
-        "Set renderMode to slides for deck-like output; set acceptanceProfile to html_ppt only when the requested artifact is specifically an HTML-PPT or slide deck, otherwise use html.",
-        "Do not stream a full HTML document through computer_write_file for this case; pass the page spec here, then verify the resulting file with verify_artifact_acceptance using the same acceptanceProfile.",
-        "path must be relative to the workspace root; absolute paths are rejected.",
-        "The result includes schema, artifactKind, renderMode, acceptanceProfile, pageCount, specSha256, and the normal write-after-inspection receipt for the generated HTML file.",
-      ].join(" "),
-      inputSchema: objectSchema(["path", "title", "renderMode", "acceptanceProfile", "pages"], {
-        path: { type: "string" },
-        title: { type: "string", maxLength: 240 },
-        subtitle: { type: "string", maxLength: 500 },
-        renderMode: { type: "string", enum: ["slides"] },
-        acceptanceProfile: { type: "string", enum: ["html", "html_ppt"] },
-        theme: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            accent: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
-            background: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
-            text: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
-            surface: { type: "string", pattern: "^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$" },
-          },
-        },
-        pages: {
-          type: "array",
-          minItems: 1,
-          maxItems: 80,
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["title"],
-            properties: {
-              eyebrow: { type: "string", maxLength: 120 },
-              title: { type: "string", maxLength: 240 },
-              subtitle: { type: "string", maxLength: 500 },
-              body: { type: "string", maxLength: 2_000 },
-              bullets: {
-                type: "array",
-                maxItems: 12,
-                items: { type: "string", maxLength: 500 },
-              },
-              callout: { type: "string", maxLength: 1_000 },
-              sourceRefs: {
-                type: "array",
-                maxItems: 12,
-                items: { type: "string", maxLength: 500 },
-              },
-            },
-          },
-        },
-        overwrite: { type: "boolean" },
-      }),
-      executionMode: "exclusive",
-      replaySafe: false,
-      preflight: async (context, value) => {
-        const input = value as ReturnType<typeof parsePaginatedHtmlMaterializeInput>;
-        await executorForContext(executor, context).prepareWritableFile(input.path, input.overwrite ? "overwrite" : "create");
-      },
-      parse: parsePaginatedHtmlMaterializeInput,
-      execute: async (context, value) => {
-        const input = value as ReturnType<typeof parsePaginatedHtmlMaterializeInput>;
-        const rendered = renderPaginatedHtml(input);
-        const receipt = await executorForContext(executor, context).writeFile(input.path, rendered.content, input.overwrite);
-        return {
-          schema: "agentloop.paginatedHtmlMaterialization/v1",
-          artifactKind: "html",
-          renderMode: input.renderMode,
-          acceptanceProfile: input.acceptanceProfile,
-          pageCount: rendered.pageCount,
-          specSha256: rendered.specSha256,
-          ...receipt,
-          artifactReceipt: buildArtifactReceipt("materialize_paginated_html", receipt, {
-            artifactKind: "html",
-            renderMode: input.renderMode,
-            acceptanceProfile: input.acceptanceProfile,
-            pageCount: rendered.pageCount,
-            specSha256: rendered.specSha256,
           }),
         };
       },

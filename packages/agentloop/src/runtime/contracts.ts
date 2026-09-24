@@ -88,6 +88,11 @@ export interface ModelInvocation {
   readonly runId: string;
   readonly systemPrompt: string;
   readonly phase: RuntimeContextSnapshot["phase"];
+  /**
+   * True only for ModelPlanner's formal OutcomePlan request. This is separate
+   * from `phase`: several non-Planner calls also occur during planning.
+   */
+  readonly plannerRequest?: boolean;
   readonly runtimeContext?: RuntimeContextSnapshot;
   readonly messages: readonly ModelMessage[];
   readonly tools: readonly ModelToolDefinition[];
@@ -182,6 +187,8 @@ export interface ModelAdapter {
   }>;
   /** Upper bound for one provider request, used by the Runtime Action deadline. */
   readonly operationTimeoutMs?: number;
+  /** Controls whether provider reasoning may enter Runtime events visible to clients. */
+  readonly reasoningVisibility?: "visible" | "hidden";
   /**
    * Optional Provider-native prompt estimate. Context assembly uses it when
    * available so the same encoder that creates the wire request also informs

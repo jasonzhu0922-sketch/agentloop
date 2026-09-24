@@ -25,6 +25,7 @@ import {
   DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS,
   DEFAULT_MAX_STEPS,
   RunService,
+  completionCaveatReasonCode,
   selectPlanningSkillRoles,
   selectPlanningSkills,
 } from "../src/runtime/run-service.ts";
@@ -234,6 +235,10 @@ test("ModelPlanner retries once when the planning model returns ordinary text", 
       assert.deepEqual(request.tools.map((tool) => tool.name), ["submit_outcome_plan"]);
       assert.equal(request.tools[0]?.strict, true);
       assertStrictProviderSchema(request.tools[0]?.inputSchema);
+      const sourceConstraintSchema = (request.tools[0]?.inputSchema as {
+        properties?: { leaves?: { items?: { properties?: { sourceConstraint?: { properties?: Record<string, unknown> } } } } };
+      }).properties?.leaves?.items?.properties?.sourceConstraint?.properties;
+      assert.deepEqual(Object.keys(sourceConstraintSchema ?? {}), ["bindings"]);
       if (calls === 1) {
         return {
           content: "已经按你的要求改成绘图人物风格了。",
@@ -662,6 +667,119 @@ test("ModelPlanner binds source grounding to the selected API Skill without unre
   ]);
 });
 
+test("ModelPlanner keeps a Markdown deliverable separate from its selected API source-provider evidence interface", async () => {
+  const apiQuery = skillFixture({
+    id: "discovered:api-query",
+    name: "api-query",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+    },
+  });
+  const database = skillFixture({
+    id: "discovered:database",
+    name: "database",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["database"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    },
+  });
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      const context = request.runtimeContext?.content ?? "";
+      if (calls === 1) {
+        assert.match(context, /"planningTask":\{"schema":"agentloop\.planningTask\/v1","task":"查询员工画像 API 并生成 报告","format":"markdown"/);
+        assert.match(context, /"recommendedRequiredKinds":\["source_summary","source_urls","explicit_caveats"\]/);
+        assert.doesNotMatch(context, /"recommendedRequiredKinds":\[[^\]]*"structured_extraction_artifact"/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("incorrect-api-artifact", {
+            goal: "查询员工画像 API 并生成 Markdown 报告",
+            shape: "fact_then_produce",
+            selectedSkillRoles: [{ skillId: apiQuery.id, role: "source_provider", reason: "API lookup source." }],
+            steps: [{
+              id: "acquire_api",
+              objective: "查询员工画像 API 信息。",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: [apiQuery.id],
+              requiredCapabilities: ["skill_source_provider.api.discovered:api-query"],
+              evidenceContract: { requiredKinds: ["source_summary", "structured_extraction_artifact", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+            }, {
+              id: "write_markdown",
+              objective: "生成 Markdown 报告。",
+              dependencies: ["acquire_api"],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              evidenceContract: { requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveatPolicy: "none" },
+            }],
+          })],
+        };
+      }
+      assert.match(context, /This is a leaf contract error, not a missing-source problem/);
+      assert.doesNotMatch(context, /database/);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("correct-api-markdown", {
+          goal: "查询员工画像 API 并生成 Markdown 报告",
+          shape: "fact_then_produce",
+          selectedSkillRoles: [{ skillId: apiQuery.id, role: "source_provider", reason: "API lookup source." }],
+          steps: [{
+            id: "acquire_api",
+            objective: "查询员工画像 API 信息。",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [apiQuery.id],
+            requiredCapabilities: ["skill_source_provider.api.discovered:api-query"],
+            evidenceContract: { requiredKinds: ["source_summary", "source_urls", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+          }, {
+            id: "write_markdown",
+            objective: "生成 Markdown 报告。",
+            dependencies: ["acquire_api"],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write"],
+            evidenceContract: { requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveatPolicy: "none" },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-api-markdown-source-contract",
+    input: "查询员工画像 API 并生成 Markdown 报告",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "查询员工画像 API 并生成 Markdown 报告",
+      evidenceDemand: "source_grounded",
+      userConstraints: [],
+      source: "deterministic",
+    },
+    availableSkills: [apiQuery],
+    selectedSkillRoles: [{ skillId: apiQuery.id, role: "source_provider", reason: "API lookup source." }],
+    availableToolNames: ["load_skill", "computer_run_command", "computer_write_file"],
+    availableCapabilities: [
+      ...planningCapabilitiesFromSkills([apiQuery]),
+      { id: "workspace_artifact_write", produces: ["artifact_path", "artifact_non_empty", "format_matches_request"] as const, sourceKinds: ["generated_artifact"] as const, sideEffect: "workspace_write" as const, risk: "low" as const },
+    ],
+    capabilityRecovery: { availableSkills: [apiQuery, database], availableCapabilities: planningCapabilitiesFromSkills([apiQuery, database]) },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.selectedSkillIds, [apiQuery.id]);
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "source_urls", "explicit_caveats"]);
+});
+
 test("ModelPlanner discovers a source producer for a plan-level lookup grounding gap", async () => {
   let calls = 0;
   const tools = [
@@ -914,6 +1032,37 @@ test("structured task understanding preserves subject, evidence, deliverable, an
   assert.deepEqual(understanding.operationProfiles, ["data_analysis", "web_research", "artifact_build"]);
 });
 
+test("structured task understanding separates business task from requested output format", () => {
+  const understanding = understandTask({
+    objective: "采集 AI 信息，用 HTML 格式做一个报告",
+    evidenceDemand: "source_grounded",
+  });
+
+  assert.equal(understanding.task, "采集 AI 信息，做一个报告");
+  assert.equal(understanding.format, "html");
+  assert.doesNotMatch(understanding.task, /html/i);
+  assert.equal(understanding.deliverable.kind, "html");
+  assert.equal(understanding.evidence.need, "source_grounded");
+});
+
+test("structured task understanding keeps source work stable when only the requested format changes", () => {
+  const html = understandTask({
+    objective: "采集 AI 信息，用 HTML 格式做一个报告",
+    evidenceDemand: "source_grounded",
+  });
+  const markdown = understandTask({
+    objective: "采集 AI 信息，用 Markdown 格式做一个报告",
+    evidenceDemand: "source_grounded",
+  });
+
+  assert.equal(html.task, markdown.task);
+  assert.equal(html.format, "html");
+  assert.equal(markdown.format, "markdown");
+  assert.deepEqual(html.evidence, markdown.evidence);
+  assert.deepEqual(html.operation, markdown.operation);
+  assert.deepEqual(html.operationProfiles, markdown.operationProfiles);
+});
+
 test("Task intent keeps an explicit workbook edit as a spreadsheet modification", () => {
   const intent = classifyTaskIntent({
     objective: "修改这个表格的配色和列宽，生成修订版 xlsx",
@@ -1121,6 +1270,350 @@ test("ModelPlanner binds uploaded originals and mandatory artifact evidence for 
   assert.equal(assessment.approved, false);
   assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("artifact_path"));
   assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("artifact_acceptance"));
+});
+
+test("ModelPlanner retries a source-namespace collision separately from an earlier admission retry", async () => {
+  const sourceIds = [
+    "src_cccccccccccccccccccccccccccccccc",
+    "src_dddddddddddddddddddddddddddddddd",
+  ];
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("bad-empty-directory", {
+            goal: "Merge uploaded PDFs.",
+            steps: [{
+              id: "merge-pdfs",
+              objective: "Merge uploaded PDFs.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              sourceConstraint: {
+                requiredToolSourceIds: null,
+                requiredUploadedSourceIds: sourceIds,
+                requiredVisibleDirectoryIds: ["dir_unavailable"],
+              },
+            }],
+          })],
+        };
+      }
+      if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /previous submit_outcome_plan call was rejected/i);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("bad-cross-namespace", {
+            goal: "Merge uploaded PDFs.",
+            steps: [{
+              id: "merge-pdfs",
+              objective: "Merge uploaded PDFs.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              sourceConstraint: {
+                requiredToolSourceIds: sourceIds,
+                requiredUploadedSourceIds: sourceIds,
+                requiredVisibleDirectoryIds: sourceIds,
+              },
+            }],
+          })],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /sourceConstraint IDs crossed resource namespaces/i);
+      assert.match(request.runtimeContext?.content ?? "", /kind=uploaded_source only for uploaded file IDs/i);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("good-upload-binding", {
+          goal: "Merge uploaded PDFs.",
+          steps: [{
+            id: "merge-pdfs",
+            objective: "Merge uploaded PDFs.",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write"],
+            sourceConstraint: {
+              requiredToolSourceIds: null,
+              requiredUploadedSourceIds: sourceIds,
+              requiredVisibleDirectoryIds: null,
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-source-namespace-retry",
+    input: "帮我合并这两个 PDF",
+    availableSkills: [],
+    availableToolNames: ["materialize_source_file", "computer_run_command"],
+    sources: sourceIds.map((id, index) => ({
+      id,
+      originalName: `input-${index + 1}.pdf`,
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100,
+      sha256: `${index + 1}`.repeat(64),
+      status: "ready" as const,
+      chunkCount: 1,
+      truncated: false,
+    })),
+  });
+
+  assert.equal(calls, 3);
+  assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, sourceIds);
+  assert.equal(plan.steps[0]?.sourceConstraint?.requiredToolSourceIds, undefined);
+  assert.equal(plan.steps[0]?.sourceConstraint?.requiredVisibleDirectoryIds, undefined);
+});
+
+test("ModelPlanner normalizes an empty legacy source-constraint placeholder after an earlier ToolSource admission failure", async () => {
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("bad-tool-source", {
+            goal: "Create a markdown file.",
+            steps: [{
+              id: "write-markdown",
+              objective: "Create and deliver a markdown file.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              sourceConstraint: { requiredToolSourceIds: ["discovered:api-query"] },
+            }],
+          })],
+        };
+      }
+      if (calls === 2) {
+        assert.match(request.runtimeContext?.content ?? "", /previous submit_outcome_plan call was rejected/i);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("bad-empty-tool-source", {
+            goal: "Create a markdown file.",
+            steps: [{
+              id: "write-markdown",
+              objective: "Create and deliver a markdown file.",
+              dependencies: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              sourceConstraint: { requiredToolSourceIds: [""] },
+            }],
+          })],
+        };
+      }
+      throw new Error("empty semantic placeholder must be normalized without another planner retry");
+    },
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-empty-source-constraint-retry",
+    input: "生成一个 markdown 文件",
+    availableSkills: [],
+    availableToolNames: ["computer_write_file"],
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(plan.steps[0]?.sourceConstraint, undefined);
+});
+
+test("ModelPlanner parses typed uploaded-source bindings into the internal source contract", async () => {
+  const sourceId = "src_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("typed-upload-binding", {
+        goal: "Read the uploaded source.",
+        steps: [{
+          id: "read-upload",
+          objective: "Read the uploaded source.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["uploaded_source_read"],
+          sourceConstraint: { bindings: [{ kind: "uploaded_source", ids: [sourceId] }] },
+        }],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-typed-upload-source-binding",
+    input: "读取上传文件",
+    availableSkills: [],
+    availableToolNames: ["read_source"],
+    availableCapabilities: [{
+      id: "uploaded_source_read",
+      produces: ["source_summary"],
+      sourceKinds: ["uploaded_source"],
+      sideEffect: "none",
+      risk: "low",
+    }],
+    sources: [{
+      id: sourceId,
+      originalName: "input.pdf",
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      byteSize: 100,
+      sha256: "e".repeat(64),
+      status: "ready" as const,
+      chunkCount: 1,
+      truncated: false,
+    }],
+  });
+
+  assert.deepEqual(plan.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [sourceId]);
+  assert.equal(plan.steps[0]?.sourceConstraint?.requiredToolSourceIds, undefined);
+  assert.equal(plan.steps[0]?.sourceConstraint?.requiredVisibleDirectoryIds, undefined);
+});
+
+test("ModelPlanner identifies a Skill ID in sourceConstraint before generic ToolSource validation", async () => {
+  const apiQuery = skillFixture({
+    id: "discovered:api-query",
+    name: "api-query",
+    description: "Query the API catalog.",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+  let calls = 0;
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("skill-as-tool-source", {
+            goal: "Query the API catalog.",
+            selectedSkillIds: [apiQuery.id],
+            steps: [{
+              id: "acquire-api-catalog",
+              objective: "Query the API catalog.",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: [apiQuery.id],
+              requiredCapabilities: ["skill_source_provider.api.discovered:api-query"],
+              sourceConstraint: { requiredToolSourceIds: [apiQuery.id] },
+              evidenceContract: {
+                requiredKinds: ["source_summary", "explicit_caveats"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+          })],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /uses Skill ID\(s\) in sourceConstraint/i);
+      assert.match(request.runtimeContext?.content ?? "", /A Skill is not a ToolSource/i);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("skill-bound-catalog", {
+          goal: "Query the API catalog.",
+          selectedSkillIds: [apiQuery.id],
+          steps: [{
+            id: "acquire-api-catalog",
+            objective: "Query the API catalog.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [apiQuery.id],
+            requiredCapabilities: ["skill_source_provider.api.discovered:api-query"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-skill-source-namespace-retry",
+    input: "查询 API 信息",
+    availableSkills: [apiQuery],
+    availableToolNames: ["load_skill"],
+    availableCapabilities: planningCapabilitiesFromSkills([apiQuery]),
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(plan.steps[0]?.sourceConstraint, undefined);
+});
+
+test("ModelPlanner removes a Skill name copied into tool_source bindings", async () => {
+  const aihot = skillFixture({
+    id: "discovered:aihot",
+    name: "aihot",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+    },
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("aihot-skill-name-binding", {
+        goal: "获取近一周 AI 热点新闻",
+        selectedSkillRoles: [{ skillId: aihot.id, role: "source_provider", reason: "AI news source Skill." }],
+        steps: [{
+          id: "acquire-news",
+          objective: "获取近一周 AI 热点新闻。",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [aihot.id],
+          requiredCapabilities: ["skill_source_provider.api.discovered:aihot"],
+          sourceConstraint: { bindings: [{ kind: "tool_source", ids: ["aihot"] }] },
+          evidenceContract: { requiredKinds: ["source_summary", "source_urls", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+        }],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-skill-name-tool-source-binding",
+    input: "获取近一周 AI 热点新闻",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "获取近一周 AI 热点新闻",
+      evidenceDemand: "source_grounded",
+      userConstraints: [],
+      source: "deterministic",
+    },
+    availableSkills: [aihot],
+    selectedSkillRoles: [{ skillId: aihot.id, role: "source_provider", reason: "AI news source Skill." }],
+    availableToolNames: ["load_skill", "computer_run_command"],
+    availableCapabilities: planningCapabilitiesFromSkills([aihot]),
+  });
+
+  assert.equal(plan.steps[0]?.sourceConstraint, undefined);
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["skill_source_provider.api.discovered:aihot"]);
 });
 
 test("ModelPlanner offers a structured native Skill-binding repair instead of repeating an empty PDF transform plan", async () => {
@@ -3450,15 +3943,15 @@ test("Plan admission rejects a Human-in-the-Loop-only terminal artifact step", (
   );
 });
 
-test("ModelPlanner accepts paginated HTML materialization as a file-producing artifact plan", async () => {
+test("ModelPlanner accepts HTML-PPT as a file-producing artifact plan without a special renderer", async () => {
   const planner = new ModelPlanner(new StaticModel({
     content: "",
     finishReason: "tool_calls",
     toolCalls: [submitOutcomePlanToolCall("plan", {
-      goal: "build and verify an HTML-PPT from a structured paginated HTML spec",
+      goal: "build and verify an HTML-PPT",
       steps: [{
-        id: "materialize-paginated-html",
-        objective: "Materialize the requested HTML-PPT from a structured paginated HTML specification and record unified artifact acceptance evidence.",
+        id: "write-html-ppt",
+        objective: "Create the requested HTML-PPT and record unified artifact acceptance evidence.",
         dependencies: [],
         role: "produce",
         skillIds: [],
@@ -3473,10 +3966,10 @@ test("ModelPlanner accepts paginated HTML materialization as a file-producing ar
 
   const plan = await planner.plan({
       get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
-    runId: "run-paginated-html-materializer-plan",
+    runId: "run-html-ppt-plan",
     input: "帮我做一个培训材料，html-ppt 格式",
     availableSkills: [],
-    availableToolNames: ["materialize_paginated_html", "verify_artifact_acceptance"],
+    availableToolNames: ["computer_write_file", "verify_artifact_acceptance"],
   });
 
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
@@ -3486,7 +3979,7 @@ test("ModelPlanner accepts paginated HTML materialization as a file-producing ar
   });
 });
 
-test("ModelPlanner does not make materialized page specs the generic HTML artifact default", async () => {
+test("ModelPlanner keeps HTML implementation generic", async () => {
   let planningContext = "";
   const planner = new ModelPlanner({
     limits: TEST_MODEL_LIMITS,
@@ -3519,23 +4012,21 @@ test("ModelPlanner does not make materialized page specs the generic HTML artifa
     runId: "run-ordinary-html-page",
     input: "做一个活动宣传网页",
     availableSkills: [],
-    availableToolNames: ["computer_write_file", "materialize_paginated_html", "verify_artifact_acceptance"],
+    availableToolNames: ["computer_write_file", "verify_artifact_acceptance"],
   });
 
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
-  assert.match(planningContext, /Do not force a structured page-spec producer for generic HTML artifacts/);
-  assert.doesNotMatch(planningContext, /For paginated HTML, HTML-PPT, or presentation-style HTML artifacts, prefer a compact structured page specification/);
+  assert.match(planningContext, /Do not force a particular HTML implementation/);
+  assert.doesNotMatch(planningContext, /structured page specification/);
 });
 
-test("checked-in HTML Skills describe page materialization as a capability instead of naming Tools", async () => {
+test("checked-in HTML Skills describe HTML implementation without naming Tools", async () => {
   const skillRoot = resolve(import.meta.dirname, "..", "..", "agentloop-skills", "skills");
   const frontend = await fs.readFile(resolve(skillRoot, "frontend-design", "SKILL.md"), "utf8");
   const webArtifacts = await fs.readFile(resolve(skillRoot, "web-artifacts-builder", "SKILL.md"), "utf8");
 
-  assert.match(frontend, /Use a structured page-materialization capability only when the user or current Plan step explicitly asks for paginated HTML/);
-  assert.match(webArtifacts, /Use a structured page-materialization capability only for explicit paginated HTML/);
-  assert.doesNotMatch(frontend, /materialize_paginated_html|verify_artifact_acceptance/);
-  assert.doesNotMatch(webArtifacts, /materialize_paginated_html|verify_artifact_acceptance|default low-latency path/);
+  assert.doesNotMatch(frontend, /materialize_paginated_html/);
+  assert.doesNotMatch(webArtifacts, /materialize_paginated_html|default low-latency path/);
 });
 
 test("Plan admission rejects file artifact delivery when the Run has no producer Tool", () => {
@@ -6625,11 +7116,11 @@ test("Admission expands a bound source-provider Skill's declared evidence capabi
   );
 });
 
-test("selectPlanningSkills recalls Chinese API catalog tasks from aliases and subphrases", () => {
+test("selectPlanningSkills recalls Chinese API information tasks from aliases and subphrases", () => {
   const apiQuery = skillFixture({
     id: "api-query",
     name: "api-query",
-    description: "查询集团（宝武数据中台）API 目录信息。Use when 用户要了解某个 API/接口/服务是干什么的、有哪些入参、哪些出参、涉及哪些数据表，或要检索现有 API。触发词：查API、查接口、API入参出参、这个接口是干啥的、接口涉及哪些表、API目录检索。数据源为数智域通用 SQL API。",
+    description: "查询集团（宝武数据中台）API 信息与参数。Use when 用户要了解某个 API/接口/服务是干什么的、有哪些入参、哪些出参、涉及哪些数据表，或要检索现有 API。触发词：查API、查接口、API入参出参、这个接口是干啥的、接口涉及哪些表、API信息检索。数据源为数智域通用 SQL API。",
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
   });
   const dashboard = skillFixture({
@@ -6658,7 +7149,7 @@ test("selectPlanningSkills recalls an API source-provider Skill for Chinese para
   const apiQuery = skillFixture({
     id: "api-query",
     name: "api-query",
-    description: "查询 API 目录信息，包括用途、入参、出参和关联数据表。",
+    description: "查询 API 信息，包括用途、入参、出参和关联数据表。",
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
   });
   const selected = selectPlanningSkills(
@@ -6818,7 +7309,7 @@ test("ModelPlanner treats unrelated source-provider prefilter results as candida
   const apiQuery = skillFixture({
     id: "api-query",
     name: "api-query",
-    description: "查询集团（宝武数据中台）API 目录信息，包括接口用途、入参、出参和涉及的数据表。",
+    description: "查询集团（宝武数据中台）API 信息，包括接口用途、入参、出参和涉及的数据表。",
     agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
   });
   const enterpriseInfo = skillFixture({
@@ -8776,6 +9267,125 @@ test("ProfiledRuleStepAssessor accepts artifact receipts from written file evide
   ]);
 });
 
+test("ProfiledRuleStepAssessor preserves artifact evidence when the final model candidate is empty", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("write-html"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "The HTML path is recorded.", source: "planner", blocking: true },
+        { id: "artifact_non_empty", description: "The HTML is non-empty.", source: "planner", blocking: true },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "",
+      toolCalls: [{
+        toolCallId: "write-html",
+        toolName: "computer_write_file",
+        isError: false,
+        result: JSON.stringify({
+          artifactReceipt: {
+            schema: "agentloop.artifactReceipt/v1",
+            artifact: { path: "news.html", bytes: 12875, characters: 9529, totalLines: 176, sha256: "a".repeat(64) },
+            evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.deepEqual(assessment.criteria.map((criterion) => [criterion.criterionId, criterion.satisfied]), [
+    ["artifact_path", true],
+    ["artifact_non_empty", true],
+  ]);
+});
+
+test("ProfiledRuleStepAssessor treats a canonical artifact receipt as its delivery receipt", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("write-html"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
+      successCriteria: [{ id: "delivery_receipt", description: "The delivered artifact is recorded.", source: "planner", blocking: true }],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "",
+      toolCalls: [{
+        toolCallId: "write-html",
+        toolName: "computer_write_file",
+        isError: false,
+        result: JSON.stringify({
+          artifactReceipt: {
+            schema: "agentloop.artifactReceipt/v1",
+            artifact: { path: "news.html", bytes: 12875, characters: 9529, totalLines: 176, sha256: "a".repeat(64) },
+            evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria[0]?.satisfied, true);
+});
+
+test("ModelPlanner keeps a selected-list count as a non-blocking evidence signal", async () => {
+  const planner = new ModelPlanner(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [submitOutcomePlanToolCall("hot-news", {
+      goal: "Deliver exactly 10 current AI news items as HTML.",
+      shape: "single_leaf",
+      steps: [{
+        id: "deliver-news",
+        objective: "Select exactly 10 current AI news items and deliver an HTML list with source links.",
+        dependencies: [],
+        role: "produce",
+        skillIds: [],
+        requiredCapabilities: ["workspace_artifact_write", "workspace_command_computation"],
+        evidenceContract: {
+          requiredKinds: ["source_summary", "source_urls", "derived_aggregation", "explicit_caveats"],
+          caveatPolicy: "mark_unverified_facts",
+        },
+      }],
+    })],
+  }));
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-hot-news",
+    input: "整理最近一周 10 条 AI 热点新闻，形成带来源链接的 HTML。",
+    availableSkills: [],
+    availableToolNames: ["computer_write_file", "computer_run_command"],
+  });
+
+  assert.equal(plan.steps[0]?.successCriteria.find((criterion) => criterion.id === "derived_aggregation")?.blocking, false);
+  assert.equal(plan.steps[0]?.successCriteria.find((criterion) => criterion.id === "explicit_caveats")?.blocking, false);
+});
+
 test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking for Runtime gates", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",
@@ -8826,6 +9436,124 @@ test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking fo
   assert.equal(assessment.approved, true);
   assert.equal(assessment.feedback, "");
   assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
+});
+
+test("ProfiledRuleStepAssessor accepts Runtime artifact acceptance when a Skill merely declares an alternate artifact producer", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("custom-rendered-poster"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "The delivered image path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The delivered image is non-empty.", source: "planner" },
+        { id: "artifact_acceptance", description: "The image has an acceptance receipt.", source: "planner", blocking: false },
+        { id: "artifact_openable", description: "The image opens.", source: "planner", blocking: false },
+        { id: "format_matches_request", description: "The delivered image is PNG.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Delivered poster.png.",
+      toolCalls: [{
+        toolCallId: "verify-custom-render",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "poster.png", bytes: 194115, kind: "image" },
+          verdict: "accepted",
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+            caveated: [],
+            failed: [],
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    workflowEvidenceActions: [{
+      skillName: "canvas-design",
+      executorId: "canvas-production",
+      actionId: "render",
+      command: "python3",
+      script: "scripts/canvas_workflow.py",
+      args: ["render", "{{design-path}}"],
+      producesEvidenceKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_openable"],
+    }],
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.feedback, "");
+  assert.equal(assessment.criteria.every((criterion) => criterion.satisfied), true);
+});
+
+test("ProfiledRuleStepAssessor still requires authenticated non-artifact workflow evidence", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("aggregate-and-deliver"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["derived_aggregation", "artifact_path", "artifact_non_empty", "artifact_acceptance"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "derived_aggregation", description: "The declared analysis produced an aggregation.", source: "planner" },
+        { id: "artifact_path", description: "The delivered report path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The delivered report is non-empty.", source: "planner" },
+        { id: "artifact_acceptance", description: "The report has an acceptance receipt.", source: "planner", blocking: false },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Delivered report.html.",
+      toolCalls: [{
+        toolCallId: "verify-report",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "report.html", bytes: 1024, kind: "html" },
+          verdict: "accepted",
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+            caveated: [],
+            failed: [],
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    workflowEvidenceActions: [{
+      skillName: "series-analysis",
+      executorId: "python-analysis",
+      actionId: "aggregate",
+      command: "python3",
+      script: "scripts/aggregate.py",
+      args: ["--input-file", "{{input-file}}"],
+      producesEvidenceKinds: ["derived_aggregation"],
+    }],
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, ["derived_aggregation"]);
 });
 
 test("ProfiledRuleStepAssessor uses the latest acceptance for a repaired artifact", async () => {
@@ -9794,6 +10522,41 @@ test("failedBoundary recovery creates and executes only a targeted repair leaf",
   } finally {
     database.close();
   }
+});
+
+test("terminal caveat reason ignores caveats and assessments from retired repair predecessors", () => {
+  const plan = {
+    steps: [
+      {
+        id: "produce-gangding-portal",
+        kind: "leaf",
+        retiredAt: Date.now(),
+        status: "failed",
+        evidence: { completionCaveat: { reason: "evidence_boundary", feedback: "old boundary" } },
+      },
+      {
+        id: "produce-gangding-portal.repair.2",
+        kind: "leaf",
+        status: "completed",
+      },
+    ],
+  } as unknown as Parameters<typeof completionCaveatReasonCode>[0];
+  const assessments = [
+    {
+      stepId: "produce-gangding-portal",
+      approved: false,
+      skills: [],
+      criteria: [],
+    },
+    {
+      stepId: "produce-gangding-portal.repair.2",
+      approved: true,
+      skills: [],
+      criteria: [],
+    },
+  ] as unknown as Parameters<typeof completionCaveatReasonCode>[1];
+
+  assert.equal(completionCaveatReasonCode(plan, assessments), undefined);
 });
 
 test("Admission rejects pure Skill activation steps", () => {
@@ -12994,7 +13757,7 @@ test("declared Skill QA does not force artifact delivery onto model-backed asses
     });
     let assessmentCalls = 0;
     let loaded = false;
-    let materialized = false;
+    let written = false;
     let verified = false;
     const model: ModelAdapter = {
       limits: TEST_MODEL_LIMITS,
@@ -13036,20 +13799,17 @@ test("declared Skill QA does not force artifact delivery onto model-backed asses
             toolCalls: [{ id: "load-browser-qa-skill", name: "load_skill", arguments: { name: "browser-qa-artifact-builder" } }],
           };
         }
-        if (!materialized && toolNames.includes("materialize_paginated_html")) {
-          materialized = true;
+        if (!written && toolNames.includes("computer_write_file")) {
+          written = true;
           return {
             content: "",
             finishReason: "tool_calls",
             toolCalls: [{
-              id: "materialize-html",
-              name: "materialize_paginated_html",
+              id: "write-html",
+              name: "computer_write_file",
               arguments: {
                 path: "deliverables/qa.html",
-                title: "QA",
-                renderMode: "slides",
-                acceptanceProfile: "html_ppt",
-                pages: [{ title: "Overview", bullets: ["Artifact", "Acceptance", "QA"] }],
+                content: "<!doctype html><main><section class=\"slide active\"><h1>QA</h1></section><button aria-label=\"Next slide\" data-action=\"next\">Next</button><script>let currentSlide=0; function nextSlide(){currentSlide += 1}</script></main>",
               },
             }],
           };
@@ -15363,7 +16123,7 @@ class ArtifactAcceptanceGateModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   assessmentCalls = 0;
   private loaded = false;
-  private materialized = false;
+  private written = false;
   private verified = false;
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
@@ -15383,23 +16143,17 @@ class ArtifactAcceptanceGateModel implements ModelAdapter {
         toolCalls: [{ id: "load-html-skill", name: "load_skill", arguments: { name: "html-training-builder" } }],
       };
     }
-    if (!this.materialized && toolNames.includes("materialize_paginated_html")) {
-      this.materialized = true;
+    if (!this.written && toolNames.includes("computer_write_file")) {
+      this.written = true;
       return {
         content: "",
         finishReason: "tool_calls",
         toolCalls: [{
-          id: "materialize-html",
-          name: "materialize_paginated_html",
+          id: "write-html",
+          name: "computer_write_file",
           arguments: {
             path: "deliverables/training.html",
-            title: "Training",
-            renderMode: "slides",
-            acceptanceProfile: "html_ppt",
-            pages: [
-              { title: "Overview", bullets: ["Goal", "Evidence", "Acceptance"] },
-              { title: "Delivery", body: "The artifact is generated from a compact page specification." },
-            ],
+            content: "<!doctype html><main><section class=\"slide active\"><h1>Training</h1></section><section class=\"slide\"><h2>Delivery</h2></section><button aria-label=\"Previous slide\">Prev</button><button aria-label=\"Next slide\" data-action=\"next\">Next</button><script>let currentSlide=0; function nextSlide(){currentSlide += 1}</script></main>",
           },
         }],
       };

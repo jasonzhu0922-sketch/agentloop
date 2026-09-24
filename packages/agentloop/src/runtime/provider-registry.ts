@@ -37,6 +37,12 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly reasoningSummary?: "auto";
+  readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  readonly thinkingMode?: "enabled" | "disabled";
+  readonly thinkingEffort?: "low" | "medium" | "high";
+  readonly reasoningVisibility: "visible" | "hidden";
+  readonly planningThinkingMode?: "enabled" | "disabled";
+  readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -51,6 +57,12 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly reasoningSummary?: "auto";
+  readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  readonly thinkingMode?: "enabled" | "disabled";
+  readonly thinkingEffort?: "low" | "medium" | "high";
+  readonly reasoningVisibility: "visible" | "hidden";
+  readonly planningThinkingMode?: "enabled" | "disabled";
+  readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -182,6 +194,12 @@ export class LlmProviderRegistry {
       toolChoiceMode: model.toolChoiceMode,
       runtimeContextPlacement: model.runtimeContextPlacement,
       ...(model.reasoningSummary === undefined ? {} : { reasoningSummary: model.reasoningSummary }),
+      ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
+      ...(model.thinkingMode === undefined ? {} : { thinkingMode: model.thinkingMode }),
+      ...(model.thinkingEffort === undefined ? {} : { thinkingEffort: model.thinkingEffort }),
+      reasoningVisibility: model.reasoningVisibility,
+      ...(model.planningThinkingMode === undefined ? {} : { planningThinkingMode: model.planningThinkingMode }),
+      ...(model.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: model.chatTemplateKwargs }),
       ...(onRetry === undefined ? {} : { onRetry }),
     };
     return model.protocol === "responses"
@@ -246,6 +264,12 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
       "toolChoiceMode",
       "runtimeContextPlacement",
       "reasoningSummary",
+      "reasoningEffort",
+      "thinkingMode",
+      "thinkingEffort",
+      "reasoningVisibility",
+      "planningThinkingMode",
+      "chatTemplateKwargs",
       "protocol",
     ],
     label,
@@ -297,7 +321,28 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     `${label}.runtimeContextPlacement`,
   );
   const reasoningSummary = optionalReasoningSummary(config.reasoningSummary, `${label}.reasoningSummary`);
+  const reasoningEffort = optionalReasoningEffort(config.reasoningEffort, `${label}.reasoningEffort`);
+  const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`);
+  const thinkingEffort = optionalThinkingEffort(config.thinkingEffort, `${label}.thinkingEffort`);
+  const reasoningVisibility = optionalReasoningVisibility(config.reasoningVisibility, `${label}.reasoningVisibility`);
+  const planningThinkingMode = optionalThinkingMode(config.planningThinkingMode, `${label}.planningThinkingMode`);
+  const chatTemplateKwargs = optionalJsonObject(config.chatTemplateKwargs, `${label}.chatTemplateKwargs`);
   const protocol = optionalProtocol(config.protocol, `${label}.protocol`);
+  if (thinkingMode !== undefined && protocol !== "chat-completions") {
+    throw new Error(`${label}.thinkingMode is supported only with chat-completions`);
+  }
+  if (thinkingEffort !== undefined && protocol !== "chat-completions") {
+    throw new Error(`${label}.thinkingEffort is supported only with chat-completions`);
+  }
+  if (thinkingEffort !== undefined && thinkingMode === "disabled") {
+    throw new Error(`${label}.thinkingEffort cannot be set when thinkingMode is disabled`);
+  }
+  if (planningThinkingMode !== undefined && protocol !== "chat-completions") {
+    throw new Error(`${label}.planningThinkingMode is supported only with chat-completions`);
+  }
+  if (reasoningEffort !== undefined && protocol !== "responses") {
+    throw new Error(`${label}.reasoningEffort is supported only with responses`);
+  }
   return {
     key: providerKey,
     kind: "openai-compatible",
@@ -312,6 +357,12 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     toolChoiceMode,
     runtimeContextPlacement,
     ...(reasoningSummary === undefined ? {} : { reasoningSummary }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(thinkingMode === undefined ? {} : { thinkingMode }),
+    ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
+    reasoningVisibility,
+    ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
+    ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
     protocol,
   };
 }
@@ -351,6 +402,12 @@ function parseModel(
       "toolChoiceMode",
       "runtimeContextPlacement",
       "reasoningSummary",
+      "reasoningEffort",
+      "thinkingMode",
+      "thinkingEffort",
+      "reasoningVisibility",
+      "planningThinkingMode",
+      "chatTemplateKwargs",
       "protocol",
     ],
     label,
@@ -366,6 +423,48 @@ function parseModel(
     MAX_CONTEXT_WINDOW_TOKENS,
     `${label}.contextWindowTokens`,
   );
+  const protocol = optionalProtocol(config.protocol, `${label}.protocol`, provider.protocol);
+  const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`, provider.thinkingMode);
+  const planningThinkingMode = optionalThinkingMode(
+    config.planningThinkingMode,
+    `${label}.planningThinkingMode`,
+    provider.planningThinkingMode,
+  );
+  const thinkingEffort = optionalThinkingEffort(
+    config.thinkingEffort,
+    `${label}.thinkingEffort`,
+    provider.thinkingEffort,
+  );
+  const reasoningEffort = optionalReasoningEffort(
+    config.reasoningEffort,
+    `${label}.reasoningEffort`,
+    provider.reasoningEffort,
+  );
+  const reasoningVisibility = optionalReasoningVisibility(
+    config.reasoningVisibility,
+    `${label}.reasoningVisibility`,
+    provider.reasoningVisibility,
+  );
+  const chatTemplateKwargs = optionalJsonObject(
+    config.chatTemplateKwargs,
+    `${label}.chatTemplateKwargs`,
+    provider.chatTemplateKwargs,
+  );
+  if (thinkingMode !== undefined && protocol !== "chat-completions") {
+    throw new Error(`${label}.thinkingMode is supported only with chat-completions`);
+  }
+  if (planningThinkingMode !== undefined && protocol !== "chat-completions") {
+    throw new Error(`${label}.planningThinkingMode is supported only with chat-completions`);
+  }
+  if (thinkingEffort !== undefined && protocol !== "chat-completions") {
+    throw new Error(`${label}.thinkingEffort is supported only with chat-completions`);
+  }
+  if (thinkingEffort !== undefined && thinkingMode === "disabled") {
+    throw new Error(`${label}.thinkingEffort cannot be set when thinkingMode is disabled`);
+  }
+  if (reasoningEffort !== undefined && protocol !== "responses") {
+    throw new Error(`${label}.reasoningEffort is supported only with responses`);
+  }
   return {
     key: modelKey,
     displayName: optionalDisplayName(config.displayName, providerModel, `${label}.displayName`),
@@ -396,7 +495,13 @@ function parseModel(
       `${label}.reasoningSummary`,
       provider.reasoningSummary,
     ),
-    protocol: optionalProtocol(config.protocol, `${label}.protocol`, provider.protocol),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(thinkingMode === undefined ? {} : { thinkingMode }),
+    ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
+    reasoningVisibility,
+    ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
+    ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
+    protocol,
   };
 }
 
@@ -419,6 +524,12 @@ function legacyModelsFromProviders(
     toolChoiceMode: provider.toolChoiceMode,
     runtimeContextPlacement: provider.runtimeContextPlacement,
     ...(provider.reasoningSummary === undefined ? {} : { reasoningSummary: provider.reasoningSummary }),
+    ...(provider.reasoningEffort === undefined ? {} : { reasoningEffort: provider.reasoningEffort }),
+    ...(provider.thinkingMode === undefined ? {} : { thinkingMode: provider.thinkingMode }),
+    ...(provider.thinkingEffort === undefined ? {} : { thinkingEffort: provider.thinkingEffort }),
+    reasoningVisibility: provider.reasoningVisibility,
+    ...(provider.planningThinkingMode === undefined ? {} : { planningThinkingMode: provider.planningThinkingMode }),
+    ...(provider.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: provider.chatTemplateKwargs }),
     protocol: provider.protocol,
   }));
 }
@@ -517,6 +628,67 @@ function optionalRuntimeContextPlacement(
   if (value === undefined) return fallback;
   if (value === "system" || value === "user-envelope") return value;
   throw new Error(`${label} must be system or user-envelope`);
+}
+
+function optionalThinkingMode(
+  value: unknown,
+  label: string,
+  fallback?: "enabled" | "disabled",
+): "enabled" | "disabled" | undefined {
+  if (value === undefined) return fallback;
+  if (value === "enabled" || value === "disabled") return value;
+  throw new Error(`${label} must be enabled or disabled`);
+}
+
+function optionalThinkingEffort(
+  value: unknown,
+  label: string,
+  fallback?: "low" | "medium" | "high",
+): "low" | "medium" | "high" | undefined {
+  if (value === undefined) return fallback;
+  if (value === "low" || value === "medium" || value === "high") return value;
+  throw new Error(`${label} must be low, medium, or high`);
+}
+
+function optionalReasoningVisibility(
+  value: unknown,
+  label: string,
+  fallback: "visible" | "hidden" = "visible",
+): "visible" | "hidden" {
+  if (value === undefined) return fallback;
+  if (value === "visible" || value === "hidden") return value;
+  throw new Error(`${label} must be visible or hidden`);
+}
+
+function optionalReasoningEffort(
+  value: unknown,
+  label: string,
+  fallback?: "none" | "low" | "medium" | "high",
+): "none" | "low" | "medium" | "high" | undefined {
+  if (value === undefined) return fallback;
+  if (value === "none" || value === "low" || value === "medium" || value === "high") return value;
+  throw new Error(`${label} must be none, low, medium, or high`);
+}
+
+/** A provider-owned JSON object forwarded as `chat_template_kwargs`. */
+function optionalJsonObject(
+  value: unknown,
+  label: string,
+  fallback?: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> | undefined {
+  if (value === undefined) return fallback;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined || serialized.length > 16_384) throw new Error();
+    const parsed = JSON.parse(serialized) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed as Readonly<Record<string, unknown>>;
+  } catch {
+    throw new Error(`${label} must be a JSON object of at most 16384 characters`);
+  }
 }
 
 function optionalProtocol(

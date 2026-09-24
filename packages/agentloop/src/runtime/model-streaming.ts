@@ -30,6 +30,8 @@ export interface ModelStreamingOptions {
   readonly signal?: AbortSignal;
   /** Extra fields carried on each `assistant.streaming` event (e.g. phase). */
   readonly base: Readonly<Record<string, unknown>>;
+  /** Keep provider reasoning internal for phases such as planning. */
+  readonly suppressReasoningContent?: boolean;
   /** Invoked when one tool call's arguments are confirmed complete. */
   readonly onToolCallReady?: (call: ModelToolCall) => void | Promise<void>;
 }
@@ -42,6 +44,11 @@ export interface ModelStreamingOptions {
  */
 export async function completeWithStreaming(options: ModelStreamingOptions): Promise<ModelResponse> {
   const { model, invocation, emit, signal, base, onToolCallReady } = options;
+  // Planner responses never retain reasoning. The global visibility setting
+  // instead hides only events: DeepSeek still needs the opaque state in the
+  // internal response/transcript for the next Chat Completions turn.
+  const suppressResponseReasoning = options.suppressReasoningContent === true || invocation.plannerRequest === true;
+  const suppressReasoningEvents = suppressResponseReasoning || model.reasoningVisibility === "hidden";
   const stream = model.streamComplete !== undefined;
   const request = model.requestLogContext?.(invocation, stream) ?? fallbackRequestLogContext(invocation, stream);
   const startedAt = Date.now();
@@ -79,7 +86,8 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
   };
   if (model.streamComplete === undefined) {
     try {
-      return await completed(await model.complete(invocation, signal));
+      const response = await model.complete(invocation, signal);
+      return await completed(suppressResponseReasoning ? withoutReasoningContent(response) : response);
     } catch (error) {
       return await failed(error);
     }
@@ -133,7 +141,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
       if (event.type === "text_delta") {
         partialContent += event.text;
       } else if (event.type === "reasoning_delta") {
-        partialReasoningContent += event.text;
+        if (!suppressReasoningEvents) partialReasoningContent += event.text;
       } else if (event.type === "tool_call_delta") {
         const accumulated = partialToolCalls.get(event.index) ?? { arguments: "" };
         if (event.id !== undefined) accumulated.id = event.id;
@@ -147,10 +155,16 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
     }, signal);
 
     await flush(true);
-    return await completed(response);
+    return await completed(suppressResponseReasoning ? withoutReasoningContent(response) : response);
   } catch (error) {
     return await failed(error);
   }
+}
+
+function withoutReasoningContent(response: ModelResponse): ModelResponse {
+  if (response.reasoningContent === undefined) return response;
+  const { reasoningContent: _reasoningContent, ...withoutReasoning } = response;
+  return withoutReasoning;
 }
 
 function fallbackRequestLogContext(invocation: ModelInvocation, stream: boolean): ModelRequestLogContext {

@@ -146,6 +146,13 @@ interface ToolOutcome {
   readonly resultRef?: RuntimeResultRef;
 }
 
+interface AutomaticArtifactAcceptanceCall {
+  readonly artifactKey: string;
+  readonly artifactPath: string;
+  readonly artifactKind?: string;
+  readonly call: ModelToolCall;
+}
+
 interface StructuredToolCandidate {
   readonly deliveryCandidate: RuntimeDeliveryCandidate;
   readonly projection: string;
@@ -180,6 +187,61 @@ const EMPTY_CANDIDATE_REPAIR_ATTEMPTS = 2;
 // so a "write → run → verify" workflow is not cut off one render short.
 const DEFAULT_CONVERGENCE_GRACE_STEPS = 0;
 
+/**
+ * Artifact acceptance is a Runtime-owned observation, not an authoring choice.
+ * Once the current leaf has a concrete final artifact and the only missing
+ * Runtime facts are produced by the verifier, dispatch it directly.  The
+ * model regains control after the receipt, particularly when it contains a
+ * concrete repair diagnostic.
+ */
+function automaticArtifactAcceptanceCall(input: {
+  readonly stepEvidenceState: ReturnType<typeof deriveRuntimeStepEvidenceState>;
+  readonly convergenceOnly: boolean;
+  readonly availableToolNames: readonly string[];
+  readonly attemptedArtifactKeys: ReadonlySet<string>;
+}): AutomaticArtifactAcceptanceCall | undefined {
+  const state = input.stepEvidenceState;
+  if (
+    input.convergenceOnly
+    ||
+    state?.nextAction !== "verify_existing_artifact"
+    || state.workProduct.status !== "deliverable_available"
+    || !input.availableToolNames.includes("verify_artifact_acceptance")
+  ) return undefined;
+  const artifact = state.workProduct.deliverableArtifacts.at(-1);
+  if (artifact === undefined) return undefined;
+  const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
+  if (input.attemptedArtifactKeys.has(artifactKey)) return undefined;
+  const artifactKind = artifact.artifactKind ?? state.workProduct.expectedArtifactKind;
+  return {
+    artifactKey,
+    artifactPath: artifact.path,
+    ...(artifactKind === undefined ? {} : { artifactKind }),
+    call: {
+      id: `runtime-verify-${createHash("sha256").update(artifactKey).digest("hex").slice(0, 20)}`,
+      name: "verify_artifact_acceptance",
+      arguments: {
+        artifactPath: artifact.path,
+        ...(artifactKind === undefined ? {} : { artifactKind }),
+      },
+    },
+  };
+}
+
+function toolEvidenceFromOutcome(outcome: ToolOutcome): AgentLoopToolEvidence {
+  return {
+    toolCallId: outcome.call.id,
+    toolName: outcome.call.name,
+    result: outcome.content,
+    invocationStatus: outcome.invocationStatus,
+    operationStatus: outcome.operationStatus,
+    ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
+    isError: outcome.isError,
+    ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
+    ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
+  };
+}
+
 const CONVERGENCE_PROMPT = [
   "<runtime_convergence>",
   "This is the final model step allowed by the current step budget.",
@@ -192,14 +254,38 @@ const CONVERGENCE_PROMPT = [
   "</runtime_convergence>",
 ].join("\n");
 
-const EMPTY_CANDIDATE_REPAIR_PROMPT = [
-  "<runtime_candidate_repair>",
-  "The previous completion candidate was empty, so it cannot be assessed.",
-  "Return a non-empty completion candidate in 1-3 short sentences.",
-  "Name the completed work, cite the concrete evidence or tool results used, and state any unmet criterion truthfully.",
-  "Do not request or emit tool calls.",
-  "</runtime_candidate_repair>",
-].join("\n");
+function emptyCandidateRepairDirective(input: {
+  readonly convergenceOnly: boolean;
+  readonly toolAvailable: boolean;
+  readonly missingEvidenceKinds: readonly string[];
+  readonly expectedArtifactKind?: string;
+}): string {
+  if (!input.convergenceOnly && input.toolAvailable) {
+    return [
+      "<runtime_delivery_action_required>",
+      "The previous completion candidate was empty, so it cannot be assessed.",
+      "This Plan step is still in execution and authorized tools remain available.",
+      "Do not return another empty or prose-only completion candidate.",
+      "Take one bounded forward action with the current-step production, build, inspection, conversion, or acceptance Tool that advances the missing delivery evidence.",
+      input.expectedArtifactKind === undefined
+        ? "A probe, temporary spec, or intermediate process artifact is not the requested delivery by itself."
+        : `The requested deliverable is a ${input.expectedArtifactKind}; a probe, temporary spec, or intermediate process artifact is not the final delivery.`,
+      ...(input.missingEvidenceKinds.length === 0
+        ? []
+        : [`Still-missing completion evidence: ${input.missingEvidenceKinds.join(", ")}.`]),
+      "Only submit a completion candidate after the relevant production/acceptance evidence is recorded.",
+      "</runtime_delivery_action_required>",
+    ].join("\n");
+  }
+  return [
+    "<runtime_candidate_repair>",
+    "The previous completion candidate was empty, so it cannot be assessed.",
+    "Return a non-empty completion candidate in 1-3 short sentences.",
+    "Name the completed work, cite the concrete evidence or tool results used, and state any unmet criterion truthfully.",
+    "No execution tools are available on this turn; do not request or emit tool calls.",
+    "</runtime_candidate_repair>",
+  ].join("\n");
+}
 
 const TEXT_TOOL_INVOCATION_REPAIR_PROMPT = [
   "<runtime_candidate_repair>",
@@ -222,6 +308,7 @@ const INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT = [
 const DEFAULT_CANDIDATE_REPAIR_ASSESSMENT_LIMIT = 2;
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
+  const model = options.model;
   const workProducts = options.workProductContext === undefined ? undefined : new WorkProductContext(options.runId, options.workProductContext);
   const emit = async (event: RuntimeEvent): Promise<void> => {
     const observed = workProducts?.capture(event) ?? event;
@@ -614,6 +701,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     return undefined;
   };
   let lastModelStep = 0;
+  const automaticArtifactAcceptanceAttempts = new Set<string>();
   try {
   for (let step = 1; step <= currentLimit(); step += 1) {
     lastModelStep = step;
@@ -712,6 +800,161 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         trace: stepExecutionDecision.trace,
       },
     });
+
+    const automaticAcceptance = automaticArtifactAcceptanceCall({
+      stepEvidenceState,
+      convergenceOnly,
+      availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
+      attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
+    });
+    if (automaticAcceptance !== undefined) {
+      automaticArtifactAcceptanceAttempts.add(automaticAcceptance.artifactKey);
+      await emit({
+        type: "runtime.artifact_acceptance.scheduled",
+        data: {
+          step,
+          toolCallId: automaticAcceptance.call.id,
+          artifactPath: automaticAcceptance.artifactPath,
+          ...(automaticAcceptance.artifactKind === undefined ? {} : { artifactKind: automaticAcceptance.artifactKind }),
+          reason: "deliverable_available_missing_artifact_acceptance",
+        },
+      });
+      const prepared = (() => {
+        try {
+          return { kind: "ready" as const, value: grantedMaterialized.prepare(automaticAcceptance.call) };
+        } catch (error) {
+          return { kind: "rejected" as const, call: automaticAcceptance.call, message: publicErrorMessage(error) };
+        }
+      })();
+      if (prepared.kind === "ready") {
+        await emit({
+          type: "assistant.tool_call.committed",
+          data: {
+            step,
+            toolCallId: automaticAcceptance.call.id,
+            name: automaticAcceptance.call.name,
+            arguments: automaticAcceptance.call.arguments,
+            runtimeOwned: true,
+          },
+        });
+        await emit({
+          type: "tool.planned",
+          data: {
+            step,
+            toolCallId: automaticAcceptance.call.id,
+            toolName: automaticAcceptance.call.name,
+            arguments: automaticAcceptance.call.arguments,
+            replaySafe: prepared.value.tool.replaySafe,
+          },
+        });
+      } else {
+        await emit({
+          type: "tool.rejected",
+          data: {
+            step,
+            toolCallId: automaticAcceptance.call.id,
+            toolName: automaticAcceptance.call.name,
+            reason: prepared.message,
+            invocationStatus: "rejected",
+            operationStatus: "unknown",
+            isError: true,
+            failurePhase: "prepare",
+          },
+        });
+      }
+      const outcome = await executePrepared(
+        prepared,
+        options.grant,
+        step,
+        emit,
+        options.signal,
+        maxToolResultCharacters,
+        options.actionTracker,
+      );
+      const evidence = toolEvidenceFromOutcome(outcome);
+      toolEvidence.push(evidence);
+      messages.push({ role: "assistant", content: "", toolCalls: [automaticAcceptance.call] });
+      messages.push({
+        role: "tool",
+        toolCallId: automaticAcceptance.call.id,
+        name: automaticAcceptance.call.name,
+        content: outcome.content,
+        isError: outcome.isError,
+      });
+      await emit({
+        type: "runtime.artifact_acceptance.completed",
+        data: {
+          step,
+          toolCallId: automaticAcceptance.call.id,
+          artifactPath: automaticAcceptance.artifactPath,
+          operationStatus: outcome.operationStatus,
+          isError: outcome.isError,
+        },
+      });
+      await emit({
+        type: "step.completed",
+        data: {
+          step,
+          toolResults: [{
+            toolCallId: outcome.call.id,
+            invocationStatus: outcome.invocationStatus,
+            operationStatus: outcome.operationStatus,
+            ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
+            isError: outcome.isError,
+          }],
+        },
+      });
+      const acceptanceState = deriveRuntimeStepEvidenceState({
+        policy: options.progressPolicy,
+        evidence: toolEvidence,
+      });
+      if (outcome.isError || acceptanceState?.recentActionableDiagnostic === true) {
+        contextAssembler.setRuntimeDirective(executionFeedbackDirective({
+          suppressLegacyWorkProductProjection: workProducts !== undefined,
+          latestToolEvidence: [evidence],
+          toolEvidence,
+          progressPolicy: options.progressPolicy,
+        }));
+      }
+      if (!outcome.isError && (acceptanceState?.missingToolEvidenceKinds.length ?? 0) === 0) {
+        requestedConvergenceReason = "artifact_acceptance_observed";
+
+        // A successful Runtime acceptance receipt already supplies the
+        // complete evidence boundary. Synthesize and assess the delivery
+        // candidate immediately; there is no reason to spend another model
+        // turn asking it to restate facts the Runtime just authenticated.
+        if (options.evaluateCandidate !== undefined) {
+          const candidate = deriveEvidenceCompletionCandidate({
+            policy: options.progressPolicy,
+            evidence: toolEvidence,
+            latestEvidence: [evidence],
+            userInput: options.input,
+          });
+          if (candidate !== undefined && evidenceCompletionCandidateHasAcceptedArtifact(options.progressPolicy, toolEvidence)) {
+            await emit({
+              type: "candidate.evidence_completion_detected",
+              data: {
+                step,
+                requiredEvidenceKinds: candidate.requiredEvidenceKinds,
+                satisfiedEvidenceKinds: candidate.satisfiedEvidenceKinds,
+                caveatedEvidenceKinds: candidate.caveatedEvidenceKinds,
+                sourceToolCallIds: candidate.sourceToolCallIds,
+                artifacts: candidate.artifacts,
+              },
+            });
+            const completion = await evaluateToolBackedCandidate({
+              step,
+              output: candidate.output,
+              projectedToolEvidence: toolEvidence,
+              stepSemanticFrame: options.stepSemanticFrame,
+              rejectionDirective: "Runtime evidence completion candidate was rejected. Repair this step using the available evidence.",
+            });
+            if (completion !== undefined) return completion;
+          }
+        }
+      }
+      continue;
+    }
     let assembly = await contextAssembler.assemble(messages, convergenceOnly ? [] : executionDefinitions, options.signal);
 
     let earlyOutcomes = new Map<string, ToolOutcome>();
@@ -760,7 +1003,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           type: "candidate.rejected",
           data: { step, output: response.content, feedback: "Completion candidate was empty" },
         });
-        contextAssembler.setRuntimeDirective(EMPTY_CANDIDATE_REPAIR_PROMPT);
+        contextAssembler.setRuntimeDirective(emptyCandidateRepairDirective({
+          convergenceOnly,
+          toolAvailable: executionDefinitions.length > 0,
+          missingEvidenceKinds: stepEvidenceState?.missingRequiredEvidenceKinds ?? [],
+          expectedArtifactKind: stepEvidenceState?.workProduct.expectedArtifactKind,
+        }));
         assembly = await contextAssembler.assemble(
           messages,
           convergenceOnly ? [] : executionDefinitions,
@@ -814,7 +1062,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         ...(response.finishReason === "length"
           ? { providerReplayableToolCallIds: replayableToolCalls.map((call) => call.id) }
           : {}),
-        ...(response.reasoningContent === undefined ? {} : { reasoningContent: response.reasoningContent }),
+        // Provider reasoning is continuation state for Chat Completions, not
+        // necessarily public Run output.  Store hidden-model state under an
+        // internal key; RunService removes it from every client projection
+        // while recovery can still reconstruct the next provider request.
+        ...(response.reasoningContent === undefined
+          ? {}
+          : model.reasoningVisibility === "hidden"
+            ? { privateReasoningContent: response.reasoningContent }
+            : { reasoningContent: response.reasoningContent }),
         ...(response.usage === undefined ? {} : { usage: response.usage }),
       },
     });
@@ -1262,17 +1518,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // actual effects complete out of order.
     const latestToolEvidence: AgentLoopToolEvidence[] = [];
     for (const outcome of outcomes) {
-      const evidence = {
-        toolCallId: outcome.call.id,
-        toolName: outcome.call.name,
-        result: outcome.content,
-        invocationStatus: outcome.invocationStatus,
-        operationStatus: outcome.operationStatus,
-        ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
-        isError: outcome.isError,
-        ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
-        ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
-      };
+      const evidence = toolEvidenceFromOutcome(outcome);
       toolEvidence.push(evidence);
       latestToolEvidence.push(evidence);
       if (replayableToolCallIds.has(outcome.call.id)) {
@@ -1403,6 +1649,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     previousPrepareRejectionSignature = undefined;
     consecutivePrepareRejectionSteps = 0;
+
+    // A just-produced deliverable can be accepted inside the same model-step
+    // budget. Re-enter the loop at the same step number so the Runtime-owned
+    // verifier is dispatched before any further model request.
+    const evidenceStateBeforeCandidate = deriveRuntimeStepEvidenceState({
+      policy: options.progressPolicy,
+      evidence: toolEvidence,
+    });
+    if (automaticArtifactAcceptanceCall({
+      stepEvidenceState: evidenceStateBeforeCandidate,
+      convergenceOnly: false,
+      availableToolNames: grantedMaterialized.definitions.map((tool) => tool.name),
+      attemptedArtifactKeys: automaticArtifactAcceptanceAttempts,
+    }) !== undefined) {
+      step -= 1;
+      continue;
+    }
 
     const evidenceCompletionCandidate = options.evaluateCandidate === undefined
       ? undefined
@@ -2106,6 +2369,10 @@ function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string 
     if (stderr !== undefined) details.push(`stderr="${stderr}"`);
     const path = shortStringField(parsed, "path");
     if (path !== undefined) details.push(`path=${path}`);
+    const diagnostics = parsed.diagnostics;
+    if (Array.isArray(diagnostics) && diagnostics.length > 0) {
+      details.push(`diagnostics=${truncateForDirective(JSON.stringify(diagnostics), 700)}`);
+    }
   } else {
     details.push(`result="${truncateForDirective(item.result, 180)}"`);
   }

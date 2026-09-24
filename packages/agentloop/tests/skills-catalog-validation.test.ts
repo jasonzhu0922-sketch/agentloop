@@ -86,6 +86,18 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
     assert.match(canvasDesign!.inspection.instructions, /Do not read the renderer source/);
     assert.match(canvasDesign!.inspection.instructions, /Do not reread the philosophy or JSON spec/);
 
+    const themeFactory = discovered.find((entry) => entry.inspection.name === "theme-factory");
+    assert.notEqual(themeFactory, undefined);
+    assert.match(themeFactory!.inspection.instructions, /Persist the choice as HIL/);
+    assert.match(themeFactory!.inspection.instructions, /call `request_human_loop`/);
+    assert.match(themeFactory!.inspection.instructions, /a sentence in assistant output[^\n]*never a substitute/);
+    assert.match(themeFactory!.inspection.instructions, /kind: "selection"/);
+    assert.match(themeFactory!.inspection.instructions, /responseSchema\.type: "select"/);
+    assert.match(themeFactory!.inspection.instructions, /kind: "confirmation"/);
+    assert.match(themeFactory!.inspection.instructions, /responseSchema\.type: "confirm"/);
+    assert.match(themeFactory!.inspection.instructions, /resume\.mode: "continue_step"/);
+    assert.match(themeFactory!.inspection.instructions, /Do not render “please confirm” as ordinary assistant prose/);
+
     const pdf = discovered.find((entry) => entry.inspection.name === "pdf");
     assert.notEqual(pdf, undefined);
     assert.ok(pdf!.inspection.files.includes("assets/fonts/NotoSansSC.ttf"));
@@ -133,6 +145,20 @@ test("every checked-in Skill package is discoverable, exact, and progressively d
     database.close();
     await removeSkillPackage(workspace).catch(() => undefined);
   }
+});
+
+test("theme-factory persists both packaged-theme selection and custom-theme approval as HIL", async () => {
+  const themeFactory = await inspectSkillPackage(resolve(SKILL_DIRECTORY, "theme-factory"));
+
+  assert.match(themeFactory.instructions, /Persist the choice as HIL/);
+  assert.match(themeFactory.instructions, /call `request_human_loop`/);
+  assert.match(themeFactory.instructions, /a sentence in assistant output[^\n]*never a substitute/);
+  assert.match(themeFactory.instructions, /kind: "selection"/);
+  assert.match(themeFactory.instructions, /responseSchema\.type: "select"/);
+  assert.match(themeFactory.instructions, /kind: "confirmation"/);
+  assert.match(themeFactory.instructions, /responseSchema\.type: "confirm"/);
+  assert.match(themeFactory.instructions, /resume\.mode: "continue_step"/);
+  assert.match(themeFactory.instructions, /Do not render “please confirm” as ordinary assistant prose/);
 });
 
 test("loaded package Skills show the Runtime path contract before Skill instructions", async () => {
