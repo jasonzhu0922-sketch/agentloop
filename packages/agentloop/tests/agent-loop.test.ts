@@ -651,6 +651,93 @@ test("artifact receipts that satisfy required evidence complete without a final 
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
 });
 
+test("automatic artifact acceptance derives a Word profile from the final path instead of forwarding document semantics", async () => {
+  let verifyInput: unknown;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write the report",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      path: "risk-report.docx",
+      bytes: 13649,
+      sha256: "docx-sha",
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path: "risk-report.docx", artifactKind: "document", bytes: 13649, sha256: "docx-sha" },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the report",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      verifyInput = input;
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "risk-report.docx", kind: "word", bytes: 13649, sha256: "docx-sha" },
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      };
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "risk-report.docx" } }],
+        };
+      }
+      throw new Error("Runtime should complete from artifact receipts");
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify a Word report.",
+    input: "create a risk report",
+    model,
+    tools: new ToolRegistry([writeTool, verifyTool]),
+    grant,
+    maxSteps: 8,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+      { expectedArtifactKind: "document" },
+    ),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /risk-report\.docx/);
+  assert.deepEqual(verifyInput, { artifactPath: "risk-report.docx" });
+  assert.equal(events.some((event) => event.type === "tool.rejected"), false);
+  const scheduled = events.find((event) => event.type === "runtime.artifact_acceptance.scheduled");
+  assert.deepEqual(scheduled?.data, {
+    step: 1,
+    toolCallId: scheduled?.data.toolCallId,
+    artifactPath: "risk-report.docx",
+    reason: "deliverable_available_missing_artifact_acceptance",
+  });
+});
+
 test("Runtime returns control for a concrete acceptance diagnostic so the model can repair", async () => {
   let modelCalls = 0;
   let writeExecutions = 0;

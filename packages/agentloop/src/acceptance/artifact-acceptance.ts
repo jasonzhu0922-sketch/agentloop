@@ -10,19 +10,27 @@ import type {
 
 const MAX_ARTIFACT_BYTES_FOR_PROFILE_INSPECTION = 20_000_000;
 
-export type ArtifactAcceptanceKind =
-  | "auto"
-  | "generic_file"
-  | "html"
-  | "html_ppt"
-  | "word"
-  | "docx"
-  | "xlsx"
-  | "pptx"
-  | "pdf"
-  | "markdown"
-  | "image"
-  | "json";
+export const ARTIFACT_ACCEPTANCE_KINDS = [
+  "auto",
+  "generic_file",
+  "html",
+  "html_ppt",
+  "word",
+  "docx",
+  "xlsx",
+  "pptx",
+  "pdf",
+  "markdown",
+  "image",
+  "json",
+] as const;
+
+export type ArtifactAcceptanceKind = typeof ARTIFACT_ACCEPTANCE_KINDS[number];
+
+export function isArtifactAcceptanceKind(value: unknown): value is ArtifactAcceptanceKind {
+  return typeof value === "string"
+    && (ARTIFACT_ACCEPTANCE_KINDS as readonly string[]).includes(value);
+}
 
 export type ArtifactAcceptanceStatus = "passed" | "failed" | "skipped_unavailable";
 export type ArtifactAcceptanceVerdict = "accepted" | "caveated" | "rejected";

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
+import { isArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
 import { createConcurrencyLimiter, mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { ContextAssembler, type ContextPolicy } from "./context-assembler.ts";
@@ -149,7 +150,7 @@ interface ToolOutcome {
 interface AutomaticArtifactAcceptanceCall {
   readonly artifactKey: string;
   readonly artifactPath: string;
-  readonly artifactKind?: string;
+  readonly profileId?: string;
   readonly call: ModelToolCall;
 }
 
@@ -212,17 +213,25 @@ function automaticArtifactAcceptanceCall(input: {
   if (artifact === undefined) return undefined;
   const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
   if (input.attemptedArtifactKeys.has(artifactKey)) return undefined;
-  const artifactKind = artifact.artifactKind ?? state.workProduct.expectedArtifactKind;
+  // `artifactKind` is a Runtime/Planner semantic label (for example
+  // `document`), whereas verifier profiles are concrete inspection kinds
+  // (`word`, `docx`, `pdf`, ...). Never pass that semantic label across the
+  // Tool boundary. A verified explicit profile is the sole override; without
+  // one the acceptance service derives the correct profile from the final path.
+  const profileId = isArtifactAcceptanceKind(artifact.acceptanceProfile)
+    && artifact.acceptanceProfile !== "auto"
+    ? artifact.acceptanceProfile
+    : undefined;
   return {
     artifactKey,
     artifactPath: artifact.path,
-    ...(artifactKind === undefined ? {} : { artifactKind }),
+    ...(profileId === undefined ? {} : { profileId }),
     call: {
       id: `runtime-verify-${createHash("sha256").update(artifactKey).digest("hex").slice(0, 20)}`,
       name: "verify_artifact_acceptance",
       arguments: {
         artifactPath: artifact.path,
-        ...(artifactKind === undefined ? {} : { artifactKind }),
+        ...(profileId === undefined ? {} : { profileId }),
       },
     },
   };
@@ -815,7 +824,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           step,
           toolCallId: automaticAcceptance.call.id,
           artifactPath: automaticAcceptance.artifactPath,
-          ...(automaticAcceptance.artifactKind === undefined ? {} : { artifactKind: automaticAcceptance.artifactKind }),
+          ...(automaticAcceptance.profileId === undefined ? {} : { profileId: automaticAcceptance.profileId }),
           reason: "deliverable_available_missing_artifact_acceptance",
         },
       });

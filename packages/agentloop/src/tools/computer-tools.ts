@@ -3,7 +3,12 @@ import { badRequest } from "../shared/errors.ts";
 import { requireRecord, requireString } from "../shared/validation.ts";
 import { buildArtifactReceipt } from "../runtime/artifact-receipt.ts";
 import type { RuntimeTool, ToolExecutionContext } from "./tool-registry.ts";
-import { ArtifactAcceptanceService, type ArtifactAcceptanceKind } from "../acceptance/artifact-acceptance.ts";
+import {
+  ARTIFACT_ACCEPTANCE_KINDS,
+  ArtifactAcceptanceService,
+  isArtifactAcceptanceKind,
+  type ArtifactAcceptanceKind,
+} from "../acceptance/artifact-acceptance.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
 import type { PatchFileInput, WriteFileMode } from "../computer/computer-executor.ts";
@@ -1519,20 +1524,6 @@ function boundJsonValue(value: unknown, caveats: string[], pointer: string, dept
   return value;
 }
 
-const ARTIFACT_ACCEPTANCE_KINDS = [
-  "auto",
-  "generic_file",
-  "html",
-  "html_ppt",
-  "word",
-  "docx",
-  "xlsx",
-  "pptx",
-  "pdf",
-  "markdown",
-  "image",
-  "json",
-] as const satisfies readonly ArtifactAcceptanceKind[];
 const MAX_ACCEPTANCE_CHECKS = 50;
 const MAX_ACCEPTANCE_CHECK_CHARACTERS = 512;
 
@@ -1543,7 +1534,7 @@ function artifactKindSchema(): Record<string, unknown> {
 function optionalArtifactKind(value: unknown, field: string): ArtifactAcceptanceKind | undefined {
   if (value === undefined) return undefined;
   const kind = requireString(value, field, { max: 64 });
-  if ((ARTIFACT_ACCEPTANCE_KINDS as readonly string[]).includes(kind)) return kind as ArtifactAcceptanceKind;
+  if (isArtifactAcceptanceKind(kind)) return kind;
   throw badRequest(`${field} must be one of ${ARTIFACT_ACCEPTANCE_KINDS.join(", ")}`);
 }
 
