@@ -454,6 +454,24 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
+  if (policy.expectedArtifactKind !== undefined) {
+    // Aggregate receipt kinds are only meaningful for the artifact identity
+    // they describe.  Do not let an accepted HTML wrapper satisfy the
+    // acceptance/openability/format obligations of a code, document, or other
+    // differently typed deliverable that exists in the same Step history.
+    const matchingAcceptanceKinds = collectMatchingArtifactAcceptanceKinds(
+      evidence,
+      policy.expectedArtifactKind,
+    );
+    for (const kind of ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS) {
+      evidenceKinds.satisfied.delete(kind);
+      evidenceKinds.caveated.delete(kind);
+      evidenceKinds.failed.delete(kind);
+      if (matchingAcceptanceKinds.satisfied.has(kind)) evidenceKinds.satisfied.add(kind);
+      if (matchingAcceptanceKinds.caveated.has(kind)) evidenceKinds.caveated.add(kind);
+      if (matchingAcceptanceKinds.failed.has(kind)) evidenceKinds.failed.add(kind);
+    }
+  }
   const latestArtifactIndex = evidence.reduce((last, item, index) =>
     item.toolName !== "verify_artifact_acceptance" && !item.isError && artifactRefFromEvidence(item) !== undefined
       ? index
@@ -497,6 +515,43 @@ function collectPolicyEvidenceKinds(
     }
   }
   return evidenceKinds;
+}
+
+function collectMatchingArtifactAcceptanceKinds(
+  evidence: readonly AgentLoopToolEvidence[],
+  expectedArtifactKind: string,
+): {
+  readonly satisfied: Set<string>;
+  readonly caveated: Set<string>;
+  readonly failed: Set<string>;
+} {
+  const output = { satisfied: new Set<string>(), caveated: new Set<string>(), failed: new Set<string>() };
+  for (const item of evidence) {
+    if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
+    for (const record of runtimeEvidenceRecordsFromToolResult(item.result)) {
+      const receipt = asRecord(record.artifactReceipt);
+      const artifactRecord = artifactRecordsFromResult(record)[0]
+        ?? artifactRecordsFromResult(receipt ?? {})[0];
+      const path = stringField(record, "artifactPath")
+        ?? stringField(record, "path")
+        ?? stringField(artifactRecord, "path")
+        ?? stringField(asRecord(record.output), "path");
+      if (path === undefined) continue;
+      const artifact: RuntimeStepArtifactRef = {
+        path,
+        sourceTool: item.toolName,
+        toolCallId: item.toolCallId,
+        artifactKind: stringField(record, "artifactKind")
+          ?? stringField(record, "kind")
+          ?? stringField(artifactRecord, "artifactKind")
+          ?? stringField(artifactRecord, "kind"),
+      };
+      if (!artifactMatchesExpectedKind(artifact, expectedArtifactKind)) continue;
+      collectEvidenceKindsFromRecord(record, output);
+      collectEvidenceKindsFromRecord(receipt, output);
+    }
+  }
+  return output;
 }
 
 function evidenceKindSatisfiedByCompletionGate(
@@ -667,10 +722,15 @@ function isAcceptanceDeliverableArtifact(
   // inspectability, not that this is the artifact the current Step promised
   // to deliver. Check the Step-owned target before either shortcut can make
   // an intermediate format eligible for automatic acceptance.
-  if (
-    policy.expectedArtifactKind !== undefined
-    && !artifactMatchesExpectedKind(artifact, policy.expectedArtifactKind)
-  ) return false;
+  if (policy.expectedArtifactKind !== undefined) {
+    if (!artifactMatchesExpectedKind(artifact, policy.expectedArtifactKind)) return false;
+    // Once the Step explicitly owns the requested artifact kind, a matching
+    // source file is no longer merely a build input.  In particular, code
+    // delivery must make a matching .py/.js/etc. eligible for Runtime-owned
+    // acceptance instead of forcing the model to manufacture a non-source
+    // wrapper (for example HTML) just to cross the delivery boundary.
+    return true;
+  }
   if (artifact.acceptanceProfile !== undefined) return true;
   if (artifact.sourceTool === "convert_artifact") return true;
   if (artifact.artifactKind !== undefined && artifact.artifactKind !== "code" && artifact.artifactKind !== "source") return true;

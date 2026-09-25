@@ -3202,6 +3202,180 @@ test("artifact progress policy keeps a converted mismatched format out of automa
   assert.notEqual(state?.nextAction, "verify_existing_artifact");
 });
 
+test("artifact progress policy treats requested source code as the deliverable instead of an intermediate", () => {
+  const policy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+    { expectedArtifactKind: "code" },
+  );
+  const state = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [{
+      toolCallId: "write-player",
+      toolName: "computer_write_file",
+      isError: false,
+      operationStatus: "succeeded",
+      result: JSON.stringify({
+        path: "play_wanfeng.py",
+        bytes: 12_528,
+        sha256: "python-source-hash",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "play_wanfeng.py", bytes: 12_528, sha256: "python-source-hash" },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+        },
+      }),
+    }],
+  });
+
+  assert.equal(state?.workProduct.status, "deliverable_available");
+  assert.deepEqual(state?.workProduct.deliverableArtifacts.map((artifact) => artifact.path), ["play_wanfeng.py"]);
+  assert.deepEqual(state?.workProduct.processArtifacts, []);
+  assert.equal(state?.nextAction, "verify_existing_artifact");
+});
+
+test("artifact progress policy does not bind a mismatched acceptance receipt to requested code", () => {
+  const policy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+    { expectedArtifactKind: "code" },
+  );
+  const state = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [{
+      toolCallId: "write-player",
+      toolName: "computer_write_file",
+      isError: false,
+      operationStatus: "succeeded",
+      result: JSON.stringify({
+        path: "play_wanfeng.py",
+        bytes: 12_528,
+        sha256: "python-source-hash",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "play_wanfeng.py", bytes: 12_528, sha256: "python-source-hash" },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+        },
+      }),
+    }, {
+      toolCallId: "verify-html-wrapper",
+      toolName: "verify_artifact_acceptance",
+      isError: false,
+      operationStatus: "succeeded",
+      result: JSON.stringify({
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "wanfeng_player.html", kind: "html", bytes: 16_519, sha256: "html-hash" },
+        verdict: "caveated",
+        evidenceKinds: {
+          satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: ["artifact_acceptance"],
+          failed: [],
+        },
+      }),
+    }],
+  });
+
+  assert.equal(state?.workProduct.status, "deliverable_available");
+  assert.deepEqual(state?.workProduct.deliverableArtifacts.map((artifact) => artifact.path), ["play_wanfeng.py"]);
+  assert.deepEqual(state?.missingRequiredEvidenceKinds, ["artifact_acceptance", "artifact_openable", "format_matches_request"]);
+  assert.equal(state?.nextAction, "verify_existing_artifact");
+});
+
+test("failed setup does not divert requested code from automatic acceptance", async () => {
+  let modelCalls = 0;
+  let verifyInput: unknown;
+  const runTool: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Run package setup",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({ exitCode: 1, stderr: "EACCES: read-only skill package", fileChanges: [] }),
+  };
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write requested program",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      path: "play_wanfeng.py",
+      bytes: 12_528,
+      sha256: "python-source-hash",
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path: "play_wanfeng.py", bytes: 12_528, sha256: "python-source-hash" },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify requested program",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      verifyInput = input;
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "play_wanfeng.py", kind: "code", bytes: 12_528, sha256: "python-source-hash" },
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "init-package", name: "computer_run_command", arguments: {} }],
+        };
+      }
+      if (modelCalls === 2) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "write-player", name: "computer_write_file", arguments: { path: "play_wanfeng.py" } }],
+        };
+      }
+      throw new Error("Runtime should verify and complete the requested code without another model turn");
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_run_command", "computer_write_file", "verify_artifact_acceptance"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify the requested program.",
+    input: "编写一个能播放《晚风渡口》的程序",
+    model,
+    tools: new ToolRegistry([runTool, writeTool, verifyTool]),
+    grant,
+    maxSteps: 8,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+      { expectedArtifactKind: "code" },
+    ),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /play_wanfeng\.py/);
+  assert.deepEqual(verifyInput, { artifactPath: "play_wanfeng.py" });
+  assert.equal(modelCalls, 2);
+  assert.equal(events.some((event) => event.type === "runtime.artifact_acceptance.scheduled"), true);
+  assert.equal(events.some((event) => event.type === "candidate.evidence_completion_detected"), true);
+});
+
 test("artifact progress policy treats a successful PPTX acceptance receipt as the presentation deliverable", () => {
   const policy = artifactStepToolProgressPolicy(
     ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
