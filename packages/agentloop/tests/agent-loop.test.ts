@@ -3080,6 +3080,41 @@ test("artifact progress policy treats DOC and DOCX receipts as the same Word del
   }
 });
 
+test("artifact progress policy keeps a converted mismatched format out of automatic acceptance", () => {
+  const policy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+    { expectedArtifactKind: "html" },
+  );
+  const state = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [{
+      toolCallId: "convert-docx-to-markdown",
+      toolName: "convert_artifact",
+      isError: false,
+      result: JSON.stringify({
+        schema: "agentloop.artifactConversion/v1",
+        output: { path: "risk-report/report-source.md", format: "markdown" },
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: {
+            path: "risk-report/report-source.md",
+            artifactKind: "markdown",
+            acceptanceProfile: "markdown",
+            bytes: 9_933,
+            sha256: "markdown-hash",
+          },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveated: [], failed: [] },
+        },
+      }),
+    }],
+  });
+
+  assert.equal(state?.workProduct.status, "process_artifact_available");
+  assert.deepEqual(state?.workProduct.deliverableArtifacts, []);
+  assert.deepEqual(state?.workProduct.processArtifacts.map((artifact) => artifact.path), ["risk-report/report-source.md"]);
+  assert.notEqual(state?.nextAction, "verify_existing_artifact");
+});
+
 test("artifact progress policy treats a successful PPTX acceptance receipt as the presentation deliverable", () => {
   const policy = artifactStepToolProgressPolicy(
     ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],

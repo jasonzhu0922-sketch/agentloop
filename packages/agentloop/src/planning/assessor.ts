@@ -7,6 +7,7 @@ import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { classifyTaskIntent } from "../runtime/task-intent.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
 import { deliveryCandidateCaveats } from "../runtime/delivery-candidate.ts";
+import { artifactMatchesExpectedKind } from "../runtime/tool-progress-policy.ts";
 import {
   canonicalArtifactAcceptanceVerdict,
   parseJsonRecord,
@@ -304,10 +305,19 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const requiredKindsSatisfied = requiredKinds
       .filter((kind) => blockingKinds.has(kind))
       .every((kind) =>
-      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions)
+      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions, input.expectedArtifactKind)
       );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
-      const evidenceSatisfied = criterionSatisfiedByEvidenceGate(criterion.id, requiredKinds, requiredKindsSatisfied, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions);
+      const evidenceSatisfied = criterionSatisfiedByEvidenceGate(
+        criterion.id,
+        requiredKinds,
+        requiredKindsSatisfied,
+        receipts,
+        successfulToolRefs,
+        deliveryCandidate,
+        input.workflowEvidenceActions,
+        input.expectedArtifactKind,
+      );
       const candidateRequired = criterion.blocking !== false
         && !isEvidenceCriterion(criterion.id);
       const satisfied = evidenceSatisfied && (nonEmpty || !candidateRequired);
@@ -347,6 +357,7 @@ interface RuntimeObservableReceipt {
   readonly schema: string;
   readonly verdict?: string;
   readonly artifactPath?: string;
+  readonly artifactKind?: string;
   readonly satisfied: ReadonlySet<string>;
   readonly failed: ReadonlySet<string>;
   readonly caveatsRecorded: boolean;
@@ -406,7 +417,10 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
         schema,
         verdict: canonicalArtifactAcceptanceVerdict(parsed),
         ...(schema === "agentloop.artifactAcceptance/v1" || schema === "agentloop.artifactReceipt/v1"
-          ? { artifactPath: artifactPathFromRecord(nestedReceipt ?? parsed) }
+          ? {
+            artifactPath: artifactPathFromRecord(nestedReceipt ?? parsed),
+            artifactKind: artifactKindFromRecord(nestedReceipt ?? parsed),
+          }
           : {}),
         satisfied: new Set(evidenceKinds.satisfied),
         failed: new Set(evidenceKinds.failed),
@@ -439,10 +453,11 @@ function criterionSatisfiedByEvidenceGate(
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
   workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
+  expectedArtifactKind?: string,
 ): boolean {
   // Semantic caveat evidence must not inherit an unrelated source/artifact
   // failure (nor automatically pass when all other operation receipts pass).
-  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions);
+  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions, expectedArtifactKind);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
 }
@@ -453,6 +468,7 @@ function evidenceKindSatisfiedByGate(
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
   workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
+  expectedArtifactKind?: string,
 ): boolean {
   if (kind === "explicit_caveats") {
     // This proves only that limitations were recorded, not that the model's
@@ -461,16 +477,18 @@ function evidenceKindSatisfiedByGate(
   }
   if (kind === "delivery_receipt") {
     const candidateReceipt = candidate?.deliveryReceipt !== undefined
-      && successfulToolRefs.includes(candidate.deliveryReceipt.sourceToolCallId);
+      && successfulToolRefs.includes(candidate.deliveryReceipt.sourceToolCallId)
+      && deliveryReceiptMatchesExpectedKind(candidate.deliveryReceipt, expectedArtifactKind);
     return candidateReceipt || receipts.some((receipt) =>
         (receipt.schema === "agentloop.artifactReceipt/v1" || receipt.schema === "agentloop.artifactAcceptance/v1")
         && receipt.artifactPath !== undefined
+        && receiptMatchesExpectedKind(receipt, expectedArtifactKind)
         && !receipt.failed.has("artifact_path")
         && !receipt.failed.has("artifact_non_empty"),
       );
   }
   if (kind === "artifact_acceptance") {
-    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate);
+    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind);
     return acceptance !== undefined
       && (
         acceptance.verdict === "accepted"
@@ -487,13 +505,14 @@ function evidenceKindSatisfiedByGate(
   // Non-artifact workflow facts remain authenticated against their declared
   // package action below.
   if (isArtifactAcceptanceEvidenceKind(kind)) {
-    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate);
+    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind);
     if (
       acceptance !== undefined
       && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
       && acceptance.satisfied.has(kind)
       && !acceptance.failed.has(kind)
     ) return true;
+    if (expectedArtifactKind !== undefined) return false;
   }
   const declaredActions = (workflowEvidenceActions ?? []).filter((action) => action.producesEvidenceKinds.includes(kind));
   if (declaredActions.length > 0) {
@@ -533,13 +552,17 @@ function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
 function latestArtifactAcceptanceReceipt(
   receipts: readonly RuntimeObservableReceipt[],
   candidate?: RuntimeDeliveryCandidate,
+  expectedArtifactKind?: string,
 ): RuntimeObservableReceipt | undefined {
   const acceptances = receipts.filter((receipt) => receipt.schema === "agentloop.artifactAcceptance/v1");
   const deliveredPath = candidate?.deliveryReceipt?.artifact.path;
   if (deliveredPath !== undefined) {
-    return acceptances.filter((receipt) => receipt.artifactPath === deliveredPath).at(-1);
+    return acceptances.filter((receipt) =>
+      receipt.artifactPath === deliveredPath
+      && receiptMatchesExpectedKind(receipt, expectedArtifactKind),
+    ).at(-1);
   }
-  return acceptances.at(-1);
+  return acceptances.filter((receipt) => receiptMatchesExpectedKind(receipt, expectedArtifactKind)).at(-1);
 }
 
 function artifactPathFromRecord(record: Record<string, unknown>): string | undefined {
@@ -548,6 +571,41 @@ function artifactPathFromRecord(record: Record<string, unknown>): string | undef
   if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact)) return undefined;
   const path = (artifact as Record<string, unknown>).path;
   return typeof path === "string" && path.trim().length > 0 ? path : undefined;
+}
+
+function artifactKindFromRecord(record: Record<string, unknown>): string | undefined {
+  const artifact = record.artifact;
+  if (artifact !== null && typeof artifact === "object" && !Array.isArray(artifact)) {
+    const value = artifact as Record<string, unknown>;
+    if (typeof value.kind === "string" && value.kind.trim().length > 0) return value.kind;
+    if (typeof value.artifactKind === "string" && value.artifactKind.trim().length > 0) return value.artifactKind;
+  }
+  if (typeof record.kind === "string" && record.kind.trim().length > 0) return record.kind;
+  if (typeof record.artifactKind === "string" && record.artifactKind.trim().length > 0) return record.artifactKind;
+  return undefined;
+}
+
+function receiptMatchesExpectedKind(
+  receipt: Pick<RuntimeObservableReceipt, "artifactPath" | "artifactKind">,
+  expectedArtifactKind: string | undefined,
+): boolean {
+  if (expectedArtifactKind === undefined) return true;
+  if (receipt.artifactPath === undefined) return false;
+  return artifactMatchesExpectedKind({
+    path: receipt.artifactPath,
+    ...(receipt.artifactKind === undefined ? {} : { artifactKind: receipt.artifactKind }),
+  }, expectedArtifactKind);
+}
+
+function deliveryReceiptMatchesExpectedKind(
+  receipt: NonNullable<RuntimeDeliveryCandidate["deliveryReceipt"]>,
+  expectedArtifactKind: string | undefined,
+): boolean {
+  if (expectedArtifactKind === undefined) return true;
+  return artifactMatchesExpectedKind({
+    path: receipt.artifact.path,
+    ...(receipt.artifact.kind === undefined ? {} : { artifactKind: receipt.artifact.kind }),
+  }, expectedArtifactKind);
 }
 
 function rejectedEvidenceGateRationale(
@@ -677,10 +735,23 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
   const admitted = input.step.successCriteria.find((item) => item.id === criterion.criterionId);
   const blocking = admitted?.blocking ?? true;
   const verification = admitted?.verification ?? "deterministic";
+  const expectedFormatUnmet = criterion.criterionId === "format_matches_request"
+    && input.expectedArtifactKind !== undefined
+    && latestArtifactAcceptanceReceipt(
+      runtimeObservableReceipts(input.evidence.toolCalls),
+      input.evidence.deliveryCandidate,
+      input.expectedArtifactKind,
+    ) === undefined;
   return {
     ...criterion,
+    ...(expectedFormatUnmet
+      ? {
+        satisfied: false,
+        rationale: `No accepted artifact matches the required ${input.expectedArtifactKind} format.`,
+      }
+      : {}),
     blocking,
-    status: criterion.satisfied
+    status: (expectedFormatUnmet ? false : criterion.satisfied)
       ? "satisfied"
       : verification === "model_judged" || verification === "decision_context"
         ? "unverified"

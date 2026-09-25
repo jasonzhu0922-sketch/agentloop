@@ -9482,6 +9482,61 @@ test("ModelPlanner keeps a selected-list count as a non-blocking evidence signal
   assert.equal(plan.steps[0]?.successCriteria.find((criterion) => criterion.id === "explicit_caveats")?.blocking, false);
 });
 
+test("ProfiledRuleStepAssessor rejects an accepted Markdown receipt when the Step requires HTML", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    expectedArtifactKind: "html",
+    step: {
+      ...step("build-html-report"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "The delivered report path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The delivered report is non-empty.", source: "planner" },
+        { id: "artifact_acceptance", description: "The artifact acceptance receipt is recorded.", source: "planner" },
+        { id: "format_matches_request", description: "The delivered report format matches the request.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Delivered report-source.md.",
+      toolCalls: [{
+        toolCallId: "verify-markdown",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "risk-report/report-source.md", kind: "markdown" },
+          verdict: "accepted",
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+            caveated: [],
+            failed: [],
+          },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(
+    assessment.criteria.filter((criterion) => ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"].includes(criterion.criterionId)).map((criterion) => criterion.satisfied),
+    [false, false, false, false],
+  );
+  assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("format_matches_request"));
+});
+
 test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking for Runtime gates", async () => {
   const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     runId: "run",

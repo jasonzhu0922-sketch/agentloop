@@ -2811,6 +2811,7 @@ export class RunService {
             runId: input.runId,
             planId: plan.id,
             step: activeStep,
+            ...(stepTaskProfile.artifactKind === "none" ? {} : { expectedArtifactKind: stepTaskProfile.artifactKind }),
             skills: activatedStepSkills,
             evidence,
             modelEvidence,

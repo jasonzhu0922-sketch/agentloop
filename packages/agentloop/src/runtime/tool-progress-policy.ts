@@ -663,12 +663,16 @@ function isAcceptanceDeliverableArtifact(
   artifact: RuntimeStepArtifactRef,
   policy: RuntimeToolProgressPolicy,
 ): boolean {
+  // A converter's output and a tool-provided acceptance profile establish
+  // inspectability, not that this is the artifact the current Step promised
+  // to deliver. Check the Step-owned target before either shortcut can make
+  // an intermediate format eligible for automatic acceptance.
+  if (
+    policy.expectedArtifactKind !== undefined
+    && !artifactMatchesExpectedKind(artifact, policy.expectedArtifactKind)
+  ) return false;
   if (artifact.acceptanceProfile !== undefined) return true;
   if (artifact.sourceTool === "convert_artifact") return true;
-  if (policy.expectedArtifactKind !== undefined) {
-    if (artifact.artifactKind !== undefined) return artifactKindMatchesExpected(artifact.artifactKind, policy.expectedArtifactKind);
-    return artifactPathMatchesExpectedKind(artifact.path, policy.expectedArtifactKind);
-  }
   if (artifact.artifactKind !== undefined && artifact.artifactKind !== "code" && artifact.artifactKind !== "source") return true;
   return !isGeneratedSourcePath(artifact.path);
 }
@@ -1135,6 +1139,14 @@ function isGeneratedSourcePath(path: string): boolean {
   if (basename === "makefile" || basename === "dockerfile") return true;
   const dot = basename.lastIndexOf(".");
   return dot > 0 && GENERATED_SOURCE_EXTENSIONS.has(basename.slice(dot));
+}
+
+export function artifactMatchesExpectedKind(
+  artifact: Pick<RuntimeStepArtifactRef, "path" | "artifactKind">,
+  expected: string,
+): boolean {
+  if (artifact.artifactKind !== undefined) return artifactKindMatchesExpected(artifact.artifactKind, expected);
+  return artifactPathMatchesExpectedKind(artifact.path, expected);
 }
 
 function artifactKindMatchesExpected(actual: string, expected: string): boolean {
