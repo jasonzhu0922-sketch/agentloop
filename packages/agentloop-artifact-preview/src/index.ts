@@ -8,7 +8,7 @@ export interface PreviewArtifact {
   readonly mimeType: string;
 }
 
-export type ArtifactPreviewMode = "html" | "image" | "pdf" | "structured";
+export type ArtifactPreviewMode = "html" | "image" | "pdf" | "audio" | "structured";
 
 export type StructuredArtifactPreview =
   | { readonly kind: "text"; readonly name: string; readonly mimeType: string; readonly text: string; readonly truncated: boolean }
@@ -160,6 +160,7 @@ export function artifactPreviewMode(artifact: Pick<PreviewArtifact, "name" | "pa
   const extension = artifactExtension(artifact.name || artifact.path || "");
   if (mimeBase === "text/html" || extension === "html" || extension === "htm") return "html";
   if (mimeBase.startsWith("image/")) return "image";
+  if (mimeBase === "audio/wav" || extension === "wav") return "audio";
   if (mimeBase === "application/pdf" || extension === "pdf") return "pdf";
   return "structured";
 }
@@ -266,6 +267,7 @@ export function renderBlobPreview(mode: Exclude<ArtifactPreviewMode, "structured
   const safeName = escapeHtml(name);
   if (mode === "html") return `<iframe class="preview-frame preview-html" src="${safeUrl}" title="${safeName}" sandbox="allow-scripts allow-forms allow-popups"></iframe>`;
   if (mode === "image") return `<img class="preview-image" src="${safeUrl}" alt="${safeName}" />`;
+  if (mode === "audio") return `<audio class="preview-audio" controls src="${safeUrl}">无法播放该音频，请下载后用本地播放器打开。</audio>`;
   return `<object class="preview-frame" data="${safeUrl}" type="application/pdf"></object>`;
 }
 

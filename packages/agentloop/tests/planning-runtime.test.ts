@@ -1012,6 +1012,17 @@ test("Task intent preserves an explicit HTML output format when a later constrai
   assert.equal(intent.wantsArtifact, true);
 });
 
+test("Task intent preserves WAV audio as a typed workspace deliverable", () => {
+  const intent = classifyTaskIntent({
+    objective: "运行工作区中的播放器脚本，生成可播放的 WAV 音频文件并保存到工作区。",
+  });
+
+  assert.equal(intent.artifactAction, "create");
+  assert.equal(intent.artifactKind, "audio");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
+  assert.equal(intent.wantsArtifact, true);
+});
+
 test("structured task understanding preserves subject, evidence, deliverable, and workflow before Planner", () => {
   const understanding = understandTask({
     objective: "分析 2025 年 11 月 3 日至 12 月 4 日，唐山市河钢 HRB400E Φ8 热轧盘螺工程采购价走势，并输出 HTML 格式的分析报告",

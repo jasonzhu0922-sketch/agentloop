@@ -5809,7 +5809,7 @@ function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number])
 
 const ARTIFACT_EXTENSIONS = new Set([
   "csv", "doc", "docx", "gif", "html", "jpeg", "jpg", "json", "md", "pdf", "png",
-  "pptx", "svg", "txt", "webp", "xlsx",
+  "pptx", "svg", "txt", "wav", "webp", "xlsx",
 ]);
 const ARTIFACT_EXTENSION_PATTERN = /\.([a-z0-9]+)(?=$|[\s'"),.:;])/gi;
 

@@ -6,6 +6,7 @@ test("routes browser-native formats to byte previews and Office formats to struc
   assert.equal(artifactPreviewMode({ name: "deck.html", mimeType: "text/html; charset=utf-8" }), "html");
   assert.equal(artifactPreviewMode({ name: "poster.png", mimeType: "image/png" }), "image");
   assert.equal(artifactPreviewMode({ name: "report.pdf", mimeType: "application/pdf" }), "pdf");
+  assert.equal(artifactPreviewMode({ name: "southern_station.wav", mimeType: "audio/wav" }), "audio");
   assert.equal(artifactPreviewMode({ name: "notes.md", mimeType: "text/markdown" }), "structured");
   assert.equal(artifactPreviewMode({ name: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }), "structured");
   assert.equal(usesBlobPreview({ name: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }), false);

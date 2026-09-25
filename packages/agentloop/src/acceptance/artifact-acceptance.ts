@@ -23,6 +23,7 @@ export const ARTIFACT_ACCEPTANCE_KINDS = [
   "markdown",
   "code",
   "image",
+  "audio",
   "json",
 ] as const;
 
@@ -240,6 +241,8 @@ function verifyByProfile(
       return verifyPdfProfile(path, content, truncated);
     case "image":
       return verifyImageProfile(path, content);
+    case "audio":
+      return verifyWavProfile(path, content);
     case "json":
       return verifyJsonProfile(path, content, truncated);
     case "markdown":
@@ -611,6 +614,63 @@ function verifyImageProfile(path: string, content: Buffer): ArtifactAcceptanceCh
   ];
 }
 
+function verifyWavProfile(path: string, content: Buffer): ArtifactAcceptanceCheck[] {
+  const metadata = decodeWavMetadata(content);
+  const extensionMatches = /\.wav$/i.test(path);
+  const decoded = metadata !== undefined;
+  return [
+    checkStatus("format_matches_request", extensionMatches && decoded, {
+      expected: "audio",
+      extensionMatches,
+      detectedType: decoded ? "wav" : undefined,
+      decoded,
+    }),
+    checkStatus("artifact_openable", decoded, {
+      mode: "wav_header",
+      ...(metadata ?? {}),
+    }),
+  ];
+}
+
+function decodeWavMetadata(content: Buffer): Record<string, number> | undefined {
+  if (content.length < 12 || content.subarray(0, 4).toString("ascii") !== "RIFF" || content.subarray(8, 12).toString("ascii") !== "WAVE") {
+    return undefined;
+  }
+  let cursor = 12;
+  let format: { audioFormat: number; channels: number; sampleRate: number; byteRate: number; blockAlign: number; bitsPerSample: number } | undefined;
+  let dataBytes: number | undefined;
+  while (cursor + 8 <= content.length) {
+    const id = content.subarray(cursor, cursor + 4).toString("ascii");
+    const size = content.readUInt32LE(cursor + 4);
+    const payloadStart = cursor + 8;
+    const payloadEnd = payloadStart + size;
+    if (payloadEnd > content.length) return undefined;
+    if (id === "fmt ") {
+      if (size < 16) return undefined;
+      format = {
+        audioFormat: content.readUInt16LE(payloadStart),
+        channels: content.readUInt16LE(payloadStart + 2),
+        sampleRate: content.readUInt32LE(payloadStart + 4),
+        byteRate: content.readUInt32LE(payloadStart + 8),
+        blockAlign: content.readUInt16LE(payloadStart + 12),
+        bitsPerSample: content.readUInt16LE(payloadStart + 14),
+      };
+    } else if (id === "data") {
+      dataBytes = size;
+    }
+    cursor = payloadEnd + (size % 2);
+  }
+  if (format === undefined || dataBytes === undefined || dataBytes === 0) return undefined;
+  if (format.channels < 1 || format.sampleRate < 1 || format.blockAlign < 1 || format.bitsPerSample < 1) return undefined;
+  if (format.byteRate !== format.sampleRate * format.blockAlign || dataBytes % format.blockAlign !== 0) return undefined;
+  return {
+    ...format,
+    dataBytes,
+    frameCount: dataBytes / format.blockAlign,
+    durationSeconds: dataBytes / format.byteRate,
+  };
+}
+
 function verifyJsonProfile(path: string, content: Buffer, truncated: boolean): ArtifactAcceptanceCheck[] {
   const extensionMatches = /\.json$/i.test(path);
   let parseOk = false;
@@ -668,6 +728,7 @@ function resolveArtifactKind(
   if (extension === ".md" || extension === ".markdown") return "markdown";
   if (extension === ".json") return "json";
   if (isSourceArtifactPath(path)) return "code";
+  if (extension === ".wav") return "audio";
   if (imageSignature(content) !== undefined) return "image";
   return "generic_file";
 }

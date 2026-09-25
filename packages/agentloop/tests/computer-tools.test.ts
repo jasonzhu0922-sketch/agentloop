@@ -27,6 +27,8 @@ test("code artifacts are classified by source extension while generic files stay
   assert.equal(artifactMatchesExpectedKind({ path: "player.tsx", artifactKind: undefined }, "code"), true);
   assert.equal(artifactMatchesExpectedKind({ path: "notes.txt", artifactKind: "generic_file" }, "code"), false);
   assert.equal(artifactMatchesExpectedKind({ path: "page.html", artifactKind: "html" }, "code"), false);
+  assert.equal(artifactMatchesExpectedKind({ path: "southern_station.wav", artifactKind: "audio" }, "audio"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "southern_station_player.py", artifactKind: "code" }, "audio"), false);
 });
 
 test("computer paths cannot escape the workspace lexically or through a symbolic link", async () => {
@@ -1169,6 +1171,44 @@ test("verify_artifact_acceptance decodes image dimensions through the local imag
     assert.equal(check(result, "rendered_open")?.status, "passed");
     assert.equal(check(result, "rendered_open")?.evidence.width, 2);
     assert.equal(check(result, "rendered_open")?.evidence.height, 3);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verify_artifact_acceptance validates WAV headers and audio metadata", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-wav-"));
+  try {
+    const wav = Buffer.alloc(48);
+    wav.write("RIFF", 0, "ascii");
+    wav.writeUInt32LE(40, 4);
+    wav.write("WAVEfmt ", 8, "ascii");
+    wav.writeUInt32LE(16, 16);
+    wav.writeUInt16LE(1, 20);
+    wav.writeUInt16LE(1, 22);
+    wav.writeUInt32LE(8_000, 24);
+    wav.writeUInt32LE(16_000, 28);
+    wav.writeUInt16LE(2, 32);
+    wav.writeUInt16LE(16, 34);
+    wav.write("data", 36, "ascii");
+    wav.writeUInt32LE(4, 40);
+    wav.writeInt16LE(0, 44);
+    wav.writeInt16LE(0, 46);
+    await fs.writeFile(join(root, "tone.wav"), wav);
+    const result = await new ArtifactAcceptanceService().verify(new ComputerExecutor(root), { artifactPath: "tone.wav" });
+
+    assert.equal(result.artifact.kind, "audio");
+    assert.equal(result.artifact.profileId, "audio");
+    assert.equal(result.verdict, "accepted");
+    assert.equal(check(result, "format_matches_request")?.status, "passed");
+    assert.equal(check(result, "artifact_openable")?.evidence.mode, "wav_header");
+    assert.equal(check(result, "artifact_openable")?.evidence.sampleRate, 8_000);
+    assert.equal(check(result, "artifact_openable")?.evidence.durationSeconds, 0.00025);
+
+    await fs.writeFile(join(root, "broken.wav"), Buffer.from("not a wav"));
+    const invalid = await new ArtifactAcceptanceService().verify(new ComputerExecutor(root), { artifactPath: "broken.wav" });
+    assert.equal(invalid.verdict, "rejected");
+    assert.equal(check(invalid, "format_matches_request")?.status, "failed");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

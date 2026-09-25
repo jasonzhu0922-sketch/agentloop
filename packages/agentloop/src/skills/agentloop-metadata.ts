@@ -11,6 +11,7 @@ export const SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES = [
   "presentation",
   "spreadsheet",
   "image",
+  "audio",
   "code",
   "none",
 ] as const;

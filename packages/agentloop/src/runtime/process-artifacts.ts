@@ -441,7 +441,7 @@ function isSafeRelativePath(path: string): boolean {
 function mimeTypeFor(path: string): string {
   const extension = extensionFor(path);
   const types: Record<string, string> = {
-    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml",
+    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml", wav: "audio/wav",
     html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8", md: "text/markdown; charset=utf-8", txt: "text/plain; charset=utf-8",
     csv: "text/csv; charset=utf-8", json: "application/json; charset=utf-8",
     doc: "application/msword",
@@ -453,7 +453,7 @@ function mimeTypeFor(path: string): string {
 }
 
 function isPreviewable(path: string): boolean {
-  return /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx)$/i.test(path);
+  return /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|wav|xlsx)$/i.test(path);
 }
 
 function extensionFor(path: string): string {

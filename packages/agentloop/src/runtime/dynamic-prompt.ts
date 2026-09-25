@@ -9,7 +9,7 @@ export type RiskProfile =
   | "external_side_effect"
   | "dangerous_or_irreversible";
 export type PlanShape = "single_leaf" | "fact_then_produce" | "multi_deliverable" | "pipeline" | "recovery_patch" | "human_blocked";
-export type ArtifactKind = "html" | "document" | "presentation" | "spreadsheet" | "image" | "code" | "none";
+export type ArtifactKind = "html" | "document" | "presentation" | "spreadsheet" | "image" | "audio" | "code" | "none";
 export type ArtifactAction = "none" | "create" | "modify" | "transform";
 export type SourceNeed = "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
 export type DeliverySurface = "conversation" | "workspace_artifact";

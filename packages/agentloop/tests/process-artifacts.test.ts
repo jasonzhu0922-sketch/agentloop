@@ -259,6 +259,33 @@ test("process artifacts collect legacy DOC command outputs as Word artifacts", a
   }
 });
 
+test("process artifacts retain WAV outputs as previewable audio artifacts", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-wav-artifacts-"));
+  try {
+    await fs.writeFile(join(root, "southern_station.wav"), Buffer.from("RIFF....WAVEfmt "));
+    const artifacts = await collectProcessArtifacts({
+      runId: "run-wav-artifacts",
+      workspaceRoot: root,
+      runCreatedAt: Date.now() - 1_000,
+      events: [event(1, "tool.completed", {
+        toolName: "computer_run_command",
+        isError: false,
+        result: JSON.stringify({
+          exitCode: 0,
+          stdout: "rendered southern_station.wav",
+          fileChanges: [{ path: "southern_station.wav", changeType: "created", bytes: 16 }],
+        }),
+      })],
+    });
+
+    assert.deepEqual(artifacts.map((artifact) => artifact.path), ["southern_station.wav"]);
+    assert.equal(artifacts[0]?.mimeType, "audio/wav");
+    assert.equal(artifacts[0]?.previewable, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("process artifacts include patched outputs from computer_patch_file", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-patched-artifacts-"));
   try {

@@ -160,6 +160,7 @@ function PreviewContent({
     );
   }
   if (url && mode === "image") return <img className="preview-image" src={url} alt={artifact.name} />;
+  if (url && mode === "audio") return <audio className="preview-audio" controls src={url}>无法播放该音频，请下载后用本地播放器打开。</audio>;
   if (url && mode === "pdf") return <object className="preview-frame" data={url} type="application/pdf" />;
   if (preview?.kind === "text") {
     const isMarkdown = /markdown/.test(preview.mimeType) || /\.md$/i.test(preview.name);

@@ -3233,6 +3233,37 @@ test("artifact progress policy treats requested source code as the deliverable i
   assert.equal(state?.nextAction, "verify_existing_artifact");
 });
 
+test("artifact progress policy never accepts a generator script for a requested audio deliverable", () => {
+  const policy = artifactStepToolProgressPolicy(
+    ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+    { expectedArtifactKind: "audio" },
+  );
+  const state = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [{
+      toolCallId: "repair-audio-generator",
+      toolName: "computer_patch_file",
+      isError: false,
+      operationStatus: "succeeded",
+      result: JSON.stringify({
+        path: "southern_station_player.py",
+        bytes: 14_457,
+        sha256: "repaired-source-hash",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "southern_station_player.py", artifactKind: "code", bytes: 14_457, sha256: "repaired-source-hash" },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveated: [], failed: [] },
+        },
+      }),
+    }],
+  });
+
+  assert.equal(state?.workProduct.status, "process_artifact_available");
+  assert.deepEqual(state?.workProduct.deliverableArtifacts, []);
+  assert.deepEqual(state?.workProduct.processArtifacts.map((artifact) => artifact.path), ["southern_station_player.py"]);
+  assert.notEqual(state?.nextAction, "verify_existing_artifact");
+});
+
 test("artifact progress policy does not bind a mismatched acceptance receipt to requested code", () => {
   const policy = artifactStepToolProgressPolicy(
     ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],

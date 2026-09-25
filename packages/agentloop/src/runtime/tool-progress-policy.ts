@@ -1208,6 +1208,7 @@ function artifactKindMatchesExpected(actual: string, expected: string): boolean 
   if (normalizedExpected === "presentation") return normalizedActual === "pptx";
   if (normalizedExpected === "spreadsheet") return normalizedActual === "xlsx" || normalizedActual === "csv";
   if (normalizedExpected === "image") return normalizedActual === "svg";
+  if (normalizedExpected === "audio") return normalizedActual === "wav";
   return false;
 }
 
@@ -1232,6 +1233,8 @@ function artifactPathMatchesExpectedKind(path: string, expected: string): boolea
       return extension === ".xlsx" || extension === ".csv";
     case "image":
       return extension === ".png" || extension === ".jpg" || extension === ".jpeg" || extension === ".webp" || extension === ".gif" || extension === ".svg";
+    case "audio":
+      return extension === ".wav";
     case "code":
       return extension === ".json" || isSourceArtifactPath(path) || /(?:^|[\\/])(?:makefile|dockerfile)$/i.test(path);
     default:
@@ -1244,6 +1247,7 @@ function normalizeArtifactKind(kind: string): string {
   if (normalized === "htm") return "html";
   if (normalized === "md") return "markdown";
   if (normalized === "jpg" || normalized === "jpeg" || normalized === "png" || normalized === "webp" || normalized === "gif") return "image";
+  if (normalized === "wav") return "audio";
   if (normalized === "word" || normalized === "pdf" || normalized === "txt") return normalized;
   if (normalized === "xlsx") return "spreadsheet";
   return normalized;
