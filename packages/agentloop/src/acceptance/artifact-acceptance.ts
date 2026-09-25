@@ -1,7 +1,7 @@
 import { extname } from "node:path";
 import { Script } from "node:vm";
 import type { ComputerExecutor } from "../computer/computer-executor.ts";
-import { isWordDocumentPath } from "../shared/artifact-format.ts";
+import { isSourceArtifactPath, isWordDocumentPath } from "../shared/artifact-format.ts";
 import type {
   ArtifactAcceptanceProvider,
   ArtifactAcceptanceProviderQuery,
@@ -21,6 +21,7 @@ export const ARTIFACT_ACCEPTANCE_KINDS = [
   "pptx",
   "pdf",
   "markdown",
+  "code",
   "image",
   "json",
 ] as const;
@@ -243,9 +244,28 @@ function verifyByProfile(
       return verifyJsonProfile(path, content, truncated);
     case "markdown":
       return verifyMarkdownProfile(path, content, truncated);
+    case "code":
+      return verifyCodeProfile(path, content, truncated);
     case "generic_file":
       return [passed("artifact_openable", { mode: "workspace_read", note: "File bytes were read through the workspace-contained executor." })];
   }
+}
+
+function verifyCodeProfile(path: string, content: Buffer, truncated: boolean): ArtifactAcceptanceCheck[] {
+  const sourcePath = isSourceArtifactPath(path);
+  const hasContent = content.length > 0;
+  return [
+    checkStatus("format_matches_request", sourcePath, {
+      expected: "code",
+      sourcePath,
+      contentTruncated: truncated,
+    }),
+    checkStatus("artifact_openable", hasContent, {
+      mode: "workspace_read",
+      sourcePath,
+      contentTruncated: truncated,
+    }),
+  ];
 }
 
 function verifyHtmlProfile(
@@ -647,6 +667,7 @@ function resolveArtifactKind(
   if (extension === ".pdf") return "pdf";
   if (extension === ".md" || extension === ".markdown") return "markdown";
   if (extension === ".json") return "json";
+  if (isSourceArtifactPath(path)) return "code";
   if (imageSignature(content) !== undefined) return "image";
   return "generic_file";
 }

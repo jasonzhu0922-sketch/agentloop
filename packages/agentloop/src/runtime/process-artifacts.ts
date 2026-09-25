@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { inflateRawSync } from "node:zlib";
+import { isSourceArtifactPath } from "../shared/artifact-format.ts";
 import type { StoredRunEvent } from "./run-service.ts";
 
 const MAX_PROCESS_ARTIFACT_BYTES = 50 * 1024 * 1024;
@@ -14,10 +15,6 @@ const MAX_PREVIEW_IMAGE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_PPTX_WIDTH = 12_192_000;
 const DEFAULT_PPTX_HEIGHT = 6_858_000;
 const COMMAND_ARTIFACT_EXTENSION_PATTERN = /(?:^|[\s'"(])([^\s'"),:;]+?\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx))(?=$|[\s'"),:;])/giu;
-const GENERATED_SOURCE_EXTENSIONS = new Set([
-  ".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ps1", ".py", ".sh", ".ts", ".tsx", ".zsh",
-]);
-
 export interface ProcessArtifact {
   readonly runId: string;
   readonly id: string;
@@ -346,9 +343,7 @@ function isAcceptedArtifactAcceptanceResult(result: Readonly<Record<string, unkn
 function isGeneratedSourcePath(path: string): boolean {
   const normalized = path.trim().toLowerCase().replaceAll("\\", "/");
   const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
-  if (basename === "makefile" || basename === "dockerfile") return true;
-  const dot = basename.lastIndexOf(".");
-  return dot > 0 && GENERATED_SOURCE_EXTENSIONS.has(basename.slice(dot));
+  return basename === "makefile" || basename === "dockerfile" || isSourceArtifactPath(path);
 }
 
 function parseResult(value: unknown): Record<string, unknown> | undefined {

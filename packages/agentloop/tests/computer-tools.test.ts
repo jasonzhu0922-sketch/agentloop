@@ -15,10 +15,19 @@ import { createComputerTools } from "../src/tools/computer-tools.ts";
 import { createCoreTools } from "../src/tools/compose.ts";
 import { createVisibleDirectoryTools } from "../src/tools/visible-directory-tools.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { artifactMatchesExpectedKind } from "../src/runtime/tool-progress-policy.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 
 const require = createRequire(import.meta.url);
 const JSZip = require("jszip") as { new(): { file(path: string, content: string): unknown; generateAsync(options: { type: "nodebuffer" }): Promise<Buffer> } };
+
+test("code artifacts are classified by source extension while generic files stay distinct", () => {
+  assert.equal(artifactMatchesExpectedKind({ path: "player.py", artifactKind: "code" }, "code"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "player.java", artifactKind: "generic_file" }, "code"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "player.tsx", artifactKind: undefined }, "code"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "notes.txt", artifactKind: "generic_file" }, "code"), false);
+  assert.equal(artifactMatchesExpectedKind({ path: "page.html", artifactKind: "html" }, "code"), false);
+});
 
 test("computer paths cannot escape the workspace lexically or through a symbolic link", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-computer-"));
@@ -1160,6 +1169,28 @@ test("verify_artifact_acceptance decodes image dimensions through the local imag
     assert.equal(check(result, "rendered_open")?.status, "passed");
     assert.equal(check(result, "rendered_open")?.evidence.width, 2);
     assert.equal(check(result, "rendered_open")?.evidence.height, 3);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verify_artifact_acceptance classifies source files as code", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-code-"));
+  try {
+    for (const path of ["player.py", "App.tsx", "Player.java"]) {
+      await fs.writeFile(join(root, path), "// source artifact\n");
+    }
+    const service = new ArtifactAcceptanceService();
+    const executor = new ComputerExecutor(root);
+
+    for (const artifactPath of ["player.py", "App.tsx", "Player.java"]) {
+      const result = await service.verify(executor, { artifactPath });
+      assert.equal(result.artifact.kind, "code", artifactPath);
+      assert.equal(result.artifact.profileId, "code", artifactPath);
+      assert.equal(result.verdict, "accepted", artifactPath);
+      assert.equal(check(result, "format_matches_request")?.status, "passed", artifactPath);
+      assert.equal(check(result, "artifact_openable")?.status, "passed", artifactPath);
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

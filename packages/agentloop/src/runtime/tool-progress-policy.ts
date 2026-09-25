@@ -1,4 +1,4 @@
-import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
+import { canonicalArtifactFormatFamily, isSourceArtifactPath } from "../shared/artifact-format.ts";
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 import {
   parseJsonRecord,
@@ -674,7 +674,8 @@ function isAcceptanceDeliverableArtifact(
   if (artifact.acceptanceProfile !== undefined) return true;
   if (artifact.sourceTool === "convert_artifact") return true;
   if (artifact.artifactKind !== undefined && artifact.artifactKind !== "code" && artifact.artifactKind !== "source") return true;
-  return !isGeneratedSourcePath(artifact.path);
+  return !isSourceArtifactPath(artifact.path)
+    && !/(?:^|[\\/])(?:makefile|dockerfile)$/i.test(artifact.path);
 }
 
 function formatEvidenceCompletionDelivery(input: {
@@ -1116,36 +1117,18 @@ function artifactRefFromEvidence(evidence: AgentLoopToolEvidence): RuntimeStepAr
   };
 }
 
-const GENERATED_SOURCE_EXTENSIONS = new Set([
-  ".bash",
-  ".cjs",
-  ".cts",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".mts",
-  ".ps1",
-  ".py",
-  ".sh",
-  ".ts",
-  ".tsx",
-  ".zsh",
-]);
-
-function isGeneratedSourcePath(path: string): boolean {
-  const normalized = path.trim().toLowerCase();
-  const slash = normalized.lastIndexOf("/");
-  const basename = slash === -1 ? normalized : normalized.slice(slash + 1);
-  if (basename === "makefile" || basename === "dockerfile") return true;
-  const dot = basename.lastIndexOf(".");
-  return dot > 0 && GENERATED_SOURCE_EXTENSIONS.has(basename.slice(dot));
-}
-
 export function artifactMatchesExpectedKind(
   artifact: Pick<RuntimeStepArtifactRef, "path" | "artifactKind">,
   expected: string,
 ): boolean {
-  if (artifact.artifactKind !== undefined) return artifactKindMatchesExpected(artifact.artifactKind, expected);
+  if (artifact.artifactKind !== undefined) {
+    if (artifactKindMatchesExpected(artifact.artifactKind, expected)) return true;
+    // Older receipts used generic_file for source files. Keep those receipts
+    // usable only when the path independently proves it is source code.
+    return normalizeArtifactKind(artifact.artifactKind) === "generic_file"
+      && normalizeArtifactKind(expected) === "code"
+      && artifactPathMatchesExpectedKind(artifact.path, expected);
+  }
   return artifactPathMatchesExpectedKind(artifact.path, expected);
 }
 
@@ -1158,6 +1141,9 @@ function artifactKindMatchesExpected(actual: string, expected: string): boolean 
       || normalizedActual === "pdf"
       || normalizedActual === "markdown"
       || normalizedActual === "generic_file";
+  }
+  if (normalizedExpected === "code") {
+    return normalizedActual === "code";
   }
   if (normalizedExpected === "presentation") return normalizedActual === "pptx";
   if (normalizedExpected === "spreadsheet") return normalizedActual === "xlsx" || normalizedActual === "csv";
@@ -1187,7 +1173,7 @@ function artifactPathMatchesExpectedKind(path: string, expected: string): boolea
     case "image":
       return extension === ".png" || extension === ".jpg" || extension === ".jpeg" || extension === ".webp" || extension === ".gif" || extension === ".svg";
     case "code":
-      return extension === ".json" || extension === ".jsx" || extension === ".tsx" || isGeneratedSourcePath(path);
+      return extension === ".json" || isSourceArtifactPath(path) || /(?:^|[\\/])(?:makefile|dockerfile)$/i.test(path);
     default:
       return false;
   }
