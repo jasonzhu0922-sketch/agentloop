@@ -10809,6 +10809,57 @@ test("Admission adds local script execution tools for Skill-bound leaves", () =>
   assert.deepEqual(plan.steps[0].executionBinding.resolvedToolNames, ["load_skill", "computer_run_command"]);
 });
 
+test("Admission rejects a fact leaf whose source-provider evidence is only supported by a different bound Skill", () => {
+  const apiQuery = skillFixture({
+    id: "api-query",
+    name: "api-query",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["api"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "source_urls", "explicit_caveats"],
+    },
+  });
+  const database = skillFixture({
+    id: "database",
+    name: "database",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["database"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    },
+  });
+  const requiredKinds = ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const;
+
+  assert.throws(
+    () => admitPlan({
+      runId: "run-mixed-source-provider-evidence",
+      proposal: {
+        goal: "查询 API 并生成报告",
+        selectedSkillIds: [apiQuery.id, database.id],
+        selectedSkillRoles: [
+          { skillId: apiQuery.id, role: "source_provider", reason: "查询 API。" },
+          { skillId: database.id, role: "source_provider", reason: "查询数据库。" },
+        ],
+        steps: [{
+          ...step("acquire_api_facts"),
+          role: "fact_acquisition",
+          objective: "查询 API 事实。",
+          skillIds: [apiQuery.id, database.id],
+          requiredCapabilities: [],
+          evidenceContract: { requiredKinds, caveatPolicy: "mark_unverified_facts" },
+          successCriteria: requiredKinds.map((id) => ({ id, description: `${id} is available.`, source: "planner" as const })),
+        }],
+      },
+      availableSkills: [apiQuery, database],
+      availableToolNames: new Set(["load_skill", "computer_run_command"]),
+      availableCapabilities: planningCapabilitiesFromSkills([apiQuery, database]),
+    }),
+    (error: unknown) => {
+      assert.equal(hasCode(error, "PLAN_NOT_ADMITTED"), true);
+      assert.match((error as Error).message, /schema_summary, record_counts, structured_extraction_artifact/);
+      return true;
+    },
+  );
+});
+
 test("ModelStepAssessor records invalid assessment response shape for diagnostics", async () => {
   const assessor = new ModelStepAssessor(new StaticModel({
     content: "not structured",

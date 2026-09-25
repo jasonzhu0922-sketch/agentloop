@@ -61,6 +61,16 @@ const SOURCE_GROUNDING_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "table_coverage",
   "structured_extraction_artifact",
 ]);
+const SOURCE_PROVIDER_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "derived_aggregation",
+  "explicit_caveats",
+]);
 
 export function admitPlan(input: {
   runId: string;
@@ -299,6 +309,7 @@ export function admitPlan(input: {
   for (const step of admittedSteps) {
     assertEvidenceContractIsProducible({
       stepId: step.id,
+      role: step.role,
       evidenceContract: step.evidenceContract,
       successCriteria: step.successCriteria,
       requiredCapabilities: step.executionBinding.requiredCapabilities,
@@ -572,6 +583,7 @@ function assertEvidenceContract(stepId: string, contract: EvidenceContract): voi
 
 function assertEvidenceContractIsProducible(input: {
   readonly stepId: string;
+  readonly role?: PlanStep["role"];
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
   readonly requiredCapabilities: readonly string[];
@@ -579,18 +591,39 @@ function assertEvidenceContractIsProducible(input: {
 }): void {
   if (input.evidenceContract === undefined) return;
   const capabilityById = new Map(input.availableCapabilities.map((capability) => [capability.id, capability]));
-  const produced = new Set(input.requiredCapabilities.flatMap((id) => capabilityById.get(id)?.produces ?? []));
+  const boundCapabilities = input.requiredCapabilities
+    .map((id) => capabilityById.get(id))
+    .filter((capability): capability is PlanningCapability => capability !== undefined);
+  const produced = new Set(boundCapabilities.flatMap((capability) => capability.produces));
+  const sourceProviderCapabilities = boundCapabilities.filter((capability) => capability.category === "skill_source_provider");
   const blockingKinds = new Set(input.successCriteria
     .filter((criterion) => criterion.blocking !== false)
     .map((criterion) => criterion.id));
-  const unavailable = input.evidenceContract.requiredKinds.filter((kind) =>
+  const unavailable = new Set(input.evidenceContract.requiredKinds.filter((kind) =>
     TOOL_PRODUCED_EVIDENCE_KINDS.has(kind)
     && blockingKinds.has(kind)
     && !produced.has(kind),
-  );
-  if (unavailable.length > 0) {
+  ));
+  // A fact-acquisition leaf may combine providers only for evidence that each
+  // bound provider can actually publish.  Treating their capabilities as a
+  // union lets an unrelated provider make a required receipt look admissible,
+  // although the executing provider cannot satisfy it at runtime.  Different
+  // source evidence interfaces belong in separate fact leaves with an
+  // explicit dependency instead.
+  if (input.role === "fact_acquisition" && sourceProviderCapabilities.length > 0) {
+    for (const kind of input.evidenceContract.requiredKinds) {
+      if (
+        SOURCE_PROVIDER_EVIDENCE_KINDS.has(kind)
+        && blockingKinds.has(kind)
+        && !sourceProviderCapabilities.every((capability) => capability.produces.includes(kind))
+      ) {
+        unavailable.add(kind);
+      }
+    }
+  }
+  if (unavailable.size > 0) {
     reject(
-      `Step ${input.stepId} requires evidence that its bound capabilities cannot produce: ${unavailable.join(", ")}`,
+      `Step ${input.stepId} requires evidence that its bound capabilities cannot produce: ${[...unavailable].join(", ")}`,
     );
   }
 }

@@ -642,11 +642,16 @@ function boundSourceProviderContractViolations(
   return proposal.steps.flatMap((step) => {
     const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
     if (requiredKinds.length === 0) return [];
-    const providerKinds: Set<EvidenceKind> = new Set(step.skillIds.flatMap((skillId) => {
+    const providerKindSets = step.skillIds.flatMap((skillId) => {
       const metadata = skillById.get(skillId)?.agentLoop;
-      return metadata?.roles.includes("source_provider") ? metadata.producesEvidenceKinds ?? [] : [];
-    }));
-    if (providerKinds.size === 0) return [];
+      return metadata?.roles.includes("source_provider")
+        ? [new Set<EvidenceKind>(metadata.producesEvidenceKinds ?? [])]
+        : [];
+    });
+    if (providerKindSets.length === 0) return [];
+    const providerKinds = new Set([...providerKindSets[0] ?? []].filter((kind) =>
+      providerKindSets.every((kinds) => kinds.has(kind)),
+    ));
     const invalidKinds = requiredKinds.filter((kind) => runtimeProducedEvidenceKind(kind) && !providerKinds.has(kind));
     return invalidKinds.length === 0 ? [] : [{
       stepId: step.id,
