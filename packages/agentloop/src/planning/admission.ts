@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
+import type { StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 import type { ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import {
@@ -92,6 +93,8 @@ export function admitPlan(input: {
     readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
     readonly evidenceDemand?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
   };
+  /** Canonical structured task interpretation produced before Planner admission. */
+  taskSemantics?: StructuredTaskUnderstanding;
   now?: number;
 }): ExecutionPlan {
   const { proposal } = input;
@@ -344,6 +347,7 @@ export function admitPlan(input: {
     version: 1,
     goal: proposal.goal,
     selectedSkillIds,
+    ...(input.taskSemantics === undefined ? {} : { taskSemantics: input.taskSemantics }),
     ...(input.resultBindings === undefined || input.resultBindings.length === 0 ? {} : { resultBindings: input.resultBindings }),
     status: "admitted",
     steps: admittedSteps,
@@ -685,11 +689,14 @@ function normalizeCompletionEvidenceContract(
   // Evidence contracts are explicit semantic requirements, not a generic
   // delivery protocol. Runtime records every delivery and Tool result for
   // audit; admission must not turn those observations into a hard criterion.
-  if (contract === undefined || role === undefined || role === "fact_acquisition" || role === "repair") return contract;
+  if (contract === undefined || role === "repair") return contract;
   if (taskIntent?.deliverySurface === "conversation" && taskIntent.artifactKind === "none") {
-    const requiredKinds = contract.requiredKinds.filter((kind) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind));
+    const requiredKinds = contract.requiredKinds.filter((kind) =>
+      !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind) && kind !== "delivery_receipt"
+    );
     return requiredKinds.length === 0 ? undefined : { ...contract, requiredKinds };
   }
+  if (role === undefined) return contract;
   if (!requireArtifactAcceptance || taskIntent?.deliverySurface !== "workspace_artifact") return contract;
   return {
     ...contract,
@@ -738,9 +745,11 @@ function normalizeCompletionSuccessCriteria(
   criteria: readonly SuccessCriterion[],
   taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
 ): readonly SuccessCriterion[] {
-  if (role === undefined || role === "fact_acquisition" || role === "repair") return criteria;
+  if (role === "repair") return criteria;
   if (taskIntent?.deliverySurface !== "conversation" || taskIntent.artifactKind !== "none") return criteria;
-  const normalized = criteria.filter((criterion) => !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id));
+  const normalized = criteria.filter((criterion) =>
+    !ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id) && criterion.id !== "delivery_receipt"
+  );
   return normalized.length > 0 ? normalized : [{
     id: "conversation_delivery",
     description: "A complete user-facing response is returned in the conversation.",
@@ -753,7 +762,7 @@ function normalizeCompletionCapabilities(
   capabilities: Set<string>,
   taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
 ): void {
-  if (role === undefined || role === "fact_acquisition" || role === "repair") return;
+  if (role === "repair") return;
   if (taskIntent?.deliverySurface !== "conversation" || taskIntent.artifactKind !== "none") return;
   capabilities.delete("workspace_artifact_write");
   capabilities.delete("artifact_acceptance");

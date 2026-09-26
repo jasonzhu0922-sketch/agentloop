@@ -2692,7 +2692,7 @@ async function executePrepared(
         toolName: call.name,
         replaySafe: tool.replaySafe,
         publishesRuntimeResult: tool.publishesRuntimeResult !== false,
-        timeoutMs: tool.timeoutMs,
+        timeoutMs: tool.executionTimeoutMs?.(input) ?? tool.timeoutMs,
       }, execute);
     const value = tracked.value;
     const operationOutcome = classifyToolOperationOutcome(value);
@@ -3114,8 +3114,8 @@ function serializeToolResult(value: unknown, maximum: number, resultRef?: Runtim
   }
   if (serialized === undefined) serialized = "null";
   if (serialized.length <= maximum) return serialized;
-  const compact = compactOversizedStructuredToolResult(visibleValue, serialized);
-  if (compact !== undefined && compact.length <= maximum) return compact;
+  const compact = compactOversizedStructuredToolResult(visibleValue, serialized, maximum);
+  if (compact !== undefined) return compact;
   const omitted = serialized.length - maximum;
   const digest = createHash("sha256").update(serialized).digest("hex");
   const refMarker = resultRef === undefined ? "" : `\n[Runtime ResultRef ${JSON.stringify(resultRef)}]`;
@@ -3123,11 +3123,17 @@ function serializeToolResult(value: unknown, maximum: number, resultRef?: Runtim
   return `${serialized.slice(0, headCharacters)}${refMarker}\n[truncated ${omitted} characters; sha256=${digest}]`;
 }
 
-function compactOversizedStructuredToolResult(value: unknown, serialized: string): string | undefined {
+/**
+ * A bounded Tool projection is still an evidence transport, not display-only
+ * text.  In particular, Assessment consumes the same projected Tool result
+ * as the next model turn.  Never replace a structured result with a partial
+ * JSON prefix: that would sever a committed RuntimeResult from its canonical
+ * receipt merely because its verbose payload is large.
+ */
+function compactOversizedStructuredToolResult(value: unknown, serialized: string, maximum: number): string | undefined {
   if (!isPlainRecord(value)) return undefined;
   const evidenceReceipt = isPlainRecord(value.evidenceReceipt) ? value.evidenceReceipt : undefined;
   const artifactReceipt = isPlainRecord(value.artifactReceipt) ? value.artifactReceipt : undefined;
-  if (evidenceReceipt === undefined && artifactReceipt === undefined) return undefined;
   const digest = createHash("sha256").update(serialized).digest("hex");
   const compact: Record<string, unknown> = {
     schema: typeof value.schema === "string" ? value.schema : undefined,
@@ -3142,8 +3148,11 @@ function compactOversizedStructuredToolResult(value: unknown, serialized: string
     sha256: value.sha256,
     artifact: isPlainRecord(value.artifact) ? value.artifact : undefined,
     caveats: Array.isArray(value.caveats) ? value.caveats : undefined,
-    evidenceReceipt,
-    artifactReceipt,
+    // Retain neutral scalar/count facts independently of the full payload so
+    // the next turn can reason over a bounded result without re-reading it.
+    summary: compactStructuredValue(value),
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt: compactStructuredValue(evidenceReceipt) }),
+    ...(artifactReceipt === undefined ? {} : { artifactReceipt: compactStructuredValue(artifactReceipt) }),
     contentLocation: value.contentLocation,
     contentSummary: value.contentSummary,
     stdoutRef: value.stdoutRef,
@@ -3155,7 +3164,71 @@ function compactOversizedStructuredToolResult(value: unknown, serialized: string
       sha256: digest,
     },
   };
-  return JSON.stringify(omitUndefinedRecord(compact));
+  const serializedCompact = JSON.stringify(omitUndefinedRecord(compact));
+  if (serializedCompact.length <= maximum) return serializedCompact;
+
+  // The receipt identity and kind states are the smallest semantic handoff
+  // required by the evidence gate.  Keep them even when a caller chooses an
+  // unusually small Tool-result budget.
+  const minimal: Record<string, unknown> = {
+    schema: typeof value.schema === "string" ? value.schema : "agentloop.resultProjection/v1",
+    ...(typeof value.rootId === "string" ? { rootId: value.rootId } : {}),
+    ...(typeof value.path === "string" ? { path: value.path } : {}),
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt: compactEvidenceReceiptIdentity(evidenceReceipt) }),
+    ...(artifactReceipt === undefined ? {} : { artifactReceipt: compactEvidenceReceiptIdentity(artifactReceipt) }),
+    ...(value.resultRef === undefined ? {} : { resultRef: value.resultRef }),
+    omittedToolResult: {
+      reason: "large_tool_result_receipt_preserved",
+      originalCharacters: serialized.length,
+      sha256: digest,
+    },
+  };
+  const serializedMinimal = JSON.stringify(omitUndefinedRecord(minimal));
+  if (serializedMinimal.length <= maximum) return serializedMinimal;
+
+  // This final projection is deliberately valid JSON.  It carries a durable
+  // content digest and may be supplemented by the RuntimeResult reference,
+  // rather than emitting an unparsable prefix that looks like evidence.
+  const terminalProjection = JSON.stringify({
+    schema: "agentloop.resultProjection/v1",
+    truncated: true,
+    sha256: digest,
+  });
+  return terminalProjection.length <= maximum ? terminalProjection : "0";
+}
+
+/**
+ * Generic bounded projection for Tool results and receipts.  It preserves
+ * shallow scalar facts (counts, paths, identifiers, verdicts) while bounding
+ * collection fan-out and nested payloads.  It intentionally knows no Tool,
+ * Skill, or domain-specific field names.
+ */
+function compactStructuredValue(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return value.length <= 512 ? value : `${value.slice(0, 509)}...`;
+  if (depth >= 3 || value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    return value.slice(0, 12)
+      .map((item) => compactStructuredValue(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+  if (!isPlainRecord(value)) return undefined;
+  return omitUndefinedRecord(Object.fromEntries(
+    Object.entries(value)
+      .slice(0, 24)
+      .map(([key, item]) => [key, compactStructuredValue(item, depth + 1)]),
+  ));
+}
+
+function compactEvidenceReceiptIdentity(value: Record<string, unknown>): Record<string, unknown> {
+  return omitUndefinedRecord({
+    schema: typeof value.schema === "string" ? value.schema : undefined,
+    receiptId: typeof value.receiptId === "string" ? value.receiptId : undefined,
+    sourceType: typeof value.sourceType === "string" ? value.sourceType : undefined,
+    verdict: typeof value.verdict === "string" ? value.verdict : undefined,
+    evidenceKinds: compactStructuredValue(value.evidenceKinds),
+    caveats: compactStructuredValue(value.caveats),
+  });
 }
 
 function omitUndefinedRecord(value: Record<string, unknown>): Record<string, unknown> {

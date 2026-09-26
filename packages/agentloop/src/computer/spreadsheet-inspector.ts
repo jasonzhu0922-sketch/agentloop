@@ -1,13 +1,8 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { extname, resolve } from "node:path";
-import { createRequire } from "node:module";
+import JSZip from "jszip";
 import { mapWithConcurrencyLimit } from "../shared/concurrency.ts";
-
-const require = createRequire(import.meta.url);
-const JSZip = require("jszip") as {
-  loadAsync(data: Buffer): Promise<ZipArchive>;
-};
 
 const XLSX_PROFILE_MAX_BYTES = 25 * 1024 * 1024;
 const CSV_PROFILE_MAX_BYTES = 10 * 1024 * 1024;

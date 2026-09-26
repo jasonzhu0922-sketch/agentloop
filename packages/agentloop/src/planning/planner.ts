@@ -1227,7 +1227,11 @@ function evidenceContractPolicyForTask(
   const sourceKinds = (["source_summary", "source_urls", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const)
     .filter((kind) => producibleSourceKinds.has(kind));
   const strictSourceKinds = sourceKinds.includes("source_summary")
-    ? (["source_summary", ...(sourceKinds.includes("source_urls") ? ["source_urls" as const] : [])] as const)
+    ? ([
+        "source_summary",
+        ...(sourceKinds.includes("source_urls") ? ["source_urls" as const] : []),
+        ...(sourceKinds.includes("explicit_caveats") ? ["explicit_caveats" as const] : []),
+      ] as const)
     : sourceKinds.filter((kind) => kind !== "explicit_caveats").slice(0, 1);
   const progressiveSourceKinds = sourceKinds.includes("source_urls")
     ? (["source_urls", ...(sourceKinds.includes("explicit_caveats") ? ["explicit_caveats" as const] : [])] as const)
@@ -1243,9 +1247,10 @@ function evidenceContractPolicyForTask(
       finalDeliverySurface: "conversation",
       sourceFactAcquisition: {
         useWhen: "the task has a source-grounded request or concrete source input",
-        recommendedRequiredKinds: sourceKinds,
+        availableEvidenceKinds: sourceKinds,
+        recommendedRequiredKinds: requiredSourceKinds,
         ...(requiresSourceEvidence ? { requiredKinds: requiredSourceKinds } : {}),
-        note: "Select only evidence kinds declared by the source-provider bound to this acquisition leaf. Do not infer structured extraction from a later conversation or file deliverable.",
+        note: "A provider's available receipt kinds are not all completion gates. Require only kinds justified by the task semantics and produced by the source-provider bound to this acquisition leaf. Do not infer structured extraction from a later conversation or file deliverable.",
       },
       finalProduceOrDeliverLeaf: {
         defaultRequiredKinds: [],
@@ -1261,8 +1266,9 @@ function evidenceContractPolicyForTask(
       finalDeliverySurface: "workspace_artifact",
       sourceFactAcquisition: {
         useWhen: "the requested artifact depends on source-grounded facts or concrete source input",
-        recommendedRequiredKinds: sourceKinds,
-        note: "The acquisition leaf uses only its bound source-provider interface. A Markdown/document output belongs to the dependent produce leaf and does not upgrade source evidence requirements.",
+        availableEvidenceKinds: sourceKinds,
+        recommendedRequiredKinds: requiredSourceKinds,
+        note: "A provider's available receipt kinds are not all completion gates. The acquisition leaf requires only task-justified evidence from its bound source-provider interface. A Markdown/document output belongs to the dependent produce leaf and does not upgrade source evidence requirements.",
       },
       finalProduceOrDeliverLeaf: {
         requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"],
@@ -1578,7 +1584,8 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
       taskProfile,
       task,
     );
-    const sourcePolicyNormalized = normalizeProgressiveSourceContract(sourceMaterializationNormalized, taskProfile);
+    const semanticEvidenceNormalized = normalizeModelEvidenceGates(sourceMaterializationNormalized, task);
+    const sourcePolicyNormalized = normalizeProgressiveSourceContract(semanticEvidenceNormalized, taskProfile);
     const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
     const artifactNormalized = normalizeWorkspaceArtifactTerminalStep(deliveryNormalized, terminalStepIds, taskProfile, task);
     if (artifactNormalized.evidenceContract !== undefined) {
@@ -1821,6 +1828,48 @@ function normalizeProgressiveSourceContract(
 }
 
 /**
+ * Model-proposed evidence gates are valid only inside their semantic scope.
+ * Providers may expose useful optional receipts, but availability alone must
+ * never promote them to a completion requirement. Runtime-owned artifact
+ * gates are added separately below and are deliberately outside this filter.
+ *
+ * Add a new entry only when an evidence kind has a narrower semantic scope
+ * than its producer interface. This keeps the normalization boundary generic:
+ * it removes a mismatched requirement rather than teaching a tool a fake
+ * receipt or adding a scenario-specific exception.
+ */
+function normalizeModelEvidenceGates(
+  step: PlanStepProposal,
+  task: TaskSpec,
+): PlanStepProposal {
+  const contract = step.evidenceContract;
+  if (contract === undefined) return step;
+  const removedKinds = new Set(contract.requiredKinds.filter((kind) => !modelMayRequireEvidenceKind(kind, step, task)));
+  if (removedKinds.size === 0) return step;
+  return {
+    ...step,
+    evidenceContract: {
+      ...contract,
+      requiredKinds: contract.requiredKinds.filter((kind) => !removedKinds.has(kind)),
+    },
+    successCriteria: step.successCriteria.filter((criterion) => !removedKinds.has(criterion.id as EvidenceKind)),
+  };
+}
+
+function modelMayRequireEvidenceKind(kind: EvidenceKind, step: PlanStepProposal, task: TaskSpec): boolean {
+  if (kind === "record_counts") return stepRequiresRecordCounts(step, task);
+  return true;
+}
+
+function stepRequiresRecordCounts(step: PlanStepProposal, task: TaskSpec): boolean {
+  return step.requiredCapabilities.some((capability) =>
+    capability === "uploaded_table_extraction"
+    || capability === "visible_table_extraction"
+    || capability === "workspace_structured_artifact_read"
+  ) || aggregationRequested(`${task.input}\n${step.objective}`);
+}
+
+/**
  * A complete structured artifact is an input to a count/group/rank question,
  * not an optional hint. Keep this at the Plan boundary: tools expose neutral
  * records and receipts, while this rule only recognizes aggregation semantics.
@@ -1911,11 +1960,17 @@ function normalizeConversationOnlyTerminalStep(
   const conversationOnly = (taskProfile.deliverySurface === "conversation" && taskProfile.artifactKind === "none")
     || task.responseOnly === true;
   if (!conversationOnly) return step;
-  if (!terminalStepIds.has(step.id) || step.role === "fact_acquisition" || step.role === "repair") return step;
+  // A terminal fact-acquisition leaf can legitimately both acquire bounded
+  // evidence and answer in the conversation (for example, a directory count).
+  // It still has no artifact delivery surface, so it must receive the same
+  // conversation normalization as any other terminal reply leaf.
+  if (!terminalStepIds.has(step.id) || step.role === "repair") return step;
   const evidenceContract = step.evidenceContract;
   if (evidenceContract === undefined) return {
     ...step,
-    successCriteria: step.successCriteria.filter((criterion) => !isArtifactDeliveryEvidenceKind(criterion.id)),
+    successCriteria: step.successCriteria.filter((criterion) =>
+      !isArtifactDeliveryEvidenceKind(criterion.id) && criterion.id !== "delivery_receipt"
+    ),
   };
   const requiredKinds = evidenceContract.requiredKinds.filter((kind) =>
     !isArtifactDeliveryEvidenceKind(kind) && kind !== "delivery_receipt"
@@ -1923,7 +1978,9 @@ function normalizeConversationOnlyTerminalStep(
   if (requiredKinds.length === 0) return {
     ...step,
     evidenceContract: undefined,
-    successCriteria: step.successCriteria.filter((criterion) => !isArtifactDeliveryEvidenceKind(criterion.id)),
+    successCriteria: step.successCriteria.filter((criterion) =>
+      !isArtifactDeliveryEvidenceKind(criterion.id) && criterion.id !== "delivery_receipt"
+    ),
   };
   return {
     ...step,

@@ -467,6 +467,12 @@ export interface ExecutionPlan {
   readonly version: number;
   readonly goal: string;
   readonly selectedSkillIds: readonly string[];
+  /**
+   * Immutable Runtime-owned task interpretation that admitted this Plan.
+   * Execution may refine a leaf workflow, but it must not reclassify the
+   * user-owned delivery surface or artifact kind from incidental leaf prose.
+   */
+  readonly taskSemantics?: StructuredTaskUnderstanding;
   /** Explicit, persisted Runtime Result inputs selected for this Plan. */
   readonly resultBindings?: readonly RuntimeResultBinding[];
   readonly status: PlanStatus;

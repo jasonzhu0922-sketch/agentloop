@@ -50,6 +50,73 @@ test("Computer Tool writes are isolated by conversation and reused by follow-up 
   }
 });
 
+test("uploaded source storage can be Runtime-owned while the work workspace stays shared", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-shared-workspace-"));
+  const sourceStorage = await fs.mkdtemp(join(tmpdir(), "agentloop-runtime-sources-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      sourceStorageRoot: sourceStorage,
+      modelFactory: () => ({ limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "unused", finishReason: "stop" as const, toolCalls: [] }) }),
+    });
+    await runs.ensureConversation(owner.user.id, "conversation-source-root", "upload a note");
+    const source = await runs.uploadSource(owner.user.id, {
+      conversationId: "conversation-source-root",
+      originalName: "note.txt",
+      content: Buffer.from("runtime-owned upload\n"),
+    });
+    const row = await database.prepare("SELECT storage_path FROM sources WHERE id = ?").get(source.id) as { storage_path: string };
+    assert.ok(row.storage_path.startsWith(sourceStorage));
+    assert.equal(row.storage_path.startsWith(workspace), false);
+    assert.equal(await fs.readFile(row.storage_path, "utf8"), "runtime-owned upload\n");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(sourceStorage, { recursive: true, force: true });
+  }
+});
+
+test("owner-scoped Runtime storage isolates workspaces and uploaded sources", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-owner-workspace-"));
+  const sourceStorage = await fs.mkdtemp(join(tmpdir(), "agentloop-owner-sources-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      sourceStorageRoot: sourceStorage,
+      ownerScopedWorkspace: true,
+      modelFactory: () => new ConversationWriteModel(),
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+    const firstOwner = "owner/a";
+    const secondOwner = "owner-b";
+    const firstConversationId = "first-conversation";
+    const secondConversationId = "second-conversation";
+    await runs.ensureConversation(firstOwner, firstConversationId, "first owner workspace");
+    await runs.ensureConversation(secondOwner, secondConversationId, "second owner workspace");
+    await runs.execute(firstOwner, "write owner.txt as first", { allowDangerousTools: true, conversationId: firstConversationId });
+    await runs.execute(secondOwner, "write owner.txt as second", { allowDangerousTools: true, conversationId: secondConversationId });
+    const firstSource = await runs.uploadSource(firstOwner, { conversationId: firstConversationId, originalName: "brief.txt", content: Buffer.from("first source\n") });
+    const secondSource = await runs.uploadSource(secondOwner, { conversationId: secondConversationId, originalName: "brief.txt", content: Buffer.from("second source\n") });
+
+    assert.equal(await fs.readFile(join(workspace, "users", "user-owner%2Fa", "conversations", firstConversationId, "owner.txt"), "utf8"), "first\n");
+    assert.equal(await fs.readFile(join(workspace, "users", "user-owner-b", "conversations", secondConversationId, "owner.txt"), "utf8"), "second\n");
+    assert.equal(await fs.readFile(join(sourceStorage, "users", "user-owner%2Fa", "conversations", firstConversationId, "sources", firstSource.id, "original"), "utf8"), "first source\n");
+    assert.equal(await fs.readFile(join(sourceStorage, "users", "user-owner-b", "conversations", secondConversationId, "sources", secondSource.id, "original"), "utf8"), "second source\n");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(sourceStorage, { recursive: true, force: true });
+  }
+});
+
 test("Run visible directories are exposed as read-only planning and execution capability", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-workspace-"));
   const visible = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-materials-"));

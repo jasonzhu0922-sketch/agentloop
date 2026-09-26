@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { PlanRepository } from "../src/planning/plan-repository.ts";
 
 test("legacy databases are rebuilt without users foreign keys while preserving every row", async () => {
   const directory = mkdtempSync(resolve(tmpdir(), "agentloop-user-boundary-"));
@@ -93,6 +94,47 @@ test("fresh databases never carry users foreign keys on business tables", async 
     assert.equal(await tableExists(database, "users"), false);
   } finally {
     await database.close();
+  }
+});
+
+test("legacy Plan steps gain a historical execution binding during database migration", async () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "agentloop-plan-binding-migration-"));
+  const filename = resolve(directory, "legacy.db");
+  const created = new AppDatabase(filename);
+  try {
+    await created.prepare(`
+      INSERT INTO runs(id, owner_user_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES ('legacy-run', 'owner', 0, 0, 'failed', 'legacy task', 1)
+    `).run();
+    await created.prepare(`
+      INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
+      VALUES ('legacy-plan', 'legacy-run', 1, 'legacy task', '[]', '[]', 'failed', 1, 1)
+    `).run();
+    await created.prepare(`
+      INSERT INTO plan_steps(
+        plan_id, step_id, kind, position, objective, dependencies_json, refinement_state,
+        required_facts_json, skill_ids_json, required_capabilities_json,
+        recommended_tool_names_json, execution_binding_json, success_criteria_json, status
+      ) VALUES ('legacy-plan', 'legacy-step', 'leaf', 0, 'preserve the old step', '[]', 'not_refinable',
+        '[]', '[]', '["web_research"]', '["websearch"]', NULL, '[{"id":"done","description":"done"}]', 'completed')
+    `).run();
+  } finally {
+    await created.close();
+  }
+
+  const migrated = new AppDatabase(filename);
+  try {
+    const plan = await new PlanRepository(migrated).getByRun("legacy-run");
+    assert.deepEqual(plan.steps[0]?.executionBinding, {
+      schema: "agentloop.stepExecutionBinding/v1",
+      requiredCapabilities: ["web_research"],
+      resolvedToolNames: [],
+      sourceKinds: [],
+      sideEffect: "none",
+      evidenceKinds: [],
+    });
+  } finally {
+    await migrated.close();
   }
 });
 

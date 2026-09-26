@@ -142,6 +142,10 @@ export class RuntimeActionRepository {
     const deadlineAt = now + input.deadlineMs;
     const metadata = input.metadata ?? {};
     await this.database.transaction(async () => {
+      const run = await this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
+      if (run === undefined || run.status !== "running") {
+        throw new AppError("CONFLICT", "Cannot dispatch an Action for a terminal Run", 409);
+      }
       await this.database.prepare(`
         INSERT INTO runtime_actions(
           id, run_id, plan_id, step_id, kind, state, attempt, max_attempts,

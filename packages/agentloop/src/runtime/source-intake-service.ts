@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { badRequest } from "../shared/errors.ts";
 import { SourceRepository, sourceSummary, type SourceRow } from "../storage/repositories/source-repository.ts";
 import type { UploadedSourceSummary, UploadedSourceStatus } from "./contracts.ts";
+import { ownerWorkspaceSegment } from "./owner-workspace.ts";
 
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const MAX_EXTRACTED_CHARACTERS = 120_000;
@@ -18,10 +19,12 @@ const execFileAsync = promisify(execFile);
 export class SourceIntakeService {
   private readonly repository: SourceRepository;
   private readonly workspaceRoot: string;
+  private readonly ownerScopedStorage: boolean;
 
-  constructor(repository: SourceRepository, workspaceRoot: string) {
+  constructor(repository: SourceRepository, workspaceRoot: string, options: { readonly ownerScopedStorage?: boolean } = {}) {
     this.repository = repository;
     this.workspaceRoot = workspaceRoot;
+    this.ownerScopedStorage = options.ownerScopedStorage === true;
   }
 
   async upload(input: {
@@ -46,13 +49,23 @@ export class SourceIntakeService {
     const now = Date.now();
     const id = `src_${randomUUID().replaceAll("-", "")}`;
     const sha256 = createHash("sha256").update(input.content).digest("hex");
-    const directory = join(
-      this.workspaceRoot,
-      input.conversationId === undefined ? "uploads" : "conversations",
-      input.conversationId ?? input.ownerUserId,
-      "sources",
-      id,
-    );
+    const directory = this.ownerScopedStorage
+      ? join(
+        this.workspaceRoot,
+        "users",
+        ownerWorkspaceSegment(input.ownerUserId),
+        input.conversationId === undefined ? "uploads" : "conversations",
+        ...(input.conversationId === undefined ? [] : [input.conversationId]),
+        "sources",
+        id,
+      )
+      : join(
+        this.workspaceRoot,
+        input.conversationId === undefined ? "uploads" : "conversations",
+        input.conversationId ?? input.ownerUserId,
+        "sources",
+        id,
+      );
     await fs.mkdir(directory, { recursive: true });
     const storagePath = join(directory, "original");
     await fs.writeFile(storagePath, input.content, { flag: "wx" });

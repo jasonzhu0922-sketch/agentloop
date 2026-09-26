@@ -26,6 +26,7 @@ import {
   DEFAULT_MAX_STEPS,
   RunService,
   completionCaveatReasonCode,
+  recoverySourceConstraint,
   selectPlanningSkillRoles,
   selectPlanningSkills,
 } from "../src/runtime/run-service.ts";
@@ -83,6 +84,108 @@ function plannerTestTaskUnderstanding(task: {
 test("default file-producing step budget is 32 primary turns plus 12 convergence turns", () => {
   assert.equal(DEFAULT_MAX_STEPS, 32);
   assert.equal(DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS, 12);
+});
+
+test("ModelPlanner removes an out-of-scope record-count gate from an unstructured source summary", async () => {
+  const source: UploadedSourceSummary = {
+    id: "src_91919191919191919191919191919191",
+    originalName: "research-paper.pdf",
+    mimeType: "application/pdf",
+    extension: ".pdf",
+    byteSize: 4_096,
+    sha256: "a".repeat(64),
+    status: "ready",
+    chunkCount: 8,
+    truncated: false,
+  };
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("summarize-document", {
+        goal: "总结上传论文的创新点",
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        steps: [{
+          id: "read-paper",
+          objective: "Read the uploaded paper and summarize its innovation points.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["uploaded_source_read", "conversation_delivery"],
+          sourceConstraint: { requiredUploadedSourceIds: [source.id] },
+          evidenceContract: {
+            requiredKinds: ["source_summary", "record_counts", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+        }],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-unstructured-summary-with-spurious-count",
+    input: "总结一下这个论文的创新点",
+    availableSkills: [],
+    availableToolNames: ["read_source"],
+    sources: [source],
+  });
+
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "explicit_caveats"]);
+  assert.deepEqual(plan.steps[0]?.successCriteria.map((criterion) => criterion.id), ["source_summary", "explicit_caveats"]);
+});
+
+test("ModelPlanner retains record-count gates for structured source extraction", async () => {
+  const source: UploadedSourceSummary = {
+    id: "src_92929292929292929292929292929292",
+    originalName: "scores.xlsx",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    extension: ".xlsx",
+    byteSize: 4_096,
+    sha256: "b".repeat(64),
+    status: "ready",
+    chunkCount: 1,
+    truncated: false,
+  };
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("extract-table", {
+        goal: "分析上传表格的评分结果",
+        shape: "single_leaf",
+        selectedSkillRoles: [],
+        steps: [{
+          id: "extract-scores",
+          objective: "Extract the uploaded score records for analysis.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["uploaded_table_extraction", "conversation_delivery"],
+          sourceConstraint: { requiredUploadedSourceIds: [source.id] },
+          evidenceContract: {
+            requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+        }],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-structured-extraction-keeps-count",
+    input: "分析上传表格的评分结果",
+    availableSkills: [],
+    availableToolNames: ["extract_source_tables"],
+    sources: [source],
+  });
+
+  assert.ok(plan.steps[0]?.evidenceContract?.requiredKinds.includes("record_counts"));
+  assert.ok(plan.steps[0]?.successCriteria.some((criterion) => criterion.id === "record_counts"));
 });
 
 function assertStrictProviderSchema(value: unknown, path = "schema"): void {
@@ -1010,6 +1113,66 @@ test("Task intent preserves an explicit HTML output format when a later constrai
   assert.equal(intent.artifactAction, "create");
   assert.equal(intent.artifactKind, "html");
   assert.equal(intent.wantsArtifact, true);
+});
+
+test("Task intent keeps an explicit PPTX deliverable when slide content mentions pages", () => {
+  const intent = classifyTaskIntent({
+    objective: "基于设计稿生成一份 PPTX 游戏推荐演示文稿，以悬念式叙事组织页面并保存到工作区。",
+  });
+
+  assert.equal(intent.artifactAction, "create");
+  assert.equal(intent.artifactKind, "presentation");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
+});
+
+test("Plan repository persists the canonical task semantics used to admit an artifact Plan", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const runId = "persist-task-semantics";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, 'task-semantics-owner', NULL, 0, 0, 'running', ?, ?)
+    `).run(runId, "生成 PPTX 演示文稿", Date.now());
+    const taskSemantics = understandTask({
+      objective: "生成 PPTX 演示文稿，并以悬念式叙事组织页面。",
+    });
+    const plan = admitPlan({
+      runId,
+      proposal: { goal: "生成 PPTX 演示文稿", selectedSkillIds: [], steps: [step("build-deck")] },
+      availableSkills: [],
+      availableToolNames: new Set(),
+      taskIntent: taskSemantics.intent,
+      taskSemantics,
+    });
+
+    const persisted = await new PlanRepository(database).create(plan);
+    assert.equal(persisted.taskSemantics?.deliverable.kind, "presentation");
+    assert.equal(persisted.taskSemantics?.deliverable.surface, "workspace_artifact");
+  } finally {
+    database.close();
+  }
+});
+
+test("Recovery preserves canonical source identities when it reconstructs an existing Plan step", () => {
+  const recovered = recoverySourceConstraint({
+    schema: "agentloop.stepExecutionBinding/v1",
+    requiredCapabilities: ["uploaded_source_read"],
+    resolvedToolNames: ["read_source"],
+    sourceKinds: ["uploaded_source"],
+    sideEffect: "workspace_read",
+    evidenceKinds: ["source_summary", "explicit_caveats"],
+    requiredToolSourceIds: ["tool-source:catalog"],
+    requiredUploadedSourceIds: ["src-design"],
+    requiredVisibleDirectoryIds: ["dir-evidence"],
+  });
+
+  assert.deepEqual(recovered, {
+    sourceConstraint: {
+      requiredToolSourceIds: ["tool-source:catalog"],
+      requiredUploadedSourceIds: ["src-design"],
+      requiredVisibleDirectoryIds: ["dir-evidence"],
+    },
+  });
 });
 
 test("Task intent preserves WAV audio as a typed workspace deliverable", () => {
@@ -3839,6 +4002,50 @@ test("Plan admission leaves acquisition source evidence contracts source-only", 
   assert.equal(admitted.steps[0].successCriteria.some((criterion) => criterion.id === "delivery_receipt"), false);
 });
 
+test("Plan admission removes artifact-style delivery receipts from a terminal conversation acquisition leaf", () => {
+  const proposal: PlanProposal = {
+    goal: "count files in an authorized directory and answer in the conversation",
+    selectedSkillIds: [],
+    steps: [{
+      id: "count-visible-files",
+      objective: "Read the authorized directory, count files, and answer in the conversation.",
+      dependencies: [],
+      role: "fact_acquisition",
+      skillIds: [],
+      requiredCapabilities: ["visible_directory_read", "visible_table_extraction", "conversation_delivery"],
+      evidenceContract: {
+        requiredKinds: ["source_summary", "record_counts", "explicit_caveats"],
+        caveatPolicy: "mark_unverified_facts",
+      },
+      successCriteria: [
+        { id: "source_summary", description: "Directory source evidence is available.", source: "planner" },
+        { id: "record_counts", description: "Directory counts are available.", source: "planner" },
+        { id: "delivery_receipt", description: "A final delivery receipt is available.", source: "planner" },
+        { id: "explicit_caveats", description: "Caveats are explicit.", source: "planner", blocking: false },
+      ],
+    }],
+  };
+
+  const admitted = admitPlan({
+    runId: "run-terminal-conversation-acquisition",
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(["visible_index_directory", "visible_extract_tables"]),
+    taskIntent: { deliverySurface: "conversation", artifactKind: "none" },
+  });
+
+  assert.deepEqual(admitted.steps[0].evidenceContract?.requiredKinds, [
+    "source_summary",
+    "record_counts",
+    "explicit_caveats",
+  ]);
+  assert.deepEqual(admitted.steps[0].successCriteria.map((criterion) => criterion.id), [
+    "source_summary",
+    "record_counts",
+    "explicit_caveats",
+  ]);
+});
+
 test("Plan admission normalizes conversation-only data analysis final leaves away from artifact gates", () => {
   const proposal: PlanProposal = {
     goal: "analyze structured table data and reply",
@@ -3849,7 +4056,7 @@ test("Plan admission normalizes conversation-only data analysis final leaves awa
       dependencies: [],
       role: "fact_acquisition",
       skillIds: [],
-      requiredCapabilities: ["visible_directory_read"],
+      requiredCapabilities: ["visible_directory_read", "visible_table_extraction"],
       evidenceContract: {
         requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
         caveatPolicy: "mark_unverified_facts",
@@ -3899,7 +4106,7 @@ test("Plan admission normalizes conversation-only data analysis final leaves awa
   ]);
   assert.equal(admitted.steps[1].evidenceContract, undefined);
   assert.deepEqual(admitted.steps[1].successCriteria.map((criterion) => criterion.id), [
-    "delivery_receipt",
+    "conversation_delivery",
   ]);
 });
 
@@ -6769,6 +6976,41 @@ test("selectPlanningSkillRoles does not let an uploaded workbook choose the prim
   })), [{ id: documents.id, role: "primary_builder" }]);
 });
 
+test("selectPlanningSkillRoles keeps a DOCX source from overriding a PPTX deliverable", () => {
+  const pptx = skillFixture({
+    id: "pptx",
+    name: "pptx",
+    description: "Create, edit, and inspect PowerPoint PPTX presentations.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["presentation"]),
+  });
+  const docx = skillFixture({
+    id: "docx",
+    name: "docx",
+    description: "Create and edit Word DOCX documents.",
+    agentLoop: agentLoopMetadata(["primary_builder"], ["document"], ["document"]),
+  });
+  const source: UploadedSourceSummary = {
+    id: "src_cost_governance_docx",
+    originalName: "AI 赋能成本治理.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: ".docx",
+    byteSize: 519_635,
+    sha256: "d".repeat(64),
+    status: "ready",
+    chunkCount: 1,
+    truncated: false,
+  };
+  const understanding = understandTask({
+    objective: "基于附件《AI 赋能成本治理.docx》生成一份 PPTX 汇报材料。",
+    uploadedSources: [source],
+  });
+
+  assert.equal(understanding.format, "presentation");
+  assert.equal(understanding.deliverable.kind, "presentation");
+  const selected = selectPlanningSkillRoles([docx, pptx], understanding, [], [source]);
+  assert.deepEqual(selected.map((item) => item.skill.id), [pptx.id]);
+});
+
 test("native uploaded PDF transform recall carries resolved task semantics to the PDF Skill", () => {
   const pdf = skillFixture({
     id: "pdf",
@@ -6798,6 +7040,9 @@ test("native uploaded PDF transform recall carries resolved task semantics to th
     uploadedSources: sources,
   });
 
+  assert.equal(understanding.format, "pdf");
+  assert.equal(understanding.deliverable.kind, "document");
+  assert.equal(understanding.deliverable.surface, "workspace_artifact");
   const selected = selectPlanningSkillRoles([docx, pdf], understanding, [], sources);
 
   assert.deepEqual(selected.map((item) => item.skill.id), [pdf.id]);
@@ -12399,6 +12644,108 @@ test("RunService inherits canonical persisted intent for a pure continuation wit
   }
 });
 
+test("RunService does not turn a reply-only continuation into prior artifact execution", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-reply-continuation";
+    const priorRunId = "prior-artifact-analysis";
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "Artifact analysis acknowledgement", now - 20_000, now - 1_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
+    `).run(
+      priorRunId,
+      owner.user.id,
+      conversationId,
+      "生成一份分析文件",
+      "先前的分析结果",
+      now - 10_000,
+      now - 8_000,
+    );
+    await database.prepare(`
+      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
+      VALUES (?, 1, 'conversation.turn.resolved', ?, ?)
+    `).run(
+      priorRunId,
+      JSON.stringify({
+        schema: "agentloop.conversationTurnResolution/v1",
+        mode: "execute",
+        relation: "new_goal",
+        inputMode: "none",
+        effectiveGoal: "生成一份包含根因分析的 Markdown 文件。",
+        evidenceDemand: "none",
+        userConstraints: ["交付 Markdown 文件"],
+        source: "model",
+      }),
+      now - 9_000,
+    );
+
+    let capturedTask: TaskSpec | undefined;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if (request.runId.startsWith("conversation-turn:")) {
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "resolve-reply-continuation",
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "reply",
+                relation: "continue_prior",
+                inputMode: "none",
+                targetGoalCandidateId: "goal_candidate_1",
+                effectiveGoal: "确认用户将自行核验先前分析。",
+                evidenceDemand: "none",
+                userConstraints: ["用户将自行核验"],
+              },
+            }],
+          };
+        }
+        return { content: "好的，建议以持久化记录为准。", finishReason: "stop", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => model,
+      plannerFactory: (plannerModel) => ({
+        plan: async (task) => {
+          capturedTask = task;
+          return await new ModelPlanner(plannerModel).plan(task);
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "好的，我会自行核验这个原因。", {
+      conversationId,
+      allowDangerousTools: true,
+    });
+
+    assert.equal(run.status, "completed");
+    assert.equal(capturedTask?.responseOnly, true);
+    assert.equal(capturedTask?.taskUnderstanding.intent.deliverySurface, "conversation");
+    assert.equal(capturedTask?.taskUnderstanding.intent.artifactKind, "none");
+    assert.deepEqual(capturedTask?.availableToolNames, []);
+    assert.equal(capturedTask?.turnResolution?.mode, "reply");
+    assert.equal(capturedTask?.turnResolution?.effectiveGoal, "确认用户将自行核验先前分析。");
+    assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "reply" });
+    assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "planning.task.understood"), false);
+  } finally {
+    database.close();
+  }
+});
+
 test("RunService continues a failed goal while inheriting its completed prior-result input", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -14147,7 +14494,7 @@ test("large structured source Tool results preserve receipts for evidence-gate a
     const owner = testOwner();
     let called = false;
     const largeSourceTool: RuntimeTool = {
-      name: "large_structured_source",
+      name: "visible_extract_tables",
       description: "Return a large structured source extraction with a canonical receipt.",
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       executionMode: "parallel",
@@ -14185,6 +14532,12 @@ test("large structured source Tool results preserve receipts for evidence-gate a
             totalRecords: 1_600,
             totalCells: 3_200,
             artifact: { path: ".agentloop/table-extractions/aa/source.json", sha256: "a".repeat(64) },
+            // The receipt itself can be verbose.  Its bounded projection must
+            // remain parseable rather than becoming a JSON prefix.
+            records: Array.from({ length: 2_000 }, (_, index) => ({
+              row: index,
+              label: `evidence-row-${index}`,
+            })),
           }],
           caveats: ["Large extraction rows are stored in the durable artifact."],
           evidenceKinds: {
@@ -14205,7 +14558,7 @@ test("large structured source Tool results preserve receipts for evidence-gate a
           return {
             content: "",
             finishReason: "tool_calls",
-            toolCalls: [{ id: "large-source", name: "large_structured_source", arguments: {} }],
+            toolCalls: [{ id: "large-source", name: "visible_extract_tables", arguments: {} }],
           };
         }
         return {
@@ -14225,7 +14578,7 @@ test("large structured source Tool results preserve receipts for evidence-gate a
           dependencies: [],
           role: "fact_acquisition",
           skillIds: [],
-          requiredCapabilities: ["external_api_call"],
+          requiredCapabilities: ["visible_table_extraction"],
           evidenceContract: {
             requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
             caveatPolicy: "mark_unverified_facts",
@@ -14255,6 +14608,13 @@ test("large structured source Tool results preserve receipts for evidence-gate a
     const completed = events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "large-source");
     assert.match(String(completed?.data.result), /large_tool_result_receipt_preserved/);
     assert.match(String(completed?.data.result), /agentloop\.toolEvidenceReceipt\/v1/);
+    const projected = JSON.parse(String(completed?.data.result)) as {
+      summary?: { totalRecords?: number };
+      evidenceReceipt?: { evidenceKinds?: { satisfied?: string[]; caveated?: string[] } };
+    };
+    assert.equal(projected.summary?.totalRecords, 1_600);
+    assert.ok(projected.evidenceReceipt?.evidenceKinds?.satisfied?.includes("record_counts"));
+    assert.ok(projected.evidenceReceipt?.evidenceKinds?.caveated?.includes("explicit_caveats"));
     const latestAssessment = (await runs.plan(owner.user.id, run.id)).assessments.at(-1);
     assert.equal(latestAssessment?.approved, true);
     assert.equal(latestAssessment?.assessmentProfile, "evidence_gate");

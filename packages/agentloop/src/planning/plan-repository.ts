@@ -12,6 +12,7 @@ import type {
 } from "./contracts.ts";
 import { parseRuntimeResult, parseRuntimeResultBinding } from "../runtime/runtime-result.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import type { StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 
 interface PlanRow {
   id: string;
@@ -19,6 +20,7 @@ interface PlanRow {
   version: number;
   goal: string;
   selected_skill_ids_json: string;
+  task_semantics_json?: string | null;
   input_bindings_json?: string;
   status: PlanStatus;
   created_at: number;
@@ -70,14 +72,15 @@ export class PlanRepository {
   async create(plan: ExecutionPlan): Promise<ExecutionPlan> {
     await this.database.transaction(async () => {
       await this.database.prepare(`
-        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, input_bindings_json, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, task_semantics_json, input_bindings_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         plan.id,
         plan.runId,
         plan.version,
         plan.goal,
         JSON.stringify(plan.selectedSkillIds),
+        plan.taskSemantics === undefined ? null : JSON.stringify(plan.taskSemantics),
         JSON.stringify(plan.resultBindings ?? []),
         plan.status,
         plan.createdAt,
@@ -155,6 +158,11 @@ export class PlanRepository {
         UPDATE plan_steps
         SET status = 'completed', output = ?, evidence_json = ?, finished_at = ?
         WHERE plan_id = ? AND step_id = ? AND status = 'running'
+          AND EXISTS (
+            SELECT 1 FROM plans
+            JOIN runs ON runs.id = plans.run_id
+            WHERE plans.id = plan_steps.plan_id AND runs.status = 'running'
+          )
       `).run(output, JSON.stringify(evidence), now, planId, stepId);
       await this.database.prepare("UPDATE plans SET updated_at = ? WHERE id = ?").run(now, planId);
     });
@@ -347,6 +355,9 @@ export class PlanRepository {
       version: row.version,
       goal: row.goal,
       selectedSkillIds: JSON.parse(row.selected_skill_ids_json),
+      ...(row.task_semantics_json === undefined || row.task_semantics_json === null
+        ? {}
+        : { taskSemantics: parseTaskSemantics(row.task_semantics_json) }),
       resultBindings: parseResultBindings(row.input_bindings_json),
       status: row.status,
       steps: steps.map(toStep),
@@ -359,6 +370,7 @@ export class PlanRepository {
     const proposal = {
       goal: plan.goal,
       selectedSkillIds: plan.selectedSkillIds,
+      ...(plan.taskSemantics === undefined ? {} : { taskSemantics: plan.taskSemantics }),
       resultBindings: plan.resultBindings ?? [],
       steps: plan.steps.map((step) => ({
         id: step.id,
@@ -382,6 +394,26 @@ export class PlanRepository {
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
     `).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);
   }
+}
+
+function parseTaskSemantics(value: string): StructuredTaskUnderstanding {
+  const parsed = JSON.parse(value) as unknown;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Plan has invalid task semantics; replan required");
+  }
+  const record = parsed as Record<string, unknown>;
+  const deliverable = record.deliverable;
+  if (
+    record.schema !== "agentloop.taskUnderstanding/v1"
+    || deliverable === null
+    || typeof deliverable !== "object"
+    || Array.isArray(deliverable)
+    || typeof (deliverable as Record<string, unknown>).kind !== "string"
+    || typeof (deliverable as Record<string, unknown>).surface !== "string"
+  ) {
+    throw new Error("Plan has invalid task semantics; replan required");
+  }
+  return parsed as StructuredTaskUnderstanding;
 }
 
 function parseAssessmentProfile(value: string | undefined): AssessmentProfileId {

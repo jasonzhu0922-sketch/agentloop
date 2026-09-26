@@ -94,6 +94,7 @@ import type {
   VisibleDirectoryGrant,
 } from "./contracts.ts";
 import { SourceIntakeService } from "./source-intake-service.ts";
+import { ownerWorkspaceSegment } from "./owner-workspace.ts";
 import {
   assertNoDuplicateTools,
   composeRunTools,
@@ -171,6 +172,8 @@ const TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES = 8 * 1024;
 const TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS = 600;
 const MAX_TOOL_ARGUMENT_REFERENCE_BYTES = 50 * 1024 * 1024;
 const MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS = 10;
+/** Covers result persistence after a Tool's own declared execution budget. */
+const TOOL_ACTION_COMMIT_GRACE_MS = 15_000;
 
 export interface RunRecord {
   readonly id: string;
@@ -308,6 +311,8 @@ export class RunService {
   private readonly defaultModelKey?: string;
   private readonly allowedModelKeys?: ReadonlySet<string>;
   private readonly workspaceRoot: string;
+  private readonly sourceStorageRoot: string;
+  private readonly ownerScopedWorkspace: boolean;
   private readonly coreTools: readonly RuntimeTool<unknown>[];
   private readonly plans: PlanRepository;
   private readonly sources: SourceRepository;
@@ -336,6 +341,10 @@ export class RunService {
     recoveryPlannerFactory?: RecoveryPlannerFactory;
     planRevisionAssessorFactory?: PlanRevisionAssessorFactory;
     workspaceRoot?: string;
+    /** Immutable uploaded-source storage. It may be Runtime-owned even when the work workspace is shared. */
+    sourceStorageRoot?: string;
+    /** Namespace workspaces and uploaded-source storage by authenticated owner. */
+    ownerScopedWorkspace?: boolean;
     computerDriver?: ComputerDriver;
     acceptanceProviders?: readonly ArtifactAcceptanceProvider[];
     computerExecutableAliases?: Readonly<Record<string, string>>;
@@ -372,6 +381,8 @@ export class RunService {
       readOnlyRoots: skillReadOnlyRoots,
     });
     this.workspaceRoot = computerExecutor.workspaceRoot;
+    this.sourceStorageRoot = options.sourceStorageRoot ?? this.workspaceRoot;
+    this.ownerScopedWorkspace = options.ownerScopedWorkspace === true;
     const acceptanceService = new ArtifactAcceptanceService({
       providers: options.acceptanceProviders,
     });
@@ -388,7 +399,7 @@ export class RunService {
       results: this.results,
       pluginTools: options.tools,
     });
-    this.sourceIntake = new SourceIntakeService(this.sources, this.workspaceRoot);
+    this.sourceIntake = new SourceIntakeService(this.sources, this.sourceStorageRoot, { ownerScopedStorage: this.ownerScopedWorkspace });
     this.humanLoops = new HumanLoopRepository(options.database);
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
     this.checkpoints = new RunCheckpointRepository(options.database);
@@ -972,10 +983,10 @@ export class RunService {
     };
   }
 
-  private runWorkspaceRoot(run: Pick<RunRecord, "conversationId">): string {
+  private runWorkspaceRoot(run: Pick<RunRecord, "ownerUserId" | "conversationId">): string {
     return run.conversationId === undefined
-      ? this.workspaceRoot
-      : this.conversationWorkspaceRoot(run.conversationId);
+      ? this.workspaceRootForOwner(run.ownerUserId)
+      : this.conversationWorkspaceRoot(run.ownerUserId, run.conversationId);
   }
 
   private async toRunRecordWithSources(row: RunRow): Promise<RunRecord> {
@@ -985,18 +996,34 @@ export class RunService {
     return toRunRecord(row, sources);
   }
 
-  private conversationWorkspaceRoot(conversationId: string): string {
-    if (!isSafeWorkspaceSegment(conversationId)) {
-      throw new AppError("BAD_REQUEST", "Invalid conversation workspace id", 400);
-    }
-    const target = resolve(this.workspaceRoot, "conversations", conversationId);
+  private workspaceRootForOwner(ownerUserId: string): string {
+    if (!this.ownerScopedWorkspace) return this.workspaceRoot;
+    const target = resolve(this.workspaceRoot, "users", ownerWorkspaceSegment(ownerUserId));
     this.assertInsideServerWorkspace(target);
     return target;
   }
 
-  private async ensureConversationWorkspace(conversationId: string): Promise<string> {
-    const parent = resolve(this.workspaceRoot, "conversations");
-    const target = this.conversationWorkspaceRoot(conversationId);
+  private conversationWorkspaceRoot(ownerUserId: string, conversationId: string): string {
+    if (!isSafeWorkspaceSegment(conversationId)) {
+      throw new AppError("BAD_REQUEST", "Invalid conversation workspace id", 400);
+    }
+    const target = resolve(this.workspaceRootForOwner(ownerUserId), "conversations", conversationId);
+    this.assertInsideServerWorkspace(target);
+    return target;
+  }
+
+  private async ensureOwnerWorkspace(ownerUserId: string): Promise<string> {
+    const root = this.workspaceRootForOwner(ownerUserId);
+    if (!this.ownerScopedWorkspace) return root;
+    await this.ensureManagedWorkspaceDirectory(resolve(this.workspaceRoot, "users"));
+    await this.ensureManagedWorkspaceDirectory(root);
+    return fs.realpath(root);
+  }
+
+  private async ensureConversationWorkspace(ownerUserId: string, conversationId: string): Promise<string> {
+    const root = await this.ensureOwnerWorkspace(ownerUserId);
+    const parent = resolve(root, "conversations");
+    const target = this.conversationWorkspaceRoot(ownerUserId, conversationId);
     await this.ensureManagedWorkspaceDirectory(parent);
     await this.ensureManagedWorkspaceDirectory(target);
     return fs.realpath(target);
@@ -1392,8 +1419,8 @@ export class RunService {
       throw new AppError("CONFLICT", "Recovery Action does not target a running effective Plan step", 409);
     }
     const runWorkspaceRoot = run.conversationId === undefined
-      ? this.workspaceRoot
-      : await this.ensureConversationWorkspace(run.conversationId);
+      ? await this.ensureOwnerWorkspace(run.ownerUserId)
+      : await this.ensureConversationWorkspace(run.ownerUserId, run.conversationId);
 
     const transcript = reconstructRecoveryTranscript({
       userInput: run.input,
@@ -1654,6 +1681,10 @@ export class RunService {
         status: "failed",
         reasonCode: "EXECUTION_AUTHORITY_LOST",
       });
+      // The persisted terminal fence must also stop the in-process executor.
+      // Without this, a command that outlived its Action lease could continue
+      // writing step evidence after the Run had already become resumable.
+      this.activeRunControllers.get(item.runId)?.abort();
       await this.appendRunEvent(item.runId, {
         type: "run.checkpoint_created",
         data: { runId: item.runId, checkpointId: checkpoint.id, reason: checkpoint.reason },
@@ -1708,8 +1739,8 @@ export class RunService {
       );
     }
     const runWorkspaceRoot = conversationId === undefined
-      ? this.workspaceRoot
-      : await this.ensureConversationWorkspace(conversationId);
+      ? await this.ensureOwnerWorkspace(actorUserId)
+      : await this.ensureConversationWorkspace(actorUserId, conversationId);
     const conversationHistory = conversationId === undefined
       ? undefined
       : await this.conversationHistory(conversationId);
@@ -2053,6 +2084,7 @@ export class RunService {
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           ...(resultBindings.length === 0 ? {} : { resultBindings }),
           taskIntent: admissionTaskIntent,
+          taskSemantics: taskUnderstanding,
         });
       } catch (error) {
         await this.notifyPlanningExtensionsAfterAdmission({
@@ -2093,6 +2125,7 @@ export class RunService {
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           ...(resultBindings.length === 0 ? {} : { resultBindings }),
           taskIntent: admissionTaskIntent,
+          taskSemantics: taskUnderstanding,
         });
       }
       plan = await this.plans.create(plan);
@@ -2525,7 +2558,7 @@ export class RunService {
         stepCanConvergeFromLookupEvidence(activeStep)
         || stepAllowsSourceSummaryCandidateConvergence(activeStep)
       );
-      const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills);
+      const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills, plan.taskSemantics);
       const stepSemanticFrame = deriveStepSemanticFrame({
         step: activeStep,
         plan,
@@ -2667,7 +2700,7 @@ export class RunService {
               stepId: activeStep.id,
               kind: "tool_call",
               replayPolicy: toolAction.replaySafe ? "safe" : "unsafe",
-              deadlineMs: toolAction.timeoutMs ?? 120_000,
+              deadlineMs: toolActionDeadlineMs(toolAction.timeoutMs),
               metadata: {
                 toolCallId: toolAction.toolCallId,
                 toolName: toolAction.toolName,
@@ -2942,7 +2975,8 @@ export class RunService {
       .map((tool) => tool.name)
       .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
     const availableToolSummaries = toolSummaries(allTools, availableToolNames);
-    const taskIntent = classifyTaskIntent({
+    const taskSemantics = input.currentPlan.taskSemantics;
+    const taskIntent = taskSemantics?.intent ?? classifyTaskIntent({
       objective: input.run.input,
       toolNames: [...availableToolNames],
       skillNames: privateSkills.map((skill) => skill.name),
@@ -2966,6 +3000,7 @@ export class RunService {
       availableUploadedSourceIds: sources.map((source) => source.id),
       availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
       taskIntent,
+      ...(taskSemantics === undefined ? {} : { taskSemantics }),
     });
     const proposedIds = new Set(admitted.steps.map((step) => step.id));
     const retiredStepIds = input.currentPlan.steps
@@ -3043,8 +3078,8 @@ export class RunService {
     }
 
     const runWorkspaceRoot = input.run.conversationId === undefined
-      ? this.workspaceRoot
-      : await this.ensureConversationWorkspace(input.run.conversationId);
+      ? await this.ensureOwnerWorkspace(input.run.ownerUserId)
+      : await this.ensureConversationWorkspace(input.run.ownerUserId, input.run.conversationId);
     const rootGrant = createCapabilityGrant({
       actorUserId: input.actorUserId,
       runId: input.run.id,
@@ -4284,6 +4319,7 @@ function failedBoundaryRecoveryDecision(
           requiredFacts: step.requiredFacts,
           skillIds: step.skillIds,
           requiredCapabilities: step.requiredCapabilities,
+          ...recoverySourceConstraint(step.executionBinding),
           ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
           successCriteria: step.successCriteria,
         }]),
@@ -4293,6 +4329,30 @@ function failedBoundaryRecoveryDecision(
     decision: "revise_plan",
     rationale: `Create a targeted repair leaf for failed assessment boundary ${target.id}; do not rerun the first-round Planner.`,
     planRevision,
+  };
+}
+
+/**
+ * Recovery proposals are re-admitted before validation. Preserve the neutral
+ * source identities encoded in an existing Step's canonical binding so an
+ * unchanged completed leaf does not appear to have been rewritten merely
+ * because the recovery proposal schema carries source constraints separately.
+ */
+export function recoverySourceConstraint(binding: ExecutionPlan["steps"][number]["executionBinding"]): Pick<PlanStepProposal, "sourceConstraint"> {
+  const requiredToolSourceIds = binding.requiredToolSourceIds ?? [];
+  const requiredUploadedSourceIds = binding.requiredUploadedSourceIds ?? [];
+  const requiredVisibleDirectoryIds = binding.requiredVisibleDirectoryIds ?? [];
+  if (
+    requiredToolSourceIds.length === 0
+    && requiredUploadedSourceIds.length === 0
+    && requiredVisibleDirectoryIds.length === 0
+  ) return {};
+  return {
+    sourceConstraint: {
+      ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+      ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
+      ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
+    },
   };
 }
 
@@ -5326,6 +5386,10 @@ class ActionTrackedModel implements ModelAdapter {
 
 function throwIfAbortSignal(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) throw new AppError("CANCELLED", "Run was cancelled", 409);
+}
+
+function toolActionDeadlineMs(executionTimeoutMs: number | undefined): number {
+  return (executionTimeoutMs ?? 120_000) + TOOL_ACTION_COMMIT_GRACE_MS;
 }
 
 function actionKindForPhase(phase: RuntimeContextSnapshot["phase"]): Exclude<RuntimeActionRecord["kind"], "recovery_review"> {
@@ -6706,6 +6770,7 @@ function executionTaskProfile(
 function executionTaskProfileForStep(
   step: ExecutionPlan["steps"][number],
   skills: readonly PrivateSkill[],
+  taskSemantics?: StructuredTaskUnderstanding,
 ): TaskProfile {
   const input = {
     objective: step.objective,
@@ -6714,7 +6779,21 @@ function executionTaskProfileForStep(
     skillNames: skills.map((skill) => skill.name),
     allowResearchPolicy: stepAllowsResearchPolicy(step),
   };
-  return executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
+  const profile = executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
+  // Planner's structured deliverable is the authority for a file-producing
+  // leaf. Leaf objectives routinely mention generic words such as "page" or
+  // "screen" as content instructions; those must never change PPTX/PDF/etc.
+  // into an HTML deliverable during execution or assessment.
+  if (
+    taskSemantics?.deliverable.surface !== "workspace_artifact"
+    || taskSemantics.deliverable.kind === "none"
+    || (!stepRequiresFileOutput(step) && !stepAllowsSkillFileOutput(step))
+  ) return profile;
+  return {
+    ...profile,
+    deliverySurface: taskSemantics.deliverable.surface,
+    artifactKind: taskSemantics.deliverable.kind,
+  };
 }
 
 function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean {
@@ -7132,6 +7211,11 @@ function inheritContinuedConversationIntent(
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
   if (resolution.relation !== "continue_prior" || resolution.targetRunId === undefined) return resolution;
+  // Goal lineage does not authorize a new execution. A reply-only follow-up
+  // may refer to prior work (for example, an acknowledgement or a question
+  // about it), but it must keep the Resolver's reply boundary rather than
+  // reopening the prior Run's artifact workflow.
+  if (resolution.mode !== "execute") return resolution;
   const target = workset?.resolvedIntents?.find((item) => item.runId === resolution.targetRunId)?.resolution;
   if (target === undefined) return resolution;
   const userConstraints = uniqueConversationConstraints([
@@ -7369,6 +7453,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
   return [
       "Resolve the latest user turn against the full conversation transcript and canonical prior-Run metadata.",
       "Do not interpret an elliptical follow-up in isolation. Rebind corrections, challenges, refinements, and continuations to the concrete prior goal they modify.",
+      "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
       "Return reply only when the effective goal can be satisfied solely from the existing transcript and supplied metadata.",
       "Return execute when faithful completion requires external state acquisition or capability use, even when the user only rejects, questions, or refines a prior answer.",

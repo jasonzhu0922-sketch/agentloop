@@ -618,6 +618,7 @@ export function createComputerTools(
       }),
       executionMode: "exclusive",
       replaySafe: false,
+      executionTimeoutMs: (value) => (value as { timeoutMs: number }).timeoutMs,
       preflight: async (context, value) => executorForContext(executor, context).preflightRunCommand(
         withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
       ),

@@ -63,7 +63,7 @@ export interface StructuredTaskUnderstanding {
   readonly schema: "agentloop.taskUnderstanding/v1";
   /** Business task with delivery-format wording removed. */
   readonly task: string;
-  /** Explicit requested output format, kept separate from the business task. */
+  /** Resolved output format, kept separate from the business task. */
   readonly format?: string;
   readonly normalizedObjective: string;
   readonly operation: StructuredTaskOperation;
@@ -207,8 +207,24 @@ export function understandTask(input: TaskIntentInput & {
     ...(input.userConstraints ?? []),
   ].join("\n"));
   const classifiedIntent = classifyTaskIntent(input);
-  const intent = input.targetArtifactKind === undefined
+  const uploadedSources = input.uploadedSources ?? [];
+  const readySources = uploadedSources.filter((source) => source.status === "ready");
+  // A native transformation without an explicit output target (for example,
+  // merging homogeneous files) preserves that input format. This is a task
+  // interpretation rule, not a Skill-selection fallback: later layers receive
+  // one resolved delivery contract regardless of how it was inferred.
+  const implicitNativeFormat = implicitNativeTransformationFormat(classifiedIntent, readySources);
+  const nativeTransformationIntent = implicitNativeFormat === undefined
     ? classifiedIntent
+    : {
+      ...classifiedIntent,
+      deliverySurface: "workspace_artifact" as const,
+      artifactKind: artifactKindForNativeFormat(implicitNativeFormat),
+      wantsArtifact: true,
+      wantsConversationAnswer: false,
+    };
+  const intent = input.targetArtifactKind === undefined
+    ? nativeTransformationIntent
     : {
       ...classifiedIntent,
       deliverySurface: "workspace_artifact" as const,
@@ -219,8 +235,6 @@ export function understandTask(input: TaskIntentInput & {
       wantsArtifact: true,
       wantsConversationAnswer: false,
     };
-  const uploadedSources = input.uploadedSources ?? [];
-  const readySources = uploadedSources.filter((source) => source.status === "ready");
   const operation = structuredTaskOperation(intent, normalizedObjective, readySources.length > 0);
   const workflow: StructuredTaskStage[] = [];
   if (intent.sourceNeed !== "none") workflow.push("acquire");
@@ -228,7 +242,7 @@ export function understandTask(input: TaskIntentInput & {
   if (operation === "transform_artifact") workflow.push("transform");
   if (intent.wantsArtifact) workflow.push("produce");
   if (workflow.length > 0 || intent.wantsConversationAnswer) workflow.push("deliver");
-  const outputFormat = structuredOutputFormat(formatInput);
+  const outputFormat = structuredOutputFormat(formatInput, intent) ?? implicitNativeFormat;
   const task = structuredTaskText(displayObjective, intent);
   return {
     schema: "agentloop.taskUnderstanding/v1",
@@ -290,7 +304,21 @@ function structuredTaskText(value: string, intent: TaskIntentClassification): st
   return task.length > 0 ? task : (intent.wantsArtifact ? "形成用户请求的交付物" : value.trim());
 }
 
-function structuredOutputFormat(value: string): string | undefined {
+/**
+ * Output-format recall owns only the requested deliverable clause.  The full
+ * objective can legitimately name uploaded source files (for example, a DOCX
+ * source for a PPTX report), so scanning it would let an input extension
+ * override the user's output contract before Skill selection.
+ */
+function structuredOutputFormat(value: string, intent: TaskIntentClassification): string | undefined {
+  if (!intent.wantsArtifact) return undefined;
+  const targetClause = intent.artifactAction === "transform"
+    ? artifactTransformationOutputClause(value)
+    : artifactCreationClause(value);
+  return structuredExplicitFormat(targetClause);
+}
+
+function structuredExplicitFormat(value: string): string | undefined {
   if (/\bhtml?\b|网页|页面|网站/iu.test(value)) return "html";
   if (/\bmarkdown\b|\bmd\b/iu.test(value)) return "markdown";
   if (/\bpdf\b/iu.test(value)) return "pdf";
@@ -299,6 +327,25 @@ function structuredOutputFormat(value: string): string | undefined {
   if (/\bxlsx?\b|\bexcel\b|\bcsv\b/iu.test(value)) return "spreadsheet";
   if (/\bpptx?\b|\bpowerpoint\b|演示文稿|幻灯片/iu.test(value)) return "presentation";
   return undefined;
+}
+
+function implicitNativeTransformationFormat(
+  intent: TaskIntentClassification,
+  sources: readonly UploadedSourceSummary[],
+): string | undefined {
+  if (intent.artifactAction !== "transform" || intent.artifactKind !== "none") return undefined;
+  const formats = new Set(sources.map((source) => sourceFormatFamily(source.extension, source.mimeType)));
+  return formats.size === 1 ? [...formats][0] : undefined;
+}
+
+function artifactKindForNativeFormat(format: string): ArtifactKind {
+  if (format === "ppt" || format === "pptx") return "presentation";
+  if (format === "xlsx" || format === "xls" || format === "csv" || format === "tsv") return "spreadsheet";
+  if (format === "html") return "html";
+  if (["png", "jpg", "webp", "gif", "svg"].includes(format)) return "image";
+  if (["wav", "mp3", "m4a", "ogg"].includes(format)) return "audio";
+  if (["js", "ts", "py", "json", "yaml", "yml"].includes(format)) return "code";
+  return "document";
 }
 
 function structuredOperationProfiles(
@@ -427,13 +474,18 @@ function detectRequestedArtifactKind(text: string, action: ArtifactAction): Arti
 }
 
 function explicitArtifactFormatKind(text: string): ArtifactKind {
-  if (/(?:\bhtml\b|网页|页面|站点|网站|前端|界面)/iu.test(text)) return "html";
+  // A concrete format token is stronger than a generic content-surface word.
+  // For example, a PPTX brief can naturally say “organize the pages”, but
+  // “pages” describes slide content rather than changing its delivery type to
+  // HTML. Generic UI words remain useful in detectArtifactKindSignal() only
+  // when no explicit format was supplied.
   if (/(?:\bpptx?\b|\bslides?\b|\bdeck\b|演示文稿|幻灯片|课件)/iu.test(text)) return "presentation";
   if (/(?:\bpdf\b|\bdocx?\b|\bword\b|\bmarkdown\b|\bmd\b|\btxt\b)/iu.test(text)) return "document";
   if (/(?:\bxlsx?\b|\bexcel\b|\bspreadsheet\b|\bcsv\b)/iu.test(text)) return "spreadsheet";
   if (/(?:\bpng\b|\bjpe?g\b|\bwebp\b|\bimage\b|\bposter\b|海报|图片|图像)/iu.test(text)) return "image";
   if (/(?:\bwav\b|audio\/wav|音频文件|音频)/iu.test(text)) return "audio";
   if (/(?:\bjson\b|代码|脚本|程序|应用)/iu.test(text)) return "code";
+  if (/\bhtml\b/iu.test(text)) return "html";
   return "none";
 }
 

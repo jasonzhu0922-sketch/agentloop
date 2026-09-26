@@ -600,7 +600,10 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     id: "conversation_delivery",
     category: "conversation_delivery",
     label: "Deliver conversation answer",
-    produces: ["delivery_receipt", "explicit_caveats"],
+    // Conversation delivery becomes durable only when TerminalCommitter writes
+    // the RunOutcome.  It does not manufacture an artifact-style receipt
+    // before assessment, which would create a second completion authority.
+    produces: ["explicit_caveats"],
     sourceKinds: ["conversation_workset"],
     sideEffect: "none",
     risk: "low",

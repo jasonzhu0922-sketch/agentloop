@@ -99,6 +99,27 @@ test("an expired dispatched Action is fenced and reported as execution authority
   }
 });
 
+test("terminal Runs fence new Actions from a stale executor", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "terminal-action-fence-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 0, 'failed', ?, ?)
+    `).run(runId, owner.user.id, "terminal Run", Date.now());
+
+    const actions = new RuntimeActionRepository(database);
+    await assert.rejects(
+      () => actions.dispatch({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 }),
+      (error: unknown) => error instanceof AppError && error.code === "CONFLICT",
+    );
+    assert.equal((await actions.list(runId)).length, 0);
+  } finally {
+    await database.close();
+  }
+});
+
 test("a resolved tool Action records a returned nonzero exit as operation failure", async () => {
   const database = new AppDatabase(":memory:");
   try {

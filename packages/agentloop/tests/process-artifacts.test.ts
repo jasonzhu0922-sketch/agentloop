@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -80,6 +81,59 @@ test("process artifacts mark accepted artifacts as final and leave candidates as
     assert.equal(draft?.sourceTool, "computer_write_file");
     assert.equal(final?.role, "final");
     assert.equal(final?.sourceTool, "computer_write_file");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted artifacts from an earlier conversation turn are rebound as final artifacts", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-reused-artifact-"));
+  try {
+    const path = join(root, "reused.wav");
+    const content = Buffer.from("RIFF....WAVEfmt ");
+    await fs.writeFile(path, content);
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(path, old, old);
+    const runCreatedAt = Date.now();
+    const events = [event(1, "tool.completed", {
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: {
+            path: "reused.wav",
+            bytes: content.byteLength,
+            sha256: createHash("sha256").update(content).digest("hex"),
+          },
+          verdict: "accepted",
+          evidenceKinds: {
+            satisfied: ["artifact_acceptance", "artifact_non_empty", "artifact_openable", "artifact_path"],
+            caveated: [],
+            failed: [],
+          },
+        }),
+      })];
+
+    const artifacts = await collectProcessArtifacts({
+      runId: "run-reused-artifact",
+      workspaceRoot: root,
+      runCreatedAt,
+      events,
+    });
+
+    assert.equal(artifacts.length, 1);
+    assert.equal(artifacts[0]?.path, "reused.wav");
+    assert.equal(artifacts[0]?.role, "final");
+    assert.equal(artifacts[0]?.sourceTool, "verify_artifact_acceptance");
+
+    await fs.writeFile(path, Buffer.from("RIFF....WAVEbad "));
+    const changed = await collectProcessArtifacts({
+      runId: "run-reused-artifact",
+      workspaceRoot: root,
+      runCreatedAt,
+      events,
+    });
+    assert.deepEqual(changed, [], "a later file mutation must invalidate the accepted receipt binding");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -259,10 +313,11 @@ test("process artifacts collect legacy DOC command outputs as Word artifacts", a
   }
 });
 
-test("process artifacts retain WAV outputs as previewable audio artifacts", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-wav-artifacts-"));
+test("process artifacts retain browser-playable audio outputs as previewable artifacts", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-process-audio-artifacts-"));
   try {
     await fs.writeFile(join(root, "southern_station.wav"), Buffer.from("RIFF....WAVEfmt "));
+    await fs.writeFile(join(root, "voice.mp3"), Buffer.from("ID3"));
     const artifacts = await collectProcessArtifacts({
       runId: "run-wav-artifacts",
       workspaceRoot: root,
@@ -272,15 +327,20 @@ test("process artifacts retain WAV outputs as previewable audio artifacts", asyn
         isError: false,
         result: JSON.stringify({
           exitCode: 0,
-          stdout: "rendered southern_station.wav",
-          fileChanges: [{ path: "southern_station.wav", changeType: "created", bytes: 16 }],
+          stdout: "rendered southern_station.wav and voice.mp3",
+          fileChanges: [
+            { path: "southern_station.wav", changeType: "created", bytes: 16 },
+            { path: "voice.mp3", changeType: "created", bytes: 3 },
+          ],
         }),
       })],
     });
 
-    assert.deepEqual(artifacts.map((artifact) => artifact.path), ["southern_station.wav"]);
-    assert.equal(artifacts[0]?.mimeType, "audio/wav");
-    assert.equal(artifacts[0]?.previewable, true);
+    assert.deepEqual(artifacts.map((artifact) => artifact.path), ["southern_station.wav", "voice.mp3"]);
+    assert.deepEqual(artifacts.map((artifact) => ({ mimeType: artifact.mimeType, previewable: artifact.previewable })), [
+      { mimeType: "audio/wav", previewable: true },
+      { mimeType: "audio/mpeg", previewable: true },
+    ]);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

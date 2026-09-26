@@ -52,6 +52,12 @@ export interface RuntimeTool<TInput = unknown> {
   readonly publishesRuntimeResult?: boolean;
   /** Upper bound for one Tool execution, used by the Runtime Action deadline. */
   readonly timeoutMs?: number;
+  /**
+   * Input-derived upper bound for one Tool execution. Use this when the
+   * accepted Tool input, rather than the Tool definition, selects the
+   * operation's execution budget.
+   */
+  executionTimeoutMs?(input: TInput): number | undefined;
   readonly maxResultCharacters?: number;
   /**
    * Optional, source-declared semantic identity fields. When an exact user

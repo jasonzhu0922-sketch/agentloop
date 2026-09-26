@@ -28,13 +28,17 @@ export interface ProcessArtifact {
 }
 
 export type ProcessArtifactRole = "final" | "process";
-type ArtifactSourceTool = "computer_write_file" | "computer_patch_file" | "computer_run_command" | "convert_artifact";
+type ArtifactSourceTool = "computer_write_file" | "computer_patch_file" | "computer_run_command" | "convert_artifact" | "verify_artifact_acceptance";
 
 function sourceToolPriority(sourceTool: ArtifactSourceTool): number {
   if (sourceTool === "convert_artifact") return 1;
   if (sourceTool === "computer_patch_file") return 2;
   if (sourceTool === "computer_write_file") return 2;
-  return 3;
+  if (sourceTool === "computer_run_command") return 3;
+  // Acceptance can bind an existing conversation artifact to the current Run.
+  // Prefer a producer from the same Run when one exists, but do not hide a
+  // verified reused artifact merely because it predates this Run.
+  return 4;
 }
 
 export type ProcessArtifactPreview =
@@ -165,15 +169,22 @@ export async function collectProcessArtifacts(input: {
   readonly promoteProducedArtifacts?: boolean;
 }): Promise<ProcessArtifact[]> {
   const candidates = collectCandidatePaths(input.events);
+  const acceptedArtifacts = collectAcceptedArtifactReceipts(input.events);
   const finalPaths = await collectFinalArtifactPaths({
     workspaceRoot: input.workspaceRoot,
     runCreatedAt: input.runCreatedAt,
-    events: input.events,
+    acceptedArtifacts,
     promoteProducedArtifacts: input.promoteProducedArtifacts === true,
+    candidates,
   });
   const artifacts = new Map<string, ProcessArtifact>();
   for (const candidate of candidates) {
-    const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, candidate.path);
+    const acceptance = acceptedArtifacts.find((artifact) => artifact.path === candidate.path);
+    const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, candidate.path, {
+      allowExistingBeforeRun: candidate.sourceTool === "verify_artifact_acceptance",
+      ...(acceptance?.bytes === undefined ? {} : { expectedBytes: acceptance.bytes }),
+      ...(acceptance?.sha256 === undefined ? {} : { expectedSha256: acceptance.sha256 }),
+    });
     if (file === undefined) continue;
     const path = file.path;
     const role: ProcessArtifactRole = finalPaths.has(path) ? "final" : "process";
@@ -282,6 +293,16 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
       if (path !== undefined && isSafeRelativePath(path)) candidates.set(path, toolName);
       continue;
     }
+    if (toolName === "verify_artifact_acceptance" && event.data.isError !== true) {
+      if (result !== undefined && isAcceptedArtifactAcceptanceResult(result)) {
+        const artifact = recordValue(result.artifact);
+        const path = stringValue(artifact?.path) ?? stringValue(artifact?.requestedPath) ?? stringValue(result.path);
+        if (path !== undefined && !path.includes("\0") && !isExecutionLogPath(path) && !candidates.has(path)) {
+          candidates.set(path, toolName);
+        }
+      }
+      continue;
+    }
     if (toolName !== "computer_run_command" || result?.exitCode !== 0 || typeof result.stdout !== "string") continue;
     for (const path of artifactPathsFromCommandFileChanges(result)) {
       if (!candidates.has(path)) candidates.set(path, toolName);
@@ -298,16 +319,21 @@ function collectCandidatePaths(events: readonly StoredRunEvent[]): Array<{
 async function collectFinalArtifactPaths(input: {
   readonly workspaceRoot: string;
   readonly runCreatedAt: number;
-  readonly events: readonly StoredRunEvent[];
+  readonly acceptedArtifacts: readonly AcceptedArtifactReceipt[];
   readonly promoteProducedArtifacts: boolean;
+  readonly candidates: readonly { readonly path: string; readonly sourceTool: ArtifactSourceTool }[];
 }): Promise<Set<string>> {
   const paths = new Set<string>();
-  for (const rawPath of collectAcceptedArtifactPaths(input.events)) {
-    const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, rawPath);
+  for (const accepted of input.acceptedArtifacts) {
+    const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, accepted.path, {
+      allowExistingBeforeRun: true,
+      ...(accepted.bytes === undefined ? {} : { expectedBytes: accepted.bytes }),
+      ...(accepted.sha256 === undefined ? {} : { expectedSha256: accepted.sha256 }),
+    });
     if (file !== undefined) paths.add(file.path);
   }
   if (input.promoteProducedArtifacts) {
-    for (const candidate of collectCandidatePaths(input.events)) {
+    for (const candidate of input.candidates) {
       if (isGeneratedSourcePath(candidate.path)) continue;
       const file = await inspectCandidate(input.workspaceRoot, input.runCreatedAt, candidate.path);
       if (file !== undefined) paths.add(file.path);
@@ -316,8 +342,14 @@ async function collectFinalArtifactPaths(input: {
   return paths;
 }
 
-function collectAcceptedArtifactPaths(events: readonly StoredRunEvent[]): string[] {
-  const paths = new Set<string>();
+interface AcceptedArtifactReceipt {
+  readonly path: string;
+  readonly bytes?: number;
+  readonly sha256?: string;
+}
+
+function collectAcceptedArtifactReceipts(events: readonly StoredRunEvent[]): AcceptedArtifactReceipt[] {
+  const receipts = new Map<string, AcceptedArtifactReceipt>();
   for (const event of events) {
     if (event.type !== "tool.completed") continue;
     if (event.data.toolName !== "verify_artifact_acceptance" || event.data.isError === true) continue;
@@ -325,9 +357,16 @@ function collectAcceptedArtifactPaths(events: readonly StoredRunEvent[]): string
     if (result === undefined || !isAcceptedArtifactAcceptanceResult(result)) continue;
     const artifact = recordValue(result.artifact);
     const path = stringValue(artifact?.path) ?? stringValue(artifact?.requestedPath) ?? stringValue(result.path);
-    if (path !== undefined && path.length > 0 && !path.includes("\0") && !isExecutionLogPath(path)) paths.add(path);
+    if (path === undefined || path.includes("\0") || isExecutionLogPath(path)) continue;
+    const bytes = typeof artifact?.bytes === "number" && Number.isSafeInteger(artifact.bytes) && artifact.bytes >= 0
+      ? artifact.bytes
+      : undefined;
+    const sha256 = typeof artifact?.sha256 === "string" && /^[a-f0-9]{64}$/iu.test(artifact.sha256)
+      ? artifact.sha256.toLowerCase()
+      : undefined;
+    receipts.set(path, { path, ...(bytes === undefined ? {} : { bytes }), ...(sha256 === undefined ? {} : { sha256 }) });
   }
-  return [...paths];
+  return [...receipts.values()];
 }
 
 function isAcceptedArtifactAcceptanceResult(result: Readonly<Record<string, unknown>>): boolean {
@@ -399,12 +438,26 @@ async function inspectCandidate(
   workspaceRoot: string,
   runCreatedAt: number,
   path: string,
+  options: {
+    readonly allowExistingBeforeRun?: boolean;
+    readonly expectedBytes?: number;
+    readonly expectedSha256?: string;
+  } = {},
 ): Promise<{ path: string; bytes: number } | undefined> {
   try {
     const resolved = await resolveWorkspacePath(workspaceRoot, path);
     const target = resolved.absolutePath;
     const stat = await fs.stat(target);
-    if (!stat.isFile() || stat.size > MAX_PROCESS_ARTIFACT_BYTES || stat.mtimeMs + 1_000 < runCreatedAt) return undefined;
+    if (
+      !stat.isFile()
+      || stat.size > MAX_PROCESS_ARTIFACT_BYTES
+      || (options.allowExistingBeforeRun !== true && stat.mtimeMs + 1_000 < runCreatedAt)
+    ) return undefined;
+    if (options.expectedBytes !== undefined && stat.size !== options.expectedBytes) return undefined;
+    if (options.expectedSha256 !== undefined) {
+      const content = await fs.readFile(target);
+      if (createHash("sha256").update(content).digest("hex") !== options.expectedSha256) return undefined;
+    }
     return { path: resolved.relativePath, bytes: stat.size };
   } catch {
     return undefined;
@@ -441,7 +494,8 @@ function isSafeRelativePath(path: string): boolean {
 function mimeTypeFor(path: string): string {
   const extension = extensionFor(path);
   const types: Record<string, string> = {
-    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml", wav: "audio/wav",
+    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml",
+    aac: "audio/aac", flac: "audio/flac", m4a: "audio/mp4", mp3: "audio/mpeg", oga: "audio/ogg", ogg: "audio/ogg", opus: "audio/ogg", wav: "audio/wav", weba: "audio/webm",
     html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8", md: "text/markdown; charset=utf-8", txt: "text/plain; charset=utf-8",
     csv: "text/csv; charset=utf-8", json: "application/json; charset=utf-8",
     doc: "application/msword",
@@ -453,7 +507,7 @@ function mimeTypeFor(path: string): string {
 }
 
 function isPreviewable(path: string): boolean {
-  return /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|wav|xlsx)$/i.test(path);
+  return /\.(?:pdf|png|jpe?g|webp|gif|svg|html?|md|txt|csv|json|docx?|pptx|xlsx|aac|flac|m4a|mp3|oga|ogg|opus|wav|weba)$/i.test(path);
 }
 
 function extensionFor(path: string): string {

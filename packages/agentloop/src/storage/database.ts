@@ -152,6 +152,7 @@ export class AppDatabase implements SqlConnection {
         version INTEGER NOT NULL,
         goal TEXT NOT NULL,
         selected_skill_ids_json TEXT NOT NULL,
+        task_semantics_json TEXT,
         input_bindings_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL CHECK(status IN ('admitted', 'running', 'completed', 'failed')),
         created_at INTEGER NOT NULL,
@@ -501,6 +502,7 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("runs", "conversation_id", "TEXT REFERENCES conversations(id) ON DELETE SET NULL");
       await this.ensureColumn("runs", "model_key", "TEXT");
       await this.ensureColumn("plans", "input_bindings_json", "TEXT NOT NULL DEFAULT '[]'");
+      await this.ensureColumn("plans", "task_semantics_json", "TEXT");
       await this.ensureColumn("plan_steps", "kind", "TEXT NOT NULL DEFAULT 'leaf'");
       await this.ensureColumn("plan_steps", "parent_step_id", "TEXT");
       await this.ensureColumn("plan_steps", "role", "TEXT");
@@ -509,6 +511,7 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("plan_steps", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'");
       await this.ensureColumn("plan_steps", "execution_binding_json", "TEXT");
       await this.ensureColumn("plan_steps", "evidence_contract_json", "TEXT");
+      await this.migrateLegacyStepExecutionBindings();
       await this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
       await this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
       await this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
@@ -728,6 +731,49 @@ export class AppDatabase implements SqlConnection {
     return keys.some((key) => key.table === "users");
   }
 
+  /**
+   * Older Plans predate persisted execution bindings but retain the neutral
+   * capability and tool columns from which a read-only historical binding can
+   * be constructed. Do not overwrite a present (including malformed) binding:
+   * that remains an integrity failure at the Plan boundary.
+   */
+  private async migrateLegacyStepExecutionBindings(): Promise<void> {
+    if (this.dialect !== "sqlite") return;
+    const rows = await this.connection.prepare(`
+      SELECT plan_id, step_id, required_capabilities_json,
+             recommended_tool_names_json, evidence_contract_json
+      FROM plan_steps
+      WHERE execution_binding_json IS NULL
+    `).all() as Array<{
+      plan_id: string;
+      step_id: string;
+      required_capabilities_json: string | null;
+      recommended_tool_names_json: string | null;
+      evidence_contract_json: string | null;
+    }>;
+    const update = this.connection.prepare(`
+      UPDATE plan_steps SET execution_binding_json = ?
+      WHERE plan_id = ? AND step_id = ? AND execution_binding_json IS NULL
+    `);
+    for (const row of rows) {
+      const location = `${row.plan_id}/${row.step_id}`;
+      const requiredCapabilities = parseLegacyStringArray(row.required_capabilities_json, location, "required capabilities");
+      const resolvedToolNames = parseLegacyStringArray(row.recommended_tool_names_json, location, "recommended tool names");
+      const evidenceKinds = parseLegacyEvidenceKinds(row.evidence_contract_json, location);
+      await update.run(JSON.stringify({
+        schema: "agentloop.stepExecutionBinding/v1",
+        requiredCapabilities,
+        resolvedToolNames,
+        // Legacy rows lack source constraints and side-effect declarations.
+        // This projection preserves history for recovery without granting new
+        // authorization to a resumed execution.
+        sourceKinds: [],
+        sideEffect: "none",
+        evidenceKinds,
+      }), row.plan_id, row.step_id);
+    }
+  }
+
   private async ensureColumn(table: string, column: string, definition: string): Promise<void> {
     const columns = await this.connection.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
     if (columns.some((item) => item.name === column)) return;
@@ -788,4 +834,37 @@ export class AppDatabase implements SqlConnection {
       `);
     });
   }
+}
+
+function parseLegacyStringArray(value: string | null, location: string, label: string): string[] {
+  if (value === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`Legacy Plan step ${location} has invalid ${label}`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+    throw new Error(`Legacy Plan step ${location} has invalid ${label}`);
+  }
+  return [...new Set(parsed)];
+}
+
+function parseLegacyEvidenceKinds(value: string | null, location: string): string[] {
+  if (value === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`Legacy Plan step ${location} has invalid evidence contract`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Legacy Plan step ${location} has invalid evidence contract`);
+  }
+  const requiredKinds = (parsed as { requiredKinds?: unknown }).requiredKinds;
+  if (requiredKinds === undefined) return [];
+  if (!Array.isArray(requiredKinds) || requiredKinds.some((item) => typeof item !== "string")) {
+    throw new Error(`Legacy Plan step ${location} has invalid evidence contract`);
+  }
+  return [...new Set(requiredKinds)];
 }

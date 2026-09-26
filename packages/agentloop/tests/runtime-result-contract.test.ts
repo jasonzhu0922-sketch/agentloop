@@ -245,6 +245,49 @@ test("AgentLoop exposes the Runtime-owned ref alongside the current exact result
   assert.equal(result.output, "score=97");
 });
 
+test("AgentLoop forwards a parsed Tool execution budget to the Action tracker", async () => {
+  let turn = 0;
+  let trackedTimeout: number | undefined;
+  const result = await runAgentLoop({
+    runId,
+    input: "run a bounded command",
+    systemPrompt: "Use the Tool.",
+    tools: new ToolRegistry([{
+      name: "bounded_command",
+      description: "Test Tool with an input-derived execution budget",
+      inputSchema: { type: "object" },
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: (input) => input as { timeoutMs: number },
+      executionTimeoutMs: (input) => input.timeoutMs,
+      execute: async () => ({ exitCode: 0 }),
+    }]),
+    availableSkills: [],
+    maxSteps: 2,
+    grant: createCapabilityGrant({
+      actorUserId: "owner", runId, planId, stepId, depth: 0,
+      allowedToolNames: ["bounded_command"], allowedSkillIds: [],
+    }),
+    actionTracker: {
+      executeToolCall: async (input, operation) => {
+        trackedTimeout = input.timeoutMs;
+        return { value: await operation() };
+      },
+    },
+    model: {
+      limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+      complete: async () => {
+        turn += 1;
+        return turn === 1
+          ? { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "long", name: "bounded_command", arguments: { timeoutMs: 300_000 } }] }
+          : { content: "done", finishReason: "stop" as const, toolCalls: [] };
+      },
+    },
+  });
+  assert.equal(result.output, "done");
+  assert.equal(trackedTimeout, 300_000);
+});
+
 test("RunService gives every successful Tool Action a persisted ref and emits it with the Tool result", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -312,6 +355,62 @@ test("RunService gives every successful Tool Action a persisted ref and emits it
     );
     assert.equal((completed?.data.resultRef as { resultId?: string } | undefined)?.resultId, action?.resultRef);
     assert.equal(JSON.parse(String(completed?.data.result)).resultRef, undefined);
+  } finally {
+    await database.close();
+  }
+});
+
+test("authority-loss reconciliation aborts the active Tool executor", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const skills = new SkillService(database);
+    let releaseExecution!: () => void;
+    const executionEntered = new Promise<void>((resolve) => { releaseExecution = resolve; });
+    let releaseAbort!: () => void;
+    const executionAborted = new Promise<void>((resolve) => { releaseAbort = resolve; });
+    const tool: RuntimeTool<unknown> = {
+      name: "blocking_tool",
+      description: "Wait until its Run is cancelled.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: (input) => input,
+      execute: async (context) => {
+        releaseExecution();
+        await new Promise<never>((_resolve, reject) => {
+          context.signal?.addEventListener("abort", () => {
+            releaseAbort();
+            reject(new AppError("CANCELLED", "Tool execution was aborted", 409));
+          }, { once: true });
+        });
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills,
+      tools: [tool],
+      plannerFactory: () => singleStepTestPlanner(),
+      modelFactory: () => ({
+        limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+        complete: async () => ({
+          content: "",
+          finishReason: "tool_calls" as const,
+          toolCalls: [{ id: "block", name: "blocking_tool", arguments: {} }],
+        }),
+      }),
+    });
+    const run = await runs.start(owner.user.id, "run one blocking operation");
+    await executionEntered;
+    const action = (await runs.actionsForRun(owner.user.id, run.id)).find((item) => item.kind === "tool_call");
+    assert.ok(action);
+    await database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
+
+    assert.equal(await runs.reconcileInterruptedRuns([run.id]), 1);
+    await executionAborted;
+    const terminal = await runs.get(owner.user.id, run.id);
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.errorCode, "EXECUTION_AUTHORITY_LOST");
   } finally {
     await database.close();
   }
@@ -691,6 +790,63 @@ test("Step result publication accepts only Assessment-owned non-blocking caveats
       }),
       (error: unknown) => error instanceof AppError && error.code === "ASSESSMENT_ERROR",
     );
+  } finally {
+    await database.close();
+  }
+});
+
+test("Step result publication is fenced once its Run is terminal", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const runId = "terminal-step-result-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, 'result-owner', NULL, 0, 0, 'running', 'publish one result', ?)
+    `).run(runId, Date.now());
+    const plans = new PlanRepository(database);
+    let plan = await plans.create(admitPlan({
+      runId,
+      proposal: {
+        goal: "publish one result",
+        selectedSkillIds: [],
+        steps: [{
+          id: "publish",
+          objective: "Publish only while the Run is active.",
+          dependencies: [],
+          skillIds: [],
+          requiredCapabilities: [],
+          successCriteria: [{ id: "delivered", description: "A result is published.", source: "planner" }],
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    plan = await plans.startStep(plan.id, "publish");
+    await plans.saveAssessment({
+      id: "terminal-step-assessment",
+      planId: plan.id,
+      stepId: "publish",
+      attempt: 1,
+      approved: true,
+      criteria: [{ criterionId: "delivered", satisfied: true, evidenceRefs: ["candidate"] }],
+      skills: [],
+      evidenceDigest: "candidate",
+      feedback: "approved",
+      createdAt: Date.now(),
+    });
+    await database.prepare("UPDATE runs SET status = 'failed' WHERE id = ?").run(runId);
+
+    await assert.rejects(
+      () => new StepResultCommitter(plans).commit({
+        runId,
+        plan,
+        step: plan.steps.find((step) => step.id === "publish")!,
+        evidence: { candidateOutput: "must not publish", toolCalls: [], modelSteps: 1 },
+      }),
+      (error: unknown) => error instanceof AppError && error.code === "CONFLICT",
+    );
+    const persisted = await plans.get(plan.id);
+    assert.equal(persisted.steps.find((step) => step.id === "publish")?.status, "running");
   } finally {
     await database.close();
   }
