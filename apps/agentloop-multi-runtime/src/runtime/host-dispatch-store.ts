@@ -1,4 +1,5 @@
-import type { AppDatabase } from "@zhujun/agentloop";
+import type { SqlConnection } from "@zhujun/agentloop";
+import { migrateRuntimeState } from "../storage/runtime-state-migrations.ts";
 
 export type DispatchClaim =
   | { readonly kind: "claimed" }
@@ -7,15 +8,20 @@ export type DispatchClaim =
 
 /** Durable dispatch idempotency and execution ownership ledger in the shared state store. */
 export class HostDispatchStore {
-  private readonly database: AppDatabase;
+  private readonly database: SqlConnection;
   private readonly runtimeId: string;
 
-  constructor(database: AppDatabase, runtimeId = "legacy-runtime") {
+  constructor(database: SqlConnection, runtimeId = "legacy-runtime") {
     this.database = database;
     this.runtimeId = runtimeId;
   }
 
   async ready(): Promise<void> {
+    await migrateRuntimeState(this.database);
+  }
+
+  /** Invoked only by the versioned schema migration registry. */
+  async installSchema(): Promise<void> {
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_host_dispatches (
         dispatch_key TEXT PRIMARY KEY,
@@ -125,6 +131,10 @@ export class HostDispatchStore {
     `).get(this.runtimeId) as { count: number } | undefined;
     return Number(row?.count ?? 0);
   }
+}
+
+export async function installHostDispatchSchema(database: SqlConnection): Promise<void> {
+  await new HostDispatchStore(database).installSchema();
 }
 
 export class RuntimeDispatchInFlightError extends Error {}

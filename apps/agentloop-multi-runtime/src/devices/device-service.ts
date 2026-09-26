@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import type { SqlConnection } from "@zhujun/agentloop";
 import type { Principal } from "../auth/identity-service.ts";
+import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 const REGISTRATION_TOKEN_BYTES = 32;
 const AGENT_TOKEN_BYTES = 32;
@@ -59,6 +60,11 @@ export class SqlDeviceRepository implements DeviceRepository {
   }
 
   async ready(): Promise<void> {
+    await migrateRouterState(this.database);
+  }
+
+  /** Invoked only by the versioned schema migration registry. */
+  async installSchema(): Promise<void> {
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_devices (
         id TEXT PRIMARY KEY,
@@ -223,6 +229,10 @@ export class SqlDeviceRepository implements DeviceRepository {
     if (row === undefined) throw new DeviceError(401, "local_session_invalid", "Local Runtime session is invalid or expired");
     return { token: tokenValue(sessionToken, "sessionToken"), expiresAt: row.expires_at, deviceId: row.device_id, tenantId: row.tenant_id, ownerUserId: row.owner_user_id };
   }
+}
+
+export async function installDeviceSchema(database: SqlConnection): Promise<void> {
+  await new SqlDeviceRepository(database).installSchema();
 }
 
 export class DeviceError extends Error {

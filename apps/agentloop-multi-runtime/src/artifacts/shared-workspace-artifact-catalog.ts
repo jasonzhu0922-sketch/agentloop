@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { previewProcessArtifact, type AppDatabase, type ProcessArtifact, type ProcessArtifactPreview } from "@zhujun/agentloop";
+import { previewProcessArtifact, type ProcessArtifact, type ProcessArtifactPreview, type SqlConnection } from "@zhujun/agentloop";
+import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 export interface CatalogArtifact extends ProcessArtifact {
   readonly sha256: string;
@@ -13,16 +14,21 @@ export interface CatalogArtifact extends ProcessArtifact {
  * A later BlobStore catalog can implement the same interface.
  */
 export class SharedWorkspaceArtifactCatalog {
-  private readonly database: AppDatabase;
+  private readonly database: SqlConnection;
   private readonly workspaceRoot: string;
   private readyPromise?: Promise<void>;
 
-  constructor(database: AppDatabase, workspaceRoot: string) {
+  constructor(database: SqlConnection, workspaceRoot: string) {
     this.database = database;
     this.workspaceRoot = workspaceRoot;
   }
 
   async ready(): Promise<void> {
+    await migrateRouterState(this.database);
+  }
+
+  /** Invoked only by the versioned schema migration registry. */
+  async installSchema(): Promise<void> {
     this.readyPromise ??= this.initialize();
     await this.readyPromise;
   }
@@ -108,6 +114,10 @@ export class SharedWorkspaceArtifactCatalog {
       await this.database.exec("DROP TABLE mr_artifacts_global_id_legacy");
     });
   }
+}
+
+export async function installArtifactCatalogSchema(database: SqlConnection): Promise<void> {
+  await new SharedWorkspaceArtifactCatalog(database, ".").installSchema();
 }
 
 function hasGlobalArtifactIdPrimaryKey(columns: readonly { name: string; pk: number }[]): boolean {

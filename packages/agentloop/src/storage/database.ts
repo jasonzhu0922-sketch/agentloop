@@ -53,6 +53,16 @@ export class AppDatabase implements SqlConnection {
     return this.migrated;
   }
 
+  /**
+   * Installs the AgentLoop kernel schema for an externally orchestrated
+   * migration. Multi Runtime calls this only from its versioned migration
+   * ledger; direct embedded SQLite users retain constructor-time migration.
+   */
+  async installKernelSchema(): Promise<void> {
+    await this.migrated;
+    await this.migrate();
+  }
+
   exec(sql: string): Promise<void> {
     return this.migrated.then(() => this.connection.exec(sql));
   }

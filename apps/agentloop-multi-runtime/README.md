@@ -86,6 +86,12 @@ AGENTLOOP_RUNTIME_STATE_DATABASE_URL=mysql://user:password@tidb:4000/agentloop_r
 未设置角色变量时，两类进程继续回退到 `AGENTLOOP_STATE_*`，便于现有单库 SQLite
 开发。Local Runtime Agent 不读取以上任何变量。
 
+Router 与 Runtime Host 会在启动、构造业务服务前分别应用其版本化迁移。每个逻辑
+database 都有 `mr_schema_migrations(id, checksum, applied_at)`：已安装 migration 的
+checksum 必须与当前代码一致，否则进程会拒绝继续启动。SQLite 旧库会先执行既有的
+前向兼容升级，再写入当前基线；PostgreSQL/TiDB 从同一有序清单建库。迁移期间使用
+SQLite 事务、PostgreSQL advisory transaction lock 或 TiDB advisory lock 串行化。
+
 当前生产部署基线将附件元数据写入共享 PostgreSQL，并把不可变附件字节放在仅 Router 共享的 RWX 挂载；Host 始终经 Router 的受控下载接口读取附件，而不会拿到存储路径。对象存储 BlobStore 是下一步替换此挂载的演进点，不是已经宣称完成的能力。可直接使用 [Kubernetes 多主机部署清单](deploy/kubernetes/README.md) 构建并独立发布 `router`、`runtime-host`、`web` 三个镜像目标。
 
 ### Step execution policy

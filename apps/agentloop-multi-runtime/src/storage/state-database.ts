@@ -41,13 +41,14 @@ export function stateDatabaseConfigFromEnvironment(input: {
  */
 export async function openStateDatabase(
   config: StateDatabaseConfig,
-  input: { readonly schema: "router" | "runtime" } = { schema: "runtime" },
+  input: { readonly schema: "router" | "runtime"; readonly autoMigrateKernel?: boolean } = { schema: "runtime" },
 ): Promise<AppDatabase> {
+  const kernelSchema = input.schema === "runtime" && input.autoMigrateKernel !== false ? "kernel" : "none";
   if (config.driver === "sqlite") {
     if (config.databasePath !== ":memory:") mkdirSync(dirname(config.databasePath), { recursive: true });
     return await AppDatabase.open({
       connection: new SqliteConnection(config.databasePath),
-      schema: input.schema === "runtime" ? "kernel" : "none",
+      schema: kernelSchema,
     });
   }
   const connection = config.driver === "postgres"
@@ -57,7 +58,7 @@ export async function openStateDatabase(
     : await TiDbConnection.create(config.poolSize === undefined
       ? config.connectionString
       : { uri: config.connectionString, connectionLimit: config.poolSize });
-  return await AppDatabase.open({ connection, schema: input.schema === "runtime" ? "kernel" : "none" });
+  return await AppDatabase.open({ connection, schema: kernelSchema });
 }
 
 function optionalPositiveInteger(value: string | undefined, name: string): number | undefined {

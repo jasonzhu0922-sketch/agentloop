@@ -1,11 +1,41 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import type { AppDatabase } from "@zhujun/agentloop";
+import type { AppDatabase, SqlConnection } from "@zhujun/agentloop";
+import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 const scrypt = promisify(scryptCallback);
 const PASSWORD_KEY_LENGTH = 64;
 const SESSION_TOKEN_BYTES = 32;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const IDENTITY_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS mr_identity_users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS mr_identity_tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS mr_identity_memberships (
+    tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(tenant_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS mr_identity_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS mr_identity_sessions_user_idx ON mr_identity_sessions(user_id);
+  CREATE INDEX IF NOT EXISTS mr_identity_sessions_expiry_idx ON mr_identity_sessions(expires_at);
+`;
 
 export interface Principal {
   readonly userId: string;
@@ -41,35 +71,7 @@ export class IdentityService {
   }
 
   async ready(): Promise<void> {
-    await this.database.exec(`
-      CREATE TABLE IF NOT EXISTS mr_identity_users (
-        id TEXT PRIMARY KEY,
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS mr_identity_tenants (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS mr_identity_memberships (
-        tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
-        role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(tenant_id, user_id)
-      );
-      CREATE TABLE IF NOT EXISTS mr_identity_sessions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES mr_identity_users(id) ON DELETE CASCADE,
-        token_hash TEXT NOT NULL UNIQUE,
-        expires_at INTEGER NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS mr_identity_sessions_user_idx ON mr_identity_sessions(user_id);
-      CREATE INDEX IF NOT EXISTS mr_identity_sessions_expiry_idx ON mr_identity_sessions(expires_at);
-    `);
+    await migrateRouterState(this.database);
   }
 
   async register(emailInput: unknown, passwordInput: unknown): Promise<IdentitySession> {
@@ -147,6 +149,11 @@ export class IdentityService {
     `).run(`session_${randomUUID()}`, principal.userId, hashToken(token), expiresAt, now);
     return { token, expiresAt, principal };
   }
+}
+
+/** Schema installer invoked only by the versioned migration registry. */
+export async function installIdentitySchema(database: SqlConnection): Promise<void> {
+  await database.exec(IDENTITY_SCHEMA_SQL);
 }
 
 function normalizeEmail(value: unknown): string {

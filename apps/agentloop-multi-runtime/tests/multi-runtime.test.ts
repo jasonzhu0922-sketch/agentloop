@@ -40,6 +40,8 @@ import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-ro
 import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/storage/state-database.ts";
+import { SchemaMigrationError } from "../src/storage/schema-migration-ledger.ts";
+import { migrateRouterState } from "../src/storage/router-state-migrations.ts";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/domain/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
@@ -159,6 +161,27 @@ test("Router state never initializes Runtime kernel tables, while Runtime state 
     }
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("role migrations record an immutable checksum and fail closed on history drift", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRouterState(database);
+    await migrateRouterState(database);
+    const row = await database.prepare(`
+      SELECT id, checksum FROM mr_schema_migrations
+      WHERE id = 'router/0001_identity_control_plane_devices_attachments_artifacts'
+    `).get<{ id: string; checksum: string }>();
+    assert.equal(row?.id, "router/0001_identity_control_plane_devices_attachments_artifacts");
+    assert.match(row?.checksum ?? "", /^[a-f0-9]{64}$/);
+    await database.prepare("UPDATE mr_schema_migrations SET checksum = 'unknown' WHERE id = ?").run(row?.id ?? "");
+    await assert.rejects(
+      () => migrateRouterState(database),
+      SchemaMigrationError,
+    );
+  } finally {
+    await database.close();
   }
 });
 

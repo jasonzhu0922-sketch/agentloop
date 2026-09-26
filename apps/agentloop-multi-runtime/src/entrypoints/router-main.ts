@@ -7,6 +7,7 @@ import { createRouterHttpServer, HttpRuntimeEndpoint, type LocalAgentRelease } f
 import { PersistentMultiRuntimeRouter } from "../control-plane/persistent-router.ts";
 import { startAssignmentReconciler } from "../control-plane/assignment-reconciler.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../storage/state-database.ts";
+import { migrateRouterState } from "../storage/router-state-migrations.ts";
 import { IdentityService } from "../auth/identity-service.ts";
 import { SharedWorkspaceArtifactCatalog } from "../artifacts/shared-workspace-artifact-catalog.ts";
 import { SqlDeviceRepository } from "../devices/device-service.ts";
@@ -29,6 +30,7 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
   sqliteFallbackPath: controlPlaneDatabasePath,
   environmentPrefix: "AGENTLOOP_ROUTER_STATE",
 }), { schema: "router" });
+await migrateRouterState(database);
 const store = new ControlPlaneStore(database);
 await store.ready();
 const identity = new IdentityService(database, positiveInteger(process.env.IDENTITY_SESSION_TTL_MS, 7 * 24 * 60 * 60 * 1000));

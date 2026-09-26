@@ -16,6 +16,7 @@ import {
   requiredRuntimePythonModules,
 } from "../runtime/runtime-command-preflight.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../storage/state-database.ts";
+import { migrateRuntimeState } from "../storage/runtime-state-migrations.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 // This non-sensitive path is the only Enterprise Info setting passed to
@@ -73,7 +74,8 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
   appRoot,
   sqliteFallbackPath: databasePath,
   environmentPrefix: "AGENTLOOP_RUNTIME_STATE",
-}), { schema: "runtime" });
+}), { schema: "runtime", autoMigrateKernel: false });
+await migrateRuntimeState(database);
 const dispatchStore = new HostDispatchStore(database, runtimeId);
 await dispatchStore.ready();
 const providers = await LlmProviderRegistry.fromConfigFile(providerConfigPath);

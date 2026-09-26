@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { AppDatabase } from "@zhujun/agentloop";
+import type { SqlConnection } from "@zhujun/agentloop";
 import type { PortableResourceRef } from "../domain/contracts.ts";
 import type { ConversationAttachment } from "./attachment-broker.ts";
+import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
@@ -19,12 +20,12 @@ interface AttachmentRow extends ConversationAttachment {
  * Runtime Hosts continue to receive only Router-issued HTTP references.
  */
 export class SharedFilesystemAttachmentBroker {
-  private readonly database: AppDatabase;
+  private readonly database: SqlConnection;
   private readonly root: string;
   private readonly hostReadBaseUrl: string;
 
   constructor(
-    database: AppDatabase,
+    database: SqlConnection,
     root: string,
     hostReadBaseUrl: string,
   ) {
@@ -34,6 +35,11 @@ export class SharedFilesystemAttachmentBroker {
   }
 
   async ready(): Promise<void> {
+    await migrateRouterState(this.database);
+  }
+
+  /** Invoked only by the versioned schema migration registry. */
+  async installSchema(): Promise<void> {
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_attachments (
         id TEXT PRIMARY KEY,
@@ -140,6 +146,10 @@ export class SharedFilesystemAttachmentBroker {
   private pathFor(storageName: string): string {
     return resolve(this.root, storageName);
   }
+}
+
+export async function installAttachmentSchema(database: SqlConnection): Promise<void> {
+  await new SharedFilesystemAttachmentBroker(database, ".", "http://invalid.local").installSchema();
 }
 
 function publicAttachment(value: AttachmentRow): ConversationAttachment {

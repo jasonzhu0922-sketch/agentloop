@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlConnection } from "@zhujun/agentloop";
 import type { ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
+import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
 
@@ -154,6 +155,11 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   }
 
   async ready(): Promise<void> {
+    await migrateRouterState(this.database);
+  }
+
+  /** Invoked only by the versioned schema migration registry. */
+  async installSchema(): Promise<void> {
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_runtime_nodes (
         id TEXT PRIMARY KEY,
@@ -945,6 +951,10 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   private async latestAssignment(taskId: string): Promise<AssignmentRow | undefined> {
     return await this.database.prepare(assignmentSelect("WHERE a.task_id = ? ORDER BY a.created_at DESC LIMIT 1")).get(taskId) as AssignmentRow | undefined;
   }
+}
+
+export async function installControlPlaneSchema(database: SqlConnection): Promise<void> {
+  await new ControlPlaneStore(database).installSchema();
 }
 
 export class RuntimeCapacityError extends Error {}
