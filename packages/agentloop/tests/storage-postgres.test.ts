@@ -85,7 +85,7 @@ test("TiDB adapter keeps question-mark binding and pins transactions", async () 
   const pool = new RecordingTiDbPool();
   const connection = TiDbConnection.fromPool(pool);
   await connection.exec("CREATE TABLE demo(value TEXT); CREATE INDEX demo_value_idx ON demo(value)");
-  assert.deepEqual(pool.poolQueries.map((query) => query.sql), ["CREATE TABLE demo(value TEXT)", "CREATE INDEX demo_value_idx ON demo(value)"]);
+  assert.deepEqual(pool.poolQueries.map((query) => query.sql), ["CREATE TABLE demo(value LONGTEXT)", "CREATE INDEX demo_value_idx ON demo(value)"]);
   await connection.prepare("SELECT ? AS value").get("bound");
   assert.deepEqual(pool.poolQueries.at(-1), { sql: "SELECT ? AS value", values: ["bound"] });
   await connection.transaction(async () => {
@@ -104,7 +104,7 @@ test("TiDB adapter keeps question-mark binding and pins transactions", async () 
   );
   assert.equal(
     translateTiDbSql("CREATE TABLE demo(kind TEXT NOT NULL DEFAULT 'inline', content TEXT NOT NULL)"),
-    "CREATE TABLE demo(kind LONGTEXT NOT NULL, content TEXT NOT NULL)",
+    "CREATE TABLE demo(kind LONGTEXT NOT NULL, content LONGTEXT NOT NULL)",
   );
   const schema = translateTiDbSql(`
     CREATE TABLE skills (
@@ -119,8 +119,12 @@ test("TiDB adapter keeps question-mark binding and pins transactions", async () 
   assert.match(schema, /id VARCHAR\(191\) PRIMARY KEY/);
   assert.match(schema, /owner_user_id VARCHAR\(191\) NOT NULL/);
   assert.match(schema, /name VARCHAR\(255\) NOT NULL/);
-  assert.match(schema, /instructions TEXT NOT NULL/);
+  assert.match(schema, /instructions LONGTEXT NOT NULL/);
   assert.match(schema, /visible_directories_json LONGTEXT NOT NULL/);
+  assert.equal(
+    translateTiDbSql("CREATE TABLE timestamps(created_at INTEGER NOT NULL, sequence INTEGER)"),
+    "CREATE TABLE timestamps(created_at BIGINT NOT NULL, sequence BIGINT)",
+  );
 });
 
 class RecordingConnection implements SqlConnection {

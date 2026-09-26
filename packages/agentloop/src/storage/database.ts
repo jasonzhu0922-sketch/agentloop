@@ -194,6 +194,7 @@ export class AppDatabase implements SqlConnection {
         output TEXT,
         evidence_json TEXT,
         error TEXT,
+        repair_boundary_json TEXT,
         started_at INTEGER,
         finished_at INTEGER,
         PRIMARY KEY(plan_id, step_id),
@@ -271,6 +272,12 @@ export class AppDatabase implements SqlConnection {
         state TEXT NOT NULL CHECK(state IN ('waiting_recovery', 'waiting_user', 'ready_to_resume')),
         action_id TEXT NOT NULL REFERENCES runtime_actions(id) ON DELETE RESTRICT,
         question TEXT,
+        resume_token TEXT,
+        resume_lease_until INTEGER,
+        resume_fence INTEGER,
+        planning_token TEXT,
+        planning_lease_until INTEGER,
+        planning_fence INTEGER,
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS run_recovery_states_action_idx ON run_recovery_states(action_id);
@@ -298,6 +305,7 @@ export class AppDatabase implements SqlConnection {
         evidence_refs_json TEXT NOT NULL,
         plan_revision_json TEXT,
         question TEXT,
+        response_schema_json TEXT,
         state TEXT NOT NULL CHECK(state IN ('submitted', 'admitted', 'rejected')),
         rejection_code TEXT,
         created_at INTEGER NOT NULL,
@@ -364,6 +372,8 @@ export class AppDatabase implements SqlConnection {
         feedback TEXT NOT NULL,
         failed_boundary_json TEXT,
         decision_bindings_json TEXT NOT NULL DEFAULT '[]',
+        binding_json TEXT,
+        inspection_json TEXT,
         created_at INTEGER NOT NULL,
         UNIQUE(plan_id, step_id, attempt),
         FOREIGN KEY(plan_id, step_id) REFERENCES plan_steps(plan_id, step_id) ON DELETE CASCADE
@@ -378,6 +388,7 @@ export class AppDatabase implements SqlConnection {
         output TEXT,
         result_ref TEXT,
         result_json TEXT,
+        delivery_receipt_json TEXT,
         reason_code TEXT NOT NULL,
         committed_at INTEGER NOT NULL
       );
@@ -524,14 +535,25 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("plan_steps", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'");
       await this.ensureColumn("plan_steps", "execution_binding_json", "TEXT");
       await this.ensureColumn("plan_steps", "evidence_contract_json", "TEXT");
+      await this.ensureColumn("plan_steps", "repair_boundary_json", "TEXT");
       await this.migrateLegacyStepExecutionBindings();
       await this.ensureColumn("skill_compliance_assessments", "assessment_profile", "TEXT NOT NULL DEFAULT 'source_grounded'");
       await this.ensureColumn("skill_compliance_assessments", "assessment_method", "TEXT NOT NULL DEFAULT 'model'");
       await this.ensureColumn("skill_compliance_assessments", "failed_boundary_json", "TEXT");
       await this.ensureColumn("skill_compliance_assessments", "decision_bindings_json", "TEXT NOT NULL DEFAULT '[]'");
+      await this.ensureColumn("skill_compliance_assessments", "binding_json", "TEXT");
+      await this.ensureColumn("skill_compliance_assessments", "inspection_json", "TEXT");
       await this.ensureColumn("runtime_actions", "effect_state", "TEXT NOT NULL DEFAULT 'unknown'");
+      await this.ensureColumn("run_recovery_states", "resume_token", "TEXT");
+      await this.ensureColumn("run_recovery_states", "resume_lease_until", "INTEGER");
+      await this.ensureColumn("run_recovery_states", "resume_fence", "INTEGER");
+      await this.ensureColumn("run_recovery_states", "planning_token", "TEXT");
+      await this.ensureColumn("run_recovery_states", "planning_lease_until", "INTEGER");
+      await this.ensureColumn("run_recovery_states", "planning_fence", "INTEGER");
+      await this.ensureColumn("recovery_decisions", "response_schema_json", "TEXT");
       await this.ensureColumn("run_outcomes", "result_ref", "TEXT");
       await this.ensureColumn("run_outcomes", "result_json", "TEXT");
+      await this.ensureColumn("run_outcomes", "delivery_receipt_json", "TEXT");
       await this.ensureSkillAssessmentProfileConstraint();
     }
     await this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");

@@ -1,0 +1,34 @@
+# Must be at least TiDB's transaction entry limit above.  A real TiKV node
+# stores large entries safely; TiDB's in-process unistore mode does not.
+[raftstore]
+raft-entry-max-size = "64MB"
+
+# Do not let a one-node laptop test cluster claim the host's default cache
+# budget.  Durable data remains on the TiKV volume; these values only bound
+# the in-memory working set.
+[storage]
+memory-quota = "256MB"
+
+[storage.block-cache]
+capacity = "256MB"
+
+[raft-engine]
+memory-limit = "128MB"
+
+# Bound memtables as well as the shared block cache.  The source is read in
+# small batches, so this sacrifices only local-import throughput, not data.
+[rocksdb.defaultcf]
+write-buffer-size = "32MB"
+max-write-buffer-number = 2
+
+[rocksdb.writecf]
+write-buffer-size = "32MB"
+max-write-buffer-number = 2
+
+[rocksdb.lockcf]
+write-buffer-size = "16MB"
+max-write-buffer-number = 2
+
+[raftdb.defaultcf]
+write-buffer-size = "32MB"
+max-write-buffer-number = 2

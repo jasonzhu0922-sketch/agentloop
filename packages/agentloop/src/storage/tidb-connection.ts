@@ -217,10 +217,17 @@ function translateTiDbDdl(sql: string): string {
     const length = keyColumns[column];
     return length === undefined ? match : `${indentation}${column} VARCHAR(${length})`;
   });
-  // TiDB does not accept a literal default for TEXT/LONGTEXT.  Keyed fields
-  // above retain their default because they are VARCHAR; unbounded JSON fields
-  // remain LONGTEXT and are always supplied by their repository on insert.
-  return withKeyTypes.replace(/\bTEXT(\s+NOT\s+NULL)\s+DEFAULT\s+'(?:''|[^'])*'/gi, "LONGTEXT$1");
+  // TiDB TEXT is capped at 64 KiB, while SQLite TEXT carries unbounded model
+  // I/O, evidence and JSON. Keyed fields above retain VARCHAR; every other
+  // textual payload is LONGTEXT so a migration never truncates evidence.
+  return withKeyTypes
+    .replace(/\bTEXT(\s+NOT\s+NULL)\s+DEFAULT\s+'(?:''|[^'])*'/gi, "LONGTEXT$1")
+    .replace(/\bTEXT\b/gi, "LONGTEXT")
+    // SQLite INTEGER values carry epoch milliseconds, byte counts, sequence
+    // numbers, and revisions. TiDB INTEGER is a 32-bit alias, so it cannot
+    // represent an ordinary millisecond timestamp; BIGINT is the portable
+    // physical representation for this application's integer domain.
+    .replace(/\bINTEGER\b/gi, "BIGINT");
 }
 
 function firstInsertColumn(sql: string): string | undefined {

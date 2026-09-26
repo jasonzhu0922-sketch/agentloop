@@ -1,0 +1,63 @@
+# A real single-node TiDB cluster for state-portability development.  This is
+# deliberately not TiDB's in-process `unistore` shortcut: the shared Runtime
+# state includes individual Evidence payloads larger than unistore's safe
+# transaction-entry path.
+#
+# Start it with:
+#   docker compose -f apps/agentloop-multi-runtime/compose.tidb-local.yaml up -d
+#
+# It exposes only TiDB's MySQL-compatible port to the host:
+#   mysql://root@127.0.0.1:4000
+name: agentloop-tidb
+
+services:
+  pd:
+    container_name: agentloop-tidb-pd
+    image: pingcap/pd:v8.5.0
+    command:
+      - --name=agentloop-pd
+      - --data-dir=/data/pd
+      - --client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://pd:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=agentloop-pd=http://pd:2380
+    volumes:
+      - pd-data:/data
+
+  tikv:
+    container_name: agentloop-tidb-tikv
+    image: pingcap/tikv:v8.5.0
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --status-addr=0.0.0.0:20180
+      - --pd=pd:2379
+      - --data-dir=/data/tikv
+      - --config=/etc/tikv/tikv.toml
+    volumes:
+      - tikv-data:/data
+      - ./config/tidb-local/tikv.toml:/etc/tikv/tikv.toml:ro
+    depends_on:
+      - pd
+
+  tidb:
+    container_name: agentloop-tidb-local
+    image: pingcap/tidb:v8.5.0
+    command:
+      - --store=tikv
+      - --path=pd:2379
+      - --host=0.0.0.0
+      - --advertise-address=tidb
+      - --config=/etc/tidb/tidb.toml
+    ports:
+      - "127.0.0.1:4000:4000"
+      - "127.0.0.1:10080:10080"
+    volumes:
+      - ./config/tidb-local/tidb.toml:/etc/tidb/tidb.toml:ro
+    depends_on:
+      - tikv
+
+volumes:
+  pd-data: {}
+  tikv-data: {}

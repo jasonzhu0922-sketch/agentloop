@@ -1,0 +1,9 @@
+# Keep an individual, opaque Runtime Evidence value intact.  This is a
+# local-only development setting; production limits are an operator decision.
+[performance]
+txn-entry-size-limit = 67108864
+# A laptop test cluster must bound TiDB's cache/working-set growth.  The
+# importer keeps normal transactions below this value and still permits one
+# complete large Evidence value under txn-entry-size-limit above.
+server-memory-quota = 536870912
+mem-quota-query = 134217728
