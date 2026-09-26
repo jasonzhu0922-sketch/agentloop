@@ -1,15 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { artifactPreviewMode, renderMarkdown, renderPptxPreview, renderStructuredPreview, usesBlobPreview } from "../src/index.ts";
+import { artifactPreviewMode, renderBlobPreview, renderMarkdown, renderPptxPreview, renderStructuredPreview, updateArtifactPreviewMarkup, usesBlobPreview } from "../src/index.ts";
 
 test("routes browser-native formats to byte previews and Office formats to structured previews", () => {
   assert.equal(artifactPreviewMode({ name: "deck.html", mimeType: "text/html; charset=utf-8" }), "html");
   assert.equal(artifactPreviewMode({ name: "poster.png", mimeType: "image/png" }), "image");
   assert.equal(artifactPreviewMode({ name: "report.pdf", mimeType: "application/pdf" }), "pdf");
   assert.equal(artifactPreviewMode({ name: "southern_station.wav", mimeType: "audio/wav" }), "audio");
+  assert.equal(artifactPreviewMode({ name: "voice.mp3", mimeType: "audio/mpeg" }), "audio");
+  assert.equal(artifactPreviewMode({ name: "recording.m4a", mimeType: "application/octet-stream" }), "audio");
+  assert.equal(artifactPreviewMode({ name: "stream.bin", mimeType: "audio/ogg; codecs=opus" }), "audio");
   assert.equal(artifactPreviewMode({ name: "notes.md", mimeType: "text/markdown" }), "structured");
   assert.equal(artifactPreviewMode({ name: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }), "structured");
   assert.equal(usesBlobPreview({ name: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }), false);
+});
+
+test("renders all recognized audio artifacts with native playback, pause, and volume controls", () => {
+  const markup = renderBlobPreview("audio", "blob:audio-preview", "voice.mp3");
+
+  assert.match(markup, /<audio\b/);
+  assert.match(markup, /\bcontrols\b/);
+  assert.match(markup, /src="blob:audio-preview"/);
+  assert.match(markup, /无法播放该音频/);
+});
+
+test("preserves a mounted native audio player when parent state re-renders without preview changes", () => {
+  let markup = "";
+  let writes = 0;
+  const host = {
+    get innerHTML() { return markup; },
+    set innerHTML(value: string) { markup = value; writes += 1; },
+  } as unknown as HTMLElement;
+  const audio = renderBlobPreview("audio", "blob:morning-stroll", "morning_stroll.wav");
+
+  assert.equal(updateArtifactPreviewMarkup(host, audio), true);
+  assert.equal(updateArtifactPreviewMarkup(host, audio), false);
+  assert.equal(writes, 1);
+  assert.equal(markup, audio);
+  assert.equal(updateArtifactPreviewMarkup(host, ""), true);
+  assert.equal(writes, 2);
 });
 
 test("renders PPTX geometry in SVG points rather than EMUs", () => {

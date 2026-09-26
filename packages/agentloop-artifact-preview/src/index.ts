@@ -10,6 +10,15 @@ export interface PreviewArtifact {
 
 export type ArtifactPreviewMode = "html" | "image" | "pdf" | "audio" | "structured";
 
+const AUDIO_EXTENSIONS = new Set([
+  "aac", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "weba",
+]);
+
+// The host may re-render surrounding conversation state while a preview is
+// active. Replacing identical markup would recreate browser-native media
+// elements and reset their playback state, so remember what each host owns.
+const mountedPreviewMarkup = new WeakMap<HTMLElement, string>();
+
 export type StructuredArtifactPreview =
   | { readonly kind: "text"; readonly name: string; readonly mimeType: string; readonly text: string; readonly truncated: boolean }
   | { readonly kind: "docx"; readonly name: string; readonly paragraphs: readonly string[]; readonly truncated: boolean; readonly schema?: "agentloop.docxPreview/v2"; readonly page?: DocxPreviewPage; readonly blocks?: readonly DocxPreviewBlock[] }
@@ -160,13 +169,24 @@ export function artifactPreviewMode(artifact: Pick<PreviewArtifact, "name" | "pa
   const extension = artifactExtension(artifact.name || artifact.path || "");
   if (mimeBase === "text/html" || extension === "html" || extension === "htm") return "html";
   if (mimeBase.startsWith("image/")) return "image";
-  if (mimeBase === "audio/wav" || extension === "wav") return "audio";
+  if (mimeBase.startsWith("audio/") || AUDIO_EXTENSIONS.has(extension)) return "audio";
   if (mimeBase === "application/pdf" || extension === "pdf") return "pdf";
   return "structured";
 }
 
 export function usesBlobPreview(artifact: Pick<PreviewArtifact, "name" | "path" | "mimeType">): boolean {
   return artifactPreviewMode(artifact) !== "structured";
+}
+
+/**
+ * Updates a preview host only when its markup changed, preserving native
+ * media playback and other browser-managed state across parent re-renders.
+ */
+export function updateArtifactPreviewMarkup(host: HTMLElement, markup: string): boolean {
+  if (mountedPreviewMarkup.get(host) === markup) return false;
+  host.innerHTML = markup;
+  mountedPreviewMarkup.set(host, markup);
+  return true;
 }
 
 /**
