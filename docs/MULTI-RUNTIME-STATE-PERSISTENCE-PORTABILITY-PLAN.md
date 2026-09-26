@@ -8,8 +8,8 @@ claim that PostgreSQL or TiDB production cutover is already supported.
 
 ## Decision
 
-Multi Runtime state must have a domain-level persistence boundary. Router and
-Local Runtime device workflows will depend on typed persistence ports, not on
+Multi Runtime shared state must have a domain-level persistence boundary. The
+Router and cloud-side device authority will depend on typed persistence ports, not on
 `AppDatabase`, `SqlConnection`, SQL strings, database schema setup, or a
 specific database dialect.
 
@@ -24,6 +24,16 @@ The supported relational backends are:
 TiDB is not treated as PostgreSQL. In particular, PostgreSQL `ON CONFLICT`
 and TiDB `ON DUPLICATE KEY UPDATE` are distinct implementations of the same
 repository operation.
+
+### Local Runtime Agent is deliberately out of this backend set
+
+The Local Runtime Agent is a device-local process. Its identity file,
+supervisor database, local directory grants, local dispatch ledger, and local
+Run database **must use SQLite only**. It never receives
+`AGENTLOOP_STATE_DRIVER`, `AGENTLOOP_STATE_DATABASE_URL`, or cloud database
+credentials. The Router remains the cloud-side authority for device
+registration/session records and is the only party that may use the shared
+SQLite/PostgreSQL/TiDB state configuration.
 
 ## Contract to preserve
 
@@ -151,7 +161,7 @@ interfaces intentionally have no `ready()` method that performs DDL.
 - Wait for the companion task to finish; review its diff first and rebase this
   plan against its final data ownership changes.
 - Inventory every current `AppDatabase` user in Multi Runtime: control plane,
-  device, identity, attachment metadata, artifact catalog, Host dispatch, and
+  cloud-side device authority, identity, attachment metadata, artifact catalog, Host dispatch, and
   local-directory scope. This change must not abstract only two files while
   leaving a second shared-state authority outside the migration boundary.
 - Characterize the current SQLite schema and production-relevant state using a

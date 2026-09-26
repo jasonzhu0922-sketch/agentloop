@@ -9,7 +9,7 @@ import { startAssignmentReconciler } from "../control-plane/assignment-reconcile
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../storage/state-database.ts";
 import { IdentityService } from "../auth/identity-service.ts";
 import { SharedWorkspaceArtifactCatalog } from "../artifacts/shared-workspace-artifact-catalog.ts";
-import { DeviceService } from "../devices/device-service.ts";
+import { SqlDeviceRepository } from "../devices/device-service.ts";
 import { DeviceRuntimeConnectionRegistry } from "../devices/runtime-connection-registry.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -32,7 +32,7 @@ const store = new ControlPlaneStore(database);
 await store.ready();
 const identity = new IdentityService(database, positiveInteger(process.env.IDENTITY_SESSION_TTL_MS, 7 * 24 * 60 * 60 * 1000));
 await identity.ready();
-const devices = new DeviceService(database);
+const devices = new SqlDeviceRepository(database);
 await devices.ready();
 const runtimeConnections = new DeviceRuntimeConnectionRegistry(devices, store, {
   leaseMs: positiveInteger(process.env.LOCAL_RUNTIME_LEASE_MS, 20_000),

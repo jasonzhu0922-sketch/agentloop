@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
-import type { ControlPlaneStore } from "../control-plane/control-plane-store.ts";
+import type { ControlPlaneRepository } from "../control-plane/control-plane-store.ts";
 import type { RuntimeEndpoint, RuntimeProfile } from "../domain/contracts.ts";
-import type { AuthenticatedDeviceAgent, DeviceService } from "./device-service.ts";
+import type { AuthenticatedDeviceAgent, DeviceRepository } from "./device-service.ts";
 
 interface RuntimeAdvertisement {
   readonly runtimeId: string;
@@ -30,12 +30,12 @@ export class DeviceRuntimeConnectionRegistry {
   private readonly runtimeConnections = new Map<string, ConnectionState>();
   private readonly server = new WebSocketServer({ noServer: true });
   private readonly leaseMs: number;
-  private readonly devices: Pick<DeviceService, "authenticateAgent">;
-  private readonly store: ControlPlaneStore;
+  private readonly devices: Pick<DeviceRepository, "authenticateAgent">;
+  private readonly store: ControlPlaneRepository;
 
   constructor(
-    devices: Pick<DeviceService, "authenticateAgent">,
-    store: ControlPlaneStore,
+    devices: Pick<DeviceRepository, "authenticateAgent">,
+    store: ControlPlaneRepository,
     input: { readonly leaseMs?: number } = {},
   ) {
     this.devices = devices;

@@ -215,6 +215,8 @@ export type {
 export { AppDatabase } from "./storage/database.ts";
 export { SqliteConnection } from "./storage/sqlite-connection.ts";
 export { PgConnection, translatePlaceholders } from "./storage/pg-connection.ts";
+export { TiDbConnection, splitSqlStatements, translateTiDbSql } from "./storage/tidb-connection.ts";
+export type { TiDbClientLike, TiDbPoolLike } from "./storage/tidb-connection.ts";
 export type { SqlConnection, SqlDialect, SqlRunResult, SqlStatement, SqlValue } from "./storage/connection.ts";
 export type {
   DiscoveredSkillSnapshot,

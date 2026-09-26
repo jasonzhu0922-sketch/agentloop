@@ -1,10 +1,10 @@
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { CommandOutputContent, ProcessArtifact, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
-import { ControlPlaneStore, RuntimeCapacityError, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
+import { RuntimeCapacityError, type ControlPlaneRepository, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
 import { SharedWorkspaceArtifactCatalog } from "../artifacts/shared-workspace-artifact-catalog.ts";
 
 export class PersistentMultiRuntimeRouter {
-  private readonly store: ControlPlaneStore;
+  private readonly store: ControlPlaneRepository;
   private readonly endpointFactory: (endpoint: string) => RuntimeEndpoint;
   private readonly heartbeatTtlMs: number;
   private readonly reservationTtlMs: number;
@@ -14,7 +14,7 @@ export class PersistentMultiRuntimeRouter {
   private reconciliation?: Promise<void>;
 
   constructor(input: {
-    readonly store: ControlPlaneStore;
+    readonly store: ControlPlaneRepository;
     readonly endpointFactory: (endpoint: string) => RuntimeEndpoint;
     readonly heartbeatTtlMs?: number;
     readonly reservationTtlMs?: number;
@@ -233,7 +233,7 @@ export class PersistentMultiRuntimeRouter {
     return response === undefined ? undefined : { assignment, response };
   }
 
-  async heartbeat(input: Parameters<ControlPlaneStore["heartbeat"]>[0]): Promise<void> {
+  async heartbeat(input: Parameters<ControlPlaneRepository["heartbeat"]>[0]): Promise<void> {
     await this.store.heartbeat(input);
   }
 

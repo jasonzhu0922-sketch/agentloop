@@ -8,7 +8,7 @@ import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import { IdentityService } from "../src/auth/identity-service.ts";
 import { ConversationDeleteConflictError } from "../src/control-plane/control-plane-store.ts";
-import { DeviceService } from "../src/devices/device-service.ts";
+import { SqlDeviceRepository } from "../src/devices/device-service.ts";
 import type { SubmitConversationTask } from "../src/domain/contracts.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
 import { createRouterHttpServer } from "../src/http/router-http.ts";
@@ -205,7 +205,7 @@ test("Web manages a paired Local Agent through Router control rather than loopba
 test("a Local Runtime Agent consumes one user-approved registration token and can be revoked", async () => {
   const database = new AppDatabase(":memory:");
   const identity = new IdentityService(database);
-  const devices = new DeviceService(database);
+  const devices = new SqlDeviceRepository(database);
   try {
     const owner = await identity.register("owner@example.test", "correct-horse-battery-7");
     const other = await identity.register("other@example.test", "correct-horse-battery-7");

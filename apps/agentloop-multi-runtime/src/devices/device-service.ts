@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
-import type { AppDatabase } from "@zhujun/agentloop";
+import type { SqlConnection } from "@zhujun/agentloop";
 import type { Principal } from "../auth/identity-service.ts";
 
 const REGISTRATION_TOKEN_BYTES = 32;
@@ -33,13 +33,26 @@ export interface AuthenticatedDeviceAgent {
   readonly ownerUserId: string;
 }
 
+/** Device-auth persistence port consumed by HTTP and connection orchestration. */
+export interface DeviceRepository {
+  ready(): Promise<void>;
+  issueRegistrationToken(principal: Principal): Promise<{ readonly token: string; readonly expiresAt: number }>;
+  registerAgent(input: { readonly registrationToken: unknown; readonly displayName: unknown; readonly publicKey: unknown }): Promise<RegisteredDeviceAgent>;
+  heartbeat(agentToken: unknown): Promise<RegisteredDevice>;
+  authenticateAgent(agentToken: unknown): Promise<AuthenticatedDeviceAgent>;
+  list(principal: Principal): Promise<readonly RegisteredDevice[]>;
+  revoke(principal: Principal, deviceId: string): Promise<void>;
+  issueLocalSession(principal: Principal, deviceId: string, ttlMs?: number): Promise<LocalDeviceSession>;
+  authorizeLocalSession(agentToken: unknown, sessionToken: unknown): Promise<LocalDeviceSession>;
+}
+
 /** Cloud authority for a user-approved Local Runtime Agent registration. */
-export class DeviceService {
-  private readonly database: AppDatabase;
+export class SqlDeviceRepository implements DeviceRepository {
+  private readonly database: SqlConnection;
   private readonly registrationTtlMs: number;
   private readonly localSessionTtlMs: number;
 
-  constructor(database: AppDatabase, registrationTtlMs = 5 * 60 * 1000, localSessionTtlMs = DEFAULT_LOCAL_SESSION_TTL_MS) {
+  constructor(database: SqlConnection, registrationTtlMs = 5 * 60 * 1000, localSessionTtlMs = DEFAULT_LOCAL_SESSION_TTL_MS) {
     this.database = database;
     this.registrationTtlMs = registrationTtlMs;
     this.localSessionTtlMs = localSessionTtlMs;

@@ -3,6 +3,8 @@ import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { PgConnection, translatePlaceholders } from "../src/storage/pg-connection.ts";
 import type { PgClientLike, PgPoolLike } from "../src/storage/pg-connection.ts";
+import { TiDbConnection, splitSqlStatements, translateTiDbSql } from "../src/storage/tidb-connection.ts";
+import type { TiDbClientLike, TiDbPoolLike } from "../src/storage/tidb-connection.ts";
 import type { SqlConnection, SqlRunResult, SqlStatement, SqlValue } from "../src/storage/connection.ts";
 
 test("AppDatabase.open accepts an injected async connection and waits for schema creation", async () => {
@@ -10,7 +12,7 @@ test("AppDatabase.open accepts an injected async connection and waits for schema
   const database = await AppDatabase.open({ connection });
   try {
     assert.equal(database.dialect, "postgres");
-    assert.equal(connection.execSql.length, 2);
+    assert.equal(connection.execSql.length, 3);
     const schema = connection.execSql[0] ?? "";
     assert.ok(schema.includes("CREATE TABLE IF NOT EXISTS discovered_skills"));
     assert.ok(
@@ -28,7 +30,7 @@ test("AppDatabase operations wait for injected connection migration", async () =
   const database = new AppDatabase({ connection });
   try {
     await database.prepare("SELECT ? AS value").get("ready");
-    assert.deepEqual(connection.calls.map((call) => call.kind), ["exec", "exec", "get"]);
+    assert.deepEqual(connection.calls.map((call) => call.kind), ["exec", "exec", "exec", "get"]);
   } finally {
     await database.close();
   }
@@ -68,14 +70,48 @@ test("translatePlaceholders skips quoted literals and identifiers", () => {
   );
 });
 
+test("AppDatabase accepts TiDB as an independent non-SQLite dialect", async () => {
+  const connection = new RecordingConnection("tidb");
+  const database = await AppDatabase.open({ connection });
+  try {
+    assert.equal(database.dialect, "tidb");
+    assert.ok(connection.execSql.every((sql) => !sql.includes("PRAGMA")));
+  } finally {
+    await database.close();
+  }
+});
+
+test("TiDB adapter keeps question-mark binding and pins transactions", async () => {
+  const pool = new RecordingTiDbPool();
+  const connection = TiDbConnection.fromPool(pool);
+  await connection.exec("CREATE TABLE demo(value TEXT); CREATE INDEX demo_value_idx ON demo(value)");
+  assert.deepEqual(pool.poolQueries.map((query) => query.sql), ["CREATE TABLE demo(value TEXT)", "CREATE INDEX demo_value_idx ON demo(value)"]);
+  await connection.prepare("SELECT ? AS value").get("bound");
+  assert.deepEqual(pool.poolQueries.at(-1), { sql: "SELECT ? AS value", values: ["bound"] });
+  await connection.transaction(async () => {
+    await connection.prepare("UPDATE demo SET value = ?").run("next");
+  });
+  assert.deepEqual(pool.clientQueries.map((query) => query.sql), ["START TRANSACTION", "UPDATE demo SET value = ?", "COMMIT"]);
+  assert.equal(pool.released, 1);
+  assert.deepEqual(splitSqlStatements("SELECT ';'; SELECT 2;"), ["SELECT ';'", "SELECT 2"]);
+  assert.equal(
+    translateTiDbSql("INSERT INTO demo(id, value) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value"),
+    "INSERT INTO demo(id, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+  );
+  assert.equal(
+    translateTiDbSql("INSERT INTO demo(id, value) VALUES (?, ?) ON CONFLICT(id) DO NOTHING"),
+    "INSERT INTO demo(id, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE id = id",
+  );
+});
+
 class RecordingConnection implements SqlConnection {
   readonly execSql: string[] = [];
   readonly calls: Array<{ kind: "exec" | "run" | "get" | "all"; sql: string; params?: SqlValue[] }> = [];
   closed = false;
-  readonly dialect: "sqlite" | "postgres";
+  readonly dialect: "sqlite" | "postgres" | "tidb";
   private readonly delayMs: number;
 
-  constructor(dialect: "sqlite" | "postgres", delayMs = 0) {
+  constructor(dialect: "sqlite" | "postgres" | "tidb", delayMs = 0) {
     this.dialect = dialect;
     this.delayMs = delayMs;
   }
@@ -132,6 +168,33 @@ class RecordingPgPool implements PgPoolLike {
   async query(text: string, values?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }> {
     this.poolQueries.push({ text, values });
     return { rows: [], rowCount: 0 };
+  }
+
+  async end(): Promise<void> {}
+}
+
+class RecordingTiDbPool implements TiDbPoolLike {
+  readonly poolQueries: Array<{ sql: string; values: readonly unknown[] }> = [];
+  readonly clientQueries: Array<{ sql: string; values: readonly unknown[] }> = [];
+  released = 0;
+
+  async getConnection(): Promise<TiDbClientLike> {
+    return {
+      execute: async (sql, values = []) => {
+        this.clientQueries.push({ sql, values });
+        return [{ affectedRows: 1 }, []];
+      },
+      query: async (sql, values = []) => {
+        this.clientQueries.push({ sql, values });
+        return [{ affectedRows: 0 }, []];
+      },
+      release: () => { this.released += 1; },
+    };
+  }
+
+  async query(sql: string, values: readonly unknown[] = []): Promise<[unknown, unknown]> {
+    this.poolQueries.push({ sql, values });
+    return sql.startsWith("SELECT") ? [[{ value: values[0] }], []] : [{ affectedRows: 0 }, []];
   }
 
   async end(): Promise<void> {}

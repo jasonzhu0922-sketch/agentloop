@@ -1,10 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { AppDatabase, PgConnection } from "@zhujun/agentloop";
+import { AppDatabase, PgConnection, TiDbConnection } from "@zhujun/agentloop";
 
 export type StateDatabaseConfig =
   | { readonly driver: "sqlite"; readonly databasePath: string }
-  | { readonly driver: "postgres"; readonly connectionString: string; readonly poolSize?: number };
+  | { readonly driver: "postgres"; readonly connectionString: string; readonly poolSize?: number }
+  | { readonly driver: "tidb"; readonly connectionString: string; readonly poolSize?: number };
 
 /** Resolves the shared state store used by the Router and Runtime Hosts. */
 export function stateDatabaseConfigFromEnvironment(input: {
@@ -19,10 +20,10 @@ export function stateDatabaseConfigFromEnvironment(input: {
       databasePath: resolve(input.appRoot, input.environment.AGENTLOOP_STATE_SQLITE_PATH ?? input.sqliteFallbackPath),
     };
   }
-  if (driver !== "postgres") throw new TypeError("AGENTLOOP_STATE_DRIVER must be sqlite or postgres");
+  if (driver !== "postgres" && driver !== "tidb") throw new TypeError("AGENTLOOP_STATE_DRIVER must be sqlite, postgres, or tidb");
   const connectionString = input.environment.AGENTLOOP_STATE_DATABASE_URL;
   if (connectionString === undefined || connectionString.trim().length === 0) {
-    throw new TypeError("AGENTLOOP_STATE_DATABASE_URL must be configured when AGENTLOOP_STATE_DRIVER=postgres");
+    throw new TypeError(`AGENTLOOP_STATE_DATABASE_URL must be configured when AGENTLOOP_STATE_DRIVER=${driver}`);
   }
   const poolSize = optionalPositiveInteger(input.environment.AGENTLOOP_STATE_POOL_SIZE, "AGENTLOOP_STATE_POOL_SIZE");
   return { driver, connectionString, ...(poolSize === undefined ? {} : { poolSize }) };
@@ -33,11 +34,13 @@ export async function openStateDatabase(config: StateDatabaseConfig): Promise<Ap
     if (config.databasePath !== ":memory:") mkdirSync(dirname(config.databasePath), { recursive: true });
     return new AppDatabase(config.databasePath);
   }
-  const connection = await PgConnection.create(
-    config.poolSize === undefined
+  const connection = config.driver === "postgres"
+    ? await PgConnection.create(config.poolSize === undefined
       ? config.connectionString
-      : { connectionString: config.connectionString, max: config.poolSize },
-  );
+      : { connectionString: config.connectionString, max: config.poolSize })
+    : await TiDbConnection.create(config.poolSize === undefined
+      ? config.connectionString
+      : { uri: config.connectionString, connectionLimit: config.poolSize });
   return await AppDatabase.open({ connection });
 }
 

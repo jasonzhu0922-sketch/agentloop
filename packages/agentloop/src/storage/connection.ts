@@ -7,7 +7,13 @@
 
 export type SqlValue = string | number | bigint | null | Uint8Array;
 
-export type SqlDialect = "sqlite" | "postgres";
+/**
+ * The relational engines supported by the connection boundary. TiDB speaks
+ * the MySQL wire protocol, but is kept distinct from MySQL/PostgreSQL so
+ * repository and migration code cannot accidentally select a PostgreSQL
+ * statement for a TiDB deployment.
+ */
+export type SqlDialect = "sqlite" | "postgres" | "tidb";
 
 export interface SqlRunResult {
   /** Number of rows affected by the statement (0 for non-mutating statements). */

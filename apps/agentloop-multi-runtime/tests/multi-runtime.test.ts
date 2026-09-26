@@ -102,8 +102,20 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     },
     appRoot: "/application", sqliteFallbackPath: "./data/legacy.db",
   }), { driver: "postgres", connectionString: "postgresql://agentloop@db/agentloop", poolSize: 8 });
+  assert.deepEqual(stateDatabaseConfigFromEnvironment({
+    environment: {
+      AGENTLOOP_STATE_DRIVER: "tidb",
+      AGENTLOOP_STATE_DATABASE_URL: "mysql://agentloop@tidb/agentloop",
+      AGENTLOOP_STATE_POOL_SIZE: "12",
+    },
+    appRoot: "/application", sqliteFallbackPath: "./data/legacy.db",
+  }), { driver: "tidb", connectionString: "mysql://agentloop@tidb/agentloop", poolSize: 12 });
   assert.throws(
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "postgres" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
+    /AGENTLOOP_STATE_DATABASE_URL/,
+  );
+  assert.throws(
+    () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "tidb" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
   );
 });

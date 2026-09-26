@@ -27,7 +27,10 @@ export class HostDispatchStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
-      CREATE UNIQUE INDEX IF NOT EXISTS mr_host_dispatches_run_idx ON mr_host_dispatches(remote_run_id) WHERE remote_run_id IS NOT NULL;
+      -- Every supported relational backend permits multiple NULL values in a
+      -- UNIQUE index. Avoid a SQLite/PostgreSQL partial index so this durable
+      -- Host ledger has the same invariant on TiDB.
+      CREATE UNIQUE INDEX IF NOT EXISTS mr_host_dispatches_run_idx ON mr_host_dispatches(remote_run_id);
       CREATE TABLE IF NOT EXISTS mr_run_executors (
         remote_run_id TEXT PRIMARY KEY,
         runtime_id TEXT NOT NULL,

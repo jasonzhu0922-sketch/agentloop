@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AppDatabase } from "@zhujun/agentloop";
+import type { SqlConnection } from "@zhujun/agentloop";
 import type { ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
@@ -81,6 +81,36 @@ export interface StoredConversationTurn {
   };
 }
 
+/**
+ * Router's persistence port. It intentionally exposes atomic control-plane
+ * operations rather than SQL primitives, so scheduling code is independent of
+ * the selected relational engine.
+ */
+export interface ControlPlaneRepository {
+  seedRuntimes(runtimes: readonly (RuntimeInstance & { readonly endpoint: string })[], now?: number): Promise<void>;
+  registerLocalRuntime(input: {
+    readonly runtimeId: string; readonly deviceId: string; readonly tenantId: string; readonly ownerUserId: string;
+    readonly connectionId: string; readonly connectionEpoch: number; readonly profile: RuntimeProfile;
+    readonly capabilities: readonly string[]; readonly maxConcurrentRuns: number; readonly status: "ready" | "draining";
+    readonly catalogVersion: string; readonly leaseExpiresAt: number; readonly now?: number;
+  }): Promise<void>;
+  unregisterLocalRuntime(runtimeId: string, connectionId: string, now?: number): Promise<void>;
+  disconnectLocalRuntimes(connectionId: string, now?: number): Promise<void>;
+  heartbeat(heartbeat: RuntimeHeartbeat): Promise<void>;
+  runtimeEndpoints(tenantId?: string, ownerUserId?: string): Promise<readonly StoredRuntimeEndpoint[]>;
+  runtimeCatalog(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeCatalogEntry[]>;
+  listConversations(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<StoredConversationPage>;
+  conversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<{ readonly turns: readonly StoredConversationTurn[] } | undefined>;
+  deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
+  reserve(task: SubmitConversationTask, input: { readonly heartbeatTtlMs: number; readonly reservationTtlMs: number; readonly now?: number }): Promise<StoredAssignment>;
+  markAccepted(assignmentId: string, remoteRunId: string, now?: number): Promise<void>;
+  markDispatchFailure(assignmentId: string, now?: number): Promise<void>;
+  createContinuationAssignment(parentAssignmentId: string, remoteRunId: string, now?: number): Promise<StoredAssignment>;
+  observeRun(assignmentId: string, run: RuntimeRunStatus, now?: number): Promise<void>;
+  assignment(id: string): Promise<StoredAssignment | undefined>;
+  unsettledAssignments(afterId: string, limit: number): Promise<readonly StoredAssignment[]>;
+}
+
 interface TaskRow {
   id: string;
   tenant_id: string;
@@ -116,10 +146,10 @@ interface AssignmentRow {
 }
 
 /** Durable Router control-plane state. It owns neither AgentLoop Runs nor their Evidence. */
-export class ControlPlaneStore {
-  private readonly database: AppDatabase;
+export class ControlPlaneStore implements ControlPlaneRepository {
+  private readonly database: SqlConnection;
 
-  constructor(database: AppDatabase) {
+  constructor(database: SqlConnection) {
     this.database = database;
   }
 
@@ -305,22 +335,7 @@ export class ControlPlaneStore {
     readonly now?: number;
   }): Promise<void> {
     const now = input.now ?? Date.now();
-    const result = await this.database.prepare(`
-      INSERT INTO mr_runtime_nodes(
-        id, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
-        profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
-        last_heartbeat_at, updated_at
-      ) VALUES (?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        endpoint = excluded.endpoint, kind = 'local', device_id = excluded.device_id,
-        tenant_id = excluded.tenant_id, owner_user_id = excluded.owner_user_id,
-        connection_id = excluded.connection_id, connection_epoch = excluded.connection_epoch,
-        lease_expires_at = excluded.lease_expires_at, catalog_version = excluded.catalog_version,
-        profile = excluded.profile, capabilities_json = excluded.capabilities_json,
-        max_concurrent_runs = excluded.max_concurrent_runs, status = excluded.status,
-        last_heartbeat_at = excluded.last_heartbeat_at, updated_at = excluded.updated_at
-      WHERE mr_runtime_nodes.kind = 'local' AND mr_runtime_nodes.device_id = excluded.device_id
-    `).run(
+    const params = [
       input.runtimeId,
       `local-runtime://${input.runtimeId}`,
       input.deviceId,
@@ -336,7 +351,56 @@ export class ControlPlaneStore {
       input.status,
       now,
       now,
-    );
+    ] as const;
+    if (this.database.dialect === "tidb") {
+      await this.database.transaction(async () => {
+        // TiDB's upsert has no PostgreSQL-style conflict WHERE clause. Lock an
+        // existing identity first so an arbitrary runtime ID can never be
+        // rebound from one device to another by a concurrent registration.
+        const existing = await this.database.prepare("SELECT kind, device_id FROM mr_runtime_nodes WHERE id = ? FOR UPDATE")
+          .get(input.runtimeId) as { kind: string; device_id: string | null } | undefined;
+        if (existing !== undefined && (existing.kind !== "local" || existing.device_id !== input.deviceId)) {
+          throw new TypeError("runtime_id_conflict");
+        }
+        if (existing === undefined) {
+          await this.database.prepare(`
+            INSERT INTO mr_runtime_nodes(
+              id, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
+              profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
+              last_heartbeat_at, updated_at
+            ) VALUES (?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+          `).run(...params);
+          return;
+        }
+        await this.database.prepare(`
+          UPDATE mr_runtime_nodes SET
+            endpoint = ?, tenant_id = ?, owner_user_id = ?, connection_id = ?, connection_epoch = ?, lease_expires_at = ?,
+            catalog_version = ?, profile = ?, capabilities_json = ?, max_concurrent_runs = ?, status = ?,
+            last_heartbeat_at = ?, updated_at = ?
+          WHERE id = ? AND kind = 'local' AND device_id = ?
+        `).run(
+          params[1], params[3], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11],
+          params[12], params[13], params[14], input.runtimeId, input.deviceId,
+        );
+      });
+      return;
+    }
+    const result = await this.database.prepare(`
+      INSERT INTO mr_runtime_nodes(
+        id, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
+        profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
+        last_heartbeat_at, updated_at
+      ) VALUES (?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        endpoint = excluded.endpoint, kind = 'local', device_id = excluded.device_id,
+        tenant_id = excluded.tenant_id, owner_user_id = excluded.owner_user_id,
+        connection_id = excluded.connection_id, connection_epoch = excluded.connection_epoch,
+        lease_expires_at = excluded.lease_expires_at, catalog_version = excluded.catalog_version,
+        profile = excluded.profile, capabilities_json = excluded.capabilities_json,
+        max_concurrent_runs = excluded.max_concurrent_runs, status = excluded.status,
+        last_heartbeat_at = excluded.last_heartbeat_at, updated_at = excluded.updated_at
+      WHERE mr_runtime_nodes.kind = 'local' AND mr_runtime_nodes.device_id = excluded.device_id
+    `).run(...params);
     if (result.changes !== 1) throw new TypeError("runtime_id_conflict");
   }
 

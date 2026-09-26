@@ -4,7 +4,7 @@ import { assertUploadedSourceContent, type CommandOutputContent, type HumanLoopR
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 import { IdentityError, type IdentityService, type Principal } from "../auth/identity-service.ts";
-import { DeviceError, type DeviceService } from "../devices/device-service.ts";
+import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
 
 interface AttachmentBroker {
   upload(input: Parameters<FileAttachmentBroker["upload"]>[0]): ReturnType<FileAttachmentBroker["upload"]>;
@@ -81,7 +81,7 @@ export interface LocalAgentRelease {
 
 export function createRouterHttpServer(router: RouterTaskApi, options: {
   readonly identity?: Pick<IdentityService, "register" | "login" | "authenticate" | "revoke">;
-  readonly devices?: Pick<DeviceService, "issueRegistrationToken" | "registerAgent" | "heartbeat" | "list" | "revoke" | "issueLocalSession" | "authorizeLocalSession">;
+  readonly devices?: Pick<DeviceRepository, "issueRegistrationToken" | "registerAgent" | "heartbeat" | "list" | "revoke" | "issueLocalSession" | "authorizeLocalSession">;
   readonly attachments?: AttachmentBroker;
   readonly runtimeAttachmentToken?: string;
   readonly runtimeDispatchToken?: string;

@@ -9,7 +9,7 @@ import { IdentityService } from "../src/auth/identity-service.ts";
 import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
 import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
 import { RuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
-import { DeviceService } from "../src/devices/device-service.ts";
+import { SqlDeviceRepository } from "../src/devices/device-service.ts";
 import { DeviceRuntimeConnectionRegistry } from "../src/devices/runtime-connection-registry.ts";
 import type { RuntimeDispatchEnvelope } from "../src/domain/contracts.ts";
 
@@ -17,7 +17,7 @@ test("Router dispatches a local Assignment through the authenticated device conn
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   const identity = new IdentityService(database);
-  const devices = new DeviceService(database);
+  const devices = new SqlDeviceRepository(database);
   await store.ready();
   const owner = await identity.register("local-owner@example.test", "correct-horse-battery-7");
   const registration = await devices.issueRegistrationToken(owner.principal);

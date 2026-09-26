@@ -59,8 +59,15 @@ npm run start:multi-runtime -- --runtimes 4
 |---|---|---|---|
 | 本地开发 | `AGENTLOOP_STATE_DRIVER=sqlite`，一个共享 WAL 文件 | 本机目录 / Docker bind mount | 单机、低并发调试 |
 | 生产 | `AGENTLOOP_STATE_DRIVER=postgres`，所有副本共用连接串 | RWX POSIX 卷（EFS、CephFS 或受控 NFS） | 多 Router、多 Host |
+| 分布式 SQL | `AGENTLOOP_STATE_DRIVER=tidb`，所有 Router/云端 Host 共用连接串 | RWX POSIX 卷（EFS、CephFS 或受控 NFS） | TiDB/MySQL 方言部署 |
 
 SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应将附件、不可变交付物与 checkpoint 放入 S3 或兼容对象存储；活跃的 Tool 工作目录、临时文件和原子重命名仍留在共享 workspace。完整边界见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
+
+`Local Runtime Agent` 不属于上述共享状态后端切换范围。Agent 的
+`LOCAL_AGENT_DATABASE_PATH`、`LOCAL_AGENT_SUPERVISOR_DATABASE_PATH`、本地目录授权和
+本地 Run 数据始终是设备上的 SQLite 文件；不要向该进程传递
+`AGENTLOOP_STATE_*` 或云端 PostgreSQL/TiDB 凭据。设备注册和浏览器本地会话的云端记录仍
+由 Router 的共享状态库保存。
 
 当前生产部署基线将附件元数据写入共享 PostgreSQL，并把不可变附件字节放在仅 Router 共享的 RWX 挂载；Host 始终经 Router 的受控下载接口读取附件，而不会拿到存储路径。对象存储 BlobStore 是下一步替换此挂载的演进点，不是已经宣称完成的能力。可直接使用 [Kubernetes 多主机部署清单](deploy/kubernetes/README.md) 构建并独立发布 `router`、`runtime-host`、`web` 三个镜像目标。
 

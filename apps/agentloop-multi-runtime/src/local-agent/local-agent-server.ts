@@ -52,6 +52,9 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
   }
   await mkdir(sharedStorageRoot, { recursive: true });
   await mkdir(uploadStorageRoot, { recursive: true });
+  // The Local Runtime Agent is device-local by contract. These constructors
+  // select the SQLite-only AppDatabase path and must never be replaced with
+  // openStateDatabase(), which is reserved for Router/cloud Host shared state.
   const supervisorDatabase = new AppDatabase(input.supervisorDatabasePath ?? join(dirname(input.databasePath), "supervisor.db"));
   const supervisor = new LocalRuntimeSupervisor(
     supervisorDatabase,
