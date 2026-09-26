@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { PgConnection, SqliteConnection, type SqlConnection } from "@zhujun/agentloop";
+import { PgConnection, SqliteConnection, TiDbConnection, type SqlConnection } from "@zhujun/agentloop";
 import type { PlanTemplateStorageConfig } from "../config.ts";
 import { sqliteDatabasePath } from "./storage-config.ts";
 
@@ -13,8 +13,13 @@ export async function createPlanTemplateConnection(
     return new SqliteConnection(databasePath);
   }
 
-  const connectionConfig: string | Record<string, unknown> = config.poolSize === undefined
+  if (config.type === "postgres") {
+    const connectionConfig: string | Record<string, unknown> = config.poolSize === undefined
+      ? config.connectionString
+      : { connectionString: config.connectionString, max: config.poolSize };
+    return PgConnection.create(connectionConfig);
+  }
+  return TiDbConnection.create(config.poolSize === undefined
     ? config.connectionString
-    : { connectionString: config.connectionString, max: config.poolSize };
-  return PgConnection.create(connectionConfig);
+    : { uri: config.connectionString, connectionLimit: config.poolSize });
 }

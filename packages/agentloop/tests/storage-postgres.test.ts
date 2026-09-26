@@ -125,6 +125,15 @@ test("TiDB adapter keeps question-mark binding and pins transactions", async () 
     translateTiDbSql("CREATE TABLE timestamps(created_at INTEGER NOT NULL, sequence INTEGER)"),
     "CREATE TABLE timestamps(created_at BIGINT NOT NULL, sequence BIGINT)",
   );
+  const planTemplateSchema = translateTiDbSql(`
+    CREATE TABLE IF NOT EXISTS \`plan_templates\` (
+      id TEXT PRIMARY KEY,
+      plan_skeleton_json TEXT NOT NULL
+    )
+  `);
+  assert.match(planTemplateSchema, /\`plan_templates\`/);
+  assert.match(planTemplateSchema, /id VARCHAR\(191\) PRIMARY KEY/);
+  assert.match(planTemplateSchema, /plan_skeleton_json LONGTEXT NOT NULL/);
 });
 
 class RecordingConnection implements SqlConnection {

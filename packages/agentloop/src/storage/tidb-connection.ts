@@ -206,11 +206,15 @@ const TIDB_KEY_TEXT_COLUMNS: Readonly<Record<string, Readonly<Record<string, num
   mr_artifacts: { id: 191, assignment_id: 191 },
   mr_host_dispatches: { dispatch_key: 191, remote_run_id: 191 },
   mr_run_executors: { remote_run_id: 191, runtime_id: 191, dispatch_key: 191 },
+  plan_templates: { id: 191 },
+  plan_template_examples: { id: 191, template_id: 191, run_id: 191 },
+  plan_template_matches: { id: 191, run_id: 191, template_id: 191 },
 };
 
 /** Applies the explicit TiDB physical-schema rules to one DDL statement. */
 function translateTiDbDdl(sql: string): string {
-  const table = sql.match(/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/i)?.[1];
+  const tableMatch = sql.match(/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`([A-Za-z_][A-Za-z0-9_]*)`|([A-Za-z_][A-Za-z0-9_]*))\s*\(/i);
+  const table = tableMatch?.[1] ?? tableMatch?.[2];
   if (table === undefined) return sql;
   const keyColumns = TIDB_KEY_TEXT_COLUMNS[table] ?? {};
   const withKeyTypes = sql.replace(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s+TEXT\b/gm, (match, indentation: string, column: string) => {

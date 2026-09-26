@@ -1,4 +1,4 @@
-import type { SqlConnection } from "@zhujun/agentloop";
+import type { SqlConnection, SqlDialect } from "@zhujun/agentloop";
 import { normalizeSchemaName } from "./storage-config.ts";
 
 export interface PlanTemplateTableNames {
@@ -8,21 +8,24 @@ export interface PlanTemplateTableNames {
 }
 
 export function planTemplateTableNames(input: {
-  readonly dialect: "sqlite" | "postgres";
+  readonly dialect: SqlDialect;
   readonly schemaName?: string;
 }): PlanTemplateTableNames {
-  if (input.dialect === "sqlite") {
+  if (input.dialect === "sqlite" || input.dialect === "tidb") {
+    if (input.dialect === "tidb" && input.schemaName !== undefined) {
+      throw new Error("PlanTemplate TiDB storage uses the database in connectionString; schemaName is PostgreSQL-only.");
+    }
     return {
-      templates: quoteIdent("plan_templates"),
-      examples: quoteIdent("plan_template_examples"),
-      matches: quoteIdent("plan_template_matches"),
+      templates: quoteIdent("plan_templates", input.dialect),
+      examples: quoteIdent("plan_template_examples", input.dialect),
+      matches: quoteIdent("plan_template_matches", input.dialect),
     };
   }
-  const schema = quoteIdent(normalizeSchemaName(input.schemaName));
+  const schema = quoteIdent(normalizeSchemaName(input.schemaName), "postgres");
   return {
-    templates: `${schema}.${quoteIdent("plan_templates")}`,
-    examples: `${schema}.${quoteIdent("plan_template_examples")}`,
-    matches: `${schema}.${quoteIdent("plan_template_matches")}`,
+    templates: `${schema}.${quoteIdent("plan_templates", "postgres")}`,
+    examples: `${schema}.${quoteIdent("plan_template_examples", "postgres")}`,
+    matches: `${schema}.${quoteIdent("plan_template_matches", "postgres")}`,
   };
 }
 
@@ -35,7 +38,7 @@ export async function migratePlanTemplateStorage(input: {
     ...(input.schemaName === undefined ? {} : { schemaName: input.schemaName }),
   });
   if (input.connection.dialect === "postgres") {
-    await input.connection.exec(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(normalizeSchemaName(input.schemaName))}`);
+    await input.connection.exec(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(normalizeSchemaName(input.schemaName), "postgres")}`);
   }
   await input.connection.exec(`
     CREATE TABLE IF NOT EXISTS ${tables.templates} (
@@ -91,11 +94,12 @@ export async function migratePlanTemplateStorage(input: {
   return tables;
 }
 
-function quoteIdent(value: string): string {
-  return `"${value.replaceAll("\"", "\"\"")}"`;
+function quoteIdent(value: string, dialect: "sqlite" | "postgres" | "tidb"): string {
+  const delimiter = dialect === "tidb" ? "`" : "\"";
+  return `${delimiter}${value.replaceAll(delimiter, `${delimiter}${delimiter}`)}${delimiter}`;
 }
 
-function indexName(dialect: "sqlite" | "postgres", schemaName: string | undefined, name: string): string {
-  if (dialect === "sqlite") return quoteIdent(name);
-  return `${quoteIdent(normalizeSchemaName(schemaName))}.${quoteIdent(name)}`;
+function indexName(dialect: SqlDialect, schemaName: string | undefined, name: string): string {
+  if (dialect === "sqlite" || dialect === "tidb") return quoteIdent(name, dialect);
+  return `${quoteIdent(normalizeSchemaName(schemaName), "postgres")}.${quoteIdent(name, "postgres")}`;
 }

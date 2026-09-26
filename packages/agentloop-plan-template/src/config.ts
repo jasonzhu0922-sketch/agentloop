@@ -37,6 +37,13 @@ export type PlanTemplateStorageConfig =
       readonly schemaName?: string;
       readonly poolSize?: number;
       readonly migrateOnStart?: boolean;
+    }
+  | {
+      /** TiDB uses the database selected by connectionString, not a PostgreSQL schema. */
+      readonly type: "tidb";
+      readonly connectionString: string;
+      readonly poolSize?: number;
+      readonly migrateOnStart?: boolean;
     };
 
 export const DEFAULT_PLAN_TEMPLATE_FAST_PATH_CONFIG: PlanTemplateFastPathConfig = {
