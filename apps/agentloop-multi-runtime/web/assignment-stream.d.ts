@@ -5,6 +5,8 @@ export function observeAssignment(options: {
   signal: AbortSignal;
   afterSeq?: number;
   onEvent(event: RuntimeRunEvent): boolean;
+  /** An optional non-terminal Runtime snapshot for live provenance. */
+  onStatus?(run: RuntimeRunStatus): void;
   onRun(run: RuntimeRunStatus): void;
   onConnection(state: "connected" | "reconnecting", error?: string): void;
   fetchImpl?: typeof fetch;

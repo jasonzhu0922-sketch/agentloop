@@ -11,12 +11,12 @@ const STORAGE_TIERS = [
  * Browser cache is only a bounded recovery aid; Host events remain
  * authoritative. A quota failure must never interrupt task submission.
  */
-export function persistSessions(storage, sessions) {
+export function persistSessions(storage, sessions, key = SESSION_STORAGE_KEY) {
   for (const tier of STORAGE_TIERS) {
     const payload = stringifySnapshot(sessions, tier);
     if (payload === undefined) continue;
     try {
-      storage.setItem(SESSION_STORAGE_KEY, payload);
+      storage.setItem(key, payload);
       return { persisted: true, tier };
     } catch {
       // Try a smaller recovery snapshot before abandoning local persistence.
@@ -25,9 +25,9 @@ export function persistSessions(storage, sessions) {
   // A stale oversized legacy value can consume all quota. Reclaiming this one
   // cache key is safe: live state remains in memory and the Host owns history.
   try {
-    storage.removeItem(SESSION_STORAGE_KEY);
+    storage.removeItem(key);
     const payload = stringifySnapshot(sessions, STORAGE_TIERS.at(-1));
-    if (payload !== undefined) storage.setItem(SESSION_STORAGE_KEY, payload);
+    if (payload !== undefined) storage.setItem(key, payload);
     return { persisted: true, tier: STORAGE_TIERS.at(-1) };
   } catch {
     return { persisted: false };
@@ -84,6 +84,9 @@ function compactMessage(message, tier) {
     error: string(value.error, tier.messageText),
     partialText: string(value.partialText, tier.messageText),
     assignmentId: string(value.assignmentId, tier.text),
+    remoteRunId: string(value.remoteRunId, tier.text),
+    localRunId: string(value.localRunId, tier.text),
+    localRuntimeId: string(value.localRuntimeId, tier.text),
     runtimeId: string(value.runtimeId, tier.text),
     completedAt: number(value.completedAt),
     planOpen: value.planOpen === true,
@@ -117,10 +120,16 @@ function compactArtifacts(artifacts, tier) {
     const value = record(artifact);
     return {
       id: string(value.id, tier.text),
+      runId: string(value.runId, tier.text),
       name: string(value.name, tier.text),
       path: string(value.path, tier.text),
       mimeType: string(value.mimeType, tier.text),
       bytes: number(value.bytes),
+      role: string(value.role, tier.text),
+      sourceTool: string(value.sourceTool, tier.text),
+      sha256: string(value.sha256, tier.text),
+      location: string(value.location, tier.text),
+      previewable: value.previewable === false ? false : undefined,
     };
   });
 }

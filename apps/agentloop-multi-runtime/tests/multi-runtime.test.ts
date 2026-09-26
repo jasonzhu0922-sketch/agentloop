@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,8 +35,9 @@ import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, 
 import { cancellationTarget, persistedCancellableAssistant } from "../web/cancellation-target.js";
 import { EventEmitter } from "node:events";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
+import { ControlPlaneStore, ConversationDeleteConflictError, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
 import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
+import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
 import { stateDatabaseConfigFromEnvironment } from "../src/storage/state-database.ts";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/domain/contracts.ts";
@@ -46,7 +47,8 @@ import { persistSessions } from "../web/session-persistence.js";
 import { renderMarkdown } from "@zhujun/agentloop-artifact-preview";
 import { isNearBottom, nextScrollTop } from "../web/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/conversation-history.js";
-import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
+import { executionLocationLabel, executionProvenanceParts } from "../web/execution-provenance.js";
+import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
 import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "../web/artifact-display.js";
 import { commandToolCallIds, executionActivities } from "../web/execution-detail-projection.js";
 import {
@@ -223,12 +225,106 @@ test("Router conversation index paginates newest conversations in stable pages o
     assignment: {
       id: "assignment-history",
       runtimeId: "runtime-history",
+      executionLocation: "cloud",
       status: "completed",
       hasRun: true,
+      remoteRunId: "run-history",
     },
   }]);
   assert.equal(await store.conversation("tenant", "other-user", "conversation-64"), undefined);
   await database.close();
+});
+
+test("deleting a terminal Router conversation removes its durable task tree but rejects active work", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("conversation-delete-runtime"), endpoint: "http://conversation-delete-runtime" }], 1_000);
+  const insertTask = database.prepare(`
+    INSERT INTO mr_tasks(
+      id, tenant_id, owner_user_id, conversation_id, client_message_id, input,
+      requested_runtime_id, requested_profile, required_capabilities_json,
+      requested_model_key, allow_dangerous_tools, resource_refs_json, status,
+      created_at, updated_at
+    ) VALUES (?, 'tenant-delete', 'user-delete', ?, ?, 'test input', NULL, NULL, '[]', NULL, 1, '[]', ?, ?, ?)
+  `);
+  const insertAssignment = database.prepare(`
+    INSERT INTO mr_assignments(
+      id, task_id, runtime_id, dispatch_key, remote_run_id, status,
+      reservation_expires_at, created_at, updated_at
+    ) VALUES (?, ?, 'conversation-delete-runtime', ?, 'remote-run', ?, NULL, ?, ?)
+  `);
+  try {
+    await insertTask.run("terminal-task", "terminal-conversation", "terminal-message", "completed", 10, 10);
+    await insertAssignment.run("terminal-assignment", "terminal-task", "terminal-dispatch", "completed", 10, 10);
+    await insertTask.run("active-task", "active-conversation", "active-message", "running", 20, 20);
+    await insertAssignment.run("active-assignment", "active-task", "active-dispatch", "accepted", 20, 20);
+
+    await store.deleteConversation("tenant-delete", "user-delete", "terminal-conversation");
+    assert.equal((await store.listConversations("tenant-delete", "user-delete", { limit: 30, offset: 0 })).conversations.some((item) => item.id === "terminal-conversation"), false);
+    assert.equal(await store.conversation("tenant-delete", "user-delete", "terminal-conversation"), undefined);
+    assert.equal((await database.prepare("SELECT COUNT(*) AS count FROM mr_assignments WHERE task_id = ?").get("terminal-task") as { count: number }).count, 0);
+
+    await assert.rejects(
+      store.deleteConversation("tenant-delete", "user-delete", "active-conversation"),
+      ConversationDeleteConflictError,
+    );
+    assert.notEqual(await store.conversation("tenant-delete", "user-delete", "active-conversation"), undefined);
+  } finally {
+    await database.close();
+  }
+});
+
+test("persisted turns preserve actual Runtime data plane and resolved model", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.registerLocalRuntime({
+    runtimeId: "local-runtime-provenance",
+    deviceId: "device-provenance",
+    tenantId: "tenant-provenance",
+    ownerUserId: "user-provenance",
+    connectionId: "connection-provenance",
+    connectionEpoch: 1,
+    profile: "general",
+    capabilities: [],
+    maxConcurrentRuns: 1,
+    status: "ready",
+    catalogVersion: "1",
+    leaseExpiresAt: 2_000,
+    now: 1_000,
+  });
+  const assignment = await store.reserve({
+    tenantId: "tenant-provenance",
+    ownerUserId: "user-provenance",
+    conversationId: "conversation-provenance",
+    clientMessageId: "message-provenance",
+    input: "本机任务",
+    executionTarget: { kind: "local_device", deviceId: "device-provenance", runtimeId: "local-runtime-provenance" },
+    dataPolicy: { mode: "local" },
+  }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 1_100 });
+  await store.markAccepted(assignment.id, "run-provenance", 1_110);
+  await store.observeRun(assignment.id, {
+    remoteRunId: "run-provenance", status: "completed", modelKey: "model-resolved-by-runtime", output: "完成", finishedAt: 1_200,
+  }, 1_201);
+  const turn = (await store.conversation("tenant-provenance", "user-provenance", "conversation-provenance"))?.turns[0];
+  assert.equal(turn?.assignment?.executionLocation, "local");
+  assert.equal(turn?.assignment?.runtimeId, "local-runtime-provenance");
+  assert.equal(turn?.finalTurn?.modelKey, "model-resolved-by-runtime");
+  const assistant = conversationMessagesFromTurns(turn === undefined ? [] : [turn])[1];
+  assert.deepEqual(executionProvenanceParts(assistant), [
+    { kind: "location", label: "本机" },
+    { kind: "runtime", label: "Runtime local-runtime-provenance" },
+    { kind: "model", label: "模型 model-resolved-by-runtime" },
+  ]);
+  await database.close();
+});
+
+test("execution provenance labels all supported data planes without Runtime ID inference", () => {
+  assert.equal(executionLocationLabel("cloud"), "云端");
+  assert.equal(executionLocationLabel("local"), "本机");
+  assert.equal(executionLocationLabel("strict_local"), "严格本地");
+  assert.equal(executionLocationLabel("runtime-local-01"), "执行位置未记录");
 });
 
 test("persisted conversation turns become a replayable conversation stream on click", () => {
@@ -260,13 +356,24 @@ test("persisted conversation turns become a replayable conversation stream on cl
   assert.equal(assistant.text, "历史回答");
 });
 
+test("completed artifact delivery supplies a stable summary when prose is empty", () => {
+  assert.equal(completedArtifactSummary(undefined), "");
+  assert.equal(completedArtifactSummary([{ role: "process", name: "draft.html" }]), "");
+  assert.equal(completedArtifactSummary([
+    { role: "final", name: "weekly-report.html" },
+    { role: "final", name: "weekly-report.html" },
+    { role: "final", path: "report.pdf" },
+  ]), "任务已完成，最终产物：weekly-report.html、report.pdf。");
+});
+
 test("Multi Runtime Web requests and appends conversation pages of 30", async () => {
   const [app, overrides] = await Promise.all([
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
   assert.match(app, /const CONVERSATION_PAGE_SIZE = 30/);
-  assert.match(app, /const recoveredSessions = sortSessions\(loadSessions\(\)\);\s*let sessions = \[\]/);
+  assert.match(app, /let recoveredSessions = \[\];\s*let sessions = \[\]/);
+  assert.match(app, /recoveredSessions = sortSessions\(loadSessions\(sessionKey\(user\.id\)\)\)/);
   assert.match(app, /mergeConversationSummaries\(body\.conversations, reset\)/);
   assert.match(app, /if \(reset && sessions\.length === 0\)/);
   assert.match(app, /\/v1\/conversations\?limit=\$\{CONVERSATION_PAGE_SIZE\}&offset=\$\{offset\}/);
@@ -275,6 +382,11 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
   assert.match(app, /\/v1\/conversations\/\$\{encodeURIComponent\(conversation\.id\)\}/);
   assert.match(app, /conversationMessagesFromTurns\(body\.turns\)/);
   assert.match(app, /hydratePersistedAssistant/);
+  assert.match(app, /executionProvenanceParts/);
+  assert.match(app, /executionLocation: executionTarget/);
+  assert.match(app, /const executionTarget = isLocalExecution\(\) \? "local" : "cloud"/);
+  assert.doesNotMatch(app, /\$\("execution-target"\)/);
+  assert.match(overrides, /\.execution-provenance-chip/);
   assert.match(overrides, /\.sessions-more/);
 });
 
@@ -296,11 +408,65 @@ test("Router and Runtime Host remain isolated deployment dependency closures", a
   assert.equal([...hostFiles].some((path) => path.includes("/src/control-plane/") || path.endsWith("/src/http/router-http.ts")), false, "Runtime Host must not import Router control-plane code");
 });
 
-test("Web runtime config preserves the launcher-selected Router URL", () => {
+test("local launcher gives Router and Runtime Hosts the same shared workspace mount", async () => {
+  const source = await readFile(new URL("../scripts/start-local.mjs", import.meta.url), "utf8");
+  const routerEnvironment = source.slice(
+    source.indexOf('children.push(start("router"'),
+    source.indexOf("// The Router owns initial schema setup"),
+  );
+  assert.match(routerEnvironment, /RUNTIME_WORKSPACE_ROOT:\s*sharedWorkspaceRoot/);
+  assert.match(source, /WORKSPACE_ROOT:\s*sharedWorkspaceRoot/);
+});
+
+test("Web runtime config keeps browser API traffic same-origin while the server owns the Router URL", () => {
   const script = runtimeConfigScript("http://127.0.0.1:9888/");
-  assert.match(script, /AGENTLOOP_ROUTER_URL/);
-  assert.ok(script.includes('"http://127.0.0.1:9888/"'));
-  assert.doesNotMatch(script, /8788/);
+  assert.match(script, /AGENTLOOP_ROUTER_URL = "\/api"/, "browser API calls must use the same-origin Web proxy");
+  assert.match(script, /AGENTLOOP_ROUTER_PUBLIC_URL = "http:\/\/127\.0\.0\.1:9888\/"/, "the fixed build/deployment Router address remains display-only browser metadata");
+});
+
+test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixed release configuration", async () => {
+  const [packager, preflight, tray, wix, rootPackage, workspacePackage] = await Promise.all([
+    readFile(new URL("../scripts/package-local-agent-windows.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/assert-windows-local-agent-build.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../distribution/windows/Program.cs", import.meta.url), "utf8"),
+    readFile(new URL("../distribution/windows/AgentLoopLocalRuntime.wxs", import.meta.url), "utf8"),
+    readFile(new URL("../../../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ]);
+  assert.match(packager, /process\.platform !== "win32" \|\| process\.arch !== "x64"/);
+  assert.match(packager, /AGENTLOOP_ROUTER_URL_PRODUCTION/);
+  assert.match(packager, /AGENTLOOP_WEB_ORIGIN_PRODUCTION/);
+  assert.match(packager, /--experimental-sea-config/);
+  assert.match(packager, /bundled Node fallback/);
+  assert.match(packager, /agentloop-local-runtime\.manifest\.json/);
+  assert.match(packager, /agent\.out\.log/);
+  assert.match(packager, /agent\.err\.log/);
+  assert.match(preflight, /Windows MSI must be built on Windows x64/);
+  assert.match(preflight, /\.NET 8 SDK is required/);
+  assert.match(preflight, /WiX Toolset v4 CLI is required/);
+  assert.match(tray, /agentloop-local-runtime-agent\.cmd/);
+  assert.match(tray, /CurrentVersion\\Run/);
+  assert.match(tray, /StartAgent\(\)/);
+  assert.match(wix, /agentloop-local-runtime/);
+  assert.match(wix, /ProgramFiles6432Folder/);
+  assert.match(wix, /MajorUpgrade/);
+  assert.match(JSON.parse(rootPackage).scripts["package:local-agent:win"], /--workspace agentloop-multi-runtime/);
+  assert.match(JSON.parse(workspacePackage).scripts["package:local-agent:win"], /assert-windows-local-agent-build\.mjs.*package-local-agent-windows\.mjs/);
+});
+
+test("Web serves authentication as a dedicated page rather than sidebar controls", async () => {
+  const [index, login, loginScript, server] = await Promise.all([
+    readFile(new URL("../web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/login.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/login.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/server.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(index, /id="auth-form"|id="auth-email"|id="auth-password"/);
+  assert.match(login, /id="auth-form"/);
+  assert.match(login, /id="auth-mode-toggle"/);
+  assert.match(loginScript, /location\.replace\(safeNextLocation\(\)\)/);
+  assert.match(server, /pathname === "\/login" \|\| pathname === "\/register"/);
+  assert.match(server, /pathname === "\/api" \|\| pathname\.startsWith\("\/api\/"\)/);
 });
 
 test("Web source disables caching so Router and browser protocol changes deploy together", async () => {
@@ -326,7 +492,7 @@ test("Web uses the shared format-aware preview component instead of text-only ar
   assert.match(html, /artifact-preview\.js/);
   assert.match(html, /artifact-markdown\.css/);
   assert.match(html, /"marked":"\/marked\.js"/);
-  assert.match(app, /import \{ openArtifactPreview, renderMarkdown \} from "\.\/artifact-preview\.js"/);
+  assert.match(app, /import \{[^}]*openArtifactPreview[^}]*renderMarkdown[^}]*\} from "\.\/artifact-preview\.js"/);
   assert.match(app, /fetchStructuredPreview/);
   assert.match(app, /fetchBytes/);
   assert.doesNotMatch(app, /function previewText\(/);
@@ -382,6 +548,14 @@ test("Web keeps an earlier reply's artifact preview selected while a newer turn 
   assert.match(app, /message\.id === inlineArtifactPreview\.assistantId/);
   assert.match(app, /const assistant = previewAssistant \|\| selectedAssistant/);
   assert.doesNotMatch(app, /renderArtifacts\(selectedAssistant\)/);
+});
+
+test("Web preserves an active artifact player across conversation re-renders", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+
+  assert.match(app, /updateArtifactPreviewMarkup/);
+  assert.match(app, /updateArtifactPreviewMarkup\(previewHost, previewMarkup\)/);
+  assert.doesNotMatch(app, /previewHost\.innerHTML\s*=/);
 });
 
 test("Web excludes command stdout and stderr captures from artifact cards", () => {
@@ -589,7 +763,7 @@ test("Web projects durable Plan transitions, formats final Markdown, and preserv
   assert.match(app, /checkpoint\/start/);
   assert.match(app, /从检查点启动/);
   assert.doesNotMatch(app, /data-recovery-advance/);
-  assert.match(app, /import \{ openArtifactPreview, renderMarkdown \} from "\.\/artifact-preview\.js"/);
+  assert.match(app, /import \{[^}]*openArtifactPreview[^}]*renderMarkdown[^}]*\} from "\.\/artifact-preview\.js"/);
   assert.match(app, /function toolOutcomeLabel\(tool\)/);
   assert.match(detailProjection, /completedCalls: 0, rejectedCalls: 0, failedCalls: 0, runningCalls: 0/);
   assert.match(app, /\$\{tool\.rejectedCalls\} 次被拒绝/);
@@ -853,19 +1027,38 @@ test("Web keeps uploaded attachment records removable until send and snapshots t
   assert.match(html, /id="pending-attachments"/);
   assert.match(html, /id="upload-file"/);
   assert.match(html, /accept="\.txt,\.md,\.csv,\.json,\.html,\.htm,\.pdf,\.doc,\.docx,\.xlsx,\.pptx"/);
+  assert.ok(html.indexOf('id="pending-attachments"') < html.indexOf('id="input"'), "pending files belong above the text input");
   assert.match(app, /async function uploadAttachments\(fileList\)/);
   assert.match(app, /const MAX_ATTACHMENT_BYTES = 25 \* 1024 \* 1024;/);
   assert.match(app, /const rejected = selected\.filter\(\(file\) => file\.size > MAX_ATTACHMENT_BYTES\)/);
   assert.match(app, /function attachmentSizeError\(file, limit = MAX_ATTACHMENT_BYTES\)/);
   assert.match(app, /超过单个文件/);
   assert.match(app, /failures\.length > 0 \? uploadFailureStatus\(failures\) : "文件已准备好"/);
-  assert.match(app, /conversation\.pendingAttachments = \[\.\.\.pendingAttachments\(conversation\), attachment\]/);
+  assert.match(app, /conversation\.pendingAttachments = \[\.\.\.pendingAttachments\(conversation\), local \? \{ \.\.\.attachment, dataPlane: "local_runtime", runtimeId: localRuntimeId \} : attachment\]\.slice\(0, MAX_PENDING_ATTACHMENTS\);/);
   assert.match(app, /function removePendingAttachment\(conversation, attachmentId\)/);
-  assert.match(app, /attachmentIds: attachments\.map\(\(attachment\) => attachment\.id\)/);
+  assert.match(app, /const cloudAttachmentIds = attachments\.filter\(\(attachment\) => attachment\.dataPlane !== "local_runtime"\)\.map\(\(attachment\) => attachment\.id\);/);
+  assert.match(app, /attachmentIds: cloudAttachmentIds,/);
+  assert.match(app, /localUploadedSourceIds: localSourceIds/);
   assert.match(app, /const submittedAt = Date\.now\(\)/);
   assert.match(app, /const userMessage = \{[^\n]+attachments, createdAt: submittedAt \}/);
-  assert.match(app, /\$\("submit"\)\.disabled = activeRun !== undefined \|\| uploadCount\(conversation\.id\) > 0/);
+  assert.match(html, /id="submit" class="composer-action" type="button"/);
+  assert.doesNotMatch(html, /id="cancel"/);
+  assert.match(app, /function runComposerAction\(\)/);
+  assert.match(app, /if \(target\.canCancel\) \{ void cancelActive\(\); return; \}/);
+  assert.match(app, /primaryAction\.classList\.toggle\("is-stop", stopping\)/);
+  assert.match(app, /primaryAction\.textContent = stopping \? "■" : "↑"/);
   assert.match(app, /msg-source-row" aria-label="本轮上传文件"/);
+});
+
+test("Web renews the Local Runtime capability before it expires and rotates it when login identity changes", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.match(app, /const LOCAL_SESSION_REFRESH_AHEAD_MS = 5 \* 60 \* 1000;/);
+  assert.match(app, /let localSessionExpiresAt = 0;/);
+  assert.match(app, /function clearLocalSession\(\)/);
+  assert.match(app, /function scheduleLocalSessionRefresh\(deviceId, userId\)/);
+  assert.match(app, /if \(!localSessionToken \|\| localSessionExpiresAt - Date\.now\(\) <= LOCAL_SESSION_REFRESH_AHEAD_MS\) await refreshLocalSessionOnce\(\);/);
+  assert.match(app, /if \(authenticatedUser\?\.id !== user\.id\) \{[\s\S]*?clearLocalSession\(\);/);
+  assert.match(app, /if \(authenticatedUser\?\.id !== userId \|\| localDevice\?\.id !== deviceId\) throw new Error\("本机 Runtime 登录身份已更新，请重试"\);/);
 });
 
 test("Web persists question and terminal-response timing for the conversation stream", async () => {
@@ -1180,26 +1373,23 @@ test("Router converts owned attachment IDs and never accepts browser resource re
       content: Buffer.from("hello router attachment"),
     });
     const dispatched = await taskFromRequest({
-      tenantId: "tenant",
-      ownerUserId: "user",
       conversationId: "conversation-user",
       clientMessageId: "message-1",
       input: "summarize attachment",
       attachmentIds: [attachment.id],
-    }, undefined, undefined, attachments);
+    }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments);
     assert.equal(dispatched.allowDangerousTools, true);
     assert.equal((await taskFromRequest({
-      tenantId: "tenant",
-      ownerUserId: "user",
       conversationId: "conversation-user",
       clientMessageId: "message-1-disabled",
       input: "summarize attachment",
       allowDangerousTools: false,
-    }, undefined, undefined, attachments)).allowDangerousTools, false);
+    }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments)).allowDangerousTools, false);
     assert.equal(dispatched.resourceRefs?.[0]?.originalName, "brief.txt");
     assert.equal(dispatched.resourceRefs?.[0]?.byteSize, "hello router attachment".length);
-    await assert.rejects(taskFromRequest({ ...task("user", "message-intent"), conversationIntent: "auto" }, undefined, undefined, attachments), /conversationIntent is Runtime-owned/);
-    await assert.rejects(taskFromRequest({ ...task("user", "message-2"), resourceRefs: [] }, undefined, undefined, attachments), /resourceRefs are Router-owned/);
+    await assert.rejects(taskFromRequest({ conversationId: "c", clientMessageId: "m", input: "x", conversationIntent: "auto" }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /conversationIntent is Runtime-owned/);
+    await assert.rejects(taskFromRequest({ conversationId: "c", clientMessageId: "m", input: "x", resourceRefs: [] }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /resourceRefs are Router-owned/);
+    await assert.rejects(taskFromRequest({ tenantId: "attacker", ownerUserId: "attacker", conversationId: "c", clientMessageId: "m", input: "x" }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /derived from the authenticated session/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1313,6 +1503,107 @@ test("Router projects a terminal Host event durably and never regresses it to ru
   await database.close();
 });
 
+test("terminal event hydrates the final artifact catalog before browser projection", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "agentloop-terminal-event-artifact-"));
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-terminal-event-artifact"), endpoint: "http://runtime-terminal-event-artifact" }], 100);
+  await store.heartbeat({ runtimeId: "runtime-terminal-event-artifact", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  const catalog = new SharedWorkspaceArtifactCatalog(database, workspaceRoot);
+  const router = new PersistentMultiRuntimeRouter({
+    store,
+    artifactsCatalog: catalog,
+    heartbeatTtlMs: 1_000,
+    now: () => 200,
+    endpointFactory: () => ({
+      async dispatch() { return { remoteRunId: "terminal-event-artifact-run" }; },
+      async events() { return [{ seq: 1, type: "run.completed", data: {}, createdAt: 200 }]; },
+      async getRun() {
+        return {
+          remoteRunId: "terminal-event-artifact-run",
+          status: "completed" as const,
+          output: "artifact delivered",
+          artifacts: [{
+            id: "terminal-event-artifact", runId: "terminal-event-artifact-run", path: "deliveries/report.pdf", name: "report.pdf", bytes: 14,
+            mimeType: "application/pdf", role: "final" as const, sourceTool: "computer_run_command" as const, previewable: true,
+          }],
+        };
+      },
+    }),
+  });
+  try {
+    const assignment = await router.submit(task("user-terminal-event-artifact", "message-terminal-event-artifact"));
+    const conversationRoot = join(workspaceRoot, "conversations", assignment.conversationId, "deliveries");
+    await mkdir(conversationRoot, { recursive: true });
+    await writeFile(join(conversationRoot, "report.pdf"), "%PDF-1.4\nfinal");
+
+    const projection = await router.events(assignment.id, 0);
+
+    assert.equal(projection?.assignment.status, "completed");
+    assert.equal((await catalog.list(assignment.id))[0]?.id, "terminal-event-artifact");
+    const conversation = await store.conversation("tenant", "user-terminal-event-artifact", assignment.conversationId);
+    assert.equal(conversation?.turns[0]?.finalTurn?.assistantOutput, "artifact delivered");
+  } finally {
+    await database.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("terminal reconciliation captures shared-workspace artifacts before the original Host is unavailable", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "agentloop-terminal-artifact-catalog-"));
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-terminal-artifact"), endpoint: "http://runtime-terminal-artifact" }], 100);
+  await store.heartbeat({ runtimeId: "runtime-terminal-artifact", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  const catalog = new SharedWorkspaceArtifactCatalog(database, workspaceRoot);
+  let hostAvailable = true;
+  const router = new PersistentMultiRuntimeRouter({
+    store,
+    artifactsCatalog: catalog,
+    heartbeatTtlMs: 1_000,
+    now: () => 200,
+    endpointFactory: () => ({
+      async dispatch() { return { remoteRunId: "terminal-artifact-run" }; },
+      async getRun() {
+        if (!hostAvailable) throw new Error("original Host is offline");
+        return {
+          remoteRunId: "terminal-artifact-run",
+          status: "completed" as const,
+          artifacts: [{
+            id: "terminal-artifact", runId: "terminal-artifact-run", path: "deliveries/report.md", name: "report.md", bytes: 17,
+            mimeType: "text/markdown", role: "final" as const, sourceTool: "computer_write_file" as const, previewable: true,
+          }],
+        };
+      },
+    }),
+  });
+  try {
+    const assignment = await router.submit(task("user-terminal-artifact", "message-terminal-artifact"));
+    const conversationRoot = join(workspaceRoot, "conversations", assignment.conversationId, "deliveries");
+    await mkdir(conversationRoot, { recursive: true });
+    await writeFile(join(conversationRoot, "report.md"), "# Durable report\n");
+
+    await router.reconcileAssignments();
+    assert.equal((await store.assignment(assignment.id))?.status, "completed");
+    assert.equal((await catalog.list(assignment.id)).length, 1);
+
+    hostAvailable = false;
+    const artifacts = await router.artifacts(assignment.id);
+    assert.equal(artifacts?.artifacts[0]?.id, "terminal-artifact");
+    const read = await router.readArtifact(assignment.id, "terminal-artifact");
+    assert.equal(Buffer.from(read?.content ?? []).toString("utf8"), "# Durable report\n");
+    const preview = await router.previewArtifact(assignment.id, "terminal-artifact");
+    assert.deepEqual(preview?.preview, {
+      kind: "text", name: "report.md", mimeType: "text/markdown", text: "# Durable report\n", truncated: false,
+    });
+  } finally {
+    await database.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("Router preserves Host round-limit failures for browser replay and recovery", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
@@ -1399,8 +1690,8 @@ test("Router Runtime catalog exposes concrete statically registered Runtime IDs"
   ], 100);
   const router = new PersistentMultiRuntimeRouter({ store, endpointFactory: () => endpoint("unused") });
   assert.deepEqual((await router.runtimes()).map((runtime) => ({ ...runtime })), [
-    { id: "runtime-artifact", profile: "artifact" },
-    { id: "runtime-general", profile: "general" },
+    { id: "runtime-artifact", profile: "artifact", kind: "cloud", status: "offline" },
+    { id: "runtime-general", profile: "general", kind: "cloud", status: "offline" },
   ]);
   await database.close();
 });

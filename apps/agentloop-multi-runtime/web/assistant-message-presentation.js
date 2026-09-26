@@ -11,6 +11,16 @@ export function assistantMessagePresentation(status) {
   return { isLive: false, label: typeof status === "string" ? status : "", icon: "", cardClass: "", emptyText: "暂无返回内容。" };
 }
 
+/** A completed artifact delivery is a user-visible result even without prose. */
+export function completedArtifactSummary(artifacts) {
+  const names = [...new Set((Array.isArray(artifacts) ? artifacts : [])
+    .filter((artifact) => artifact?.role === "final")
+    .map((artifact) => typeof artifact.name === "string" && artifact.name.length > 0 ? artifact.name : artifact.path)
+    .filter((name) => typeof name === "string" && name.length > 0))];
+  if (names.length === 0) return "";
+  return `任务已完成，最终产物：${names.join("、")}。`;
+}
+
 /** A cancelled Run cannot leave an unfinished Plan step looking active. */
 export function terminalAwarePlanStepStatus(stepStatus, runStatus) {
   if (runStatus === "cancelled" && stepStatus !== "completed" && stepStatus !== "failed") return "cancelled";

@@ -3,6 +3,8 @@ import type { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
 import { assertUploadedSourceContent, type CommandOutputContent, type HumanLoopRequest, type HumanLoopResponse, type RecoveryDetail, type ToolArgumentsContent } from "@zhujun/agentloop";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
+import { IdentityError, type IdentityService, type Principal } from "../auth/identity-service.ts";
+import { DeviceError, type DeviceService } from "../devices/device-service.ts";
 
 interface AttachmentBroker {
   upload(input: Parameters<FileAttachmentBroker["upload"]>[0]): ReturnType<FileAttachmentBroker["upload"]>;
@@ -10,10 +12,14 @@ interface AttachmentBroker {
   readForRuntime(id: string): ReturnType<FileAttachmentBroker["readForRuntime"]>;
 }
 
+interface LocalAgentControlPlane {
+  agentControl<T>(input: { readonly tenantId: string; readonly ownerUserId: string; readonly deviceId: string; readonly method: string; readonly payload?: Record<string, unknown> }): Promise<T>;
+}
+
 interface RouterTaskApi {
   submit(task: SubmitConversationTask): Promise<{ readonly id: string; readonly tenantId: string; readonly ownerUserId: string }>;
-  models?(): Promise<readonly RuntimeModelSummary[]>;
-  runtimes?(): Promise<readonly { id: string; profile: string }[]>;
+  models?(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]>;
+  runtimes?(tenantId?: string, ownerUserId?: string): Promise<readonly { id: string; profile: string }[]>;
   conversations?(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<{
     readonly conversations: readonly {
       readonly id: string;
@@ -38,11 +44,13 @@ interface RouterTaskApi {
         readonly runtimeId: string;
         readonly status: string;
         readonly hasRun: boolean;
+        readonly remoteRunId?: string;
         readonly errorCode?: string;
         readonly errorMessage?: string;
       };
     }[];
   } | undefined>;
+  deleteConversation?(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
   assignment(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run?: RuntimeRunStatus } | undefined>;
   artifacts?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifacts: readonly ProcessArtifact[] } | undefined>;
   readArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifact: ProcessArtifact; readonly content: Uint8Array } | undefined>;
@@ -59,11 +67,27 @@ interface RouterTaskApi {
   respondHumanLoop?(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly response: HumanLoopResponse } | undefined>;
 }
 
+export interface LocalAgentRelease {
+  readonly version: string;
+  readonly protocolVersion: string;
+  readonly platform: "darwin" | "windows" | "linux";
+  readonly arch: "arm64" | "x64";
+  readonly downloadUrl: string;
+  readonly sha256: string;
+  readonly signature: string;
+  readonly releaseNotes?: string;
+  readonly launchUrl?: string;
+}
+
 export function createRouterHttpServer(router: RouterTaskApi, options: {
+  readonly identity?: Pick<IdentityService, "register" | "login" | "authenticate" | "revoke">;
+  readonly devices?: Pick<DeviceService, "issueRegistrationToken" | "registerAgent" | "heartbeat" | "list" | "revoke" | "issueLocalSession" | "authorizeLocalSession">;
   readonly attachments?: AttachmentBroker;
   readonly runtimeAttachmentToken?: string;
   readonly runtimeDispatchToken?: string;
   readonly webOrigin?: string;
+  readonly localAgentReleases?: readonly LocalAgentRelease[];
+  readonly localAgentControl?: LocalAgentControlPlane;
 } = {}): Server {
   return createServer(async (request, response) => {
     try {
@@ -71,11 +95,115 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       if (request.method === "OPTIONS") return json(response, 204, undefined);
       const url = new URL(request.url ?? "/", "http://agentloop-router.local");
       if (request.method === "GET" && url.pathname === "/healthz") return json(response, 200, { status: "ok" });
+      if (request.method === "POST" && (url.pathname === "/v1/auth/register" || url.pathname === "/v1/auth/login")) {
+        if (options.identity === undefined) return json(response, 503, { error: "identity_not_configured" });
+        const body = record(await readJson(request), "request body");
+        const session = url.pathname.endsWith("register")
+          ? await options.identity.register(body.email, body.password)
+          : await options.identity.login(body.email, body.password);
+        return json(response, url.pathname.endsWith("register") ? 201 : 200, sessionResponse(session));
+      }
+      if (request.method === "POST" && url.pathname === "/v1/device-agent/register") {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        const body = record(await readJson(request), "request body");
+        const device = await options.devices.registerAgent({ registrationToken: body.registrationToken, displayName: body.displayName, publicKey: body.publicKey });
+        return json(response, 201, { device: { id: device.id, displayName: device.displayName, status: device.status, lastSeenAt: device.lastSeenAt, createdAt: device.createdAt }, agentToken: device.agentToken });
+      }
+      if (request.method === "POST" && url.pathname === "/v1/device-agent/heartbeat") {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        const authorization = Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : request.headers.authorization;
+        return json(response, 200, { device: await options.devices.heartbeat(authorization?.replace(/^Bearer\s+/i, "")) });
+      }
+      if (request.method === "POST" && url.pathname === "/v1/device-agent/authorize-session") {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        const body = record(await readJson(request), "request body");
+        const authorization = Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : request.headers.authorization;
+        return json(response, 200, { session: await options.devices.authorizeLocalSession(authorization?.replace(/^Bearer\s+/i, ""), body.sessionToken) });
+      }
+      const internalRequest = url.pathname.startsWith("/v1/internal/");
+      let principal: Principal | undefined;
+      if (!internalRequest) {
+        if (options.identity === undefined) return json(response, 503, { error: "identity_not_configured" });
+        principal = await options.identity.authenticate(request.headers.authorization);
+        // Existing handlers consume these fields; overwrite untrusted values only after authentication.
+        request.headers["x-tenant-id"] = principal.tenantId;
+        request.headers["x-user-id"] = principal.userId;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/auth/me") {
+        return json(response, 200, { user: { id: principal!.userId, email: principal!.email }, tenant: { id: principal!.tenantId } });
+      }
       if (request.method === "GET" && url.pathname === "/v1/models") {
-        return json(response, 200, { models: await router.models?.() ?? [] });
+        return json(response, 200, { models: await router.models?.(principal!.tenantId, principal!.userId) ?? [] });
       }
       if (request.method === "GET" && url.pathname === "/v1/runtimes") {
-        return json(response, 200, { runtimes: await router.runtimes?.() ?? [] });
+        return json(response, 200, { runtimes: await router.runtimes?.(principal!.tenantId, principal!.userId) ?? [] });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/local-agent/releases/latest") {
+        const platform = url.searchParams.get("platform");
+        const arch = url.searchParams.get("arch");
+        const releases = (options.localAgentReleases ?? []).filter((release) =>
+          (platform === null || release.platform === platform) && (arch === null || arch === "unknown" || release.arch === arch));
+        if (releases.length === 0) return json(response, 404, { error: "local_agent_release_unavailable" });
+        return json(response, 200, { protocolVersion: "1", releases });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/devices") {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        return json(response, 200, { devices: await options.devices.list(principal!) });
+      }
+      const localAgentStatusMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/status$/);
+      if (request.method === "GET" && localAgentStatusMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentStatusMatch[1]), "agent.status"));
+      }
+      const localAgentRuntimesMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/runtimes$/);
+      if (request.method === "GET" && localAgentRuntimesMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentRuntimesMatch[1]), "agent.runtimes.list"));
+      }
+      if (request.method === "POST" && localAgentRuntimesMatch !== null) {
+        const body = record(await readJson(request), "request body");
+        return json(response, 201, await localAgentControl(options, principal!, decodeURIComponent(localAgentRuntimesMatch[1]), "agent.runtimes.create", { displayName: body.displayName }));
+      }
+      const localAgentRuntimeMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/runtimes\/([^/]+)$/);
+      if (request.method === "PATCH" && localAgentRuntimeMatch !== null) {
+        const body = record(await readJson(request), "request body");
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentRuntimeMatch[1]), "agent.runtimes.rename", { runtimeId: decodeURIComponent(localAgentRuntimeMatch[2]), displayName: body.displayName }));
+      }
+      if (request.method === "DELETE" && localAgentRuntimeMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentRuntimeMatch[1]), "agent.runtimes.remove", { runtimeId: decodeURIComponent(localAgentRuntimeMatch[2]) }));
+      }
+      const localAgentLifecycleMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/runtimes\/([^/]+)\/(drain|restart|stop|start)$/);
+      if (request.method === "POST" && localAgentLifecycleMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentLifecycleMatch[1]), "agent.runtimes.lifecycle", { runtimeId: decodeURIComponent(localAgentLifecycleMatch[2]), action: localAgentLifecycleMatch[3] }));
+      }
+      const localAgentConfigMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/config$/);
+      if (request.method === "GET" && localAgentConfigMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentConfigMatch[1]), "agent.config.get"));
+      }
+      const localAgentStoragePickMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/config\/shared-storage\/pick$/);
+      if (request.method === "POST" && localAgentStoragePickMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentStoragePickMatch[1]), "agent.config.sharedStorage.pick"));
+      }
+      const localAgentUploadStoragePickMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-agent\/config\/upload-storage\/pick$/);
+      if (request.method === "POST" && localAgentUploadStoragePickMatch !== null) {
+        return json(response, 200, await localAgentControl(options, principal!, decodeURIComponent(localAgentUploadStoragePickMatch[1]), "agent.config.uploadStorage.pick"));
+      }
+      if (request.method === "POST" && url.pathname === "/v1/devices/registration-tokens") {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        return json(response, 201, await options.devices.issueRegistrationToken(principal!));
+      }
+      const localSessionMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/local-sessions$/);
+      if (request.method === "POST" && localSessionMatch !== null) {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        return json(response, 201, await options.devices.issueLocalSession(principal!, decodeURIComponent(localSessionMatch[1])));
+      }
+      const revokeDeviceMatch = url.pathname.match(/^\/v1\/devices\/([^/]+)\/revoke$/);
+      if (request.method === "POST" && revokeDeviceMatch !== null) {
+        if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
+        await options.devices.revoke(principal!, decodeURIComponent(revokeDeviceMatch[1]));
+        return json(response, 204, undefined);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/auth/logout") {
+        await options.identity?.revoke(request.headers.authorization);
+        return json(response, 204, undefined);
       }
       if (request.method === "GET" && url.pathname === "/v1/conversations") {
         if (router.conversations === undefined) return json(response, 501, { error: "conversations_not_configured" });
@@ -86,6 +214,12 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         }));
       }
       const conversationMatch = url.pathname.match(/^\/v1\/conversations\/([^/]+)$/);
+      if (request.method === "DELETE" && conversationMatch !== null) {
+        if (router.deleteConversation === undefined) return json(response, 501, { error: "conversation_delete_not_configured" });
+        const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        await router.deleteConversation(identity.tenantId, identity.ownerUserId, decodeURIComponent(conversationMatch[1]));
+        return json(response, 204, undefined);
+      }
       if (request.method === "GET" && conversationMatch !== null) {
         if (router.conversation === undefined) return json(response, 501, { error: "conversation_detail_not_configured" });
         const identity = identityFromHeaders(request.headers["x-tenant-id"], request.headers["x-user-id"]);
@@ -95,7 +229,7 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       if (request.method === "POST" && url.pathname === "/v1/attachments") {
         if (options.attachments === undefined) return json(response, 501, { error: "attachments_not_configured" });
         const body = await readJson(request);
-        const identity = identityFromRequest(body, request.headers["x-tenant-id"], request.headers["x-user-id"]);
+        const identity = identityFromRequest(body, principal!);
         const value = record(body, "request body");
         const originalName = stringValue(value.originalName, "originalName");
         const content = base64(value.contentBase64, "contentBase64");
@@ -142,7 +276,12 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       }
       if (request.method === "POST" && url.pathname === "/v1/tasks") {
         const body = await readJson(request);
-        const task = await taskFromRequest(body, request.headers["x-tenant-id"], request.headers["x-user-id"], options.attachments);
+        const task = await taskFromRequest(body, principal!, options.attachments, false);
+        return json(response, 202, { assignment: await router.submit(task) });
+      }
+      if (request.method === "POST" && url.pathname === "/v2/tasks") {
+        const body = await readJson(request);
+        const task = await taskFromRequest(body, principal!, options.attachments, true);
         return json(response, 202, { assignment: await router.submit(task) });
       }
       const recoveryAdvanceMatch = url.pathname.match(/^\/v1\/assignments\/([^/]+)\/recovery\/advance$/);
@@ -283,7 +422,9 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       return json(response, 404, { error: "not_found" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return json(response, message.includes("capacity") ? 409 : 400, { error: message });
+      const status = error instanceof IdentityError || error instanceof DeviceError ? error.status
+        : (error as { statusCode?: number }).statusCode ?? (message.includes("capacity") || message.includes("device_unavailable") ? 409 : 400);
+      return json(response, status, { error: message, ...(error instanceof IdentityError || error instanceof DeviceError ? { code: error.code } : {}) });
     }
   });
 }
@@ -449,11 +590,18 @@ async function readJson(request: import("node:http").IncomingMessage): Promise<u
 
 export async function taskFromRequest(
   body: unknown,
-  tenantHeader: string | string[] | undefined,
-  userHeader: string | string[] | undefined,
+  principal: Principal,
   attachments: AttachmentBroker | undefined,
+  requireV2 = false,
 ): Promise<SubmitConversationTask> {
   const value = record(body, "request body");
+  if (requireV2 && value.schema !== "agentloop.task/v2") throw new TypeError("schema must be agentloop.task/v2");
+  if (requireV2 && (value.executionTarget === undefined || value.dataPolicy === undefined)) {
+    throw new TypeError("agentloop.task/v2 requires executionTarget and dataPolicy");
+  }
+  for (const field of ["tenantId", "ownerUserId", "userId"]) {
+    if (Object.hasOwn(value, field)) throw new TypeError(`${field} is derived from the authenticated session`);
+  }
   if (Object.hasOwn(value, "visibleDirectories")) {
     throw new TypeError("visibleDirectories are disabled for the cloud multi-runtime application");
   }
@@ -461,8 +609,30 @@ export async function taskFromRequest(
     throw new TypeError("conversationIntent is Runtime-owned and cannot be supplied by callers");
   }
   if (Object.hasOwn(value, "resourceRefs")) throw new TypeError("resourceRefs are Router-owned; submit attachmentIds instead");
-  const identity = identityFromRequest(body, tenantHeader, userHeader);
+  const executionTarget = parseExecutionTarget(value.executionTarget ?? { kind: "cloud_pool" });
+  const dataPolicy = parseDataPolicy(value.dataPolicy ?? { mode: "cloud" });
+  if (executionTarget.kind === "cloud_pool" && dataPolicy.mode !== "cloud") {
+    throw Object.assign(new Error("cloud_data_policy_required: cloud execution requires dataPolicy.mode=cloud"), { statusCode: 409 });
+  }
+  if (executionTarget.kind === "local_device" && dataPolicy.mode === "cloud") {
+    throw Object.assign(new Error("local_data_policy_required: local execution requires dataPolicy.mode=local or strict_local"), { statusCode: 409 });
+  }
+  if (executionTarget.kind === "local_device" && dataPolicy.mode === "strict_local") {
+    throw Object.assign(new Error("strict_local_direct_required: strict local task content must use the loopback data plane"), { statusCode: 409 });
+  }
+  if (executionTarget.kind === "local_device" && value.requestedRuntimeId !== undefined) {
+    throw new TypeError("executionTarget.runtimeId is the sole Runtime selection for local execution");
+  }
+  const identity = identityFromPrincipal(principal);
   const attachmentIds = value.attachmentIds === undefined ? [] : stringArray(value.attachmentIds, "attachmentIds");
+  if (executionTarget.kind === "local_device" && attachmentIds.length > 0) {
+    throw Object.assign(new Error("cloud_data_transfer_required: local execution cannot consume cloud attachments without an explicit transfer"), { statusCode: 409 });
+  }
+  const localUploadedSourceIds = value.localUploadedSourceIds === undefined ? undefined : (
+    executionTarget.kind === "local_device"
+      ? stringArray(value.localUploadedSourceIds, "localUploadedSourceIds")
+      : (() => { throw new TypeError("localUploadedSourceIds require a local execution target"); })()
+  );
   if (attachmentIds.length > 0 && attachments === undefined) throw new TypeError("attachments are not configured");
   const conversationId = stringValue(value.conversationId, "conversationId");
   const resourceRefs = await (attachments?.resolveForTask({ ...identity, conversationId, attachmentIds }) ?? []);
@@ -471,6 +641,14 @@ export async function taskFromRequest(
     conversationId,
     clientMessageId: stringValue(value.clientMessageId, "clientMessageId"),
     input: stringValue(value.input, "input"),
+    executionTarget,
+    dataPolicy,
+    ...(value.localDirectoryScopeIds === undefined ? {} : {
+      localDirectoryScopeIds: executionTarget.kind === "local_device"
+        ? stringArray(value.localDirectoryScopeIds, "localDirectoryScopeIds")
+        : (() => { throw new TypeError("localDirectoryScopeIds require a local execution target"); })(),
+    }),
+    ...(localUploadedSourceIds === undefined ? {} : { localUploadedSourceIds }),
     ...(value.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: stringValue(value.requestedRuntimeId, "requestedRuntimeId") }),
     ...(value.requestedProfile === undefined ? {} : { requestedProfile: value.requestedProfile as SubmitConversationTask["requestedProfile"] }),
     ...(value.requiredCapabilities === undefined
@@ -482,12 +660,55 @@ export async function taskFromRequest(
   };
 }
 
-function identityFromRequest(body: unknown, tenantHeader: string | string[] | undefined, userHeader: string | string[] | undefined): { readonly tenantId: string; readonly ownerUserId: string } {
-  const value = record(body, "request body");
+function identityFromRequest(_body: unknown, principal: Principal): { readonly tenantId: string; readonly ownerUserId: string } {
+  const value = record(_body, "request body");
+  for (const field of ["tenantId", "ownerUserId", "userId"]) {
+    if (Object.hasOwn(value, field)) throw new TypeError(`${field} is derived from the authenticated session`);
+  }
+  return identityFromPrincipal(principal);
+}
+
+function identityFromPrincipal(principal: Principal): { readonly tenantId: string; readonly ownerUserId: string } {
   return {
-    tenantId: headerString(tenantHeader) ?? stringValue(value.tenantId, "tenantId"),
-    ownerUserId: headerString(userHeader) ?? stringValue(value.ownerUserId, "ownerUserId"),
+    tenantId: principal.tenantId,
+    ownerUserId: principal.userId,
   };
+}
+
+async function localAgentControl<T>(options: { readonly localAgentControl?: LocalAgentControlPlane }, principal: Principal, deviceId: string, method: string, payload?: Record<string, unknown>): Promise<T> {
+  if (options.localAgentControl === undefined) throw new Error("local_agent_control_not_configured");
+  return await options.localAgentControl.agentControl<T>({
+    tenantId: principal.tenantId,
+    ownerUserId: principal.userId,
+    deviceId,
+    method,
+    ...(payload === undefined ? {} : { payload }),
+  });
+}
+
+function parseExecutionTarget(value: unknown): import("../domain/contracts.ts").ExecutionTarget {
+  const target = record(value, "executionTarget");
+  if (target.kind === "cloud_pool") {
+    if (target.profile !== undefined && target.profile !== "general" && target.profile !== "artifact") throw new TypeError("executionTarget.profile is invalid");
+    if (target.region !== undefined) stringValue(target.region, "executionTarget.region");
+    return { kind: "cloud_pool", ...(target.profile === undefined ? {} : { profile: target.profile }), ...(target.region === undefined ? {} : { region: target.region as string }) };
+  }
+  if (target.kind === "local_device") return {
+    kind: "local_device",
+    deviceId: stringValue(target.deviceId, "executionTarget.deviceId"),
+    runtimeId: stringValue(target.runtimeId, "executionTarget.runtimeId"),
+  };
+  throw new TypeError("executionTarget.kind must be cloud_pool or local_device");
+}
+
+function parseDataPolicy(value: unknown): import("../domain/contracts.ts").DataPolicy {
+  const policy = record(value, "dataPolicy");
+  if (policy.mode === "cloud" || policy.mode === "local" || policy.mode === "strict_local") return { mode: policy.mode };
+  throw new TypeError("dataPolicy.mode must be cloud, local, or strict_local");
+}
+
+function sessionResponse(session: import("../auth/identity-service.ts").IdentitySession) {
+  return { token: session.token, expiresAt: session.expiresAt, user: { id: session.principal.userId, email: session.principal.email }, tenant: { id: session.principal.tenantId } };
 }
 
 function identityFromHeaders(tenantHeader: string | string[] | undefined, userHeader: string | string[] | undefined): { readonly tenantId: string; readonly ownerUserId: string } {
@@ -563,8 +784,8 @@ function json(response: import("node:http").ServerResponse, status: number, body
 function setCors(response: import("node:http").ServerResponse, origin: string | undefined, allowedOrigin: string | undefined): void {
   if (origin !== undefined && webOriginMatches(origin, allowedOrigin)) {
     response.setHeader("access-control-allow-origin", origin);
-    response.setHeader("access-control-allow-headers", "content-type, x-tenant-id, x-user-id");
-    response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+    response.setHeader("access-control-allow-headers", "content-type, authorization");
+    response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
   }
 }
 

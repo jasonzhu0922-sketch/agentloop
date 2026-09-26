@@ -193,3 +193,36 @@ docker compose \
 本地开发界面中的租户/用户输入会被映射为 `x-tenant-id` 与 `x-user-id` 请求头，仅用于演示身份适配；它不是生产认证。Runtime 下拉框读取 Router 静态节点的具体实例 ID，例如 `general-01`、`general-02`；选择“自动”时由 Router 均衡调度，显式选择某实例时只在该实例有可预留容量时提交，不存在的实例会明确报错。Router 只选择未过期、`ready`、capability 匹配且未满的节点，并在同一事务中创建 Task、Assignment 和 30 秒可过期预留。评分是 `(activeRuns + pendingAdmissions + 0.5 × queuedRuns) / maxConcurrentRuns`；Host 仍会按自己已接受且正在运行的 Run 执行容量准入。`reserved` 不形成会话绑定；只有 Host 返回 `remoteRunId` 后才成为 affinity 候选。后续新 Run 优先健康的原 Host，原 Host 失联、draining 或满载时会迁移到下一台兼容 Host，并写入迁移审计记录。
 
 Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignmentId/events/stream` SSE 代理；事件权威仍在共享状态库的持久 Run event log，浏览器绝不直连 Host。当前已实现的是“下一新 Run”的健康 affinity 降级；执行中的 Run 的自动接管仍需要 Run lease、fence 与按 Action receipt 的安全恢复，尚未声明完成。Compose 是本地/单机骨架；生产应替换为 PostgreSQL、对象存储和 RWX workspace。设计见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
+
+### 打包 Local Runtime Agent（macOS Apple Silicon）
+
+Local Runtime Agent 优先使用 Node SEA 打包为后台可执行程序，配合一个很小的 Swift 托盘壳，不包含 Electron/Chromium。若构建机的 Node 二进制没有 SEA fuse（例如当前 Homebrew Node 26），打包器会自动改为随包携带 Node runtime 及其 macOS 动态库依赖；两种产物使用同一个 Agent bundle 和协议。打包命令会先构建 kernel 和 bundled Skills：
+
+```bash
+npm run package:local-agent:mac --workspace agentloop-multi-runtime
+```
+
+默认生成开发环境包，固定连接本地 Router。测试、生产环境的 Router/Web 地址必须在构建时注入，安装后用户不能修改：
+
+```bash
+AGENTLOOP_RELEASE_ENV=test \
+AGENTLOOP_ROUTER_URL_TEST=https://router.test.example.com \
+AGENTLOOP_WEB_ORIGIN_TEST=https://app.test.example.com \
+npm run package:local-agent:mac --workspace agentloop-multi-runtime
+```
+
+生产包使用 `AGENTLOOP_RELEASE_ENV=production`、`AGENTLOOP_ROUTER_URL_PRODUCTION` 和 `AGENTLOOP_WEB_ORIGIN_PRODUCTION`。变量模板见 `distribution/macos/environments.example.env`。产物位于 `release/local-agent/macos-arm64/AgentLoop-Local-Runtime-<version>-macos-arm64.pkg`。未设置签名身份时，`.app` 使用 ad-hoc 签名且 `.pkg` 不签名，只适用于本地开发。正式分发应分别使用 Developer ID Application 和 Developer ID Installer 身份签名，并完成 notarize/staple；当前脚本中的 `APPLE_CODESIGN_IDENTITY` 只负责 app 内代码签名，尚未替代 installer 签名流程。
+
+安装后 Agent 通过 macOS LaunchAgent 登录启动；托盘只提供在线状态、重连、打开 Web、查看日志和退出，业务配置仍由 Web 管理。Router 地址作为固定构建配置嵌入 Agent；Agent 的 bootstrap 文件仅作为安装器/运维迁移用途保留。
+
+### 打包 Local Runtime Agent（Windows x64 MSI）
+
+Windows 使用 WiX 生成 per-machine `.msi`，安装到 `Program Files`，注册 `agentloop-local-runtime://` 协议。协议唤起的原生 .NET 托盘壳会启动本机 Agent，并在首次运行时写入当前用户的登录自启项；业务配置仍只存在于 Web。它同样优先使用 Node SEA，无法注入时携带 Node fallback，不包含 Electron。
+
+必须在 64 位 Windows 构建机上执行，并准备：Node 26、.NET 8 SDK、WiX Toolset v4（`wix` 在 `PATH` 中）。
+
+```powershell
+npm run package:local-agent:win
+```
+
+默认生成开发环境 MSI。测试、生产环境沿用同一组构建期固定地址变量：`AGENTLOOP_RELEASE_ENV`、`AGENTLOOP_ROUTER_URL_TEST`/`AGENTLOOP_ROUTER_URL_PRODUCTION`、`AGENTLOOP_WEB_ORIGIN_TEST`/`AGENTLOOP_WEB_ORIGIN_PRODUCTION`；模板见 `distribution/windows/environments.example.env`。产物为 `release/local-agent/windows-x64/AgentLoop-Local-Runtime-<version>-windows-x64.msi`。正式分发还应在 Windows 发布流水线中使用组织的代码签名证书分别签名 tray/Agent 可执行文件和 MSI，并运行 Windows 签名验证。

@@ -12,6 +12,7 @@ const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeCount = parseRuntimeCount(process.argv.slice(2));
 const routerPort = positiveInteger(process.env.PORT, 8788);
 const webPort = positiveInteger(process.env.WEB_PORT, 5174);
+const localAgentPort = positiveInteger(process.env.LOCAL_AGENT_PORT, 8790);
 const runtimePort = positiveInteger(process.env.RUNTIME_BASE_PORT, 8791);
 const runtimeHost = process.env.RUNTIME_HOST ?? "127.0.0.1";
 const routerHost = process.env.HOST ?? "127.0.0.1";
@@ -50,6 +51,7 @@ try {
   await assertPortsAvailable([
     { label: "Router", host: routerHost, port: routerPort },
     { label: "Web", host: routerHost, port: webPort },
+    { label: "Local Runtime Agent", host: "127.0.0.1", port: localAgentPort },
     ...Array.from({ length: runtimeCount }, (_, index) => ({
       label: `Runtime Host general-${String(index + 1).padStart(2, "0")}`,
       host: runtimeHost,
@@ -101,6 +103,10 @@ children.push(start("router", "src/entrypoints/router-main.ts", {
   RUNTIME_CONFIG_PATH: configPath,
   WEB_ORIGIN: process.env.WEB_ORIGIN ?? defaultWebOrigins,
   ATTACHMENT_BASE_URL: process.env.ATTACHMENT_BASE_URL ?? publicRouterUrl,
+  // The Router artifact catalog and Runtime Hosts must resolve the same
+  // conversation-relative paths. Passing the mount only to Hosts makes
+  // execution succeed while every artifact list/read fails at the Router.
+  RUNTIME_WORKSPACE_ROOT: sharedWorkspaceRoot,
   AGENTLOOP_STATE_DRIVER: process.env.AGENTLOOP_STATE_DRIVER ?? "sqlite",
   AGENTLOOP_STATE_SQLITE_PATH: sharedStateDatabasePath,
 }, localEnvFiles));
@@ -109,6 +115,23 @@ children.push(start("router", "src/entrypoints/router-main.ts", {
 // endpoint responds prevents multiple processes from competing to initialize
 // a shared SQLite/WAL file during local development.
 await waitForRouterHealth(publicRouterUrl);
+
+children.push(start("local-agent", "src/entrypoints/local-agent-main.ts", {
+  ...common,
+  LOCAL_AGENT_PORT: String(localAgentPort),
+  ROUTER_URL: publicRouterUrl,
+  WEB_ORIGIN: defaultWebOrigins,
+  LOCAL_AGENT_STATE_PATH: process.env.LOCAL_AGENT_STATE_PATH ?? "./data/local-agent/device-identity.json",
+  LOCAL_AGENT_DATABASE_PATH: process.env.LOCAL_AGENT_DATABASE_PATH ?? join(runtimeDataRoot, "local-agent", "agentloop.db"),
+  LOCAL_AGENT_WORKSPACE_ROOT: process.env.LOCAL_AGENT_WORKSPACE_ROOT ?? join(runtimeDataRoot, "local-agent", "workspace"),
+  LOCAL_AGENT_SKILL_PACKAGE_STORE_ROOT: process.env.LOCAL_AGENT_SKILL_PACKAGE_STORE_ROOT ?? join(runtimeDataRoot, "local-agent", "skill-packages"),
+  LOCAL_AGENT_RUNTIME_DATA_ROOT: process.env.LOCAL_AGENT_RUNTIME_DATA_ROOT ?? join(runtimeDataRoot, "local-agent", "runtimes"),
+  LOCAL_AGENT_SUPERVISOR_DATABASE_PATH: process.env.LOCAL_AGENT_SUPERVISOR_DATABASE_PATH ?? join(runtimeDataRoot, "local-agent", "supervisor.db"),
+  LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
+  STEP_EXECUTION_STRATEGY_CONFIG_PATH: stepExecutionStrategyConfigPath,
+  SKILL_DIRECTORIES_CONFIG_PATH: process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json",
+  LLM_PROVIDER_ENV_FILE: providerEnvFile,
+}, providerEnvFiles));
 
 for (let index = 0; index < runtimeCount; index += 1) {
   const ordinal = String(index + 1).padStart(2, "0");
@@ -134,10 +157,11 @@ children.push(start("web", "web/server.mjs", {
   HOST: routerHost,
   WEB_PORT: String(webPort),
   ROUTER_URL: publicRouterUrl,
+  LOCAL_AGENT_URL: process.env.LOCAL_AGENT_URL ?? `http://127.0.0.1:${localAgentPort}`,
 }));
 
 process.stdout.write(`Starting multi-runtime locally with ${runtimeCount} Runtime Host(s).\n`);
-process.stdout.write(`Router: http://${routerHost}:${routerPort}; Web: http://${routerHost}:${webPort}\n`);
+process.stdout.write(`Router: http://${routerHost}:${routerPort}; Web: http://${routerHost}:${webPort}; Local Agent: http://127.0.0.1:${localAgentPort}\n`);
 process.stdout.write(`Shared workspace: ${sharedWorkspaceRoot}; shared state: ${sharedStateDatabasePath}\n`);
 
 let closing = false;

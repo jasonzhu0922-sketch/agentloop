@@ -2,9 +2,24 @@ import type { CommandOutputContent, HumanLoopRequest, HumanLoopResponse, Process
 
 export type RuntimeProfile = "general" | "artifact";
 export type RuntimeStatus = "ready" | "draining" | "offline";
+export type RuntimeKind = "cloud" | "local";
+
+export type ExecutionTarget =
+  | { readonly kind: "cloud_pool"; readonly profile?: RuntimeProfile; readonly region?: string }
+  | { readonly kind: "local_device"; readonly deviceId: string; readonly runtimeId: string };
+
+export type DataPolicy =
+  | { readonly mode: "cloud" }
+  | { readonly mode: "local" }
+  | { readonly mode: "strict_local" };
+
+/** The data plane that actually executed a conversation turn. */
+export type ExecutionLocation = DataPolicy["mode"];
 
 export interface RuntimeInstance {
   readonly id: string;
+  readonly kind?: RuntimeKind;
+  readonly deviceId?: string;
   readonly profile: RuntimeProfile;
   readonly capabilities: readonly string[];
   readonly maxConcurrentRuns: number;
@@ -28,11 +43,32 @@ export interface RuntimeDispatchEnvelope {
   readonly subject: { readonly tenantId: string; readonly userId: string };
   readonly conversationId: string;
   readonly input: string;
+  readonly executionTarget?: ExecutionTarget;
+  readonly dataPolicy?: DataPolicy;
   readonly requestedRuntimeId?: string;
   readonly requestedProfile?: RuntimeProfile;
   readonly requestedModelKey?: string;
   readonly allowDangerousTools: boolean;
   readonly resourceRefs: readonly PortableResourceRef[];
+  /** Opaque Local Agent capabilities. Absolute paths never cross this boundary. */
+  readonly localDirectoryScopeIds?: readonly string[];
+  /** Opaque IDs of uploaded sources owned by this exact Local Runtime. File bytes never cross the Router. */
+  readonly localUploadedSourceIds?: readonly string[];
+}
+
+export interface FinalTurnSummary {
+  readonly assignmentId: string;
+  readonly remoteRunId: string;
+  readonly status: "completed" | "failed" | "cancelled";
+  readonly assistantOutput?: string;
+  readonly errorCode?: string;
+  readonly completedAt: number;
+  readonly artifactRefs: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly mimeType: string;
+    readonly byteSize: number;
+  }[];
 }
 
 export interface RuntimeDispatchResult {
@@ -42,6 +78,11 @@ export interface RuntimeDispatchResult {
 export interface RuntimeRunStatus {
   readonly remoteRunId: string;
   readonly status: "running" | "completed" | "failed" | "cancelled";
+  /**
+   * The model key resolved by the owning Runtime for this Run.  This is
+   * execution provenance, rather than the browser's requested model choice.
+   */
+  readonly modelKey?: string;
   readonly output?: string;
   /**
    * A Host-approved explanation for a failed Run. This is deliberately
@@ -126,6 +167,11 @@ export interface SubmitConversationTask {
   readonly conversationId: string;
   readonly clientMessageId: string;
   readonly input: string;
+  readonly executionTarget?: ExecutionTarget;
+  readonly dataPolicy?: DataPolicy;
+  readonly localDirectoryScopeIds?: readonly string[];
+  /** Local Runtime-owned uploaded-source IDs. Valid only with a local_device target. */
+  readonly localUploadedSourceIds?: readonly string[];
   /** Optional explicit Host selection. Omit it to use Router load-balancing. */
   readonly requestedRuntimeId?: string;
   readonly requestedProfile?: RuntimeProfile;

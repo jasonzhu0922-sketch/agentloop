@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentloop.local-runtime-agent</string>
+  <key>ProgramArguments</key><array><string>/Applications/AgentLoop Local Runtime.app/Contents/Resources/agentloop-local-runtime-agent</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>AGENTLOOP_AGENT_PACKAGED</key><string>1</string>
+    <key>AGENTLOOP_AGENT_APP_ROOT</key><string>/Applications/AgentLoop Local Runtime.app/Contents/Resources</string>
+    <key>AGENTLOOP_BUNDLED_SKILL_DIRECTORIES</key><string>/Applications/AgentLoop Local Runtime.app/Contents/Resources/skills</string>
+  </dict>
+  <key>StandardOutPath</key><string>__LOG_ROOT__/agent.out.log</string>
+  <key>StandardErrorPath</key><string>__LOG_ROOT__/agent.err.log</string>
+</dict></plist>

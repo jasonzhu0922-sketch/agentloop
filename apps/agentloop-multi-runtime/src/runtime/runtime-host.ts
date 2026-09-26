@@ -45,6 +45,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     return {
       remoteRunId: run.id,
       status: run.status,
+      ...(run.modelKey === undefined ? {} : { modelKey: run.modelKey }),
       ...(run.output === undefined ? {} : { output: run.output }),
       // Failed AgentLoop Runs persist a dedicated, user-facing failure report
       // as their output. Label it here at the Host/UI boundary rather than
@@ -92,6 +93,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     return {
       remoteRunId: run.id,
       status: run.status,
+      ...(run.modelKey === undefined ? {} : { modelKey: run.modelKey }),
       ...(run.output === undefined ? {} : { output: run.output }),
       ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
       ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
@@ -134,6 +136,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     return {
       remoteRunId: run.id,
       status: run.status,
+      ...(run.modelKey === undefined ? {} : { modelKey: run.modelKey }),
       ...(run.output === undefined ? {} : { output: run.output }),
       ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
       ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
@@ -266,6 +269,9 @@ export function assertRuntimeDispatchEnvelope(input: unknown): asserts input is 
   }
   if (Object.hasOwn(input, "visibleDirectories")) {
     throw new TypeError("visibleDirectories are disabled for cloud Runtime Hosts");
+  }
+  if (Object.hasOwn(input, "localUploadedSourceIds")) {
+    throw new TypeError("localUploadedSourceIds are Local Agent-owned and cannot be dispatched to cloud Runtime Hosts");
   }
   const value = input as Record<string, unknown>;
   if (value.schema !== "agentloop.runtimeDispatch/v1") throw new TypeError("unsupported runtime dispatch schema");

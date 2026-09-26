@@ -99,6 +99,8 @@ export class MultiRuntimeRouter {
       subject: { tenantId: task.tenantId, userId: task.ownerUserId },
       conversationId: task.conversationId,
       input: task.input,
+      executionTarget: task.executionTarget ?? { kind: "cloud_pool", ...(task.requestedProfile === undefined ? {} : { profile: task.requestedProfile }) },
+      dataPolicy: task.dataPolicy ?? { mode: "cloud" },
       ...(task.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: task.requestedRuntimeId }),
       ...(task.requestedProfile === undefined ? {} : { requestedProfile: task.requestedProfile }),
       ...(task.requestedModelKey === undefined ? {} : { requestedModelKey: task.requestedModelKey }),

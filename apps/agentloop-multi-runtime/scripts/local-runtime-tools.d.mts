@@ -10,4 +10,5 @@ export function localRuntimeHostEnvironment(environment: Environment, toolsBin: 
   RUNTIME_REQUIRED_PYTHON_MODULES: string;
   RUNTIME_REQUIRED_NODE_MODULES: string;
 };
+export function requiredLocalRuntimePythonModules(environment?: Environment): string[];
 export function ensureLocalRuntimeTools(options: { appRoot: string; environment?: Environment }): Promise<string>;

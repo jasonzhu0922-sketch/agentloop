@@ -7,4 +7,5 @@ export interface AssistantMessagePresentation {
 }
 
 export function assistantMessagePresentation(status: unknown): AssistantMessagePresentation;
+export function completedArtifactSummary(artifacts: unknown): string;
 export function terminalAwarePlanStepStatus(stepStatus: unknown, runStatus: unknown): unknown;

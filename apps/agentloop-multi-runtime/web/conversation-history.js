@@ -25,6 +25,27 @@ export function conversationMessagesFromTurns(turns) {
         assignment,
       )];
     }
+    const finalTurn = turn.finalTurn;
+    if (finalTurn && ["completed", "failed", "cancelled"].includes(finalTurn.status)) {
+      const output = typeof finalTurn.assistantOutput === "string" ? finalTurn.assistantOutput : "";
+      return [user, {
+        id: `history-${assignment.id}`,
+        role: "assistant",
+        text: output,
+        ...(finalTurn.status === "failed" ? { error: output || finalTurn.errorCode || "执行失败" } : {}),
+        reasoning: "",
+        status: finalTurn.status,
+        assignmentId: assignment.id,
+        runtimeId: assignment.runtimeId,
+        ...(typeof assignment.executionLocation === "string" ? { executionLocation: assignment.executionLocation } : {}),
+        ...(typeof finalTurn.modelKey === "string" ? { modelKey: finalTurn.modelKey } : {}),
+        ...(typeof assignment.remoteRunId === "string" ? { remoteRunId: assignment.remoteRunId } : {}),
+        createdAt,
+        completedAt: finiteNumber(finalTurn.completedAt, createdAt),
+        events: [],
+        plan: [],
+      }];
+    }
     return [user, {
       id: `history-${assignment.id}`,
       role: "assistant",
@@ -33,6 +54,8 @@ export function conversationMessagesFromTurns(turns) {
       status: "running",
       assignmentId: assignment.id,
       runtimeId: assignment.runtimeId,
+      ...(typeof assignment.executionLocation === "string" ? { executionLocation: assignment.executionLocation } : {}),
+      ...(typeof assignment.remoteRunId === "string" ? { remoteRunId: assignment.remoteRunId } : {}),
       createdAt,
       events: [],
       plan: [],
@@ -50,6 +73,7 @@ function failedAssistant(id, createdAt, message, assignment) {
     status: "failed",
     ...(typeof assignment?.id === "string" ? { assignmentId: assignment.id } : {}),
     ...(typeof assignment?.runtimeId === "string" ? { runtimeId: assignment.runtimeId } : {}),
+    ...(typeof assignment?.executionLocation === "string" ? { executionLocation: assignment.executionLocation } : {}),
     createdAt,
     completedAt: createdAt,
     events: [],

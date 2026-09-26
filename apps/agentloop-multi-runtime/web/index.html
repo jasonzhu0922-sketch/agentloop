@@ -17,9 +17,19 @@
         <div class="sidebar-label">会话</div>
         <div id="sessions" class="sessions"></div>
         <div class="sidebar-foot">
-          <div class="identity">demo-user@agentloop.local</div>
-          <div class="identity-fields"><label class="identity-field">用户 ID<input id="user-id" value="demo-user" /></label><label class="identity-field">租户 ID<input id="tenant-id" value="demo-tenant" /></label></div>
-          <div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题">◐</button><button class="icon-btn" type="button" title="刷新会话" onclick="location.reload()">⟳</button></div>
+          <input id="user-id" type="hidden" /><input id="tenant-id" type="hidden" />
+          <section class="local-capability" aria-label="本机能力">
+            <div class="local-capability-head"><div><strong>本机能力</strong><small id="local-agent-version"></small></div><button id="local-agent-settings" type="button" title="Local Runtime Agent 设置" disabled>设置</button></div>
+            <button id="enable-local-runtime" class="local-agent-state" type="button"><i id="local-agent-state-dot" class="offline"></i><span id="local-agent-state-label">正在检查 Local Runtime Agent…</span></button>
+            <label class="local-execution-toggle"><input id="use-local-runtime" type="checkbox" disabled /><span><strong>本机运行</strong><small>关闭时由云端自动选择 Runtime</small></span></label>
+            <div id="local-runtime-picker" class="local-runtime-picker" hidden>
+              <div class="local-runtime-picker-head"><label for="runtime">本机 Runtime</label><span>选择本机助理</span></div>
+              <select id="runtime" disabled></select>
+            </div>
+            <p id="local-agent-hint" class="local-agent-hint">本机目录和产物默认不上传云端。</p>
+          </section>
+          <div id="identity-label" class="identity"></div>
+          <div class="foot-actions"><button id="auth-logout" class="icon-btn" type="button" title="退出登录">⇥</button><button id="theme-toggle" class="icon-btn" type="button" title="切换主题">◐</button><button class="icon-btn" type="button" title="刷新会话" onclick="location.reload()">⟳</button></div>
         </div>
       </aside>
       <main class="main">
@@ -32,9 +42,10 @@
             <div id="conversation-scroll" class="conversation-scroll"><div id="empty-state" class="empty-state"><div class="empty-logo">A</div><h2>我能帮你做什么？</h2><p class="empty-sub">我可以在不同 Runtime Host 上执行任务，并通过 Planner、Step Agent Loop 和工具链给出可核验的结果。</p><p class="empty-hint">在下方输入任务，我会先制定计划、执行，并在完成后给出结果。你可以在同一个对话里继续提出后续要求。</p><div class="suggestions"><button type="button" class="suggestion" data-suggest="帮我写一份清晰的项目周报">帮我写一份清晰的项目周报</button><button type="button" class="suggestion" data-suggest="把这段内容整理成要点">把这段内容整理成要点</button><button type="button" class="suggestion" data-suggest="检查并修复这段代码的问题">检查并修复这段代码的问题</button></div></div><div id="messages" class="messages"></div></div>
             <form id="composer" class="composer">
               <div class="composer-box">
-                <textarea id="input" class="composer-input" rows="1" placeholder="给 AgentLoop 一个任务……（⌘/Ctrl + Enter 发送，Enter 换行）"></textarea>
+                <div id="local-directory-scopes" class="source-row local-scope-row" aria-label="已授权本机目录" hidden></div>
                 <div id="pending-attachments" class="source-row" aria-label="本次上传文件" hidden></div>
-                <div class="composer-tools"><div class="composer-bar"><button type="button" class="dir-picker-btn" disabled title="云端 Multi Runtime 不暴露本地目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select"><option value="">使用 Runtime 默认模型</option></select></label><label class="chip runtime-chip">Runtime<select id="runtime"><option value="">自动</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送 · Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="cancel" class="stop-btn" type="button" disabled>■</button><button id="submit" class="send-btn" type="submit">↑</button></div></div>
+                <textarea id="input" class="composer-input" rows="1" placeholder="给 AgentLoop 一个任务……（⌘/Ctrl + Enter 发送，Enter 换行）"></textarea>
+                <div class="composer-tools"><div class="composer-bar"><button id="directory-scope" type="button" class="dir-picker-btn" disabled title="用系统选择器授权本机目录">▣ 添加目录</button><input id="attachment" class="hidden" type="file" accept=".txt,.md,.csv,.json,.html,.htm,.pdf,.doc,.docx,.xlsx,.pptx" multiple /><button id="upload-file" type="button" class="dir-picker-btn" title="上传文件" aria-label="上传文件">▤ 上传文件</button><label class="chip">模型<select id="model-select"><option value="">使用 Runtime 默认模型</option></select></label><span class="composer-hint">⌘/Ctrl + Enter 发送 · Enter 换行</span><span id="conversation-id" class="conversation-id"></span><span class="composer-spacer"></span><button id="submit" class="composer-action" type="button" aria-label="发送任务" title="发送任务">↑</button></div></div>
               </div>
             </form>
           </section>
@@ -48,6 +59,41 @@
           </aside>
         </div>
       </main>
+    </div>
+    <div id="runtime-create-modal" class="runtime-modal" hidden>
+      <form id="runtime-create-form" class="runtime-modal-card">
+        <div><strong>新建本机 Runtime</strong><p>每个 Runtime 保留独立执行状态，产物工作区由设备级共享存储统一提供；Skill 在 Runtime 启动时统一加载。</p></div>
+        <label>名称<input id="runtime-create-name" type="text" maxlength="100" autocomplete="off" placeholder="例如：研究助理" required /></label>
+        <div class="runtime-modal-actions"><button id="runtime-create-cancel" type="button">取消</button><button type="submit" class="primary">创建</button></div>
+      </form>
+    </div>
+    <div id="agent-install-modal" class="runtime-modal" hidden>
+      <div class="runtime-modal-card">
+        <div><strong>安装 Local Runtime Agent</strong><p id="agent-install-description">正在获取适合当前设备的签名安装包…</p></div>
+        <dl id="agent-install-detail" class="settings-detail"></dl>
+        <p class="install-security-note">下载安装包后需要你明确运行安装器。完成安装后，页面会自动发现 Agent 并继续配对。</p>
+        <div class="runtime-modal-actions"><button id="agent-install-cancel" type="button">稍后</button><a id="agent-install-download" class="button primary" href="#" download hidden>下载安装包</a></div>
+      </div>
+    </div>
+    <div id="agent-settings-modal" class="runtime-modal" hidden>
+      <div class="runtime-modal-card agent-settings-card">
+        <div><strong>Local Runtime Agent 设置</strong><p>这是设备级 Supervisor。所有子 Runtime 共享同一工作目录与上传源文件根目录；Skill 仍在各 Runtime 启动时按统一配置加载。</p></div>
+        <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl>
+        <p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区，删除子 Runtime 只回收其自身分区。</p>
+        <section id="local-runtime-manager" class="local-runtime-manager agent-runtime-manager" aria-labelledby="local-runtime-manager-title" hidden>
+          <div class="local-runtime-manager-head"><div><strong id="local-runtime-manager-title">子 Runtime 管理</strong><small>在此新增、停止、重启、删除和进入细节配置。</small></div><button id="local-runtime-create" type="button">＋ 新增</button></div>
+          <div id="local-runtime-list" class="local-runtime-list" role="list" aria-label="子 Runtime 列表"></div>
+        </section>
+        <div class="runtime-modal-actions"><button id="agent-settings-close" type="button">完成</button></div>
+      </div>
+    </div>
+    <div id="runtime-config-modal" class="runtime-modal" hidden>
+      <form id="runtime-config-form" class="runtime-modal-card">
+        <div><strong>配置子 Runtime</strong><p id="runtime-config-description">Runtime 共享设备存储和 Skill 来源，但保留独立执行状态。</p></div>
+        <label>名称<input id="runtime-config-name" type="text" maxlength="100" autocomplete="off" required /></label>
+        <dl class="settings-detail"><dt>Runtime ID</dt><dd id="runtime-config-id">-</dd><dt>状态</dt><dd id="runtime-config-status">-</dd></dl>
+        <div class="runtime-modal-actions"><button id="runtime-config-cancel" type="button">取消</button><button type="submit" class="primary">保存</button></div>
+      </form>
     </div>
     <div id="command-detail-modal"></div>
     <script src="/runtime-config.js"></script>

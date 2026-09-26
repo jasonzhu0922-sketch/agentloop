@@ -11,8 +11,8 @@ export function persistedCancellableAssistant(messages) {
     .reverse()
     .find((message) => message?.role === "assistant"
       && message.status === "running"
-      && typeof message.assignmentId === "string"
-      && message.assignmentId.length > 0);
+      && ((typeof message.assignmentId === "string" && message.assignmentId.length > 0)
+        || (typeof message.localRunId === "string" && message.localRunId.length > 0)));
 }
 
 export function cancellationTarget(activeRun, messages) {
@@ -24,6 +24,7 @@ export function cancellationTarget(activeRun, messages) {
     activeRun,
     assistant,
     assignmentId,
+    ...((activeRun?.localRunId ?? assistant?.localRunId) === undefined ? {} : { localRunId: activeRun?.localRunId ?? assistant?.localRunId }),
     canCancel: activeRun !== undefined || assistant !== undefined,
   };
 }

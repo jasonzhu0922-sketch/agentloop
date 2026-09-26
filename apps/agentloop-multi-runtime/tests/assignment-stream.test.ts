@@ -65,6 +65,18 @@ test("terminal snapshot frame completes an already caught-up stream without fabr
   assert.equal(status, "completed");
 });
 
+test("live Runtime status exposes the resolved model before terminal events", async () => {
+  let observed: unknown;
+  await observeAssignment({ baseUrl: "http://fixture/a", headers: {}, signal: new AbortController().signal,
+    fetchImpl: async (url) => String(url).includes("/stream")
+      ? sse(packet(event(1, "run.completed", { output: "done" })))
+      : json({ run: { remoteRunId: "run", status: "running", modelKey: "deepseek-v4-flash" } }),
+    onStatus: (run) => { observed = run; },
+    onEvent: (value) => value.type === "run.completed", onRun: () => assert.fail("completion arrived via events"), onConnection() {},
+  });
+  assert.deepEqual(observed, { remoteRunId: "run", status: "running", modelKey: "deepseek-v4-flash" });
+});
+
 test("silent open stream times out, reconnects, and receives split CRLF frames", async () => {
   let streams = 0;
   let finished = false;
@@ -119,4 +131,26 @@ test("server recency correction replaces stale browser cache ordering", async ()
   context.mergeConversationSummaries([{ id: "old", createdAt: 1, updatedAt: 200 }, { id: "recent", createdAt: 400, updatedAt: 500 }], true);
   assert.equal(vm.runInContext('sessions[0].id', context), "recent");
   assert.equal(vm.runInContext('sessions[1].updatedAt', context), 200);
+});
+
+test("server refresh invalidates cached history so Assignment artifacts are hydrated again", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const context = vm.createContext({ activeRunsByConversation: new Map() });
+  vm.runInContext(`
+    const recoveredSessions = [{
+      id: "cached",
+      title: "cached",
+      createdAt: 1,
+      updatedAt: 2,
+      historyLoaded: true,
+      messages: [{ role: "assistant", assignmentId: "assignment-cached", artifacts: [] }],
+    }];
+    let sessions = [];
+  `, context);
+  vm.runInContext(source.slice(source.indexOf("function mergeConversationSummaries("), source.indexOf("async function selectConversation(")), context);
+
+  context.mergeConversationSummaries([{ id: "cached", createdAt: 1, updatedAt: 3, runCount: 1 }], true);
+
+  assert.equal(vm.runInContext('sessions[0].historyLoaded', context), false);
+  assert.equal(vm.runInContext('sessions[0].messages[0].assignmentId', context), "assignment-cached");
 });

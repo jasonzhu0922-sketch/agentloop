@@ -1,25 +1,31 @@
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "./assistant-event-projection.js";
-import { assistantMessagePresentation, terminalAwarePlanStepStatus } from "./assistant-message-presentation.js";
+import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "./assistant-message-presentation.js";
 import { createCoalescedUpdater } from "./live-update-scheduler.js";
 import { persistJson, persistSessions } from "./session-persistence.js";
-import { openArtifactPreview, renderMarkdown } from "./artifact-preview.js";
-import { artifactPreviewMode, renderBlobPreview, renderStructuredPreview } from "./artifact-preview.js";
+import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "./local-runtime-preference.js";
+import { artifactPreviewMode, openArtifactPreview, renderBlobPreview, renderMarkdown, renderStructuredPreview, updateArtifactPreviewMarkup } from "./artifact-preview.js";
 import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "./artifact-display.js";
 import { cancellationTarget } from "./cancellation-target.js";
 import { isNearBottom, nextScrollTop } from "./scroll-follow.js";
 import { conversationMessagesFromTurns } from "./conversation-history.js";
 import { commandToolCallIds, executionActivities } from "./execution-detail-projection.js";
+import { executionProvenanceParts } from "./execution-provenance.js";
 import { observeAssignment } from "./assignment-stream.js";
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from "./composer-input.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
+const publicRouterUrl = String(globalThis.AGENTLOOP_ROUTER_PUBLIC_URL || (api.startsWith("http") ? api : location.origin)).replace(/\/+$/, "");
+const localAgentApi = String(globalThis.AGENTLOOP_LOCAL_AGENT_URL || "http://127.0.0.1:8790").replace(/\/+$/, "");
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "agentloop.multi-runtime.sessions.v1";
-const IDENTITY_KEY = "agentloop.multi-runtime.identity.v1";
+const AUTH_TOKEN_KEY = "agentloop.multi-runtime.auth-token.v1";
+const ACTIVE_USER_KEY = "agentloop.multi-runtime.active-user.v1";
 const WORKSPACE_WIDTH_KEY = "agentloop.multi-runtime.artifact-width.v1";
 const MAX_PENDING_ATTACHMENTS = 20;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const CONVERSATION_PAGE_SIZE = 30;
+const LOCAL_AGENT_PROTOCOL_VERSION = "1";
+const LOCAL_SESSION_REFRESH_AHEAD_MS = 5 * 60 * 1000;
 const ARTIFACT_PRODUCING_TOOLS = new Set([
   "computer_write_file",
   "computer_patch_file",
@@ -27,8 +33,24 @@ const ARTIFACT_PRODUCING_TOOLS = new Set([
   "convert_artifact",
   "verify_artifact_acceptance",
 ]);
-const recoveredSessions = sortSessions(loadSessions());
+let recoveredSessions = [];
 let sessions = [];
+let authToken = sessionStorage.getItem(AUTH_TOKEN_KEY) || "";
+let authenticatedUser;
+let localDevice;
+let localRuntimeId = "";
+let localSessionToken = "";
+let localSessionExpiresAt = 0;
+let localSessionRefresh;
+let localSessionRefreshTimer;
+let localScopes = [];
+let localRuntimes = [];
+let localAgentHealth;
+let localAgentConfig;
+let localAgentState = "checking";
+let localAgentInstallPoll;
+let localAgentReprobe;
+let hydratedLocalRuntimePreferenceKey = "";
 let activeId;
 let renderedConversationId;
 let conversationVisibleLimit = CONVERSATION_PAGE_SIZE;
@@ -38,6 +60,7 @@ let conversationsLoadingMore = false;
 const activeRunsByConversation = new Map();
 const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
+const deletingConversationIds = new Set();
 const hydratedDetailAssignmentIds = new Set();
 let commandDetailSelection;
 let inlineArtifactPreview;
@@ -47,17 +70,23 @@ let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
 const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
 
-loadIdentity();
-void loadConversationPage(true);
-void loadModels();
-void loadRuntimes();
-render();
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const requestUrl = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+  if (new URL(requestUrl, location.href).origin !== new URL(api, location.href).origin) return nativeFetch(input, init);
+  const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  return nativeFetch(input, { ...init, headers });
+};
+
+void bootstrapAuthenticatedApp();
 document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; autoResizeComposerInput($("input")); $("input").focus(); }));
 $("theme-toggle")?.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "" : "dark"; });
 
 $("new-chat").addEventListener("click", () => { activeId = newConversation().id; resetArtifactWorkspace(); render(); $("input").focus(); });
-$("composer").addEventListener("submit", (event) => { event.preventDefault(); void submit(); });
-$("cancel").addEventListener("click", () => void cancelActive());
+$("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
+$("submit").addEventListener("click", () => void runComposerAction());
 $("upload-file").addEventListener("click", () => $("attachment").click());
 $("attachment").addEventListener("change", () => void uploadAttachments($("attachment").files));
 $("workspace-resizer").addEventListener("pointerdown", beginWorkspaceResize);
@@ -66,13 +95,57 @@ $("workspace-resizer").addEventListener("dblclick", resetArtifactPanelWidth);
 $("artifact-panel-close").addEventListener("click", () => { resetArtifactWorkspace(); render(); });
 $("artifact-fullscreen").addEventListener("click", () => void openSelectedArtifactFullscreen());
 $("input").addEventListener("keydown", (event) => {
-  if (shouldSubmitComposerOnKeydown(event)) { event.preventDefault(); void submit(); }
+  if (shouldSubmitComposerOnKeydown(event)) { event.preventDefault(); void runComposerAction(); }
 });
 $("input").addEventListener("input", () => autoResizeComposerInput($("input")));
-$("user-id").addEventListener("change", reloadConversationsForIdentity);
-$("tenant-id").addEventListener("change", reloadConversationsForIdentity);
+$("auth-logout").addEventListener("click", () => void logoutUser());
+$("enable-local-runtime").addEventListener("click", () => void enableLocalRuntime());
+$("local-agent-settings").addEventListener("click", () => void openLocalAgentSettings());
+$("agent-storage-pick").addEventListener("click", () => void pickSharedStorage());
+$("agent-upload-storage-pick").addEventListener("click", () => void pickUploadStorage());
+$("agent-settings-close").addEventListener("click", closeLocalAgentSettings);
+$("agent-install-cancel").addEventListener("click", closeLocalAgentInstall);
+$("runtime-config-cancel").addEventListener("click", closeConfigureLocalRuntime);
+$("runtime-config-form").addEventListener("submit", (event) => { event.preventDefault(); void saveLocalRuntimeConfiguration(); });
+$("use-local-runtime").addEventListener("change", () => {
+  saveLocalRuntimePreference(localStorage, authenticatedUser?.id, localDevice?.id, isLocalExecution());
+  refreshRuntimeOptions();
+  updateLocalControls();
+  if (isLocalExecution()) {
+    void loadLocalScopes();
+    setStatus("本机运行：由所选本机 Runtime 执行", "ok");
+  } else setStatus("云端运行：由云端自动选择 Runtime", "ok");
+  render();
+});
+$("runtime").addEventListener("change", () => {
+  if (isLocalExecution()) {
+    localRuntimeId = $("runtime").value;
+    syncLocalRuntimeManager();
+    void loadLocalScopes();
+  }
+  updateLocalControls();
+  render();
+});
+$("directory-scope").addEventListener("click", () => void addDirectoryScope());
+$("local-runtime-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-local-runtime-action]");
+  if (!button || button.disabled) return;
+  const runtimeId = button.dataset.runtimeId;
+  if (!runtimeId) return;
+  const action = button.dataset.localRuntimeAction;
+  if (action === "select") void selectLocalRuntime(runtimeId);
+  if (action === "configure") { selectLocalRuntime(runtimeId); openConfigureLocalRuntime(runtimeId); }
+  if (action === "delete") void deleteLocalRuntime(runtimeId);
+  if (action === "drain") void applyLocalRuntimeLifecycle("drain", runtimeId);
+  if (action === "restart") void applyLocalRuntimeLifecycle("restart", runtimeId);
+  if (action === "toggle") void toggleLocalRuntimeStarted(runtimeId);
+});
+$("local-runtime-create").addEventListener("click", openCreateLocalRuntime);
+$("runtime-create-cancel").addEventListener("click", closeCreateLocalRuntime);
+$("runtime-create-modal").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeCreateLocalRuntime(); });
+$("runtime-create-form").addEventListener("submit", (event) => { event.preventDefault(); void createLocalRuntime($("runtime-create-name").value); });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeCommandDetail();
+  if (event.key === "Escape") { closeCommandDetail(); closeCreateLocalRuntime(); closeLocalAgentSettings(); closeLocalAgentInstall(); closeConfigureLocalRuntime(); }
 });
 
 function newConversation() {
@@ -83,10 +156,10 @@ function newConversation() {
 }
 
 function activeConversation() { return sessions.find((item) => item.id === activeId) ?? sessions[0]; }
-function saveSessions() { persistSessions(localStorage, sessions); }
-function loadSessions() {
+function saveSessions() { if (authenticatedUser) persistSessions(localStorage, sessions, sessionKey(authenticatedUser.id)); }
+function loadSessions(key) {
   try {
-    const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
     if (!Array.isArray(value)) return [];
     return value.map((conversation) => {
       if (conversation === null || typeof conversation !== "object" || !Array.isArray(conversation.messages)) return conversation;
@@ -101,8 +174,619 @@ function loadSessions() {
     return [];
   }
 }
-function loadIdentity() { try { const value = JSON.parse(localStorage.getItem(IDENTITY_KEY) || "{}"); if (value.tenantId) $("tenant-id").value = value.tenantId; if (value.userId) $("user-id").value = value.userId; } catch {} }
-function saveIdentity() { persistJson(localStorage, IDENTITY_KEY, { tenantId: $("tenant-id").value.trim(), userId: $("user-id").value.trim() }); }
+function sessionKey(userId) { return `${STORAGE_KEY}.${encodeURIComponent(userId)}`; }
+
+async function bootstrapAuthenticatedApp() {
+  if (!(await restoreIdentitySession())) return;
+  render();
+  await Promise.all([loadModels(), loadDevices(), loadConversationPage(true)]);
+}
+
+async function restoreIdentitySession() {
+  if (!authToken) { redirectToLogin(); return false; }
+  try {
+    const response = await fetch(`${api}/v1/auth/me`);
+    if (response.status === 401) { clearAuthState(); return false; }
+    if (!response.ok) throw new Error(`router_unavailable:${response.status}`);
+    applyAuthenticatedIdentity(await response.json());
+    return true;
+  } catch (error) {
+    // A Router restart must not erase a valid browser session or masquerade as
+    // an authentication failure. Keep the cached, user-scoped UI available
+    // and surface the infrastructure state explicitly.
+    const userId = sessionStorage.getItem(ACTIVE_USER_KEY);
+    if (!userId) { redirectToLogin(); return false; }
+    authenticatedUser = { id: userId, email: "已登录（Router 暂不可达）" };
+    recoveredSessions = sortSessions(loadSessions(sessionKey(userId)));
+    sessions = [...recoveredSessions];
+    activeId = sessions[0]?.id;
+    $("identity-label").textContent = authenticatedUser.email;
+    setTimeout(() => setStatus(`Router 暂不可达：${error instanceof Error ? error.message : String(error)}`, "error"));
+    return true;
+  }
+}
+
+function applyAuthenticatedIdentity(value) {
+  const user = value.user; const tenant = value.tenant;
+  if (!user || typeof user.id !== "string" || typeof user.email !== "string" || !tenant || typeof tenant.id !== "string") throw new Error("identity_response_invalid");
+  if (authenticatedUser?.id !== user.id) {
+    sessions = []; activeId = undefined; localDevice = undefined; localRuntimeId = ""; localScopes = []; localRuntimes = [];
+    hydratedLocalRuntimePreferenceKey = "";
+    clearLocalSession();
+  }
+  authenticatedUser = user;
+  $("user-id").value = user.id; $("tenant-id").value = tenant.id; $("identity-label").textContent = user.email;
+  sessionStorage.setItem(ACTIVE_USER_KEY, user.id);
+  recoveredSessions = sortSessions(loadSessions(sessionKey(user.id)));
+}
+
+function clearAuthState() {
+  authToken = ""; authenticatedUser = undefined; sessions = []; activeId = undefined; recoveredSessions = [];
+  localDevice = undefined; localRuntimeId = ""; localScopes = []; localRuntimes = [];
+  hydratedLocalRuntimePreferenceKey = "";
+  clearLocalSession();
+  sessionStorage.removeItem(AUTH_TOKEN_KEY); sessionStorage.removeItem(ACTIVE_USER_KEY);
+  $("user-id").value = ""; $("tenant-id").value = ""; $("identity-label").textContent = "";
+  redirectToLogin();
+}
+
+async function logoutUser() { try { await fetch(`${api}/v1/auth/logout`, { method: "POST" }); } catch {} clearAuthState(); }
+
+async function enableLocalRuntime() {
+  const button = $("enable-local-runtime");
+  if (!authenticatedUser) { redirectToLogin(); return; }
+  button.disabled = true;
+  try {
+    await probeLocalAgent();
+    if (localAgentState === "not_installed") {
+      await offerLocalAgentInstall();
+      return;
+    }
+    if (localAgentState === "installed_stopped") {
+      await startInstalledLocalAgent();
+      return;
+    }
+    if (localAgentState === "incompatible") throw new Error("Local Runtime Agent 协议版本不兼容，请安装匹配版本");
+    if (localAgentState !== "online_unpaired" && localAgentState !== "online") throw new Error("Local Runtime Agent 尚未就绪");
+    if (localAgentHealth?.registered === true) {
+      await connectRegisteredLocalAgent();
+      return;
+    }
+    const authorization = await call("/v1/devices/registration-tokens", {});
+    if (typeof authorization.token !== "string") throw new Error("设备注册授权无效");
+    const response = await fetch(`${localAgentApi}/v1/device-registration`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ registrationToken: authorization.token }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || typeof body.device?.id !== "string") throw new Error(typeof body.error === "string" ? body.error : `Local Agent HTTP ${response.status}`);
+    localDevice = body.device;
+    await refreshLocalSession();
+    await loadLocalRuntimes();
+    await loadLocalScopes();
+    updateLocalControls();
+    await probeLocalAgent();
+    setStatus(`Local Runtime Agent 已配对：${body.device.displayName || body.device.id}`, "ok");
+  } catch (error) {
+    setStatus(`本机能力不可用：${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally { button.disabled = false; }
+}
+
+async function loadDevices() {
+  await probeLocalAgent();
+  try {
+    const response = await fetch(`${api}/v1/devices`);
+    if (!response.ok) return;
+    const body = await response.json();
+    localDevice = (body.devices || []).find((device) => device.id === localAgentHealth?.deviceId && device.status === "active");
+    if (localDevice && localAgentState === "online") await connectRegisteredLocalAgent();
+  } catch {}
+  if (localAgentState === "router_disconnected") scheduleLocalAgentReprobe();
+  updateLocalControls();
+}
+
+function scheduleLocalAgentReprobe() {
+  if (localAgentReprobe) return;
+  localAgentReprobe = setTimeout(() => void (async () => {
+    localAgentReprobe = undefined;
+    await probeLocalAgent();
+    if (localAgentState === "online") await loadDevices();
+    else if (localAgentState === "router_disconnected") scheduleLocalAgentReprobe();
+  })(), 1_500);
+}
+
+async function connectRegisteredLocalAgent() {
+  if (!localDevice?.id) return;
+  await refreshLocalSession();
+  await loadLocalRuntimes();
+  await loadLocalScopes();
+  await reconcileStrictLocalRuns();
+  await loadLocalAgentConfig();
+  updateLocalControls();
+}
+
+async function probeLocalAgent() {
+  localAgentState = "checking";
+  renderLocalAgentState();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const response = await fetch(`${localAgentApi}/healthz`, { signal: controller.signal, cache: "no-store" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body.status !== "ready") throw new Error(`Local Agent HTTP ${response.status}`);
+    localAgentHealth = body;
+    localStorage.setItem("agentloop.local-agent-seen.v1", "1");
+    localAgentState = body.protocolVersion !== LOCAL_AGENT_PROTOCOL_VERSION ? "incompatible"
+      : !body.router?.configured ? "router_not_configured"
+      : !body.registered ? "online_unpaired"
+      : body.routerConnected ? "online" : "router_disconnected";
+  } catch {
+    localAgentHealth = undefined;
+    localAgentState = localStorage.getItem("agentloop.local-agent-seen.v1") === "1" ? "installed_stopped" : "not_installed";
+  } finally {
+    clearTimeout(timeout);
+    renderLocalAgentState();
+    updateLocalControls();
+  }
+}
+
+function renderLocalAgentState() {
+  const copy = {
+    checking: ["正在检查 Local Runtime Agent…", "检查本机 Agent", "请稍候。"],
+    not_installed: ["未安装 Local Runtime Agent", "安装 Local Runtime Agent", "安装后可在本机安全地访问已授权目录。"],
+    router_not_configured: ["此安装包未配置服务端", "重新安装匹配环境版本", "服务端地址由开发、测试或生产构建配置固定。"],
+    installed_stopped: ["Local Runtime Agent 未运行", "启动 Local Runtime Agent", "已安装的 Agent 将通过系统启动协议恢复。"],
+    online_unpaired: ["Local Runtime Agent 已就绪，尚未配对", "配对此设备", "配对后 Router 才可调度本机 Runtime。"],
+    online: ["Local Runtime Agent 已连接", "本机 Agent 已连接", "本机目录和产物默认不上传云端。"],
+    router_disconnected: ["Local Runtime Agent 已注册，Router 断开", "重新检查连接", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。"],
+    incompatible: ["Local Runtime Agent 需要更新", "下载安装匹配版本", "当前 Agent 与 Web 控制协议不兼容。"],
+  }[localAgentState] || ["Local Runtime Agent 不可用", "重新检查", "请检查本机 Agent。"];
+  $("local-agent-state-label").textContent = copy[0];
+  $("local-agent-hint").textContent = copy[2];
+  $("local-agent-state-dot").className = localAgentState;
+  $("local-agent-version").textContent = localAgentHealth?.agentVersion ? `v${localAgentHealth.agentVersion}` : "";
+  $("enable-local-runtime").classList.toggle("active", localAgentState === "online");
+  $("local-agent-settings").disabled = localAgentState !== "online";
+}
+
+async function offerLocalAgentInstall() {
+  const platform = detectedAgentPlatform();
+  const arch = await detectedAgentArchitecture();
+  $("agent-install-modal").hidden = false;
+  $("agent-install-description").textContent = "正在从云端获取与当前设备匹配的签名安装包…";
+  $("agent-install-detail").innerHTML = "";
+  $("agent-install-download").hidden = true;
+  try {
+    const response = await fetch(`${api}/v1/local-agent/releases/latest?platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !Array.isArray(body.releases)) throw new Error(body.error || "当前环境尚未发布此设备的 Local Runtime Agent 安装包");
+    const release = body.releases.find((item) => item.arch === arch) || body.releases[0];
+    if (!release || release.protocolVersion !== LOCAL_AGENT_PROTOCOL_VERSION) throw new Error("没有与当前 Web 协议兼容的安装包");
+    $("agent-install-description").textContent = `将下载 Local Runtime Agent ${release.version}（${release.platform}/${release.arch}）。`;
+    $("agent-install-detail").innerHTML = `<dt>SHA-256</dt><dd>${escapeHtml(release.sha256)}</dd><dt>签名</dt><dd>${escapeHtml(release.signature)}</dd>`;
+    const download = $("agent-install-download");
+    download.href = release.downloadUrl;
+    download.hidden = false;
+    download.onclick = () => beginLocalAgentInstallPolling();
+  } catch (error) {
+    $("agent-install-description").textContent = `无法获得安装包：${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function beginLocalAgentInstallPolling() {
+  if (localAgentInstallPoll) clearInterval(localAgentInstallPoll);
+  localAgentInstallPoll = setInterval(() => void (async () => {
+    await probeLocalAgent();
+    if (localAgentState === "online" || localAgentState === "online_unpaired") {
+      clearInterval(localAgentInstallPoll); localAgentInstallPoll = undefined; closeLocalAgentInstall();
+      if (localAgentState === "online") await loadDevices();
+    }
+  })(), 2_000);
+}
+
+async function startInstalledLocalAgent() {
+  openLocalAgentProtocol("start");
+  beginLocalAgentInstallPolling();
+  setStatus("已请求系统启动 Local Runtime Agent，正在等待它上线…", "ok");
+}
+
+async function configureLocalAgentRouter(value = publicRouterUrl) {
+  let routerUrl;
+  try {
+    routerUrl = new URL(value || publicRouterUrl);
+    if (routerUrl.protocol !== "https:" && routerUrl.protocol !== "http:") throw new Error("协议必须为 HTTPS 或 HTTP");
+    if (routerUrl.username || routerUrl.password || routerUrl.pathname !== "/" || routerUrl.search || routerUrl.hash) throw new Error("请填写服务端根地址，例如 https://router.example.com");
+  } catch (error) {
+    setStatus(`服务端地址无效：${error instanceof Error ? error.message : String(error)}`, "error");
+    return;
+  }
+  openLocalAgentProtocol("configure", routerUrl.toString());
+  beginLocalAgentInstallPolling();
+  setStatus("已请求 Local Runtime Agent 保存服务端地址并重连…", "ok");
+}
+
+function openLocalAgentProtocol(action, routerUrl = publicRouterUrl) {
+  const target = new URL(`agentloop-local-runtime://${action}`);
+  target.searchParams.set("routerUrl", routerUrl);
+  target.searchParams.set("webOrigin", location.origin);
+  window.location.href = target.toString();
+}
+
+function closeLocalAgentInstall() { $("agent-install-modal").hidden = true; }
+function detectedAgentPlatform() { return navigator.userAgent.includes("Windows") ? "windows" : navigator.userAgent.includes("Mac") ? "darwin" : "linux"; }
+async function detectedAgentArchitecture() {
+  const hints = navigator.userAgentData && typeof navigator.userAgentData.getHighEntropyValues === "function"
+    ? await navigator.userAgentData.getHighEntropyValues(["architecture"]).catch(() => ({})) : {};
+  const value = String(hints.architecture || "").toLowerCase();
+  if (value.includes("arm")) return "arm64";
+  if (value.includes("x86") || value.includes("x64")) return "x64";
+  return "unknown";
+}
+
+async function refreshLocalSession() {
+  const deviceId = localDevice?.id;
+  const userId = authenticatedUser?.id;
+  if (!deviceId || !userId) throw new Error("本机 Runtime 尚未与当前登录用户配对");
+  const body = await call(`/v1/devices/${encodeURIComponent(deviceId)}/local-sessions`, {});
+  if (authenticatedUser?.id !== userId || localDevice?.id !== deviceId) throw new Error("本机 Runtime 登录身份已更新，请重试");
+  if (typeof body.token !== "string" || !Number.isSafeInteger(body.expiresAt) || body.expiresAt <= Date.now()) throw new Error("本机 Runtime 会话授权无效");
+  localSessionToken = body.token;
+  localSessionExpiresAt = body.expiresAt;
+  scheduleLocalSessionRefresh(deviceId, userId);
+}
+
+function clearLocalSession() {
+  localSessionToken = "";
+  localSessionExpiresAt = 0;
+  if (localSessionRefreshTimer) clearTimeout(localSessionRefreshTimer);
+  localSessionRefreshTimer = undefined;
+}
+
+function scheduleLocalSessionRefresh(deviceId, userId) {
+  if (localSessionRefreshTimer) clearTimeout(localSessionRefreshTimer);
+  const delay = Math.max(1_000, localSessionExpiresAt - Date.now() - LOCAL_SESSION_REFRESH_AHEAD_MS);
+  localSessionRefreshTimer = setTimeout(() => {
+    localSessionRefreshTimer = undefined;
+    if (localDevice?.id !== deviceId || authenticatedUser?.id !== userId) return;
+    void refreshLocalSessionOnce().catch(() => undefined);
+  }, delay);
+}
+
+/**
+ * The browser-to-Agent credential is separately scoped from the device
+ * credential. Connection state is not authorization state: renewing it here keeps a healthy Agent
+ * usable without teaching individual directory/run/artifact operations about
+ * session lifetime.  A rejected request has not reached its side effect,
+ * because the Agent authenticates before dispatching every protected route.
+ */
+async function refreshLocalSessionOnce() {
+  if (!localSessionRefresh) {
+    localSessionRefresh = refreshLocalSession().finally(() => { localSessionRefresh = undefined; });
+  }
+  return await localSessionRefresh;
+}
+
+async function localAgentFetch(path, init = {}) {
+  if (!localSessionToken || localSessionExpiresAt - Date.now() <= LOCAL_SESSION_REFRESH_AHEAD_MS) await refreshLocalSessionOnce();
+  const request = () => {
+    const headers = new Headers(init.headers || {});
+    headers.set("x-local-session", localSessionToken);
+    return fetch(`${localAgentApi}${path}`, { ...init, headers });
+  };
+  let response = await request();
+  if (response.status !== 401) return response;
+  const body = await response.clone().json().catch(() => ({}));
+  if (body.error !== "local_session_invalid" && body.error !== "local_session_required") return response;
+  await refreshLocalSessionOnce();
+  response = await request();
+  return response;
+}
+
+async function agentAwareFetch(endpoint, init = {}) {
+  return endpoint.startsWith(`${localAgentApi}/`)
+    ? await localAgentFetch(endpoint.slice(localAgentApi.length), init)
+    : await fetch(endpoint, init);
+}
+
+async function loadLocalRuntimes() {
+  if (!localDevice?.id) return;
+  const response = await fetch(localAgentRouterPath("/runtimes"));
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+  localRuntimes = Array.isArray(body.runtimes) ? body.runtimes : [];
+  if (!localRuntimes.some((runtime) => runtime.id === localRuntimeId)) {
+    localRuntimeId = localRuntimes.find((runtime) => runtime.status === "ready" && runtime.isDefault)?.id
+      || localRuntimes.find((runtime) => runtime.status === "ready")?.id
+      || localRuntimes[0]?.id
+      || "";
+  }
+  syncLocalRuntimeManager();
+  refreshRuntimeOptions();
+  updateLocalControls();
+}
+
+async function loadLocalScopes() {
+  if (!localSessionToken || !localRuntimeId || !selectedLocalRuntimeRunning()) { localScopes = []; renderLocalScopes(); return; }
+  const response = await localAgentFetch(`/v1/directory-scopes?runtimeId=${encodeURIComponent(localRuntimeId)}`);
+  if (!response.ok) { localScopes = []; renderLocalScopes(); return; }
+  localScopes = (await response.json()).scopes || [];
+  renderLocalScopes();
+}
+
+function updateLocalControls() {
+  const paired = localAgentState === "online" && Boolean(localDevice && localSessionToken);
+  const localToggle = $("use-local-runtime");
+  localToggle.disabled = !paired;
+  if (paired) {
+    const preferenceKey = localRuntimePreferenceKey(authenticatedUser?.id, localDevice?.id);
+    if (preferenceKey && hydratedLocalRuntimePreferenceKey !== preferenceKey) {
+      const preference = loadLocalRuntimePreference(localStorage, authenticatedUser?.id, localDevice?.id);
+      // A missing value belongs to this user/device just as much as an
+      // explicit false: never carry the previous device's DOM state across.
+      localToggle.checked = preference === true;
+      hydratedLocalRuntimePreferenceKey = preferenceKey;
+    }
+  } else {
+    // Losing the live pairing only suspends the UI. Do not turn this temporary
+    // safety reset into a persisted user choice, or reconnection could not
+    // restore the user's local-execution preference.
+    hydratedLocalRuntimePreferenceKey = "";
+    if (localToggle.checked) localToggle.checked = false;
+    localScopes = [];
+  }
+  const local = isLocalExecution();
+  const runtimeReady = selectedLocalRuntime()?.status === "ready";
+  $("local-runtime-picker").hidden = !local;
+  $("runtime").disabled = !local || !runtimeReady;
+  $("directory-scope")?.toggleAttribute("disabled", !local || !runtimeReady);
+  $("local-runtime-manager").hidden = !paired;
+  $("upload-file").toggleAttribute("disabled", local && !runtimeReady);
+  syncLocalRuntimeManager();
+  renderLocalScopes();
+}
+
+async function addDirectoryScope() {
+  if (!localSessionToken || !localRuntimeId) { setStatus("请先启用并选择本机 Runtime", "error"); return; }
+  try {
+    const response = await localAgentFetch("/v1/directory-scopes/pick", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runtimeId: localRuntimeId }) });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    if (body.cancelled === true) return;
+    localScopes = [body.scope, ...localScopes.filter((scope) => scope.id !== body.scope.id)];
+    renderLocalScopes();
+    setStatus(`已授权本机目录：${body.scope.displayName}`, "ok");
+  } catch (error) { setStatus(`目录授权失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+function renderLocalScopes() {
+  const container = $("local-directory-scopes");
+  if (!container) return;
+  // The authority endpoint returns active scopes only. Keep this filter as a
+  // client-side guard against a stale response completing after revocation.
+  const activeScopes = localScopes.filter((scope) => scope.status === "active");
+  const visible = isLocalExecution() && activeScopes.length > 0;
+  container.hidden = !visible;
+  container.innerHTML = visible ? activeScopes.map((scope) => `<span class="source-chip local-scope-chip"><span class="scope-icon" aria-hidden="true">▣</span><span>${escapeHtml(scope.displayName)}</span><small>已授权</small><button type="button" data-revoke-local-scope="${escapeHtml(scope.id)}" aria-label="撤销目录 ${escapeHtml(scope.displayName)}">×</button></span>`).join("") : "";
+  container.querySelectorAll("[data-revoke-local-scope]").forEach((button) => button.addEventListener("click", () => void revokeLocalScope(button.dataset.revokeLocalScope)));
+}
+
+async function revokeLocalScope(scopeId) {
+  if (!scopeId || !localRuntimeId) return;
+  try {
+    const response = await localAgentFetch(`/v1/directory-scopes/${encodeURIComponent(scopeId)}/revoke`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runtimeId: localRuntimeId }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    }
+    await loadLocalScopes();
+    setStatus("已撤销本机目录授权", "ok");
+  } catch (error) { setStatus(`撤销目录失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+function openCreateLocalRuntime() {
+  $("runtime-create-name").value = "";
+  $("runtime-create-modal").hidden = false;
+  $("runtime-create-name").focus();
+}
+
+function closeCreateLocalRuntime() { $("runtime-create-modal").hidden = true; }
+
+async function createLocalRuntime(displayName) {
+  if (!displayName?.trim()) return;
+  try {
+    const response = await fetch(localAgentRouterPath("/runtimes"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ displayName: displayName.trim() }) });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    localRuntimeId = body.runtime.id;
+    await loadLocalRuntimes();
+    await loadLocalScopes();
+    closeCreateLocalRuntime();
+    setStatus(`已创建 ${body.runtime.displayName}`, "ok");
+  } catch (error) { setStatus(`创建 Runtime 失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+function openConfigureLocalRuntime(runtimeId = localRuntimeId) {
+  const runtime = selectedLocalRuntime(runtimeId);
+  if (!runtime) return;
+  localRuntimeId = runtime.id;
+  $("runtime-config-name").value = runtime.displayName;
+  $("runtime-config-id").textContent = runtime.id;
+  $("runtime-config-status").textContent = runtimeStatusLabel(runtime.status);
+  $("runtime-config-modal").hidden = false;
+  $("runtime-config-name").focus();
+}
+
+function closeConfigureLocalRuntime() { $("runtime-config-modal").hidden = true; }
+
+async function saveLocalRuntimeConfiguration() {
+  const runtime = selectedLocalRuntime();
+  const displayName = $("runtime-config-name").value.trim();
+  if (!runtime || !displayName) return;
+  try {
+    const response = await fetch(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtime.id)}`), {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ displayName }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    await loadLocalRuntimes();
+    closeConfigureLocalRuntime();
+    setStatus("已更新 Runtime 配置", "ok");
+  } catch (error) { setStatus(`更新 Runtime 配置失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+async function deleteLocalRuntime(runtimeId = localRuntimeId) {
+  const runtime = selectedLocalRuntime(runtimeId);
+  if (!runtime) return;
+  if (runtime.isDefault) { setStatus("默认 Runtime 不能删除", "error"); return; }
+  if (!confirm(`删除“${runtime.displayName}”？该 Runtime 必须没有活动任务；确认后会停止并回收其独立运行记录与目录授权。设备级共享产物和 Skill 不会删除。`)) return;
+  try {
+    const response = await fetch(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtime.id)}`), { method: "DELETE" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    localRuntimeId = "";
+    await loadLocalRuntimes();
+    await loadLocalScopes();
+    setStatus("已删除 Runtime，并回收其独立状态", "ok");
+  } catch (error) { setStatus(`删除 Runtime 失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+async function loadLocalAgentConfig() {
+  if (!localDevice?.id) return;
+  const response = await fetch(localAgentRouterPath("/config"));
+  if (!response.ok) return;
+  localAgentConfig = await response.json().catch(() => undefined);
+  renderLocalAgentConfig();
+}
+
+function renderLocalAgentConfig() {
+  const storage = localAgentConfig?.sharedStorage;
+  const uploadStorage = localAgentConfig?.uploadStorage;
+  $("agent-settings-version").textContent = localAgentConfig?.agentVersion ? `v${localAgentConfig.agentVersion} · 协议 ${localAgentConfig.protocolVersion}` : "-";
+  $("agent-settings-storage").textContent = storage?.path || "-";
+  $("agent-settings-upload-storage").textContent = uploadStorage?.path || defaultUploadStoragePath(storage?.path);
+  $("agent-router-url").textContent = localAgentConfig?.router?.url || localAgentHealth?.router?.url || publicRouterUrl;
+}
+
+function defaultUploadStoragePath(sharedStoragePath) {
+  if (typeof sharedStoragePath !== "string" || sharedStoragePath.length === 0) return "-";
+  const normalized = sharedStoragePath.replace(/[\\/]+$/, "");
+  const separator = normalized.includes("\\") ? "\\" : "/";
+  const parentEnd = normalized.lastIndexOf(separator);
+  return parentEnd < 0 ? "uploads" : `${normalized.slice(0, parentEnd)}${separator}uploads`;
+}
+
+async function openLocalAgentSettings() {
+  if (!localSessionToken) return;
+  await Promise.all([loadLocalAgentConfig(), loadLocalRuntimes()]);
+  renderLocalAgentConfig();
+  syncLocalRuntimeManager();
+  $("agent-settings-modal").hidden = false;
+}
+
+function closeLocalAgentSettings() { $("agent-settings-modal").hidden = true; }
+
+async function pickSharedStorage() {
+  try {
+    const response = await fetch(localAgentRouterPath("/config/shared-storage/pick"), { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    if (body.cancelled) return;
+    localAgentConfig = { ...(localAgentConfig || {}), sharedStorage: body.sharedStorage };
+    renderLocalAgentConfig();
+    await loadLocalRuntimes();
+    await loadLocalScopes();
+    setStatus("已切换设备级共享存储，所有运行中的子 Runtime 已重新加载", "ok");
+  } catch (error) { setStatus(`切换共享存储失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+async function pickUploadStorage() {
+  try {
+    const response = await fetch(localAgentRouterPath("/config/upload-storage/pick"), { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    if (body.cancelled) return;
+    localAgentConfig = { ...(localAgentConfig || {}), uploadStorage: body.uploadStorage };
+    renderLocalAgentConfig();
+    await loadLocalRuntimes();
+    setStatus("已切换设备级上传源文件目录，所有运行中的子 Runtime 已重新加载", "ok");
+  } catch (error) { setStatus(`切换上传源文件目录失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+async function applyLocalRuntimeLifecycle(action, runtimeId = localRuntimeId) {
+  if (!runtimeId) return;
+  try {
+    const response = await fetch(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtimeId)}/${action}`), { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    await loadLocalRuntimes();
+    await loadLocalScopes();
+    const labels = { drain: "已进入 Drain", restart: "重启请求已提交", stop: "已停止", start: "已启动" };
+    setStatus(`${body.runtime.displayName}：${labels[action]}`, body.runtime.status === "failed" ? "error" : "ok");
+  } catch (error) { setStatus(`Runtime 操作失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+async function toggleLocalRuntimeStarted(runtimeId = localRuntimeId) {
+  const runtime = selectedLocalRuntime(runtimeId);
+  if (!runtime) return;
+  await applyLocalRuntimeLifecycle(runtime.status === "stopped" || (runtime.status === "draining" && !runtime.pendingAction) ? "start" : "stop", runtime.id);
+}
+
+async function selectLocalRuntime(runtimeId) {
+  if (!localRuntimes.some((runtime) => runtime.id === runtimeId)) return;
+  localRuntimeId = runtimeId;
+  refreshRuntimeOptions();
+  await loadLocalScopes();
+  updateLocalControls();
+  render();
+}
+
+function selectedLocalRuntime(runtimeId = localRuntimeId) { return localRuntimes.find((runtime) => runtime.id === runtimeId); }
+function selectedLocalRuntimeRunning() { return selectedLocalRuntime()?.status !== "stopped" && selectedLocalRuntime()?.status !== "failed"; }
+function isLocalExecution() { return $("use-local-runtime")?.checked === true; }
+function localHeaders(json = false) { return { ...(json ? { "content-type": "application/json" } : {}), "x-local-session": localSessionToken }; }
+function localAgentRouterPath(suffix) {
+  if (!localDevice?.id) throw new Error("本机 Agent 尚未配对");
+  return `${api}/v1/devices/${encodeURIComponent(localDevice.id)}/local-agent${suffix}`;
+}
+
+function syncLocalRuntimeManager() {
+  const list = $("local-runtime-list");
+  if (!list) return;
+  list.innerHTML = localRuntimes.map((runtime) => {
+    const isSelected = runtime.id === localRuntimeId;
+    const isStopped = runtime.status === "stopped";
+    const canDrain = runtime.status === "ready";
+    const canRestart = runtime.status !== "stopped" && runtime.status !== "failed" && !runtime.pendingAction;
+    const canToggle = runtime.status !== "restarting" && !runtime.pendingAction;
+    const canDelete = !runtime.isDefault && !runtime.pendingAction && runtime.activeRunCount === 0;
+    const toggleLabel = isStopped ? "启动" : runtime.status === "draining" && !runtime.pendingAction ? "恢复" : "停止";
+    const pending = runtime.pendingAction ? ` · 等待${runtime.pendingAction === "restart" ? "重启" : "停止"}` : "";
+    return `<article class="local-runtime-item${isSelected ? " selected" : ""}" role="listitem">
+      <button type="button" class="local-runtime-summary" data-local-runtime-action="select" data-runtime-id="${escapeHtml(runtime.id)}" aria-pressed="${isSelected}">
+        <span class="local-runtime-name">${escapeHtml(runtime.displayName)}${runtime.isDefault ? '<b class="runtime-default-badge">默认</b>' : ""}</span>
+        <small>${escapeHtml(runtimeStatusLabel(runtime.status))}${escapeHtml(pending)}${runtime.activeRunCount > 0 ? ` · ${runtime.activeRunCount} 个任务` : ""}</small>
+      </button>
+      <div class="local-runtime-actions" aria-label="${escapeHtml(runtime.displayName)} 的操作">
+        <button type="button" data-local-runtime-action="configure" data-runtime-id="${escapeHtml(runtime.id)}">配置</button>
+        <button type="button" data-local-runtime-action="drain" data-runtime-id="${escapeHtml(runtime.id)}" ${canDrain ? "" : "disabled"}>Drain</button>
+        <button type="button" data-local-runtime-action="restart" data-runtime-id="${escapeHtml(runtime.id)}" ${canRestart ? "" : "disabled"}>重启</button>
+        <button type="button" data-local-runtime-action="toggle" data-runtime-id="${escapeHtml(runtime.id)}" ${canToggle ? "" : "disabled"}>${toggleLabel}</button>
+        <button type="button" class="danger" data-local-runtime-action="delete" data-runtime-id="${escapeHtml(runtime.id)}" ${canDelete ? "" : "disabled"} title="${runtime.isDefault ? "默认 Runtime 不可删除" : runtime.activeRunCount > 0 ? "有活动任务时不能删除" : runtime.pendingAction ? "生命周期操作完成后才能删除" : "删除并回收独立状态"}">删除</button>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+function runtimeStatusLabel(status) {
+  return status === "ready" ? "就绪" : status === "draining" ? "排空中" : status === "restarting" ? "重启中" : status === "stopped" ? "已停止" : "失败";
+}
+
+function redirectToLogin() {
+  if (location.pathname === "/login" || location.pathname === "/register") return;
+  const next = `${location.pathname}${location.search}${location.hash}`;
+  location.replace(`/login?next=${encodeURIComponent(next)}`);
+}
 
 function loadArtifactPanelWidth() {
   const stored = Number(localStorage.getItem(WORKSPACE_WIDTH_KEY));
@@ -171,13 +855,9 @@ function resetArtifactPanelWidth() {
   render();
 }
 
-function reloadConversationsForIdentity() {
-  saveIdentity();
-  void loadConversationPage(true);
-}
-
 async function loadConversationPage(reset = false) {
   if (conversationsLoadingMore || (!reset && !conversationsHasMore)) return;
+  if (!authenticatedUser || !authToken) return;
   const tenantId = $("tenant-id").value.trim();
   const userId = $("user-id").value.trim();
   if (!tenantId || !userId) return;
@@ -196,7 +876,13 @@ async function loadConversationPage(reset = false) {
     conversationsHasMore = body.hasMore === true;
     conversationsNextOffset = Number.isSafeInteger(body.nextOffset) ? body.nextOffset : offset + body.conversations.length;
     activeId = activeConversation()?.id ?? newConversation().id;
-    if (reset) void reconcilePersistedRuns();
+    if (reset) {
+      // Browser snapshots are only an offline recovery aid. Once the Router is
+      // reachable, refresh the active conversation so every persisted reply
+      // is rebound to its authoritative Assignment artifacts.
+      await selectConversation(activeId);
+      void reconcileStrictLocalRuns();
+    }
   } catch (error) {
     if (reset && sessions.length === 0) {
       sessions = [...recoveredSessions];
@@ -214,6 +900,13 @@ async function loadConversationPage(reset = false) {
 function mergeConversationSummaries(summaries, reset = false) {
   const byId = new Map([...recoveredSessions, ...sessions].map((conversation) => [conversation.id, conversation]));
   const nextSessions = reset ? [...sessions] : sessions;
+  if (reset) {
+    for (const recovered of recoveredSessions) {
+      if ((recovered.messages || []).some((message) => message?.role === "assistant" && message.localRunId) && !nextSessions.some((conversation) => conversation.id === recovered.id)) {
+        nextSessions.push(recovered);
+      }
+    }
+  }
   for (const summary of summaries) {
     if (!summary || typeof summary.id !== "string") continue;
     const existing = byId.get(summary.id);
@@ -227,6 +920,7 @@ function mergeConversationSummaries(summaries, reset = false) {
         : finiteNumber(summary.updatedAt, existing.updatedAt);
       existing.runCount = finiteNumber(summary.runCount, existing.runCount);
       existing.lastStatus = typeof summary.lastStatus === "string" ? summary.lastStatus : existing.lastStatus;
+      if (reset) existing.historyLoaded = false;
       if (!nextSessions.some((conversation) => conversation.id === existing.id)) nextSessions.push(existing);
       continue;
     }
@@ -277,9 +971,16 @@ async function selectConversation(conversationId) {
     if (!response.ok || !Array.isArray(body?.turns)) throw new Error(body?.error || `HTTP ${response.status}`);
     conversation.messages = conversationMessagesFromTurns(body.turns);
     render();
-    await Promise.all(conversation.messages
-      .filter((message) => message.role === "assistant" && typeof message.assignmentId === "string" && message.status === "running")
-      .map((assistant) => hydratePersistedAssistant(assistant, tenantId, userId)));
+    const assistants = conversation.messages
+      .filter((message) => message.role === "assistant" && typeof message.assignmentId === "string");
+    // Conversation history stores the durable turn/result index, while the
+    // assignment artifact endpoint owns downloadable artifact identities.
+    // Rehydrate every historical assistant turn so a final artifact remains
+    // attached to the reply that delivered it after reload or another device
+    // opens the conversation. Running turns additionally need status/events.
+    await Promise.allSettled(assistants.map((assistant) => assistant.status === "running"
+      ? hydratePersistedAssistant(assistant, tenantId, userId)
+      : refreshArtifacts(assistant.assignmentId, assistant, tenantId, userId)));
     const selected = selectedAssistantMessage(conversation);
     if (selected?.assignmentId) {
       conversation.selectedAssistantId = selected.id;
@@ -357,14 +1058,17 @@ async function reconcilePersistedRuns() {
 }
 
 function applyRecoveredRunState(assistant, run) {
+  if (typeof run?.remoteRunId === "string") assistant.remoteRunId = run.remoteRunId;
+  const modelChanged = typeof run?.modelKey === "string" && run.modelKey.trim().length > 0 && assistant.modelKey !== run.modelKey;
+  if (modelChanged) assistant.modelKey = run.modelKey;
   if (run?.status === "running") {
-    if ((assistant.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type))) return false;
+    if ((assistant.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type))) return modelChanged;
     if (assistant.status === "failed") {
       // Repair old browser caches that recorded a transport error as a Run failure.
       assistant.status = "running"; assistant.error = undefined; assistant.text = ""; assistant.completedAt = undefined;
       return true;
     }
-    return false;
+    return modelChanged;
   }
   if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return false;
   assistant.status = run.status;
@@ -464,41 +1168,51 @@ function mergeDetailEvents(currentEvents, incomingEvents) {
 async function loadModels() {
   try {
     const response = await fetch(`${api}/v1/models`);
+    if (!response.ok) throw new Error(`router_unavailable:${response.status}`);
     const body = await response.json();
     const models = Array.isArray(body.models) ? body.models : [];
     $("model-select").innerHTML = `<option value="">使用 Runtime 默认模型</option>` + models.map((model) => `<option value="${escapeHtml(model.key)}">${escapeHtml(model.displayName || model.key)}</option>`).join("");
     if (models[0]) setStatus(models[0].displayName || models[0].key, "ok");
-  } catch { $("runtime-status").textContent = "模型目录暂不可用"; }
+  } catch (error) { setStatus(`Router 暂不可达：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
-async function loadRuntimes() {
-  try {
-    const response = await fetch(`${api}/v1/runtimes`);
-    const body = await response.json();
-    const runtimes = Array.isArray(body.runtimes) ? body.runtimes.filter((runtime) => runtime && typeof runtime.id === "string" && runtime.id.length > 0) : [];
-    $("runtime").innerHTML = `<option value="">自动</option>` + runtimes.map((runtime) => `<option value="${escapeHtml(runtime.id)}">${escapeHtml(runtime.id)}</option>`).join("");
-  } catch {
-    // Auto-routing remains a valid safe fallback when the optional catalog is unavailable.
+function refreshRuntimeOptions() {
+  const select = $("runtime");
+  if (!select) return;
+  const local = isLocalExecution();
+  $("local-runtime-picker").hidden = !local;
+  if (!local) {
+    select.innerHTML = "";
+    select.disabled = true;
+    return;
   }
+  select.innerHTML = localRuntimes.map((runtime) => `<option value="${escapeHtml(runtime.id)}" ${runtime.status === "ready" ? "" : "disabled"}>${escapeHtml(runtime.displayName)} · ${escapeHtml(runtimeStatusLabel(runtime.status))}</option>`).join("");
+  select.value = localRuntimeId;
+  select.disabled = selectedLocalRuntime()?.status !== "ready";
 }
 
 async function submit() {
   const input = $("input").value.trim();
   const conversation = activeConversation();
   if (!input || !conversation) return;
-  if (activeRunsByConversation.has(conversation.id) || conversation.messages.some((message) => message.role === "assistant" && message.status === "running" && message.assignmentId)) { setStatus("当前会话仍在发起或执行；请等待或点击停止", "error"); return; }
+  const executionTarget = isLocalExecution() ? "local" : "cloud";
+  if (executionTarget === "local" && !localSessionToken) { setStatus("本机运行需要先启用 Local Runtime", "error"); return; }
+  if (executionTarget === "local" && selectedLocalRuntime()?.status !== "ready") { setStatus("请选择处于就绪状态的本机 Runtime", "error"); return; }
+  if (activeRunsByConversation.has(conversation.id) || conversation.messages.some((message) => message.role === "assistant" && message.status === "running" && (message.assignmentId || message.localRunId))) { setStatus("当前会话仍在发起或执行；请等待或点击停止", "error"); return; }
   if (uploadCount(conversation.id) > 0) { setStatus("文件仍在上传，请稍候再发送", "error"); return; }
   const tenantId = $("tenant-id").value.trim();
   const ownerUserId = $("user-id").value.trim();
-  if (!tenantId || !ownerUserId) { setStatus("请先填写用户和租户 ID", "error"); return; }
-  saveIdentity();
+  if (!authenticatedUser || !tenantId || !ownerUserId) { setStatus("请先登录", "error"); return; }
   const attachments = pendingAttachments(conversation);
   const activeRun = { assignmentId: null, abortController: null, submitAbortController: new AbortController(), submitTimedOut: false, submitTimeout: null, assistant: null };
   activeRunsByConversation.set(conversation.id, activeRun);
   conversation.pendingAttachments = [];
   const submittedAt = Date.now();
   const userMessage = { id: crypto.randomUUID(), role: "user", text: input, attachments, createdAt: submittedAt };
-  const assistantMessage = { id: crypto.randomUUID(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt };
+  const assistantMessage = {
+    id: crypto.randomUUID(), role: "assistant", text: "", reasoning: "", status: "running", events: [], plan: [], createdAt: submittedAt,
+    executionLocation: executionTarget,
+  };
   setVolatile(assistantMessage, "detailEvents", []);
   conversation.messages.push(userMessage, assistantMessage);
   conversation.selectedAssistantId = assistantMessage.id;
@@ -511,16 +1225,39 @@ async function submit() {
   render();
   setStatus("正在分配 Runtime…", "running");
   try {
-    const payload = { conversationId: conversation.id, clientMessageId: userMessage.id, input, attachmentIds: attachments.map((attachment) => attachment.id), ...($("runtime").value ? { requestedRuntimeId: $("runtime").value } : {}), ...($("model-select").value ? { requestedModelKey: $("model-select").value } : {}) };
+    const localSourceIds = attachments.filter((attachment) => attachment.dataPlane === "local_runtime").map((attachment) => attachment.id);
+    const cloudAttachmentIds = attachments.filter((attachment) => attachment.dataPlane !== "local_runtime").map((attachment) => attachment.id);
+    if (executionTarget === "local" && cloudAttachmentIds.length > 0) throw new Error("本机运行不能读取云端附件；请重新选择本机文件上传");
+    if (executionTarget === "cloud" && localSourceIds.length > 0) throw new Error("云端运行不能读取本机 Runtime 文件；请重新选择云端文件上传");
+    if (executionTarget === "local" && attachments.some((attachment) => attachment.dataPlane === "local_runtime" && attachment.runtimeId !== localRuntimeId)) {
+      throw new Error("本机文件属于另一个 Runtime；请切回其 Runtime 或重新上传");
+    }
+    const payload = {
+      conversationId: conversation.id,
+      clientMessageId: userMessage.id,
+      input,
+      attachmentIds: cloudAttachmentIds,
+      ...(executionTarget === "local" ? { localDirectoryScopeIds: localScopes.filter((scope) => scope.status === "active").map((scope) => scope.id) } : {}),
+      ...(executionTarget === "local" && localSourceIds.length > 0 ? { localUploadedSourceIds: localSourceIds } : {}),
+      ...($("model-select").value ? { requestedModelKey: $("model-select").value } : {}),
+    };
     activeRun.submitTimeout = setTimeout(() => { activeRun.submitTimedOut = true; activeRun.submitAbortController.abort(); }, 15_000);
-    const body = await call("/v1/tasks", tenantId, ownerUserId, payload, activeRun.submitAbortController.signal);
+    const body = await call("/v2/tasks", {
+      schema: "agentloop.task/v2",
+      executionTarget: executionTarget === "local"
+        ? { kind: "local_device", deviceId: localDevice.id, runtimeId: localRuntimeId }
+        : { kind: "cloud_pool" },
+      dataPolicy: { mode: executionTarget },
+      ...payload,
+    }, activeRun.submitAbortController.signal);
     clearTimeout(activeRun.submitTimeout);
     activeRun.submitTimeout = null;
     activeRun.assignmentId = body.assignment.id;
     assistantMessage.assignmentId = activeRun.assignmentId;
     assistantMessage.runtimeId = body.assignment.runtimeId;
-    setStatus(`已分配 ${body.assignment.runtimeId} · SSE 连接中`, "running");
-    $("cancel").disabled = false;
+    assistantMessage.executionLocation = executionTarget === "local" ? "local" : "cloud";
+    if (executionTarget === "local") assistantMessage.localRuntimeId = body.assignment.runtimeId;
+    setStatus(`${executionTarget === "local" ? "本机" : "云端"}已分配 ${body.assignment.runtimeId} · SSE 连接中`, "running");
     saveSessions();
     render();
     await streamAssignment(activeRun.assignmentId, conversation, assistantMessage, tenantId, ownerUserId, activeRun);
@@ -535,6 +1272,14 @@ async function submit() {
   }
 }
 
+function runComposerAction() {
+  const conversation = activeConversation();
+  if (!conversation) return;
+  const target = cancellationTarget(activeRunsByConversation.get(conversation.id), conversation.messages);
+  if (target.canCancel) { void cancelActive(); return; }
+  void submit();
+}
+
 async function uploadAttachments(fileList) {
   const conversation = activeConversation();
   const tenantId = $("tenant-id").value.trim();
@@ -542,8 +1287,7 @@ async function uploadAttachments(fileList) {
   const selected = [...(fileList || [])].slice(0, Math.max(0, MAX_PENDING_ATTACHMENTS - pendingAttachments(conversation).length));
   $("attachment").value = "";
   if (!conversation || selected.length === 0 || activeRunsByConversation.has(conversation.id)) return;
-  if (!tenantId || !ownerUserId) { setStatus("请先填写用户和租户 ID", "error"); return; }
-  saveIdentity();
+  if (!authenticatedUser || !tenantId || !ownerUserId) { setStatus("请先登录", "error"); return; }
   const rejected = selected.filter((file) => file.size > MAX_ATTACHMENT_BYTES);
   const uploadable = selected.filter((file) => file.size <= MAX_ATTACHMENT_BYTES);
   const failures = rejected.map(attachmentSizeError);
@@ -556,17 +1300,23 @@ async function uploadAttachments(fileList) {
   try {
     for (const file of uploadable) {
       try {
-        const body = await call("/v1/attachments", tenantId, ownerUserId, {
+        const local = isLocalExecution();
+        if (local && (!localSessionToken || !localRuntimeId || selectedLocalRuntime()?.status !== "ready")) {
+          throw new Error("请先启用并选择处于就绪状态的本机 Runtime");
+        }
+        const body = local
+          ? await localUploadSource(file, conversation.id, localRuntimeId)
+          : await call("/v1/attachments", {
           conversationId: conversation.id,
           originalName: file.name,
           mediaType: file.type || "application/octet-stream",
           contentBase64: await toBase64(file),
         });
-        const attachment = body?.attachment;
+        const attachment = local ? body?.source : body?.attachment;
         if (!attachment || typeof attachment.id !== "string" || typeof attachment.originalName !== "string" || typeof attachment.byteSize !== "number") {
           throw new Error("上传服务返回的附件无效");
         }
-        conversation.pendingAttachments = [...pendingAttachments(conversation), attachment].slice(0, MAX_PENDING_ATTACHMENTS);
+        conversation.pendingAttachments = [...pendingAttachments(conversation), local ? { ...attachment, dataPlane: "local_runtime", runtimeId: localRuntimeId } : attachment].slice(0, MAX_PENDING_ATTACHMENTS);
         saveSessions();
       } catch (error) {
         failures.push(uploadFailureMessage(file, error));
@@ -580,6 +1330,18 @@ async function uploadAttachments(fileList) {
       setStatus(failures.length > 0 ? uploadFailureStatus(failures) : "文件已准备好", failures.length > 0 ? "error" : "ok");
     }
   }
+}
+
+async function localUploadSource(file, conversationId, runtimeId) {
+  const response = await localAgentFetch("/v1/uploads", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runtimeId, conversationId, originalName: file.name, mediaType: file.type || "application/octet-stream", contentBase64: await toBase64(file) }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+  if (body.runtimeId !== runtimeId) throw new Error("本机上传返回了不匹配的 Runtime");
+  return body;
 }
 
 function attachmentSizeError(file, limit = MAX_ATTACHMENT_BYTES) {
@@ -625,6 +1387,10 @@ async function streamAssignment(assignmentId, conversation, assistant, tenantId,
     signal: activeRun.abortController.signal,
     afterSeq: Math.max(0, ...(assistant.events || []).map((event) => Number.isSafeInteger(event.seq) ? event.seq : 0)),
     onEvent: (event) => onEvent(event, conversation, assistant),
+    onStatus: (run) => {
+      applyRecoveredRunState(assistant, run);
+      liveUpdates.flush();
+    },
     onRun: (run) => {
       applyRecoveredRunState(assistant, run);
       liveUpdates.flush();
@@ -637,6 +1403,85 @@ async function streamAssignment(assignmentId, conversation, assistant, tenantId,
   });
   if (["completed", "failed", "cancelled"].includes(assistant.status)) {
     await Promise.all([refreshArtifacts(assignmentId, assistant, tenantId, userId), hydrateCommandEvidence(assistant, tenantId, userId)]);
+  }
+}
+
+async function observeStrictLocalRun(conversation, assistant, activeRun) {
+  const runtimeId = assistant.localRuntimeId;
+  const runId = assistant.localRunId;
+  if (!runtimeId || !runId) throw new Error("strict_local_run_identity_missing");
+  activeRun.abortController = new AbortController();
+  let afterSeq = Math.max(0, ...(assistant.events || []).map((event) => Number.isSafeInteger(event.seq) ? event.seq : 0));
+  let transientFailures = 0;
+  while (!activeRun.abortController.signal.aborted && assistant.status === "running") {
+    try {
+      const [eventsResponse, runResponse] = await Promise.all([
+        localAgentFetch(`/v1/strict-local-runs/${encodeURIComponent(runtimeId)}/${encodeURIComponent(runId)}/events?afterSeq=${afterSeq}`, { signal: activeRun.abortController.signal }),
+        localAgentFetch(`/v1/strict-local-runs/${encodeURIComponent(runtimeId)}/${encodeURIComponent(runId)}`, { signal: activeRun.abortController.signal }),
+      ]);
+      const [eventsBody, runBody] = await Promise.all([eventsResponse.json().catch(() => ({})), runResponse.json().catch(() => ({}))]);
+      if (!eventsResponse.ok) throw new Error(eventsBody.error || `Local Agent HTTP ${eventsResponse.status}`);
+      if (!runResponse.ok) throw new Error(runBody.error || `Local Agent HTTP ${runResponse.status}`);
+      transientFailures = 0;
+      for (const event of Array.isArray(eventsBody.events) ? eventsBody.events : []) {
+        if (Number.isSafeInteger(event.seq)) afterSeq = Math.max(afterSeq, event.seq);
+        onEvent(event, conversation, assistant);
+      }
+      applyRecoveredRunState(assistant, runBody.run);
+      liveUpdates.flush();
+      if (assistant.status !== "running") break;
+      await waitForStrictLocalPoll(activeRun.abortController.signal);
+    } catch (error) {
+      if (activeRun.abortController.signal.aborted) break;
+      transientFailures += 1;
+      setStatus(`本机事件连接暂时中断，正在重连：${error instanceof Error ? error.message : String(error)}`, "error");
+      await waitForStrictLocalPoll(activeRun.abortController.signal, Math.min(3_000, 500 * transientFailures));
+    }
+  }
+  if (["completed", "failed", "cancelled"].includes(assistant.status)) {
+    await refreshStrictLocalArtifacts(assistant);
+    setStatus(assistant.status === "completed" ? "严格本地执行已完成" : assistant.status === "cancelled" ? "已停止" : "严格本地执行失败", assistant.status === "completed" ? "ok" : "error");
+  }
+}
+
+function waitForStrictLocalPoll(signal, delay = 700) {
+  return new Promise((resolve) => {
+    if (signal.aborted) { resolve(); return; }
+    const timer = setTimeout(done, delay);
+    function done() { signal.removeEventListener("abort", done); clearTimeout(timer); resolve(); }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+async function refreshStrictLocalArtifacts(assistant) {
+  if (!assistant?.localRuntimeId || !assistant?.localRunId || !localSessionToken) return;
+  try {
+    const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(assistant.localRuntimeId)}/runs/${encodeURIComponent(assistant.localRunId)}/artifacts`);
+    if (!response.ok) return;
+    const body = await response.json();
+    assistant.artifacts = (Array.isArray(body.artifacts) ? body.artifacts : []).map((artifact) => ({ ...artifact, location: "local" }));
+    saveSessions();
+    render();
+  } catch {}
+}
+
+function resumeStrictLocalObservation(conversation, assistant) {
+  if (!localSessionToken || !assistant?.localRuntimeId || !assistant?.localRunId || assistant.status !== "running" || activeRunsByConversation.has(conversation.id)) return;
+  const activeRun = { assignmentId: null, localRunId: assistant.localRunId, localRuntimeId: assistant.localRuntimeId, abortController: null, submitAbortController: null, assistant };
+  activeRunsByConversation.set(conversation.id, activeRun);
+  void observeStrictLocalRun(conversation, assistant, activeRun)
+    .catch(() => setStatus("严格本地观察连接中断，任务仍由本机 Runtime 执行", "error"))
+    .finally(() => {
+      if (activeRunsByConversation.get(conversation.id) === activeRun) activeRunsByConversation.delete(conversation.id);
+      saveSessions(); render();
+    });
+}
+
+async function reconcileStrictLocalRuns() {
+  for (const conversation of sessions) {
+    for (const assistant of conversation.messages || []) {
+      if (assistant?.role === "assistant" && assistant.status === "running" && assistant.localRunId) resumeStrictLocalObservation(conversation, assistant);
+    }
   }
 }
 
@@ -703,6 +1548,30 @@ async function cancelActive() {
   if (!conversation) return;
   const target = cancellationTarget(activeRunsByConversation.get(conversation.id), conversation.messages);
   if (!target.canCancel || !target.assistant) return;
+  if (target.localRunId) {
+    const runtimeId = target.activeRun?.localRuntimeId ?? target.assistant.localRuntimeId;
+    if (!runtimeId || !localSessionToken) { setStatus("无法停止严格本地任务：本机 Runtime 会话不可用", "error"); return; }
+    const key = `strict:${runtimeId}:${target.localRunId}`;
+    if (cancellingAssignmentIds.has(key)) return;
+    cancellingAssignmentIds.add(key);
+    render();
+    try {
+      const response = await localAgentFetch(`/v1/strict-local-runs/${encodeURIComponent(runtimeId)}/${encodeURIComponent(target.localRunId)}/cancel`, { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+      applyRecoveredRunState(target.assistant, body.run);
+      target.activeRun?.abortController?.abort();
+      await refreshStrictLocalArtifacts(target.assistant);
+      saveSessions();
+      setStatus(body.run?.status === "cancelled" ? "已停止" : "任务已结束", body.run?.status === "completed" ? "ok" : "error");
+    } catch (error) {
+      setStatus(`停止失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    } finally {
+      cancellingAssignmentIds.delete(key);
+      render();
+    }
+    return;
+  }
   if (!target.assignmentId) {
     if (target.activeRun?.assistant) {
       target.activeRun.assistant.status = "cancelled";
@@ -754,7 +1623,10 @@ function render() {
     if (conversationsHasMore) void loadConversationPage(false);
     else { conversationVisibleLimit += CONVERSATION_PAGE_SIZE; render(); }
   });
-  document.querySelectorAll("[data-delete-session]").forEach((button) => button.addEventListener("click", () => { sessions = sessions.filter((item) => item.id !== button.dataset.deleteSession); if (activeId === button.dataset.deleteSession) activeId = sessions[0]?.id ?? newConversation().id; saveSessions(); render(); }));
+  document.querySelectorAll("[data-delete-session]").forEach((button) => {
+    button.disabled = deletingConversationIds.has(button.dataset.deleteSession);
+    button.addEventListener("click", () => void deleteConversation(button.dataset.deleteSession));
+  });
   const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
   document.querySelectorAll("[data-assistant-message]").forEach((card) => {
     const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
@@ -799,9 +1671,18 @@ function render() {
   const selectedAssistant = selectedAssistantMessage(conversation, messages);
   const activeRun = activeRunsByConversation.get(conversation.id);
   const cancelTarget = cancellationTarget(activeRun, messages);
-  $("submit").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0;
-  $("cancel").disabled = !cancelTarget.canCancel || (cancelTarget.assignmentId !== undefined && cancellingAssignmentIds.has(cancelTarget.assignmentId));
-  $("upload-file").disabled = activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
+  const localTargetUnavailable = isLocalExecution() && selectedLocalRuntime()?.status !== "ready";
+  const cancellingKey = cancelTarget.localRunId ? `strict:${cancelTarget.activeRun?.localRuntimeId ?? cancelTarget.assistant?.localRuntimeId}:${cancelTarget.localRunId}` : cancelTarget.assignmentId;
+  const primaryAction = $("submit");
+  const stopping = cancelTarget.canCancel;
+  primaryAction.disabled = stopping
+    ? cancellingKey !== undefined && cancellingAssignmentIds.has(cancellingKey)
+    : activeRun !== undefined || uploadCount(conversation.id) > 0 || localTargetUnavailable;
+  primaryAction.classList.toggle("is-stop", stopping);
+  primaryAction.textContent = stopping ? "■" : "↑";
+  primaryAction.setAttribute("aria-label", stopping ? "停止当前任务" : "发送任务");
+  primaryAction.title = stopping ? "停止当前任务" : "发送任务";
+  $("upload-file").disabled = (isLocalExecution() && selectedLocalRuntime()?.status !== "ready") || activeRun !== undefined || uploadCount(conversation.id) > 0 || pendingAttachments(conversation).length >= MAX_PENDING_ATTACHMENTS;
   renderPendingAttachments(conversation);
   // The artifact pane has its own selection: while a new turn is running the
   // user can still preview a product from any earlier assistant reply. Do not
@@ -825,6 +1706,42 @@ function render() {
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
   renderedConversationId = conversation.id;
+}
+
+async function deleteConversation(conversationId) {
+  const conversation = sessions.find((item) => item.id === conversationId);
+  if (!conversation || deletingConversationIds.has(conversationId)) return;
+  if (activeRunsByConversation.has(conversationId) || (conversation.messages || []).some((message) => message.role === "assistant" && message.status === "running")) {
+    setStatus("会话仍有运行中的任务，请先停止后再删除", "error");
+    return;
+  }
+  const hasRouterConversation = Number(conversation.runCount || 0) > 0 || (conversation.messages || []).some((message) => typeof message.assignmentId === "string");
+  const strictLocalRuntimeIds = [...new Set((conversation.messages || [])
+    .filter((message) => typeof message.localRunId === "string" && typeof message.assignmentId !== "string" && typeof message.localRuntimeId === "string")
+    .map((message) => message.localRuntimeId))];
+  deletingConversationIds.add(conversationId);
+  render();
+  try {
+    const deletions = [];
+    if (hasRouterConversation) {
+      deletions.push(fetch(`${api}/v1/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE", headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } })
+        .then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `HTTP ${response.status}`); } }));
+    }
+    for (const runtimeId of strictLocalRuntimeIds) {
+      deletions.push(localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtimeId)}/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" })
+        .then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `Local Agent HTTP ${response.status}`); } }));
+    }
+    await Promise.all(deletions);
+    sessions = sessions.filter((item) => item.id !== conversationId);
+    if (activeId === conversationId) activeId = sessions[0]?.id ?? newConversation().id;
+    saveSessions();
+    setStatus("会话已删除", "ok");
+  } catch (error) {
+    setStatus(`删除会话失败：${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally {
+    deletingConversationIds.delete(conversationId);
+    render();
+  }
 }
 
 function selectedAssistantMessage(conversation, messages = conversation?.messages || []) {
@@ -874,7 +1791,7 @@ function renderMessage(message) {
   const isSelected = selectedAssistantMessage(activeConversation())?.id === message.id;
   const isLive = presentation.isLive;
   const plan = projectPlanStatuses(message.plan || [], message.events || [], message.status);
-  const runtime = message.runtimeId ? ` · ${message.runtimeId}` : "";
+  const provenance = renderExecutionProvenance(message);
   const reasoning = isLive && message.reasoning ? `<details class="live-reasoning" open><summary>模型思考</summary><div class="reasoning-body">${formatText(message.reasoning)}</div></details>` : "";
   const humanLoop = renderHumanLoop(message);
   const recovery = renderRecovery(message);
@@ -883,7 +1800,8 @@ function renderMessage(message) {
   // any useful interim model text, but never let it displace the response
   // controls the user needs in order to continue the Run.
   const projectedOutput = `${interimOutput}${humanLoop}${recovery}`;
-  const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(presentation.emptyText)}</span>`;
+  const artifactSummary = message.status === "completed" ? completedArtifactSummary(message.artifacts) : "";
+  const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(artifactSummary || presentation.emptyText)}</span>`;
   const output = message.status === "failed"
     ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.partialText ? `<div class="partial-result"><strong>本次处理说明</strong>${renderMarkdown(message.partialText)}</div>` : ""}${recovery}`
     : projectedOutput || emptyOutput;
@@ -899,7 +1817,11 @@ function renderMessage(message) {
   const executionTrace = renderExecutionTrace(message);
   const liveEventIndicator = renderLiveEventIndicator(message);
   const inlineArtifacts = renderInlineArtifacts(message);
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop${runtime} · ${stateLabel}</span>${liveEventIndicator}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${liveEventIndicator}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+}
+
+function renderExecutionProvenance(message) {
+  return `<span class="execution-provenance" aria-label="本轮执行来源">${executionProvenanceParts(message).map((part) => `<span class="execution-provenance-chip ${escapeHtml(part.kind)}">${escapeHtml(part.label)}</span>`).join("")}</span>`;
 }
 
 function renderInlineArtifacts(assistant) {
@@ -1286,12 +2208,15 @@ function renderArtifacts() {
   if (!previewHost || !emptyHost) return;
   if (!inlineArtifactPreview || inlineArtifactPreview.assistantId !== assistant?.id || !artifacts.some((artifact) => artifact.id === inlineArtifactPreview.artifactId)) {
     previewHost.hidden = true;
-    previewHost.innerHTML = "";
+    updateArtifactPreviewMarkup(previewHost, "");
     emptyHost.hidden = true;
     return;
   }
   previewHost.hidden = false;
-  previewHost.innerHTML = inlineArtifactPreview.loading ? `<div class="artifact-inline-loading">正在生成预览…</div>` : (inlineArtifactPreview.html || `<div class="artifact-inline-loading">暂无预览内容</div>`);
+  const previewMarkup = inlineArtifactPreview.loading
+    ? `<div class="artifact-inline-loading">正在生成预览…</div>`
+    : (inlineArtifactPreview.html || `<div class="artifact-inline-loading">暂无预览内容</div>`);
+  updateArtifactPreviewMarkup(previewHost, previewMarkup);
   emptyHost.hidden = true;
 }
 
@@ -1301,9 +2226,8 @@ async function openSelectedArtifactFullscreen() {
     || selectedAssistantMessage(conversation);
   const artifactId = inlineArtifactPreview?.artifactId;
   const artifact = (assistant?.artifacts || []).find((item) => item.id === artifactId);
-  if (!assistant?.assignmentId || !artifact) return;
-  const headers = () => ({ "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() });
-  const endpoint = (suffix = "") => `${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifact.id)}${suffix}`;
+  if ((!assistant?.assignmentId && !assistant?.localRunId) || !artifact) return;
+  const { endpoint, headers } = artifactTransport(assistant, artifact);
   openArtifactPreview({
     artifact,
     fetchBytes: () => fetchBytes(endpoint, headers).then((response) => response.blob()),
@@ -1313,19 +2237,21 @@ async function openSelectedArtifactFullscreen() {
 
 async function downloadArtifact(artifactId, assistantId) {
   const assistant = (activeConversation()?.messages || []).find((message) => message.role === "assistant" && message.id === assistantId) || selectedAssistantMessage(activeConversation());
-  if (!assistant?.assignmentId) return;
-  const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifactId)}`, { headers: { "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() } });
+  if (!assistant?.assignmentId && !assistant?.localRunId) return;
+  const artifact = (assistant.artifacts || []).find((item) => item.id === artifactId);
+  if (!artifact) return;
+  const transport = artifactTransport(assistant, artifact);
+  const response = await agentAwareFetch(transport.endpoint(), { headers: transport.headers() });
   if (!response.ok) return;
   const blob = await response.blob(); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = response.headers.get("content-disposition")?.split("filename*=UTF-8''")[1] ? decodeURIComponent(response.headers.get("content-disposition").split("filename*=UTF-8''")[1]) : "artifact"; link.click(); URL.revokeObjectURL(link.href);
 }
 
 async function previewArtifact(artifactId, assistantId) {
   const assistant = (activeConversation()?.messages || []).find((message) => message.role === "assistant" && message.id === assistantId) || selectedAssistantMessage(activeConversation());
-  if (!assistant?.assignmentId) return;
+  if (!assistant?.assignmentId && !assistant?.localRunId) return;
   const artifact = (assistant.artifacts || []).find((item) => item.id === artifactId);
   if (!artifact || artifact.previewable === false) return;
-  const headers = () => ({ "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() });
-  const endpoint = (suffix = "") => `${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifactId)}${suffix}`;
+  const { endpoint, headers } = artifactTransport(assistant, artifact);
   artifactPanelOpen = true;
   inlineArtifactPreview = { assistantId: assistant.id, artifactId, loading: true };
   render();
@@ -1347,14 +2273,36 @@ async function previewArtifact(artifactId, assistantId) {
   render();
 }
 
+function artifactTransport(assistant, artifact) {
+  // A Router-assigned local Runtime is reachable only through the Agent's
+  // outbound WebSocket. Keep the browser on the authenticated Router route;
+  // `strict_local` has no Assignment and is the sole loopback-only path.
+  if (assistant.assignmentId) {
+    return {
+      endpoint: (suffix = "") => `${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/artifacts/${encodeURIComponent(artifact.id)}${suffix}`,
+      headers: () => ({ "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() }),
+    };
+  }
+  if (artifact.location === "local") {
+    const runId = assistant.localRunId || assistant.remoteRunId;
+    const runtimeId = assistant.localRuntimeId || assistant.runtimeId;
+    if (!runId || !runtimeId) throw new Error("本机产物运行标识不可用");
+    return {
+      endpoint: (suffix = "") => `${localAgentApi}/v1/local-runtimes/${encodeURIComponent(runtimeId)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}${suffix}`,
+      headers: () => localHeaders(),
+    };
+  }
+  throw new Error("产物没有可访问的数据面");
+}
+
 async function fetchBytes(endpoint, headers) {
-  const response = await fetch(endpoint(), { headers: headers() });
+  const response = await agentAwareFetch(endpoint(), { headers: headers() });
   if (!response.ok) throw new Error(`无法读取产物（HTTP ${response.status}）`);
   return response;
 }
 
 async function fetchStructuredPreview(endpoint, headers) {
-  const response = await fetch(endpoint("/preview"), { headers: headers() });
+  const response = await agentAwareFetch(endpoint("/preview"), { headers: headers() });
   if (!response.ok) throw new Error(`无法生成预览（HTTP ${response.status}）`);
   return await response.json();
 }
@@ -1440,5 +2388,5 @@ function formatBytes(bytes) { if (typeof bytes !== "number") return "大小未�
 function setStatus(text, tone = "") { $("runtime-status").innerHTML = `<i class="status-dot"></i> ${escapeHtml(text)}`; $("runtime-status").className = `status-pill ${tone}`; }
 function formatText(text) { return escapeHtml(text).replace(/\n/g, "<br />"); }
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>\"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char])); }
-async function call(path, tenantId, userId, body, signal) { const response = await fetch(`${api}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": tenantId, "x-user-id": userId }, body: JSON.stringify(body), ...(signal === undefined ? {} : { signal }) }); const parsed = await response.json(); if (!response.ok) throw new Error(parsed.error || `HTTP ${response.status}`); return parsed; }
+async function call(path, body, signal) { const response = await fetch(`${api}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), ...(signal === undefined ? {} : { signal }) }); const parsed = await response.json(); if (!response.ok) throw new Error(parsed.error || `HTTP ${response.status}`); return parsed; }
 async function toBase64(file) { const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary); }

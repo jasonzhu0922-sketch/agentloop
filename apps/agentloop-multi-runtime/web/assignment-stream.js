@@ -1,7 +1,7 @@
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
 /** Observe an accepted assignment. Transport failure never creates a Run outcome. */
-export async function observeAssignment({ baseUrl, headers, signal, afterSeq = 0, onEvent, onRun, onConnection,
+export async function observeAssignment({ baseUrl, headers, signal, afterSeq = 0, onEvent, onRun, onStatus, onConnection,
   fetchImpl = fetch, wait = retryDelay, idleTimeoutMs = 30_000 }) {
   let cursor = afterSeq;
   let retries = 0;
@@ -12,6 +12,20 @@ export async function observeAssignment({ baseUrl, headers, signal, afterSeq = 0
     retries = 0;
     return terminal;
   };
+  // A Runtime resolves its actual model when it admits the Run, well before a
+  // terminal event exists.  Read that neutral status once for consumers that
+  // render live provenance; it is not a synthetic event and never changes a
+  // Run outcome.  Keep this opt-in so generic observers retain their original
+  // event-only traffic profile.
+  if (onStatus !== undefined) {
+    try {
+      const response = await fetchImpl(baseUrl, { headers, signal });
+      const body = response.ok ? await response.json() : undefined;
+      if (body?.run?.status === "running") onStatus(body.run);
+    } catch {
+      // The SSE/status retry loop remains the authority for transport faults.
+    }
+  }
   while (!signal.aborted) {
     const connection = new AbortController();
     const abort = () => connection.abort(signal.reason);

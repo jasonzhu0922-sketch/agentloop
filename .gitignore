@@ -8,6 +8,7 @@ apps/agentloop-multi-runtime/config/llm-providers.json
 apps/agentloop-app/custom-skills/
 apps/agentloop-multi-runtime/custom-skills/*
 !apps/agentloop-multi-runtime/custom-skills/.gitkeep
+apps/agentloop-multi-runtime/release/
 apps/agentloop-app/data/
 apps/agentloop-app/conversations/
 apps/agentloop-app/uploads/
@@ -25,6 +26,7 @@ web/tsconfig.tsbuildinfo
 *.db
 *.db-shm
 *.db-wal
+**/__pycache__/
 .DS_Store
 .agentloop/
 .workspace/

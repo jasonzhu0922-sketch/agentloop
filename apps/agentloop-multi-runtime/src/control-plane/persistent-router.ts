@@ -1,6 +1,7 @@
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { CommandOutputContent, ProcessArtifact, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
 import { ControlPlaneStore, RuntimeCapacityError, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
+import { SharedWorkspaceArtifactCatalog } from "../artifacts/shared-workspace-artifact-catalog.ts";
 
 export class PersistentMultiRuntimeRouter {
   private readonly store: ControlPlaneStore;
@@ -8,6 +9,7 @@ export class PersistentMultiRuntimeRouter {
   private readonly heartbeatTtlMs: number;
   private readonly reservationTtlMs: number;
   private readonly now: () => number;
+  private readonly artifactsCatalog?: SharedWorkspaceArtifactCatalog;
   private observationCursor = "";
   private reconciliation?: Promise<void>;
 
@@ -17,12 +19,14 @@ export class PersistentMultiRuntimeRouter {
     readonly heartbeatTtlMs?: number;
     readonly reservationTtlMs?: number;
     readonly now?: () => number;
+    readonly artifactsCatalog?: SharedWorkspaceArtifactCatalog;
   }) {
     this.store = input.store;
     this.endpointFactory = input.endpointFactory;
     this.heartbeatTtlMs = input.heartbeatTtlMs ?? 15_000;
     this.reservationTtlMs = input.reservationTtlMs ?? 30_000;
     this.now = input.now ?? Date.now;
+    this.artifactsCatalog = input.artifactsCatalog;
   }
 
   async submit(task: SubmitConversationTask): Promise<StoredAssignment> {
@@ -45,9 +49,9 @@ export class PersistentMultiRuntimeRouter {
     }
   }
 
-  async models(): Promise<readonly RuntimeModelSummary[]> {
+  async models(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]> {
     const seen = new Map<string, RuntimeModelSummary>();
-    const catalogs = await Promise.all((await this.store.runtimeEndpoints()).map(async (runtime) => {
+    const catalogs = await Promise.all((await this.store.runtimeEndpoints(tenantId, ownerUserId)).map(async (runtime) => {
       try { return await this.endpointFactory(runtime.endpoint).models?.() ?? []; } catch { return []; }
     }));
     for (const models of catalogs) for (const model of models) if (!seen.has(model.key)) seen.set(model.key, model);
@@ -70,16 +74,18 @@ export class PersistentMultiRuntimeRouter {
     for (let offset = 0; offset < assignments.length; offset += 4) {
       await Promise.all(assignments.slice(offset, offset + 4).map(async (assignment) => {
         let run: RuntimeRunStatus | undefined;
-        try { run = await this.endpointFactory(assignment.runtimeEndpoint).getRun?.(assignment.remoteRunId); }
+        try {
+          run = await this.endpointFactory(assignment.runtimeEndpoint).getRun?.(assignment.remoteRunId);
+          if (run !== undefined && run.remoteRunId === assignment.remoteRunId) await this.observeHostRun(assignment, run);
+        }
         catch { return; } // Keep the last observed state; retry on a later pass.
-        if (run !== undefined && run.remoteRunId === assignment.remoteRunId) await this.store.observeRun(assignment.id, run, this.now());
       }));
     }
     this.observationCursor = assignments.at(-1)?.id ?? "";
   }
 
-  async runtimes(): Promise<readonly RuntimeCatalogEntry[]> {
-    return await this.store.runtimeCatalog();
+  async runtimes(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeCatalogEntry[]> {
+    return await this.store.runtimeCatalog(tenantId, ownerUserId);
   }
 
   async conversations(
@@ -94,13 +100,17 @@ export class PersistentMultiRuntimeRouter {
     return await this.store.conversation(tenantId, ownerUserId, conversationId);
   }
 
+  async deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void> {
+    await this.store.deleteConversation(tenantId, ownerUserId, conversationId);
+  }
+
   async assignment(id: string): Promise<{ readonly assignment: StoredAssignment; readonly run?: RuntimeRunStatus } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined) return undefined;
     if (assignment.remoteRunId.length === 0) return { assignment };
     try {
       const run = await this.endpointFactory(assignment.runtimeEndpoint).getRun?.(assignment.remoteRunId);
-      if (run !== undefined) await this.store.observeRun(assignment.id, run, this.now());
+      if (run !== undefined && run.remoteRunId === assignment.remoteRunId) await this.observeHostRun(assignment, run);
       const refreshed = await this.store.assignment(id);
       return {
         assignment: refreshed ?? assignment,
@@ -115,13 +125,18 @@ export class PersistentMultiRuntimeRouter {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined) return undefined;
     if (assignment.remoteRunId.length === 0) return { assignment, artifacts: [] };
+    const catalogued = await this.artifactsCatalog?.list(assignment.id) ?? [];
+    if (catalogued.length > 0) return { assignment, artifacts: catalogued };
     const artifacts = await this.endpointFactory(assignment.runtimeEndpoint).artifacts?.(assignment.remoteRunId) ?? [];
-    return { assignment, artifacts };
+    if (assignment.runtimeEndpoint.startsWith("local-runtime://")) return { assignment, artifacts };
+    return { assignment, artifacts: await this.captureArtifacts(assignment, artifacts) };
   }
 
   async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: StoredAssignment; readonly artifact: ProcessArtifact; readonly content: Uint8Array } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const catalogued = await this.artifactsCatalog?.read(assignment.id, artifactId);
+    if (catalogued !== undefined) return { assignment, ...catalogued };
     const result = await this.endpointFactory(assignment.runtimeEndpoint).readArtifact?.(assignment.remoteRunId, artifactId);
     return result === undefined ? undefined : { assignment, ...result };
   }
@@ -129,6 +144,8 @@ export class PersistentMultiRuntimeRouter {
   async previewArtifact(id: string, artifactId: string): Promise<{ readonly assignment: StoredAssignment; readonly preview: unknown } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
+    const catalogued = await this.artifactsCatalog?.preview(assignment.id, artifactId);
+    if (catalogued !== undefined) return { assignment, preview: catalogued };
     const preview = await this.endpointFactory(assignment.runtimeEndpoint).previewArtifact?.(assignment.remoteRunId, artifactId);
     return preview === undefined ? undefined : { assignment, preview };
   }
@@ -148,13 +165,14 @@ export class PersistentMultiRuntimeRouter {
     if (assignment === undefined) return undefined;
     if (assignment.remoteRunId.length === 0) return { assignment, events: [] };
     const events = await this.endpointFactory(assignment.runtimeEndpoint).events?.(assignment.remoteRunId, afterSeq) ?? [];
-    const terminalRun = terminalRunFromEvents(events, assignment.remoteRunId);
-    if (terminalRun === undefined) return { assignment, events };
+    const terminalEventRun = terminalRunFromEvents(events, assignment.remoteRunId);
+    if (terminalEventRun === undefined) return { assignment, events };
 
-    // Event streaming is the normal browser-facing observation path.  Keep
-    // the Router-owned Assignment projection in sync when it observes the
-    // Host's terminal Run event, rather than requiring a separate assignment
-    // status read to repair it later.
+    // A terminal event is only a lightweight notification. Hydrate it from
+    // the Host before emitting it to the browser, so the persisted turn and
+    // shared artifact catalog are already coherent when the UI handles the
+    // event and requests its final products.
+    const terminalRun = await this.hydrateTerminalEventRun(assignment, terminalEventRun);
     await this.store.observeRun(id, terminalRun, this.now());
     return { assignment: (await this.store.assignment(id)) ?? assignment, events };
   }
@@ -219,6 +237,45 @@ export class PersistentMultiRuntimeRouter {
     await this.store.heartbeat(input);
   }
 
+  private async captureArtifacts(assignment: StoredAssignment, artifacts: readonly ProcessArtifact[]): Promise<readonly ProcessArtifact[]> {
+    if (this.artifactsCatalog === undefined || artifacts.length === 0) return artifacts;
+    return await this.artifactsCatalog.capture({
+      assignmentId: assignment.id, tenantId: assignment.tenantId, ownerUserId: assignment.ownerUserId,
+      conversationId: assignment.conversationId, remoteRunId: assignment.remoteRunId, artifacts,
+    });
+  }
+
+  private async hydrateTerminalEventRun(assignment: StoredAssignment, eventRun: RuntimeRunStatus): Promise<RuntimeRunStatus> {
+    const endpoint = this.endpointFactory(assignment.runtimeEndpoint);
+    if (endpoint.getRun === undefined) return eventRun;
+    const hostRun = await endpoint.getRun(assignment.remoteRunId);
+    if (hostRun.remoteRunId !== assignment.remoteRunId) throw new TypeError("terminal_event_run_identity_mismatch");
+    if (!isTerminalRunStatus(hostRun.status)) throw new TypeError("terminal_event_host_status_not_terminal");
+    if (hostRun.artifacts !== undefined && hostRun.artifacts.length > 0) await this.captureArtifacts(assignment, hostRun.artifacts);
+    // The terminal event is the source of the exact completion instant; some
+    // Host status APIs omit finishedAt even though their event stream records it.
+    return {
+      ...hostRun,
+      ...(hostRun.output === undefined && eventRun.output !== undefined ? { output: eventRun.output } : {}),
+      ...(hostRun.partialOutput === undefined && eventRun.partialOutput !== undefined ? { partialOutput: eventRun.partialOutput } : {}),
+      ...(hostRun.errorCode === undefined && eventRun.errorCode !== undefined ? { errorCode: eventRun.errorCode } : {}),
+      ...(hostRun.errorMessage === undefined && eventRun.errorMessage !== undefined ? { errorMessage: eventRun.errorMessage } : {}),
+      ...(eventRun.finishedAt === undefined ? {} : { finishedAt: eventRun.finishedAt }),
+    };
+  }
+
+  /**
+   * Host status polling is the terminal-state authority.  Persist its artifact
+   * receipts before projecting a terminal status, so the Router does not
+   * advertise a completed assignment whose shared-workspace artifacts have
+   * never been captured.  On a transient shared-workspace error the caller
+   * keeps the assignment unsettled and retries the complete observation.
+   */
+  private async observeHostRun(assignment: StoredAssignment, run: RuntimeRunStatus): Promise<void> {
+    if (run.artifacts !== undefined && run.artifacts.length > 0) await this.captureArtifacts(assignment, run.artifacts);
+    await this.store.observeRun(assignment.id, run, this.now());
+  }
+
 }
 
 export { RuntimeCapacityError };
@@ -242,6 +299,10 @@ function terminalRunFromEvents(events: readonly RuntimeRunEvent[], remoteRunId: 
   return undefined;
 }
 
+function isTerminalRunStatus(status: RuntimeRunStatus["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 function mergeObservedFailure(run: RuntimeRunStatus, assignment: StoredAssignment): RuntimeRunStatus {
   if (run.status !== "failed") return run;
   return {
@@ -263,11 +324,15 @@ function toEnvelope(task: SubmitConversationTask, assignment: StoredAssignment):
     subject: { tenantId: task.tenantId, userId: task.ownerUserId },
     conversationId: task.conversationId,
     input: task.input,
+    executionTarget: task.executionTarget ?? { kind: "cloud_pool", ...(task.requestedProfile === undefined ? {} : { profile: task.requestedProfile }) },
+    dataPolicy: task.dataPolicy ?? { mode: "cloud" },
     ...(task.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: task.requestedRuntimeId }),
     ...(task.requestedProfile === undefined ? {} : { requestedProfile: task.requestedProfile }),
     ...(task.requestedModelKey === undefined ? {} : { requestedModelKey: task.requestedModelKey }),
     allowDangerousTools: task.allowDangerousTools !== false,
     resourceRefs: task.resourceRefs ?? [],
+    ...(task.localDirectoryScopeIds === undefined ? {} : { localDirectoryScopeIds: task.localDirectoryScopeIds }),
+    ...(task.localUploadedSourceIds === undefined ? {} : { localUploadedSourceIds: task.localUploadedSourceIds }),
   };
 }
 

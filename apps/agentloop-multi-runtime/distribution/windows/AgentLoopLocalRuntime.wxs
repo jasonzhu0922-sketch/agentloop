@@ -1,0 +1,36 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="AgentLoop Local Runtime"
+           Manufacturer="AgentLoop"
+           Version="$(var.Version)"
+           UpgradeCode="$(var.UpgradeCode)"
+           Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of AgentLoop Local Runtime is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="AgentLoop Local Runtime">
+        <Component Id="RuntimeFiles" Bitness="always64">
+          <Files Include="$(var.PayloadDir)\**" />
+          <RegistryValue Root="HKLM" Key="Software\AgentLoop\LocalRuntime" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+        <Component Id="ProtocolRegistration" Bitness="always64">
+          <RegistryKey Root="HKCR" Key="agentloop-local-runtime" ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+            <RegistryValue Type="string" Value="URL:AgentLoop Local Runtime" />
+            <RegistryValue Name="URL Protocol" Type="string" Value="" />
+            <RegistryKey Key="DefaultIcon">
+              <RegistryValue Type="string" Value="[INSTALLFOLDER]AgentLoop Local Runtime.exe,0" />
+            </RegistryKey>
+            <RegistryKey Key="shell\open\command">
+              <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]AgentLoop Local Runtime.exe&quot; &quot;%1&quot;" />
+            </RegistryKey>
+          </RegistryKey>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Complete" Title="AgentLoop Local Runtime" Level="1">
+      <ComponentRef Id="RuntimeFiles" />
+      <ComponentRef Id="ProtocolRegistration" />
+    </Feature>
+  </Package>
+</Wix>

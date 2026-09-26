@@ -6,12 +6,15 @@ import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
 import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
 import { startAssignmentReconciler } from "../src/control-plane/assignment-reconciler.ts";
 import { createRouterHttpServer } from "../src/http/router-http.ts";
+import { IdentityService } from "../src/auth/identity-service.ts";
 import { observeAssignment } from "../web/assignment-stream.js";
 import { projectAssistantEvent } from "../web/assistant-event-projection.js";
 
 test("HTTP Router + browser observer survives upstream error and socket loss, reconciles final state without redispatch", { timeout: 10_000 }, async () => {
   const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
   await store.ready();
+  const identity = new IdentityService(database);
+  const session = await identity.register("observer@example.test", "long-test-password-123");
   await store.seedRuntimes([{ id: "host", endpoint: "http://fixture-host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }]);
   await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: Date.now() });
   let finished = false; let dispatches = 0; let eventReads = 0;
@@ -26,8 +29,8 @@ test("HTTP Router + browser observer survives upstream error and socket loss, re
       return events.filter((event) => event.seq > afterSeq);
     },
   }) });
-  const assignment = await router.submit({ tenantId: "t", ownerUserId: "u", conversationId: "c", clientMessageId: "m", input: "fixture" });
-  const server = createRouterHttpServer(router);
+  const assignment = await router.submit({ tenantId: session.principal.tenantId, ownerUserId: session.principal.userId, conversationId: "c", clientMessageId: "m", input: "fixture" });
+  const server = createRouterHttpServer(router, { identity });
   const observerAbort = new AbortController();
   let stop = async () => {};
   try {
@@ -36,7 +39,7 @@ test("HTTP Router + browser observer survives upstream error and socket loss, re
     const baseUrl = `http://127.0.0.1:${address.port}/v1/assignments/${assignment.id}`;
     const assistant: Record<string, unknown> = { status: "running", text: "" };
     const applied: number[] = []; let reconnects = 0; let streamRequests = 0; const cursors: string[] = [];
-    await observeAssignment({ baseUrl, headers: { "x-tenant-id": "t", "x-user-id": "u" }, signal: observerAbort.signal,
+    await observeAssignment({ baseUrl, headers: { authorization: `Bearer ${session.token}`, "x-tenant-id": "forged", "x-user-id": "forged" }, signal: observerAbort.signal,
       fetchImpl: async (url, init) => {
         if (String(url).includes("/stream")) {
           streamRequests++; cursors.push(new URL(String(url)).searchParams.get("afterSeq")!);
@@ -53,7 +56,7 @@ test("HTTP Router + browser observer survives upstream error and socket loss, re
     assert.equal((await store.assignment(assignment.id))?.status, "completed");
 
     // A second accepted Run has no SSE client at all. Only the background observer updates it.
-    const unobserved = await router.submit({ tenantId: "t", ownerUserId: "u", conversationId: "c2", clientMessageId: "m2", input: "fixture" });
+    const unobserved = await router.submit({ tenantId: session.principal.tenantId, ownerUserId: session.principal.userId, conversationId: "c2", clientMessageId: "m2", input: "fixture" });
     stop = startAssignmentReconciler(router);
     await stop();
     assert.equal((await store.assignment(unobserved.id))?.status, "completed"); assert.equal(dispatches, 2);
