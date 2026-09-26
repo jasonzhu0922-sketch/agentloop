@@ -186,8 +186,8 @@ export class RunRepository {
 
   async insertConversation(input: { id: string; ownerUserId: string; title: string; createdAt: number }): Promise<void> {
     await this.connection.prepare(`
-      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO conversations(id, owner_user_id, title, visible_directories_json, created_at, updated_at)
+      VALUES (?, ?, ?, '[]', ?, ?)
     `).run(input.id, input.ownerUserId, input.title, input.createdAt, input.createdAt);
   }
 
@@ -203,8 +203,8 @@ export class RunRepository {
         return;
       }
       await this.connection.prepare(`
-        INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO conversations(id, owner_user_id, title, visible_directories_json, created_at, updated_at)
+        VALUES (?, ?, ?, '[]', ?, ?)
       `).run(input.id, input.ownerUserId, input.title, input.now, input.now);
     });
   }

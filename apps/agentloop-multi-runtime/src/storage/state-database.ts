@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { AppDatabase, PgConnection, TiDbConnection } from "@zhujun/agentloop";
+import { AppDatabase, PgConnection, SqliteConnection, TiDbConnection } from "@zhujun/agentloop";
 
 export type StateDatabaseConfig =
   | { readonly driver: "sqlite"; readonly databasePath: string }
@@ -12,27 +12,43 @@ export function stateDatabaseConfigFromEnvironment(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly appRoot: string;
   readonly sqliteFallbackPath: string;
+  /** Role-specific names such as AGENTLOOP_ROUTER_STATE_DRIVER, with AGENTLOOP_STATE_* fallback. */
+  readonly environmentPrefix?: "AGENTLOOP_ROUTER_STATE" | "AGENTLOOP_RUNTIME_STATE";
 }): StateDatabaseConfig {
-  const driver = input.environment.AGENTLOOP_STATE_DRIVER ?? "sqlite";
+  const value = (suffix: "DRIVER" | "SQLITE_PATH" | "DATABASE_URL" | "POOL_SIZE"): string | undefined =>
+    input.environment[input.environmentPrefix === undefined ? `AGENTLOOP_STATE_${suffix}` : `${input.environmentPrefix}_${suffix}`]
+      ?? input.environment[`AGENTLOOP_STATE_${suffix}`];
+  const driver = value("DRIVER") ?? "sqlite";
   if (driver === "sqlite") {
     return {
       driver,
-      databasePath: resolve(input.appRoot, input.environment.AGENTLOOP_STATE_SQLITE_PATH ?? input.sqliteFallbackPath),
+      databasePath: resolve(input.appRoot, value("SQLITE_PATH") ?? input.sqliteFallbackPath),
     };
   }
   if (driver !== "postgres" && driver !== "tidb") throw new TypeError("AGENTLOOP_STATE_DRIVER must be sqlite, postgres, or tidb");
-  const connectionString = input.environment.AGENTLOOP_STATE_DATABASE_URL;
+  const connectionString = value("DATABASE_URL");
   if (connectionString === undefined || connectionString.trim().length === 0) {
     throw new TypeError(`AGENTLOOP_STATE_DATABASE_URL must be configured when AGENTLOOP_STATE_DRIVER=${driver}`);
   }
-  const poolSize = optionalPositiveInteger(input.environment.AGENTLOOP_STATE_POOL_SIZE, "AGENTLOOP_STATE_POOL_SIZE");
+  const poolSize = optionalPositiveInteger(value("POOL_SIZE"), "AGENTLOOP_STATE_POOL_SIZE");
   return { driver, connectionString, ...(poolSize === undefined ? {} : { poolSize }) };
 }
 
-export async function openStateDatabase(config: StateDatabaseConfig): Promise<AppDatabase> {
+/**
+ * Opens one cloud-side state database. Router and Runtime have distinct
+ * schema ownership: the Router only receives the connection facade, while a
+ * Runtime Host installs the AgentLoop kernel tables it executes against.
+ */
+export async function openStateDatabase(
+  config: StateDatabaseConfig,
+  input: { readonly schema: "router" | "runtime" } = { schema: "runtime" },
+): Promise<AppDatabase> {
   if (config.driver === "sqlite") {
     if (config.databasePath !== ":memory:") mkdirSync(dirname(config.databasePath), { recursive: true });
-    return new AppDatabase(config.databasePath);
+    return await AppDatabase.open({
+      connection: new SqliteConnection(config.databasePath),
+      schema: input.schema === "runtime" ? "kernel" : "none",
+    });
   }
   const connection = config.driver === "postgres"
     ? await PgConnection.create(config.poolSize === undefined
@@ -41,7 +57,7 @@ export async function openStateDatabase(config: StateDatabaseConfig): Promise<Ap
     : await TiDbConnection.create(config.poolSize === undefined
       ? config.connectionString
       : { uri: config.connectionString, connectionLimit: config.poolSize });
-  return await AppDatabase.open({ connection });
+  return await AppDatabase.open({ connection, schema: input.schema === "runtime" ? "kernel" : "none" });
 }
 
 function optionalPositiveInteger(value: string | undefined, name: string): number | undefined {

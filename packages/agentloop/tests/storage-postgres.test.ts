@@ -102,6 +102,25 @@ test("TiDB adapter keeps question-mark binding and pins transactions", async () 
     translateTiDbSql("INSERT INTO demo(id, value) VALUES (?, ?) ON CONFLICT(id) DO NOTHING"),
     "INSERT INTO demo(id, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE id = id",
   );
+  assert.equal(
+    translateTiDbSql("CREATE TABLE demo(kind TEXT NOT NULL DEFAULT 'inline', content TEXT NOT NULL)"),
+    "CREATE TABLE demo(kind LONGTEXT NOT NULL, content TEXT NOT NULL)",
+  );
+  const schema = translateTiDbSql(`
+    CREATE TABLE skills (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      instructions TEXT NOT NULL,
+      visible_directories_json TEXT NOT NULL DEFAULT '[]',
+      UNIQUE(owner_user_id, name)
+    )
+  `);
+  assert.match(schema, /id VARCHAR\(191\) PRIMARY KEY/);
+  assert.match(schema, /owner_user_id VARCHAR\(191\) NOT NULL/);
+  assert.match(schema, /name VARCHAR\(255\) NOT NULL/);
+  assert.match(schema, /instructions TEXT NOT NULL/);
+  assert.match(schema, /visible_directories_json LONGTEXT NOT NULL/);
 });
 
 class RecordingConnection implements SqlConnection {

@@ -39,7 +39,7 @@ import { ControlPlaneStore, ConversationDeleteConflictError, RuntimeCapacityErro
 import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
-import { stateDatabaseConfigFromEnvironment } from "../src/storage/state-database.ts";
+import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/storage/state-database.ts";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/domain/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
@@ -110,6 +110,26 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     },
     appRoot: "/application", sqliteFallbackPath: "./data/legacy.db",
   }), { driver: "tidb", connectionString: "mysql://agentloop@tidb/agentloop", poolSize: 12 });
+  assert.deepEqual(stateDatabaseConfigFromEnvironment({
+    environment: {
+      AGENTLOOP_STATE_DRIVER: "sqlite",
+      AGENTLOOP_ROUTER_STATE_DRIVER: "tidb",
+      AGENTLOOP_ROUTER_STATE_DATABASE_URL: "mysql://router@tidb/agentloop_router",
+      AGENTLOOP_RUNTIME_STATE_DRIVER: "tidb",
+      AGENTLOOP_RUNTIME_STATE_DATABASE_URL: "mysql://runtime@tidb/agentloop_runtime",
+    },
+    appRoot: "/application", sqliteFallbackPath: "./data/router.db", environmentPrefix: "AGENTLOOP_ROUTER_STATE",
+  }), { driver: "tidb", connectionString: "mysql://router@tidb/agentloop_router" });
+  assert.deepEqual(stateDatabaseConfigFromEnvironment({
+    environment: {
+      AGENTLOOP_STATE_DRIVER: "sqlite",
+      AGENTLOOP_ROUTER_STATE_DRIVER: "tidb",
+      AGENTLOOP_ROUTER_STATE_DATABASE_URL: "mysql://router@tidb/agentloop_router",
+      AGENTLOOP_RUNTIME_STATE_DRIVER: "tidb",
+      AGENTLOOP_RUNTIME_STATE_DATABASE_URL: "mysql://runtime@tidb/agentloop_runtime",
+    },
+    appRoot: "/application", sqliteFallbackPath: "./data/runtime.db", environmentPrefix: "AGENTLOOP_RUNTIME_STATE",
+  }), { driver: "tidb", connectionString: "mysql://runtime@tidb/agentloop_runtime" });
   assert.throws(
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "postgres" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
@@ -118,6 +138,28 @@ test("shared state configuration switches between local SQLite and PostgreSQL wi
     () => stateDatabaseConfigFromEnvironment({ environment: { AGENTLOOP_STATE_DRIVER: "tidb" }, appRoot: "/application", sqliteFallbackPath: "./data/legacy.db" }),
     /AGENTLOOP_STATE_DATABASE_URL/,
   );
+});
+
+test("Router state never initializes Runtime kernel tables, while Runtime state does", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-state-schema-"));
+  try {
+    const router = await openStateDatabase({ driver: "sqlite", databasePath: join(root, "router.db") }, { schema: "router" });
+    try {
+      const routerTables = await router.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
+      assert.equal(routerTables.some((table) => table.name === "runs"), false);
+    } finally {
+      await router.close();
+    }
+    const runtime = await openStateDatabase({ driver: "sqlite", databasePath: join(root, "runtime.db") }, { schema: "runtime" });
+    try {
+      const runtimeTables = await runtime.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
+      assert.equal(runtimeTables.some((table) => table.name === "runs"), true);
+    } finally {
+      await runtime.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Runtime Host validates deployment-required commands before accepting Runs", () => {

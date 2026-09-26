@@ -19,8 +19,8 @@ export class AppDatabase implements SqlConnection {
   private readonly migrated: Promise<void>;
 
   constructor(filename: string);
-  constructor(options: { connection: SqlConnection });
-  constructor(filenameOrOptions: string | { connection: SqlConnection }) {
+  constructor(options: { connection: SqlConnection; schema?: "kernel" | "none" });
+  constructor(filenameOrOptions: string | { connection: SqlConnection; schema?: "kernel" | "none" }) {
     if (typeof filenameOrOptions === "string") {
       this.connection = new SqliteConnection(filenameOrOptions);
     } else {
@@ -34,13 +34,16 @@ export class AppDatabase implements SqlConnection {
       this.migrated = this.migrate();
       void this.migrated;
     } else {
-      this.migrated = this.migrate();
+      // A Router database owns only Router/control-plane state.  Do not leak
+      // the Runtime kernel schema into it merely because both use AppDatabase
+      // as a connection facade.
+      this.migrated = filenameOrOptions.schema === "none" ? Promise.resolve() : this.migrate();
     }
   }
 
   /** Async construction path for injected connections (e.g. PostgreSQL). */
-  static async open(options: { connection: SqlConnection }): Promise<AppDatabase> {
-    const database = new AppDatabase({ connection: options.connection });
+  static async open(options: { connection: SqlConnection; schema?: "kernel" | "none" }): Promise<AppDatabase> {
+    const database = new AppDatabase(options);
     await database.migrated;
     return database;
   }
@@ -523,10 +526,13 @@ export class AppDatabase implements SqlConnection {
     }
     await this.connection.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_id, created_at)");
     await this.connection.exec(`
+      -- SQLite, PostgreSQL, and TiDB all permit multiple NULL values in a
+      -- UNIQUE index.  A partial index is therefore unnecessary and would
+      -- make the portable schema invalid on TiDB.
       CREATE UNIQUE INDEX IF NOT EXISTS runtime_actions_result_ref_idx
-        ON runtime_actions(result_ref) WHERE result_ref IS NOT NULL;
+        ON runtime_actions(result_ref);
       CREATE UNIQUE INDEX IF NOT EXISTS run_outcomes_result_ref_idx
-        ON run_outcomes(result_ref) WHERE result_ref IS NOT NULL;
+        ON run_outcomes(result_ref);
     `);
   }
 

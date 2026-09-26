@@ -72,7 +72,8 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
   environment: process.env,
   appRoot,
   sqliteFallbackPath: databasePath,
-}));
+  environmentPrefix: "AGENTLOOP_RUNTIME_STATE",
+}), { schema: "runtime" });
 const dispatchStore = new HostDispatchStore(database, runtimeId);
 await dispatchStore.ready();
 const providers = await LlmProviderRegistry.fromConfigFile(providerConfigPath);

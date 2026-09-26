@@ -27,7 +27,8 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
   environment: process.env,
   appRoot,
   sqliteFallbackPath: controlPlaneDatabasePath,
-}));
+  environmentPrefix: "AGENTLOOP_ROUTER_STATE",
+}), { schema: "router" });
 const store = new ControlPlaneStore(database);
 await store.ready();
 const identity = new IdentityService(database, positiveInteger(process.env.IDENTITY_SESSION_TTL_MS, 7 * 24 * 60 * 60 * 1000));

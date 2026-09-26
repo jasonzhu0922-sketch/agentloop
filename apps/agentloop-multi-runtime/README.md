@@ -69,6 +69,23 @@ SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应�
 `AGENTLOOP_STATE_*` 或云端 PostgreSQL/TiDB 凭据。设备注册和浏览器本地会话的云端记录仍
 由 Router 的共享状态库保存。
 
+### TiDB role databases
+
+TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host
+分到两个 database：`agentloop_router` 保存身份、设备、附件、Assignment 与 Router
+投影；`agentloop_runtime` 保存 Run、Plan、事件与 Host dispatch ledger。Router 经
+受控 Runtime endpoint 读取 Run 状态，不直接跨库读 Host 的执行表。
+
+```dotenv
+AGENTLOOP_ROUTER_STATE_DRIVER=tidb
+AGENTLOOP_ROUTER_STATE_DATABASE_URL=mysql://user:password@tidb:4000/agentloop_router
+AGENTLOOP_RUNTIME_STATE_DRIVER=tidb
+AGENTLOOP_RUNTIME_STATE_DATABASE_URL=mysql://user:password@tidb:4000/agentloop_runtime
+```
+
+未设置角色变量时，两类进程继续回退到 `AGENTLOOP_STATE_*`，便于现有单库 SQLite
+开发。Local Runtime Agent 不读取以上任何变量。
+
 当前生产部署基线将附件元数据写入共享 PostgreSQL，并把不可变附件字节放在仅 Router 共享的 RWX 挂载；Host 始终经 Router 的受控下载接口读取附件，而不会拿到存储路径。对象存储 BlobStore 是下一步替换此挂载的演进点，不是已经宣称完成的能力。可直接使用 [Kubernetes 多主机部署清单](deploy/kubernetes/README.md) 构建并独立发布 `router`、`runtime-host`、`web` 三个镜像目标。
 
 ### Step execution policy
