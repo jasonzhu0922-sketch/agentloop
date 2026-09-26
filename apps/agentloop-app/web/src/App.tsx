@@ -40,6 +40,9 @@ function Shell(): React.ReactNode {
             <span className="status-pill">
               <i className="status-dot" /> {modelLabel(state.models, state.selectedModelKey || state.defaultModelKey)}
             </span>
+            <span className="runtime-pill" title="单机版前端的 Multi Runtime 拓扑模拟">
+              <i className="runtime-pill-dot" /> {runtimeLabel(state)}
+            </span>
           </div>
         </header>
         <div className="main-grid">
@@ -54,6 +57,16 @@ function Shell(): React.ReactNode {
       </main>
     </div>
   );
+}
+
+function runtimeLabel(state: Pick<import("./state/context").AppState, "simulatedAssignment" | "simulatedRuntimeHosts">): string {
+  const assignment = state.simulatedAssignment;
+  if (assignment === null) return `模拟拓扑 · ${state.simulatedRuntimeHosts.length} Hosts`;
+  return `${assignment.runtimeId} · ${phaseLabel(assignment.phase)}`;
+}
+
+function phaseLabel(phase: string): string {
+  return ({ queued: "排队", planning: "规划", executing: "执行", finalizing: "收尾", completed: "已完成", failed: "失败", cancelled: "已取消" } as Record<string, string>)[phase] ?? phase;
 }
 
 /** A stream event changes the live card's height and must advance the actual scroll container. */

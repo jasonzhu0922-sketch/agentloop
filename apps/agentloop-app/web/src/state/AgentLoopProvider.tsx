@@ -15,6 +15,7 @@ import type {
   SkillSummary,
 } from "../lib/types";
 import { AgentLoopContext, type AppState } from "./context";
+import { projectSimulatedAssignment, SIMULATED_RUNTIME_HOSTS } from "../lib/multi-runtime-simulation";
 
 const THEME_KEY = "agentloop-theme";
 const CONVERSATION_PAGE_SIZE = 20;
@@ -595,6 +596,8 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       selectedModelKey,
       showDetails,
       theme,
+      simulatedRuntimeHosts: SIMULATED_RUNTIME_HOSTS,
+      simulatedAssignment: currentRun === null ? null : projectSimulatedAssignment(currentRun.run, currentRun.events),
     }),
     [
       token,
@@ -617,6 +620,7 @@ export function AgentLoopProvider({ children }: { readonly children: React.React
       selectedModelKey,
       showDetails,
       theme,
+      currentRun,
     ],
   );
 

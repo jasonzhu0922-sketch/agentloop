@@ -9,6 +9,7 @@ import type {
   RunRecord,
   SkillSummary,
 } from "../lib/types";
+import type { RuntimeHostSummary, SimulatedAssignment } from "../lib/multi-runtime-simulation";
 
 export interface AppState {
   readonly token: string;
@@ -31,6 +32,8 @@ export interface AppState {
   readonly selectedModelKey: string;
   readonly showDetails: boolean;
   readonly theme: "auto" | "light" | "dark";
+  readonly simulatedRuntimeHosts: readonly RuntimeHostSummary[];
+  readonly simulatedAssignment: SimulatedAssignment | null;
 }
 
 export interface AppActions {

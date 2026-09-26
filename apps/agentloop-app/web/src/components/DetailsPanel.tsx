@@ -833,6 +833,21 @@ export function ArtifactsPanel(): React.ReactNode {
           {run.finishedAt ? " - " + fmtTime(run.finishedAt) : ""}
         </p>
       </div>
+      <div className="details-section runtime-topology" aria-label="Multi Runtime 模拟拓扑">
+        <h4>Runtime 拓扑（前端模拟）</h4>
+        <div className="runtime-assignment-card">
+          <div><span className="muted">Assignment</span><strong>{state.simulatedAssignment?.id}</strong></div>
+          <div><span className="muted">当前 Host</span><strong>{state.simulatedAssignment?.runtimeId}</strong></div>
+          <div><span className="muted">阶段</span><strong>{phaseLabel(state.simulatedAssignment?.phase ?? "queued")}</strong></div>
+        </div>
+        <div className="runtime-host-list">
+          {state.simulatedRuntimeHosts.map((host) => (
+            <span className={"runtime-host-chip" + (host.id === state.simulatedAssignment?.runtimeId ? " active" : "")} key={host.id}>
+              <i /> {host.id}
+            </span>
+          ))}
+        </div>
+      </div>
       <div className="details-section">
         <h4>实际使用</h4>
         <ExecutionCapabilitiesList events={state.currentRun.events} />
@@ -856,4 +871,8 @@ export function ArtifactsPanel(): React.ReactNode {
       <CommandDetailDialog runId={run.id} command={selectedCommand} onClose={() => setSelectedCommand(null)} />
     </aside>
   );
+}
+
+function phaseLabel(phase: string): string {
+  return ({ queued: "排队", planning: "规划", executing: "执行", finalizing: "收尾", completed: "已完成", failed: "失败", cancelled: "已取消" } as Record<string, string>)[phase] ?? phase;
 }
