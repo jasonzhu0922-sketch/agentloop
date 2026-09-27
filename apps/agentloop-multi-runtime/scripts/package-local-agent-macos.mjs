@@ -103,6 +103,7 @@ await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify
   customSkillDirectories: [],
 }, null, 2));
 await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
+await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
 await cp(join(appRoot, "distribution/macos/com.agentloop.local-runtime-agent.plist"), join(resources, "com.agentloop.local-runtime-agent.plist"));
 await mkdir(macOS, { recursive: true });
 run("/usr/bin/swiftc", [

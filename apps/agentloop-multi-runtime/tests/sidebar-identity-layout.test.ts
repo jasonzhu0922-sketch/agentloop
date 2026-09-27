@@ -13,4 +13,6 @@ test("sidebar identity and account actions share one horizontal layout group", a
   assert.match(overrides, /\.sidebar-foot > \.local-capability \{ grid-column: 1 \/ -1; \}/);
   assert.match(overrides, /\.sidebar-foot > \.identity \{ min-width: 0; margin: 0; \}/);
   assert.match(overrides, /\.sidebar-foot > \.foot-actions \{ display: flex; grid-column: 2; gap: 6px; \}/);
+  assert.match(overrides, /\.local-capability-title \{\s*display: flex;\s*align-items: center;\s*min-width: 0;/);
+  assert.match(overrides, /\.local-capability-title \.local-agent-state \{\s*margin-left: 2ch;/);
 });

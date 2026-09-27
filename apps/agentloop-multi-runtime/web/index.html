@@ -19,17 +19,14 @@
         <div class="sidebar-foot">
           <input id="user-id" type="hidden" /><input id="tenant-id" type="hidden" />
           <section class="local-capability" aria-label="本机能力">
-            <div class="local-capability-head"><div><strong>本机能力</strong><small id="local-agent-version"></small></div><button id="local-agent-settings" type="button" title="Local Runtime Agent 设置" disabled>设置</button></div>
-            <button id="enable-local-runtime" class="local-agent-state" type="button"><i id="local-agent-state-dot" class="offline"></i><span id="local-agent-state-label">正在检查 Local Runtime Agent…</span></button>
-            <label class="local-execution-toggle"><input id="use-local-runtime" type="checkbox" disabled /><span><strong>本机运行</strong><small>关闭时由云端自动选择 Runtime</small></span></label>
+            <div class="local-capability-head"><div class="local-capability-title"><strong>本机能力</strong><small id="local-agent-version"></small><button id="enable-local-runtime" class="local-agent-state" type="button"><i id="local-agent-state-dot" class="offline"></i><span id="local-agent-state-label">正在检查</span></button></div><button id="local-agent-settings" type="button" title="Local Runtime Agent 设置" disabled>设置</button></div>
             <div id="local-runtime-picker" class="local-runtime-picker" hidden>
-              <div class="local-runtime-picker-head"><label for="runtime">本机 Runtime</label><span>选择本机助理</span></div>
-              <select id="runtime" disabled></select>
+              <label class="local-execution-toggle" title="启用后，下一次任务由所选本机 Runtime 执行"><input id="use-local-runtime" type="checkbox" disabled /><span>本机运行</span></label>
+              <label class="local-runtime-select"><span class="sr-only">选择本机 Runtime</span><select id="runtime" disabled></select></label>
             </div>
-            <p id="local-agent-hint" class="local-agent-hint">本机目录和产物默认不上传云端。</p>
           </section>
           <div id="identity-label" class="identity"></div>
-          <div class="foot-actions"><button id="auth-logout" class="icon-btn" type="button" title="退出登录">⇥</button><button id="theme-toggle" class="icon-btn" type="button" title="切换主题">◐</button><button class="icon-btn" type="button" title="刷新会话" onclick="location.reload()">⟳</button></div>
+          <div class="foot-actions"><button id="theme-toggle" class="icon-btn" type="button" title="切换主题">◐</button><button id="auth-logout" class="icon-btn" type="button" title="退出登录">⇥</button></div>
         </div>
       </aside>
       <main class="main">

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import type { WebToolsOptions } from "@zhujun/agentloop";
+import { assertPracticeProfileCatalog, type PracticeProfileCatalog, type WebToolsOptions } from "@zhujun/agentloop";
 import type { RuntimeInstance, RuntimeProfile } from "../domain/contracts.ts";
 
 export interface SkillDirectoriesConfig {
@@ -32,6 +32,9 @@ export interface StepExecutionStrategyProfileConfig {
   };
 }
 
+/** Deployment-owned professional prompt guidance, separate from Skills and Tool policy. */
+export interface PracticeProfileConfig extends PracticeProfileCatalog {}
+
 /**
  * Maps deployment-owned search credentials to the generic Host web tools.
  * Router requests never participate in this mapping, so the selected search
@@ -52,6 +55,10 @@ export async function loadMultiRuntimeConfig(path: string): Promise<MultiRuntime
 
 export async function loadStepExecutionStrategyProfileConfig(path: string): Promise<StepExecutionStrategyProfileConfig> {
   return parseStepExecutionStrategyProfileConfig(await readFile(path, "utf8"));
+}
+
+export async function loadPracticeProfileConfig(path: string): Promise<PracticeProfileConfig> {
+  return parsePracticeProfileConfig(await readFile(path, "utf8"));
 }
 
 /**
@@ -83,6 +90,26 @@ export function parseSkillDirectoriesConfig(raw: string): SkillDirectoriesConfig
     schema: "agentloop.skillDirectories/v1",
     customSkillDirectories: value.customSkillDirectories as readonly string[],
   };
+}
+
+export function parsePracticeProfileConfig(raw: string): PracticeProfileConfig {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new TypeError("practice profile config must be valid JSON");
+  }
+  if (!isRecord(value) || value.schema !== "agentloop.practiceProfileCatalog/v1") {
+    throw new TypeError("practice profile config must use schema agentloop.practiceProfileCatalog/v1");
+  }
+  assertOnlyKeys(value, ["schema", "enabled", "mode", "maxActiveProfiles", "maxInstructions", "profiles"], "practice profile config");
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") throw new TypeError("practice profile config enabled must be boolean when provided");
+  if (value.mode !== undefined && value.mode !== "observe" && value.mode !== "active") {
+    throw new TypeError("practice profile config mode must be observe or active when provided");
+  }
+  if (!Array.isArray(value.profiles)) throw new TypeError("practice profile config profiles must be an array");
+  for (const [index, item] of value.profiles.entries()) assertPracticeProfileConfigShape(item, index);
+  return assertPracticeProfileCatalog(value as unknown as PracticeProfileConfig);
 }
 
 export function resolveSkillDirectoriesConfig(config: SkillDirectoriesConfig, appRoot: string): readonly string[] {
@@ -211,6 +238,24 @@ function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) throw new TypeError(`${field} must be a non-empty string`);
   if (isAbsolute(value) && field.endsWith("endpoint")) throw new TypeError(`${field} must be a URL, not a local path`);
   return value;
+}
+
+function assertPracticeProfileConfigShape(value: unknown, index: number): void {
+  if (!isRecord(value)) throw new TypeError(`practice profile config profiles[${index}] must be an object`);
+  assertOnlyKeys(value, ["schema", "id", "version", "enabled", "name", "priority", "appliesTo", "guidance"], `practice profile config profiles[${index}]`);
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") throw new TypeError(`practice profile config profiles[${index}].enabled must be boolean when provided`);
+  if (value.appliesTo !== undefined) {
+    if (!isRecord(value.appliesTo)) throw new TypeError(`practice profile config profiles[${index}].appliesTo must be an object`);
+    assertOnlyKeys(value.appliesTo, ["operationProfiles", "artifactKinds", "sourceNeeds", "deliverySurfaces", "inputFamilies", "allTerms", "anyTerms"], `practice profile config profiles[${index}].appliesTo`);
+  }
+  if (!isRecord(value.guidance)) throw new TypeError(`practice profile config profiles[${index}].guidance must be an object`);
+  assertOnlyKeys(value.guidance, ["instructions", "antiPatterns"], `practice profile config profiles[${index}].guidance`);
+}
+
+function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) throw new TypeError(`${label} has unsupported field: ${key}`);
+  }
 }
 
 function uniqueStrings(values: readonly string[]): readonly string[] {

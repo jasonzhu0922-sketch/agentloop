@@ -18,7 +18,6 @@ import {
 import { mapWithConcurrencyLimit } from "../shared/concurrency.ts";
 import { CONTENT_REFERENCE_WINDOW_CHARACTERS, type ContentReference } from "../runtime/content-reference.ts";
 
-const DEFAULT_OUTPUT_LIMIT = 100_000;
 const COMMAND_OUTPUT_REFERENCE_THRESHOLD = 8_000;
 const COMMAND_OUTPUT_REFERENCE_PREVIEW = 2_000;
 const STRUCTURED_STDOUT_PROJECTION_THRESHOLD = 8_000;
@@ -1487,12 +1486,10 @@ export class ComputerExecutor {
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
     const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
     const cwd = cwdResolution.path;
-    const limit = DEFAULT_OUTPUT_LIMIT;
     const beforeFiles = await this.snapshotWorkspaceFiles();
     return new Promise((resolvePromise, rejectPromise) => {
-      let stdout: Buffer = Buffer.alloc(0);
-      let stderr: Buffer = Buffer.alloc(0);
-      let truncated = false;
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
       let timedOut = false;
       let settled = false;
       let forceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1505,18 +1502,15 @@ export class ComputerExecutor {
         }),
         stdio: ["ignore", "pipe", "pipe"],
       });
-      const collect = (current: Buffer, chunk: Buffer): Buffer => {
-        if (current.length >= limit) {
-          truncated = true;
-          return current;
-        }
-        const combined = Buffer.concat([current, chunk]);
-        if (combined.length <= limit) return combined;
-        truncated = true;
-        return combined.subarray(0, limit);
+      const collect = (chunks: Buffer[], chunk: Buffer): void => {
+        chunks.push(chunk);
       };
-      child.stdout.on("data", (chunk: Buffer) => { stdout = collect(stdout, chunk); });
-      child.stderr.on("data", (chunk: Buffer) => { stderr = collect(stderr, chunk); });
+      // Semantic command output must be captured in full before it is parsed
+      // into the bounded Runtime projection. Truncating here can split valid
+      // JSON and discard its evidence receipt before content-addressed storage
+      // and result normalization have a chance to preserve it.
+      child.stdout.on("data", (chunk: Buffer) => { collect(stdoutChunks, chunk); });
+      child.stderr.on("data", (chunk: Buffer) => { collect(stderrChunks, chunk); });
       const terminate = (): void => {
         if (child.exitCode !== null || child.signalCode !== null) return;
         child.kill("SIGTERM");
@@ -1563,6 +1557,8 @@ export class ComputerExecutor {
         }
         void (async () => {
           try {
+            const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+            const stderr = Buffer.concat(stderrChunks).toString("utf8");
             const afterFiles = await this.snapshotWorkspaceFiles();
             const fileChangeSummary = summarizeFileChanges(beforeFiles, afterFiles);
             // Only an immutable, Runtime-registered Skill package may publish
@@ -1570,17 +1566,17 @@ export class ComputerExecutor {
             // later file reads remain ordinary content, never control-plane
             // input.
             const allowControlSignals = cwdResolution.readOnlyRoot?.id.startsWith("@skills/") === true;
-            const stdoutProjection = await this.projectCommandOutput("stdout", stdout.toString("utf8"), { allowControlSignals });
-            const stderrProjection = await this.projectCommandOutput("stderr", stderr.toString("utf8"));
-            const evidenceReceipt = extractStdoutEvidenceReceipt(stdout.toString("utf8"));
+            const stdoutProjection = await this.projectCommandOutput("stdout", stdout, { allowControlSignals });
+            const stderrProjection = await this.projectCommandOutput("stderr", stderr);
+            const evidenceReceipt = extractStdoutEvidenceReceipt(stdout);
             const computationEvidence = await this.bindCommandComputationEvidence({
               inputs: computationInputs,
               command: input.command,
               args: input.args,
               exitCode,
               signal,
-              truncated,
-              stdout: stdout.toString("utf8"),
+              truncated: false,
+              stdout,
               stdoutRef: stdoutProjection.reference,
             });
             const workflowEvidence = await this.bindSkillWorkflowEvidence({
@@ -1590,8 +1586,8 @@ export class ComputerExecutor {
               args: input.args,
               exitCode,
               signal,
-              truncated,
-              stdout: stdout.toString("utf8"),
+              truncated: false,
+              stdout,
               stdoutRef: stdoutProjection.reference,
             });
             resolvePromise({
@@ -1613,7 +1609,7 @@ export class ComputerExecutor {
                   count: fileChangeSummary.changes.length,
                 },
               },
-              truncated,
+              truncated: false,
               timedOut,
               ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
               ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
@@ -1652,7 +1648,20 @@ export class ComputerExecutor {
     readonly stdout: string;
     readonly stdoutRef?: CommandOutputReference;
   }): Promise<{ readonly receipt?: Record<string, unknown>; readonly error?: string }> {
-    if (input.inputs.length === 0) return {};
+    if (input.inputs.length === 0) {
+      // A command-computation envelope is an explicit request for Runtime to
+      // authenticate derived facts.  Without captured inputs there is no
+      // source identity to bind, so silently returning nothing leaves the
+      // current step unable to converge and gives the caller no repair path.
+      // Do not infer inputs from stdout: only the tool-call arguments are an
+      // authorized, hashable source declaration.
+      if (parseJsonRecord(input.stdout)?.schema === "agentloop.commandComputation/v1") {
+        return {
+          error: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs. Rerun with the exact source files in computationInputs, and emit inputRefs (not inputs) with those same paths in stdout; Runtime cannot bind derived aggregation without source identity.",
+        };
+      }
+      return {};
+    }
     if (input.exitCode !== 0 || input.signal !== null) {
       return { error: "Command did not succeed, so a derived aggregation cannot be bound." };
     }

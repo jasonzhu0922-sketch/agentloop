@@ -926,6 +926,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     phase: "planning",
     intent: recovery ? "recover" : "execute",
     operations: operationProfiles,
+    practices: task.taskUnderstanding.practiceProfiles,
     evidenceProfile: sourceNeed === "none"
       ? "deterministic"
       : sourceNeed === "strict_user_source"

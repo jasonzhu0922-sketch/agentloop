@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
-import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../config/config.ts";
+import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../config/config.ts";
 import { HttpResourceImporter } from "../runtime/http-resource-importer.ts";
 import { HostDispatchStore } from "../runtime/host-dispatch-store.ts";
 import { createRuntimeHostHttpServer } from "../http/runtime-host-http.ts";
@@ -43,6 +43,7 @@ const skillPackageStoreRoot = resolve(appRoot, process.env.SKILL_PACKAGE_STORE_R
 const providerConfigPath = resolve(appRoot, process.env.LLM_PROVIDER_CONFIG_PATH ?? "./config/llm-providers.json");
 const skillDirectoriesConfigPath = resolve(appRoot, process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json");
 const stepExecutionStrategyConfigPath = resolve(appRoot, process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? "./config/step-execution-strategy.json");
+const practiceProfileConfigPath = resolve(appRoot, process.env.PRACTICE_PROFILE_CONFIG_PATH ?? "./config/practice-profiles.json");
 const routerAttachmentToken = requiredEnv("RUNTIME_ATTACHMENT_TOKEN");
 const runtimeDispatchToken = requiredEnv("RUNTIME_DISPATCH_TOKEN");
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
@@ -61,6 +62,7 @@ assertRequiredRuntimeNodeModules(requiredRuntimeNodeModules(process.env.RUNTIME_
 const customSkillDirectories = await loadSkillDirectoriesConfig({ appRoot, configPath: skillDirectoriesConfigPath });
 const skillDirectories = mergeSkillDirectories(bundledSkillDirectories(), customSkillDirectories);
 const stepExecutionStrategyConfig = await loadStepExecutionStrategyProfileConfig(stepExecutionStrategyConfigPath);
+const practiceProfileCatalog = await loadPracticeProfileConfig(practiceProfileConfigPath);
 const stepExecutionStrategy = createStepExecutionStrategyProfile(
   stepExecutionStrategyConfig.profile,
   stepExecutionStrategyConfig.projection,
@@ -93,6 +95,7 @@ const runs = new RunService({
   modelKeys: providers.modelKeys(),
   workspaceRoot,
   stepExecutionStrategy,
+  practiceProfileCatalog,
   tools: integrationTools,
   computerCommandEnvironment: {
     ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,

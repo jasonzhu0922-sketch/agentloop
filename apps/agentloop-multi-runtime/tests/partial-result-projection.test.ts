@@ -5,19 +5,19 @@ import test from "node:test";
 import { projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 
 const report = "任务未完成，以下仅为阶段性结果。\n\n已取得部分记录，但缺少结构预检证据。";
-test("failed terminal event hides Runtime diagnostics and keeps only explicit partial output", () => {
+test("failed terminal event keeps its persisted final report separate from the failure status", () => {
   const event = { seq: 42, type: "run.failed", data: { code: "STEP_NOT_COMPLETED", message: "Evidence missing", output: report }, createdAt: 42 };
   const assistant: { status: string; text: string; error?: string; partialText?: string } = { status: "running", text: "rejected draft", error: undefined };
   assert.equal(projectAssistantEvent(assistant, event), true);
   assert.equal(assistant.status, "failed");
   assert.equal(assistant.text, "");
-  assert.equal(assistant.partialText, undefined);
+  assert.equal(assistant.partialText, report);
   assert.equal(assistant.error, "本次结果未通过最终验收。");
   const restored: { status: string; text: string; error?: string; partialText?: string } = { status: "running", text: "" };
   replayAssistantEvents(restored, [event]);
   assert.equal(restored.status, "failed");
   assert.equal(restored.text, "");
-  assert.equal(restored.partialText, undefined);
+  assert.equal(restored.partialText, report);
 });
 
 test("explicit partial output is retained without exposing backend messages", () => {
@@ -29,7 +29,7 @@ test("explicit partial output is retained without exposing backend messages", ()
 });
 
 // Run the actual browser snapshot function without its DOM/bootstrap side effects.
-test("browser reload uses only Host-projected failed output while preserving terminal metadata", () => {
+test("browser reload restores a failed Run's persisted final report", () => {
   const source = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
   const start = source.indexOf("function applyRecoveredRunState(");
   const end = source.indexOf("\nfunction recoveredFailureMessage", start);
@@ -39,10 +39,10 @@ test("browser reload uses only Host-projected failed output while preserving ter
     completeAssistantMessage: (message: Record<string, unknown>, event: { createdAt: number }) => { message.completedAt = event.createdAt; },
   });
   const assistant: { status: string; text: string; error?: string; partialText?: string; completedAt?: number } = { status: "running", text: "old", completedAt: undefined };
-  restore(assistant, { status: "failed", output: "internal diagnostic", partialOutput: report, finishedAt: 42 });
+  restore(assistant, { status: "failed", output: report, partialOutput: "fallback report", finishedAt: 42 });
   assert.equal(assistant.status, "failed");
   assert.equal(assistant.text, "");
   assert.equal(assistant.partialText, report);
   assert.equal(assistant.completedAt, 42);
-  assert.match(source, /class="partial-result"[\s\S]*?renderMarkdown\(message\.partialText\)/);
+  assert.match(source, /class="partial-result"[\s\S]*?执行总结[\s\S]*?renderMarkdown\(message\.partialText\)/);
 });

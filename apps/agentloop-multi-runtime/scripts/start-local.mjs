@@ -37,6 +37,13 @@ const stepExecutionStrategyConfigPath = resolve(
 if (!existsSync(stepExecutionStrategyConfigPath)) {
   throw new Error(`STEP_EXECUTION_STRATEGY_CONFIG_PATH does not exist: ${stepExecutionStrategyConfigPath}.`);
 }
+const practiceProfileConfigPath = resolve(
+  appRoot,
+  process.env.PRACTICE_PROFILE_CONFIG_PATH ?? "./config/practice-profiles.json",
+);
+if (!existsSync(practiceProfileConfigPath)) {
+  throw new Error(`PRACTICE_PROFILE_CONFIG_PATH does not exist: ${practiceProfileConfigPath}.`);
+}
 const providerEnvFileSetting = process.env.LLM_PROVIDER_ENV_FILE;
 const providerEnvFile = resolve(appRoot, providerEnvFileSetting ?? "./.env");
 if (providerEnvFileSetting !== undefined && !existsSync(providerEnvFile)) {
@@ -129,6 +136,7 @@ children.push(start("local-agent", "local-agent-runtime/src/local-agent-main.ts"
   LOCAL_AGENT_SUPERVISOR_DATABASE_PATH: process.env.LOCAL_AGENT_SUPERVISOR_DATABASE_PATH ?? join(runtimeDataRoot, "local-agent", "supervisor.db"),
   LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
   STEP_EXECUTION_STRATEGY_CONFIG_PATH: stepExecutionStrategyConfigPath,
+  PRACTICE_PROFILE_CONFIG_PATH: practiceProfileConfigPath,
   SKILL_DIRECTORIES_CONFIG_PATH: process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json",
   LLM_PROVIDER_ENV_FILE: providerEnvFile,
 }, providerEnvFiles));

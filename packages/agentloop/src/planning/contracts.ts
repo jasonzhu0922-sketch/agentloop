@@ -184,6 +184,28 @@ export type ConversationTurnInputMode =
   | "prior_artifact"
   | "refresh_sources";
 
+/**
+ * The model's single semantic decision about how this turn obtains facts.
+ * `bound_visible_sources` is deliberately distinct from generic source
+ * grounding: it means the model selected Runtime-issued visible-directory
+ * candidates as the primary task input.
+ */
+export type ConversationEvidenceStrategy =
+  | "none"
+  | "lookup_lite"
+  | "source_grounded"
+  | "strict_user_source"
+  | "bound_visible_sources";
+
+/**
+ * A source selection is meaningful only over opaque Runtime candidates. A
+ * visible-directory grant is permission to inspect, not an implicit input.
+ */
+export interface ConversationSourceBinding {
+  readonly mode: "none" | "primary_data";
+  readonly visibleDirectoryIds: readonly string[];
+}
+
 export interface ConversationTurnResolution {
   readonly schema: "agentloop.conversationTurnResolution/v1";
   readonly mode: ConversationTurnMode;
@@ -209,6 +231,15 @@ export interface ConversationTurnResolution {
    */
   readonly targetResult?: RuntimeResultRef;
   readonly effectiveGoal: string;
+  /** Model-authored, atomic with sourceBinding; Runtime projects evidenceDemand from it. */
+  readonly evidenceStrategy: ConversationEvidenceStrategy;
+  /** Model-authored selection over Runtime-issued visible-directory candidates. */
+  readonly sourceBinding: ConversationSourceBinding;
+  /**
+   * Runtime-owned compatibility projection of evidenceStrategy. Downstream
+   * task understanding consumes this field, but the model never chooses it
+   * independently of sourceBinding.
+   */
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
   readonly source: "model" | "model_guarded" | "deterministic" | "fallback";
@@ -600,6 +631,8 @@ export interface StepAssessmentInput {
   readonly modelEvidence?: StepEvidence;
   readonly contextSummary?: string;
   readonly assessmentProfile?: AssessmentProfileId;
+  /** The admission-pinned professional guidance snapshot for this Plan. */
+  readonly practiceProfiles?: readonly import("../runtime/practice-profiles.ts").PracticeProfileSelection[];
   /** This candidate has an artifact/source-receipt shape mismatch for holistic assessment. */
   readonly holisticSourceContractMismatch?: boolean;
   readonly attempt: number;

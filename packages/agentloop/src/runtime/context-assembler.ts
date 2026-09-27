@@ -127,6 +127,7 @@ export class ContextAssembler {
   private contextEpoch = 0;
   private contextRevision = 0;
   private runtimeDirective?: string;
+  private runtimePromptAugmentation?: string;
   private runtimeStepFrame?: string;
   private promptProjectionPolicy?: PromptProjectionDecision;
   private snapshot?: RuntimeContextSnapshot;
@@ -163,6 +164,19 @@ export class ContextAssembler {
     const normalized = value?.trim() || undefined;
     if (this.runtimeDirective === normalized) return;
     this.runtimeDirective = normalized;
+    this.contextRevision += 1;
+    this.invalidateSnapshot();
+  }
+
+  /**
+   * Persistent server-authored guidance discovered while a leaf is running.
+   * Unlike a repair directive this survives later execution-feedback updates,
+   * so the next model invocation receives the newly established context.
+   */
+  setRuntimePromptAugmentation(value: string | undefined): void {
+    const normalized = value?.trim() || undefined;
+    if (this.runtimePromptAugmentation === normalized) return;
+    this.runtimePromptAugmentation = normalized;
     this.contextRevision += 1;
     this.invalidateSnapshot();
   }
@@ -919,6 +933,11 @@ export class ContextAssembler {
         "<runtime_directive>",
         this.runtimeDirective,
         "</runtime_directive>",
+      ]),
+      ...(this.runtimePromptAugmentation === undefined ? [] : [
+        "<runtime_prompt_augmentation source=\"server\">",
+        this.runtimePromptAugmentation,
+        "</runtime_prompt_augmentation>",
       ]),
     ].join("\n");
     this.snapshot = {

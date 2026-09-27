@@ -201,12 +201,16 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(index, /<dd class="settings-detail-value"><span id="agent-settings-upload-storage">-<\/span><button id="agent-upload-storage-pick"/);
   assert.doesNotMatch(index, /settings-action-row/, "each storage action must stay with its corresponding path value");
   assert.doesNotMatch(index, /id="execution-target"/);
+  assert.match(index, /class="local-capability-title"[\s\S]*?id="local-agent-version"[\s\S]*?id="enable-local-runtime"/, "the compact readiness tag belongs beside the local-capability version");
+  assert.match(index, /id="local-runtime-picker"[\s\S]*?id="use-local-runtime"[\s\S]*?id="runtime"/, "the local-execution checkbox must sit before the Runtime selector");
   assert.match(app, /const executionTarget = isLocalExecution\(\) \? "local" : "cloud"/);
   assert.match(app, /dataPolicy: \{ mode: executionTarget \}/);
   assert.match(app, /localAgentRouterPath/);
   assert.match(app, /async function localAgentFetch\(path, init = \{\}\)/);
   assert.match(app, /body\.error !== "local_session_invalid" && body\.error !== "local_session_required"/);
   assert.match(app, /await refreshLocalSessionOnce\(\)/);
+  assert.match(app, /localRuntimes\.find\(\(runtime\) => runtime\.status === "ready" && runtime\.isDefault\)/, "the initial picker choice must prefer the persistent default Runtime");
+  assert.match(app, /\$\("local-runtime-picker"\)\.hidden = !paired/, "a paired ready device exposes its Runtime selector even before local execution is enabled");
   assert.match(app, /localAgentFetch\("\/v1\/directory-scopes\/pick"/);
   assert.match(app, /const response = await agentAwareFetch\(endpoint\(\), \{ headers: headers\(\) \}\)/);
   assert.match(app, /if \(assistant\.assignmentId\) \{[\s\S]*?\/v1\/assignments\/\$\{encodeURIComponent\(assistant\.assignmentId\)\}\/artifacts/);

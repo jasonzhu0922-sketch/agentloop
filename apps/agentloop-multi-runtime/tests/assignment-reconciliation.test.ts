@@ -129,10 +129,12 @@ test("late parent observation cannot overwrite a newer continuation task status 
 });
 
 function responseFixture() {
-  const response = new EventEmitter() as EventEmitter & { statusCode: number; setHeader(): void; flushHeaders(): void; write(value: string): void; end(): void };
+  const response = new EventEmitter() as EventEmitter & { statusCode: number; destroyed: boolean; writableEnded: boolean; setHeader(): void; flushHeaders(): void; write(value: string): void; end(): void };
   const writes: string[] = [];
   response.setHeader = () => {}; response.flushHeaders = () => {}; response.write = (value) => { writes.push(value); };
-  response.end = () => { response.emit("close"); };
+  response.destroyed = false;
+  response.writableEnded = false;
+  response.end = () => { response.writableEnded = true; response.emit("close"); };
   return { response, writes };
 }
 
@@ -163,4 +165,16 @@ test("Router upstream polling error is transport-only; later durable terminal ev
     assert.match(writes.join(""), /event: stream.error/); assert.doesNotMatch(writes.join(""), /run.failed/);
     t.mock.timers.tick(1000); await settle(); assert.match(writes.join(""), /event: run.completed/);
   } finally { response.emit("close"); }
+});
+
+test("SSE stops before an in-flight status read resumes after its response ends", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { response, writes } = responseFixture();
+  let release!: () => void;
+  streamEvents(new EventEmitter() as never, response as never, async () => ({ assignment: { tenantId: "t", ownerUserId: "u" }, events: [] }), "a", [], 0,
+    () => new Promise<RuntimeRunStatus>((resolve) => { release = () => resolve({ remoteRunId: "run", status: "running" }); }));
+  t.mock.timers.tick(1_000); await settle();
+  response.end();
+  release(); await settle();
+  assert.doesNotMatch(writes.join(""), /keepalive/);
 });

@@ -1,43 +1,45 @@
 /* Runtime placement is a device-level choice. Cloud placement is automatic;
    only a paired Local Agent exposes an explicit child Runtime selector. */
 .local-execution-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
-  margin-top: 10px;
-  padding: 8px 9px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg);
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text-2);
+  font-size: 11px;
+  font-weight: 650;
   cursor: pointer;
 }
 
 .local-execution-toggle:has(input:checked) {
-  border-color: color-mix(in srgb, var(--brand) 42%, var(--border));
+  border-color: color-mix(in srgb, var(--brand) 34%, var(--border));
   background: var(--brand-soft);
   color: var(--text);
 }
 
 .local-execution-toggle:has(input:disabled) { cursor: not-allowed; opacity: .62; }
 .local-execution-toggle input { flex: none; width: 15px; height: 15px; accent-color: var(--brand); }
-.local-execution-toggle span { min-width: 0; display: grid; gap: 1px; }
-.local-execution-toggle strong { font-size: 12px; }
-.local-execution-toggle small { color: var(--text-3); font-size: 10px; line-height: 1.35; }
+.local-execution-toggle span { min-width: 0; white-space: nowrap; }
 
-/* The connection state is also the single action surface for install, start,
-   pairing, and reconnect.  Do not duplicate it as a second status button. */
+/* The state tag is also the single action surface for install, start,
+   pairing, and reconnect. */
 .local-agent-state {
-  width: 100%;
-  min-height: 34px;
-  padding: 7px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 23px;
+  min-width: 0;
+  padding: 3px 7px;
   border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg-2);
+  border-radius: 999px;
+  background: var(--bg);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 650;
-  text-align: left;
   transition: border-color .15s var(--ease), background .15s var(--ease), color .15s var(--ease);
 }
 
@@ -47,16 +49,31 @@
   color: var(--brand);
 }
 
-.local-agent-state.active {
+.local-agent-state.ready {
   border-color: color-mix(in srgb, var(--ok) 34%, var(--border));
   background: color-mix(in srgb, var(--ok) 8%, var(--bg));
   color: var(--ok);
 }
 
-.local-agent-state.active:hover:not(:disabled) {
+.local-agent-state.ready:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--ok) 58%, var(--border));
   background: color-mix(in srgb, var(--ok) 13%, var(--bg));
   color: var(--ok);
+}
+
+.local-agent-state span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-agent-state i { display: block; flex: none; width: 6px; height: 6px; border-radius:50%; background: var(--text-3); }
+.local-agent-state i.checking { background: var(--brand); animation: local-agent-pulse 1.2s infinite; }
+.local-agent-state i.online { background: var(--ok); }
+
+.local-capability-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.local-capability-title .local-agent-state {
+  margin-left: 2ch;
 }
 
 .sidebar-foot > .identity {
@@ -77,50 +94,32 @@
 .sidebar-foot > .foot-actions { display: flex; grid-column: 2; gap: 6px; }
 
 .local-runtime-picker {
-  display: grid;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 9px;
-  border: 1px solid color-mix(in srgb, var(--brand) 30%, var(--border));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--brand-soft) 58%, var(--bg));
-}
-
-.local-runtime-picker-head {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
+  margin-top: 2px;
+  padding: 2px;
+  border-top: 1px solid var(--border);
 }
 
-.local-runtime-picker-head label {
-  color: var(--text-2);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.local-runtime-picker-head span {
-  overflow: hidden;
-  color: var(--text-3);
-  font-size: 10px;
-  font-weight: 500;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.local-runtime-select {
+  display: block;
+  min-width: 0;
+  flex: 1;
 }
 
 .local-runtime-picker select {
   width: 100%;
   min-width: 0;
-  min-height: 32px;
+  min-height: 30px;
   appearance: none;
-  border: 1px solid color-mix(in srgb, var(--brand) 22%, var(--border));
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
   background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 9px center / 14px;
   color: var(--text);
-  padding: 6px 30px 6px 9px;
-  font-size: 12px;
+  padding: 5px 28px 5px 8px;
+  font-size: 11px;
   font-weight: 600;
   outline: 0;
   cursor: pointer;
@@ -132,6 +131,8 @@
 }
 
 .local-runtime-picker select:disabled { cursor: not-allowed; opacity: .55; }
+
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 .live-card {
   min-width: 0;

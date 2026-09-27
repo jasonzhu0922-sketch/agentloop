@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { formatPracticePromptAugmentation } from "../src/runtime/dynamic-prompt.ts";
+import { resolvePracticeProfileResolution, type PracticeProfileCatalog } from "../src/runtime/practice-profiles.ts";
+import { observedSourceKindsFromToolEvidence } from "../src/runtime/source-family-observation.ts";
 import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
+import { understandTask } from "../src/runtime/task-intent.ts";
 import {
   artifactStepToolProgressPolicy,
   deriveRuntimeStepEvidenceState,
@@ -141,6 +145,69 @@ test("single leaf execution carries loop step handoff across model steps", async
   assert.equal(result.output, "route summary delivered");
   assert.equal(calls, 2);
   assert.equal(contexts.length, 2);
+});
+
+test("newly committed evidence can add server guidance to the next model invocation", async () => {
+  let calls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        assert.doesNotMatch(request.runtimeContext?.content ?? "", /Observe schema before aggregation/);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "discover", name: "discover_source", arguments: {} }],
+        };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /runtime_prompt_augmentation source="server"/);
+      assert.match(request.runtimeContext?.content ?? "", /Observe schema before aggregation/);
+      return { content: "analysis completed", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const task = understandTask({ objective: "分析当前目录中的数据", toolNames: ["discover_source"] });
+  const catalog: PracticeProfileCatalog = {
+    schema: "agentloop.practiceProfileCatalog/v1",
+    enabled: true,
+    mode: "active",
+    profiles: [{
+      schema: "agentloop.practiceProfile/v1",
+      id: "tabular-analysis",
+      version: "1",
+      appliesTo: { operationProfiles: ["data_analysis"], inputFamilies: ["tabular"] },
+      guidance: { instructions: ["Observe schema before aggregation."] },
+    }],
+  };
+  const result = await runAgentLoop({
+    runId: "run-prompt-refresh",
+    systemPrompt: "Complete the step.",
+    input: "analyze sources",
+    model,
+    tools: new ToolRegistry([{
+      name: "discover_source",
+      description: "Discover source metadata",
+      inputSchema: { type: "object" },
+      executionMode: "parallel",
+      replaySafe: true,
+      parse: (value) => value,
+      execute: async () => ({ schema: "agentloop.sourceSummary/v1", extensions: { ".xlsx": 1 } }),
+    }]),
+    grant: makeGrant(["discover_source"]),
+    maxSteps: 3,
+    refreshRuntimePrompt: async ({ latestToolEvidence }) => {
+      assert.equal(latestToolEvidence[0]?.toolName, "discover_source");
+      const observedSourceKinds = observedSourceKindsFromToolEvidence(latestToolEvidence);
+      assert.deepEqual(observedSourceKinds, ["xlsx"]);
+      const refinedTask = { ...task, evidence: { ...task.evidence, sourceKinds: observedSourceKinds } };
+      const resolution = resolvePracticeProfileResolution(catalog, refinedTask, { selectionPoint: "source_discovery" });
+      assert.equal(resolution.profiles[0]?.id, "tabular-analysis");
+      assert.equal(resolution.guidanceInjected, true);
+      return { runtimePromptAugmentation: formatPracticePromptAugmentation(resolution.profiles) };
+    },
+  });
+  assert.equal(result.output, "analysis completed");
+  assert.equal(calls, 2);
 });
 
 test("custom step execution strategy keeps deprioritized Run-authorized tools callable", async () => {
@@ -3124,6 +3191,25 @@ test("artifact progress policy treats mismatched typed intermediates as source u
     && event.data.toolCallId === "rewrite-spec"
   ), true);
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
+});
+
+test("command computation binding errors are actionable while derived evidence remains missing", () => {
+  const state = deriveRuntimeStepEvidenceState({
+    policy: runtimeStepToolProgressPolicy(["derived_aggregation"], { scope: "source" }),
+    evidence: [{
+      toolCallId: "unbound-computation",
+      toolName: "computer_run_command",
+      isError: false,
+      result: JSON.stringify({
+        exitCode: 0,
+        computationEvidenceError: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs.",
+      }),
+    }],
+  });
+
+  assert.equal(state?.recentActionableDiagnostic, true);
+  assert.deepEqual(state?.missingRequiredEvidenceKinds, ["derived_aggregation"]);
+  assert.match(state?.instruction ?? "", /recent .*diagnostic/i);
 });
 
 test("artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family", () => {

@@ -44,6 +44,7 @@ const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtim
 const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));
+const practiceProfileConfigPath = resolve(process.env.PRACTICE_PROFILE_CONFIG_PATH ?? join(appRoot, "config", "practice-profiles.json"));
 const webOrigin = process.env.WEB_ORIGIN ?? buildWebOrigin ?? bootstrap.webOrigin;
 const logColorOptions = {
   colorMode: process.env.AGENTLOOP_LOG_COLOR,
@@ -52,7 +53,7 @@ const logColorOptions = {
 };
 const server = await createLocalAgentServer({
   appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath,
-  providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath,
+  providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath, practiceProfileConfigPath,
   computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
   integrationEnvironment,
   runEventLogSink: (runtime, line) => process.stdout.write(`${localRuntimeTerminalLogLine(runtime.id, line, logColorOptions)}\n`),

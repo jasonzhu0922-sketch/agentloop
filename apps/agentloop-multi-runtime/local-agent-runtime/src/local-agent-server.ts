@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { hostname } from "node:os";
 import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
-import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../src/config/config.ts";
+import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../src/config/config.ts";
 import { LocalDirectoryScopeStore } from "./local-directory-scope-store.ts";
 import { RuntimeConnectionClient } from "./runtime-connection-client.ts";
 import { LocalRuntimeSupervisor, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./local-runtime-supervisor.ts";
@@ -34,6 +34,8 @@ export interface LocalAgentServerOptions {
   readonly providerConfigPath: string;
   readonly skillDirectoriesConfigPath: string;
   readonly stepExecutionStrategyConfigPath: string;
+  /** Optional for embedding compatibility; Local Agent defaults to its bundled catalog. */
+  readonly practiceProfileConfigPath?: string;
   /** Deployment-owned non-secret paths passed only to local Skill commands. */
   readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
   /** Device-owned model and integration settings; never passed to Skill commands. */
@@ -344,11 +346,17 @@ async function createLocalRuntime(input: LocalAgentServerOptions, definition: Lo
   });
   await skills.syncSkillDirectories();
   const strategyConfig = await loadStepExecutionStrategyProfileConfig(input.stepExecutionStrategyConfigPath);
+  const practiceProfileCatalog = await loadPracticeProfileConfig(input.practiceProfileConfigPath ?? join(
+    input.appRoot,
+    "config",
+    "practice-profiles.json",
+  ));
   const runs = new RunService({
     database, skills, modelFactory: (onRetry, modelKey) => provider.create(modelKey, onRetry),
     defaultModelKey: provider.defaultModelKey, modelKeys: provider.modelKeys(), workspaceRoot, sourceStorageRoot,
     ownerScopedWorkspace: true,
     stepExecutionStrategy: createStepExecutionStrategyProfile(strategyConfig.profile, strategyConfig.projection),
+    practiceProfileCatalog,
     tools: integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment)),
     computerCommandEnvironment: input.computerCommandEnvironment,
     ...(input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => input.runEventLogSink!(definition, line) }),

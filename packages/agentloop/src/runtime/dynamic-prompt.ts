@@ -1,3 +1,5 @@
+import { practiceGuidanceForPrompt, type PracticeProfileSelection } from "./practice-profiles.ts";
+
 export type DynamicPromptPhase = "planning" | "execution" | "assessment" | "compaction";
 export type TaskIntent = "reply" | "execute" | "continue" | "recover" | "clarify";
 export type EvidenceProfile = "deterministic" | "evidence_gate" | "lookup_lite" | "source_grounded" | "risk_sensitive";
@@ -50,6 +52,8 @@ export interface TaskProfile {
   readonly phase: DynamicPromptPhase;
   readonly intent: TaskIntent;
   readonly operations: readonly DynamicPromptProfile[];
+  /** Deployment-selected professional guidance; never an authority grant. */
+  readonly practices?: readonly PracticeProfileSelection[];
   readonly evidenceProfile?: EvidenceProfile;
   readonly riskProfile?: RiskProfile;
   readonly planShape?: PlanShape;
@@ -68,6 +72,7 @@ export function buildTaskProfile(input: {
   readonly phase: DynamicPromptPhase;
   readonly intent: TaskIntent;
   readonly operations?: readonly DynamicPromptProfile[];
+  readonly practices?: readonly PracticeProfileSelection[];
   readonly evidenceProfile?: EvidenceProfile;
   readonly riskProfile?: RiskProfile;
   readonly planShape?: PlanShape;
@@ -84,6 +89,7 @@ export function buildTaskProfile(input: {
     phase: input.phase,
     intent: input.intent,
     operations: input.operations ?? [],
+    ...(input.practices === undefined || input.practices.length === 0 ? {} : { practices: input.practices }),
     ...(input.evidenceProfile === undefined ? {} : { evidenceProfile: input.evidenceProfile }),
     ...(input.riskProfile === undefined ? {} : { riskProfile: input.riskProfile }),
     ...(input.planShape === undefined ? {} : { planShape: input.planShape }),
@@ -122,10 +128,16 @@ export function buildDynamicSystemPrompt(input: {
 
 export function formatDynamicPromptContext(taskProfile: TaskProfile): string {
   const now = new Date();
+  const promptSafeProfile = {
+    ...taskProfile,
+    ...(taskProfile.practices === undefined ? {} : {
+      practices: taskProfile.practices.map(({ id, version, contentHash, reason }) => ({ id, version, contentHash, reason })),
+    }),
+  };
   return [
     `<dynamic_prompt_context source="server" phase="${escapeXmlAttribute(taskProfile.phase)}">`,
     JSON.stringify({
-      ...taskProfile,
+      ...promptSafeProfile,
       runtimeClock: {
         currentDateTimeIso: now.toISOString(),
         currentDateUtc: now.toISOString().slice(0, 10),
@@ -133,6 +145,19 @@ export function formatDynamicPromptContext(taskProfile: TaskProfile): string {
       },
     }),
     "</dynamic_prompt_context>",
+  ].join("\n");
+}
+
+/**
+ * Server-authored professional guidance discovered after a leaf has begun.
+ * This is deliberately context-only: it does not impersonate a user message
+ * and cannot change Runtime authority or the available Tool surface.
+ */
+export function formatPracticePromptAugmentation(profiles: readonly PracticeProfileSelection[]): string {
+  return [
+    "<professional_prompt_augmentations source=\"server\" semantics=\"guidance-only\">",
+    JSON.stringify({ professionalPromptAugmentations: practiceGuidanceForPrompt(profiles) }),
+    "</professional_prompt_augmentations>",
   ].join("\n");
 }
 
@@ -149,6 +174,7 @@ function taskProfileSystemSection(taskProfile: TaskProfile | undefined): string 
       ...(profile.executionRules === undefined ? {} : { executionRules: profile.executionRules }),
       ...(profile.successEvidence === undefined ? {} : { successEvidence: profile.successEvidence }),
     })),
+    professionalPromptAugmentations: practiceGuidanceForPrompt(taskProfile.practices),
     ...(taskProfile.evidenceProfile === undefined ? {} : { evidence: taskProfile.evidenceProfile }),
     ...(taskProfile.riskProfile === undefined ? {} : { risk: taskProfile.riskProfile }),
     ...(taskProfile.planShape === undefined ? {} : { shape: taskProfile.planShape }),

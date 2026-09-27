@@ -236,7 +236,7 @@ test("Conversation entry classifies with Runtime-owned external context handles"
     assert.equal(model.intentCalls, 2);
     assert.match(model.intentContexts[0] ?? "", /agentloop\.conversationTurnContext\/v1/);
     assert.match(model.intentContexts[0] ?? "", /"visibleDirectories":\[/);
-    assert.deepEqual(planner.visibleDirectoryCounts, [1, 1]);
+    assert.deepEqual(planner.visibleDirectoryCounts, [1, 0]);
     assert.deepEqual(planner.responseOnlyFlags, [false, true]);
     assert.equal(planner.availableToolNameSnapshots[0]?.includes("visible_find_files"), true);
     assert.equal(planner.availableToolNameSnapshots[0]?.includes("visible_read_files"), true);
@@ -247,6 +247,87 @@ test("Conversation entry classifies with Runtime-owned external context handles"
     await database.close();
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(visible, { recursive: true, force: true });
+  }
+});
+
+test("Conversation resolver atomically binds only the visible directory selected as primary data", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-workspace-"));
+  const unrelated = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-unrelated-"));
+  const performance = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-performance-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          if (request.runId.startsWith("conversation-turn:")) {
+            return {
+              content: "",
+              finishReason: "tool_calls" as const,
+              toolCalls: [{
+                id: "atomic-visible-resolution",
+                name: "resolve_conversation_turn",
+                arguments: {
+                  mode: "execute",
+                  relation: "new_goal",
+                  inputMode: "none",
+                  effectiveGoal: "读取 2026 年 8 月个人绩效评定表，汇总各等级与分值的人数及占比。",
+                  evidenceStrategy: "bound_visible_sources",
+                  sourceBinding: { mode: "primary_data", visibleDirectoryIds: ["visible_dir_2"] },
+                  userConstraints: [],
+                },
+              }],
+            };
+          }
+          return { content: "绩效分布已汇总。", finishReason: "stop" as const, toolCalls: [] };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          return {
+            goal: "analyze selected performance data",
+            selectedSkillIds: [],
+            steps: [{
+              id: "aggregate-performance",
+              objective: "Aggregate the selected performance table into counts and shares.",
+              dependencies: [],
+              skillIds: [],
+              role: "fact_acquisition",
+              requiredCapabilities: ["visible_directory_read"],
+              sourceConstraint: { requiredVisibleDirectoryIds: [task.visibleDirectories![0]!.id] },
+              evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+              successCriteria: [{ id: "delivered", description: "The requested distribution is delivered.", source: "planner" }],
+            }],
+          };
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "分析 2026 年 8 月个人绩效评定表的等级和分值分布", {
+      visibleDirectories: [unrelated, performance],
+    });
+
+    assert.equal(run.status, "completed");
+    assert.deepEqual(capturedTask?.visibleDirectories?.map((directory) => directory.id), ["visible_dir_2"]);
+    assert.equal(capturedTask?.taskUnderstanding.operation, "analysis");
+    assert.equal(capturedTask?.taskUnderstanding.evidence.need, "source_grounded");
+    assert.equal(capturedTask?.taskUnderstanding.operationProfiles.includes("data_analysis"), true);
+    assert.equal(capturedTask?.availableToolNames.includes("visible_extract_tables"), true);
+    const resolved = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.turn.resolved");
+    assert.deepEqual(resolved?.data.sourceBinding, { mode: "primary_data", visibleDirectoryIds: ["visible_dir_2"] });
+    assert.equal(resolved?.data.evidenceDemand, "source_grounded");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(unrelated, { recursive: true, force: true });
+    await fs.rm(performance, { recursive: true, force: true });
   }
 });
 
@@ -514,6 +595,7 @@ class RecordingVisibleDirectoryPlanner implements Planner {
   async plan(task: TaskSpec): Promise<PlanProposal> {
     const hasVisibleTools = task.availableToolNames.includes("visible_find_files")
       && task.availableToolNames.includes("visible_read_file");
+    const sourceGrounded = task.taskUnderstanding.evidence.need !== "none";
     this.visibleDirectoryCounts.push(task.visibleDirectories?.length ?? 0);
     this.availableToolNameSnapshots.push([...task.availableToolNames]);
     this.responseOnlyFlags.push(task.responseOnly === true);
@@ -526,7 +608,12 @@ class RecordingVisibleDirectoryPlanner implements Planner {
         objective: "Record whether visible directory bindings were supplied to this run.",
         dependencies: [],
         skillIds: [],
+        role: sourceGrounded ? "fact_acquisition" : "deliver",
         requiredCapabilities: hasVisibleTools ? ["visible_directory_read"] : [],
+        ...(sourceGrounded && task.visibleDirectories![0] !== undefined ? {
+          sourceConstraint: { requiredVisibleDirectoryIds: [task.visibleDirectories![0].id] },
+          evidenceContract: { requiredKinds: ["source_summary" as const], caveatPolicy: "mark_unverified_facts" as const },
+        } : {}),
         successCriteria: [{
           id: "recorded",
           description: "The visible directory binding count was observed by the planner.",
@@ -679,6 +766,7 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
       assert.match(context, /agentloop\.conversationTurnContext\/v1/);
       const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
       const mode = latest.includes("分析") ? "execute" : "reply";
+      const usesVisibleData = mode === "execute";
       return {
         content: "",
         finishReason: "tool_calls",
@@ -690,7 +778,10 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
             relation: "new_goal",
             inputMode: "none",
             effectiveGoal: latest,
-            evidenceDemand: "none",
+            evidenceStrategy: usesVisibleData ? "bound_visible_sources" : "none",
+            sourceBinding: usesVisibleData
+              ? { mode: "primary_data", visibleDirectoryIds: ["visible_dir_1"] }
+              : { mode: "none", visibleDirectoryIds: [] },
             userConstraints: [],
           },
         }],

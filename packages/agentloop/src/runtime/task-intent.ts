@@ -1,4 +1,5 @@
 import type { ArtifactAction, ArtifactKind, ResearchPolicy, SourceNeed } from "./dynamic-prompt.ts";
+import type { PracticeProfileSelection } from "./practice-profiles.ts";
 import type { UploadedSourceSummary } from "./contracts.ts";
 import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 
@@ -87,6 +88,8 @@ export interface StructuredTaskUnderstanding {
   readonly operationProfiles: readonly StructuredTaskOperationProfile[];
   readonly constraints: readonly string[];
   readonly intent: TaskIntentClassification;
+  /** Immutable deployment-profile snapshot selected at Run admission. */
+  readonly practiceProfiles?: readonly PracticeProfileSelection[];
 }
 
 export interface UploadedSourcePlanningContext {
@@ -190,6 +193,7 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
 export function understandTask(input: TaskIntentInput & {
   readonly uploadedSources?: readonly UploadedSourceSummary[];
   readonly targetArtifactKind?: Exclude<ArtifactKind, "none">;
+  readonly practiceProfiles?: readonly PracticeProfileSelection[];
 }): StructuredTaskUnderstanding {
   const rawObjective = input.objective;
   const normalizedInput = [
@@ -235,7 +239,7 @@ export function understandTask(input: TaskIntentInput & {
       wantsArtifact: true,
       wantsConversationAnswer: false,
     };
-  const operation = structuredTaskOperation(intent, normalizedObjective, readySources.length > 0);
+  const operation = structuredTaskOperation(intent, normalizedObjective, readySources);
   const workflow: StructuredTaskStage[] = [];
   if (intent.sourceNeed !== "none") workflow.push("acquire");
   if (operation === "analysis" || operation === "composite") workflow.push("analyze");
@@ -276,6 +280,7 @@ export function understandTask(input: TaskIntentInput & {
     operationProfiles: structuredOperationProfiles(intent, operation, normalizedObjective),
     constraints: [...(input.userConstraints ?? [])],
     intent,
+    ...(input.practiceProfiles === undefined || input.practiceProfiles.length === 0 ? {} : { practiceProfiles: input.practiceProfiles }),
   };
 }
 
@@ -312,10 +317,15 @@ function structuredTaskText(value: string, intent: TaskIntentClassification): st
  */
 function structuredOutputFormat(value: string, intent: TaskIntentClassification): string | undefined {
   if (!intent.wantsArtifact) return undefined;
-  const targetClause = intent.artifactAction === "transform"
-    ? artifactTransformationOutputClause(value)
-    : artifactCreationClause(value);
-  return structuredExplicitFormat(targetClause);
+  if (intent.artifactAction === "transform") return structuredExplicitFormat(artifactTransformationOutputClause(value));
+  // Reuse the same delivery-only scope as artifact-kind classification.  A
+  // format field is metadata for an already resolved output contract, never a
+  // second, broader scan of source/business wording.
+  for (const qualifier of explicitDeliveryFormatQualifiers(value)) {
+    const format = structuredExplicitFormat(qualifier);
+    if (format !== undefined) return format;
+  }
+  return structuredExplicitFormat(artifactCreationDeliveryTarget(value));
 }
 
 function structuredExplicitFormat(value: string): string | undefined {
@@ -388,17 +398,36 @@ export function artifactKindForReference(input: {
 function structuredTaskOperation(
   intent: TaskIntentClassification,
   objective: string,
-  uploadedInput: boolean,
+  uploadedSources: readonly UploadedSourceSummary[],
 ): StructuredTaskOperation {
+  const uploadedInput = uploadedSources.length > 0;
+  const uploadedDataAnalysis = hasStructuredDataSource(uploadedSources) && isDataAnalysisIntent(objective);
   if (intent.artifactAction === "transform" || (intent.artifactAction === "modify" && uploadedInput)) return "transform_artifact";
   if (intent.wantsArtifact && intent.sourceNeed !== "none") return "composite";
+  // Uploaded tabular data is already Runtime-authorized source evidence. A
+  // user asking to analyze it must not be downgraded to a direct reply merely
+  // because no external lookup is required. If a deliverable is requested,
+  // preserve the acquire/analyze/produce boundary as a composite task.
+  if (uploadedDataAnalysis) return intent.wantsArtifact ? "composite" : "analysis";
   if (intent.wantsArtifact) return "create_artifact";
   if (intent.sourceNeed !== "none") {
-    return /(?:分析|评估|比较|走势|趋势|统计|汇总|总结|analy[sz]|compare|trend|summar)/iu.test(objective)
+    return isDataAnalysisIntent(objective)
       ? "analysis"
       : "lookup";
   }
   return "answer";
+}
+
+function isDataAnalysisIntent(value: string): boolean {
+  return /(?:分析|评估|比较|走势|趋势|统计|汇总|总结|analy[sz]|compare|trend|summar)/iu.test(value);
+}
+
+function hasStructuredDataSource(sources: readonly UploadedSourceSummary[]): boolean {
+  return sources.some((source) => /(?:csv|tsv|xlsx|xlsm|xls|parquet|ndjson|json)/iu.test([
+    source.originalName,
+    source.extension,
+    source.mimeType,
+  ].join(" ")));
 }
 
 function structuredSubjectText(value: string): string {
@@ -457,14 +486,14 @@ function inferArtifactAction(text: string, actionSignals: readonly string[]): Ar
 function detectRequestedArtifactKind(text: string, action: ArtifactAction): ArtifactKind {
   if (action === "none") return "none";
   if (action === "create") {
-    // The resolved goal may contain a later generic constraint such as
-    // “输出完整报告” after an earlier explicit “输出 HTML 报告”. Looking
-    // only after the last creation verb would erase the requested format and
-    // let a broad document Skill win. An explicit format anywhere in a
-    // create request is output evidence; input-format ownership is handled
-    // separately by native transform logic.
-    const explicitKind = explicitArtifactFormatKind(text);
-    return explicitKind !== "none" ? explicitKind : detectArtifactKindSignal(artifactCreationClause(text));
+    // Delivery format is user-owned output intent.  A source field can use
+    // words such as “code” (for example, a company registration code), but
+    // must never turn a factual query into a request for a code artifact.
+    // Restrict classification to the delivery target and explicit “use/as
+    // <format> ... create/deliver” declarations.
+    const deliveryTarget = artifactCreationDeliveryTarget(text);
+    const explicitKind = explicitDeliveryFormatKind(text, deliveryTarget);
+    return explicitKind !== "none" ? explicitKind : detectArtifactKindSignal(deliveryTarget);
   }
   if (action === "transform") {
     const outputKind = detectArtifactKindSignal(artifactTransformationOutputClause(text));
@@ -489,8 +518,33 @@ function explicitArtifactFormatKind(text: string): ArtifactKind {
   return "none";
 }
 
+function explicitDeliveryFormatKind(text: string, deliveryTarget: string): ArtifactKind {
+  // Keep an explicit format that precedes its creation verb, such as
+  // “用 HTML 格式做一个报告”.  This is deliberately a delivery-language
+  // pattern rather than a scan of the whole task, so input/source formats do
+  // not become output contracts.
+  for (const qualifier of explicitDeliveryFormatQualifiers(text)) {
+    const kind = explicitArtifactFormatKind(qualifier);
+    if (kind !== "none") return kind;
+  }
+  return explicitArtifactFormatKind(deliveryTarget);
+}
+
+function explicitDeliveryFormatQualifiers(text: string): string[] {
+  return [...text.matchAll(/(?:以|用)\s*([^，,。；;\n]{1,48}?)\s*(?:格式|文件(?:形式)?|文档)(?:形式)?\s*(?:来|去)?\s*(?:输出|生成|创建|制作|交付|呈现|写|设计|实现|搭建|构建|导出|做|落成)/giu)]
+    .map((match) => match[1] ?? "");
+}
+
+function artifactCreationDeliveryTarget(text: string): string {
+  const clause = artifactCreationClause(text);
+  // These terms switch from naming the output to describing its contents,
+  // sources, or fields.  Only the preceding target can determine its format.
+  const boundary = /[，,。；;\n]|基于|根据|来自|从|读取|解析|提取|包含|包括|字段|来源|输入|上传|参考|关于/iu.exec(clause);
+  return boundary?.index === undefined ? clause : clause.slice(0, boundary.index);
+}
+
 function artifactCreationClause(text: string): string {
-  const matches = [...text.matchAll(/\b(?:make|create|build|generate|produce|deliver|write|export|design|implement|materialize|form)\b|做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出/giu)];
+  const matches = [...text.matchAll(/\b(?:make|create|build|generate|produce|deliver|write|export|design|implement|materialize|form)\b|做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出|落成/giu)];
   const last = matches.at(-1);
   return last?.index === undefined ? text : text.slice(last.index);
 }
@@ -508,7 +562,10 @@ function detectArtifactKindSignal(text: string): ArtifactKind {
   if (/(?:xlsx?|excel|spreadsheet|sheet|csv|表格|工作簿)/iu.test(text)) return "spreadsheet";
   if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(text)) return "image";
   if (/(?:\b(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|weba)\b|audio\/(?:aac|flac|mpeg|mp4|ogg|wav|webm)|音频文件|音频)/iu.test(text)) return "audio";
-  if (/(?:code|script|program|app|json|代码|脚本|程序|应用)/iu.test(text)) return "code";
+  // Code-like vocabulary is intentionally handled only by
+  // explicitArtifactFormatKind() over the delivery target.  It frequently
+  // occurs in source schemas and business fields and is not an output-format
+  // declaration on its own.
   if (/(?:\b(?:report|summary|brief|memo|proposal|assessment)\b|报告|总结|简报|备忘录|方案|评估|评价材料)/iu.test(text)) return "document";
   return "none";
 }
@@ -603,7 +660,7 @@ function matchedArtifactActions(text: string): string[] {
     ["make", /\b(?:make|create|build|generate|produce|deliver|write|export|convert|design|implement|materialize|form)\b/iu],
     ["repair", /\b(?:fix|repair|edit|update|correct|regenerate|rebuild|open|inspect|check)\b|修复|修改|更改|改动|改为|改成|更正|重新生成|重做|打开|检查|查看|乱码|不可读|打不开/iu],
     ["transform", /\b(?:convert|merge|combine|concatenate|join|split|rotate|encrypt|decrypt|watermark|compress|resize|transcode)\b|合并|拼接|拆分|分割|旋转|加密|解密|加水印|压缩|缩放|转码|转换|转成|转为/iu],
-    ["make_zh", /做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出|转换|转成|转为|转/iu],
+    ["make_zh", /做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出|落成|转换|转成|转为|转/iu],
   ]);
 }
 

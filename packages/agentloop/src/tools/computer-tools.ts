@@ -595,7 +595,7 @@ export function createComputerTools(
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
-        "For a declared Skill workflow action with an immutable evidence input, pass that exact workspace input path in computationInputs. Runtime captures the live hash and binds the package action identity to its stdout receipt; do not self-issue a Runtime receipt. For an unbound reusable derived aggregation, stdout must instead be one agentloop.commandComputation/v1 JSON document with matching input paths and a non-empty facts object.",
+        "For every command that derives facts from workspace data, pass each exact source path in computationInputs (for example, computationInputs:[{path:'series.json'}]). Its sole stdout JSON document must use agentloop.commandComputation/v1 with inputRefs:[{path:'series.json'}] in the same order and a non-empty facts object; inputs is not a valid stdout field. Runtime captures source hashes from computationInputs and will not infer source identity from stdout.",
         `timeoutMs is optional, defaults to ${DEFAULT_COMMAND_TIMEOUT_MS}, and must be between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS}.`,
       ].join(" "),
       inputSchema: objectSchema(["command", "args"], {

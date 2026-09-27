@@ -100,6 +100,7 @@ async function copyRuntimePayload() {
   await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));
   await writeFile(join(resources, "config/skill-directories.json"), JSON.stringify({ schema: "agentloop.skillDirectories/v1", customSkillDirectories: [] }, null, 2));
   await cp(join(appRoot, "config/step-execution-strategy.json"), join(resources, "config/step-execution-strategy.json"));
+  await cp(join(appRoot, "config/practice-profiles.json"), join(resources, "config/practice-profiles.json"));
   await writeFile(join(resources, "agentloop-local-runtime.manifest.json"), `${JSON.stringify({ schema: "agentloop.localRuntimeRelease/v1", routerUrl, webOrigin }, null, 2)}\n`);
 }
 

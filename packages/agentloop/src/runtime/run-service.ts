@@ -22,6 +22,8 @@ import type {
   ConversationTurnRelation,
   ConversationTurnInputMode,
   ConversationTurnResolution,
+  ConversationEvidenceStrategy,
+  ConversationSourceBinding,
   ConversationWorkingSet,
   ExecutionPlan,
   FailedBoundary,
@@ -72,9 +74,11 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
-import { buildDynamicSystemPrompt, buildTaskProfile, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
+import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
+import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
+import { observedSourceKindsFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
 import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type StructuredTaskUnderstanding } from "./task-intent.ts";
 import type {
@@ -332,6 +336,7 @@ export class RunService {
   private readonly planningExtensions: readonly PlanningExtension[];
   private readonly stepExecutionStrategy?: StepExecutionStrategy;
   private readonly toolExecutionPlugins: readonly ToolExecutionPlugin[];
+  private readonly practiceProfileCatalog?: PracticeProfileCatalog;
 
   constructor(options: {
     database: SqlConnection;
@@ -359,6 +364,8 @@ export class RunService {
     planningExtensions?: readonly PlanningExtension[];
     stepExecutionStrategy?: StepExecutionStrategy;
     toolExecutionPlugins?: readonly ToolExecutionPlugin[];
+    /** Deployment-owned guidance profiles. They cannot grant capabilities or completion authority. */
+    practiceProfileCatalog?: PracticeProfileCatalog;
   }) {
     this.database = options.database;
     this.skills = options.skills;
@@ -412,6 +419,7 @@ export class RunService {
     this.planningExtensions = options.planningExtensions ?? [];
     this.stepExecutionStrategy = options.stepExecutionStrategy;
     this.toolExecutionPlugins = Object.freeze([...(options.toolExecutionPlugins ?? [])]);
+    this.practiceProfileCatalog = options.practiceProfileCatalog;
   }
 
   async execute(
@@ -1924,6 +1932,10 @@ export class RunService {
           executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)
         );
       const effectiveGoal = turnResolution?.effectiveGoal ?? input;
+      // Visible directories are capabilities offered to the resolver, never
+      // implicit task input.  Only its atomic source binding is propagated to
+      // planning, admission, and the prompt profile selection.
+      const planningVisibleDirectories = visibleDirectoriesForTurn(turnResolution, visibleDirectories);
       const targetArtifact = turnResolution?.targetArtifact === undefined
         ? undefined
         : conversationWorkingSet?.reusableArtifacts.find((artifact) =>
@@ -1931,7 +1943,7 @@ export class RunService {
           && artifact.runId === turnResolution.targetArtifact!.runId
           && artifact.path === turnResolution.targetArtifact!.path,
         );
-      const taskUnderstanding = understandTask({
+      const baseTaskUnderstanding = understandTask({
         // The resolver supplies a self-contained goal, while the immutable
         // latest user input preserves delivery verbs that a paraphrase may
         // weaken (for example, "generate a Markdown file" -> "present as Markdown").
@@ -1946,12 +1958,31 @@ export class RunService {
           targetArtifactKind: artifactKindForReference(targetArtifact),
         }),
       });
+      const initialPracticeResolution = resolvePracticeProfileResolution(this.practiceProfileCatalog, baseTaskUnderstanding, {
+        selectionPoint: "task_understanding",
+      });
+      const selectedPracticeProfiles = initialPracticeResolution.guidanceInjected
+        ? initialPracticeResolution.profiles
+        : [];
+      const taskUnderstanding = {
+        ...baseTaskUnderstanding,
+        ...(selectedPracticeProfiles.length === 0 ? {} : { practiceProfiles: selectedPracticeProfiles }),
+      };
+      if (this.practiceProfileCatalog !== undefined) {
+        await emit({
+          type: "practice_profile.resolved",
+          data: practiceProfileResolutionEventData(initialPracticeResolution),
+        });
+      }
       const taskIntent = taskUnderstanding.intent;
       const admissionTaskIntent = {
         ...taskIntent,
         ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
       };
-      const allowedToolSummaries = toolSummaries(allTools, new Set(allowedToolNames));
+      const planningAllowedToolNames = turnResolution === undefined || planningVisibleDirectories.length > 0
+        ? allowedToolNames
+        : allowedToolNames.filter((name) => !isVisibleDirectoryToolName(name));
+      const allowedToolSummaries = toolSummaries(allTools, new Set(planningAllowedToolNames));
       const requiredToolSourceIds = requiredToolSourceIdsFromInput(`${input}\n${effectiveGoal}`, allowedToolSummaries);
       const rootGrant = createCapabilityGrant({
         actorUserId,
@@ -1959,7 +1990,7 @@ export class RunService {
         ...(conversationId === undefined ? {} : { conversationId }),
         depth: 0,
         workspaceRoot: runWorkspaceRoot,
-        visibleDirectories,
+        visibleDirectories: planningVisibleDirectories,
         uploadedSources: availableSources,
         allowedToolNames,
         allowedSkillIds: privateSkills.map((skill) => skill.id),
@@ -2010,7 +2041,7 @@ export class RunService {
           },
         });
       }
-      const planningWorkspace = await planningWorkspaceFacts(runWorkspaceRoot, visibleDirectories, conversationId, availableSources);
+      const planningWorkspace = await planningWorkspaceFacts(runWorkspaceRoot, planningVisibleDirectories, conversationId, availableSources);
       const planningTask: TaskSpec = {
         runId,
         input,
@@ -2019,7 +2050,7 @@ export class RunService {
         availableSkills: planningSkills,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
-        availableToolNames: allowedToolNames,
+        availableToolNames: planningAllowedToolNames,
         availableTools: allowedToolSummaries,
         availableCapabilities: [
           ...planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
@@ -2034,7 +2065,7 @@ export class RunService {
         },
         ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
         workspaceFacts: planningWorkspace,
-        visibleDirectories,
+        visibleDirectories: planningVisibleDirectories,
         sources: availableSources,
         ...(responseOnly ? { responseOnly: true } : {}),
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
@@ -2087,7 +2118,7 @@ export class RunService {
           availableCapabilities: planningCapabilitiesForAdmittedProposal(proposal, privateSkills, allowedToolSummaries, availableSources),
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
-          availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
+          availableVisibleDirectoryIds: planningVisibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           ...(resultBindings.length === 0 ? {} : { resultBindings }),
           taskIntent: admissionTaskIntent,
@@ -2128,7 +2159,7 @@ export class RunService {
           availableCapabilities: planningCapabilitiesForAdmittedProposal(proposal, privateSkills, allowedToolSummaries, availableSources),
           ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
-          availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
+          availableVisibleDirectoryIds: planningVisibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           ...(resultBindings.length === 0 ? {} : { resultBindings }),
           taskIntent: admissionTaskIntent,
@@ -2613,6 +2644,11 @@ export class RunService {
         recovery?.toolEvidence ?? [],
         conversationToolEvidence,
       );
+      // A visible directory is intentionally not preclassified from its path.
+      // Only a committed structured source summary/extraction can refine the
+      // task's observed input families for the next model turn.
+      const discoveredSourceKinds = new Set<string>(plan.taskSemantics?.evidence.sourceKinds ?? []);
+      const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
       const result = await runAgentLoop({
         runId: input.runId,
         // Stage 3 is limited to fresh file-producing leaves with a snapshot reader.
@@ -2661,6 +2697,31 @@ export class RunService {
           initialMessages: recovery.messages,
         }),
         ...(initialToolEvidence.length === 0 ? {} : { initialToolEvidence }),
+        ...(this.practiceProfileCatalog === undefined ? {} : {
+          refreshRuntimePrompt: async ({ latestToolEvidence }) => {
+            const newlyObservedSourceKinds = observedSourceKindsFromToolEvidence(latestToolEvidence)
+              .filter((kind) => !discoveredSourceKinds.has(kind));
+            if (newlyObservedSourceKinds.length === 0) return undefined;
+            for (const kind of newlyObservedSourceKinds) discoveredSourceKinds.add(kind);
+            const refinedTaskUnderstanding = taskUnderstandingWithObservedSourceKinds(plan.taskSemantics, discoveredSourceKinds);
+            if (refinedTaskUnderstanding === undefined) return undefined;
+            const resolution = resolvePracticeProfileResolution(this.practiceProfileCatalog, refinedTaskUnderstanding, {
+              selectionPoint: "source_discovery",
+              excludedProfileIds: [...selectedPracticeProfileIds],
+            });
+            await input.emit({
+              type: "practice_profile.resolved",
+              data: practiceProfileResolutionEventData(resolution, {
+                planId: plan.id,
+                stepId: activeStep.id,
+                observedSourceKinds: newlyObservedSourceKinds,
+              }),
+            });
+            for (const profile of resolution.profiles) selectedPracticeProfileIds.add(profile.id);
+            if (!resolution.guidanceInjected) return undefined;
+            return { runtimePromptAugmentation: formatPracticePromptAugmentation(resolution.profiles) };
+          },
+        }),
         model: input.model,
         tools: input.registry,
         grant: stepGrant,
@@ -2789,6 +2850,7 @@ export class RunService {
           const assessmentSignature = stepAssessmentSignature({
             stepId: activeStep.id,
             assessmentProfile,
+            ...(plan.taskSemantics?.practiceProfiles === undefined ? {} : { practiceProfiles: plan.taskSemantics.practiceProfiles }),
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
@@ -2858,6 +2920,7 @@ export class RunService {
             modelEvidence,
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
+            ...(plan.taskSemantics?.practiceProfiles === undefined ? {} : { practiceProfiles: plan.taskSemantics.practiceProfiles }),
             ...(holisticSourceContractMismatch ? { holisticSourceContractMismatch: true } : {}),
             attempt: assessmentAttempt,
             decisionLedger,
@@ -6783,6 +6846,7 @@ function executionTaskProfile(
     readonly toolNames: readonly string[];
     readonly skillNames?: readonly string[];
     readonly allowResearchPolicy?: boolean;
+    readonly practiceProfiles?: readonly import("./practice-profiles.ts").PracticeProfileSelection[];
   },
 ): TaskProfile {
   const intent = input === undefined
@@ -6797,6 +6861,7 @@ function executionTaskProfile(
     phase: "execution",
     intent: "execute",
     operations: [operationProfile],
+    practices: input?.practiceProfiles,
     ...(intent?.artifactKind === undefined ? {} : { artifactKind: intent.artifactKind }),
     ...(intent?.sourceNeed === undefined || input?.allowResearchPolicy !== true ? {} : { sourceNeed: intent.sourceNeed }),
     ...(intent?.researchPolicy === undefined || input?.allowResearchPolicy !== true ? {} : { researchPolicy: intent.researchPolicy }),
@@ -6816,6 +6881,7 @@ function executionTaskProfileForStep(
     toolNames: stepResolvedToolNames(step),
     skillNames: skills.map((skill) => skill.name),
     allowResearchPolicy: stepAllowsResearchPolicy(step),
+    practiceProfiles: taskSemantics?.practiceProfiles,
   };
   const profile = executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
   // Planner's structured deliverable is the authority for a file-producing
@@ -6866,6 +6932,41 @@ function buildStepSystemPrompt(
     ],
     taskProfile,
   });
+}
+
+function practiceProfileResolutionEventData(
+  resolution: PracticeProfileResolution,
+  extra: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  return {
+    ...extra,
+    schema: resolution.schema,
+    catalogEnabled: resolution.catalogEnabled,
+    mode: resolution.mode,
+    selectionPoint: resolution.selectionPoint,
+    observedInputFamilies: resolution.observedInputFamilies,
+    guidanceInjected: resolution.guidanceInjected,
+    selectedProfiles: resolution.profiles.map((profile) => ({
+      id: profile.id,
+      version: profile.version,
+      contentHash: profile.contentHash,
+      reason: profile.reason,
+    })),
+  };
+}
+
+function taskUnderstandingWithObservedSourceKinds(
+  task: StructuredTaskUnderstanding | undefined,
+  sourceKinds: ReadonlySet<string>,
+): StructuredTaskUnderstanding | undefined {
+  if (task === undefined) return undefined;
+  return {
+    ...task,
+    evidence: {
+      ...task.evidence,
+      sourceKinds: [...sourceKinds].sort(),
+    },
+  };
 }
 
 function buildStepRuntimeContext(
@@ -7140,11 +7241,11 @@ async function resolveVisibleDirectories(paths: readonly string[]): Promise<Visi
 
 const CONVERSATION_TURN_TOOL = {
   name: "resolve_conversation_turn",
-  description: "Bind the latest conversational turn to its effective goal, goal lineage, and Runtime-issued prior-work candidate.",
+  description: "Resolve one conversational turn atomically: goal, evidence strategy, source role, and any Runtime-issued candidates it uses.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["mode", "relation", "inputMode", "effectiveGoal", "evidenceDemand", "userConstraints"],
+    required: ["mode", "relation", "inputMode", "effectiveGoal", "evidenceStrategy", "sourceBinding", "userConstraints"],
     properties: {
       mode: { type: "string", enum: ["reply", "execute", "clarify"] },
       relation: {
@@ -7166,9 +7267,22 @@ const CONVERSATION_TURN_TOOL = {
       },
       resultCandidateId: { type: "string", pattern: "^result_candidate_[1-9][0-9]*$" },
       effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
-      evidenceDemand: {
+      evidenceStrategy: {
         type: "string",
-        enum: ["none", "lookup_lite", "source_grounded", "strict_user_source"],
+        enum: ["none", "lookup_lite", "source_grounded", "strict_user_source", "bound_visible_sources"],
+      },
+      sourceBinding: {
+        type: "object",
+        additionalProperties: false,
+        required: ["mode", "visibleDirectoryIds"],
+        properties: {
+          mode: { type: "string", enum: ["none", "primary_data"] },
+          visibleDirectoryIds: {
+            type: "array",
+            maxItems: 12,
+            items: { type: "string", pattern: "^visible_dir_[1-9][0-9]*$" },
+          },
+        },
       },
       userConstraints: {
         type: "array",
@@ -7208,7 +7322,7 @@ async function resolveConversationTurn(
       tools: [CONVERSATION_TURN_TOOL],
       toolChoice: { name: CONVERSATION_TURN_TOOL.name },
     }, signal);
-    const resolution = parseConversationTurnResolution(response, context.conversationWorkingSet);
+    const resolution = parseConversationTurnResolution(response, context);
     if (resolution !== undefined) {
       const inherited = inheritContinuedConversationIntent(resolution, context.conversationWorkingSet);
       const inheritedBinding = inheritPriorWorkProductBinding(inherited, context.conversationWorkingSet);
@@ -7230,6 +7344,8 @@ async function resolveConversationTurn(
       relation: "new_goal",
       inputMode: "none",
       effectiveGoal: "Clarify which prior completed result should be used as input.",
+      evidenceStrategy: "none",
+      sourceBinding: noConversationSourceBinding(),
       evidenceDemand: "none",
       userConstraints: [semanticFeedback],
       source: "deterministic",
@@ -7260,9 +7376,17 @@ function inheritContinuedConversationIntent(
     ...target.userConstraints,
     ...resolution.userConstraints,
   ]);
-  const evidenceDemand = strongerConversationEvidenceDemand(target.evidenceDemand, resolution.evidenceDemand);
+  const sourceBinding = target.sourceBinding;
+  const evidenceDemand = sourceBinding.mode === "primary_data"
+    ? "source_grounded"
+    : strongerConversationEvidenceDemand(target.evidenceDemand, resolution.evidenceDemand);
+  const evidenceStrategy = conversationEvidenceStrategyForDemand(evidenceDemand, sourceBinding);
   const changed = resolution.effectiveGoal !== target.effectiveGoal
     || evidenceDemand !== resolution.evidenceDemand
+    || evidenceStrategy !== resolution.evidenceStrategy
+    || sourceBinding.mode !== resolution.sourceBinding.mode
+    || sourceBinding.visibleDirectoryIds.length !== resolution.sourceBinding.visibleDirectoryIds.length
+    || sourceBinding.visibleDirectoryIds.some((id, index) => id !== resolution.sourceBinding.visibleDirectoryIds[index])
     || userConstraints.length !== resolution.userConstraints.length
     || userConstraints.some((constraint, index) => constraint !== resolution.userConstraints[index]);
   if (!changed) return resolution;
@@ -7270,6 +7394,8 @@ function inheritContinuedConversationIntent(
     ...resolution,
     mode: "execute",
     effectiveGoal: target.effectiveGoal,
+    evidenceStrategy,
+    sourceBinding,
     evidenceDemand,
     userConstraints,
     source: "model_guarded",
@@ -7454,21 +7580,35 @@ function applyConversationTurnEvidenceFloor(
     && userAuthoredSourceNeed !== "strict_user_source"
     ? "source_grounded"
     : resolution.evidenceDemand;
-  const guardedSourceNeed = strongerConversationEvidenceDemand(modelSourceNeed, userAuthoredSourceNeed);
+  // A primary visible-directory binding is a closed input contract. Its
+  // source-grounded projection must not be made inconsistent by the legacy
+  // generic evidence floor; ambiguity about whether that local data satisfies
+  // an "official" request belongs to Resolver clarification instead.
+  const guardedSourceNeed = resolution.sourceBinding.mode === "primary_data"
+    ? "source_grounded"
+    : strongerConversationEvidenceDemand(modelSourceNeed, userAuthoredSourceNeed);
   // A bound native work product is an input artifact, not a request to
   // reacquire the facts that led to its earlier creation. If the latest
   // user-authored request has no source demand, retain prior provenance in the
   // artifact lineage but do not turn a layout/file transformation into
   // source-grounded research merely because the target Run was grounded.
   if (hasBoundPriorWorkProduct && userAuthoredSourceNeed === "none") {
-    if (resolution.evidenceDemand === "none" && resolution.mode === "execute") return resolution;
-    return { ...resolution, mode: "execute", evidenceDemand: "none", source: "model_guarded" };
+    const evidenceDemand = resolution.sourceBinding.mode === "primary_data" ? "source_grounded" : "none";
+    if (resolution.evidenceDemand === evidenceDemand && resolution.mode === "execute") return resolution;
+    return {
+      ...resolution,
+      mode: "execute",
+      evidenceStrategy: conversationEvidenceStrategyForDemand(evidenceDemand, resolution.sourceBinding),
+      evidenceDemand,
+      source: "model_guarded",
+    };
   }
   if (guardedSourceNeed === resolution.evidenceDemand && resolution.mode === "execute") return resolution;
   if (guardedSourceNeed === "none") return resolution;
   return {
     ...resolution,
     mode: "execute",
+    evidenceStrategy: conversationEvidenceStrategyForDemand(guardedSourceNeed, resolution.sourceBinding),
     evidenceDemand: guardedSourceNeed,
     source: "model_guarded",
   };
@@ -7493,6 +7633,11 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Do not interpret an elliptical follow-up in isolation. Rebind corrections, challenges, refinements, and continuations to the concrete prior goal they modify.",
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
+      "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
+      "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
+      "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
+      "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
+      "For lookup, uploaded, or other non-directory evidence, keep sourceBinding.mode=none and choose the matching non-bound evidenceStrategy.",
       "Return reply only when the effective goal can be satisfied solely from the existing transcript and supplied metadata.",
       "Return execute when faithful completion requires external state acquisition or capability use, even when the user only rejects, questions, or refines a prior answer.",
       "A request for specific externally verifiable facts that are not grounded in the transcript needs lookup_lite or source_grounded evidence even when the user did not explicitly say search or browse.",
@@ -7504,7 +7649,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
       "Set inputMode=prior_artifact only when changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
       "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while resultCandidateId identifies the published Runtime Result supplying its content.",
-      "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceDemand=none. For 'reanalyze the source and make a PDF', use refresh_sources with source-grounded evidence.",
+      "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
       "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
@@ -7519,8 +7664,9 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
 
 function parseConversationTurnResolution(
   response: ModelResponse,
-  workset: ConversationWorkingSet | undefined,
+  context: ConversationIntentExternalContext,
 ): ConversationTurnResolution | undefined {
+  const workset = context.conversationWorkingSet;
   const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL.name);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
     return undefined;
@@ -7529,7 +7675,9 @@ function parseConversationTurnResolution(
   const mode = argumentsRecord.mode;
   const relation = argumentsRecord.relation;
   const inputMode = argumentsRecord.inputMode;
-  const evidenceDemand = argumentsRecord.evidenceDemand;
+  const legacyEvidenceDemand = argumentsRecord.evidenceDemand;
+  const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy, legacyEvidenceDemand);
+  const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
     : "";
@@ -7558,7 +7706,7 @@ function parseConversationTurnResolution(
   if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return undefined;
   if (!isConversationTurnRelation(relation)) return undefined;
   if (!isConversationTurnInputMode(inputMode)) return undefined;
-  if (!isConversationEvidenceDemand(evidenceDemand)) return undefined;
+  if (evidenceStrategy === undefined || sourceBinding === undefined) return undefined;
   if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
   if (targetGoalCandidateId !== undefined && targetRunId === undefined) return undefined;
   if (resultCandidateId !== undefined && targetResult === undefined) return undefined;
@@ -7567,7 +7715,9 @@ function parseConversationTurnResolution(
   if (inputMode === "prior_artifact" && targetArtifact === undefined) return undefined;
   if (inputMode !== "prior_artifact" && targetArtifact !== undefined) return undefined;
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000 || userConstraints === undefined) return undefined;
-  if (mode !== "execute" && evidenceDemand !== "none") return undefined;
+  const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
+  if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return undefined;
+  if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return undefined;
 
   const priorRunIds = conversationTurnTargetRunIds(workset);
   if (relation === "new_goal") {
@@ -7591,6 +7741,8 @@ function parseConversationTurnResolution(
     ...(targetArtifact === undefined ? {} : { targetArtifact }),
     ...(targetResult === undefined ? {} : { targetResult }),
     effectiveGoal,
+    evidenceStrategy,
+    sourceBinding,
     evidenceDemand,
     userConstraints,
     source: "model",
@@ -7638,13 +7790,16 @@ function conversationTurnRepairFeedback(response: ModelResponse): string {
 }
 
 function deterministicConversationTurnResolution(input: string): ConversationTurnResolution {
+  const evidenceDemand = classifyTaskIntent({ objective: input }).sourceNeed;
   return {
     schema: "agentloop.conversationTurnResolution/v1",
     mode: "execute",
     relation: "new_goal",
     inputMode: "none",
     effectiveGoal: input.trim() || "Complete the latest user request",
-    evidenceDemand: classifyTaskIntent({ objective: input }).sourceNeed,
+    evidenceStrategy: evidenceDemand,
+    sourceBinding: noConversationSourceBinding(),
+    evidenceDemand,
     userConstraints: [],
     source: "deterministic",
   };
@@ -7674,6 +7829,11 @@ function conversationTurnResolutionFromEvents(
           : "none"
       : data.inputMode;
     const evidenceDemand = data.evidenceDemand;
+    const evidenceStrategy = parseConversationEvidenceStrategy(data.evidenceStrategy, evidenceDemand);
+    // Historical resolution events did not record a source binding. They are
+    // interpreted as unbound; only new model resolutions can bind a visible
+    // directory candidate.
+    const sourceBinding = parsePersistedConversationSourceBinding(data.sourceBinding);
     const source = data.source;
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
     const targetRunId = typeof data.targetRunId === "string" ? data.targetRunId.trim() : undefined;
@@ -7683,14 +7843,16 @@ function conversationTurnResolutionFromEvents(
     if (data.schema !== "agentloop.conversationTurnResolution/v1") return undefined;
     if (!isConversationTurnMode(mode) || !isConversationTurnRelation(relation)) return undefined;
     if (!isConversationTurnInputMode(inputMode)) return undefined;
-    if (!isConversationEvidenceDemand(evidenceDemand) || !isConversationTurnResolutionSource(source)) return undefined;
+    if (!isConversationEvidenceDemand(evidenceDemand) || evidenceStrategy === undefined || sourceBinding === undefined || !isConversationTurnResolutionSource(source)) return undefined;
     if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return undefined;
     if (
       !Array.isArray(data.userConstraints)
       || userConstraints.length !== data.userConstraints.length
       || userConstraints.some((item) => item.length > 240)
     ) return undefined;
-    if (mode !== "execute" && evidenceDemand !== "none") return undefined;
+    if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return undefined;
+    if (conversationEvidenceDemandForStrategy(evidenceStrategy) !== evidenceDemand) return undefined;
+    if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return undefined;
     if (relation !== "new_goal" && (targetRunId === undefined || targetRunId.length === 0)) return undefined;
     if (targetArtifact !== undefined && (relation === "new_goal" || targetArtifact.runId !== targetRunId)) return undefined;
     if (data.targetResult !== undefined && targetResult === undefined) return undefined;
@@ -7703,12 +7865,25 @@ function conversationTurnResolutionFromEvents(
       ...(targetArtifact === undefined ? {} : { targetArtifact }),
       ...(targetResult === undefined ? {} : { targetResult }),
       effectiveGoal,
+      evidenceStrategy,
+      sourceBinding,
       evidenceDemand,
       userConstraints,
       source,
     };
   }
   return undefined;
+}
+
+function parsePersistedConversationSourceBinding(value: unknown): ConversationSourceBinding | undefined {
+  if (value === undefined) return noConversationSourceBinding();
+  const record = optionalRecord(value);
+  const mode = record.mode;
+  const ids = record.visibleDirectoryIds;
+  if ((mode !== "none" && mode !== "primary_data") || !Array.isArray(ids) || ids.length > 12) return undefined;
+  if (!ids.every((id) => typeof id === "string" && /^visible_dir_[1-9][0-9]*$/u.test(id))) return undefined;
+  if (new Set(ids).size !== ids.length) return undefined;
+  return { mode, visibleDirectoryIds: ids as string[] };
 }
 
 function conversationArtifactReference(value: unknown): { readonly runId: string; readonly path: string } | undefined {
@@ -7747,6 +7922,87 @@ function isConversationEvidenceDemand(
     || value === "lookup_lite"
     || value === "source_grounded"
     || value === "strict_user_source";
+}
+
+function noConversationSourceBinding(): ConversationSourceBinding {
+  return { mode: "none", visibleDirectoryIds: [] };
+}
+
+function parseConversationEvidenceStrategy(
+  value: unknown,
+  legacyEvidenceDemand: unknown,
+): ConversationEvidenceStrategy | undefined {
+  if (
+    value === "none"
+    || value === "lookup_lite"
+    || value === "source_grounded"
+    || value === "strict_user_source"
+    || value === "bound_visible_sources"
+  ) return value;
+  // Persisted v1 events and test doubles emitted the former independent
+  // evidenceDemand. They have no visible source choice, so retain only the
+  // unbound interpretation while rolling out the atomic contract.
+  return isConversationEvidenceDemand(legacyEvidenceDemand) ? legacyEvidenceDemand : undefined;
+}
+
+function conversationEvidenceDemandForStrategy(
+  strategy: ConversationEvidenceStrategy,
+): ConversationTurnResolution["evidenceDemand"] {
+  return strategy === "bound_visible_sources" ? "source_grounded" : strategy;
+}
+
+function conversationEvidenceStrategyForDemand(
+  demand: ConversationTurnResolution["evidenceDemand"],
+  sourceBinding: ConversationSourceBinding,
+): ConversationEvidenceStrategy {
+  return sourceBinding.mode === "primary_data" ? "bound_visible_sources" : demand;
+}
+
+function parseConversationSourceBinding(
+  value: unknown,
+  visibleDirectories: readonly VisibleDirectoryGrant[],
+): ConversationSourceBinding | undefined {
+  if (value === undefined) return noConversationSourceBinding();
+  const record = optionalRecord(value);
+  const mode = record.mode;
+  const ids = record.visibleDirectoryIds;
+  if ((mode !== "none" && mode !== "primary_data") || !Array.isArray(ids) || ids.length > 12) return undefined;
+  if (!ids.every((id) => typeof id === "string" && /^visible_dir_[1-9][0-9]*$/u.test(id))) return undefined;
+  const visibleIds = new Set(visibleDirectories.map((directory) => directory.id));
+  if (new Set(ids).size !== ids.length || ids.some((id) => !visibleIds.has(id))) return undefined;
+  return { mode, visibleDirectoryIds: ids as string[] };
+}
+
+function isConversationSourceBindingConsistent(
+  evidenceStrategy: ConversationEvidenceStrategy,
+  sourceBinding: ConversationSourceBinding,
+): boolean {
+  if (sourceBinding.mode === "primary_data") {
+    return sourceBinding.visibleDirectoryIds.length > 0 && evidenceStrategy === "bound_visible_sources";
+  }
+  return sourceBinding.visibleDirectoryIds.length === 0 && evidenceStrategy !== "bound_visible_sources";
+}
+
+function visibleDirectoriesForTurn(
+  resolution: ConversationTurnResolution | undefined,
+  visibleDirectories: readonly VisibleDirectoryGrant[],
+): readonly VisibleDirectoryGrant[] {
+  // Non-conversational Runs retain their explicit caller-provided capability
+  // scope. Conversational Runs must have an atomic model binding before a
+  // visible directory becomes a planner input.
+  if (resolution === undefined) return visibleDirectories;
+  const selected = new Set(resolution.sourceBinding.visibleDirectoryIds);
+  return visibleDirectories.filter((directory) => selected.has(directory.id));
+}
+
+function isVisibleDirectoryToolName(name: string): boolean {
+  return name === "visible_find_files"
+    || name === "visible_index_directory"
+    || name === "visible_extract_tables"
+    || name === "visible_search_text"
+    || name === "visible_read_file"
+    || name === "visible_read_files"
+    || name === "visible_list_directory";
 }
 
 function conversationTurnTargetRunIds(workset: ConversationWorkingSet | undefined): Set<string> {
@@ -7818,6 +8074,8 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
                 relation: intent.relation,
                 inputMode: intent.inputMode,
                 effectiveGoal: intent.effectiveGoal,
+                evidenceStrategy: intent.evidenceStrategy,
+                sourceBinding: intent.sourceBinding,
                 evidenceDemand: intent.evidenceDemand,
                 userConstraints: intent.userConstraints,
               },

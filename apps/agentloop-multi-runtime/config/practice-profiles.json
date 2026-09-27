@@ -1,0 +1,32 @@
+{
+  "schema": "agentloop.practiceProfileCatalog/v1",
+  "enabled": true,
+  "mode": "observe",
+  "maxActiveProfiles": 3,
+  "maxInstructions": 6,
+  "profiles": [
+    {
+      "schema": "agentloop.practiceProfile/v1",
+      "id": "structured-data-analysis",
+      "version": "1.0.0",
+      "enabled": true,
+      "name": "Structured data analysis",
+      "priority": 10,
+      "appliesTo": {
+        "operationProfiles": ["data_analysis"],
+        "inputFamilies": ["tabular"]
+      },
+      "guidance": {
+        "instructions": [
+          "For a tabular-data task, first establish the input files, workbook sheets or tables, headers, data ranges, record counts, data types, missing values, and the exact subset needed for the user question.",
+          "Distinguish observed measurements, derived aggregates, and interpretation; state coverage before drawing a conclusion.",
+          "Use one bounded structured extraction as the reasoning source and avoid repeated overlapping raw-data reads."
+        ],
+        "antiPatterns": [
+          "Do not treat a workbook filename, a partial preview, or a visually formatted sheet as proof of complete data coverage.",
+          "Do not present a numeric conclusion without identifying the field, filter, aggregation, and covered record range used to derive it."
+        ]
+      }
+    }
+  ]
+}

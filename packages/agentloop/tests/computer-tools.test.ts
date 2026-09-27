@@ -2049,6 +2049,22 @@ test("computer_run_command binds a standard computation artifact to immutable in
     const sha256 = createHash("sha256").update(series).digest("hex");
     const inputRefs = [{ path: "series.json" }];
     const executor = new ComputerExecutor(root, { executableAliases: { "trusted-node": process.execPath } });
+
+    const missingBoundInputs = await executor.runCommand({
+      command: "trusted-node",
+      args: ["-e", [
+        // This reproduces the failed Runtime call: stdout attempts to declare
+        // a computation but the invocation has no authoritative source input.
+        `process.stdout.write(JSON.stringify({schema:'agentloop.commandComputation/v1',inputs:${JSON.stringify(inputRefs)},facts:{records:2,change:70}}));`,
+      ].join("")],
+      cwd: ".",
+      timeoutMs: 2_000,
+    });
+    assert.equal(missingBoundInputs.exitCode, 0);
+    assert.equal(missingBoundInputs.computationReceipt, undefined);
+    assert.match(missingBoundInputs.computationEvidenceError ?? "", /did not pass computationInputs/);
+    assert.match(missingBoundInputs.computationEvidenceError ?? "", /inputRefs \(not inputs\)/);
+
     const result = await executor.runCommand({
       command: "trusted-node",
       args: ["-e", [
@@ -2468,7 +2484,7 @@ test("computer_run_command preserves structured delivery candidates when stdout 
       "caveats: ['candidate ranking requires exact API_ID confirmation'],",
       "evidenceKinds: { satisfied: ['source_summary', 'source_urls'], caveated: ['explicit_caveats'], failed: [] },",
       "},",
-      "rawRows: 'x'.repeat(20000),",
+      "rawRows: 'x'.repeat(120000),",
       "};",
       "process.stdout.write(JSON.stringify(payload));",
     ].join("\n");
@@ -2485,9 +2501,11 @@ test("computer_run_command preserves structured delivery candidates when stdout 
     const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as {
       exitCode: number | null;
       stdout: string;
+      truncated: boolean;
       stdoutRef?: { path: string; sha256: string; characters: number; bytes: number; previewCharacters: number };
     };
     assert.equal(result.exitCode, 0);
+    assert.equal(result.truncated, false);
     assert.ok(result.stdoutRef !== undefined);
     const projected = JSON.parse(result.stdout) as {
       schema: string;
@@ -2513,7 +2531,7 @@ test("computer_run_command preserves structured delivery candidates when stdout 
     assert.match(projected.stdoutReferenceNotice, /stored as content-addressed evidence/);
     assert.match(projected.stdoutReferenceNotice, new RegExp(result.stdoutRef.sha256));
     const stored = JSON.parse(await fs.readFile(join(root, result.stdoutRef.path), "utf8")) as { rawRows?: string };
-    assert.equal(stored.rawRows?.length, 20_000);
+    assert.equal(stored.rawRows?.length, 120_000);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

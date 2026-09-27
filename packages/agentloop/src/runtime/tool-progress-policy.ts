@@ -1353,6 +1353,12 @@ function isPatchPreconditionDiagnostic(result: string): boolean {
 }
 
 function isActionableDiagnostic(evidence: AgentLoopToolEvidence): boolean {
+  const result = parseToolEvidenceRecord(evidence);
+  if (
+    evidence.toolName === "computer_run_command"
+    && typeof result?.computationEvidenceError === "string"
+    && result.computationEvidenceError.trim().length > 0
+  ) return true;
   const text = toolEvidenceText(evidence);
   if (evidence.toolName === "verify_artifact_acceptance") {
     const verdicts = runtimeEvidenceRecordsFromToolResult(evidence.result)

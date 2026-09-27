@@ -8,6 +8,8 @@ export type { BatchItemRecord, BatchRecord } from "./batch/batch-service.ts";
 export { ComputerExecutor } from "./computer/computer-executor.ts";
 export type { ComputerDriver, ComputerSnapshot } from "./computer/computer-driver.ts";
 export { ArtifactAcceptanceService } from "./acceptance/artifact-acceptance.ts";
+export { assertPracticeProfileCatalog, practiceGuidanceForPrompt, practiceInputFamiliesForSourceKinds, resolvePracticeProfileResolution, resolvePracticeProfiles } from "./runtime/practice-profiles.ts";
+export type { PracticeInputFamily, PracticeProfile, PracticeProfileCatalog, PracticeProfileMode, PracticeProfileResolution, PracticeProfileSelection, PracticeProfileSelectionPoint } from "./runtime/practice-profiles.ts";
 export type {
   ArtifactAcceptanceCheck,
   ArtifactAcceptanceEvidence,

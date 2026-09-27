@@ -53,11 +53,11 @@ export function projectAssistantEvent(assistant, event) {
   if (event.type === "run.failed") {
     assistant.status = "failed";
     assistant.error = failureMessage(data);
-    // Runtime output is execution evidence, not a user-facing answer. Keep
-    // only an explicit Host projection separate from the terminal status.
-    if (typeof data.partialOutput === "string" && data.partialOutput.trim()) {
-      assistant.partialText = data.partialOutput;
-    }
+    // A terminal failure report is authored by the Runtime's final reporting
+    // turn and persisted by TerminalCommitter. Keep it separate from a
+    // successful answer, but project it instead of replacing it with only a
+    // generic failure card.
+    assistant.partialText = terminalFailureReport(data);
     assistant.text = "";
   }
   if (event.type === "run.cancelled") {
@@ -74,7 +74,9 @@ export function projectAssistantEvent(assistant, event) {
 function failureMessage(data) {
   switch (data.code) {
     case "RUN_LIMIT_EXCEEDED":
-      return "本次处理超出可用时限，尚未形成最终结果。";
+      return terminalFailureReport(data)
+        ? "本轮达到可用轮次上限；以下为已持久化的执行总结，尚非成功交付。"
+        : "本轮达到可用轮次上限，尚未形成最终结果。";
     case "STEP_NOT_COMPLETED":
       return "本次结果未通过最终验收。";
     case "ASSESSMENT_ERROR":
@@ -91,6 +93,12 @@ function failureMessage(data) {
     default:
       return "本次未能形成可提交的最终结果。";
   }
+}
+
+function terminalFailureReport(data) {
+  if (typeof data?.output === "string" && data.output.trim()) return data.output;
+  if (typeof data?.partialOutput === "string" && data.partialOutput.trim()) return data.partialOutput;
+  return undefined;
 }
 
 export function mergeRuntimeEvents(currentEvents, incomingEvents, limit = MAX_PERSISTED_EVENTS) {

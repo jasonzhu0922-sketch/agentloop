@@ -1186,6 +1186,37 @@ test("Task intent derives a new report from the output clause rather than the re
   assert.equal(intent.deliverySurface, "workspace_artifact");
 });
 
+test("Task intent does not treat business fields or source payloads as output formats", () => {
+  const enterpriseQuery = classifyTaskIntent({
+    objective: "查询宝武共享的工商企业信息，交付包括企业名称、统一社会信用代码、法定代表人、注册资本、经营范围和状态的查询结果，并说明数据来源。",
+    evidenceDemand: "source_grounded",
+  });
+  const jsonSourceQuery = classifyTaskIntent({
+    objective: "根据 API 返回的 JSON 字段交付企业查询结果，并说明数据来源。",
+    evidenceDemand: "source_grounded",
+  });
+
+  for (const intent of [enterpriseQuery, jsonSourceQuery]) {
+    assert.equal(intent.artifactKind, "none");
+    assert.equal(intent.deliverySurface, "conversation");
+    assert.equal(intent.wantsArtifact, false);
+  }
+});
+
+test("Task intent keeps explicit output formats and report-file delivery contracts", () => {
+  const code = classifyTaskIntent({ objective: "生成一个可运行的 TypeScript 脚本文件。" });
+  const html = classifyTaskIntent({ objective: "用 HTML 格式做一个企业信息报告。" });
+  const report = classifyTaskIntent({ objective: "查询企业信息并生成一份报告文件。" });
+
+  assert.equal(code.artifactKind, "code");
+  assert.equal(html.artifactKind, "html");
+  assert.equal(report.artifactKind, "document");
+  for (const intent of [code, html, report]) {
+    assert.equal(intent.deliverySurface, "workspace_artifact");
+    assert.equal(intent.wantsArtifact, true);
+  }
+});
+
 test("Task intent preserves an explicit HTML output format when a later constraint says only output a report", () => {
   const intent = classifyTaskIntent({
     objective: "分析钢材价格走势，输出 HTML 格式的分析报告。需要具体的日期和价格数据。",
@@ -12729,6 +12760,8 @@ test("RunService inherits canonical persisted intent for a pure continuation wit
         relation: "new_goal",
         inputMode: "none",
         effectiveGoal: priorEffectiveGoal,
+        evidenceStrategy: "source_grounded",
+        sourceBinding: { mode: "none", visibleDirectoryIds: [] },
         evidenceDemand: "source_grounded",
         userConstraints: priorConstraints,
         source: "model",

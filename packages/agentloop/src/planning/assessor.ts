@@ -981,6 +981,7 @@ function assessmentTaskProfile(input: StepAssessmentInput): TaskProfile {
   return buildTaskProfile({
     phase: "assessment",
     intent: "execute",
+    practices: input.practiceProfiles,
     evidenceProfile: input.assessmentProfile ?? "source_grounded",
     ...(allowsResearchPolicy ? { sourceNeed: intent.sourceNeed } : {}),
     ...(allowsResearchPolicy && intent.researchPolicy !== undefined ? { researchPolicy: intent.researchPolicy } : {}),

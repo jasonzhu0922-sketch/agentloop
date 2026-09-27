@@ -827,41 +827,63 @@ export function streamEvents(
   let closed = false;
   let polling = false;
   let lastStatusCheck = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    if (closed) return;
+    closed = true;
+    if (timer !== undefined) clearInterval(timer);
+  };
+  const writable = () => !closed && !response.destroyed && !response.writableEnded;
+  const write = (chunk: string): boolean => {
+    if (!writable()) {
+      stop();
+      return false;
+    }
+    response.write(chunk);
+    return true;
+  };
+  const end = () => {
+    stop();
+    if (!response.destroyed && !response.writableEnded) response.end();
+  };
   const emit = (events: readonly RuntimeRunEvent[]) => {
     for (const event of events) {
       if (event.seq <= cursor) continue;
       cursor = Math.max(cursor, event.seq);
-      response.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      if (!write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)) return;
     }
   };
+  // `close` is asynchronous relative to `end()` and a socket error can occur
+  // without a clean close. Both must stop this response's poller immediately.
+  response.on("close", stop);
+  response.on("error", stop);
   emit(initialEvents);
-  const timer = setInterval(() => {
+  if (closed) return;
+  timer = setInterval(() => {
     if (closed || polling) return;
     polling = true;
     void events(assignmentId, cursor)
       .then(async (projection) => {
-        if (closed) return;
+        if (!writable()) return;
         if (projection === undefined) {
-          response.write("event: stream.error\ndata: {\"error\":\"assignment_not_found\"}\n\n");
-          response.end();
+          if (write("event: stream.error\ndata: {\"error\":\"assignment_not_found\"}\n\n")) end();
           return;
         }
         emit(projection.events);
         if (projection.events.length === 0 && readRun !== undefined && Date.now() - lastStatusCheck >= 5_000) {
           lastStatusCheck = Date.now();
           const run = await readRun(assignmentId);
-          if (closed) return;
+          if (!writable()) return;
           if (run !== undefined && ["completed", "failed", "cancelled"].includes(run.status)) {
             // Snapshot is explicitly not a fabricated durable event or sequence.
-            response.write(`event: run.snapshot\ndata: ${JSON.stringify({ run })}\n\n`);
-            response.end();
+            if (write(`event: run.snapshot\ndata: ${JSON.stringify({ run })}\n\n`)) end();
             return;
           }
         }
-        response.write(": keepalive\n\n");
+        write(": keepalive\n\n");
       })
       .catch((error) => {
-        if (!closed) response.write(`event: stream.error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n\n`);
+        write(`event: stream.error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n\n`);
       }).finally(() => { polling = false; });
   }, 1_000);
   // An HTTP GET request is complete as soon as its headers have been read;
@@ -869,8 +891,4 @@ export function streamEvents(
   // response.  Closing the poller there leaves the browser with only the
   // initial events (often just `run.started`).  The response owns the stream,
   // so release it only when that connection actually closes.
-  response.on("close", () => {
-    closed = true;
-    clearInterval(timer);
-  });
 }

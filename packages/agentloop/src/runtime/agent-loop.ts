@@ -63,6 +63,15 @@ export interface AgentLoopOptions {
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
+  /**
+   * Runtime-owned hook for newly committed neutral evidence. It may add
+   * server-authored prompt context for the next model invocation, but has no
+   * access to Tools, grants, assessment, or completion authority.
+   */
+  readonly refreshRuntimePrompt?: (context: {
+    readonly toolEvidence: readonly AgentLoopToolEvidence[];
+    readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
+  }) => Promise<Readonly<{ runtimePromptAugmentation?: string }> | undefined>;
   readonly model: ModelAdapter;
   readonly tools: ToolRegistry;
   readonly grant: CapabilityGrant;
@@ -1557,6 +1566,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
       }
     }
+    const promptRefresh = await options.refreshRuntimePrompt?.({ toolEvidence, latestToolEvidence });
+    if (promptRefresh?.runtimePromptAugmentation !== undefined) {
+      contextAssembler.setRuntimePromptAugmentation(promptRefresh.runtimePromptAugmentation);
+    }
     if (rejectedProviderToolCalls.length > 0) {
       messages.push({
         role: "user",
@@ -2376,6 +2389,8 @@ function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string 
     if (stdout !== undefined) details.push(`stdout="${stdout}"`);
     const stderr = shortStringField(parsed, "stderr");
     if (stderr !== undefined) details.push(`stderr="${stderr}"`);
+    const computationEvidenceError = shortStringField(parsed, "computationEvidenceError");
+    if (computationEvidenceError !== undefined) details.push(`computationEvidenceError="${computationEvidenceError}"`);
     const path = shortStringField(parsed, "path");
     if (path !== undefined) details.push(`path=${path}`);
     const diagnostics = parsed.diagnostics;

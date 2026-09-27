@@ -331,20 +331,21 @@ async function probeLocalAgent() {
 
 function renderLocalAgentState() {
   const copy = {
-    checking: ["正在检查 Local Runtime Agent…", "检查本机 Agent", "请稍候。"],
-    not_installed: ["未安装 Local Runtime Agent", "安装 Local Runtime Agent", "安装后可在本机安全地访问已授权目录。"],
-    router_not_configured: ["此安装包未配置服务端", "重新安装匹配环境版本", "服务端地址由开发、测试或生产构建配置固定。"],
-    installed_stopped: ["Local Runtime Agent 未运行", "启动 Local Runtime Agent", "已安装的 Agent 将通过系统启动协议恢复。"],
-    online_unpaired: ["Local Runtime Agent 已就绪，尚未配对", "配对此设备", "配对后 Router 才可调度本机 Runtime。"],
-    online: ["Local Runtime Agent 已连接", "本机 Agent 已连接", "本机目录和产物默认不上传云端。"],
-    router_disconnected: ["Local Runtime Agent 已注册，Router 断开", "重新检查连接", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。"],
-    incompatible: ["Local Runtime Agent 需要更新", "下载安装匹配版本", "当前 Agent 与 Web 控制协议不兼容。"],
-  }[localAgentState] || ["Local Runtime Agent 不可用", "重新检查", "请检查本机 Agent。"];
+    checking: ["检查中", "正在检查 Local Runtime Agent。"],
+    not_installed: ["未安装 · 安装", "安装后可在本机安全地访问已授权目录。"],
+    router_not_configured: ["需重新安装", "此安装包未配置当前服务端。"],
+    installed_stopped: ["未启动 · 启动", "已安装的 Agent 将通过系统启动协议恢复。"],
+    online_unpaired: ["未配对 · 配对", "配对后 Router 才可调度本机 Runtime。"],
+    online: ["已就绪", "本机 Agent 已连接；本机目录和产物默认不上传云端。"],
+    router_disconnected: ["连接中断 · 重试", "Agent 正在自动重连 Router；恢复后才可调度本机 Runtime。"],
+    incompatible: ["需更新", "当前 Agent 与 Web 控制协议不兼容。"],
+  }[localAgentState] || ["未就绪 · 重试", "请检查本机 Agent。"];
   $("local-agent-state-label").textContent = copy[0];
-  $("local-agent-hint").textContent = copy[2];
+  $("enable-local-runtime").title = copy[1];
+  $("enable-local-runtime").setAttribute("aria-label", `本机能力：${copy[0]}。${copy[1]}`);
   $("local-agent-state-dot").className = localAgentState;
   $("local-agent-version").textContent = localAgentHealth?.agentVersion ? `v${localAgentHealth.agentVersion}` : "";
-  $("enable-local-runtime").classList.toggle("active", localAgentState === "online");
+  $("enable-local-runtime").classList.toggle("ready", localAgentState === "online");
   $("local-agent-settings").disabled = localAgentState !== "online";
 }
 
@@ -535,8 +536,12 @@ function updateLocalControls() {
   }
   const local = isLocalExecution();
   const runtimeReady = selectedLocalRuntime()?.status === "ready";
-  $("local-runtime-picker").hidden = !local;
-  $("runtime").disabled = !local || !runtimeReady;
+  const hasReadyRuntime = localRuntimes.some((runtime) => runtime.status === "ready");
+  // The Runtime selection is visible as soon as a device is paired, even when
+  // local execution is off.  It remains a preference until the checkbox opts
+  // the next submission into the selected device Runtime.
+  $("local-runtime-picker").hidden = !paired;
+  $("runtime").disabled = !paired || !hasReadyRuntime;
   $("directory-scope")?.toggleAttribute("disabled", !local || !runtimeReady);
   $("local-runtime-manager").hidden = !paired;
   $("upload-file").toggleAttribute("disabled", local && !runtimeReady);
@@ -1077,9 +1082,14 @@ function applyRecoveredRunState(assistant, run) {
   if (run.status === "completed" && typeof run.output === "string") assistant.text = run.output;
   if (run.status === "failed") {
     assistant.error = recoveredFailureMessage(run) || assistant.error || "本次未能形成可提交的最终结果。";
-    // Only the Host's explicit projection is eligible for this user-facing
-    // section; never infer it from the generic Runtime `output` field here.
-    if (typeof run.partialOutput === "string" && run.partialOutput.trim()) assistant.partialText = run.partialOutput;
+    // Failed Runs can carry a Runtime-authored final report. It is not a
+    // successful answer, but it is the user-facing terminal summary and must
+    // survive browser reload just like the live terminal event projection.
+    assistant.partialText = typeof run.output === "string" && run.output.trim()
+      ? run.output
+      : typeof run.partialOutput === "string" && run.partialOutput.trim()
+        ? run.partialOutput
+        : undefined;
     assistant.text = "";
   }
   assistant.reasoning = "";
@@ -1093,7 +1103,9 @@ function applyRecoveredRunState(assistant, run) {
 function recoveredFailureMessage(run) {
   switch (run?.errorCode) {
     case "RUN_LIMIT_EXCEEDED":
-      return "本次处理超出可用时限，尚未形成最终结果。";
+      return typeof run?.output === "string" && run.output.trim()
+        ? "本轮达到可用轮次上限；以下为已持久化的执行总结，尚非成功交付。"
+        : "本轮达到可用轮次上限，尚未形成最终结果。";
     case "STEP_NOT_COMPLETED":
       return "本次结果未通过最终验收。";
     case "ASSESSMENT_ERROR":
@@ -1179,16 +1191,15 @@ async function loadModels() {
 function refreshRuntimeOptions() {
   const select = $("runtime");
   if (!select) return;
-  const local = isLocalExecution();
-  $("local-runtime-picker").hidden = !local;
-  if (!local) {
+  const paired = localAgentState === "online" && Boolean(localDevice && localSessionToken);
+  if (!paired) {
     select.innerHTML = "";
     select.disabled = true;
     return;
   }
-  select.innerHTML = localRuntimes.map((runtime) => `<option value="${escapeHtml(runtime.id)}" ${runtime.status === "ready" ? "" : "disabled"}>${escapeHtml(runtime.displayName)} · ${escapeHtml(runtimeStatusLabel(runtime.status))}</option>`).join("");
+  select.innerHTML = localRuntimes.map((runtime) => `<option value="${escapeHtml(runtime.id)}" ${runtime.status === "ready" ? "" : "disabled"}>${runtime.isDefault ? "默认 · " : ""}${escapeHtml(runtime.displayName)} · ${escapeHtml(runtimeStatusLabel(runtime.status))}</option>`).join("");
   select.value = localRuntimeId;
-  select.disabled = selectedLocalRuntime()?.status !== "ready";
+  select.disabled = !localRuntimes.some((runtime) => runtime.status === "ready");
 }
 
 async function submit() {
@@ -1803,7 +1814,7 @@ function renderMessage(message) {
   const artifactSummary = message.status === "completed" ? completedArtifactSummary(message.artifacts) : "";
   const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(artifactSummary || presentation.emptyText)}</span>`;
   const output = message.status === "failed"
-    ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.partialText ? `<div class="partial-result"><strong>本次处理说明</strong>${renderMarkdown(message.partialText)}</div>` : ""}${recovery}`
+    ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.partialText ? `<div class="partial-result"><strong>执行总结</strong>${renderMarkdown(message.partialText)}</div>` : ""}${recovery}`
     : projectedOutput || emptyOutput;
   const stateLabel = message.humanLoop?.status === "open" ? "等待你的输入" : message.recovery?.status === "required" || message.recovery?.status === "advancing" ? "正在恢复" : presentation.label;
   const stateIcon = presentation.icon;
