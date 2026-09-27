@@ -20,6 +20,7 @@ import type {
   RuntimeEvent,
   RuntimeEventSink,
   RuntimeDeliveryCandidate,
+  RuntimePromptAugmentation,
 } from "./contracts.ts";
 import type { RuntimeResultRef } from "./runtime-result.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
@@ -63,15 +64,8 @@ export interface AgentLoopOptions {
   /** Complete, persisted exchanges from a prior interrupted execution. */
   readonly initialMessages?: readonly ModelMessage[];
   readonly initialToolEvidence?: readonly AgentLoopToolEvidence[];
-  /**
-   * Runtime-owned hook for newly committed neutral evidence. It may add
-   * server-authored prompt context for the next model invocation, but has no
-   * access to Tools, grants, assessment, or completion authority.
-   */
-  readonly refreshRuntimePrompt?: (context: {
-    readonly toolEvidence: readonly AgentLoopToolEvidence[];
-    readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
-  }) => Promise<Readonly<{ runtimePromptAugmentation?: string }> | undefined>;
+  /** Standard Runtime boundary after Tool facts commit and before the next model request. */
+  readonly enrichRuntimeContext?: (context: RuntimeContextEnrichmentInput) => Promise<RuntimeContextEnrichment | undefined>;
   readonly model: ModelAdapter;
   readonly tools: ToolRegistry;
   readonly grant: CapabilityGrant;
@@ -126,6 +120,17 @@ export interface AgentLoopOptions {
   readonly evaluateCandidate?: (
     context: CandidateCompletionContext,
   ) => Promise<CandidateCompletionEvaluation>;
+}
+
+/** Evidence is committed before this hook runs; enrichers cannot access Tools or Runtime authority. */
+export interface RuntimeContextEnrichmentInput {
+  readonly toolEvidence: readonly AgentLoopToolEvidence[];
+  readonly latestToolEvidence: readonly AgentLoopToolEvidence[];
+}
+
+/** Typed, server-authored additions for the next model context. */
+export interface RuntimeContextEnrichment {
+  readonly augmentations: readonly RuntimePromptAugmentation[];
 }
 
 export interface ToolStepConvergenceContext {
@@ -998,6 +1003,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         invocation,
         emit,
         step,
+        contextRevision: assembly.contextRevision,
+        runtimePromptAugmentationIds: assembly.runtimePromptAugmentationIds,
         signal: options.signal,
         grant: options.grant,
         prepare: (call) => grantedMaterialized.prepare(call),
@@ -1061,6 +1068,47 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       break;
     }
     if (response === undefined) throw new AppError("MODEL_ERROR", "Model did not produce a response", 502);
+    // The first empty stop response is retried immediately above. A second
+    // one is still not an answer: force a compacted-context repair turn (when
+    // possible) or fail explicitly. Never hand an empty completion candidate
+    // to an assessor, even if prior Tool evidence is otherwise sufficient.
+    if (isEmptyStopCompletion(response)) {
+      const feedback = "Completion candidate was empty after the bounded immediate retry";
+      await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
+      const compacted = await contextAssembler.forceCompactForCompletionRepair(
+        messages,
+        convergenceOnly ? [] : executionDefinitions,
+        options.signal,
+      ).catch(async (error) => {
+        await emit({
+          type: "context.compaction.skipped",
+          data: {
+            reason: "completion_repair_compaction_failed",
+            error: error instanceof Error ? error.message : "Context compaction failed",
+          },
+        });
+        return false;
+      });
+      if (!compacted) {
+        throw new AppError(
+          "STEP_NOT_COMPLETED",
+          "The model produced two empty completion responses and Runtime could not compact context for a repair retry.",
+          422,
+          { emptyCompletionResponses: EMPTY_CANDIDATE_REPAIR_ATTEMPTS },
+        );
+      }
+      await grantCandidateRepairGrace(step, feedback);
+      setCandidateRepairDirective([
+        emptyCandidateRepairDirective({
+          convergenceOnly,
+          toolAvailable: executionDefinitions.length > 0,
+          missingEvidenceKinds: stepEvidenceState?.missingRequiredEvidenceKinds ?? [],
+          expectedArtifactKind: stepEvidenceState?.workProduct.expectedArtifactKind,
+        }),
+        "The previous two completion attempts were empty. Use the compacted canonical evidence and return the user-visible completion now.",
+      ].join("\n"));
+      continue;
+    }
     // A length-truncated response can contain an incomplete native tool call.
     // Only calls that a provider explicitly marked ready may have executed, so
     // never carry the remaining calls into the next provider-native transcript.
@@ -1566,9 +1614,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
       }
     }
-    const promptRefresh = await options.refreshRuntimePrompt?.({ toolEvidence, latestToolEvidence });
-    if (promptRefresh?.runtimePromptAugmentation !== undefined) {
-      contextAssembler.setRuntimePromptAugmentation(promptRefresh.runtimePromptAugmentation);
+    const enrichment = await options.enrichRuntimeContext?.({ toolEvidence, latestToolEvidence });
+    if (enrichment !== undefined) {
+      const applied = contextAssembler.applyRuntimePromptAugmentations(enrichment.augmentations);
+      if (applied.length > 0) {
+        await emit({
+          type: "prompt_augmentation.activated",
+          data: {
+            schema: "agentloop.promptAugmentationActivation/v1",
+            augmentationIds: applied,
+            contextRevision: contextAssembler.runtimeContextRevision,
+            augmentations: enrichment.augmentations
+              .filter((item) => applied.includes(item.id))
+              .map((item) => ({ id: item.id, source: item.source, ...(item.provenance === undefined ? {} : { provenance: item.provenance }) })),
+          },
+        });
+      }
     }
     if (rejectedProviderToolCalls.length > 0) {
       messages.push({
@@ -2059,6 +2120,12 @@ function rejectedToolCallsEvidenceMessage(
   ].join("\n");
 }
 
+function isEmptyStopCompletion(response: ModelResponse): boolean {
+  return response.toolCalls.length === 0
+    && response.finishReason === "stop"
+    && response.content.trim().length === 0;
+}
+
 function isInternalEvidenceMarkupCandidate(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed.length === 0) return false;
@@ -2460,6 +2527,8 @@ interface StreamingDispatchContext {
   readonly invocation: ModelInvocation;
   readonly emit: RuntimeEventSink;
   readonly step: number;
+  readonly contextRevision: number;
+  readonly runtimePromptAugmentationIds: readonly string[];
   readonly signal: AbortSignal | undefined;
   readonly grant: CapabilityGrant;
   readonly prepare: (call: ModelToolCall) => PreparedToolCall;
@@ -2578,7 +2647,12 @@ async function completeWithStreamingAndDispatch(
       invocation: context.invocation,
       emit: context.emit,
       signal: context.signal,
-      base: { phase: "execution", step: context.step },
+      base: {
+        phase: "execution",
+        step: context.step,
+        contextRevision: context.contextRevision,
+        runtimePromptAugmentationIds: context.runtimePromptAugmentationIds,
+      },
       onToolCallReady: async (call) => {
         // When the turn was dispatched without tools (convergence) any tool call is
         // model misbehaviour and is never executed, so skip both commit and dispatch.

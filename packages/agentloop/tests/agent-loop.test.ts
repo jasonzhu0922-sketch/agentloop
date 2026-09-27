@@ -147,8 +147,9 @@ test("single leaf execution carries loop step handoff across model steps", async
   assert.equal(contexts.length, 2);
 });
 
-test("newly committed evidence can add server guidance to the next model invocation", async () => {
+test("standard context enrichment activates tabular guidance from committed visible-file facts before the next model request", async () => {
   let calls = 0;
+  const events: RuntimeEvent[] = [];
   const model: ModelAdapter = {
     limits: TEST_MODEL_LIMITS,
     complete: async (request) => {
@@ -191,11 +192,15 @@ test("newly committed evidence can add server guidance to the next model invocat
       executionMode: "parallel",
       replaySafe: true,
       parse: (value) => value,
-      execute: async () => ({ schema: "agentloop.sourceSummary/v1", extensions: { ".xlsx": 1 } }),
+      execute: async () => ({
+        schema: "agentloop.visibleFindFiles/v1",
+        matches: ["performance/august.xlsx"],
+      }),
     }]),
     grant: makeGrant(["discover_source"]),
     maxSteps: 3,
-    refreshRuntimePrompt: async ({ latestToolEvidence }) => {
+    emit: (event) => { events.push(event); },
+    enrichRuntimeContext: async ({ latestToolEvidence }) => {
       assert.equal(latestToolEvidence[0]?.toolName, "discover_source");
       const observedSourceKinds = observedSourceKindsFromToolEvidence(latestToolEvidence);
       assert.deepEqual(observedSourceKinds, ["xlsx"]);
@@ -203,11 +208,24 @@ test("newly committed evidence can add server guidance to the next model invocat
       const resolution = resolvePracticeProfileResolution(catalog, refinedTask, { selectionPoint: "source_discovery" });
       assert.equal(resolution.profiles[0]?.id, "tabular-analysis");
       assert.equal(resolution.guidanceInjected, true);
-      return { runtimePromptAugmentation: formatPracticePromptAugmentation(resolution.profiles) };
+      return {
+        augmentations: resolution.profiles.map((profile) => ({
+          schema: "agentloop.promptAugmentation/v1" as const,
+          id: `practice_profile:${profile.id}:${profile.version}:${profile.contentHash}`,
+          source: "practice_profile",
+          content: formatPracticePromptAugmentation([profile]),
+          provenance: { selectionPoint: "source_discovery", sourceKinds: observedSourceKinds },
+        })),
+      };
     },
   });
   assert.equal(result.output, "analysis completed");
   assert.equal(calls, 2);
+  const activation = events.find((event) => event.type === "prompt_augmentation.activated");
+  assert.equal(Array.isArray(activation?.data.augmentationIds), true);
+  assert.match(String((activation?.data.augmentationIds as readonly string[] | undefined)?.[0]), /^practice_profile:tabular-analysis:1:[a-f0-9]{64}$/);
+  const secondRequest = events.filter((event) => event.type === "model.request.started")[1];
+  assert.deepEqual(secondRequest?.data.runtimePromptAugmentationIds, activation?.data.augmentationIds);
 });
 
 test("custom step execution strategy keeps deprioritized Run-authorized tools callable", async () => {
@@ -1727,6 +1745,101 @@ test("an empty completion candidate is repaired within the same budgeted step", 
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 1);
   assert.equal(events.filter((event) => event.type === "step.started").length, 2);
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
+});
+
+test("two empty completion candidates compact context before one bounded delivery retry", async () => {
+  const events: RuntimeEvent[] = [];
+  let executionCalls = 0;
+  let compactionCalls = 0;
+  const collectEvidence: RuntimeTool<unknown> = {
+    name: "collect_evidence",
+    description: "Collect the durable evidence needed for the answer.",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({ observations: "canonical evidence ".repeat(8_000) }),
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      if (request.phase === "compaction") {
+        compactionCalls += 1;
+        return {
+          content: "## Goal\nDeliver the collected evidence.\n\n## Progress\n### Done\n- Evidence collected.\n\n## Next Steps\n1. Return the user-visible conclusion.",
+          finishReason: "stop",
+          toolCalls: [],
+        };
+      }
+      executionCalls += 1;
+      if (executionCalls === 1) {
+        return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "collect", name: "collect_evidence", arguments: {} }] };
+      }
+      if (executionCalls === 2 || executionCalls === 3) {
+        return { content: "", finishReason: "stop", toolCalls: [] };
+      }
+      assert.match(request.runtimeContext?.content ?? "", /previous two completion attempts were empty/);
+      return { content: "已基于已收集的证据完成用户可读结论。", finishReason: "stop", toolCalls: [] };
+    },
+  };
+
+  const result = await runAgentLoop({
+    runId: "empty-completion-compaction-retry",
+    systemPrompt: "Collect evidence and provide a user-visible conclusion.",
+    input: "Summarize the evidence.",
+    model,
+    tools: new ToolRegistry([collectEvidence]),
+    grant: makeGrant(["collect_evidence"]),
+    maxSteps: 4,
+    candidateRepairGraceSteps: 1,
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => {
+      assert.notEqual(candidate.output.trim(), "");
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "已基于已收集的证据完成用户可读结论。");
+  assert.equal(compactionCalls, 1);
+  assert.equal(executionCalls, 4);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
+  assert.equal(events.some((event) => event.type === "context.compacted"), true);
+  assert.equal(events.some((event) => event.type === "candidate.approved" && event.data.output === ""), false);
+});
+
+test("repeated empty completion candidates fail explicitly after the compacted retry is exhausted", async () => {
+  const events: RuntimeEvent[] = [];
+  let compactionCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      if (request.phase === "compaction") {
+        compactionCalls += 1;
+        return { content: "## Goal\nAnswer the user.\n\n## Next Steps\n1. Return a non-empty answer.", finishReason: "stop", toolCalls: [] };
+      }
+      return { content: "", finishReason: "stop", toolCalls: [] };
+    },
+  };
+
+  await assert.rejects(
+    () => runAgentLoop({
+      runId: "repeated-empty-completion-fails",
+      systemPrompt: "Return a user-visible answer.",
+      input: "Answer directly.",
+      model,
+      tools: new ToolRegistry([]),
+      grant: makeGrant([]),
+      maxSteps: 2,
+      candidateRepairGraceSteps: 1,
+      emit: (event) => { events.push(event); },
+      evaluateCandidate: async () => ({ approved: true, feedback: "must not evaluate empty output" }),
+    }),
+    (error: unknown) => error instanceof AppError && error.code === "STEP_NOT_COMPLETED",
+  );
+
+  assert.equal(compactionCalls, 1);
+  assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 4);
+  assert.equal(events.some((event) => event.type === "candidate.approved"), false);
 });
 
 test("an empty candidate during artifact execution keeps the delivery tools available", async () => {

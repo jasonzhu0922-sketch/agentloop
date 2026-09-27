@@ -18,6 +18,21 @@ export interface RuntimeContextSnapshot {
   readonly resolvedOperationBindings?: readonly import("./decision-binding.ts").ResolvedOperationBinding[];
 }
 
+/**
+ * A server-authored, evidence-backed addition to the next Runtime context.
+ * Augmentations influence model attention only; they are never user messages,
+ * tool grants, or completion authority.
+ */
+export interface RuntimePromptAugmentation {
+  readonly schema: "agentloop.promptAugmentation/v1";
+  /** Stable Run-local dedupe key. */
+  readonly id: string;
+  readonly source: string;
+  readonly content: string;
+  /** Compact, persisted-safe explanation of why this addition is applicable. */
+  readonly provenance?: Readonly<Record<string, unknown>>;
+}
+
 export interface RuntimeDeliveryCandidateEvidenceKinds {
   readonly satisfied: readonly string[];
   readonly caveated: readonly string[];

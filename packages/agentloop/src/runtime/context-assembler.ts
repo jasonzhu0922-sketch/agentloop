@@ -12,6 +12,7 @@ import type {
   RuntimeContextSnapshot,
   RuntimeEvent,
   RuntimeEventSink,
+  RuntimePromptAugmentation,
 } from "./contracts.ts";
 import type { PromptProjectionDecision } from "./step-execution-strategy.ts";
 import type { RuntimeResultContextEntry, RuntimeResultRef } from "./runtime-result.ts";
@@ -35,6 +36,8 @@ export interface ContextAssembly {
   readonly estimatedInputTokens: number;
   readonly usableInputTokens: number;
   readonly contextEpoch: number;
+  readonly contextRevision: number;
+  readonly runtimePromptAugmentationIds: readonly string[];
 }
 
 interface ResolvedContextPolicy {
@@ -127,7 +130,7 @@ export class ContextAssembler {
   private contextEpoch = 0;
   private contextRevision = 0;
   private runtimeDirective?: string;
-  private runtimePromptAugmentation?: string;
+  private readonly runtimePromptAugmentations = new Map<string, RuntimePromptAugmentation>();
   private runtimeStepFrame?: string;
   private promptProjectionPolicy?: PromptProjectionDecision;
   private snapshot?: RuntimeContextSnapshot;
@@ -173,12 +176,25 @@ export class ContextAssembler {
    * Unlike a repair directive this survives later execution-feedback updates,
    * so the next model invocation receives the newly established context.
    */
-  setRuntimePromptAugmentation(value: string | undefined): void {
-    const normalized = value?.trim() || undefined;
-    if (this.runtimePromptAugmentation === normalized) return;
-    this.runtimePromptAugmentation = normalized;
+  applyRuntimePromptAugmentations(values: readonly RuntimePromptAugmentation[]): readonly string[] {
+    const applied: string[] = [];
+    for (const value of values) {
+      const content = value.content.trim();
+      if (content.length === 0) continue;
+      const normalized = { ...value, content };
+      const existing = this.runtimePromptAugmentations.get(normalized.id);
+      if (existing !== undefined && existing.content === normalized.content) continue;
+      this.runtimePromptAugmentations.set(normalized.id, normalized);
+      applied.push(normalized.id);
+    }
+    if (applied.length === 0) return applied;
     this.contextRevision += 1;
     this.invalidateSnapshot();
+    return applied;
+  }
+
+  get runtimeContextRevision(): number {
+    return this.contextRevision;
   }
 
   /**
@@ -374,6 +390,8 @@ export class ContextAssembler {
       type: "context.assembled",
       data: {
         contextEpoch: this.contextEpoch,
+        contextRevision: this.contextRevision,
+        runtimePromptAugmentationIds: this.runtimePromptAugmentationIds(),
         canonicalMessageCount: canonicalMessages.length,
         projectedMessageCount: projection.length,
         estimatedInputTokens,
@@ -388,7 +406,39 @@ export class ContextAssembler {
       estimatedInputTokens,
       usableInputTokens,
       contextEpoch: this.contextEpoch,
+      contextRevision: this.contextRevision,
+      runtimePromptAugmentationIds: this.runtimePromptAugmentationIds(),
     };
+  }
+
+  /**
+   * A provider may terminate empty even while a usable context still fits its
+   * advertised window.  Completion repair is one such exceptional boundary:
+   * compact once before asking again, rather than repeating the identical
+   * oversized transcript and treating the empty result as an answer.
+   */
+  async forceCompactForCompletionRepair(
+    canonicalMessages: readonly ModelMessage[],
+    tools: readonly ModelToolDefinition[],
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    assertClosedToolProtocol(canonicalMessages);
+    this.refreshToolResultCatalog(canonicalMessages);
+    const runtimeContext = this.currentRuntimeContext();
+    const projection = this.buildProjection(canonicalMessages);
+    const estimatedTokensBefore = this.estimateInvocationTokens(tools, runtimeContext, projection);
+    const compacted = await this.compact(canonicalMessages, tools, runtimeContext, estimatedTokensBefore, signal);
+    if (!compacted) {
+      await this.emitEvent({
+        type: "context.compaction.skipped",
+        data: {
+          contextEpoch: this.contextEpoch,
+          estimatedInputTokens: estimatedTokensBefore,
+          reason: "completion_repair_has_no_compactable_history",
+        },
+      });
+    }
+    return compacted;
   }
 
   projectToolEvidence(
@@ -934,11 +984,11 @@ export class ContextAssembler {
         this.runtimeDirective,
         "</runtime_directive>",
       ]),
-      ...(this.runtimePromptAugmentation === undefined ? [] : [
-        "<runtime_prompt_augmentation source=\"server\">",
-        this.runtimePromptAugmentation,
+      ...[...this.runtimePromptAugmentations.values()].map((augmentation) => [
+        `<runtime_prompt_augmentation source=\"server\" id=\"${escapeXmlAttribute(augmentation.id)}\">`,
+        augmentation.content,
         "</runtime_prompt_augmentation>",
-      ]),
+      ].join("\n")),
     ].join("\n");
     this.snapshot = {
       id,
@@ -948,6 +998,10 @@ export class ContextAssembler {
     };
     this.previousSnapshotId = id;
     return this.snapshot;
+  }
+
+  private runtimePromptAugmentationIds(): readonly string[] {
+    return [...this.runtimePromptAugmentations.keys()];
   }
 
   private invalidateSnapshot(): void {
@@ -2237,6 +2291,10 @@ function assertClosedToolProtocol(messages: readonly ModelMessage[]): void {
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value.replace(/&/gu, "&amp;").replace(/"/gu, "&quot;").replace(/</gu, "&lt;");
 }
 
 function contextBudgetError(message: string, details?: Readonly<Record<string, unknown>>): AppError {

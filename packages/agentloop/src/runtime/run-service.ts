@@ -78,7 +78,7 @@ import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugment
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
-import { observedSourceKindsFromToolEvidence } from "./source-family-observation.ts";
+import { observeSourceFamiliesFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
 import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type StructuredTaskUnderstanding } from "./task-intent.ts";
 import type {
@@ -2698,11 +2698,23 @@ export class RunService {
         }),
         ...(initialToolEvidence.length === 0 ? {} : { initialToolEvidence }),
         ...(this.practiceProfileCatalog === undefined ? {} : {
-          refreshRuntimePrompt: async ({ latestToolEvidence }) => {
-            const newlyObservedSourceKinds = observedSourceKindsFromToolEvidence(latestToolEvidence)
+          enrichRuntimeContext: async ({ latestToolEvidence }) => {
+            const observation = observeSourceFamiliesFromToolEvidence(latestToolEvidence);
+            const newlyObservedSourceKinds = observation.sourceKinds
               .filter((kind) => !discoveredSourceKinds.has(kind));
             if (newlyObservedSourceKinds.length === 0) return undefined;
             for (const kind of newlyObservedSourceKinds) discoveredSourceKinds.add(kind);
+            await input.emit({
+              type: "source_fact.observed",
+              data: {
+                schema: observation.schema,
+                planId: plan.id,
+                stepId: activeStep.id,
+                sourceKinds: newlyObservedSourceKinds,
+                inputFamilies: observation.inputFamilies,
+                sourceToolCallIds: observation.sourceToolCallIds,
+              },
+            });
             const refinedTaskUnderstanding = taskUnderstandingWithObservedSourceKinds(plan.taskSemantics, discoveredSourceKinds);
             if (refinedTaskUnderstanding === undefined) return undefined;
             const resolution = resolvePracticeProfileResolution(this.practiceProfileCatalog, refinedTaskUnderstanding, {
@@ -2719,7 +2731,22 @@ export class RunService {
             });
             for (const profile of resolution.profiles) selectedPracticeProfileIds.add(profile.id);
             if (!resolution.guidanceInjected) return undefined;
-            return { runtimePromptAugmentation: formatPracticePromptAugmentation(resolution.profiles) };
+            return {
+              augmentations: resolution.profiles
+                .filter((profile) => profile.guidance.instructions.length > 0)
+                .map((profile) => ({
+                  schema: "agentloop.promptAugmentation/v1" as const,
+                  id: `practice_profile:${profile.id}:${profile.version}:${profile.contentHash}`,
+                  source: "practice_profile",
+                  content: formatPracticePromptAugmentation([profile]),
+                  provenance: {
+                    selectionPoint: "source_discovery",
+                    profile: { id: profile.id, version: profile.version, contentHash: profile.contentHash, reason: profile.reason },
+                    sourceKinds: newlyObservedSourceKinds,
+                    sourceToolCallIds: observation.sourceToolCallIds,
+                  },
+                })),
+            };
           },
         }),
         model: input.model,
@@ -3649,6 +3676,8 @@ const TERMINAL_EVENT_TYPES = new Set([
   "context.compaction.skipped",
   "context.compacted",
   "context.tool_outputs_pruned",
+  "source_fact.observed",
+  "prompt_augmentation.activated",
   "skill.activation.expired",
   "plan.proposed",
   "plan.admitted",
@@ -3786,6 +3815,14 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     addNumber(details, "usableInputTokens", data.usableInputTokens);
     addNumber(details, "prunedTools", data.prunedToolResultCount);
     addBoolean(details, "summary", data.hasSummary);
+  }
+  if (type === "source_fact.observed") {
+    if (Array.isArray(data.sourceKinds)) details.push(`sourceKinds=${JSON.stringify(data.sourceKinds)}`);
+    if (Array.isArray(data.inputFamilies)) details.push(`inputFamilies=${JSON.stringify(data.inputFamilies)}`);
+  }
+  if (type === "prompt_augmentation.activated") {
+    if (Array.isArray(data.augmentationIds)) details.push(`augmentations=${JSON.stringify(data.augmentationIds)}`);
+    addNumber(details, "contextRevision", data.contextRevision);
   }
   if (type === "context.tool_outputs_pruned") {
     addNumber(details, "epoch", data.contextEpoch);

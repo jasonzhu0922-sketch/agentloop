@@ -1,7 +1,7 @@
 {
   "schema": "agentloop.practiceProfileCatalog/v1",
   "enabled": true,
-  "mode": "observe",
+  "mode": "active",
   "maxActiveProfiles": 3,
   "maxInstructions": 6,
   "profiles": [

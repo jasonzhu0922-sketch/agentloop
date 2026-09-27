@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import type { ArtifactKind, DeliverySurface, SourceNeed } from "./dynamic-prompt.ts";
+import { sourceInputFamiliesForKinds, type SourceInputFamily } from "./source-family-observation.ts";
 import type { StructuredTaskOperationProfile, StructuredTaskUnderstanding } from "./task-intent.ts";
 
-export type PracticeInputFamily = "tabular" | "document" | "presentation" | "image" | "audio" | "code" | "unknown";
+export type PracticeInputFamily = SourceInputFamily;
 export type PracticeProfileMode = "observe" | "active";
 export type PracticeProfileSelectionPoint = "task_understanding" | "source_discovery";
 
@@ -309,18 +310,7 @@ function assertGuidanceLines(value: unknown, field: string): asserts value is re
 }
 
 export function practiceInputFamiliesForSourceKinds(sourceKinds: readonly string[]): ReadonlySet<PracticeInputFamily> {
-  const families = new Set<PracticeInputFamily>();
-  for (const sourceKind of sourceKinds) {
-    const value = sourceKind.toLowerCase();
-    if (/(?:csv|tsv|xlsx|xlsm|xls|parquet|ndjson|json)/u.test(value)) families.add("tabular");
-    else if (/(?:pdf|docx?|odt|rtf)/u.test(value)) families.add("document");
-    else if (/(?:pptx?|key)/u.test(value)) families.add("presentation");
-    else if (/(?:png|jpe?g|gif|webp|svg)/u.test(value)) families.add("image");
-    else if (/(?:mp3|wav|m4a|aac|flac|ogg)/u.test(value)) families.add("audio");
-    else if (/(?:js|ts|py|java|go|rs|cpp|json|yaml|yml)/u.test(value)) families.add("code");
-    else families.add("unknown");
-  }
-  return families;
+  return sourceInputFamiliesForKinds(sourceKinds);
 }
 
 function taskInputFamilies(task: StructuredTaskUnderstanding): ReadonlySet<PracticeInputFamily> {
