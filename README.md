@@ -22,9 +22,9 @@ agentloop/
 | 入口 | 定位 | 运行边界 | 适用场景 |
 |---|---|---|---|
 | [`apps/agentloop-app`](apps/agentloop-app/) | **单 Runtime 参考应用** | 一个 Node 进程承载 HTTP API、应用鉴权、Run 与 React Web；默认使用应用自己的 SQLite 数据库和本地工作目录。 | 本地开发、功能演示、单节点或内网部署。 |
-| [`apps/agentloop-multi-runtime`](apps/agentloop-multi-runtime/) | **多 Runtime 参考应用** | 独立 Web 只连接 Router；Router 负责会话入口、附件与调度；多个 Runtime Host 分别加载内核并完整执行一个 Run，共享状态库和任务工作区。 | 需要按会话分流、扩展 Host 容量，或把控制面与执行面分离的部署。 |
+| [`apps/agentloop-multi-runtime`](apps/agentloop-multi-runtime/) | **多 Runtime 参考应用** | Web 以同一会话工作台表达云端与已配对设备上的本机执行；Router 负责云端会话入口、附件与调度；多个 Runtime Host 分别加载内核并完整执行一个 Run，共享状态库和任务工作区。本机数据仍留在 Local Runtime Agent 的设备数据面。 | 需要按会话分流、扩展 Host 容量，或把控制面与执行面分离，同时保留受控本机执行的部署。 |
 
-两者各自拥有入口、配置、Web、认证/接入边界和运行数据，不能把 `agentloop-app` 的 SQLite、工作目录或 Web 直接接到 Multi Runtime 的 Router/Host 上。Multi Runtime 的一个 Run 始终由一个 Host 完整执行：不会把同一 Run 的 Plan 或 Step 拆到多个 Host，也不支持运行中的 Run 在 Host 间迁移。需要接入第三方业务系统时，应依赖 `@zhujun/agentloop` 内核包，而不是把任一参考应用当作 SDK。
+两者各自拥有入口、配置、Web、认证/接入边界和运行数据，不能把 `agentloop-app` 的 SQLite、工作目录或 Web 直接接到 Multi Runtime 的 Router/Host 上。Multi Runtime 的一个 Run 始终由一个 Host 完整执行：不会把同一 Run 的 Plan 或 Step 拆到多个 Host，也不支持运行中的 Run 在 Host 间迁移。Web 的云端/本机一致性只统一用户交互与执行溯源，不会隐式同步附件、目录、工作区或 Local Runtime 数据；云端 `attachmentIds` 与设备 `localUploadedSourceIds` 是两条受控数据面。需要接入第三方业务系统时，应依赖 `@zhujun/agentloop` 内核包，而不是把任一参考应用当作 SDK。
 
 选择单 Runtime 时按下文启动 `agentloop-app`；选择 Multi Runtime 时可先按下文用一条命令启动本地拓扑；需要分别运行 Router、Host、Web 或使用 Docker Compose 时，再查阅 [`apps/agentloop-multi-runtime/README.md`](apps/agentloop-multi-runtime/README.md)。
 

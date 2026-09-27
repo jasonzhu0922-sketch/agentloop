@@ -1,12 +1,14 @@
 # AgentLoop Multi Runtime
 
-`agentloop-multi-runtime` 有三个独立发布、独立扩缩容的部署角色；本地启动器只是同时启动它们的开发便利工具：
+![AgentLoop Web 登录页：云端与本机统一 Runtime 工作台](../../docs/assets/multi-runtime-web-local-login.png)
+
+`agentloop-multi-runtime` 有三个独立发布、独立扩缩容的云端部署角色；本地启动器只是同时启动它们的开发便利工具：
 
 ```text
 Browser Web → Router API / 控制面 → Runtime Host A | Runtime Host B | Runtime Host N
 ```
 
-- `web` 提供会话列表、新对话、模型选择、附件上传和 SSE 实时事件展示；不直连或选择 Runtime。
+- `web` 是用户唯一的工作台：无论本次选择云端还是已配对设备上的本机 Runtime，用户都在同一会话列表、Composer、执行轨迹和产物工作区中完成操作。Web 只表达已选执行位置、数据策略和实际 Runtime，不自行成为第二个执行或状态权威。
 - `router` 承载会话入口、附件 broker 与 Assignment，选择一个 Host 并读取其 Run 状态。
 - 每个 `runtime-host` 加载 `@zhujun/agentloop`，在共享状态库中完成一个完整 Run；所有 Host 共享一个任务工作区根目录。
 
@@ -15,6 +17,28 @@ Router 还可以作为应用集成与鉴权钩子的承载面：Host 通过受�
 因此 Runtime 个数由部署副本决定：启动同一 Host 镜像多次，每个实例设置不同的 `RUNTIME_ID`，但 Router 与所有 Host 必须连接同一个状态库，并挂载同一个 `WORKSPACE_ROOT`。RunService 将任务目录固定为 `WORKSPACE_ROOT/conversations/<conversationId>`，故同一会话可复用目录、不同会话物理隔离。Router 通过 `runtimes.json` 或节点注册表知道可用实例。
 
 已实现：持久 Assignment 与可过期槽位预留、静态节点配置加动态心跳、基于实际运行数的容量调度、Host 侧持久 `dispatchKey` 幂等、Host 容量准入、Router-owned 附件导入、Runtime 本地 Source 导入及 SHA-256 校验、Router/Host 私有 HTTP 协议、取消转发接口、Run 事件查询与 SSE 代理、会话式 Web 入口（会话列表、新对话、模型选择、Planner 与 SSE 事件面板），以及云端拒绝 `visibleDirectories`。它不拆分 Plan 或 Step，也不实现跨 Runtime 的 Run 迁移。
+
+## Web 的云端/本机一致性表达
+
+Web 的“一致”是交互和可追溯性的一致，而不是把设备数据复制成云端数据。用户始终在同一个会话中发送消息、看到待上传文件、执行状态、事件、回复和产物；每条回复同时记录实际执行位置与 Runtime 身份。因此切换本机运行只影响**下一次**提交，不能把正在运行的云端 Run 改派到设备，也不能把本机 Run 迁移到云端。
+
+```text
+同一 Web 会话 / Composer / 回复卡片 / 产物工作区
+             │
+             ├─ 云端：Router Assignment → Cloud Runtime Host → Router SSE / 产物代理
+             │         数据策略 cloud；附件是 Router-owned attachmentIds
+             │
+             └─ 本机：已配对的 Local Runtime Agent → 设备上的 Local Runtime
+                       数据策略 local；目录授权和上传源由设备持有
+```
+
+这两条路径共享的是用户可见的交互模型，不共享数据归属：
+
+- 云端提交只能使用 Router 管理的 `attachmentIds`；Router 解析资源引用，并将其交给获分配的 Cloud Runtime Host。
+- 本机提交只能使用目标 Local Runtime 自己的 `localUploadedSourceIds` 与目录 scope。它们是 opaque ID，文件字节和绝对路径不穿过 Router；云端附件不能被本机 Runtime 隐式读取，本机上传也不能被云端 Runtime 隐式读取。
+- Web 以每条回复记录的执行位置展示“云端”或“本机”，而不是依据当前开关倒推历史。Router 可用的本机 Run 通过受控连接投影状态、事件和产物；浏览器既不直连云端 Host，也不把 Local Agent 当作未鉴权的公共服务。
+
+`local` 表示由已配对的设备 Runtime 执行、但仍可由 Router 完成身份、调度和受控状态投影；`strict_local` 是更强的 loopback-only 数据面，任务内容、Run 观察和取消均直接经过本机 Agent，不创建 Router Assignment。后者不能用“本机运行”开关自动替代，必须由明确的严格本地入口发起。无论哪种方式，Local Runtime Agent 的数据库、目录授权、工作区和上传源始终留在设备 SQLite/文件系统中。
 
 ## 代码分层
 
@@ -168,7 +192,9 @@ npm run start:runtime-host --workspace agentloop-multi-runtime
 npm run start:web --workspace agentloop-multi-runtime
 ```
 
-访问 [http://127.0.0.1:5174](http://127.0.0.1:5174)。Web 页面提供会话侧栏、对话流、Composer 和详情面板；左侧可以创建和切换会话。会话侧栏通过 Router 的 `GET /v1/conversations?limit=30&offset=...` 按最近活动时间倒序加载，首屏 30 条，点击“加载更多对话”后追加下一页 30 条；正常分页结果以 Router 为权威，localStorage 只在首屏接口失败时作为恢复缓存。首次点击分页加载的会话时，再通过 `GET /v1/conversations/:conversationId` 读取持久轮次索引，并按 Assignment 回放 Host 状态与事件形成完整对话流。每次发送都会复用当前 `conversationId`，模型下拉只提交公开的 `requestedModelKey`，Planner 和 Run 事件通过 Router 的 SSE 代理实时展示。文件会先上传到 Router，再由被选 Host 导入为仅对该 Host 有效的 `sourceId`。
+访问 [http://127.0.0.1:5174](http://127.0.0.1:5174)。Web 页面提供会话侧栏、对话流、Composer 和详情面板；左侧可以创建和切换会话。会话侧栏通过 Router 的 `GET /v1/conversations?limit=30&offset=...` 按最近活动时间倒序加载，首屏 30 条，点击“加载更多对话”后追加下一页 30 条；正常分页结果以 Router 为权威，localStorage 只在首屏接口失败时作为恢复缓存。首次点击分页加载的会话时，再通过 `GET /v1/conversations/:conversationId` 读取持久轮次索引，并按 Assignment 回放 Host 状态与事件形成完整对话流。每次发送都会复用当前 `conversationId`，模型下拉只提交公开的 `requestedModelKey`，Planner 和 Run 事件通过 Router 的 SSE 代理实时展示。
+
+默认是云端路径：文件先上传到 Router，再由被选 Host 导入为仅对该 Host 有效的 `sourceId`。启用并配对 Local Runtime Agent 后，Web 在同一 Composer 中切换到指定的设备 Runtime；待上传文件会跟随该选择进入相应数据面。发送前 Web 会拒绝混用云端附件与本机上传源，也会拒绝把属于另一台 Local Runtime 的上传源提交给当前 Runtime。切换仅影响新消息，已有回复继续按其记录的执行位置恢复、展示与取消。
 
 ## Docker Compose：一条命令启动
 
