@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { artifactPreviewMode, renderBlobPreview, renderMarkdown, renderPptxPreview, renderStructuredPreview, updateArtifactPreviewMarkup, usesBlobPreview } from "../src/index.ts";
+import { artifactPreviewMode, renderBlobPreview, renderMarkdown, renderPptxPreview, renderStructuredPreview, setArtifactPreviewMaximized, updateArtifactPreviewMarkup, usesBlobPreview } from "../src/index.ts";
 
 test("routes browser-native formats to byte previews and Office formats to structured previews", () => {
   assert.equal(artifactPreviewMode({ name: "deck.html", mimeType: "text/html; charset=utf-8" }), "html");
@@ -39,6 +39,39 @@ test("preserves a mounted native audio player when parent state re-renders witho
   assert.equal(markup, audio);
   assert.equal(updateArtifactPreviewMarkup(host, ""), true);
   assert.equal(writes, 2);
+});
+
+test("maximizing keeps the backdrop safe area and dialog layout state in sync", () => {
+  const classes = (initial: readonly string[] = []) => {
+    const values = new Set(initial);
+    return {
+      contains: (value: string) => values.has(value),
+      toggle: (value: string, force?: boolean) => {
+        const enabled = force ?? !values.has(value);
+        if (enabled) values.add(value); else values.delete(value);
+        return enabled;
+      },
+    };
+  };
+  const backdrop = { classList: classes() } as unknown as HTMLElement;
+  const dialog = { classList: classes() } as unknown as HTMLElement;
+  const attributes = new Map<string, string>();
+  const maximize = {
+    textContent: "⛶",
+    setAttribute: (name: string, value: string) => attributes.set(name, value),
+  } as unknown as HTMLButtonElement;
+
+  setArtifactPreviewMaximized(backdrop, dialog, maximize, true);
+  assert.equal(backdrop.classList.contains("maximized"), true);
+  assert.equal(dialog.classList.contains("maximized"), true);
+  assert.equal(maximize.textContent, "↙");
+  assert.equal(attributes.get("aria-label"), "还原预览");
+
+  setArtifactPreviewMaximized(backdrop, dialog, maximize, false);
+  assert.equal(backdrop.classList.contains("maximized"), false);
+  assert.equal(dialog.classList.contains("maximized"), false);
+  assert.equal(maximize.textContent, "⛶");
+  assert.equal(attributes.get("aria-label"), "最大化预览");
 });
 
 test("renders PPTX geometry in SVG points rather than EMUs", () => {

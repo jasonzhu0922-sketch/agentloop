@@ -102,6 +102,22 @@ export interface ArtifactPreviewDialog {
   close(): void;
 }
 
+/**
+ * Keeps the preview shell and its dialog on the same layout state. The
+ * backdrop owns the safe-area gutter while the dialog fills that area.
+ */
+export function setArtifactPreviewMaximized(
+  backdrop: HTMLElement,
+  dialog: HTMLElement,
+  maximize: HTMLButtonElement,
+  maximized: boolean,
+): void {
+  backdrop.classList.toggle("maximized", maximized);
+  dialog.classList.toggle("maximized", maximized);
+  maximize.textContent = maximized ? "↙" : "⛶";
+  maximize.setAttribute("aria-label", maximized ? "还原预览" : "最大化预览");
+}
+
 const SAFE_LINK_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 const SAFE_IMAGE_SCHEMES = new Set(["http", "https"]);
 
@@ -233,9 +249,7 @@ export function openArtifactPreview(options: OpenArtifactPreviewOptions): Artifa
   closeButton.addEventListener("click", close);
   backdrop.addEventListener("click", (event) => { if (event.target === backdrop) close(); });
   maximize.addEventListener("click", () => {
-    const isMaximized = dialog.classList.toggle("maximized");
-    maximize.textContent = isMaximized ? "↙" : "⛶";
-    maximize.setAttribute("aria-label", isMaximized ? "还原预览" : "最大化预览");
+    setArtifactPreviewMaximized(backdrop, dialog, maximize, !dialog.classList.contains("maximized"));
   });
   window.addEventListener("keydown", onKeyDown);
   download.addEventListener("click", () => {

@@ -916,8 +916,9 @@ body.workspace-resizing * {
 /* Shared artifact-preview component. Keep these class contracts aligned with
    agentloop-app: the renderer itself is served from the shared package. */
 .preview-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 28px; background: rgba(15,17,21,.38); }
+.preview-backdrop.maximized { padding: 8px; }
 .preview-dialog { display: flex; flex-direction: column; width: min(1120px,calc(100vw - 56px)); height: min(820px,calc(100vh - 56px)); border: 1px solid var(--border-2); border-radius: 12px; background: var(--bg-2); box-shadow: var(--shadow-lg); overflow: hidden; }
-.preview-dialog.maximized { width: calc(100vw - 16px); height: calc(100vh - 16px); border-radius: 10px; }
+.preview-dialog.maximized { width: 100%; height: 100%; border-radius: 10px; }
 .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--bg-2); }
 .preview-title { min-width: 0; display: grid; gap: 2px; }.preview-title strong,.preview-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.preview-title strong { font-size: 14px; }.preview-title span { color: var(--text-3); font-size: 11px; }
 .preview-actions { display: flex; align-items: center; gap: 8px; }.preview-maximize,.preview-close { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--text-2); font-size: 18px; line-height: 1; }.preview-close { font-size: 20px; }.preview-maximize:hover,.preview-close:hover { background: var(--bg-3); color: var(--text); }
