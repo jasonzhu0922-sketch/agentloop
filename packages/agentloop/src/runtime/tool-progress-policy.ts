@@ -1208,7 +1208,7 @@ function artifactKindMatchesExpected(actual: string, expected: string): boolean 
   if (normalizedExpected === "presentation") return normalizedActual === "pptx";
   if (normalizedExpected === "spreadsheet") return normalizedActual === "xlsx" || normalizedActual === "csv";
   if (normalizedExpected === "image") return normalizedActual === "svg";
-  if (normalizedExpected === "audio") return normalizedActual === "wav";
+  if (normalizedExpected === "audio") return normalizedActual === "audio";
   return false;
 }
 
@@ -1234,7 +1234,7 @@ function artifactPathMatchesExpectedKind(path: string, expected: string): boolea
     case "image":
       return extension === ".png" || extension === ".jpg" || extension === ".jpeg" || extension === ".webp" || extension === ".gif" || extension === ".svg";
     case "audio":
-      return extension === ".wav";
+      return [".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".weba"].includes(extension);
     case "code":
       return extension === ".json" || isSourceArtifactPath(path) || /(?:^|[\\/])(?:makefile|dockerfile)$/i.test(path);
     default:
@@ -1247,7 +1247,7 @@ function normalizeArtifactKind(kind: string): string {
   if (normalized === "htm") return "html";
   if (normalized === "md") return "markdown";
   if (normalized === "jpg" || normalized === "jpeg" || normalized === "png" || normalized === "webp" || normalized === "gif") return "image";
-  if (normalized === "wav") return "audio";
+  if (["aac", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "weba"].includes(normalized)) return "audio";
   if (normalized === "word" || normalized === "pdf" || normalized === "txt") return normalized;
   if (normalized === "xlsx") return "spreadsheet";
   return normalized;

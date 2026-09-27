@@ -1,9 +1,10 @@
 import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from "../local-agent/bootstrap-config.ts";
-import { createLocalAgentServer } from "../local-agent/local-agent-server.ts";
-import { localRuntimeTerminalLogLine } from "../local-agent/local-runtime-terminal-log.ts";
+import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from "./bootstrap-config.ts";
+import { createLocalAgentServer } from "./local-agent-server.ts";
+import { localRuntimeTerminalLogLine } from "./local-runtime-terminal-log.ts";
+import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "./runtime-configuration.ts";
 
 void main();
 
@@ -37,7 +38,10 @@ const workspaceRoot = resolve(process.env.LOCAL_AGENT_WORKSPACE_ROOT ?? join(dat
 const skillPackageStoreRoot = resolve(process.env.LOCAL_AGENT_SKILL_PACKAGE_STORE_ROOT ?? join(dataRoot, "skill-packages"));
 const runtimeDataRoot = resolve(process.env.LOCAL_AGENT_RUNTIME_DATA_ROOT ?? join(dataRoot, "runtimes"));
 const supervisorDatabasePath = resolve(process.env.LOCAL_AGENT_SUPERVISOR_DATABASE_PATH ?? join(dataRoot, "supervisor.db"));
-const providerConfigPath = resolve(process.env.LLM_PROVIDER_CONFIG_PATH ?? join(appRoot, "config", "llm-providers.json"));
+const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, process.env);
+await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
+const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
+const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));
 const webOrigin = process.env.WEB_ORIGIN ?? buildWebOrigin ?? bootstrap.webOrigin;
@@ -49,6 +53,8 @@ const logColorOptions = {
 const server = await createLocalAgentServer({
   appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath,
   providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath,
+  computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
+  integrationEnvironment,
   runEventLogSink: (runtime, line) => process.stdout.write(`${localRuntimeTerminalLogLine(runtime.id, line, logColorOptions)}\n`),
   ...(webOrigin === undefined ? {} : { webOrigin }), environment: process.env,
 });

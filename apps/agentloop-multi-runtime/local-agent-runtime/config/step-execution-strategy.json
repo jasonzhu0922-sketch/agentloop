@@ -1,0 +1,10 @@
+{
+  "schema": "agentloop.stepExecutionStrategyConfig/v1",
+  "profile": "action-aware",
+  "projection": {
+    "diagnosticProjectionCharacters": 4096,
+    "diagnosticPreviewCharacters": 1200,
+    "terminalProjectionCharacters": 2048,
+    "terminalPreviewCharacters": 800
+  }
+}

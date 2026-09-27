@@ -12,7 +12,7 @@ test("failed terminal event hides Runtime diagnostics and keeps only explicit pa
   assert.equal(assistant.status, "failed");
   assert.equal(assistant.text, "");
   assert.equal(assistant.partialText, undefined);
-  assert.equal(assistant.error, "本次结果尚未完成最终确认，以下说明可供参考。");
+  assert.equal(assistant.error, "本次结果未通过最终验收。");
   const restored: { status: string; text: string; error?: string; partialText?: string } = { status: "running", text: "" };
   replayAssistantEvents(restored, [event]);
   assert.equal(restored.status, "failed");
@@ -25,7 +25,7 @@ test("explicit partial output is retained without exposing backend messages", ()
   projectAssistantEvent(assistant, { type: "run.failed", data: { code: "TOOL_EXECUTION_ERROR", message: "secret backend detail", partialOutput: "已生成一个可查看的文件。" } });
   assert.equal(assistant.text, "");
   assert.equal(assistant.partialText, "已生成一个可查看的文件。");
-  assert.equal(assistant.error, "部分处理未能继续完成，以下说明可供参考。");
+  assert.equal(assistant.error, "处理未能继续完成。");
 });
 
 // Run the actual browser snapshot function without its DOM/bootstrap side effects.

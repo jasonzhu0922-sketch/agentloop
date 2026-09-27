@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import type { ProcessArtifact } from "@zhujun/agentloop";
-import type { RuntimeDispatchEnvelope, RuntimeRunStatus } from "../domain/contracts.ts";
+import type { RuntimeDispatchEnvelope, RuntimeRunStatus } from "../../src/domain/contracts.ts";
 import { LocalRuntimeSupervisor, type LocalRuntimeControl } from "./local-runtime-supervisor.ts";
 
 export interface DeviceCredential {

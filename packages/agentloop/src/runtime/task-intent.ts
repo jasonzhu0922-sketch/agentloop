@@ -380,7 +380,7 @@ export function artifactKindForReference(input: {
   if (/(?:\.xlsx?\b|\.xlsm\b|spreadsheetml|\bexcel\b|\.csv\b)/u.test(signal)) return "spreadsheet";
   if (/(?:\.html?\b|text\/html)/u.test(signal)) return "html";
   if (/(?:\.png\b|\.jpe?g\b|\.webp\b|\.gif\b|\.svg\b|image\/)/u.test(signal)) return "image";
-  if (/(?:\.wav\b|audio\/wav)/u.test(signal)) return "audio";
+  if (/(?:\.(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|weba)\b|audio\/(?:aac|flac|mpeg|mp4|ogg|wav|webm))/u.test(signal)) return "audio";
   if (/(?:\.js\b|\.ts\b|\.py\b|\.json\b|\.yaml?\b|text\/x-)/u.test(signal)) return "code";
   return "document";
 }
@@ -483,7 +483,7 @@ function explicitArtifactFormatKind(text: string): ArtifactKind {
   if (/(?:\bpdf\b|\bdocx?\b|\bword\b|\bmarkdown\b|\bmd\b|\btxt\b)/iu.test(text)) return "document";
   if (/(?:\bxlsx?\b|\bexcel\b|\bspreadsheet\b|\bcsv\b)/iu.test(text)) return "spreadsheet";
   if (/(?:\bpng\b|\bjpe?g\b|\bwebp\b|\bimage\b|\bposter\b|海报|图片|图像)/iu.test(text)) return "image";
-  if (/(?:\bwav\b|audio\/wav|音频文件|音频)/iu.test(text)) return "audio";
+  if (/(?:\b(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|weba)\b|audio\/(?:aac|flac|mpeg|mp4|ogg|wav|webm)|音频文件|音频)/iu.test(text)) return "audio";
   if (/(?:\bjson\b|代码|脚本|程序|应用)/iu.test(text)) return "code";
   if (/\bhtml\b/iu.test(text)) return "html";
   return "none";
@@ -507,7 +507,7 @@ function detectArtifactKindSignal(text: string): ArtifactKind {
   if (/(?:pdf|docx?|word|document|markdown|md|txt|文档|报告书|(?:总结|报告|方案|说明|文稿|材料).{0,8}文件|文件.{0,8}(?:总结|报告|方案|说明|文稿|材料))/iu.test(text)) return "document";
   if (/(?:xlsx?|excel|spreadsheet|sheet|csv|表格|工作簿)/iu.test(text)) return "spreadsheet";
   if (/(?:png|jpe?g|webp|image|visual|canvas|poster|artwork|art\s?piece|visual\s?study|海报|图片|图像|视觉|画布)/iu.test(text)) return "image";
-  if (/(?:\bwav\b|audio\/wav|音频文件|音频)/iu.test(text)) return "audio";
+  if (/(?:\b(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|weba)\b|audio\/(?:aac|flac|mpeg|mp4|ogg|wav|webm)|音频文件|音频)/iu.test(text)) return "audio";
   if (/(?:code|script|program|app|json|代码|脚本|程序|应用)/iu.test(text)) return "code";
   if (/(?:\b(?:report|summary|brief|memo|proposal|assessment)\b|报告|总结|简报|备忘录|方案|评估|评价材料)/iu.test(text)) return "document";
   return "none";

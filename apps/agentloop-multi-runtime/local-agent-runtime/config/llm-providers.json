@@ -1,0 +1,89 @@
+{
+  "defaultProvider": "openai",
+  "defaultModelKey": "deepseek-v4-flash",
+  "providers": {
+    "my-provider": {
+      "kind": "openai-compatible",
+      "baseUrl": "http://10.251.26.100:3000/v1",
+      "protocol": "chat-completions",
+      "apiKeyEnv": "MY_LLM_API_KEY",
+      "defaultModel": "deepseek-v4-pro",
+      "contextWindowTokens": 128000,
+      "maxOutputTokens": 16384,
+      "timeoutMs": 300000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
+      "toolChoiceMode": "constrained-as-auto"
+    },
+    "openai": {
+      "kind": "openai-compatible",
+      "baseUrl": "https://www.126token.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "defaultModel": "gpt-5.6-terra",
+      "contextWindowTokens": 400000,
+      "maxOutputTokens": 32768,
+      "timeoutMs": 180000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
+      "toolChoiceMode": "native",
+      "runtimeContextPlacement": "system",
+      "protocol": "responses"
+    }
+  },
+  "models": {
+    "deepseek-v4-pro": {
+      "providerKey": "my-provider",
+      "providerModel": "deepseek-v4-pro",
+      "displayName": "DeepSeek v4 Pro",
+      "maxOutputTokens": 16384,
+      "thinkingMode": "enabled",
+      "thinkingEffort": "medium",
+      "reasoningVisibility": "hidden"
+    },
+    "deepseek-v4-flash": {
+      "providerKey": "my-provider",
+      "providerModel": "deepseek-v4-flash",
+      "displayName": "DeepSeek v4 Flash",
+      "maxOutputTokens": 16384,
+      "toolChoiceMode": "named-as-required",
+      "thinkingMode": "disabled",
+      "reasoningVisibility": "hidden"
+    },
+    "deepseek-v4-flash-2": {
+      "providerKey": "my-provider",
+      "providerModel": "DeepSeek-V4-flash",
+      "displayName": "DeepSeek v4 Flash 2",
+      "maxOutputTokens": 16384,
+      "toolChoiceMode": "named-as-required",
+      "chatTemplateKwargs": {
+        "thinking": false,
+        "effort": "none"
+      },
+      "reasoningVisibility": "hidden"
+    },
+    "kimi-2.6": {
+      "providerKey": "my-provider",
+      "providerModel": "Kimi-K2.6",
+      "displayName": "Kimi 2.6",
+      "maxOutputTokens": 16384
+    },
+    "gpt-5.6-terra": {
+      "providerKey": "openai",
+      "providerModel": "gpt-5.6-terra",
+      "displayName": "GPT-5.6 Terra",
+      "reasoningEffort": "none",
+      "reasoningVisibility": "hidden",
+      "protocol": "responses"
+    },
+    "gpt-5.5": {
+      "providerKey": "openai",
+      "providerModel": "gpt-5.5",
+      "displayName": "GPT5.5",
+      "timeoutMs": 180000,
+      "maxAttempts": 3,
+      "retryDelayMs": 250,
+      "toolChoiceMode": "named-as-required",
+      "protocol": "responses"
+    }
+  }
+}

@@ -1418,6 +1418,14 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
+    executionReceipt: {
+      schema: "agentloop.commandExecutionReceipt/v1";
+      startState: "started";
+      completionState: "exited" | "signaled";
+      /** Workspace observation cannot prove that an arbitrary command had no outside effect. */
+      effectScope: "unbounded";
+      workspaceFileChanges: { coverage: "complete" | "truncated"; count: number };
+    };
     }> {
     await this.preflightRunCommand(input);
     return await this.runCommandAfterPreflight(input);
@@ -1468,6 +1476,13 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
+    executionReceipt: {
+      schema: "agentloop.commandExecutionReceipt/v1";
+      startState: "started";
+      completionState: "exited" | "signaled";
+      effectScope: "unbounded";
+      workspaceFileChanges: { coverage: "complete" | "truncated"; count: number };
+    };
   }> {
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
     const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
@@ -1518,7 +1533,21 @@ export class ComputerExecutor {
         if (settled) return;
         settled = true;
         cleanup();
-        rejectPromise(new AppError("TOOL_EXECUTION_ERROR", `Failed to start command: ${error.message}`, 500));
+        // `spawn` reports this before a child process exists. Preserve that
+        // boundary fact so the Runtime does not invent an unknown side effect.
+        rejectPromise(new AppError(
+          "TOOL_EXECUTION_ERROR",
+          `Failed to start command: ${error.message}`,
+          500,
+          {
+            executionReceipt: {
+              schema: "agentloop.commandExecutionReceipt/v1",
+              startState: "not_started",
+              completionState: "not_started",
+              effectScope: "none",
+            },
+          },
+        ));
       });
       child.once("close", (exitCode, signal) => {
         if (settled) return;
@@ -1574,6 +1603,16 @@ export class ComputerExecutor {
               ...(stderrProjection.reference === undefined ? {} : { stderrRef: stderrProjection.reference }),
               fileChanges: fileChangeSummary.changes,
               fileChangesTruncated: fileChangeSummary.truncated,
+              executionReceipt: {
+                schema: "agentloop.commandExecutionReceipt/v1",
+                startState: "started",
+                completionState: exitCode === null ? "signaled" : "exited",
+                effectScope: "unbounded",
+                workspaceFileChanges: {
+                  coverage: fileChangeSummary.truncated ? "truncated" : "complete",
+                  count: fileChangeSummary.changes.length,
+                },
+              },
               truncated,
               timedOut,
               ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),

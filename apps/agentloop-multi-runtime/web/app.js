@@ -1076,7 +1076,7 @@ function applyRecoveredRunState(assistant, run) {
   assistant.error = undefined;
   if (run.status === "completed" && typeof run.output === "string") assistant.text = run.output;
   if (run.status === "failed") {
-    assistant.error = recoveredFailureMessage(run) || assistant.error || "本次未能形成可提交的最终结果，以下说明可供参考。";
+    assistant.error = recoveredFailureMessage(run) || assistant.error || "本次未能形成可提交的最终结果。";
     // Only the Host's explicit projection is eligible for this user-facing
     // section; never infer it from the generic Runtime `output` field here.
     if (typeof run.partialOutput === "string" && run.partialOutput.trim()) assistant.partialText = run.partialOutput;
@@ -1093,20 +1093,20 @@ function applyRecoveredRunState(assistant, run) {
 function recoveredFailureMessage(run) {
   switch (run?.errorCode) {
     case "RUN_LIMIT_EXCEEDED":
-      return "本次处理时间较长，暂未形成最终结果；以下说明可供参考。";
+      return "本次处理超出可用时限，尚未形成最终结果。";
     case "STEP_NOT_COMPLETED":
-      return "本次结果尚未完成最终确认，以下说明可供参考。";
+      return "本次结果未通过最终验收。";
     case "ASSESSMENT_ERROR":
-      return "系统正在核对结果，暂未形成最终结论；以下说明可供参考。";
+      return "本次结果仍未通过验收确认。";
     case "MODEL_ERROR":
-      return "本次处理暂时未能完成，以下说明可供参考。";
+      return "本次处理暂时未能完成。";
     case "TOOL_EXECUTION_ERROR":
-      return "部分处理未能继续完成，以下说明可供参考。";
+      return "处理未能继续完成。";
     case "TOOL_POLICY_DENIED":
     case "FORBIDDEN":
-      return "当前内容需要更多权限才能继续处理，以下说明可供参考。";
+      return "当前内容需要更多权限才能继续处理。";
     default:
-      return "本次未能形成可提交的最终结果，以下说明可供参考。";
+      return "本次未能形成可提交的最终结果。";
   }
 }
 

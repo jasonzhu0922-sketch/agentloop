@@ -60,7 +60,7 @@ process.stdout.write(`Built ${msi} (${seaInjected ? "Node SEA" : "bundled Node f
 
 async function buildAgentBundles() {
   const common = {
-    entryPoints: [join(appRoot, "src/entrypoints/local-agent-main.ts")],
+    entryPoints: [join(appRoot, "local-agent-runtime/src/local-agent-main.ts")],
     bundle: true,
     platform: "node",
     target: "node26",
@@ -94,6 +94,7 @@ async function writeLauncher(seaInjected) {
 
 async function copyRuntimePayload() {
   await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
+  await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
   await cp(join(repositoryRoot, "packages/agentloop/src/assets"), join(payloadRoot, "assets"), { recursive: true });
   await mkdir(join(resources, "config"), { recursive: true });
   await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));

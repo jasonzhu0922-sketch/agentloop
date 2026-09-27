@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import {
   failureEffectState,
+  failedResultEffectState,
   type RuntimeActionEffectState,
 } from "./action-effect.ts";
 import type { RuntimeResultRecord } from "./runtime-result.ts";
@@ -105,6 +106,8 @@ export class RuntimeActionRepository {
     metadata?: Readonly<Record<string, unknown>>;
     /** A resolved operation may still report a semantic failure, such as a nonzero command exit. */
     resultFailureCode?: (value: unknown) => string | undefined;
+    /** A completed operation receipt may prove its effect boundary despite an operation failure. */
+    resultFailureEffectState?: (value: unknown) => RuntimeActionEffectState;
     /** Build the canonical Runtime result that is atomically committed with Action success. */
     prepareResult?: (value: T, action: RuntimeActionRecord) => Promise<RuntimeResultRecord>;
   }, operation: () => Promise<T>): Promise<T> {
@@ -116,7 +119,12 @@ export class RuntimeActionRepository {
         const result = await input.prepareResult?.(value, action);
         await this.succeed(action.id, action.fence, result);
       } else {
-        await this.fail(action.id, action.fence, resultFailureCode, "unknown");
+        await this.fail(
+          action.id,
+          action.fence,
+          resultFailureCode,
+          input.resultFailureEffectState?.(value) ?? failedResultEffectState(value),
+        );
       }
       return value;
     } catch (error) {
@@ -466,7 +474,7 @@ export class RuntimeActionRepository {
     actionId: string,
     fence: number,
     code: string,
-    effectState: Extract<RuntimeActionEffectState, "not_started" | "unknown">,
+    effectState: RuntimeActionEffectState,
   ): Promise<void> {
     const now = Date.now();
     await this.database.transaction(async () => {

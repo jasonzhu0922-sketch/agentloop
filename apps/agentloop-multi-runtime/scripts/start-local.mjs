@@ -116,7 +116,7 @@ children.push(start("router", "src/entrypoints/router-main.ts", {
 // a shared SQLite/WAL file during local development.
 await waitForRouterHealth(publicRouterUrl);
 
-children.push(start("local-agent", "src/entrypoints/local-agent-main.ts", {
+children.push(start("local-agent", "local-agent-runtime/src/local-agent-main.ts", {
   ...common,
   LOCAL_AGENT_PORT: String(localAgentPort),
   ROUTER_URL: publicRouterUrl,

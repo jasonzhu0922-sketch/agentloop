@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { hostname } from "node:os";
 import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
-import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../config/config.ts";
+import { loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../src/config/config.ts";
 import { LocalDirectoryScopeStore } from "./local-directory-scope-store.ts";
 import { RuntimeConnectionClient } from "./runtime-connection-client.ts";
 import { LocalRuntimeSupervisor, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./local-runtime-supervisor.ts";
@@ -34,6 +34,10 @@ export interface LocalAgentServerOptions {
   readonly providerConfigPath: string;
   readonly skillDirectoriesConfigPath: string;
   readonly stepExecutionStrategyConfigPath: string;
+  /** Deployment-owned non-secret paths passed only to local Skill commands. */
+  readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
+  /** Device-owned model and integration settings; never passed to Skill commands. */
+  readonly integrationEnvironment?: Readonly<Record<string, string | undefined>>;
   readonly webOrigin?: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly directoryPicker?: () => Promise<string | undefined>;
@@ -311,6 +315,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
 
 async function createLocalRuntime(input: LocalAgentServerOptions, definition: LocalRuntimeDefinition, sharedStorageRoot: string, uploadStorageRoot: string): Promise<LocalRuntimeControl> {
   const environment = input.environment ?? process.env;
+  const integrationEnvironment = input.integrationEnvironment ?? {};
   const runtimeRoot = runtimeRootFor(input, definition) ?? dirname(input.databasePath);
   const databasePath = definition.isDefault ? input.databasePath : join(runtimeRoot, "agentloop.db");
   // Both roots are device-level settings. Runtime identity namespaces the
@@ -330,7 +335,7 @@ async function createLocalRuntime(input: LocalAgentServerOptions, definition: Lo
   `);
   const scopes = new LocalDirectoryScopeStore(database);
   await scopes.ready();
-  const provider = await LlmProviderRegistry.fromConfigFile(input.providerConfigPath);
+  const provider = await LlmProviderRegistry.fromConfigFile(input.providerConfigPath, integrationEnvironment);
   const custom = await loadSkillDirectoriesConfig({ appRoot: input.appRoot, configPath: input.skillDirectoriesConfigPath });
   const packagedSkillDirectories = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
   const skills = new SkillService(database, {
@@ -344,7 +349,8 @@ async function createLocalRuntime(input: LocalAgentServerOptions, definition: Lo
     defaultModelKey: provider.defaultModelKey, modelKeys: provider.modelKeys(), workspaceRoot, sourceStorageRoot,
     ownerScopedWorkspace: true,
     stepExecutionStrategy: createStepExecutionStrategyProfile(strategyConfig.profile, strategyConfig.projection),
-    tools: environment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(environment)),
+    tools: integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment)),
+    computerCommandEnvironment: input.computerCommandEnvironment,
     ...(input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => input.runEventLogSink!(definition, line) }),
   });
   const activeRunIds = new Set<string>();

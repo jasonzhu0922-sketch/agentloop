@@ -502,8 +502,9 @@ test("Web runtime config keeps browser API traffic same-origin while the server 
 });
 
 test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixed release configuration", async () => {
-  const [packager, preflight, tray, wix, rootPackage, workspacePackage] = await Promise.all([
+  const [packager, macPackager, preflight, tray, wix, rootPackage, workspacePackage] = await Promise.all([
     readFile(new URL("../scripts/package-local-agent-windows.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/package-local-agent-macos.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/assert-windows-local-agent-build.mjs", import.meta.url), "utf8"),
     readFile(new URL("../distribution/windows/Program.cs", import.meta.url), "utf8"),
     readFile(new URL("../distribution/windows/AgentLoopLocalRuntime.wxs", import.meta.url), "utf8"),
@@ -518,6 +519,8 @@ test("Windows Local Runtime MSI owns protocol activation, tray startup, and fixe
   assert.match(packager, /agentloop-local-runtime\.manifest\.json/);
   assert.match(packager, /agent\.out\.log/);
   assert.match(packager, /agent\.err\.log/);
+  assert.match(packager, /local-agent-runtime[\s\S]*agent-loop-runtime/);
+  assert.match(macPackager, /local-agent-runtime[\s\S]*agent-loop-runtime/);
   assert.match(preflight, /Windows MSI must be built on Windows x64/);
   assert.match(preflight, /\.NET 8 SDK is required/);
   assert.match(preflight, /WiX Toolset v4 CLI is required/);
@@ -1274,7 +1277,7 @@ test("Runtime Host imports resources once and reuses its dispatch key", async ()
   });
 });
 
-test("Runtime Host explicitly projects an approved failure report for user presentation", async () => {
+test("Runtime Host keeps generic failed output as execution evidence", async () => {
   const report = "任务未完成，以下为已确认的处理说明。\n\n已整理可供参考的部分结果。";
   const host = new AgentLoopRuntimeHost({
     async ensureConversation() {},
@@ -1304,13 +1307,12 @@ test("Runtime Host explicitly projects an approved failure report for user prese
     remoteRunId: "failed-run",
     status: "failed",
     output: report,
-    partialOutput: report,
     errorCode: "STEP_NOT_COMPLETED",
   });
   assert.deepEqual(await host.events("failed-run", 0), [{
     seq: 4,
     type: "run.failed",
-    data: { code: "STEP_NOT_COMPLETED", message: "internal failure detail", output: report, partialOutput: report },
+    data: { code: "STEP_NOT_COMPLETED", message: "internal failure detail", output: report },
     createdAt: 400,
   }]);
 });
@@ -1722,7 +1724,7 @@ test("Router preserves Host round-limit failures for browser replay and recovery
   };
   assert.equal(projectAssistantEvent(assistant, observed?.events[0] as unknown as Record<string, unknown>), true);
   assert.equal(assistant.status, "failed");
-  assert.equal(assistant.error, "本次处理时间较长，暂未形成最终结果；以下说明可供参考。");
+  assert.equal(assistant.error, "本次处理超出可用时限，尚未形成最终结果。");
   assert.equal(assistant.text, "");
   assert.doesNotMatch(assistant.error ?? "", /12-step limit|required evidence remained missing/);
   await database.close();

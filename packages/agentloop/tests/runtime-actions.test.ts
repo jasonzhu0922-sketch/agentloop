@@ -1,5 +1,8 @@
 import { testOwner } from "./runtime-test-helpers.ts";
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { RuntimeActionRepository } from "../src/runtime/runtime-action-repository.ts";
 import { toolOperationFailureCode } from "../src/runtime/tool-operation-outcome.ts";
@@ -8,6 +11,7 @@ import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
+import { ComputerExecutor } from "../src/computer/computer-executor.ts";
 
 test("Action failures preserve the explicit pre-effect boundary and otherwise fail closed", async () => {
   const database = new AppDatabase(":memory:");
@@ -47,6 +51,61 @@ test("Action failures preserve the explicit pre-effect boundary and otherwise fa
 
     assert.equal(executions, 0);
     assert.deepEqual((await actions.list(runId)).map((action) => action.effectState).sort(), ["not_started", "unknown"]);
+  } finally {
+    await database.close();
+  }
+});
+
+test("a command spawn failure records not_started instead of an unknown unsafe effect", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-spawn-failure-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "spawn-failure-effect-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
+    `).run(runId, owner.user.id, "test spawn boundary", Date.now());
+    const actions = new RuntimeActionRepository(database);
+    const executor = new ComputerExecutor(workspace);
+    await assert.rejects(
+      () => actions.execute(
+        { runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 },
+        () => executor.runCommand({ command: "agentloop-command-does-not-exist", args: [], cwd: ".", timeoutMs: 1_000 }),
+      ),
+      (error: unknown) => error instanceof AppError && error.code === "TOOL_EXECUTION_ERROR",
+    );
+    assert.equal((await actions.list(runId))[0]?.effectState, "not_started");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("operation-failure receipts distinguish a bounded observed effect from an unbounded command", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runId = "operation-receipt-effect-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
+    `).run(runId, owner.user.id, "test operation receipts", Date.now());
+    const actions = new RuntimeActionRepository(database);
+    const failedOperation = () => "TOOL_OPERATION_FAILED";
+    await actions.execute(
+      { runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000, resultFailureCode: failedOperation },
+      async () => ({ executionReceipt: {
+        startState: "started", effectScope: "workspace", workspaceFileChanges: { coverage: "complete", count: 0 },
+      } }),
+    );
+    await actions.execute(
+      { runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000, resultFailureCode: failedOperation },
+      async () => ({ executionReceipt: {
+        startState: "started", effectScope: "unbounded", workspaceFileChanges: { coverage: "complete", count: 0 },
+      } }),
+    );
+    assert.deepEqual((await actions.list(runId)).map((action) => action.effectState).sort(), ["applied", "unknown"]);
   } finally {
     await database.close();
   }

@@ -28,6 +28,9 @@ test("code artifacts are classified by source extension while generic files stay
   assert.equal(artifactMatchesExpectedKind({ path: "notes.txt", artifactKind: "generic_file" }, "code"), false);
   assert.equal(artifactMatchesExpectedKind({ path: "page.html", artifactKind: "html" }, "code"), false);
   assert.equal(artifactMatchesExpectedKind({ path: "southern_station.wav", artifactKind: "audio" }, "audio"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "southern_station.mp3", artifactKind: "audio" }, "audio"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "southern_station.m4a" }, "audio"), true);
+  assert.equal(artifactMatchesExpectedKind({ path: "southern_station.opus" }, "audio"), true);
   assert.equal(artifactMatchesExpectedKind({ path: "southern_station_player.py", artifactKind: "code" }, "audio"), false);
 });
 
@@ -1209,6 +1212,56 @@ test("verify_artifact_acceptance validates WAV headers and audio metadata", asyn
     const invalid = await new ArtifactAcceptanceService().verify(new ComputerExecutor(root), { artifactPath: "broken.wav" });
     assert.equal(invalid.verdict, "rejected");
     assert.equal(check(invalid, "format_matches_request")?.status, "failed");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verify_artifact_acceptance recognizes MP3 as audio rather than a generic file", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-mp3-"));
+  try {
+    // A valid MPEG-1 Layer III frame header. The acceptance profile validates
+    // the container/frame structure; actual listening quality is a separate QA concern.
+    await fs.writeFile(join(root, "tone.mp3"), Buffer.from([0xff, 0xfb, 0x90, 0x64, 0, 0, 0, 0]));
+    const result = await new ArtifactAcceptanceService().verify(new ComputerExecutor(root), { artifactPath: "tone.mp3" });
+
+    assert.equal(result.artifact.kind, "audio");
+    assert.equal(result.artifact.profileId, "audio");
+    assert.equal(result.verdict, "accepted");
+    assert.equal(check(result, "format_matches_request")?.status, "passed");
+    assert.equal(check(result, "artifact_openable")?.evidence.mode, "mpeg_audio_frame");
+
+    await fs.writeFile(join(root, "broken.mp3"), Buffer.from("not an mp3"));
+    const invalid = await new ArtifactAcceptanceService().verify(new ComputerExecutor(root), { artifactPath: "broken.mp3" });
+    assert.equal(invalid.artifact.kind, "audio");
+    assert.equal(invalid.verdict, "rejected");
+    assert.equal(check(invalid, "format_matches_request")?.status, "failed");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verify_artifact_acceptance keeps every previewable audio container in the audio family", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-audio-family-"));
+  try {
+    const fixtures: readonly [string, Buffer][] = [
+      ["tone.aac", Buffer.from([0xff, 0xf1, 0x50, 0x80, 0, 0x1f, 0xfc])],
+      ["tone.flac", Buffer.from("fLaC\0\0\0\0")],
+      ["tone.m4a", Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20])],
+      ["tone.oga", Buffer.from("OggS\0\0\0\0")],
+      ["tone.ogg", Buffer.from("OggS\0\0\0\0")],
+      ["tone.opus", Buffer.from("OggS\0\0\0\0OpusHead")],
+      ["tone.weba", Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0])],
+    ];
+    const service = new ArtifactAcceptanceService();
+    const executor = new ComputerExecutor(root);
+    for (const [path, content] of fixtures) {
+      await fs.writeFile(join(root, path), content);
+      const result = await service.verify(executor, { artifactPath: path });
+      assert.equal(result.artifact.kind, "audio", path);
+      assert.equal(result.verdict, "accepted", path);
+      assert.equal(check(result, "format_matches_request")?.status, "passed", path);
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

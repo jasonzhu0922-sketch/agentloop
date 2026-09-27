@@ -40,7 +40,7 @@ await mkdir(resources, { recursive: true });
 await mkdir(swiftModuleCache, { recursive: true });
 
 await build({
-  entryPoints: [join(appRoot, "src/entrypoints/local-agent-main.ts")],
+  entryPoints: [join(appRoot, "local-agent-runtime/src/local-agent-main.ts")],
   bundle: true,
   format: "esm",
   platform: "node",
@@ -55,7 +55,7 @@ await build({
   },
 });
 await build({
-  entryPoints: [join(appRoot, "src/entrypoints/local-agent-main.ts")],
+  entryPoints: [join(appRoot, "local-agent-runtime/src/local-agent-main.ts")],
   bundle: true,
   format: "cjs",
   platform: "node",
@@ -94,6 +94,7 @@ try {
   await chmod(executable, 0o755);
 }
 await cp(join(repositoryRoot, "packages/agentloop-skills/skills"), join(resources, "skills"), { recursive: true });
+await cp(join(appRoot, "local-agent-runtime"), join(resources, "agent-loop-runtime"), { recursive: true });
 await cp(join(repositoryRoot, "packages/agentloop/src/assets"), join(contents, "assets"), { recursive: true });
 await mkdir(join(resources, "config"), { recursive: true });
 await cp(join(appRoot, "config/llm-providers.example.json"), join(resources, "config/llm-providers.json"));

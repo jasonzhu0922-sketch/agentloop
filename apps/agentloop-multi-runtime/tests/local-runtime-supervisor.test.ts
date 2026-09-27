@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { LocalDirectoryScopeStore } from "../src/local-agent/local-directory-scope-store.ts";
-import { LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../src/local-agent/local-runtime-supervisor.ts";
+import { LocalDirectoryScopeStore } from "../local-agent-runtime/src/local-directory-scope-store.ts";
+import { LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/local-runtime-supervisor.ts";
 import { persistSessions } from "../web/session-persistence.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/local-runtime-preference.js";
 
@@ -178,7 +178,7 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/index.html", import.meta.url), "utf8"),
   ]);
-  const agent = await readFile(new URL("../src/local-agent/local-agent-server.ts", import.meta.url), "utf8");
+  const agent = await readFile(new URL("../local-agent-runtime/src/local-agent-server.ts", import.meta.url), "utf8");
   assert.match(app, /\/v1\/strict-local-runs/);
   assert.match(app, /async function localUploadSource\(file, conversationId, runtimeId\)/);
   assert.match(app, /function defaultUploadStoragePath\(sharedStoragePath\)/);

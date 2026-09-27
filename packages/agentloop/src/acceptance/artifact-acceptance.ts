@@ -242,7 +242,7 @@ function verifyByProfile(
     case "image":
       return verifyImageProfile(path, content);
     case "audio":
-      return verifyWavProfile(path, content);
+      return verifyAudioProfile(path, content);
     case "json":
       return verifyJsonProfile(path, content, truncated);
     case "markdown":
@@ -614,22 +614,86 @@ function verifyImageProfile(path: string, content: Buffer): ArtifactAcceptanceCh
   ];
 }
 
-function verifyWavProfile(path: string, content: Buffer): ArtifactAcceptanceCheck[] {
-  const metadata = decodeWavMetadata(content);
-  const extensionMatches = /\.wav$/i.test(path);
-  const decoded = metadata !== undefined;
+const AUDIO_EXTENSIONS = new Set([".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".weba"]);
+
+/**
+ * Audio is a semantic deliverable kind, not an alias for WAV.  This structural
+ * check deliberately covers every browser-playable audio format that Runtime
+ * projects as an audio artifact.  It proves a parseable local container/frame
+ * header; it does not claim subjective playback quality.
+ */
+function verifyAudioProfile(path: string, content: Buffer): ArtifactAcceptanceCheck[] {
+  const extension = extname(path).toLowerCase();
+  const detected = audioMetadataFor(extension, content);
+  const extensionMatches = AUDIO_EXTENSIONS.has(extension);
+  const decoded = detected !== undefined;
   return [
     checkStatus("format_matches_request", extensionMatches && decoded, {
       expected: "audio",
       extensionMatches,
-      detectedType: decoded ? "wav" : undefined,
+      ...(detected === undefined ? {} : { detectedType: detected.type }),
       decoded,
     }),
     checkStatus("artifact_openable", decoded, {
-      mode: "wav_header",
-      ...(metadata ?? {}),
+      mode: detected?.mode ?? "audio_header",
+      ...(detected?.metadata ?? {}),
     }),
   ];
+}
+
+function audioMetadataFor(extension: string, content: Buffer): { type: string; mode: string; metadata?: Record<string, number | string> } | undefined {
+  if (extension === ".wav") {
+    const metadata = decodeWavMetadata(content);
+    return metadata === undefined ? undefined : { type: "wav", mode: "wav_header", metadata };
+  }
+  if (extension === ".mp3" && hasMp3Frame(content)) return { type: "mp3", mode: "mpeg_audio_frame" };
+  if (extension === ".aac" && hasAacAdtsHeader(content)) return { type: "aac", mode: "adts_header" };
+  if (extension === ".flac" && content.subarray(0, 4).toString("ascii") === "fLaC") return { type: "flac", mode: "flac_marker" };
+  if (extension === ".m4a" && hasIsoBaseMediaHeader(content)) return { type: "m4a", mode: "iso_base_media_header" };
+  if ([".oga", ".ogg", ".opus"].includes(extension) && hasOggHeader(content, extension === ".opus")) {
+    return { type: extension.slice(1), mode: "ogg_page_header" };
+  }
+  if (extension === ".weba" && content.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
+    return { type: "weba", mode: "ebml_header" };
+  }
+  return undefined;
+}
+
+function hasMp3Frame(content: Buffer): boolean {
+  const offset = content.subarray(0, 3).toString("ascii") === "ID3" ? id3v2FrameOffset(content) : 0;
+  if (offset === undefined || offset + 4 > content.length) return false;
+  const first = content[offset]!;
+  const second = content[offset + 1]!;
+  const third = content[offset + 2]!;
+  return first === 0xff
+    && (second & 0xe0) === 0xe0
+    && ((second >> 3) & 0x03) !== 0x01
+    && ((second >> 1) & 0x03) !== 0x00
+    && ((third >> 4) & 0x0f) !== 0x00
+    && ((third >> 4) & 0x0f) !== 0x0f;
+}
+
+function id3v2FrameOffset(content: Buffer): number | undefined {
+  if (content.length < 10 || (content[6]! | content[7]! | content[8]! | content[9]!) & 0x80) return undefined;
+  const size = (content[6]! << 21) | (content[7]! << 14) | (content[8]! << 7) | content[9]!;
+  const footer = (content[5]! & 0x10) === 0x10 ? 10 : 0;
+  return 10 + size + footer;
+}
+
+function hasAacAdtsHeader(content: Buffer): boolean {
+  return content.length >= 7
+    && content[0] === 0xff
+    && (content[1]! & 0xf6) === 0xf0
+    && ((content[2]! >> 2) & 0x0f) !== 0x0f;
+}
+
+function hasIsoBaseMediaHeader(content: Buffer): boolean {
+  return content.length >= 12 && content.subarray(4, 8).toString("ascii") === "ftyp";
+}
+
+function hasOggHeader(content: Buffer, requireOpus: boolean): boolean {
+  if (content.subarray(0, 4).toString("ascii") !== "OggS") return false;
+  return !requireOpus || content.subarray(0, Math.min(content.length, 128)).includes(Buffer.from("OpusHead"));
 }
 
 function decodeWavMetadata(content: Buffer): Record<string, number> | undefined {
@@ -728,7 +792,7 @@ function resolveArtifactKind(
   if (extension === ".md" || extension === ".markdown") return "markdown";
   if (extension === ".json") return "json";
   if (isSourceArtifactPath(path)) return "code";
-  if (extension === ".wav") return "audio";
+  if (AUDIO_EXTENSIONS.has(extension)) return "audio";
   if (imageSignature(content) !== undefined) return "image";
   return "generic_file";
 }

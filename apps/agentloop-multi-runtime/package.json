@@ -28,7 +28,7 @@
   "scripts": {
     "start:router": "node --env-file-if-exists=.env src/entrypoints/router-main.ts",
     "start:runtime-host": "node --env-file-if-exists=.env src/entrypoints/runtime-host-main.ts",
-    "start:local-agent": "node --env-file-if-exists=.env src/entrypoints/local-agent-main.ts",
+    "start:local-agent": "node --env-file-if-exists=.env local-agent-runtime/src/local-agent-main.ts",
     "start:local": "node scripts/start-local.mjs",
     "package:local-agent:mac": "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-macos.mjs",
     "package:local-agent:win": "node scripts/assert-windows-local-agent-build.mjs && npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-windows.mjs",

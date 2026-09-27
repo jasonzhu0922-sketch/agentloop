@@ -93,6 +93,12 @@ SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应�
 `AGENTLOOP_STATE_*` 或云端 PostgreSQL/TiDB 凭据。设备注册和浏览器本地会话的云端记录仍
 由 Router 的共享状态库保存。
 
+### Local Runtime Agent 独立部署配置
+
+Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包，也不复用 Router/云端 Host 的 `.env`。开发模式从 `local-agent-runtime/.env` 与 `local-agent-runtime/config/llm-providers.json` 读取；已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime\`。该 `.env` 是 Local Agent 唯一的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
+
+Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `local-agent-main.ts` 为唯一入口。
+
 ### TiDB role databases
 
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host

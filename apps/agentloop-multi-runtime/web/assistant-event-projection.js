@@ -53,9 +53,8 @@ export function projectAssistantEvent(assistant, event) {
   if (event.type === "run.failed") {
     assistant.status = "failed";
     assistant.error = failureMessage(data);
-    // Runtime output is an internal failure report, not a user-facing answer.
-    // Keep any explicitly projected partial result separate so the terminal
-    // status cannot overwrite useful progress with backend diagnostics.
+    // Runtime output is execution evidence, not a user-facing answer. Keep
+    // only an explicit Host projection separate from the terminal status.
     if (typeof data.partialOutput === "string" && data.partialOutput.trim()) {
       assistant.partialText = data.partialOutput;
     }
@@ -75,22 +74,22 @@ export function projectAssistantEvent(assistant, event) {
 function failureMessage(data) {
   switch (data.code) {
     case "RUN_LIMIT_EXCEEDED":
-      return "本次处理时间较长，暂未形成最终结果；以下说明可供参考。";
+      return "本次处理超出可用时限，尚未形成最终结果。";
     case "STEP_NOT_COMPLETED":
-      return "本次结果尚未完成最终确认，以下说明可供参考。";
+      return "本次结果未通过最终验收。";
     case "ASSESSMENT_ERROR":
-      return "系统正在核对结果，暂未形成最终结论；以下说明可供参考。";
+      return "本次结果仍未通过验收确认。";
     case "MODEL_ERROR":
-      return "本次处理暂时未能完成，以下说明可供参考。";
+      return "本次处理暂时未能完成。";
     case "TOOL_EXECUTION_ERROR":
-      return "部分处理未能继续完成，以下说明可供参考。";
+      return "处理未能继续完成。";
     case "TOOL_POLICY_DENIED":
     case "FORBIDDEN":
-      return "当前内容需要更多权限才能继续处理，以下说明可供参考。";
+      return "当前内容需要更多权限才能继续处理。";
     case "CANCELLED":
       return "这次处理已停止，系统没有提交最终结果。";
     default:
-      return "本次未能形成可提交的最终结果，以下说明可供参考。";
+      return "本次未能形成可提交的最终结果。";
   }
 }
 

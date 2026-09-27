@@ -770,6 +770,89 @@ test("ModelPlanner binds source grounding to the selected API Skill without unre
   ]);
 });
 
+test("ModelPlanner binds a primary Skill's declared database provider before preview Admission", async () => {
+  const mysql = skillFixture({
+    id: "discovered:mysql-steel-data",
+    name: "mysql-steel-data",
+    agentLoop: {
+      ...agentLoopMetadata(["source_provider"], ["none"], ["database"], ["local_script"]),
+      producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+    },
+  });
+  const analysis = skillFixture({
+    id: "discovered:steel-market-analysis",
+    name: "steel-market-analysis",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"], ["local_script"]),
+      requiredSkillNames: [mysql.name],
+    },
+  });
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => ({
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [submitOutcomePlanToolCall("steel-price", {
+        goal: "查询指定日期唐山河钢螺纹钢的市场价格。",
+        selectedSkillRoles: [{
+          skillId: analysis.id,
+          role: "primary_builder",
+          reason: "The domain analysis Skill owns the market-price conclusion.",
+        }],
+        steps: [{
+          id: "query_steel_price",
+          objective: "读取受控钢材数据库并交付指定日期的原始市场价格事实。",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [analysis.id],
+          requiredCapabilities: ["web_research", "conversation_delivery"],
+          evidenceContract: {
+            requiredKinds: ["source_urls", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+        }],
+      })],
+    }),
+  });
+
+  const plan = await planner.plan({
+      get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-primary-skill-companion-preview-admission",
+    input: "查询指定日期唐山河钢螺纹钢的市场价格",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "execute",
+      relation: "new_goal",
+      effectiveGoal: "查询指定日期唐山河钢螺纹钢的市场价格。",
+      evidenceDemand: "lookup_lite",
+      userConstraints: [],
+      source: "model",
+    },
+    availableSkills: [analysis, mysql],
+    selectedSkillRoles: [{
+      skillId: analysis.id,
+      role: "primary_builder",
+      reason: "The domain analysis Skill owns the market-price conclusion.",
+    }],
+    availableToolNames: ["load_skill", "computer_run_command"],
+    availableCapabilities: planningCapabilitiesFromSkills([mysql]),
+  });
+
+  assert.deepEqual(plan.selectedSkillIds, [analysis.id, mysql.id]);
+  assert.deepEqual(plan.steps[0]?.skillIds, [analysis.id, mysql.id]);
+  assert.equal(plan.steps[0]?.requiredCapabilities.includes("web_research"), false);
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "explicit_caveats"]);
+  const admitted = admitPlan({
+    runId: "run-primary-skill-companion-final-admission",
+    proposal: plan,
+    availableSkills: [analysis, mysql],
+    availableToolNames: new Set(["load_skill", "computer_run_command"]),
+    availableCapabilities: planningCapabilitiesFromSkills([mysql]),
+    taskIntent: { evidenceDemand: "lookup_lite" },
+  });
+  assert.ok(admitted.steps[0]?.requiredCapabilities.includes("skill_source_provider.database.discovered:mysql-steel-data"));
+});
+
 test("ModelPlanner keeps a Markdown deliverable separate from its selected API source-provider evidence interface", async () => {
   const apiQuery = skillFixture({
     id: "discovered:api-query",
@@ -1175,7 +1258,7 @@ test("Recovery preserves canonical source identities when it reconstructs an exi
   });
 });
 
-test("Task intent preserves WAV audio as a typed workspace deliverable", () => {
+test("Task intent preserves WAV and MP3 audio as typed workspace deliverables", () => {
   const intent = classifyTaskIntent({
     objective: "运行工作区中的播放器脚本，生成可播放的 WAV 音频文件并保存到工作区。",
   });
@@ -1184,6 +1267,18 @@ test("Task intent preserves WAV audio as a typed workspace deliverable", () => {
   assert.equal(intent.artifactKind, "audio");
   assert.equal(intent.deliverySurface, "workspace_artifact");
   assert.equal(intent.wantsArtifact, true);
+
+  const mp3Intent = classifyTaskIntent({
+    objective: "生成 MP3 音频文件并保存到工作区。",
+  });
+  assert.equal(mp3Intent.artifactKind, "audio");
+  assert.equal(mp3Intent.deliverySurface, "workspace_artifact");
+
+  const opusIntent = classifyTaskIntent({
+    objective: "导出 Ogg Opus 音频到工作区。",
+  });
+  assert.equal(opusIntent.artifactKind, "audio");
+  assert.equal(opusIntent.deliverySurface, "workspace_artifact");
 });
 
 test("structured task understanding preserves subject, evidence, deliverable, and workflow before Planner", () => {
@@ -16150,7 +16245,7 @@ test("a recovery revision may retire a step whose earlier unsafe call was reject
   }
 });
 
-test("a recovery revision cannot retire a step with an unsafe Action whose effect is unknown", async () => {
+test("a recovery replacement with an unknown unsafe effect becomes an explainable user decision", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const skills = new SkillService(database);
@@ -16208,12 +16303,65 @@ test("a recovery revision cannot retire a step with an unsafe Action whose effec
       }),
     });
 
-    await assert.rejects(
-      () => runs.advanceRecovery(owner.user.id, runId),
-      (error: unknown) => hasCode(error, "TOOL_POLICY_DENIED"),
-    );
+    const recovery = await runs.advanceRecovery(owner.user.id, runId);
     assert.equal((await runs.get(owner.user.id, runId)).status, "running");
     assert.equal((await runs.plan(owner.user.id, runId)).plan.steps.find((item) => item.id === "critique-polish")?.retiredAt, undefined);
+    assert.equal(recovery.state?.state, "waiting_user");
+    assert.match(recovery.state?.question ?? "", /未确认副作用/);
+    assert.equal(recovery.decisions[0]?.decision, "ask_user");
+    assert.equal(recovery.decisions[0]?.state, "admitted");
+  } finally {
+    database.close();
+  }
+});
+
+test("a terminal assessment-recovery failure publishes the deferred final progress report", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const runId = "assessment-recovery-final-report-run";
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
+      VALUES (?, ?, NULL, 0, 1, 'running', ?, ?)
+    `).run(runId, owner.user.id, "produce the requested artifact", Date.now());
+    const plans = new PlanRepository(database);
+    const plan = await plans.create(admitPlan({
+      runId,
+      proposal: { goal: "produce the requested artifact", selectedSkillIds: [], steps: [step("build")] },
+      availableSkills: [],
+      availableToolNames: new Set(),
+    }));
+    await plans.startStep(plan.id, "build");
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => new StaticModel({ content: "", toolCalls: [], finishReason: "stop" }),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({ approved: false, feedback: "The repair is not admissible.", evidenceRefs: [] }),
+      }),
+    });
+    await (runs as unknown as {
+      applyAssessmentRepair(input: Record<string, unknown>): Promise<void>;
+    }).applyAssessmentRepair({
+      actorUserId: owner.user.id,
+      run: await runs.get(owner.user.id, runId),
+      currentPlan: await plans.get(plan.id),
+      stepId: "build",
+      failedBoundary: {
+        stepId: "build",
+        missingEvidenceKinds: ["artifact_path"],
+        violatedSkillRequirements: [],
+        reusableEvidenceRefs: [],
+        suggestedRepairShape: "repair_leaf",
+      },
+      failureReport: async () => "任务未完成：已生成阶段性工作，但没有可验收的最终产物。",
+    });
+    const outcome = await database.prepare("SELECT status, reason_code, output FROM run_outcomes WHERE run_id = ?")
+      .get(runId) as { status: string; reason_code: string; output: string | null } | undefined;
+    assert.equal(outcome?.status, "failed");
+    assert.equal(outcome?.reason_code, "ASSESSMENT_ERROR");
+    assert.match(outcome?.output ?? "", /没有可验收的最终产物/);
   } finally {
     database.close();
   }

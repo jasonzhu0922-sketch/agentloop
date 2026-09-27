@@ -22,7 +22,7 @@ import type {
   SelectedSkillRole,
   TaskSpec,
 } from "./contracts.ts";
-import { admitPlan, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
+import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "./admission.ts";
 import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
@@ -43,6 +43,25 @@ const EVIDENCE_KIND_VALUES = [
   "delivery_receipt",
   "explicit_caveats",
 ] as const satisfies readonly EvidenceKind[];
+
+const SOURCE_PROVIDER_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+  "derived_aggregation",
+  "explicit_caveats",
+]);
+const SOURCE_GROUNDING_EVIDENCE_KINDS = new Set<EvidenceKind>([
+  "source_summary",
+  "source_urls",
+  "schema_summary",
+  "record_counts",
+  "table_coverage",
+  "structured_extraction_artifact",
+]);
 
 const ARTIFACT_DELIVERY_EVIDENCE_KIND_VALUES = [
   "artifact_path",
@@ -352,7 +371,10 @@ export class ModelPlanner implements Planner {
         if (response.toolCalls.length !== 1 || outcomePlanCalls.length !== 1) {
           throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
         }
-        const proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), planningTask);
+        const proposal = normalizeOutcomePlanProposal(
+          bindRequiredSkillCompanions(parseOutcomePlanProposal(outcomePlanCalls[0]), planningTask.availableSkills),
+          planningTask,
+        );
         assertInitialOutcomePlanShape(proposal, planningTask);
         await emit?.({
           type: "planning.outcome_plan.submitted",
@@ -1585,7 +1607,7 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
       task,
     );
     const semanticEvidenceNormalized = normalizeModelEvidenceGates(sourceMaterializationNormalized, task);
-    const sourcePolicyNormalized = normalizeProgressiveSourceContract(semanticEvidenceNormalized, taskProfile);
+    const sourcePolicyNormalized = normalizeProgressiveSourceContract(semanticEvidenceNormalized, taskProfile, task);
     const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
     const artifactNormalized = normalizeWorkspaceArtifactTerminalStep(deliveryNormalized, terminalStepIds, taskProfile, task);
     if (artifactNormalized.evidenceContract !== undefined) {
@@ -1803,20 +1825,40 @@ function normalizeWorkspaceArtifactTerminalStep(
 function normalizeProgressiveSourceContract(
   step: PlanStepProposal,
   taskProfile: TaskProfile,
+  task: TaskSpec,
 ): PlanStepProposal {
   const contract = step.evidenceContract;
   if (contract === undefined || taskProfile.sourceNeed === "strict_user_source") return step;
+  const providerEvidence: ReadonlySet<EvidenceKind> = new Set<EvidenceKind>(task.availableSkills
+    .filter((skill) => step.skillIds.includes(skill.id) && skill.agentLoop?.roles.includes("source_provider"))
+    .flatMap((skill) => skill.agentLoop?.producesEvidenceKinds ?? []));
   const discoveryCanSupportBoundedDelivery = taskProfile.sourceNeed === "lookup_lite"
     && taskProfile.deliverySurface === "conversation"
     && taskProfile.operations.some((operation) => operation.id === "web_research")
     && contract.requiredKinds.includes("source_urls");
-  const requiredKinds = discoveryCanSupportBoundedDelivery
+  let requiredKinds = discoveryCanSupportBoundedDelivery
     ? contract.requiredKinds.filter((kind) => kind !== "source_summary")
     : contract.requiredKinds;
+  // A declared source-provider owns its receipt interface. For non-strict
+  // work, keep only source evidence it can emit and retain one real grounding
+  // kind. A generic web profile must not turn a database read into an
+  // impossible source_urls contract.
+  if (providerEvidence.size > 0) {
+    requiredKinds = requiredKinds.filter((kind) =>
+      !SOURCE_PROVIDER_EVIDENCE_KINDS.has(kind) || providerEvidence.has(kind),
+    );
+    if (!requiredKinds.some((kind) => SOURCE_GROUNDING_EVIDENCE_KINDS.has(kind))) {
+      const groundingKind = [...SOURCE_GROUNDING_EVIDENCE_KINDS].find((kind) => providerEvidence.has(kind));
+      if (groundingKind !== undefined) requiredKinds = [groundingKind, ...requiredKinds];
+    }
+  }
   const caveatPolicy = contract.caveatPolicy === "strict_fail_on_missing_source"
     ? "mark_unverified_facts"
     : contract.caveatPolicy;
-  if (requiredKinds.length === contract.requiredKinds.length && caveatPolicy === contract.caveatPolicy) return step;
+  const contractKindsUnchanged = requiredKinds.length === contract.requiredKinds.length
+    && requiredKinds.every((kind, index) => kind === contract.requiredKinds[index]);
+  if (contractKindsUnchanged && caveatPolicy === contract.caveatPolicy) return step;
+  const required: ReadonlySet<EvidenceKind> = new Set<EvidenceKind>(requiredKinds);
   return {
     ...step,
     evidenceContract: {
@@ -1824,6 +1866,18 @@ function normalizeProgressiveSourceContract(
       requiredKinds,
       caveatPolicy,
     },
+    successCriteria: [
+      ...step.successCriteria.filter((criterion) =>
+        !SOURCE_PROVIDER_EVIDENCE_KINDS.has(criterion.id as EvidenceKind) || required.has(criterion.id as EvidenceKind),
+      ),
+      ...requiredKinds
+        .filter((kind) => !step.successCriteria.some((criterion) => criterion.id === kind))
+        .map((kind) => ({
+          id: kind,
+          description: evidenceCriterionDescription(kind, caveatPolicy),
+          source: "planner" as const,
+        })),
+    ],
   };
 }
 

@@ -47,10 +47,6 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       status: run.status,
       ...(run.modelKey === undefined ? {} : { modelKey: run.modelKey }),
       ...(run.output === undefined ? {} : { output: run.output }),
-      // Failed AgentLoop Runs persist a dedicated, user-facing failure report
-      // as their output. Label it here at the Host/UI boundary rather than
-      // asking the browser to infer safety from a generic Runtime field.
-      ...(run.status === "failed" && hasText(run.output) ? { partialOutput: run.output } : {}),
       ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
       ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
       ...(this.runs.processArtifacts === undefined ? {} : { artifacts: await this.runs.processArtifacts(ownerUserId, remoteRunId) }),
@@ -241,18 +237,13 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   }
 }
 
-/**
- * Runtime failure reports are authored by the Runtime's final reporting turn.
- * Preserve the raw `output` for execution evidence, and issue the explicit
- * `partialOutput` presentation field for clients. This also upgrades old,
- * persisted terminal events when they are replayed from the Host.
- */
 function projectTerminalEvent(event: { readonly seq: number; readonly type: string; readonly data: Readonly<Record<string, unknown>>; readonly createdAt: number }): RuntimeRunEvent {
-  const output = event.type === "run.failed" && hasText(event.data.output) ? event.data.output : undefined;
   return {
     seq: event.seq,
     type: event.type,
-    data: output === undefined || hasText(event.data.partialOutput) ? event.data : { ...event.data, partialOutput: output },
+    // A failed Run's generic output is execution evidence.  Only an explicit
+    // Host projection may be rendered as a user-facing partial result.
+    data: event.data,
     createdAt: event.createdAt,
   };
 }

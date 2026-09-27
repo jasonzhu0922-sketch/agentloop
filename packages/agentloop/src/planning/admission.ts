@@ -97,7 +97,7 @@ export function admitPlan(input: {
   taskSemantics?: StructuredTaskUnderstanding;
   now?: number;
 }): ExecutionPlan {
-  const { proposal } = input;
+  const proposal = bindRequiredSkillCompanions(input.proposal, input.availableSkills);
   assertRuntimeResultBindings(input.resultBindings ?? []);
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
     reject("Plan must contain between 1 and 100 steps");
@@ -477,6 +477,60 @@ export function reusableSourceEvidenceKindsForTurn(
     if (summary.missingOrUnverified.length > 0) kinds.add("explicit_caveats");
   }
   return [...kinds];
+}
+
+/**
+ * A primary Skill's declared companions are part of its execution contract,
+ * not a Planner hint.  Normalize them before every Admission pass so preview
+ * Admission and persisted Admission evaluate the same Skill graph.
+ */
+export function bindRequiredSkillCompanions(
+  proposal: PlanProposal,
+  availableSkills: readonly PrivateSkill[],
+): PlanProposal {
+  const skillByName = new Map(availableSkills.map((skill) => [skill.name, skill]));
+  const skillById = new Map(availableSkills.map((skill) => [skill.id, skill]));
+  const selected = new Set(proposal.selectedSkillIds);
+  const roles = [...(proposal.selectedSkillRoles ?? [])];
+  let steps = proposal.steps;
+  const pending = [...selected];
+
+  for (let parentId = pending.shift(); parentId !== undefined; parentId = pending.shift()) {
+    const parent = skillById.get(parentId);
+    if (parent === undefined) continue;
+    for (const requiredName of parent.agentLoop?.requiredSkillNames ?? []) {
+      const companion = skillByName.get(requiredName);
+      if (companion === undefined) reject(`Skill ${parent.name} requires unavailable Skill ${requiredName}`);
+      if (!selected.has(companion.id)) {
+        selected.add(companion.id);
+        pending.push(companion.id);
+      }
+      if (!roles.some((role) => role.skillId === companion.id)) {
+        roles.push({
+          skillId: companion.id,
+          role: companion.agentLoop?.roles.includes("source_provider") === true ? "source_provider" : "primary_builder",
+          reason: `Required by selected Skill ${parent.name}.`,
+        });
+      }
+      const databaseProvider = companion.agentLoop?.sourceKinds.includes("database") === true;
+      steps = steps.map((step) => {
+        if (!step.skillIds.includes(parent.id)) return step;
+        return {
+          ...step,
+          skillIds: step.skillIds.includes(companion.id) ? step.skillIds : [...step.skillIds, companion.id],
+          requiredCapabilities: databaseProvider
+            ? step.requiredCapabilities.filter((capability) => capability !== "external_api_call" && capability !== "web_research")
+            : step.requiredCapabilities,
+        };
+      });
+    }
+  }
+  return {
+    ...proposal,
+    selectedSkillIds: [...selected],
+    ...(roles.length === 0 ? {} : { selectedSkillRoles: roles }),
+    steps,
+  };
 }
 
 /**

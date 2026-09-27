@@ -6,7 +6,7 @@ import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
 import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptance-provider.ts";
-import { admitPlan, reusableSourceEvidenceKindsForTurn } from "../planning/admission.ts";
+import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "../planning/admission.ts";
 import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import type {
   AssessmentProfileId,
@@ -107,6 +107,7 @@ import {
 } from "../tools/index.ts";
 import type { ToolExecutionPlugin } from "../tools/tool-execution-plugin.ts";
 import { TerminalCommitter } from "./terminal-committer.ts";
+import { failedResultEffectState } from "./action-effect.ts";
 import { StepResultCommitter } from "./step-result-committer.ts";
 import { RunOutcomeRepository } from "../storage/repositories/outcome-repository.ts";
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
@@ -1328,7 +1329,7 @@ export class RunService {
     }
     const failedBoundary = failedBoundaryFromRecoveryAction(action);
     const events = await this.events(actorUserId, runId);
-    const proposal = failedBoundaryRecoveryDecision(
+    const proposedDecision = failedBoundaryRecoveryDecision(
       run,
       action,
       currentPlan,
@@ -1348,6 +1349,12 @@ export class RunService {
           createdAt: item.createdAt,
         })),
       });
+    const proposal = await this.guardRecoveryPlanRetirement({
+      runId,
+      action,
+      plan: currentPlan,
+      proposal: proposedDecision,
+    });
     const decision = await this.recovery.submit(runId, proposal);
     try {
       switch (decision.decision) {
@@ -2052,7 +2059,7 @@ export class RunService {
       }, runController.signal, emit);
       let proposal = bindRequiredSkillCompanions(
         planningExtensionResolution.proposal ?? await proposalFromPlanner(),
-        planningSkillRoles,
+        privateSkills,
       );
       let proposalSource = planningExtensionResolution.proposalSource;
       await throwIfRunCancelled(this.runs, runId, runController.signal);
@@ -2105,7 +2112,7 @@ export class RunService {
             message: error instanceof Error ? error.message : "Plan was not admitted",
           },
         });
-        proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), planningSkillRoles);
+        proposal = bindRequiredSkillCompanions(await proposalFromPlanner(), privateSkills);
         proposalSource = undefined;
         await throwIfRunCancelled(this.runs, runId, runController.signal);
         await emit({
@@ -2707,6 +2714,7 @@ export class RunService {
                 modelStep: toolAction.step,
               },
               resultFailureCode: toolOperationFailureCode,
+              resultFailureEffectState: failedResultEffectState,
               ...(publishesRuntimeResult ? { prepareResult: async (result, action) => {
                 const runtimeResult = createRuntimeResult({
                   kind: "tool",
@@ -3219,7 +3227,7 @@ export class RunService {
       () => actionScope,
     );
     const events = await this.events(input.actorUserId, input.run.id);
-    const proposal = failedBoundaryRecoveryDecision(
+    const proposedDecision = failedBoundaryRecoveryDecision(
       input.run,
       action,
       input.currentPlan,
@@ -3233,6 +3241,12 @@ export class RunService {
       failedBoundary: input.failedBoundary,
       events,
       userResponses: [],
+    });
+    const proposal = await this.guardRecoveryPlanRetirement({
+      runId: input.run.id,
+      action,
+      plan: input.currentPlan,
+      proposal: proposedDecision,
     });
     const decision = await this.recovery.submit(input.run.id, proposal);
     try {
@@ -3289,7 +3303,12 @@ export class RunService {
       const run = await this.get(input.actorUserId, input.run.id);
       if (run.status === "running") {
         const code = error instanceof AppError ? error.code : "ASSESSMENT_REPAIR_FAILED";
-        const output = error instanceof CompletionFailure ? await error.report() : undefined;
+        // The execution loop defers this one final, evidence-only report while
+        // Recovery remains possible. If Recovery becomes terminal, publish it
+        // rather than discarding the recorded progress.
+        const output = error instanceof CompletionFailure
+          ? await error.report()
+          : await input.failureReport?.();
         if ((await this.runs.get(input.run.id))?.status !== "running") return;
         await this.terminal.commitStopped({
           runId: input.run.id,
@@ -3311,6 +3330,45 @@ export class RunService {
         });
       }
     }
+  }
+
+  /**
+   * Do not persist an automatic replacement Plan that would immediately be
+   * rejected for discarding a Step with an unconfirmed unsafe effect. Keep the
+   * Run recoverable and request an explicit user decision instead.
+   */
+  private async guardRecoveryPlanRetirement(input: {
+    runId: string;
+    action: RuntimeActionRecord;
+    plan: ExecutionPlan | undefined;
+    proposal: RecoveryDecisionProposal;
+  }): Promise<RecoveryDecisionProposal> {
+    if (input.proposal.decision !== "revise_plan" || input.plan === undefined || input.proposal.planRevision === undefined) {
+      return input.proposal;
+    }
+    const proposedStepIds = new Set(input.proposal.planRevision.steps.map((step) => step.id));
+    const retiredStepIds = input.plan.steps
+      .filter((step) => step.retiredAt === undefined && !proposedStepIds.has(step.id))
+      .map((step) => step.id);
+    if (retiredStepIds.length === 0) return input.proposal;
+    const retired = new Set(retiredStepIds);
+    const blockers = (await this.actions.list(input.runId)).filter((candidate) =>
+      candidate.planId === input.plan!.id
+      && candidate.stepId !== undefined
+      && retired.has(candidate.stepId)
+      && candidate.kind !== "recovery_review"
+      && candidate.replayPolicy === "unsafe"
+      && this.unsafeActionNeedsEffectConfirmation(candidate),
+    );
+    if (blockers.length === 0) return input.proposal;
+    return {
+      actionId: input.action.id,
+      expectedActionRevision: input.action.revision,
+      decision: "ask_user",
+      rationale: "Automatic plan replacement would retire a Step with an unconfirmed unsafe Action, so Runtime requires an explicit recovery decision instead.",
+      evidenceRefs: input.proposal.evidenceRefs,
+      question: unconfirmedEffectRecoveryQuestion(blockers),
+    };
   }
 
   private async assertRetirementHasNoUnconfirmedUnsafeEffect(
@@ -4251,6 +4309,18 @@ function stringArrayField(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+function unconfirmedEffectRecoveryQuestion(actions: readonly RuntimeActionRecord[]): string {
+  const descriptions = actions.map((action) => {
+    const toolName = typeof action.metadata.toolName === "string" ? action.metadata.toolName : action.kind;
+    return `${toolName} (${action.id})`;
+  });
+  return [
+    "自动修复会退休一个含未确认副作用的步骤，因此已暂停而非重试或结束任务。",
+    `需要确认的操作：${descriptions.join("、")}。`,
+    "请说明这些操作的外部效果是否需要保留，或明确授权以新的执行方式继续；系统不会把缺少收据当作未执行。",
+  ].join("\n");
+}
+
 function failedBoundaryRecoveryDecision(
   run: RunRecord,
   action: RuntimeActionRecord,
@@ -4591,38 +4661,6 @@ export interface PlanningSkillRoleSelection {
   readonly selection: SelectedSkillRole;
   /** The matched Skill that declared this required companion. */
   readonly companionForSkillId?: string;
-}
-
-function bindRequiredSkillCompanions(
-  proposal: PlanProposal,
-  selections: readonly PlanningSkillRoleSelection[],
-): PlanProposal {
-  const companions = selections.filter((selection) => selection.companionForSkillId !== undefined);
-  if (companions.length === 0) return proposal;
-  const selected = new Set(proposal.selectedSkillIds);
-  const roles = [...(proposal.selectedSkillRoles ?? [])];
-  let steps = proposal.steps;
-  for (const companion of companions) {
-    const parentId = companion.companionForSkillId!;
-    if (!selected.has(parentId)) continue;
-    selected.add(companion.skill.id);
-    if (!roles.some((role) => role.skillId === companion.skill.id)) roles.push(companion.selection);
-    const databaseProvider = companion.skill.agentLoop?.sourceKinds.includes("database") === true;
-    steps = steps.map((step) => {
-      if (!step.skillIds.includes(parentId)) return step;
-      const skillIds = step.skillIds.includes(companion.skill.id) ? step.skillIds : [...step.skillIds, companion.skill.id];
-      const requiredCapabilities = databaseProvider
-        ? step.requiredCapabilities.filter((capability) => capability !== "external_api_call" && capability !== "web_research")
-        : step.requiredCapabilities;
-      return { ...step, skillIds, requiredCapabilities };
-    });
-  }
-  return {
-    ...proposal,
-    selectedSkillIds: [...selected],
-    ...(roles.length === 0 ? {} : { selectedSkillRoles: roles }),
-    steps,
-  };
 }
 
 export function selectPlanningSkills(
