@@ -25,7 +25,7 @@
 .sessions-more{width:100%;margin:8px 0 2px;border:1px solid var(--border);border-radius:10px;background:var(--bg);padding:8px 10px;color:var(--text-2);font-size:12px;font-weight:650;transition:border .15s var(--ease),background .15s var(--ease),color .15s var(--ease)}.sessions-more:hover{border-color:var(--brand);background:var(--brand-soft);color:var(--brand)}.sessions-more:disabled{opacity:.55;cursor:not-allowed}
 .session-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--text-3)}.session-dot.completed{background:var(--ok)}.session-dot.running{background:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}.session-dot.failed,.session-dot.cancelled{background:var(--bad)}
 .session-body{min-width:0;display:grid;gap:2px}.session-title{overflow:hidden;color:var(--text);font-size:13px;font-weight:550;text-overflow:ellipsis;white-space:nowrap}.session-time{color:var(--text-3);font-size:11px}
-.sidebar-foot{border-top:1px solid var(--border);padding:12px 14px}.identity{overflow:hidden;margin-bottom:10px;color:var(--text-2);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.foot-actions{display:flex;gap:6px}
+.sidebar-foot{display:flex;align-items:center;gap:10px;border-top:1px solid var(--border);padding:12px 14px}.identity{min-width:0;flex:1;overflow:hidden;margin:0;color:var(--text-2);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.foot-actions{display:flex;flex:none;gap:6px}
 .icon-btn{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;border:1px solid transparent;color:var(--text-2);font-size:14px;text-decoration:none;transition:background .12s var(--ease),color .12s var(--ease)}.icon-btn:hover{background:var(--bg-3);color:var(--text)}
 
 /* ---- main ---- */
