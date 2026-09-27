@@ -30,6 +30,7 @@ export interface StoredRuntimeEndpoint {
 
 export interface RuntimeCatalogEntry {
   readonly id: string;
+  readonly displayName?: string;
   readonly profile: RuntimeProfile;
   readonly kind: RuntimeKind;
   readonly deviceId?: string;
@@ -73,6 +74,7 @@ export interface StoredConversationTurn {
   readonly assignment?: {
     readonly id: string;
     readonly runtimeId: string;
+    readonly runtimeDisplayName?: string;
     readonly executionLocation: ExecutionLocation;
     readonly status: AssignmentStatus;
     readonly hasRun: boolean;
@@ -163,6 +165,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS mr_runtime_nodes (
         id TEXT PRIMARY KEY,
+        display_name TEXT,
         endpoint TEXT NOT NULL,
         kind TEXT NOT NULL DEFAULT 'cloud',
         device_id TEXT,
@@ -275,6 +278,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         ["connection_epoch", "INTEGER"],
         ["lease_expires_at", "INTEGER"],
         ["catalog_version", "TEXT"],
+        ["display_name", "TEXT"],
       ] as const) {
         if (!runtimeColumns.some((column) => column.name === name)) {
           await this.database.exec(`ALTER TABLE mr_runtime_nodes ADD COLUMN ${name} ${definition}`);
@@ -310,16 +314,17 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   async seedRuntimes(runtimes: readonly (RuntimeInstance & { readonly endpoint: string })[], now = Date.now()): Promise<void> {
     await this.database.transaction(async () => {
       const statement = this.database.prepare(`
-        INSERT INTO mr_runtime_nodes(id, endpoint, kind, profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count, updated_at)
-        VALUES (?, ?, 'cloud', ?, ?, ?, 'offline', 0, 0, ?)
+        INSERT INTO mr_runtime_nodes(id, display_name, endpoint, kind, profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count, updated_at)
+        VALUES (?, ?, ?, 'cloud', ?, ?, ?, 'offline', 0, 0, ?)
         ON CONFLICT(id) DO UPDATE SET
+          display_name = excluded.display_name,
           endpoint = excluded.endpoint,
           profile = excluded.profile,
           capabilities_json = excluded.capabilities_json,
           updated_at = excluded.updated_at
       `);
       for (const runtime of runtimes) {
-        await statement.run(runtime.id, runtime.endpoint, runtime.profile, JSON.stringify(runtime.capabilities), runtime.maxConcurrentRuns, now);
+        await statement.run(runtime.id, runtime.displayName ?? null, runtime.endpoint, runtime.profile, JSON.stringify(runtime.capabilities), runtime.maxConcurrentRuns, now);
       }
     });
   }
@@ -327,6 +332,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   /** Registers a Runtime advertised by an authenticated device connection. */
   async registerLocalRuntime(input: {
     readonly runtimeId: string;
+    readonly displayName?: string;
     readonly deviceId: string;
     readonly tenantId: string;
     readonly ownerUserId: string;
@@ -343,6 +349,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     const now = input.now ?? Date.now();
     const params = [
       input.runtimeId,
+      input.displayName ?? null,
       `local-runtime://${input.runtimeId}`,
       input.deviceId,
       input.tenantId,
@@ -371,34 +378,34 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         if (existing === undefined) {
           await this.database.prepare(`
             INSERT INTO mr_runtime_nodes(
-              id, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
+              id, display_name, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
               profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
               last_heartbeat_at, updated_at
-            ) VALUES (?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
           `).run(...params);
           return;
         }
         await this.database.prepare(`
           UPDATE mr_runtime_nodes SET
-            endpoint = ?, tenant_id = ?, owner_user_id = ?, connection_id = ?, connection_epoch = ?, lease_expires_at = ?,
+            display_name = COALESCE(?, display_name), endpoint = ?, tenant_id = ?, owner_user_id = ?, connection_id = ?, connection_epoch = ?, lease_expires_at = ?,
             catalog_version = ?, profile = ?, capabilities_json = ?, max_concurrent_runs = ?, status = ?,
             last_heartbeat_at = ?, updated_at = ?
           WHERE id = ? AND kind = 'local' AND device_id = ?
         `).run(
-          params[1], params[3], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11],
-          params[12], params[13], params[14], input.runtimeId, input.deviceId,
+          params[1], params[2], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11], params[12],
+          params[13], params[14], params[15], input.runtimeId, input.deviceId,
         );
       });
       return;
     }
     const result = await this.database.prepare(`
       INSERT INTO mr_runtime_nodes(
-        id, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
+        id, display_name, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
         profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
         last_heartbeat_at, updated_at
-      ) VALUES (?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+      ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        endpoint = excluded.endpoint, kind = 'local', device_id = excluded.device_id,
+        display_name = COALESCE(excluded.display_name, mr_runtime_nodes.display_name), endpoint = excluded.endpoint, kind = 'local', device_id = excluded.device_id,
         tenant_id = excluded.tenant_id, owner_user_id = excluded.owner_user_id,
         connection_id = excluded.connection_id, connection_epoch = excluded.connection_epoch,
         lease_expires_at = excluded.lease_expires_at, catalog_version = excluded.catalog_version,
@@ -462,13 +469,14 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   /** Static Hosts registered with this Router; availability remains heartbeat-driven. */
   async runtimeCatalog(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeCatalogEntry[]> {
     const rows = await (tenantId === undefined || ownerUserId === undefined
-      ? this.database.prepare("SELECT id, profile, kind, device_id, status FROM mr_runtime_nodes WHERE kind = 'cloud' ORDER BY id").all()
+      ? this.database.prepare("SELECT id, display_name, profile, kind, device_id, status FROM mr_runtime_nodes WHERE kind = 'cloud' ORDER BY id").all()
       : this.database.prepare(`
-          SELECT id, profile, kind, device_id, status FROM mr_runtime_nodes
+          SELECT id, display_name, profile, kind, device_id, status FROM mr_runtime_nodes
           WHERE kind = 'cloud' OR (kind = 'local' AND tenant_id = ? AND owner_user_id = ?)
           ORDER BY id
-        `).all(tenantId, ownerUserId)) as Array<{
+    `).all(tenantId, ownerUserId)) as Array<{
       id: string;
+      display_name: string | null;
       profile: RuntimeProfile;
       kind: RuntimeKind;
       device_id: string | null;
@@ -476,6 +484,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     }>;
     return rows.map((row) => ({
       id: row.id,
+      ...(row.display_name === null ? {} : { displayName: row.display_name }),
       profile: row.profile,
       kind: row.kind,
       status: row.status,
@@ -565,6 +574,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         t.updated_at,
         a.id AS assignment_id,
         a.runtime_id,
+        runtime.display_name AS runtime_display_name,
         a.remote_run_id,
         a.status AS assignment_status,
         a.error_code,
@@ -583,6 +593,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         LIMIT 1
       )
       LEFT JOIN mr_turns turn ON turn.assignment_id = a.id
+      LEFT JOIN mr_runtime_nodes runtime ON runtime.id = a.runtime_id
       WHERE t.tenant_id = ? AND t.owner_user_id = ? AND t.conversation_id = ?
       ORDER BY t.created_at ASC, t.id ASC
     `).all(tenantId, ownerUserId, conversationId) as Array<{
@@ -594,6 +605,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       updated_at: number;
       assignment_id: string | null;
       runtime_id: string | null;
+      runtime_display_name: string | null;
       remote_run_id: string | null;
       assignment_status: AssignmentStatus | null;
       error_code: string | null;
@@ -625,6 +637,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
           assignment: {
             id: row.assignment_id,
             runtimeId: row.runtime_id,
+            ...(row.runtime_display_name === null ? {} : { runtimeDisplayName: row.runtime_display_name }),
             executionLocation: executionLocationFromDataPolicy(row.data_policy_json),
             status: row.assignment_status,
             hasRun: row.remote_run_id !== null,

@@ -18,6 +18,8 @@ export type ExecutionLocation = DataPolicy["mode"];
 
 export interface RuntimeInstance {
   readonly id: string;
+  /** Human-readable Runtime identity for user-facing provenance. */
+  readonly displayName?: string;
   readonly kind?: RuntimeKind;
   readonly deviceId?: string;
   readonly profile: RuntimeProfile;

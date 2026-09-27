@@ -49,6 +49,7 @@ test("Supervisor persists multiple isolated Runtime definitions and removes stop
     assert.deepEqual((await supervisor.list()).filter((runtime) => runtime.isDefault).map((runtime) => runtime.id), ["local-default"]);
     assert.deepEqual(created.map((runtime) => runtime.storageKey), ["default", second.id]);
     assert.equal(new Set(supervisor.advertisements().map((runtime) => runtime.runtimeId)).size, 2);
+    assert.equal(supervisor.advertisements().find((runtime) => runtime.runtimeId === second.id)?.displayName, "研究助理");
 
     await supervisor.stop(second.id);
     assert.equal((await supervisor.list()).find((runtime) => runtime.id === second.id)?.status, "stopped");

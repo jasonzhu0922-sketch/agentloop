@@ -8,6 +8,7 @@ import type { AuthenticatedDeviceAgent, DeviceRepository } from "./device-servic
 
 interface RuntimeAdvertisement {
   readonly runtimeId: string;
+  readonly displayName?: string;
   readonly profile: RuntimeProfile;
   readonly capabilities: readonly string[];
   readonly maxConcurrentRuns: number;
@@ -202,6 +203,7 @@ export class DeviceRuntimeConnectionRegistry {
 function validAdvertisement(value: RuntimeAdvertisement): boolean {
   return value !== null && typeof value === "object"
     && typeof value.runtimeId === "string" && value.runtimeId.length > 0
+    && (value.displayName === undefined || (typeof value.displayName === "string" && value.displayName.trim().length > 0 && value.displayName.length <= 100))
     && (value.profile === "general" || value.profile === "artifact")
     && Array.isArray(value.capabilities) && value.capabilities.every((item) => typeof item === "string")
     && Number.isSafeInteger(value.maxConcurrentRuns) && value.maxConcurrentRuns > 0

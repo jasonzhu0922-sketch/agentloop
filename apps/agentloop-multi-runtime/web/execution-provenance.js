@@ -10,12 +10,12 @@ export function executionLocationLabel(location) {
 }
 
 export function executionProvenanceParts(message) {
-  const runtimeId = text(message?.runtimeId);
+  const runtimeName = text(message?.runtimeDisplayName);
   const modelKey = text(message?.modelKey);
   const isLive = message?.status === "running";
   return [
     { kind: "location", label: executionLocationLabel(message?.executionLocation) },
-    { kind: "runtime", label: runtimeId === undefined ? "Runtime 分配中" : `Runtime ${runtimeId}` },
+    { kind: "runtime", label: runtimeName === undefined ? "Runtime 未命名" : `Runtime ${runtimeName}` },
     { kind: "model", label: modelKey === undefined ? (isLive ? "模型确认中" : "模型未记录") : `模型 ${modelKey}` },
   ];
 }

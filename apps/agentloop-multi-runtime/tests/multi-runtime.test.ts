@@ -361,6 +361,7 @@ test("persisted turns preserve actual Runtime data plane and resolved model", as
   await store.ready();
   await store.registerLocalRuntime({
     runtimeId: "local-runtime-provenance",
+    displayName: "研究 Runtime",
     deviceId: "device-provenance",
     tenantId: "tenant-provenance",
     ownerUserId: "user-provenance",
@@ -390,11 +391,12 @@ test("persisted turns preserve actual Runtime data plane and resolved model", as
   const turn = (await store.conversation("tenant-provenance", "user-provenance", "conversation-provenance"))?.turns[0];
   assert.equal(turn?.assignment?.executionLocation, "local");
   assert.equal(turn?.assignment?.runtimeId, "local-runtime-provenance");
+  assert.equal(turn?.assignment?.runtimeDisplayName, "研究 Runtime");
   assert.equal(turn?.finalTurn?.modelKey, "model-resolved-by-runtime");
   const assistant = conversationMessagesFromTurns(turn === undefined ? [] : [turn])[1];
   assert.deepEqual(executionProvenanceParts(assistant), [
     { kind: "location", label: "本机" },
-    { kind: "runtime", label: "Runtime local-runtime-provenance" },
+    { kind: "runtime", label: "Runtime 研究 Runtime" },
     { kind: "model", label: "模型 model-resolved-by-runtime" },
   ]);
   await database.close();
@@ -405,6 +407,11 @@ test("execution provenance labels all supported data planes without Runtime ID i
   assert.equal(executionLocationLabel("local"), "本机");
   assert.equal(executionLocationLabel("strict_local"), "严格本地");
   assert.equal(executionLocationLabel("runtime-local-01"), "执行位置未记录");
+  assert.deepEqual(executionProvenanceParts({ runtimeId: "runtime-internal-id", status: "completed" }), [
+    { kind: "location", label: "执行位置未记录" },
+    { kind: "runtime", label: "Runtime 未命名" },
+    { kind: "model", label: "模型未记录" },
+  ]);
 });
 
 test("persisted conversation turns become a replayable conversation stream on click", () => {
@@ -1216,12 +1223,21 @@ test("Web persists question and terminal-response timing for the conversation st
   assert.match(app, /回答结束于 \$\{completedAt\}/);
   assert.match(app, /耗时 \$\{duration\}/);
   assert.match(app, /提问于 \$\{askedAt\}/);
+  assert.match(app, /const outputClass = message\.status === "completed" \? " completed-output" : "";/);
+  assert.match(app, /isLive \? liveEventIndicator : ""/);
+  assert.match(app, /renderMessageFooter\(message, completedAt[^\n]+isLive \? "" : liveEventIndicator\)/);
+  assert.match(app, /function renderMessageFooter\(message, timing, kind, terminalFeedback = ""\)/);
   assert.match(app, /data-copy-message=/);
   assert.match(app, /function copyConversationMessage\(message, button\)/);
   assert.match(app, /navigator\.clipboard\?\.writeText/);
   assert.match(app, /function showCopyFeedback\(button, kind\)/);
   assert.match(app, /button\.classList\.add\("copied"\)/);
   assert.match(overrides, /\.message-timing/);
+  assert.match(overrides, /\.live-output-text\.completed-output/);
+  assert.match(overrides, /max-height: min\(240px, 32vh\);/);
+  assert.match(overrides, /\.message-footer\.terminal-feedback/);
+  assert.match(overrides, /\.terminal-feedback \.live-event-indicator\.terminal/);
+  assert.match(overrides, /@keyframes terminal-event-arrive/);
 });
 
 test("router distributes independent user tasks by available Runtime capacity", async () => {

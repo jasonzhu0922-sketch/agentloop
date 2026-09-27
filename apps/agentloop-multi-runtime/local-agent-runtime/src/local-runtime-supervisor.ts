@@ -145,6 +145,7 @@ export class LocalRuntimeSupervisor {
 
   advertisements(): readonly {
     runtimeId: string;
+    displayName: string;
     profile: "general";
     capabilities: readonly string[];
     maxConcurrentRuns: number;
@@ -153,6 +154,7 @@ export class LocalRuntimeSupervisor {
   }[] {
     return [...this.instances.values()].map((runtime) => ({
       runtimeId: runtime.id,
+      displayName: runtime.displayName,
       profile: "general",
       capabilities: [],
       maxConcurrentRuns: this.maxConcurrentRuns,

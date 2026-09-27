@@ -749,6 +749,7 @@ async function selectLocalRuntime(runtimeId) {
 }
 
 function selectedLocalRuntime(runtimeId = localRuntimeId) { return localRuntimes.find((runtime) => runtime.id === runtimeId); }
+function runtimeDisplayNameFor(runtimeId) { return selectedLocalRuntime(runtimeId)?.displayName; }
 function selectedLocalRuntimeRunning() { return selectedLocalRuntime()?.status !== "stopped" && selectedLocalRuntime()?.status !== "failed"; }
 function isLocalExecution() { return $("use-local-runtime")?.checked === true; }
 function localHeaders(json = false) { return { ...(json ? { "content-type": "application/json" } : {}), "x-local-session": localSessionToken }; }
@@ -1268,9 +1269,10 @@ async function submit() {
     activeRun.assignmentId = body.assignment.id;
     assistantMessage.assignmentId = activeRun.assignmentId;
     assistantMessage.runtimeId = body.assignment.runtimeId;
+    assistantMessage.runtimeDisplayName = runtimeDisplayNameFor(body.assignment.runtimeId);
     assistantMessage.executionLocation = executionTarget === "local" ? "local" : "cloud";
     if (executionTarget === "local") assistantMessage.localRuntimeId = body.assignment.runtimeId;
-    setStatus(`${executionTarget === "local" ? "本机" : "云端"}已分配 ${body.assignment.runtimeId} · SSE 连接中`, "running");
+    setStatus(`${executionTarget === "local" ? "本机" : "云端"}已分配 ${assistantMessage.runtimeDisplayName || "未命名 Runtime"} · SSE 连接中`, "running");
     saveSessions();
     render();
     await streamAssignment(activeRun.assignmentId, conversation, assistantMessage, tenantId, ownerUserId, activeRun);
@@ -1828,15 +1830,16 @@ function renderMessage(message) {
   const stateIcon = presentation.icon;
   const completedAt = formatMessageTime(message.completedAt);
   const duration = formatConversationDuration(message.createdAt, message.completedAt);
-  const responseTiming = renderMessageFooter(message, completedAt ? `回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}` : "", "回答");
+  const liveEventIndicator = renderLiveEventIndicator(message);
+  const responseTiming = renderMessageFooter(message, completedAt ? `回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}` : "", "回答", isLive ? "" : liveEventIndicator);
   const hasPlan = plan.length;
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
   const executionTrace = renderExecutionTrace(message);
-  const liveEventIndicator = renderLiveEventIndicator(message);
   const inlineArtifacts = renderInlineArtifacts(message);
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${liveEventIndicator}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  const outputClass = message.status === "completed" ? " completed-output" : "";
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${isLive ? liveEventIndicator : ""}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md${outputClass}">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
 }
 
 function renderExecutionProvenance(message) {
@@ -1892,7 +1895,8 @@ function renderLiveEventIndicator(message) {
   const type = stringValue(latest?.type);
   if (seq === undefined && !type) return "";
   const running = ["running", "waiting"].includes(message?.status);
-  return `<span class="live-event-indicator ${running ? "active" : ""}" data-event-seq="${escapeHtml(seq ?? "?")}" title="最新运行事件"><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">#${escapeHtml(seq ?? "?")}</span><small>${escapeHtml(type ? eventTypeLabel(type) : "runtime event")}</small></span>`;
+  const terminal = !running;
+  return `<span class="live-event-indicator ${running ? "active" : ""} ${terminal ? "terminal" : ""} ${escapeHtml(message?.status || "")}" data-event-seq="${escapeHtml(seq ?? "?")}" title="最新运行事件"><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">#${escapeHtml(seq ?? "?")}</span><small>${escapeHtml(type ? eventTypeLabel(type) : "runtime event")}</small></span>`;
 }
 
 function executionTraceItems(events, activities) {
@@ -2001,9 +2005,9 @@ function traceParseResult(value) {
   }
 }
 
-function renderMessageFooter(message, timing, kind) {
+function renderMessageFooter(message, timing, kind, terminalFeedback = "") {
   const label = `复制${kind}`;
-  return `<div class="message-footer">${timing ? `<div class="message-timing">${timing}</div>` : ""}<button type="button" class="message-copy" data-copy-message="${escapeHtml(message.id)}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg></button></div>`;
+  return `<div class="message-footer${terminalFeedback ? " terminal-feedback" : ""}">${terminalFeedback}${timing ? `<div class="message-timing">${timing}</div>` : ""}<button type="button" class="message-copy" data-copy-message="${escapeHtml(message.id)}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg></button></div>`;
 }
 
 async function copyConversationMessage(message, button) {

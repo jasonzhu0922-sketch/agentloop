@@ -88,6 +88,7 @@ function compactMessage(message, tier) {
     localRunId: string(value.localRunId, tier.text),
     localRuntimeId: string(value.localRuntimeId, tier.text),
     runtimeId: string(value.runtimeId, tier.text),
+    runtimeDisplayName: string(value.runtimeDisplayName, tier.text),
     completedAt: number(value.completedAt),
     planOpen: value.planOpen === true,
     plan: compactPlan(value.plan, tier),

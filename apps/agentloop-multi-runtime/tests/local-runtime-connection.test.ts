@@ -46,7 +46,7 @@ test("Router dispatches a local Assignment through the authenticated device conn
     socket.send(JSON.stringify({
       type: "agent.hello",
       deviceId: device.id,
-      runtimes: [{ runtimeId, profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1" }],
+      runtimes: [{ runtimeId, displayName: "文档分析", profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1" }],
     }));
     assert.equal((await helloAck).type, "agent.hello.ack");
     const republishedAck = nextMessage(socket);
@@ -54,8 +54,8 @@ test("Router dispatches a local Assignment through the authenticated device conn
       type: "agent.hello",
       deviceId: device.id,
       runtimes: [
-        { runtimeId, profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1" },
-        { runtimeId: "local-runtime-second", profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1" },
+        { runtimeId, displayName: "文档分析", profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1" },
+        { runtimeId: "local-runtime-second", displayName: "数据整理", profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1" },
       ],
     }));
     assert.equal((await republishedAck).type, "agent.hello.ack");
@@ -64,6 +64,7 @@ test("Router dispatches a local Assignment through the authenticated device conn
       (await store.runtimeCatalog(owner.principal.tenantId, owner.principal.userId)).filter((runtime) => runtime.kind === "local").map((runtime) => runtime.id).sort(),
       [runtimeId, "local-runtime-second"].sort(),
     );
+    assert.equal((await store.runtimeCatalog(owner.principal.tenantId, owner.principal.userId)).find((runtime) => runtime.id === runtimeId)?.displayName, "文档分析");
     socket.on("message", (raw) => {
       const request = JSON.parse(raw.toString()) as { type: string; messageId: string; method: string; payload: Record<string, unknown> };
       if (request.type !== "rpc.request") return;

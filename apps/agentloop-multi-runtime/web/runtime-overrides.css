@@ -437,6 +437,78 @@
   padding-top: 2px;
 }
 
+/* Completed model summaries are unbounded input. Keep the reply card usable
+   when a model returns a long report, without constraining live updates or
+   actionable Human-in-the-Loop controls. */
+.live-output-text.completed-output {
+  max-height: min(240px, 32vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+}
+
+.message-footer.terminal-feedback {
+  min-width: 0;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.terminal-feedback .live-event-indicator.terminal {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 0;
+  gap: 7px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 650;
+  animation: terminal-event-arrive .52s var(--ease);
+}
+
+.terminal-feedback .live-event-indicator.terminal small {
+  max-width: none;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.terminal-feedback .live-event-indicator.completed {
+  color: var(--ok);
+}
+
+.terminal-feedback .live-event-indicator.failed {
+  color: var(--bad);
+}
+
+.terminal-feedback .live-event-indicator.cancelled {
+  color: var(--text-2);
+}
+
+.terminal-feedback .live-event-pulse {
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 18%, transparent);
+  animation: terminal-event-pulse .72s var(--ease);
+}
+
+.terminal-feedback .live-event-number {
+  color: currentColor;
+  font-size: 12px;
+}
+
+@keyframes terminal-event-arrive {
+  0% { opacity: 0; transform: translateY(8px); }
+  55% { opacity: 1; transform: translateY(-2px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes terminal-event-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 34%, transparent); }
+  100% { box-shadow: 0 0 0 7px transparent; }
+}
+
 .failure-title {
   color: var(--text);
   font-size: 15px;
