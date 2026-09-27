@@ -980,6 +980,23 @@ test("Web projects the persisted Human-in-the-Loop request from its waiting even
   assert.deepEqual(assistant.humanLoop, request);
 });
 
+test("Web keeps an open Human-in-the-Loop request reachable outside the bounded conversation scroller", async () => {
+  const [app, html, overrides] = await Promise.all([
+    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /id="conversation-scroll"[\s\S]*id="human-loop-panel"[\s\S]*id="composer"/);
+  assert.match(app, /function renderHumanLoopSurfaces\(messages\)/);
+  assert.match(app, /function renderHumanLoopCard\(message\)/);
+  assert.match(app, /function currentHumanLoopMessage\(messages\)/);
+  assert.match(app, /panel\.hidden = false;/);
+  assert.doesNotMatch(app, /data-human-loop-open/);
+  assert.match(overrides, /\.human-loop-panel\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*width:\s*min\(780px, calc\(100% - 48px\)\);[^}]*height:\s*min\(760px, calc\(100% - 48px\)\);[^}]*overflow:\s*hidden/s);
+  assert.match(overrides, /\.human-loop-panel-body\s*\{[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);
+  assert.doesNotMatch(overrides, /\.human-loop-card\s*\{[^}]*max-height:/s);
+});
+
 test("Web renders a cancelled Run as a stable terminal state instead of live progress", () => {
   const assistant = {
     status: "running",

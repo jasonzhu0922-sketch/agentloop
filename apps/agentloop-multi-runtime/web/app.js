@@ -1653,6 +1653,7 @@ function render() {
     button.addEventListener("click", () => void deleteConversation(button.dataset.deleteSession));
   });
   const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
+  renderHumanLoopSurfaces(messages);
   document.querySelectorAll("[data-assistant-message]").forEach((card) => {
     const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
     card.addEventListener("click", (event) => {
@@ -1697,6 +1698,10 @@ function render() {
       input.checked,
       Number(input.dataset.humanLoopMaxSelections),
     );
+  }));
+  document.querySelectorAll("[data-human-loop-form-field]").forEach((field) => field.addEventListener("input", () => rememberHumanLoopFormValue(field.dataset.humanLoopMessage, field.dataset.humanLoopRequest, field.dataset.humanLoopFormField, field.value)));
+  document.querySelectorAll("[data-human-loop-confirm]").forEach((input) => input.addEventListener("change", () => {
+    if (input.checked) rememberHumanLoopConfirmation(input.dataset.humanLoopMessage, input.dataset.humanLoopRequest, input.value);
   }));
   document.querySelectorAll("[data-checkpoint-start]").forEach((button) => button.addEventListener("click", () => void startFromCheckpoint(button.dataset.checkpointStart)));
   const selectedAssistant = selectedAssistantMessage(conversation, messages);
@@ -2079,6 +2084,25 @@ async function refreshHumanLoop(assignmentId, assistant, tenantId, userId) {
 
 function renderHumanLoop(message) {
   const request = message.humanLoop;
+  if (request?.status === "open") return `<section class="human-loop-inline-notice"><b>正在等待你的决策</b><span>${escapeHtml(request.title)}</span></section>`;
+  return renderResolvedHumanLoops(message);
+}
+
+function renderResolvedHumanLoops(message) {
+  const history = Array.isArray(message.humanLoopHistory) ? message.humanLoopHistory : [];
+  if (!history.length) return "";
+  return `<section class="human-loop-history" aria-label="已回答的人工决策">${history.map((entry) => `<details><summary>已回答：${escapeHtml(entry.request?.title || "人工决策")}</summary><p>${escapeHtml(entry.request?.prompt || "")}</p><div><b>你的回答</b><span>${escapeHtml(humanLoopResponseText(entry.value))}</span></div></details>`).join("")}</section>`;
+}
+
+function humanLoopResponseText(value) {
+  if (value === true) return "已确认";
+  if (Array.isArray(value)) return value.length ? value.join("、") : "未选择";
+  if (value && typeof value === "object") return Object.entries(value).map(([key, entry]) => `${key}: ${String(entry)}`).join("；");
+  return String(value ?? "");
+}
+
+function renderHumanLoopCard(message) {
+  const request = message.humanLoop;
   if (!request || request.status !== "open") return "";
   const schema = request.responseSchema || {};
   const key = `${message.id}-${request.id}`;
@@ -2087,9 +2111,33 @@ function renderHumanLoop(message) {
     const selections = humanLoopSelections(message, request.id);
     fields = `<div class="human-loop-options">${(schema.options || []).map((option) => `<label class="human-loop-option"><input type="${schema.maxSelections === 1 ? "radio" : "checkbox"}" name="human-${key}" value="${escapeHtml(option.id)}" data-human-loop-option data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" data-human-loop-max-selections="${escapeHtml(String(schema.maxSelections || 0))}" ${selections.has(option.id) ? "checked" : ""}/><span><b>${escapeHtml(option.label)}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}</div>`;
   }
-  else if (schema.type === "form") fields = `<div class="human-loop-form">${(schema.fields || []).map((field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}${field.valueType === "textarea" ? `<textarea data-human-field="${escapeHtml(field.id)}" ${field.required ? "required" : ""}></textarea>` : `<input data-human-field="${escapeHtml(field.id)}" type="${field.valueType === "date" ? "date" : field.valueType === "number" ? "number" : "text"}" ${field.required ? "required" : ""}/>`}${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}</label>`).join("")}</div>`;
-  else fields = `<div class="human-loop-confirm"><label><input type="radio" name="human-${key}" value="accept" checked/>${escapeHtml(schema.acceptLabel || "确认")}</label><label><input type="radio" name="human-${key}" value="reject"/>${escapeHtml(schema.rejectLabel || "拒绝")}</label></div>`;
-  return `<section class="human-loop-card" data-human-loop="${escapeHtml(request.id)}" data-human-kind="${escapeHtml(schema.type || "")}" data-human-revision="${request.revision}"><b>${escapeHtml(request.title)}</b><p>${escapeHtml(request.prompt)}</p>${fields}<button type="button" class="human-loop-submit" data-human-loop-submit="${message.id}">提交</button><small class="human-loop-error" aria-live="polite"></small></section>`;
+  else if (schema.type === "form") fields = `<div class="human-loop-form">${(schema.fields || []).map((field) => {
+    const value = humanLoopFormValue(message, request.id, field.id);
+    return `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}${field.valueType === "textarea" ? `<textarea data-human-field="${escapeHtml(field.id)}" data-human-loop-form-field="${escapeHtml(field.id)}" data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" ${field.required ? "required" : ""}>${escapeHtml(value)}</textarea>` : `<input data-human-field="${escapeHtml(field.id)}" data-human-loop-form-field="${escapeHtml(field.id)}" data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" type="${field.valueType === "date" ? "date" : field.valueType === "number" ? "number" : "text"}" value="${escapeHtml(value)}" ${field.required ? "required" : ""}/>`}${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}</label>`;
+  }).join("")}</div>`;
+  else {
+    const confirmation = humanLoopConfirmation(message, request.id);
+    fields = `<div class="human-loop-confirm"><label><input type="radio" name="human-${key}" value="accept" data-human-loop-confirm data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" ${confirmation !== "reject" ? "checked" : ""}/>${escapeHtml(schema.acceptLabel || "确认")}</label><label><input type="radio" name="human-${key}" value="reject" data-human-loop-confirm data-human-loop-message="${escapeHtml(message.id)}" data-human-loop-request="${escapeHtml(request.id)}" ${confirmation === "reject" ? "checked" : ""}/>${escapeHtml(schema.rejectLabel || "拒绝")}</label></div>`;
+  }
+  const selectionHint = schema.type === "select" ? `<span class="human-loop-selection-hint">${schema.minSelections === schema.maxSelections ? `请选择 ${schema.maxSelections} 项` : `请选择 ${schema.minSelections}–${schema.maxSelections} 项`}</span>` : "";
+  return `<section class="human-loop-card" data-human-loop="${escapeHtml(request.id)}" data-human-kind="${escapeHtml(schema.type || "")}" data-human-revision="${request.revision}"><div class="human-loop-card-copy"><p>${escapeHtml(request.prompt)}</p>${selectionHint}</div>${fields}<small class="human-loop-error" aria-live="polite"></small></section>`;
+}
+
+function currentHumanLoopMessage(messages) {
+  return [...messages].reverse().find((message) => message?.role === "assistant" && message.humanLoop?.status === "open");
+}
+
+function renderHumanLoopSurfaces(messages) {
+  const message = currentHumanLoopMessage(messages);
+  const panel = $("human-loop-panel");
+  if (!message) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  const request = message.humanLoop;
+  panel.hidden = false;
+  panel.innerHTML = `<header class="human-loop-panel-head"><div><span class="human-loop-panel-kicker">需要你的决策</span><strong>${escapeHtml(request.title)}</strong></div><span class="human-loop-panel-badge">等待你的输入</span></header><div class="human-loop-panel-body">${renderHumanLoopCard(message)}</div><footer class="human-loop-panel-actions"><span>提交后，AgentLoop 会继续执行</span><button type="button" class="human-loop-submit" data-human-loop-submit="${escapeHtml(message.id)}">确认并继续</button></footer>`;
 }
 
 /** Preserve an unfinished HIL answer across unrelated live-state renders. */
@@ -2108,6 +2156,29 @@ function rememberHumanLoopSelection(messageId, requestId, optionId, checked, max
   } else if (checked) current.add(optionId);
   else current.delete(optionId);
   assistant.humanLoopDrafts = { ...(assistant.humanLoopDrafts || {}), [requestId]: [...current] };
+  saveSessions();
+}
+
+function humanLoopFormValue(message, requestId, fieldId) {
+  const value = message?.humanLoopFormDrafts?.[requestId]?.[fieldId];
+  return typeof value === "string" ? value : "";
+}
+
+function rememberHumanLoopFormValue(messageId, requestId, fieldId, value) {
+  const assistant = (activeConversation()?.messages || []).find((message) => message.id === messageId && message.role === "assistant");
+  if (!assistant || assistant.humanLoop?.id !== requestId || !fieldId) return;
+  assistant.humanLoopFormDrafts = { ...(assistant.humanLoopFormDrafts || {}), [requestId]: { ...(assistant.humanLoopFormDrafts?.[requestId] || {}), [fieldId]: value } };
+  saveSessions();
+}
+
+function humanLoopConfirmation(message, requestId) {
+  return message?.humanLoopConfirmationDrafts?.[requestId] === "reject" ? "reject" : "accept";
+}
+
+function rememberHumanLoopConfirmation(messageId, requestId, value) {
+  const assistant = (activeConversation()?.messages || []).find((message) => message.id === messageId && message.role === "assistant");
+  if (!assistant || assistant.humanLoop?.id !== requestId || (value !== "accept" && value !== "reject")) return;
+  assistant.humanLoopConfirmationDrafts = { ...(assistant.humanLoopConfirmationDrafts || {}), [requestId]: value };
   saveSessions();
 }
 
@@ -2182,8 +2253,11 @@ async function submitHumanLoop(messageId) {
   try {
     const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(assistant.assignmentId)}/human-loop/${encodeURIComponent(request.id)}/respond`, { method: "POST", headers: { "content-type": "application/json", "x-tenant-id": $("tenant-id").value.trim(), "x-user-id": $("user-id").value.trim() }, body: JSON.stringify({ value, expectedRevision: request.revision }) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    assistant.humanLoopHistory = [...(Array.isArray(assistant.humanLoopHistory) ? assistant.humanLoopHistory : []), { request, value, respondedAt: Date.now() }];
     assistant.humanLoop = undefined;
     if (assistant.humanLoopDrafts) delete assistant.humanLoopDrafts[request.id];
+    if (assistant.humanLoopFormDrafts) delete assistant.humanLoopFormDrafts[request.id];
+    if (assistant.humanLoopConfirmationDrafts) delete assistant.humanLoopConfirmationDrafts[request.id];
     saveSessions(); render(); setStatus("已收到你的回答，继续执行", "running");
   } catch (cause) { if (error) error.textContent = `提交失败：${cause instanceof Error ? cause.message : String(cause)}`; }
 }
