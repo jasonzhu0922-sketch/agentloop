@@ -45,6 +45,7 @@ export class PersistentMultiRuntimeRouter {
       return assignment;
     } catch (error) {
       await this.store.markDispatchFailure(assignment.id, this.now());
+      if (isRuntimeCapacityFailure(error)) throw new RuntimeCapacityError("runtime_capacity_exhausted");
       throw error;
     }
   }
@@ -279,6 +280,10 @@ export class PersistentMultiRuntimeRouter {
 }
 
 export { RuntimeCapacityError };
+
+function isRuntimeCapacityFailure(error: unknown): boolean {
+  return error instanceof Error && error.message === "runtime_capacity_exhausted";
+}
 
 function terminalRunFromEvents(events: readonly RuntimeRunEvent[], remoteRunId: string): RuntimeRunStatus | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {

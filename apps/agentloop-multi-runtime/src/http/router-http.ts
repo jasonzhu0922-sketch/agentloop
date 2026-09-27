@@ -4,6 +4,7 @@ import { assertUploadedSourceContent, type CommandOutputContent, type HumanLoopR
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 import { IdentityError, type IdentityService, type Principal } from "../auth/identity-service.ts";
+import { RuntimeCapacityError } from "../control-plane/control-plane-store.ts";
 import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
 
 interface AttachmentBroker {
@@ -424,7 +425,10 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       const message = error instanceof Error ? error.message : String(error);
       const status = error instanceof IdentityError || error instanceof DeviceError ? error.status
         : (error as { statusCode?: number }).statusCode ?? (message.includes("capacity") || message.includes("device_unavailable") ? 409 : 400);
-      return json(response, status, { error: message, ...(error instanceof IdentityError || error instanceof DeviceError ? { code: error.code } : {}) });
+      return json(response, status, {
+        error: message,
+        ...(error instanceof IdentityError || error instanceof DeviceError || error instanceof RuntimeCapacityError ? { code: error.code } : {}),
+      });
     }
   });
 }

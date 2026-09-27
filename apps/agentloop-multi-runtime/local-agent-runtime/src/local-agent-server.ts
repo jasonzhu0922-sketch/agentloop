@@ -29,6 +29,8 @@ export interface LocalAgentServerOptions {
   readonly databasePath: string;
   readonly workspaceRoot: string;
   readonly skillPackageStoreRoot: string;
+  /** Per-Runtime admission limit advertised to and enforced with the Router. */
+  readonly maxConcurrentRuns?: number;
   readonly runtimeDataRoot?: string;
   readonly supervisorDatabasePath?: string;
   readonly providerConfigPath: string;
@@ -71,6 +73,7 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
       const uploadRoot = runtimeUploadRootFor(definition, uploadStorageRoot);
       if (uploadRoot !== undefined) await rm(uploadRoot, { recursive: true, force: true });
     },
+    input.maxConcurrentRuns,
   );
   await supervisor.ready(state.defaultRuntimeId);
   const picker = input.directoryPicker ?? pickNativeDirectory;

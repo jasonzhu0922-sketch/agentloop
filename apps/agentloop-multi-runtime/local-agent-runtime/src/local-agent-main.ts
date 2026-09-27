@@ -38,6 +38,7 @@ const workspaceRoot = resolve(process.env.LOCAL_AGENT_WORKSPACE_ROOT ?? join(dat
 const skillPackageStoreRoot = resolve(process.env.LOCAL_AGENT_SKILL_PACKAGE_STORE_ROOT ?? join(dataRoot, "skill-packages"));
 const runtimeDataRoot = resolve(process.env.LOCAL_AGENT_RUNTIME_DATA_ROOT ?? join(dataRoot, "runtimes"));
 const supervisorDatabasePath = resolve(process.env.LOCAL_AGENT_SUPERVISOR_DATABASE_PATH ?? join(dataRoot, "supervisor.db"));
+const maxConcurrentRuns = positiveInteger(process.env.LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, 10, "LOCAL_RUNTIME_MAX_CONCURRENT_RUNS");
 const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, process.env);
 await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
 const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
@@ -52,7 +53,7 @@ const logColorOptions = {
   noColor: process.env.NO_COLOR,
 };
 const server = await createLocalAgentServer({
-  appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath,
+  appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath, maxConcurrentRuns,
   providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath, practiceProfileConfigPath,
   computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
   integrationEnvironment,
@@ -62,7 +63,11 @@ const server = await createLocalAgentServer({
 server.listen(port, host, () => process.stdout.write(`AgentLoop Local Runtime Agent listening on http://${host}:${port}${routerUrl === undefined ? " (Router not configured)" : ""}\n`));
 }
 
-function positiveInteger(value: string | undefined, fallback: number): number { const result = Number(value ?? fallback); if (!Number.isSafeInteger(result) || result < 1 || result > 65_535) throw new Error("LOCAL_AGENT_PORT must be a valid port"); return result; }
+function positiveInteger(value: string | undefined, fallback: number, name = "LOCAL_AGENT_PORT"): number {
+  const result = Number(value ?? fallback);
+  if (!Number.isSafeInteger(result) || result < 1 || result > 65_535) throw new Error(`${name} must be a positive integer no greater than 65535`);
+  return result;
+}
 function requiredArgument(value: string | undefined, flag: string): string { if (value === undefined || value.trim() === "") throw new Error(`${flag} requires a value`); return value; }
 
 function packagedDataRoot(): string {

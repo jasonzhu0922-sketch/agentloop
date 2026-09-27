@@ -957,7 +957,10 @@ export async function installControlPlaneSchema(database: SqlConnection): Promis
   await new ControlPlaneStore(database).installSchema();
 }
 
-export class RuntimeCapacityError extends Error {}
+export class RuntimeCapacityError extends Error {
+  readonly statusCode = 429;
+  readonly code = "runtime_capacity_exhausted";
+}
 
 export class ConversationDeleteConflictError extends Error {
   readonly statusCode = 409;

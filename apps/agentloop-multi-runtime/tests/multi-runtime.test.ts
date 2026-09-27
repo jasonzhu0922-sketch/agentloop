@@ -55,6 +55,7 @@ import { executionLocationLabel, executionProvenanceParts } from "../web/executi
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "../web/assistant-message-presentation.js";
 import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "../web/artifact-display.js";
 import { commandToolCallIds, executionActivities } from "../web/execution-detail-projection.js";
+import { hasSelectedTextWithin } from "../web/message-selection.js";
 import {
   LOCAL_MARKITDOWN_VERSION,
   localRuntimeHostEnvironment,
@@ -823,6 +824,21 @@ test("conversation Agent replies select their own Run execution detail", async (
   assert.match(app, /assistant\.detailEvents \|\| assistant\.events/);
   assert.doesNotMatch(app, /events\.slice\(-80\)/);
   assert.match(styles, /\.msg\.assistant\.selected \.live-card/);
+});
+
+test("selecting reply text does not activate the reply card", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const card = {};
+  const selectedInsideCard = {
+    isCollapsed: false,
+    rangeCount: 1,
+    toString: () => "要复制的回答",
+    getRangeAt: () => ({ intersectsNode: (node: unknown) => node === card }),
+  };
+  const emptySelection = { isCollapsed: true, rangeCount: 0, toString: () => "" };
+  assert.equal(hasSelectedTextWithin(selectedInsideCard, card), true);
+  assert.equal(hasSelectedTextWithin(emptySelection, card), false);
+  assert.match(app, /if \(hasSelectedTextWithin\(window\.getSelection\(\), card\)\) return;/);
 });
 
 test("Multi Runtime proxies full tool arguments and command output from the owning Host Run", async () => {

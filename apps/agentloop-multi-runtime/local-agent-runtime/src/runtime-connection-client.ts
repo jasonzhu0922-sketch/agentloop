@@ -113,7 +113,7 @@ export class RuntimeConnectionClient {
         status: advertised.status,
         activeRunCount: runtime.activeRunIds.size,
         queuedRunCount: 0,
-        maxConcurrentRuns: 1,
+        maxConcurrentRuns: advertised.maxConcurrentRuns,
       }));
     }
   }

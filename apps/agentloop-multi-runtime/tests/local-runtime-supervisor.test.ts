@@ -5,9 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import { LocalDirectoryScopeStore } from "../local-agent-runtime/src/local-directory-scope-store.ts";
-import { LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/local-runtime-supervisor.ts";
+import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/local-runtime-supervisor.ts";
 import { persistSessions } from "../web/session-persistence.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/local-runtime-preference.js";
+import { submissionFailureMessage } from "../web/submission-failure-message.js";
 
 test("local-execution preference is explicit, user-device scoped, and best-effort", () => {
   const values = new Map<string, string>();
@@ -99,6 +100,31 @@ test("drain closes admission before restart and restart waits for both in-flight
   } finally {
     await supervisor.close();
   }
+});
+
+test("a Local Runtime accepts ten concurrent Runs and reports a stable capacity limit", async () => {
+  const supervisor = new LocalRuntimeSupervisor(new AppDatabase(":memory:"), fakeFactory([]));
+  await supervisor.ready("local-default");
+  try {
+    assert.equal(supervisor.advertisements()[0]?.maxConcurrentRuns, DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS);
+    await Promise.all([...Array(DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS)].map((_, index) =>
+      supervisor.admitRun("local-default", async () => ({ runId: `run-${index}`, value: undefined })),
+    ));
+    assert.equal((await supervisor.list())[0]?.activeRunCount, DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS);
+    await assert.rejects(
+      supervisor.admitRun("local-default", async () => ({ runId: "run-over-capacity", value: undefined })),
+      /runtime_capacity_exhausted/,
+    );
+  } finally {
+    await supervisor.close();
+  }
+});
+
+test("browser translates a capacity failure without exposing Router internals", () => {
+  assert.equal(
+    submissionFailureMessage(Object.assign(new Error("runtime_capacity_exhausted"), { code: "runtime_capacity_exhausted" })),
+    "当前本机 Runtime 任务过多，请稍候再试",
+  );
 });
 
 test("deleting an idle child Runtime closes it and invokes its state reclaimer", async () => {

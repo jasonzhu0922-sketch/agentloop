@@ -5,6 +5,9 @@ import type { LocalDirectoryScopeStore } from "./local-directory-scope-store.ts"
 export type LocalRuntimeLifecycleStatus = "ready" | "draining" | "restarting" | "stopped" | "failed";
 type PendingAction = "restart" | "stop";
 
+/** Per-Runtime admission limit for device-local execution unless deployment overrides it. */
+export const DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS = 10;
+
 export interface LocalRuntimeDefinition {
   readonly id: string;
   readonly displayName: string;
@@ -47,15 +50,21 @@ export class LocalRuntimeSupervisor {
   private readonly database: AppDatabase;
   private readonly factory: (definition: LocalRuntimeDefinition) => Promise<LocalRuntimeControl>;
   private readonly reclaimer: LocalRuntimeReclaimer;
+  private readonly maxConcurrentRuns: number;
 
   constructor(
     database: AppDatabase,
     factory: (definition: LocalRuntimeDefinition) => Promise<LocalRuntimeControl>,
     reclaimer: LocalRuntimeReclaimer = async () => undefined,
+    maxConcurrentRuns = DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS,
   ) {
+    if (!Number.isSafeInteger(maxConcurrentRuns) || maxConcurrentRuns < 1) {
+      throw new TypeError("maxConcurrentRuns must be a positive integer");
+    }
     this.database = database;
     this.factory = factory;
     this.reclaimer = reclaimer;
+    this.maxConcurrentRuns = maxConcurrentRuns;
   }
 
   async ready(defaultRuntimeId: string): Promise<void> {
@@ -146,7 +155,7 @@ export class LocalRuntimeSupervisor {
       runtimeId: runtime.id,
       profile: "general",
       capabilities: [],
-      maxConcurrentRuns: 1,
+      maxConcurrentRuns: this.maxConcurrentRuns,
       status: this.statusFromCache(runtime.id) === "ready" ? "ready" : "draining",
       catalogVersion: "1",
     }));
@@ -161,7 +170,9 @@ export class LocalRuntimeSupervisor {
 
   async admitRun<T>(runtimeId: string, start: (runtime: LocalRuntimeControl) => Promise<{ readonly runId: string; readonly value: T }>): Promise<T> {
     const runtime = this.runtime(runtimeId, true);
-    if (this.hasActiveWorkForRuntime(runtimeId)) throw new LocalRuntimeSupervisorError(409, "runtime_capacity_exhausted");
+    if (this.activeWorkCount(runtimeId) >= this.maxConcurrentRuns) {
+      throw new LocalRuntimeSupervisorError(429, "runtime_capacity_exhausted");
+    }
     this.pendingAdmissions.set(runtimeId, (this.pendingAdmissions.get(runtimeId) ?? 0) + 1);
     this.emit();
     try {
@@ -421,7 +432,11 @@ export class LocalRuntimeSupervisor {
   }
 
   private hasActiveWorkForRuntime(runtimeId: string): boolean {
-    return (this.instances.get(runtimeId)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(runtimeId) ?? 0) > 0;
+    return this.activeWorkCount(runtimeId) > 0;
+  }
+
+  private activeWorkCount(runtimeId: string): number {
+    return (this.instances.get(runtimeId)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(runtimeId) ?? 0);
   }
 }
 

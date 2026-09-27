@@ -12,6 +12,8 @@ import { commandToolCallIds, executionActivities } from "./execution-detail-proj
 import { executionProvenanceParts } from "./execution-provenance.js";
 import { observeAssignment } from "./assignment-stream.js";
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from "./composer-input.js";
+import { hasSelectedTextWithin } from "./message-selection.js";
+import { submissionFailureMessage } from "./submission-failure-message.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const publicRouterUrl = String(globalThis.AGENTLOOP_ROUTER_PUBLIC_URL || (api.startsWith("http") ? api : location.origin)).replace(/\/+$/, "");
@@ -1275,7 +1277,7 @@ async function submit() {
   } catch (error) {
     if (activeRun.assignmentId) {
       if (error?.name !== "AbortError") setStatus("观察连接中断，任务状态以 Runtime 为准；重新打开会话可继续同步", "error");
-    } else if (error?.name !== "AbortError" || activeRun.submitTimedOut) { assistantMessage.status = "failed"; assistantMessage.text = activeRun.submitTimedOut ? "发起会话超时，请重试" : `提交失败：${error instanceof Error ? error.message : String(error)}`; completeAssistantMessage(assistantMessage); saveSessions(); render(); setStatus("任务失败", "error"); }
+    } else if (error?.name !== "AbortError" || activeRun.submitTimedOut) { assistantMessage.status = "failed"; assistantMessage.text = activeRun.submitTimedOut ? "发起会话超时，请重试" : submissionFailureMessage(error); completeAssistantMessage(assistantMessage); saveSessions(); render(); setStatus("任务失败", "error"); }
   } finally {
     if (activeRun.submitTimeout !== null) clearTimeout(activeRun.submitTimeout);
     if (activeRunsByConversation.get(conversation.id) === activeRun) activeRunsByConversation.delete(conversation.id);
@@ -1641,7 +1643,13 @@ function render() {
   const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
   document.querySelectorAll("[data-assistant-message]").forEach((card) => {
     const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
-    card.addEventListener("click", (event) => { if (!event.target.closest("button, input, label, a")) select(); });
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, input, label, a")) return;
+      // Selecting a reply fires click on mouse-up.  Rendering here would
+      // replace the DOM and discard the selection before the user can copy it.
+      if (hasSelectedTextWithin(window.getSelection(), card)) return;
+      select();
+    });
     card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !event.target.closest("button, input, label, a")) { event.preventDefault(); select(); } });
   });
   document.querySelectorAll("[data-plan-toggle]").forEach((button) => button.addEventListener("click", () => {
@@ -2399,5 +2407,10 @@ function formatBytes(bytes) { if (typeof bytes !== "number") return "大小未�
 function setStatus(text, tone = "") { $("runtime-status").innerHTML = `<i class="status-dot"></i> ${escapeHtml(text)}`; $("runtime-status").className = `status-pill ${tone}`; }
 function formatText(text) { return escapeHtml(text).replace(/\n/g, "<br />"); }
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>\"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char])); }
-async function call(path, body, signal) { const response = await fetch(`${api}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), ...(signal === undefined ? {} : { signal }) }); const parsed = await response.json(); if (!response.ok) throw new Error(parsed.error || `HTTP ${response.status}`); return parsed; }
+async function call(path, body, signal) {
+  const response = await fetch(`${api}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), ...(signal === undefined ? {} : { signal }) });
+  const parsed = await response.json();
+  if (!response.ok) throw Object.assign(new Error(parsed.error || `HTTP ${response.status}`), typeof parsed.code === "string" ? { code: parsed.code } : {});
+  return parsed;
+}
 async function toBase64(file) { const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary); }
