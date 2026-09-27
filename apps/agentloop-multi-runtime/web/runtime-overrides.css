@@ -60,10 +60,21 @@
 }
 
 .sidebar-foot > .identity {
-  margin: 2px 0 8px;
+  margin: 0;
   color: var(--text-3);
   font-size: 11px;
 }
+
+.sidebar-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+}
+
+.sidebar-foot > .local-capability { grid-column: 1 / -1; }
+.sidebar-foot > .identity { min-width: 0; margin: 0; }
+.sidebar-foot > .foot-actions { display: flex; grid-column: 2; gap: 6px; }
 
 .local-runtime-picker {
   display: grid;
