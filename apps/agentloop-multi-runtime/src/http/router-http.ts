@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { FileAttachmentBroker } from "../attachments/attachment-broker.ts";
 import { assertUploadedSourceContent, type CommandOutputContent, type HumanLoopRequest, type HumanLoopResponse, type RecoveryDetail, type ToolArgumentsContent } from "@zhujun/agentloop";
-import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
+import type { ConversationAttachmentSnapshot, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
 import { IdentityError, type IdentityService, type Principal } from "../auth/identity-service.ts";
 import { RuntimeCapacityError } from "../control-plane/control-plane-store.ts";
@@ -637,6 +637,11 @@ export async function taskFromRequest(
       ? stringArray(value.localUploadedSourceIds, "localUploadedSourceIds")
       : (() => { throw new TypeError("localUploadedSourceIds require a local execution target"); })()
   );
+  const messageAttachments = value.messageAttachments === undefined ? undefined : (
+    executionTarget.kind === "local_device"
+      ? localMessageAttachments(value.messageAttachments, localUploadedSourceIds ?? [])
+      : (() => { throw new TypeError("messageAttachments require a local execution target"); })()
+  );
   if (attachmentIds.length > 0 && attachments === undefined) throw new TypeError("attachments are not configured");
   const conversationId = stringValue(value.conversationId, "conversationId");
   const resourceRefs = await (attachments?.resolveForTask({ ...identity, conversationId, attachmentIds }) ?? []);
@@ -653,6 +658,7 @@ export async function taskFromRequest(
         : (() => { throw new TypeError("localDirectoryScopeIds require a local execution target"); })(),
     }),
     ...(localUploadedSourceIds === undefined ? {} : { localUploadedSourceIds }),
+    ...(messageAttachments === undefined ? {} : { messageAttachments }),
     ...(value.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: stringValue(value.requestedRuntimeId, "requestedRuntimeId") }),
     ...(value.requestedProfile === undefined ? {} : { requestedProfile: value.requestedProfile as SubmitConversationTask["requestedProfile"] }),
     ...(value.requiredCapabilities === undefined
@@ -662,6 +668,25 @@ export async function taskFromRequest(
     allowDangerousTools: value.allowDangerousTools !== false,
     resourceRefs,
   };
+}
+
+function localMessageAttachments(value: unknown, localUploadedSourceIds: readonly string[]): readonly ConversationAttachmentSnapshot[] {
+  if (!Array.isArray(value)) throw new TypeError("messageAttachments must be an array");
+  const expectedIds = new Set(localUploadedSourceIds);
+  const attachments = value.map((item) => {
+    const attachment = record(item, "message attachment");
+    const id = stringValue(attachment.id, "message attachment id");
+    const originalName = stringValue(attachment.originalName, "message attachment originalName");
+    const mediaType = stringValue(attachment.mediaType, "message attachment mediaType");
+    const byteSize = attachment.byteSize;
+    if (typeof byteSize !== "number" || !Number.isSafeInteger(byteSize) || byteSize < 0) throw new TypeError("message attachment byteSize must be a non-negative integer");
+    return { id, originalName, mediaType, byteSize };
+  });
+  const actualIds = new Set(attachments.map((attachment) => attachment.id));
+  if (actualIds.size !== attachments.length || actualIds.size !== expectedIds.size || [...actualIds].some((id) => !expectedIds.has(id))) {
+    throw new TypeError("messageAttachments must exactly describe localUploadedSourceIds");
+  }
+  return attachments;
 }
 
 function identityFromRequest(_body: unknown, principal: Principal): { readonly tenantId: string; readonly ownerUserId: string } {

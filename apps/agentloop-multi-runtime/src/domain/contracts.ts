@@ -38,6 +38,18 @@ export interface PortableResourceRef {
   readonly byteSize: number;
 }
 
+/**
+ * User-visible attachment metadata retained with a conversation turn.  It is
+ * deliberately limited to presentation metadata: no file content, URI, hash,
+ * or local filesystem path crosses this boundary.
+ */
+export interface ConversationAttachmentSnapshot {
+  readonly id: string;
+  readonly originalName: string;
+  readonly mediaType: string;
+  readonly byteSize: number;
+}
+
 export interface RuntimeDispatchEnvelope {
   readonly schema: "agentloop.runtimeDispatch/v1";
   readonly assignmentId: string;
@@ -174,6 +186,11 @@ export interface SubmitConversationTask {
   readonly localDirectoryScopeIds?: readonly string[];
   /** Local Runtime-owned uploaded-source IDs. Valid only with a local_device target. */
   readonly localUploadedSourceIds?: readonly string[];
+  /**
+   * Replay-safe presentation metadata for Local Runtime uploads. Cloud
+   * attachment snapshots are derived from Router-owned resource references.
+   */
+  readonly messageAttachments?: readonly ConversationAttachmentSnapshot[];
   /** Optional explicit Host selection. Omit it to use Router load-balancing. */
   readonly requestedRuntimeId?: string;
   readonly requestedProfile?: RuntimeProfile;

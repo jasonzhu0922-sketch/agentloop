@@ -572,7 +572,7 @@ function renderLocalScopes() {
   const activeScopes = localScopes.filter((scope) => scope.status === "active");
   const visible = isLocalExecution() && activeScopes.length > 0;
   container.hidden = !visible;
-  container.innerHTML = visible ? activeScopes.map((scope) => `<span class="source-chip local-scope-chip"><span class="scope-icon" aria-hidden="true">▣</span><span>${escapeHtml(scope.displayName)}</span><small>已授权</small><button type="button" data-revoke-local-scope="${escapeHtml(scope.id)}" aria-label="撤销目录 ${escapeHtml(scope.displayName)}">×</button></span>`).join("") : "";
+  container.innerHTML = visible ? `<span class="runtime-directory-label"><span class="scope-icon" aria-hidden="true">▣</span>当前 Runtime 已授权目录</span>${activeScopes.map((scope) => `<span class="source-chip local-scope-chip"><span>${escapeHtml(scope.displayName)}</span><small>已授权</small><button type="button" data-revoke-local-scope="${escapeHtml(scope.id)}" aria-label="撤销目录 ${escapeHtml(scope.displayName)}">×</button></span>`).join("")}` : "";
   container.querySelectorAll("[data-revoke-local-scope]").forEach((button) => button.addEventListener("click", () => void revokeLocalScope(button.dataset.revokeLocalScope)));
 }
 
@@ -1253,6 +1253,7 @@ async function submit() {
       attachmentIds: cloudAttachmentIds,
       ...(executionTarget === "local" ? { localDirectoryScopeIds: localScopes.filter((scope) => scope.status === "active").map((scope) => scope.id) } : {}),
       ...(executionTarget === "local" && localSourceIds.length > 0 ? { localUploadedSourceIds: localSourceIds } : {}),
+      ...(executionTarget === "local" && localSourceIds.length > 0 ? { messageAttachments: attachmentSnapshots(attachments) } : {}),
       ...($("model-select").value ? { requestedModelKey: $("model-select").value } : {}),
     };
     activeRun.submitTimeout = setTimeout(() => { activeRun.submitTimedOut = true; activeRun.submitAbortController.abort(); }, 15_000);
@@ -1392,6 +1393,15 @@ function removePendingAttachment(conversation, attachmentId) {
   conversation.pendingAttachments = pendingAttachments(conversation).filter((attachment) => attachment.id !== attachmentId);
   saveSessions();
   render();
+}
+
+function attachmentSnapshots(attachments) {
+  return attachments.map((attachment) => ({
+    id: attachment.id,
+    originalName: attachment.originalName,
+    mediaType: attachment.mediaType || "application/octet-stream",
+    byteSize: attachment.byteSize,
+  }));
 }
 
 async function streamAssignment(assignmentId, conversation, assistant, tenantId, userId, activeRun) {
@@ -1831,15 +1841,14 @@ function renderMessage(message) {
   const completedAt = formatMessageTime(message.completedAt);
   const duration = formatConversationDuration(message.createdAt, message.completedAt);
   const liveEventIndicator = renderLiveEventIndicator(message);
-  const responseTiming = renderMessageFooter(message, completedAt ? `回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}` : "", "回答", isLive ? "" : liveEventIndicator);
+  const responseTiming = renderMessageFooter(message, completedAt ? `回答结束于 ${completedAt}${duration ? ` · 耗时 ${duration}` : ""}` : "", "回答", liveEventIndicator);
   const hasPlan = plan.length;
   const planPanelId = `plan-${message.id}`;
   const stepToggle = hasPlan ? `<button type="button" class="live-step-toggle" data-plan-toggle="${message.id}" aria-expanded="${message.planOpen === true}" aria-controls="${planPanelId}">步骤 ${plan.filter((step) => step.status === "completed").length}/${plan.length}<span class="live-step-caret" aria-hidden="true">⌄</span></button>` : "";
   const planPanel = hasPlan && message.planOpen === true ? `<ol class="inline-plan-steps" id="${planPanelId}">${plan.map((step, index) => `<li><span class="step-dot ${step.status === "completed" ? "done" : step.status === "running" ? "running" : step.status === "failed" ? "error" : "pending"}"></span><span><b>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.objective || step.id || "未命名步骤")}</b><small>${planStepLabel(step.status)}</small></span></li>`).join("")}</ol>` : "";
   const executionTrace = renderExecutionTrace(message);
   const inlineArtifacts = renderInlineArtifacts(message);
-  const outputClass = message.status === "completed" ? " completed-output" : "";
-  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${isLive ? liveEventIndicator : ""}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md${outputClass}">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
+  return `<article class="msg assistant ${isLive ? "live" : "final"} ${isSelected ? "selected" : ""}" data-assistant-message="${escapeHtml(message.id)}" role="button" tabindex="0" aria-label="查看该轮执行详情" aria-pressed="${isSelected}"><div class="msg-avatar">A</div><div class="msg-body"><div class="live-card ${presentation.cardClass}"><div class="live-head"><span class="assistant-state ${message.status}">${stateIcon || (isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : "")}</span><span>AgentLoop · ${stateLabel}</span>${provenance}${stepToggle}</div>${planPanel}${reasoning}<div class="live-output-text md">${output}</div>${executionTrace}${inlineArtifacts}${responseTiming}</div></div></article>`;
 }
 
 function renderExecutionProvenance(message) {
@@ -1893,10 +1902,12 @@ function renderLiveEventIndicator(message) {
   const latest = events.at(-1);
   const seq = numberValue(latest?.seq);
   const type = stringValue(latest?.type);
-  if (seq === undefined && !type) return "";
   const running = ["running", "waiting"].includes(message?.status);
+  if (seq === undefined && !type && !running) return "";
   const terminal = !running;
-  return `<span class="live-event-indicator ${running ? "active" : ""} ${terminal ? "terminal" : ""} ${escapeHtml(message?.status || "")}" data-event-seq="${escapeHtml(seq ?? "?")}" title="最新运行事件"><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">#${escapeHtml(seq ?? "?")}</span><small>${escapeHtml(type ? eventTypeLabel(type) : "runtime event")}</small></span>`;
+  const eventNumber = seq === undefined ? "进行中" : `#${seq}`;
+  const eventLabel = type ? eventTypeLabel(type) : "正在连接 Runtime";
+  return `<span class="live-event-indicator ${running ? "active" : ""} ${terminal ? "terminal" : ""} ${escapeHtml(message?.status || "")}" data-event-seq="${escapeHtml(seq ?? "pending")}" title="${running ? "当前运行进度" : "最新运行事件"}" ${running ? 'role="status" aria-live="polite"' : ""}><i class="live-event-pulse" aria-hidden="true"></i><span class="live-event-number">${escapeHtml(eventNumber)}</span><small>${escapeHtml(eventLabel)}</small></span>`;
 }
 
 function executionTraceItems(events, activities) {
@@ -2005,9 +2016,9 @@ function traceParseResult(value) {
   }
 }
 
-function renderMessageFooter(message, timing, kind, terminalFeedback = "") {
+function renderMessageFooter(message, timing, kind, eventFeedback = "") {
   const label = `复制${kind}`;
-  return `<div class="message-footer${terminalFeedback ? " terminal-feedback" : ""}">${terminalFeedback}${timing ? `<div class="message-timing">${timing}</div>` : ""}<button type="button" class="message-copy" data-copy-message="${escapeHtml(message.id)}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg></button></div>`;
+  return `<div class="message-footer${eventFeedback ? " event-feedback" : ""}">${eventFeedback}${timing ? `<div class="message-timing">${timing}</div>` : ""}<button type="button" class="message-copy" data-copy-message="${escapeHtml(message.id)}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg></button></div>`;
 }
 
 async function copyConversationMessage(message, button) {

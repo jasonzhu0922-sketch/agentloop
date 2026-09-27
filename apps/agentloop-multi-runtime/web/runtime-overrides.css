@@ -433,14 +433,40 @@
   text-align: right;
 }
 
+/* Directory scopes are granted to the selected Runtime, rather than attached
+   to one prompt. Keep them outside the composer boundary so that authority is
+   visible before, and distinct from, this turn's pending file attachments. */
+.runtime-directory-scopes {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 940px;
+  margin: 0 auto 8px;
+  padding: 0 4px;
+}
+
+.runtime-directory-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.runtime-directory-scopes .local-scope-chip {
+  background: color-mix(in srgb, var(--brand-soft) 52%, var(--bg-2));
+}
+
 .assistant-timing {
   padding-top: 2px;
 }
 
-/* Completed model summaries are unbounded input. Keep the reply card usable
-   when a model returns a long report, without constraining live updates or
-   actionable Human-in-the-Loop controls. */
-.live-output-text.completed-output {
+/* A streaming reply needs a bounded inner scroller so incoming output does
+   not continuously resize the conversation. Terminal replies are part of the
+   conversation history and must remain fully visible in the outer scroller. */
+.msg.assistant.live .live-output-text {
   max-height: min(240px, 32vh);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -448,14 +474,15 @@
   padding-right: 6px;
 }
 
-.message-footer.terminal-feedback {
+.message-footer.event-feedback {
   min-width: 0;
   align-items: center;
+  justify-content: space-between;
   border-top: 1px solid var(--border);
   padding-top: 10px;
 }
 
-.terminal-feedback .live-event-indicator.terminal {
+.event-feedback .live-event-indicator {
   flex: 1 1 auto;
   min-width: 0;
   margin-left: 0;
@@ -463,29 +490,41 @@
   color: var(--text-2);
   font-size: 12px;
   font-weight: 650;
-  animation: terminal-event-arrive .52s var(--ease);
 }
 
-.terminal-feedback .live-event-indicator.terminal small {
+.event-feedback .live-event-indicator small {
   max-width: none;
   color: inherit;
   font-size: 12px;
   font-weight: 650;
 }
 
-.terminal-feedback .live-event-indicator.completed {
+.event-feedback .live-event-indicator.active {
+  border: 1px solid color-mix(in srgb, var(--brand) 34%, var(--border));
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--brand) 9%, var(--bg));
+  color: var(--brand);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--brand) 12%, transparent);
+  animation: live-progress-arrive .42s var(--ease), live-progress-glow 1.7s infinite var(--ease);
+}
+
+.event-feedback .live-event-indicator.completed {
   color: var(--ok);
+  animation: terminal-event-arrive .52s var(--ease);
 }
 
-.terminal-feedback .live-event-indicator.failed {
+.event-feedback .live-event-indicator.failed {
   color: var(--bad);
+  animation: terminal-event-arrive .52s var(--ease);
 }
 
-.terminal-feedback .live-event-indicator.cancelled {
+.event-feedback .live-event-indicator.cancelled {
   color: var(--text-2);
+  animation: terminal-event-arrive .52s var(--ease);
 }
 
-.terminal-feedback .live-event-pulse {
+.event-feedback .live-event-pulse {
   width: 8px;
   height: 8px;
   background: currentColor;
@@ -493,9 +532,19 @@
   animation: terminal-event-pulse .72s var(--ease);
 }
 
-.terminal-feedback .live-event-number {
+.event-feedback .live-event-number {
   color: currentColor;
   font-size: 12px;
+}
+
+@keyframes live-progress-arrive {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes live-progress-glow {
+  0%, 100% { box-shadow: 0 4px 14px color-mix(in srgb, var(--brand) 10%, transparent); }
+  50% { box-shadow: 0 5px 20px color-mix(in srgb, var(--brand) 24%, transparent); }
 }
 
 @keyframes terminal-event-arrive {

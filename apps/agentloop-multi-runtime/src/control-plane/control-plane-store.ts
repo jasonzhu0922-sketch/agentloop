@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqlConnection } from "@zhujun/agentloop";
-import type { ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
+import type { ConversationAttachmentSnapshot, ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
@@ -57,12 +57,7 @@ export interface StoredConversationTurn {
   readonly input: string;
   readonly createdAt: number;
   readonly updatedAt: number;
-  readonly attachments: readonly {
-    readonly id: string;
-    readonly originalName: string;
-    readonly mediaType: string;
-    readonly byteSize: number;
-  }[];
+  readonly attachments: readonly ConversationAttachmentSnapshot[];
   readonly finalTurn?: {
     readonly status: "completed" | "failed" | "cancelled";
     readonly assistantOutput?: string;
@@ -129,6 +124,7 @@ interface TaskRow {
   requested_model_key: string | null;
   allow_dangerous_tools: number;
   resource_refs_json: string;
+  message_attachments_json: string;
   local_directory_scope_ids_json: string;
   status: string;
 }
@@ -199,6 +195,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         requested_model_key TEXT,
         allow_dangerous_tools INTEGER NOT NULL,
         resource_refs_json TEXT NOT NULL,
+        message_attachments_json TEXT NOT NULL DEFAULT '[]',
         local_directory_scope_ids_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -267,6 +264,9 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       }
       if (!taskColumns.some((column) => column.name === "local_directory_scope_ids_json")) {
         await this.database.exec("ALTER TABLE mr_tasks ADD COLUMN local_directory_scope_ids_json TEXT NOT NULL DEFAULT '[]'");
+      }
+      if (!taskColumns.some((column) => column.name === "message_attachments_json")) {
+        await this.database.exec("ALTER TABLE mr_tasks ADD COLUMN message_attachments_json TEXT NOT NULL DEFAULT '[]'");
       }
       const runtimeColumns = await this.database.prepare("PRAGMA table_info(mr_runtime_nodes)").all() as Array<{ name: string }>;
       for (const [name, definition] of [
@@ -569,6 +569,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         t.client_message_id,
         t.input,
         t.resource_refs_json,
+        t.message_attachments_json,
         t.data_policy_json,
         t.created_at,
         t.updated_at,
@@ -600,6 +601,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       client_message_id: string;
       input: string;
       resource_refs_json: string;
+      message_attachments_json: string;
       data_policy_json: string;
       created_at: number;
       updated_at: number;
@@ -623,7 +625,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         input: row.input,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
-        attachments: browserAttachments(row.resource_refs_json),
+        attachments: browserAttachments(row.message_attachments_json, row.resource_refs_json),
         ...(row.final_status === null || row.final_completed_at === null ? {} : {
           finalTurn: {
             status: row.final_status,
@@ -696,16 +698,17 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         requested_model_key: task.requestedModelKey ?? null,
         allow_dangerous_tools: task.allowDangerousTools !== false ? 1 : 0,
         resource_refs_json: JSON.stringify(task.resourceRefs ?? []),
+        message_attachments_json: JSON.stringify(task.messageAttachments ?? browserAttachmentsFromResourceRefs(task.resourceRefs ?? [])),
         local_directory_scope_ids_json: JSON.stringify(task.localDirectoryScopeIds ?? []),
         status: "dispatching",
       };
       await this.database.prepare(`
-        INSERT INTO mr_tasks(id, tenant_id, owner_user_id, conversation_id, client_message_id, input, requested_runtime_id, requested_profile, execution_target_json, data_policy_json, required_capabilities_json, requested_model_key, allow_dangerous_tools, resource_refs_json, local_directory_scope_ids_json, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO mr_tasks(id, tenant_id, owner_user_id, conversation_id, client_message_id, input, requested_runtime_id, requested_profile, execution_target_json, data_policy_json, required_capabilities_json, requested_model_key, allow_dangerous_tools, resource_refs_json, message_attachments_json, local_directory_scope_ids_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         created.id, created.tenant_id, created.owner_user_id, created.conversation_id, created.client_message_id,
         created.input, created.requested_runtime_id, created.requested_profile, created.execution_target_json, created.data_policy_json, created.required_capabilities_json, created.requested_model_key,
-        created.allow_dangerous_tools, created.resource_refs_json, created.local_directory_scope_ids_json, created.status, now, now,
+        created.allow_dangerous_tools, created.resource_refs_json, created.message_attachments_json, created.local_directory_scope_ids_json, created.status, now, now,
       );
       return await this.reserveForTask(created, now, input.heartbeatTtlMs, input.reservationTtlMs);
     });
@@ -956,7 +959,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
 
   private async findTask(task: SubmitConversationTask): Promise<TaskRow | undefined> {
     return await this.database.prepare(`
-      SELECT id, tenant_id, owner_user_id, conversation_id, client_message_id, input, requested_runtime_id, requested_profile, execution_target_json, data_policy_json, required_capabilities_json, requested_model_key, allow_dangerous_tools, resource_refs_json, local_directory_scope_ids_json, status
+      SELECT id, tenant_id, owner_user_id, conversation_id, client_message_id, input, requested_runtime_id, requested_profile, execution_target_json, data_policy_json, required_capabilities_json, requested_model_key, allow_dangerous_tools, resource_refs_json, message_attachments_json, local_directory_scope_ids_json, status
       FROM mr_tasks WHERE tenant_id = ? AND owner_user_id = ? AND conversation_id = ? AND client_message_id = ?
     `).get(task.tenantId, task.ownerUserId, task.conversationId, task.clientMessageId) as TaskRow | undefined;
   }
@@ -1023,19 +1026,47 @@ function executionLocationFromDataPolicy(value: string): ExecutionLocation {
   return "cloud";
 }
 
-function browserAttachments(value: string): StoredConversationTurn["attachments"] {
+function browserAttachments(value: string, fallbackResourceRefs: string): StoredConversationTurn["attachments"] {
+  const snapshots = parseAttachmentSnapshots(value);
+  return snapshots.length > 0 ? snapshots : browserAttachmentsFromResourceRefsJson(fallbackResourceRefs);
+}
+
+function browserAttachmentsFromResourceRefsJson(value: string): StoredConversationTurn["attachments"] {
   try {
     const refs = JSON.parse(value) as unknown;
-    if (!Array.isArray(refs)) return [];
-    return refs.flatMap((ref) => {
-      if (ref === null || typeof ref !== "object") return [];
-      const item = ref as Partial<PortableResourceRef>;
-      if (typeof item.attachmentId !== "string" || typeof item.originalName !== "string") return [];
+    return browserAttachmentsFromResourceRefs(Array.isArray(refs) ? refs as readonly PortableResourceRef[] : []);
+  } catch {
+    return [];
+  }
+}
+
+function browserAttachmentsFromResourceRefs(refs: readonly PortableResourceRef[]): StoredConversationTurn["attachments"] {
+  return refs.flatMap((ref) => {
+    if (ref === null || typeof ref !== "object") return [];
+    const item = ref as Partial<PortableResourceRef>;
+    if (typeof item.attachmentId !== "string" || typeof item.originalName !== "string") return [];
+    return [{
+      id: item.attachmentId,
+      originalName: item.originalName,
+      mediaType: typeof item.mediaType === "string" ? item.mediaType : "application/octet-stream",
+      byteSize: typeof item.byteSize === "number" ? item.byteSize : 0,
+    }];
+  });
+}
+
+function parseAttachmentSnapshots(value: string): StoredConversationTurn["attachments"] {
+  try {
+    const snapshots = JSON.parse(value) as unknown;
+    if (!Array.isArray(snapshots)) return [];
+    return snapshots.flatMap((snapshot) => {
+      if (snapshot === null || typeof snapshot !== "object") return [];
+      const item = snapshot as Partial<ConversationAttachmentSnapshot>;
+      if (typeof item.id !== "string" || typeof item.originalName !== "string") return [];
       return [{
-        id: item.attachmentId,
+        id: item.id,
         originalName: item.originalName,
         mediaType: typeof item.mediaType === "string" ? item.mediaType : "application/octet-stream",
-        byteSize: typeof item.byteSize === "number" ? item.byteSize : 0,
+        byteSize: typeof item.byteSize === "number" && Number.isSafeInteger(item.byteSize) && item.byteSize >= 0 ? item.byteSize : 0,
       }];
     });
   } catch {

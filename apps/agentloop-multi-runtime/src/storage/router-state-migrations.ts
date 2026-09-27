@@ -24,6 +24,19 @@ const MIGRATIONS: readonly SchemaMigration[] = [{
     }
     await database.exec("ALTER TABLE mr_runtime_nodes ADD COLUMN IF NOT EXISTS display_name TEXT");
   },
+}, {
+  id: "router/0003_message_attachment_snapshots",
+  definition: "mr_tasks.message_attachments_json:v1",
+  apply: async (database) => {
+    if (database.dialect === "sqlite") {
+      const columns = await database.prepare("PRAGMA table_info(mr_tasks)").all<{ name: string }>();
+      if (!columns.some((column) => column.name === "message_attachments_json")) {
+        await database.exec("ALTER TABLE mr_tasks ADD COLUMN message_attachments_json TEXT NOT NULL DEFAULT '[]'");
+      }
+      return;
+    }
+    await database.exec("ALTER TABLE mr_tasks ADD COLUMN IF NOT EXISTS message_attachments_json TEXT NOT NULL DEFAULT '[]'");
+  },
 }];
 
 export async function migrateRouterState(database: SqlConnection): Promise<void> {

@@ -289,6 +289,12 @@ test("Router conversation index paginates newest conversations in stable pages o
     originalName: "history.txt",
     byteSize: 7,
   }]), "task-64");
+  await database.prepare("UPDATE mr_tasks SET message_attachments_json = ? WHERE id = ?").run(JSON.stringify([{
+    id: "local-source-64",
+    originalName: "local-history.docx",
+    mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    byteSize: 11,
+  }]), "task-64");
   await database.prepare(`
     INSERT INTO mr_assignments(
       id, task_id, runtime_id, dispatch_key, remote_run_id, status,
@@ -301,7 +307,7 @@ test("Router conversation index paginates newest conversations in stable pages o
     input: "Conversation 64",
     createdAt: 64,
     updatedAt: 64,
-    attachments: [{ id: "attachment-64", originalName: "history.txt", mediaType: "text/plain", byteSize: 7 }],
+    attachments: [{ id: "local-source-64", originalName: "local-history.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", byteSize: 11 }],
     assignment: {
       id: "assignment-history",
       runtimeId: "runtime-history",
@@ -1168,11 +1174,16 @@ test("Web recovers the Router cancellation target from a persisted running messa
   });
 });
 
-test("Web keeps uploaded attachment records removable until send and snapshots them into the user message", async () => {
-  const [html, app] = await Promise.all([
+test("Web keeps Runtime directory authority above the composer and snapshots uploaded attachments into the user message", async () => {
+  const [html, app, overrides] = await Promise.all([
     readFile(new URL("../web/index.html", import.meta.url), "utf8"),
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
+  assert.match(html, /id="local-directory-scopes" class="runtime-directory-scopes" aria-label="当前 Runtime 已授权目录"/);
+  assert.ok(html.indexOf('id="local-directory-scopes"') < html.indexOf('<div class="composer-box">'), "Runtime directory authority belongs above the composer box");
+  assert.match(app, /当前 Runtime 已授权目录/);
+  assert.match(overrides, /\.runtime-directory-scopes/);
   assert.match(html, /id="pending-attachments"/);
   assert.match(html, /id="upload-file"/);
   assert.match(html, /accept="\.txt,\.md,\.csv,\.json,\.html,\.htm,\.pdf,\.doc,\.docx,\.xlsx,\.pptx"/);
@@ -1188,6 +1199,8 @@ test("Web keeps uploaded attachment records removable until send and snapshots t
   assert.match(app, /const cloudAttachmentIds = attachments\.filter\(\(attachment\) => attachment\.dataPlane !== "local_runtime"\)\.map\(\(attachment\) => attachment\.id\);/);
   assert.match(app, /attachmentIds: cloudAttachmentIds,/);
   assert.match(app, /localUploadedSourceIds: localSourceIds/);
+  assert.match(app, /messageAttachments: attachmentSnapshots\(attachments\)/);
+  assert.match(app, /function attachmentSnapshots\(attachments\)/);
   assert.match(app, /const submittedAt = Date\.now\(\)/);
   assert.match(app, /const userMessage = \{[^\n]+attachments, createdAt: submittedAt \}/);
   assert.match(html, /id="submit" class="composer-action" type="button"/);
@@ -1223,20 +1236,22 @@ test("Web persists question and terminal-response timing for the conversation st
   assert.match(app, /回答结束于 \$\{completedAt\}/);
   assert.match(app, /耗时 \$\{duration\}/);
   assert.match(app, /提问于 \$\{askedAt\}/);
-  assert.match(app, /const outputClass = message\.status === "completed" \? " completed-output" : "";/);
-  assert.match(app, /isLive \? liveEventIndicator : ""/);
-  assert.match(app, /renderMessageFooter\(message, completedAt[^\n]+isLive \? "" : liveEventIndicator\)/);
-  assert.match(app, /function renderMessageFooter\(message, timing, kind, terminalFeedback = ""\)/);
+  assert.match(app, /class="msg assistant \$\{isLive \? "live" : "final"\}/);
+  assert.doesNotMatch(app, /\$\{isLive \? liveEventIndicator : ""\}/);
+  assert.match(app, /renderMessageFooter\(message, completedAt[^\n]+liveEventIndicator\)/);
+  assert.match(app, /正在连接 Runtime/);
+  assert.match(app, /function renderMessageFooter\(message, timing, kind, eventFeedback = ""\)/);
   assert.match(app, /data-copy-message=/);
   assert.match(app, /function copyConversationMessage\(message, button\)/);
   assert.match(app, /navigator\.clipboard\?\.writeText/);
   assert.match(app, /function showCopyFeedback\(button, kind\)/);
   assert.match(app, /button\.classList\.add\("copied"\)/);
   assert.match(overrides, /\.message-timing/);
-  assert.match(overrides, /\.live-output-text\.completed-output/);
-  assert.match(overrides, /max-height: min\(240px, 32vh\);/);
-  assert.match(overrides, /\.message-footer\.terminal-feedback/);
-  assert.match(overrides, /\.terminal-feedback \.live-event-indicator\.terminal/);
+  assert.match(overrides, /\.msg\.assistant\.live \.live-output-text\s*\{[^}]*max-height:\s*min\(240px, 32vh\);[^}]*overflow-y:\s*auto;/s);
+  assert.doesNotMatch(overrides, /\.live-output-text\.completed-output\s*\{/);
+  assert.match(overrides, /\.message-footer\.event-feedback/);
+  assert.match(overrides, /\.event-feedback \.live-event-indicator\.active/);
+  assert.match(overrides, /@keyframes live-progress-glow/);
   assert.match(overrides, /@keyframes terminal-event-arrive/);
 });
 
@@ -1544,6 +1559,25 @@ test("Router converts owned attachment IDs and never accepts browser resource re
     }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments)).allowDangerousTools, false);
     assert.equal(dispatched.resourceRefs?.[0]?.originalName, "brief.txt");
     assert.equal(dispatched.resourceRefs?.[0]?.byteSize, "hello router attachment".length);
+    const localDispatched = await taskFromRequest({
+      conversationId: "conversation-user",
+      clientMessageId: "message-local",
+      input: "summarize local attachment",
+      executionTarget: { kind: "local_device", deviceId: "device-1", runtimeId: "runtime-1" },
+      dataPolicy: { mode: "local" },
+      localUploadedSourceIds: ["source-local"],
+      messageAttachments: [{ id: "source-local", originalName: "local-brief.txt", mediaType: "text/plain", byteSize: 23 }],
+    }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments);
+    assert.deepEqual(localDispatched.messageAttachments, [{ id: "source-local", originalName: "local-brief.txt", mediaType: "text/plain", byteSize: 23 }]);
+    await assert.rejects(taskFromRequest({
+      conversationId: "conversation-user",
+      clientMessageId: "message-local-invalid",
+      input: "summarize local attachment",
+      executionTarget: { kind: "local_device", deviceId: "device-1", runtimeId: "runtime-1" },
+      dataPolicy: { mode: "local" },
+      localUploadedSourceIds: ["source-local"],
+      messageAttachments: [{ id: "other-source", originalName: "wrong.txt", mediaType: "text/plain", byteSize: 1 }],
+    }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /messageAttachments must exactly describe localUploadedSourceIds/);
     await assert.rejects(taskFromRequest({ conversationId: "c", clientMessageId: "m", input: "x", conversationIntent: "auto" }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /conversationIntent is Runtime-owned/);
     await assert.rejects(taskFromRequest({ conversationId: "c", clientMessageId: "m", input: "x", resourceRefs: [] }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /resourceRefs are Router-owned/);
     await assert.rejects(taskFromRequest({ tenantId: "attacker", ownerUserId: "attacker", conversationId: "c", clientMessageId: "m", input: "x" }, { tenantId: "tenant", userId: "user", email: "test@example.test" }, attachments), /derived from the authenticated session/);
