@@ -1,6 +1,7 @@
 import type { AgentLoopToolEvidence, RuntimeDeliveryCandidate, RuntimeDeliveryCandidateEvidenceKinds, RuntimeDeliveryReceipt } from "./contracts.ts";
 import { canonicalArtifactAcceptanceVerdict } from "./tool-result-evidence.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
+import { artifactMatchesExpectedTarget } from "./tool-progress-policy.ts";
 
 export function normalizeDeliveryCandidate(input: {
   readonly output: string;
@@ -59,11 +60,24 @@ export function buildRuntimeDeliveryCandidate(input: {
   readonly output: string;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
+  /** Runtime-owned delivery target; never infer it from the model's prose. */
+  readonly expectedArtifactKind?: string;
+  /** Concrete output format such as pdf, distinct from semantic kind document. */
+  readonly expectedArtifactFormat?: string;
   readonly caveats?: readonly string[];
   readonly sourceToolCallIds?: readonly string[];
 }): RuntimeDeliveryCandidate {
-  const evidenceKinds = collectEvidenceKinds(input.toolEvidence, input.stepSemanticFrame);
-  const deliveryReceipt = collectDeliveryReceipt(input.toolEvidence);
+  const evidenceKinds = collectEvidenceKinds(
+    input.toolEvidence,
+    input.stepSemanticFrame,
+    input.expectedArtifactKind,
+    input.expectedArtifactFormat,
+  );
+  const deliveryReceipt = collectDeliveryReceipt(
+    input.toolEvidence,
+    input.expectedArtifactKind,
+    input.expectedArtifactFormat,
+  );
   const caveats = uniqueStrings([
     ...(input.caveats ?? []),
     ...semanticCaveats(input.stepSemanticFrame, input.caveats),
@@ -88,6 +102,8 @@ function escapeRegExp(value: string): string {
 function collectEvidenceKinds(
   evidence: readonly AgentLoopToolEvidence[],
   stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">,
+  expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
 ): RuntimeDeliveryCandidateEvidenceKinds {
   const satisfied = new Set<string>();
   const caveated = new Set<string>();
@@ -100,7 +116,18 @@ function collectEvidenceKinds(
     const records = [parsed, parseJsonRecord(parsed.evidenceReceipt), parseJsonRecord(parsed.artifactReceipt)];
     for (const record of records) {
       if (record === undefined) continue;
-      if (deliveryReceiptFromRecord(record, item.toolCallId) !== undefined) hasDeliveryReceipt = true;
+      const deliveryReceipt = deliveryReceiptFromRecord(record, item.toolCallId);
+      if (
+        deliveryReceipt !== undefined
+        && artifactMatchesExpectedTarget(
+          {
+            path: deliveryReceipt.artifact.path,
+            ...(deliveryReceipt.artifact.kind === undefined ? {} : { artifactKind: deliveryReceipt.artifact.kind }),
+          },
+          expectedArtifactKind,
+          expectedArtifactFormat,
+        )
+      ) hasDeliveryReceipt = true;
       const evidenceKinds = isPlainRecord(record.evidenceKinds) ? record.evidenceKinds : undefined;
       collectStrings(evidenceKinds?.satisfied, satisfied);
       collectStrings(evidenceKinds?.caveated, caveated);
@@ -118,7 +145,12 @@ function collectEvidenceKinds(
   };
 }
 
-function collectDeliveryReceipt(evidence: readonly AgentLoopToolEvidence[]): RuntimeDeliveryReceipt | undefined {
+function collectDeliveryReceipt(
+  evidence: readonly AgentLoopToolEvidence[],
+  expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
+): RuntimeDeliveryReceipt | undefined {
+  const receipts: RuntimeDeliveryReceipt[] = [];
   for (const item of evidence) {
     if (item.isError) continue;
     const parsed = parseJsonRecord(item.result);
@@ -126,10 +158,17 @@ function collectDeliveryReceipt(evidence: readonly AgentLoopToolEvidence[]): Run
     const records = [parsed, parseJsonRecord(parsed.evidenceReceipt), parseJsonRecord(parsed.artifactReceipt)];
     for (const record of records) {
       const receipt = record === undefined ? undefined : deliveryReceiptFromRecord(record, item.toolCallId);
-      if (receipt !== undefined) return receipt;
+      if (receipt !== undefined) receipts.push(receipt);
     }
   }
-  return undefined;
+  // Runtime evidence may contain process receipts before the final artifact
+  // receipt. Select only a target-compatible receipt, and let a later
+  // verification of that same target supersede its earlier observation.
+  return receipts.filter((receipt) => artifactMatchesExpectedTarget(
+    { path: receipt.artifact.path, ...(receipt.artifact.kind === undefined ? {} : { artifactKind: receipt.artifact.kind }) },
+    expectedArtifactKind,
+    expectedArtifactFormat,
+  )).at(-1);
 }
 
 function deliveryReceiptFromRecord(record: Record<string, unknown>, toolCallId: string): RuntimeDeliveryReceipt | undefined {

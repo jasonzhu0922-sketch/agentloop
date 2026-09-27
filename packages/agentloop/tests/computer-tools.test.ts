@@ -15,7 +15,7 @@ import { createComputerTools } from "../src/tools/computer-tools.ts";
 import { createCoreTools } from "../src/tools/compose.ts";
 import { createVisibleDirectoryTools } from "../src/tools/visible-directory-tools.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
-import { artifactMatchesExpectedKind } from "../src/runtime/tool-progress-policy.ts";
+import { artifactMatchesExpectedKind, artifactMatchesExpectedTarget } from "../src/runtime/tool-progress-policy.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 
 const require = createRequire(import.meta.url);
@@ -32,6 +32,10 @@ test("code artifacts are classified by source extension while generic files stay
   assert.equal(artifactMatchesExpectedKind({ path: "southern_station.m4a" }, "audio"), true);
   assert.equal(artifactMatchesExpectedKind({ path: "southern_station.opus" }, "audio"), true);
   assert.equal(artifactMatchesExpectedKind({ path: "southern_station_player.py", artifactKind: "code" }, "audio"), false);
+  assert.equal(artifactMatchesExpectedTarget({ path: ".agentloop/tool-results/a1/stdout.txt", artifactKind: "generic_file" }, "document", "pdf"), false);
+  assert.equal(artifactMatchesExpectedTarget({ path: "outputs/merged.pdf", artifactKind: "pdf" }, "document", "pdf"), true);
+  assert.equal(artifactMatchesExpectedTarget({ path: "outputs/deck.pptx", artifactKind: "pptx" }, undefined, "presentation"), true);
+  assert.equal(artifactMatchesExpectedTarget({ path: "outputs/report.pdf", artifactKind: "pdf" }, undefined, "presentation"), false);
 });
 
 test("computer paths cannot escape the workspace lexically or through a symbolic link", async () => {

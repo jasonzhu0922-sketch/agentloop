@@ -7,7 +7,7 @@ import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { classifyTaskIntent } from "../runtime/task-intent.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
 import { deliveryCandidateCaveats } from "../runtime/delivery-candidate.ts";
-import { artifactMatchesExpectedKind } from "../runtime/tool-progress-policy.ts";
+import { artifactMatchesExpectedTarget } from "../runtime/tool-progress-policy.ts";
 import {
   canonicalArtifactAcceptanceVerdict,
   parseJsonRecord,
@@ -305,7 +305,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const requiredKindsSatisfied = requiredKinds
       .filter((kind) => blockingKinds.has(kind))
       .every((kind) =>
-      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions, input.expectedArtifactKind)
+      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions, input.expectedArtifactKind, input.expectedArtifactFormat)
       );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
       const evidenceSatisfied = criterionSatisfiedByEvidenceGate(
@@ -317,6 +317,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
         deliveryCandidate,
         input.workflowEvidenceActions,
         input.expectedArtifactKind,
+        input.expectedArtifactFormat,
       );
       const candidateRequired = criterion.blocking !== false
         && !isEvidenceCriterion(criterion.id);
@@ -328,7 +329,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
           ? "The completion candidate and required observable Runtime operations satisfy the principle assessment gate."
           : rejectedEvidenceGateRationale(nonEmpty, receipts,
             requiredKinds.includes(criterion.id) || criterion.id === "explicit_caveats" ? [criterion.id] : requiredKinds,
-            successfulToolRefs, deliveryCandidate, candidateRequired),
+            successfulToolRefs, deliveryCandidate, candidateRequired, input.expectedArtifactKind, input.expectedArtifactFormat),
         evidenceRefs: satisfied
           ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId), ...(deliveryCandidate?.sourceToolCallIds ?? [])]
           : successfulToolRefs,
@@ -454,10 +455,11 @@ function criterionSatisfiedByEvidenceGate(
   candidate?: RuntimeDeliveryCandidate,
   workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
   expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
 ): boolean {
   // Semantic caveat evidence must not inherit an unrelated source/artifact
   // failure (nor automatically pass when all other operation receipts pass).
-  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions, expectedArtifactKind);
+  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions, expectedArtifactKind, expectedArtifactFormat);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
 }
@@ -469,6 +471,7 @@ function evidenceKindSatisfiedByGate(
   candidate?: RuntimeDeliveryCandidate,
   workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
   expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
 ): boolean {
   if (kind === "explicit_caveats") {
     // This proves only that limitations were recorded, not that the model's
@@ -478,17 +481,17 @@ function evidenceKindSatisfiedByGate(
   if (kind === "delivery_receipt") {
     const candidateReceipt = candidate?.deliveryReceipt !== undefined
       && successfulToolRefs.includes(candidate.deliveryReceipt.sourceToolCallId)
-      && deliveryReceiptMatchesExpectedKind(candidate.deliveryReceipt, expectedArtifactKind);
+      && deliveryReceiptMatchesExpectedTarget(candidate.deliveryReceipt, expectedArtifactKind, expectedArtifactFormat);
     return candidateReceipt || receipts.some((receipt) =>
         (receipt.schema === "agentloop.artifactReceipt/v1" || receipt.schema === "agentloop.artifactAcceptance/v1")
         && receipt.artifactPath !== undefined
-        && receiptMatchesExpectedKind(receipt, expectedArtifactKind)
+        && receiptMatchesExpectedTarget(receipt, expectedArtifactKind, expectedArtifactFormat)
         && !receipt.failed.has("artifact_path")
         && !receipt.failed.has("artifact_non_empty"),
       );
   }
   if (kind === "artifact_acceptance") {
-    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind);
+    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind, expectedArtifactFormat);
     return acceptance !== undefined
       && (
         acceptance.verdict === "accepted"
@@ -505,14 +508,14 @@ function evidenceKindSatisfiedByGate(
   // Non-artifact workflow facts remain authenticated against their declared
   // package action below.
   if (isArtifactAcceptanceEvidenceKind(kind)) {
-    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind);
+    const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind, expectedArtifactFormat);
     if (
       acceptance !== undefined
       && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
       && acceptance.satisfied.has(kind)
       && !acceptance.failed.has(kind)
     ) return true;
-    if (expectedArtifactKind !== undefined) return false;
+    if (expectedArtifactKind !== undefined || expectedArtifactFormat !== undefined) return false;
   }
   const declaredActions = (workflowEvidenceActions ?? []).filter((action) => action.producesEvidenceKinds.includes(kind));
   if (declaredActions.length > 0) {
@@ -553,16 +556,18 @@ function latestArtifactAcceptanceReceipt(
   receipts: readonly RuntimeObservableReceipt[],
   candidate?: RuntimeDeliveryCandidate,
   expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
 ): RuntimeObservableReceipt | undefined {
   const acceptances = receipts.filter((receipt) => receipt.schema === "agentloop.artifactAcceptance/v1");
   const deliveredPath = candidate?.deliveryReceipt?.artifact.path;
   if (deliveredPath !== undefined) {
-    return acceptances.filter((receipt) =>
+    const deliveredAcceptance = acceptances.filter((receipt) =>
       receipt.artifactPath === deliveredPath
-      && receiptMatchesExpectedKind(receipt, expectedArtifactKind),
+      && receiptMatchesExpectedTarget(receipt, expectedArtifactKind, expectedArtifactFormat),
     ).at(-1);
+    if (deliveredAcceptance !== undefined) return deliveredAcceptance;
   }
-  return acceptances.filter((receipt) => receiptMatchesExpectedKind(receipt, expectedArtifactKind)).at(-1);
+  return acceptances.filter((receipt) => receiptMatchesExpectedTarget(receipt, expectedArtifactKind, expectedArtifactFormat)).at(-1);
 }
 
 function artifactPathFromRecord(record: Record<string, unknown>): string | undefined {
@@ -585,27 +590,29 @@ function artifactKindFromRecord(record: Record<string, unknown>): string | undef
   return undefined;
 }
 
-function receiptMatchesExpectedKind(
+function receiptMatchesExpectedTarget(
   receipt: Pick<RuntimeObservableReceipt, "artifactPath" | "artifactKind">,
   expectedArtifactKind: string | undefined,
+  expectedArtifactFormat: string | undefined,
 ): boolean {
-  if (expectedArtifactKind === undefined) return true;
+  if (expectedArtifactKind === undefined && expectedArtifactFormat === undefined) return true;
   if (receipt.artifactPath === undefined) return false;
-  return artifactMatchesExpectedKind({
+  return artifactMatchesExpectedTarget({
     path: receipt.artifactPath,
     ...(receipt.artifactKind === undefined ? {} : { artifactKind: receipt.artifactKind }),
-  }, expectedArtifactKind);
+  }, expectedArtifactKind, expectedArtifactFormat);
 }
 
-function deliveryReceiptMatchesExpectedKind(
+function deliveryReceiptMatchesExpectedTarget(
   receipt: NonNullable<RuntimeDeliveryCandidate["deliveryReceipt"]>,
   expectedArtifactKind: string | undefined,
+  expectedArtifactFormat: string | undefined,
 ): boolean {
-  if (expectedArtifactKind === undefined) return true;
-  return artifactMatchesExpectedKind({
+  if (expectedArtifactKind === undefined && expectedArtifactFormat === undefined) return true;
+  return artifactMatchesExpectedTarget({
     path: receipt.artifact.path,
     ...(receipt.artifact.kind === undefined ? {} : { artifactKind: receipt.artifact.kind }),
-  }, expectedArtifactKind);
+  }, expectedArtifactKind, expectedArtifactFormat);
 }
 
 function rejectedEvidenceGateRationale(
@@ -615,11 +622,21 @@ function rejectedEvidenceGateRationale(
   successfulToolRefs: readonly string[],
   candidate?: RuntimeDeliveryCandidate,
   candidateRequired = true,
+  expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
 ): string {
   if (!nonEmpty && candidateRequired) return "The candidate output is empty.";
   if (successfulToolRefs.length === 0) return "No successful Runtime operation is available.";
   if (receipts.length === 0 && requiredKinds.length > 0) return "No observable Runtime artifact or acceptance receipt is available for the principle assessment gate.";
-  const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, candidate));
+  const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(
+    kind,
+    receipts,
+    successfulToolRefs,
+    candidate,
+    undefined,
+    expectedArtifactKind,
+    expectedArtifactFormat,
+  ));
   if (missing.length > 0) return `No bound observable evidence confirms: ${missing.join(", ")}. This does not establish that the underlying content or operation is absent.`;
   return "The observable Runtime operations do not satisfy the principle assessment gate.";
 }
@@ -736,18 +753,19 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
   const blocking = admitted?.blocking ?? true;
   const verification = admitted?.verification ?? "deterministic";
   const expectedFormatUnmet = criterion.criterionId === "format_matches_request"
-    && input.expectedArtifactKind !== undefined
+    && (input.expectedArtifactKind !== undefined || input.expectedArtifactFormat !== undefined)
     && latestArtifactAcceptanceReceipt(
       runtimeObservableReceipts(input.evidence.toolCalls),
       input.evidence.deliveryCandidate,
       input.expectedArtifactKind,
+      input.expectedArtifactFormat,
     ) === undefined;
   return {
     ...criterion,
     ...(expectedFormatUnmet
       ? {
         satisfied: false,
-        rationale: `No accepted artifact matches the required ${input.expectedArtifactKind} format.`,
+        rationale: `No accepted artifact matches the required ${input.expectedArtifactFormat ?? input.expectedArtifactKind} format.`,
       }
       : {}),
     blocking,

@@ -70,7 +70,7 @@ import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
-import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
+import { canonicalArtifactFormatFamily, isConcreteArtifactFormat } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
@@ -2597,6 +2597,7 @@ export class RunService {
         || stepAllowsSourceSummaryCandidateConvergence(activeStep)
       );
       const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills, plan.taskSemantics);
+      const expectedArtifactFormat = executionArtifactFormatForStep(activeStep, plan.taskSemantics);
       const stepSemanticFrame = deriveStepSemanticFrame({
         step: activeStep,
         plan,
@@ -2612,6 +2613,7 @@ export class RunService {
         step: activeStep,
         requiresFileOutput: fileOutputStep,
         taskProfile: stepTaskProfile,
+        ...(expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat }),
         workflowEvidenceActions,
       });
       // A delivery leaf may be deliberately tool-free: its direct dependency
@@ -2942,6 +2944,7 @@ export class RunService {
             planId: plan.id,
             step: activeStep,
             ...(stepTaskProfile.artifactKind === "none" ? {} : { expectedArtifactKind: stepTaskProfile.artifactKind }),
+            ...(expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat }),
             skills: activatedStepSkills,
             evidence,
             modelEvidence,
@@ -6935,6 +6938,29 @@ function executionTaskProfileForStep(
     deliverySurface: taskSemantics.deliverable.surface,
     artifactKind: taskSemantics.deliverable.kind,
   };
+}
+
+/**
+ * `deliverable.kind` is a semantic family.  When Task Understanding also
+ * resolved a concrete format, that format is the binding constraint for
+ * Runtime-owned artifact selection and acceptance.
+ */
+function executionArtifactFormatForStep(
+  step: ExecutionPlan["steps"][number],
+  taskSemantics?: StructuredTaskUnderstanding,
+): string | undefined {
+  if (
+    taskSemantics?.deliverable.surface !== "workspace_artifact"
+    || taskSemantics.deliverable.kind === "none"
+    || (!stepRequiresFileOutput(step) && !stepAllowsSkillFileOutput(step))
+  ) return undefined;
+  // Plans persisted before concrete format ownership used family labels such
+  // as `presentation` here. Preserve their semantic `deliverable.kind`, but
+  // never reinterpret a family label as a filename format at the acceptance
+  // boundary.
+  return taskSemantics.format !== undefined && isConcreteArtifactFormat(taskSemantics.format)
+    ? taskSemantics.format
+    : undefined;
 }
 
 function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean {

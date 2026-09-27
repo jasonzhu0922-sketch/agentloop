@@ -19,6 +19,31 @@ export function canonicalArtifactFormatFamily(value: string): string {
   return normalized;
 }
 
+const SEMANTIC_ARTIFACT_FAMILIES = new Set([
+  "none",
+  "document",
+  "presentation",
+  "spreadsheet",
+  "image",
+  "audio",
+  "code",
+]);
+
+/**
+ * A semantic family is a valid delivery-category constraint, but it is never
+ * a physical filename format. Keeping this conversion in the shared format
+ * boundary makes typed Runtime callers resilient to a model or legacy Plan
+ * that puts a family label in the `format` field.
+ */
+export function semanticArtifactFamily(value: string): string | undefined {
+  const canonical = canonicalArtifactFormatFamily(value);
+  return SEMANTIC_ARTIFACT_FAMILIES.has(canonical) ? canonical : undefined;
+}
+
+export function isConcreteArtifactFormat(value: string): boolean {
+  return semanticArtifactFamily(value) === undefined;
+}
+
 export function artifactFormatFamilyForPath(path: string): string | undefined {
   const extension = extname(path).toLowerCase();
   if (extension.length <= 1) return undefined;

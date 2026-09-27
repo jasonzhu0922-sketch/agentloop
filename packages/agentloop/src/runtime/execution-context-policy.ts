@@ -475,12 +475,15 @@ export function buildStepToolProgressPolicy(input: {
   readonly step: ExecutionPlan["steps"][number];
   readonly requiresFileOutput: boolean;
   readonly taskProfile?: TaskProfile;
+  /** Exact format admitted for this artifact-producing Step. */
+  readonly expectedArtifactFormat?: string;
   readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
 }): RuntimeToolProgressPolicy | undefined {
   const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
   if (!input.requiresFileOutput && !stepRequiresRuntimeEvidenceProgress(requiredKinds)) return undefined;
   return runtimeStepToolProgressPolicy(requiredKinds, {
     expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
+    ...(input.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: input.expectedArtifactFormat }),
     artifactDeliveryRequired: input.requiresFileOutput,
     workflowEvidenceActions: input.workflowEvidenceActions,
     scope: stepRequiresArtifactEvidence(input.step)

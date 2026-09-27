@@ -64,7 +64,10 @@ export interface StructuredTaskUnderstanding {
   readonly schema: "agentloop.taskUnderstanding/v1";
   /** Business task with delivery-format wording removed. */
   readonly task: string;
-  /** Resolved output format, kept separate from the business task. */
+  /**
+   * Concrete output encoding, if the user requested one (for example `pdf`
+   * or `pptx`). Generic delivery families belong only in `deliverable.kind`.
+   */
   readonly format?: string;
   readonly normalizedObjective: string;
   readonly operation: StructuredTaskOperation;
@@ -332,10 +335,22 @@ function structuredExplicitFormat(value: string): string | undefined {
   if (/\bhtml?\b|网页|页面|网站/iu.test(value)) return "html";
   if (/\bmarkdown\b|\bmd\b/iu.test(value)) return "markdown";
   if (/\bpdf\b/iu.test(value)) return "pdf";
-  if (/\bdocx?\b|\bword\b/iu.test(value)) return "docx";
+  if (/\bdocx\b/iu.test(value)) return "docx";
   if (/\btxt\b|纯文本/iu.test(value)) return "txt";
-  if (/\bxlsx?\b|\bexcel\b|\bcsv\b/iu.test(value)) return "spreadsheet";
-  if (/\bpptx?\b|\bpowerpoint\b|演示文稿|幻灯片/iu.test(value)) return "presentation";
+  if (/\bxlsx\b/iu.test(value)) return "xlsx";
+  if (/\bcsv\b/iu.test(value)) return "csv";
+  if (/\bpptx\b/iu.test(value)) return "pptx";
+  if (/\bpng\b/iu.test(value)) return "png";
+  if (/\bjpe?g\b/iu.test(value)) return "jpg";
+  if (/\bwebp\b/iu.test(value)) return "webp";
+  if (/\bgif\b/iu.test(value)) return "gif";
+  if (/\bsvg\b/iu.test(value)) return "svg";
+  if (/\bwav\b/iu.test(value)) return "wav";
+  if (/\bmp3\b/iu.test(value)) return "mp3";
+  if (/\bm4a\b/iu.test(value)) return "m4a";
+  if (/\b(?:ogg|opus)\b/iu.test(value)) return "ogg";
+  // `Word`, `Excel`, `PowerPoint`, and their Chinese equivalents identify a
+  // semantic family. They intentionally do not fabricate an exact extension.
   return undefined;
 }
 

@@ -7131,10 +7131,49 @@ test("selectPlanningSkillRoles keeps a DOCX source from overriding a PPTX delive
     uploadedSources: [source],
   });
 
-  assert.equal(understanding.format, "presentation");
+  assert.equal(understanding.format, "pptx");
   assert.equal(understanding.deliverable.kind, "presentation");
   const selected = selectPlanningSkillRoles([docx, pptx], understanding, [], [source]);
   assert.deepEqual(selected.map((item) => item.skill.id), [pptx.id]);
+});
+
+test("structured task understanding separates generic delivery families from concrete output formats", () => {
+  const cases = [
+    { objective: "生成一份 PPTX 汇报", kind: "presentation", format: "pptx" },
+    { objective: "生成一份演示文稿", kind: "presentation", format: undefined },
+    { objective: "生成一个 XLSX 工作簿", kind: "spreadsheet", format: "xlsx" },
+    { objective: "生成一个 Excel 工作簿", kind: "spreadsheet", format: undefined },
+    { objective: "生成一份 PDF 报告", kind: "document", format: "pdf" },
+    { objective: "生成一份 Word 文档", kind: "document", format: undefined },
+  ] as const;
+
+  for (const item of cases) {
+    const understanding = understandTask({ objective: item.objective });
+    assert.equal(understanding.deliverable.kind, item.kind, item.objective);
+    assert.equal(understanding.format, item.format, item.objective);
+  }
+});
+
+test("uploaded source format never replaces an explicit artifact output format", () => {
+  const source: UploadedSourceSummary = {
+    id: "src_assessment_pdf",
+    originalName: "assessment.pdf",
+    mimeType: "application/pdf",
+    extension: ".pdf",
+    byteSize: 1_024,
+    sha256: "a".repeat(64),
+    status: "ready",
+    chunkCount: 1,
+    truncated: false,
+  };
+  const understanding = understandTask({
+    objective: "结合这个评估报告生成一份 PPTX",
+    uploadedSources: [source],
+  });
+
+  assert.deepEqual(understanding.evidence.sourceKinds, [".pdf"]);
+  assert.equal(understanding.deliverable.kind, "presentation");
+  assert.equal(understanding.format, "pptx");
 });
 
 test("native uploaded PDF transform recall carries resolved task semantics to the PDF Skill", () => {
@@ -9917,6 +9956,84 @@ test("ProfiledRuleStepAssessor rejects an accepted Markdown receipt when the Ste
     [false, false, false, false],
   );
   assert.ok(assessment.failedBoundary?.missingEvidenceKinds.includes("format_matches_request"));
+});
+
+test("ProfiledRuleStepAssessor binds artifact acceptance to the admitted concrete format", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    expectedArtifactKind: "document",
+    expectedArtifactFormat: "pdf",
+    step: {
+      ...step("merge-pdfs"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "artifact_path", description: "The delivered artifact path is recorded.", source: "planner" },
+        { id: "artifact_non_empty", description: "The delivered artifact is non-empty.", source: "planner" },
+        { id: "artifact_acceptance", description: "The artifact acceptance receipt is recorded.", source: "planner" },
+        { id: "artifact_openable", description: "The delivered artifact can be opened.", source: "planner", blocking: false },
+        { id: "format_matches_request", description: "The delivered artifact format matches the request.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "Merged PDF delivered.",
+      deliveryCandidate: {
+        schema: "agentloop.runtimeDeliveryCandidate/v1",
+        output: "Merged PDF delivered.",
+        caveats: [],
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable"], caveated: [], failed: [] },
+        sourceToolCallIds: ["verify-stdout"],
+        deliveryReceipt: {
+          schema: "agentloop.runtimeDeliveryReceipt/v1",
+          artifact: { path: ".agentloop/tool-results/a1/stdout.txt", kind: "generic_file" },
+          verdict: "accepted",
+          caveats: [],
+          sourceToolCallId: "verify-stdout",
+        },
+      },
+      toolCalls: [{
+        toolCallId: "verify-stdout",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: ".agentloop/tool-results/a1/stdout.txt", kind: "generic_file" },
+          verdict: "accepted",
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable"], caveated: [], failed: [] },
+        }),
+      }, {
+        toolCallId: "verify-pdf",
+        toolName: "verify_artifact_acceptance",
+        isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "outputs/merged.pdf", kind: "pdf" },
+          verdict: "caveated",
+          evidenceKinds: {
+            satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+            caveated: ["artifact_acceptance", "explicit_caveats"],
+            failed: [],
+          },
+          caveats: ["PDF renderer is unavailable."],
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+    assessmentProfile: "evidence_gate",
+  });
+
+  assert.equal(assessment.approved, true);
+  assert.equal(assessment.criteria.every((criterion) => criterion.satisfied || criterion.blocking === false), true);
 });
 
 test("ProfiledRuleStepAssessor treats Skill-owned QA evidence as non-blocking for Runtime gates", async () => {

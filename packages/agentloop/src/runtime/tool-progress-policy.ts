@@ -1,4 +1,4 @@
-import { canonicalArtifactFormatFamily, isSourceArtifactPath } from "../shared/artifact-format.ts";
+import { artifactFormatFamilyForPath, canonicalArtifactFormatFamily, isSourceArtifactPath, semanticArtifactFamily } from "../shared/artifact-format.ts";
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 import {
   parseJsonRecord,
@@ -10,7 +10,10 @@ import {
 export interface RuntimeToolProgressPolicy {
   readonly schema: "agentloop.runtimeToolProgressPolicy/v1";
   readonly requiredEvidenceKinds: readonly string[];
+  /** Semantic delivery family such as document, presentation, or audio. */
   readonly expectedArtifactKind?: string;
+  /** Exact output format resolved from the admitted task, such as pdf or html. */
+  readonly expectedArtifactFormat?: string;
   /** A requested file must be authored after any declared Skill workflow fact it consumes. */
   readonly artifactDeliveryRequired?: boolean;
   /** Package-owned action declarations whose outputs are prerequisite evidence for this leaf. */
@@ -111,6 +114,7 @@ export interface RuntimeStepWorkProductState {
   readonly status: RuntimeStepWorkProductStatus;
   readonly acceptanceRequired: boolean;
   readonly expectedArtifactKind?: string;
+  readonly expectedArtifactFormat?: string;
   readonly deliverableArtifacts: readonly RuntimeStepArtifactRef[];
   readonly processArtifacts: readonly RuntimeStepArtifactRef[];
 }
@@ -256,7 +260,7 @@ export function deriveRuntimeStepEvidenceState(input: {
 
 export function artifactStepToolProgressPolicy(
   requiredEvidenceKinds: readonly string[],
-  options: { readonly expectedArtifactKind?: string } = {},
+  options: { readonly expectedArtifactKind?: string; readonly expectedArtifactFormat?: string } = {},
 ): RuntimeToolProgressPolicy {
   return runtimeStepToolProgressPolicy(requiredEvidenceKinds, {
     ...options,
@@ -268,6 +272,7 @@ export function runtimeStepToolProgressPolicy(
   requiredEvidenceKinds: readonly string[],
   options: {
     readonly expectedArtifactKind?: string;
+    readonly expectedArtifactFormat?: string;
     readonly artifactDeliveryRequired?: boolean;
     readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
     readonly scope?: "artifact" | "source" | "generic";
@@ -287,6 +292,7 @@ export function runtimeStepToolProgressPolicy(
     // correctly.
     requiredEvidenceKinds: observableRequiredEvidenceKinds,
     ...(options.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: options.expectedArtifactKind }),
+    ...(options.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: options.expectedArtifactFormat }),
     ...(options.artifactDeliveryRequired === true ? { artifactDeliveryRequired: true } : {}),
     workflowEvidenceActions: Object.freeze([...(options.workflowEvidenceActions ?? [])]),
     autoCompleteFromEvidence: observableRequiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
@@ -454,7 +460,7 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
-  if (policy.expectedArtifactKind !== undefined) {
+  if (policy.expectedArtifactKind !== undefined || policy.expectedArtifactFormat !== undefined) {
     // Aggregate receipt kinds are only meaningful for the artifact identity
     // they describe.  Do not let an accepted HTML wrapper satisfy the
     // acceptance/openability/format obligations of a code, document, or other
@@ -462,6 +468,7 @@ function collectPolicyEvidenceKinds(
     const matchingAcceptanceKinds = collectMatchingArtifactAcceptanceKinds(
       evidence,
       policy.expectedArtifactKind,
+      policy.expectedArtifactFormat,
     );
     for (const kind of ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS) {
       evidenceKinds.satisfied.delete(kind);
@@ -519,7 +526,8 @@ function collectPolicyEvidenceKinds(
 
 function collectMatchingArtifactAcceptanceKinds(
   evidence: readonly AgentLoopToolEvidence[],
-  expectedArtifactKind: string,
+  expectedArtifactKind: string | undefined,
+  expectedArtifactFormat: string | undefined,
 ): {
   readonly satisfied: Set<string>;
   readonly caveated: Set<string>;
@@ -546,7 +554,7 @@ function collectMatchingArtifactAcceptanceKinds(
           ?? stringField(artifactRecord, "artifactKind")
           ?? stringField(artifactRecord, "kind"),
       };
-      if (!artifactMatchesExpectedKind(artifact, expectedArtifactKind)) continue;
+      if (!artifactMatchesExpectedTarget(artifact, expectedArtifactKind, expectedArtifactFormat)) continue;
       collectEvidenceKindsFromRecord(record, output);
       collectEvidenceKindsFromRecord(receipt, output);
     }
@@ -630,6 +638,7 @@ function classifyWorkProduct(
   // artifact. Do not let a helper script become a fictional final deliverable
   // merely because it was written by a work-product-capable tool.
   const tracksArtifactDelivery = policy.expectedArtifactKind !== undefined
+    || policy.expectedArtifactFormat !== undefined
     || policy.requiredEvidenceKinds.some((kind) => ARTIFACT_WORK_PRODUCT_EVIDENCE_KINDS.has(kind));
   const artifacts = tracksArtifactDelivery
     ? collectKnownArtifacts(evidence)
@@ -668,6 +677,7 @@ function classifyWorkProduct(
     status,
     acceptanceRequired,
     ...(policy.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: policy.expectedArtifactKind }),
+    ...(policy.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: policy.expectedArtifactFormat }),
     deliverableArtifacts,
     processArtifacts,
   };
@@ -722,8 +732,8 @@ function isAcceptanceDeliverableArtifact(
   // inspectability, not that this is the artifact the current Step promised
   // to deliver. Check the Step-owned target before either shortcut can make
   // an intermediate format eligible for automatic acceptance.
-  if (policy.expectedArtifactKind !== undefined) {
-    if (!artifactMatchesExpectedKind(artifact, policy.expectedArtifactKind)) return false;
+  if (policy.expectedArtifactKind !== undefined || policy.expectedArtifactFormat !== undefined) {
+    if (!artifactMatchesExpectedTarget(artifact, policy.expectedArtifactKind, policy.expectedArtifactFormat)) return false;
     // Once the Step explicitly owns the requested artifact kind, a matching
     // source file is no longer merely a build input.  In particular, code
     // delivery must make a matching .py/.js/etc. eligible for Runtime-owned
@@ -956,6 +966,9 @@ function instructionForStepState(input: {
   ];
   if (input.workProduct.expectedArtifactKind !== undefined) {
     lines.push(`The requested final artifact kind is ${input.workProduct.expectedArtifactKind}.`);
+  }
+  if (input.workProduct.expectedArtifactFormat !== undefined) {
+    lines.push(`The requested final artifact format is ${input.workProduct.expectedArtifactFormat}.`);
   }
   if (input.requiredWorkflowAction !== undefined) {
     const action = input.requiredWorkflowAction;
@@ -1190,6 +1203,29 @@ export function artifactMatchesExpectedKind(
       && artifactPathMatchesExpectedKind(artifact.path, expected);
   }
   return artifactPathMatchesExpectedKind(artifact.path, expected);
+}
+
+/**
+ * A delivery target has two independent dimensions: semantic family and
+ * concrete output format.  A generic document must not satisfy an explicit
+ * PDF target merely because both are user-facing files.
+ */
+export function artifactMatchesExpectedTarget(
+  artifact: Pick<RuntimeStepArtifactRef, "path" | "artifactKind">,
+  expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
+): boolean {
+  // A model or an older Plan can put a semantic family such as
+  // `presentation` in the format slot. Interpret that as a category
+  // constraint, never as a literal extension; an explicit physical format
+  // such as `pdf` remains strict.
+  const formatFamily = expectedArtifactFormat === undefined
+    ? undefined
+    : semanticArtifactFamily(expectedArtifactFormat);
+  const effectiveArtifactKind = expectedArtifactKind ?? formatFamily;
+  if (effectiveArtifactKind !== undefined && !artifactMatchesExpectedKind(artifact, effectiveArtifactKind)) return false;
+  if (expectedArtifactFormat === undefined || formatFamily !== undefined) return true;
+  return artifactFormatFamilyForPath(artifact.path) === canonicalArtifactFormatFamily(expectedArtifactFormat);
 }
 
 function artifactKindMatchesExpected(actual: string, expected: string): boolean {

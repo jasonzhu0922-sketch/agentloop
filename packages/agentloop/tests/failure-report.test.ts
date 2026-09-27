@@ -168,12 +168,15 @@ test("failed Run persists its report in both snapshot and Outcome, never a deliv
     assert.equal(run.status, "failed");
     assert.equal(reports, 1);
     assert.match(run.output ?? "", /任务未完成/);
+    assert.match(run.output ?? "", /未发布正式交付结果/);
+    assert.match(run.output ?? "", /阶段性说明（未作为最终交付）/);
     assert.match(run.output ?? "", /已取得部分资料/);
     const refreshed = await runs.get(owner.user.id, run.id);
     assert.equal(refreshed.output, run.output);
-    const outcome = await database.prepare("SELECT status, output, reason_code FROM run_outcomes WHERE run_id = ?").get(run.id) as Record<string, unknown>;
+    const outcome = await database.prepare("SELECT status, output, delivery_receipt_json, reason_code FROM run_outcomes WHERE run_id = ?").get(run.id) as Record<string, unknown>;
     assert.equal(outcome.status, "failed");
     assert.equal(outcome.output, run.output);
+    assert.equal(outcome.delivery_receipt_json, null);
     assert.equal(outcome.reason_code, "STEP_NOT_COMPLETED");
     const events = await runs.events(owner.user.id, run.id);
     assert.equal(events.find((event) => event.type === "run.failed")?.data.output, run.output);

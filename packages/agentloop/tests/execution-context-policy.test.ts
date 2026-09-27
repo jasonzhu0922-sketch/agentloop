@@ -38,6 +38,37 @@ test("source semantics stay out of the global Runtime progress policy", () => {
   assert.match(policy?.repairDirective ?? "", /source-evidence step/);
 });
 
+test("artifact progress policy retains the admitted concrete format beside its semantic kind", () => {
+  const step = planStep({
+    id: "merge-pdfs",
+    kind: "leaf",
+    position: 0,
+    objective: "Merge the uploaded PDFs.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+    evidenceContract: {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_acceptance"],
+      caveatPolicy: "none",
+    },
+    successCriteria: [],
+    status: "pending",
+  });
+
+  const policy = buildStepToolProgressPolicy({
+    step,
+    requiresFileOutput: true,
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", artifactKind: "document" }),
+    expectedArtifactFormat: "pdf",
+  });
+
+  assert.equal(policy?.expectedArtifactKind, "document");
+  assert.equal(policy?.expectedArtifactFormat, "pdf");
+});
+
 test("execution context binds dependency evidence before downstream reacquisition", () => {
   const inspectStep = planStep({
     id: "inspect_data",

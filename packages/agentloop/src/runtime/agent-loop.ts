@@ -45,6 +45,7 @@ import {
   evaluateRuntimeToolProgress,
   initialRuntimeToolProgressState,
   candidateRejectionProgressHint,
+  artifactMatchesExpectedTarget,
   type RuntimeToolProgressPolicy,
 } from "./tool-progress-policy.ts";
 import {
@@ -223,7 +224,11 @@ function automaticArtifactAcceptanceCall(input: {
     || state.workProduct.status !== "deliverable_available"
     || !input.availableToolNames.includes("verify_artifact_acceptance")
   ) return undefined;
-  const artifact = state.workProduct.deliverableArtifacts.at(-1);
+  const artifact = state.workProduct.deliverableArtifacts.findLast((candidate) => artifactMatchesExpectedTarget(
+    candidate,
+    state.workProduct.expectedArtifactKind,
+    state.workProduct.expectedArtifactFormat,
+  ));
   if (artifact === undefined) return undefined;
   const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
   if (input.attemptedArtifactKeys.has(artifactKey)) return undefined;
@@ -364,6 +369,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       : options.initialMessages),
   ];
   const toolEvidence: AgentLoopToolEvidence[] = [...(options.initialToolEvidence ?? [])];
+  const buildDeliveryCandidate = (
+    input: Omit<Parameters<typeof buildRuntimeDeliveryCandidate>[0], "expectedArtifactKind" | "expectedArtifactFormat">,
+  ): RuntimeDeliveryCandidate => buildRuntimeDeliveryCandidate({
+    ...input,
+    ...(options.progressPolicy?.expectedArtifactKind === undefined
+      ? {}
+      : { expectedArtifactKind: options.progressPolicy.expectedArtifactKind }),
+    ...(options.progressPolicy?.expectedArtifactFormat === undefined
+      ? {}
+      : { expectedArtifactFormat: options.progressPolicy.expectedArtifactFormat }),
+  });
   const availableSkillList = options.availableSkills ?? [];
   const availableSkills = buildSkillReferenceMap(availableSkillList);
   const activatedSkillNames = new Set(
@@ -464,8 +480,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     throwIfAborted(options.signal);
     const missing = evaluation.failedBoundary?.missingEvidenceKinds ?? [];
     const notice = [
-      "任务未完成，以下仅为阶段性结果，未通过完整验收。",
+      "任务未完成，Runtime 未发布正式交付结果。",
       ...(missing.length === 0 ? [] : [`尚未确认的验收项：${missing.join("、")}。缺少证据不等于相关操作一定未执行。`]),
+      "下述材料仅记录已观察到的阶段性工作；其中出现的文件、路径或验证描述均不构成正式交付。",
     ].join("\n");
     await emit({ type: "failure_report.started", data: { step, missingEvidenceKinds: missing } });
     const reportSignal = AbortSignal.any([...(options.signal === undefined ? [] : [options.signal]), AbortSignal.timeout(30_000)]);
@@ -477,7 +494,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         "Use existing canonical evidence only. No tools or further execution are allowed.",
         "Write a standalone user-facing report in the user's language: useful supported partial results, concrete limitations and their impact, and what remains to be done.",
         "Distinguish missing evidence/receipt from an operation that actually failed. Keep source uncertainty explicit.",
-        "Omit unsupported conclusions. Do not claim completion, successful validation, delivery, or a usable artifact when those facts were not verified. Do not present unverified artifact links as deliverables.",
+        "Omit unsupported conclusions. Do not claim completion, successful validation, delivery, or a usable artifact when those facts were not verified. Refer to any observed file only as a stage artifact, never as a delivered artifact.",
         "If no useful result is supported, say what was attempted and why a reliable result cannot yet be provided. Never invent a partial answer merely to fill the report.",
         "Do not expose internal protocol markup or tool calls. Do not claim that another agent will automatically finish the work.",
         `Assessment feedback: ${evaluation.feedback}`,
@@ -509,7 +526,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         || isTextToolInvocation(response.content) || isInternalEvidenceMarkupCandidate(response.content)) {
         throw new AppError("MODEL_ERROR", "The final failure report was not valid user-facing text", 502);
       }
-      const report = `${notice}\n\n${response.content.trim()}`;
+      const report = `${notice}\n\n## 阶段性说明（未作为最终交付）\n\n${response.content.trim()}`;
       await emit({ type: "failure_report.generated", data: { step, output: report } });
       return report;
     } catch {
@@ -569,7 +586,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const evaluation = await evaluateCandidate(input.step, {
       output: input.output,
       stepSemanticFrame: input.stepSemanticFrame,
-      deliveryCandidate: buildRuntimeDeliveryCandidate({
+      deliveryCandidate: buildDeliveryCandidate({
         output: input.output,
         stepSemanticFrame: input.stepSemanticFrame,
         toolEvidence,
@@ -592,7 +609,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "loop.completed", data: { step: input.step, output: input.output } });
       return {
         output: input.output,
-        deliveryCandidate: buildRuntimeDeliveryCandidate({
+        deliveryCandidate: buildDeliveryCandidate({
           output: input.output,
           stepSemanticFrame: input.stepSemanticFrame,
           toolEvidence,
@@ -607,7 +624,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (evaluation.deferredValidation === true) {
       const output = deferredValidationOutput(input.output, evaluation.feedback);
       const completionCaveat = { reason: "deferred_validation" as const, feedback: evaluation.feedback };
-      const deliveryCandidate = buildRuntimeDeliveryCandidate({
+      const deliveryCandidate = buildDeliveryCandidate({
         output,
         stepSemanticFrame: input.stepSemanticFrame,
         toolEvidence,
@@ -632,7 +649,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (evaluation.evidenceBoundary === true) {
       const output = evidenceBoundaryOutput(input.output, evaluation.feedback);
       const completionCaveat = { reason: "evidence_boundary" as const, feedback: evaluation.feedback };
-      const deliveryCandidate = buildRuntimeDeliveryCandidate({
+      const deliveryCandidate = buildDeliveryCandidate({
         output,
         stepSemanticFrame: input.stepSemanticFrame,
         toolEvidence,
@@ -684,7 +701,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       const output = repairLimitCompletionOutput(input.output, candidateRepairAssessmentLimit);
       const completionCaveat = { reason: "repair_limit" as const, feedback: evaluation.feedback };
-      const deliveryCandidate = buildRuntimeDeliveryCandidate({
+      const deliveryCandidate = buildDeliveryCandidate({
         output,
         stepSemanticFrame: input.stepSemanticFrame,
         toolEvidence,
@@ -1236,7 +1253,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       const evaluation = await evaluateCandidate(step, {
         output: response.content,
         stepSemanticFrame: options.stepSemanticFrame,
-        deliveryCandidate: buildRuntimeDeliveryCandidate({
+        deliveryCandidate: buildDeliveryCandidate({
           output: response.content,
           stepSemanticFrame: options.stepSemanticFrame,
           toolEvidence,
@@ -1258,7 +1275,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output: response.content } });
         return {
           output: response.content,
-          deliveryCandidate: buildRuntimeDeliveryCandidate({
+          deliveryCandidate: buildDeliveryCandidate({
             output: response.content,
             stepSemanticFrame: options.stepSemanticFrame,
             toolEvidence,
@@ -1279,7 +1296,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output, deferredValidation: true, completionCaveat } });
         return {
           output,
-          deliveryCandidate: buildRuntimeDeliveryCandidate({
+          deliveryCandidate: buildDeliveryCandidate({
             output,
             stepSemanticFrame: options.stepSemanticFrame,
             toolEvidence,
@@ -1302,7 +1319,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
         return {
           output,
-          deliveryCandidate: buildRuntimeDeliveryCandidate({
+          deliveryCandidate: buildDeliveryCandidate({
             output,
             stepSemanticFrame: options.stepSemanticFrame,
             toolEvidence,
@@ -1359,7 +1376,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         await emit({ type: "loop.completed", data: { step, output, completionCaveat } });
         return {
           output,
-          deliveryCandidate: buildRuntimeDeliveryCandidate({
+          deliveryCandidate: buildDeliveryCandidate({
             output,
             stepSemanticFrame: options.stepSemanticFrame,
             toolEvidence,

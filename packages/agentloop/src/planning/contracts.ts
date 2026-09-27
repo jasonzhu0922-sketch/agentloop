@@ -626,6 +626,8 @@ export interface StepAssessmentInput {
   readonly step: PlanStep;
   /** Runtime-derived target format for a workspace-artifact Step. */
   readonly expectedArtifactKind?: string;
+  /** Exact format resolved from the admitted task semantics. */
+  readonly expectedArtifactFormat?: string;
   readonly skills: readonly PrivateSkill[];
   readonly evidence: StepEvidence;
   readonly modelEvidence?: StepEvidence;

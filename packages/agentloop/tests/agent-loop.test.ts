@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
+import { buildRuntimeDeliveryCandidate } from "../src/runtime/delivery-candidate.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { formatPracticePromptAugmentation } from "../src/runtime/dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog } from "../src/runtime/practice-profiles.ts";
@@ -821,6 +822,153 @@ test("automatic artifact acceptance derives a Word profile from the final path i
     artifactPath: "risk-report.docx",
     reason: "deliverable_available_missing_artifact_acceptance",
   });
+});
+
+test("automatic artifact acceptance skips command stdout when the admitted target is PDF", async () => {
+  let verifyInput: unknown;
+  const commandTool: RuntimeTool<unknown> = {
+    name: "computer_run_command",
+    description: "Merge source PDFs",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      path: ".agentloop/tool-results/merge/stdout.txt",
+      bytes: 24,
+      sha256: "stdout-sha",
+      artifactKind: "generic_file",
+    }),
+  };
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write merged PDF",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      path: "outputs/merged.pdf",
+      bytes: 13649,
+      sha256: "pdf-sha",
+      artifactKind: "pdf",
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path: "outputs/merged.pdf", artifactKind: "pdf", bytes: 13649, sha256: "pdf-sha" },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify merged PDF",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      verifyInput = input;
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "outputs/merged.pdf", kind: "pdf", bytes: 13649, sha256: "pdf-sha" },
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      };
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            { id: "merge-command", name: "computer_run_command", arguments: { command: "merge" } },
+            { id: "write-pdf", name: "computer_write_file", arguments: { path: "outputs/merged.pdf" } },
+          ],
+        };
+      }
+      throw new Error("Runtime should select and verify the PDF from artifact receipts");
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_run_command", "computer_write_file", "verify_artifact_acceptance"]);
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Merge PDFs and verify the final PDF.",
+    input: "merge PDFs",
+    model,
+    tools: new ToolRegistry([commandTool, writeTool, verifyTool]),
+    grant,
+    maxSteps: 8,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      { expectedArtifactKind: "document", expectedArtifactFormat: "pdf" },
+    ),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /outputs\/merged\.pdf/);
+  assert.deepEqual(verifyInput, { artifactPath: "outputs/merged.pdf" });
+  const scheduled = events.find((event) => event.type === "runtime.artifact_acceptance.scheduled");
+  assert.equal(scheduled?.data.artifactPath, "outputs/merged.pdf");
+});
+
+test("delivery candidates publish only the latest receipt matching the admitted artifact target", () => {
+  const stdoutReceipt = {
+    toolCallId: "verify-stdout",
+    toolName: "verify_artifact_acceptance",
+    isError: false,
+    result: JSON.stringify({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifact: { path: ".agentloop/tool-results/merge/stdout.txt", kind: "generic_file" },
+      verdict: "accepted",
+      evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+    }),
+  };
+  const pdfReceipt = {
+    toolCallId: "verify-pdf",
+    toolName: "verify_artifact_acceptance",
+    isError: false,
+    result: JSON.stringify({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifact: { path: "outputs/merged.pdf", kind: "pdf" },
+      verdict: "caveated",
+      evidenceKinds: {
+        satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+        caveated: ["explicit_caveats"],
+        failed: [],
+      },
+    }),
+  };
+
+  const candidate = buildRuntimeDeliveryCandidate({
+    output: "Merged PDF is ready.",
+    expectedArtifactKind: "document",
+    expectedArtifactFormat: "pdf",
+    toolEvidence: [stdoutReceipt, pdfReceipt],
+  });
+  assert.equal(candidate.deliveryReceipt?.artifact.path, "outputs/merged.pdf");
+  assert.deepEqual(candidate.deliveryReceipt?.sourceToolCallId, "verify-pdf");
+  assert.equal(candidate.evidenceKinds.satisfied.includes("delivery_receipt"), true);
+
+  const noTargetReceipt = buildRuntimeDeliveryCandidate({
+    output: "A process file exists.",
+    expectedArtifactKind: "document",
+    expectedArtifactFormat: "pdf",
+    toolEvidence: [stdoutReceipt],
+  });
+  assert.equal(noTargetReceipt.deliveryReceipt, undefined);
+  assert.equal(noTargetReceipt.evidenceKinds.satisfied.includes("delivery_receipt"), false);
 });
 
 test("Runtime returns control for a concrete acceptance diagnostic so the model can repair", async () => {
