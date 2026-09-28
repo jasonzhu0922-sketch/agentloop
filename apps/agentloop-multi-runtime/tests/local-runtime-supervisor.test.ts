@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { LocalDirectoryScopeStore } from "../local-agent-runtime/src/local-directory-scope-store.ts";
-import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/local-runtime-supervisor.ts";
+import { LocalDirectoryScopeStore } from "../local-agent-runtime/src/persistence/directory-scope-store.ts";
+import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/application/runtime-supervisor.ts";
 import { persistSessions } from "../web/session-persistence.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/local-runtime-preference.js";
 import { submissionFailureMessage } from "../web/submission-failure-message.js";
@@ -201,11 +201,14 @@ test("revoking a directory removes it from the local authorization catalog", asy
 });
 
 test("web keeps strict_local recovery support while normal placement uses the Local Runtime toggle", async () => {
-  const [app, index] = await Promise.all([
+  const [app, index, agent, service, factory, localAgentClient] = await Promise.all([
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/transport/http-server.ts", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/application/local-agent-service.ts", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/application/local-runtime-factory.ts", import.meta.url), "utf8"),
+    readFile(new URL("../web/local-agent-client.js", import.meta.url), "utf8"),
   ]);
-  const agent = await readFile(new URL("../local-agent-runtime/src/local-agent-server.ts", import.meta.url), "utf8");
   assert.match(app, /\/v1\/strict-local-runs/);
   assert.match(app, /async function localUploadSource\(file, conversationId, runtimeId\)/);
   assert.match(app, /function defaultUploadStoragePath\(sharedStoragePath\)/);
@@ -213,8 +216,8 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(app, /dataPlane: "local_runtime"/);
   assert.match(app, /\/v1\/directory-scopes\/pick/);
   assert.match(app, /function renderLocalScopes\(\)/);
-  assert.match(app, /saveLocalRuntimePreference\(localStorage, authenticatedUser\?\.id, localDevice\?\.id, isLocalExecution\(\)\)/);
-  assert.match(app, /const preference = loadLocalRuntimePreference\(localStorage, authenticatedUser\?\.id, localDevice\?\.id\)/);
+  assert.match(app, /saveLocalRuntimePreference\(localStorage, sessionState\.user\?\.id, localDevice\?\.id, isLocalExecution\(\)\)/);
+  assert.match(app, /const preference = loadLocalRuntimePreference\(localStorage, sessionState\.user\?\.id, localDevice\?\.id\)/);
   assert.match(app, /localToggle\.checked = preference === true/, "an uncached device must not inherit another device's checked state");
   assert.match(app, /Losing the live pairing only suspends the UI/);
   assert.match(app, /data-revoke-local-scope/);
@@ -234,7 +237,7 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(app, /dataPolicy: \{ mode: executionTarget \}/);
   assert.match(app, /localAgentRouterPath/);
   assert.match(app, /async function localAgentFetch\(path, init = \{\}\)/);
-  assert.match(app, /body\.error !== "local_session_invalid" && body\.error !== "local_session_required"/);
+  assert.match(localAgentClient, /body\.error !== "local_session_invalid" && body\.error !== "local_session_required"/);
   assert.match(app, /await refreshLocalSessionOnce\(\)/);
   assert.match(app, /localRuntimes\.find\(\(runtime\) => runtime\.status === "ready" && runtime\.isDefault\)/, "the initial picker choice must prefer the persistent default Runtime");
   assert.match(app, /\$\("local-runtime-picker"\)\.hidden = !paired/, "a paired ready device exposes its Runtime selector even before local execution is enabled");
@@ -242,17 +245,18 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(app, /const response = await agentAwareFetch\(endpoint\(\), \{ headers: headers\(\) \}\)/);
   assert.match(app, /if \(assistant\.assignmentId\) \{[\s\S]*?\/v1\/assignments\/\$\{encodeURIComponent\(assistant\.assignmentId\)\}\/artifacts/);
   assert.match(app, /`strict_local` has no Assignment and is the sole loopback-only path/);
-  assert.match(agent, /agent\.runtimes\.lifecycle/);
+  assert.match(service, /agent\.runtimes\.lifecycle/);
   assert.match(agent, /url\.pathname === "\/v1\/uploads"/);
-  assert.match(agent, /runtime\.runs\.uploadSource/);
-  assert.match(agent, /sourceIds: stringArray\(value\.localUploadedSourceIds/);
-  assert.match(agent, /sharedStorageRoot/);
-  assert.match(agent, /uploadStorageRoot/);
-  assert.match(agent, /agent\.config\.uploadStorage\.pick/);
-  assert.match(agent, /runEventLogSink: \(line\) => input\.runEventLogSink!\(definition, line\)/, "every Local Runtime must forward RunService events to the device Agent sink");
-  assert.match(agent, /join\(dirname\(input\.databasePath\), "uploads"\)/);
-  assert.match(agent, /json\(response, 200, await agentStatus\(/, "health must serialize the resolved control-plane status, not a Promise as {}");
-  assert.match(agent, /mergeSkillDirectories\(packagedSkillDirectories\?\.length \? packagedSkillDirectories : bundledSkillDirectories\(\), custom\)/);
+  assert.match(service, /runtime\.runs\.uploadSource/);
+  assert.match(agent, /localUploadedSourceIds: stringArray\(value\.localUploadedSourceIds/);
+  assert.match(service, /sharedStorageRoot/);
+  assert.match(service, /uploadStorageRoot/);
+  assert.match(service, /agent\.config\.uploadStorage\.pick/);
+  assert.match(factory, /runEventLogSink: \(line\) => this\.input\.runEventLogSink!\(definition, line\)/, "every Local Runtime must forward RunService events to the device Agent sink");
+  assert.match(service, /join\(dirname\(input\.databasePath\), "uploads"\)/);
+  assert.match(agent, /json\(response, 200, await service\.health\(\)\)/, "health must serialize the resolved application status, not a Promise as {}");
+  assert.match(factory, /mergeSkillDirectories\(packaged\?\.length \? packaged : bundledSkillDirectories\(\), custom\)/);
+  assert.doesNotMatch(agent, /@zhujun\/agentloop|readFile\(|writeFile\(|LocalRuntimeSupervisor/, "HTTP transport must not own Runtime construction or device state persistence");
   assert.doesNotMatch(agent, /skills\/(install|update|rollback)/);
 });
 

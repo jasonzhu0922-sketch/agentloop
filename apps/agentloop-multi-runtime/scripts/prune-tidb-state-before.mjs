@@ -1,4 +1,4 @@
-import { openStateDatabase } from "../src/storage/state-database.ts";
+import { openStateDatabase } from "../src/shared/persistence/state-database.ts";
 
 const before = argumentValue("--before");
 if (before === undefined) throw new Error("Usage: --before=<ISO-8601 timestamp> [--apply --confirm=<same timestamp>]");

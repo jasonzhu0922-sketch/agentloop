@@ -2,9 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openStateDatabase } from "../src/storage/state-database.ts";
-import { migrateRouterState } from "../src/storage/router-state-migrations.ts";
-import { migrateRuntimeState } from "../src/storage/runtime-state-migrations.ts";
+import { openStateDatabase } from "../src/shared/persistence/state-database.ts";
+import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
+import { migrateRuntimeState } from "../src/runtime-host/persistence/state-migrations.ts";
 
 const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sourcePath = resolve(appRoot, argumentValue("--source") ?? "./data/local/agentloop.db");

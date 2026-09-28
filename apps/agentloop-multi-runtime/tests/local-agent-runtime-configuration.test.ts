@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "../local-agent-runtime/src/runtime-configuration.ts";
+import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "../local-agent-runtime/src/config/runtime-configuration.ts";
 
 test("Local Agent uses its top-level source configuration in development and device storage when packaged", () => {
   const configuration = localAgentRuntimeConfiguration("/application", "/device-data", {});

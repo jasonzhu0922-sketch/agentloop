@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { localRuntimeTerminalLogLine } from "../local-agent-runtime/src/local-runtime-terminal-log.ts";
+import { localRuntimeTerminalLogLine } from "../local-agent-runtime/src/observability/runtime-terminal-log.ts";
 
 test("Local Runtime terminal logs retain the concrete child Runtime identity", () => {
   assert.equal(

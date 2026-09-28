@@ -5,13 +5,13 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { AppDatabase } from "@zhujun/agentloop";
-import { IdentityService } from "../src/auth/identity-service.ts";
-import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { RuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
-import { SqlDeviceRepository } from "../src/devices/device-service.ts";
-import { DeviceRuntimeConnectionRegistry } from "../src/devices/runtime-connection-registry.ts";
-import type { RuntimeDispatchEnvelope } from "../src/domain/contracts.ts";
+import { IdentityService } from "../src/router/identity/service.ts";
+import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { RuntimeCapacityError } from "../src/router/persistence/control-plane-store.ts";
+import { SqlDeviceRepository } from "../src/router/devices/device-service.ts";
+import { DeviceRuntimeConnectionRegistry } from "../src/router/devices/runtime-connection-registry.ts";
+import type { RuntimeDispatchEnvelope } from "../src/shared/contracts.ts";
 
 test("Router dispatches a local Assignment through the authenticated device connection exactly once", async () => {
   const database = new AppDatabase(":memory:");

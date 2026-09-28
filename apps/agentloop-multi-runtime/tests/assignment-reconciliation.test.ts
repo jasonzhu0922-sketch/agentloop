@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { startAssignmentReconciler } from "../src/control-plane/assignment-reconciler.ts";
-import { streamEvents } from "../src/http/router-http.ts";
-import type { RuntimeRunStatus } from "../src/domain/contracts.ts";
+import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { startAssignmentReconciler } from "../src/router/application/assignment-reconciler.ts";
+import { streamEvents } from "../src/router/transport/http.ts";
+import type { RuntimeRunStatus } from "../src/shared/contracts.ts";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 async function fixture(getRun: (id: string) => Promise<RuntimeRunStatus>) {

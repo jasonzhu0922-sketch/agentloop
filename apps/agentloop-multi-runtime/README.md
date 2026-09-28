@@ -43,19 +43,49 @@ Web 的“一致”是交互和可追溯性的一致，而不是把设备数据�
 ## 代码分层
 
 ```text
+web/                       唯一业务 Web 界面与同源 Router 代理
+├── router-client.js       Router URL、Bearer 认证与 JSON 请求适配
+├── local-agent-client.js  Loopback Agent 会话头、续期与 401 重试
+├── session-state.js       登录身份与 Local Agent 会话凭据状态
+├── local-runtime-state.js Local Agent/设备/Runtime 的浏览器状态
+├── local-runtime-view-model.js 本机 Runtime 控件的纯视图投影
+├── run-state.js            运行中任务、上传、取消与实时刷新协调状态
+├── *-projection.js        Run/事件/产物的纯投影与展示数据转换
+└── app.js                 页面状态协调、DOM 事件绑定与渲染
 src/
-├── domain/         唯一允许跨 Router/Host 的版本化协议
-├── config/         无角色语义的部署配置解析
-├── storage/        无角色语义的共享状态库适配
-├── control-plane/  Router 专属：调度、Assignment 和控制面持久化
-├── attachments/    Router 专属：附件元数据和受控资源引用
-├── runtime/        Host 专属：Run 执行、资源导入和 dispatch 幂等
-├── http/           router-http 与 runtime-host-http 两套受控传输适配
-└── entrypoints/    三个角色各自的进程装配入口
-config/             本应用的 Runtime/Provider 配置模板
+├── shared/               Router 与 Cloud Runtime Host 共用的中立契约、配置与连接适配
+├── router/
+│   ├── transport/        用户、Host 与设备的 Router HTTP 接入
+│   ├── application/      Assignment、任务提交构造、调度、状态观察与投影
+│   ├── persistence/      Router 专属 schema、迁移与 Repository
+│   ├── identity/         云端用户身份与会话
+│   ├── devices/          Local Agent 注册和反向连接
+│   ├── attachments/      云端附件与受控资源引用
+│   └── artifacts/        云端产物目录与完整性收据
+└── runtime-host/
+    ├── transport/        仅 Router 信任的 Host HTTP 接入
+    ├── application/      dispatch 适配、容量准入与运行前检查
+    ├── persistence/      Runtime kernel 迁移与 Host dispatch ledger
+    └── infrastructure/   Router 受控资源导入
+local-agent-runtime/
+└── src/
+    ├── config/           设备启动和集成配置
+    ├── transport/        loopback HTTP 协议解码、响应与错误映射
+    ├── application/      Agent 用例、Runtime 工厂、Supervisor 与生命周期
+    ├── persistence/      设备状态、目录授权等设备 SQLite/文件状态
+    ├── infrastructure/   Router 反向连接与原生目录选择器
+    └── observability/    多 Local Runtime 的终端日志
+config/                   本应用的 Runtime/Provider 配置模板
 ```
 
-各层通过 `domain/contracts.ts` 交换中立协议类型；HTTP 层不承载调度规则，入口层只负责依赖装配。测试会递归检查依赖闭包：Router 不得引入 `runtime/`，Host 不得引入 `control-plane/` 或 `router-http`。新增跨角色能力必须先进入 `domain/` 的版本化协议，不能以进程内 import 绕过边界。
+Local Runtime Agent 没有独立的业务 Web 页面。它是设备侧后台服务和托盘程序：HTTP
+协议、Runtime 生命周期、目录授权、设备本地 Run 与文件状态都在
+`local-agent-runtime/src/`；托盘只负责启动、停止、重连提示和协议唤起。用户可见的
+Runtime 选择、目录授权操作、执行状态和产物展示全部属于 `web/`，通过
+`local-agent-client.js` 或 Router 的受控设备接口访问 Agent。这样不会形成第二套页面、
+第二套身份状态或第二套业务路由。
+
+`src/shared/contracts.ts` 是 Router 与 Cloud Runtime Host 唯一允许共享的版本化运行协议；HTTP 层只做协议解码、响应和错误映射，任务身份绑定、数据面校验和调度规则属于 application，`main.ts` 只负责依赖装配。测试会递归检查依赖闭包：Router 不得引入 `runtime-host/`，Host 不得引入 `router/`，Local Agent 不得依赖任一云端角色。新增跨角色能力必须先进入 `shared/` 的中立协议，不能以进程内 import 绕过边界。
 
 ```bash
 npm run typecheck --workspace agentloop-multi-runtime
@@ -97,7 +127,7 @@ SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应�
 
 Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包，也不复用 Router/云端 Host 的 `.env`。开发模式从 `local-agent-runtime/.env` 与 `local-agent-runtime/config/llm-providers.json` 读取；已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime\`。该 `.env` 是 Local Agent 唯一的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
 
-Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `local-agent-main.ts` 为唯一入口。
+Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
 ### TiDB role databases
 

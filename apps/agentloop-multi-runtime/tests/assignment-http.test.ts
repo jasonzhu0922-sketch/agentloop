@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { startAssignmentReconciler } from "../src/control-plane/assignment-reconciler.ts";
-import { createRouterHttpServer } from "../src/http/router-http.ts";
-import { IdentityService } from "../src/auth/identity-service.ts";
+import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { startAssignmentReconciler } from "../src/router/application/assignment-reconciler.ts";
+import { createRouterHttpServer } from "../src/router/transport/http.ts";
+import { IdentityService } from "../src/router/identity/service.ts";
 import { observeAssignment } from "../web/assignment-stream.js";
 import { projectAssistantEvent } from "../web/assistant-event-projection.js";
 

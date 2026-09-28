@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { FileAttachmentBroker } from "../src/attachments/attachment-broker.ts";
-import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
-import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/control-plane/router.ts";
-import { AgentLoopRuntimeHost } from "../src/runtime/runtime-host.ts";
+import { FileAttachmentBroker } from "../src/router/attachments/attachment-broker.ts";
+import { SharedFilesystemAttachmentBroker } from "../src/router/attachments/shared-filesystem-attachment-broker.ts";
+import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/router/application/router.ts";
+import { AgentLoopRuntimeHost } from "../src/runtime-host/application/runtime-host.ts";
 import {
   assertRequiredRuntimeCommands,
   assertRequiredRuntimeNodeModules,
@@ -18,8 +18,8 @@ import {
   requiredRuntimeNodeModules,
   requiredRuntimePythonModules,
   runtimeCommandProbeArguments,
-} from "../src/runtime/runtime-command-preflight.ts";
-import { HttpResourceImporter } from "../src/runtime/http-resource-importer.ts";
+} from "../src/runtime-host/application/runtime-command-preflight.ts";
+import { HttpResourceImporter } from "../src/runtime-host/infrastructure/http-resource-importer.ts";
 import {
   mergeSkillDirectories,
   loadSkillDirectoriesConfig,
@@ -31,20 +31,20 @@ import {
   parseStepExecutionStrategyProfileConfig,
   resolveSkillDirectoriesConfig,
   webToolsOptionsFromEnvironment,
-} from "../src/config/config.ts";
-import { assertRuntimeDispatchEnvelope } from "../src/runtime/runtime-host.ts";
-import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, webOriginMatches } from "../src/http/router-http.ts";
+} from "../src/shared/config.ts";
+import { assertRuntimeDispatchEnvelope } from "../src/runtime-host/application/runtime-host.ts";
+import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, webOriginMatches } from "../src/router/transport/http.ts";
 import { cancellationTarget, persistedCancellableAssistant } from "../web/cancellation-target.js";
 import { EventEmitter } from "node:events";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore, ConversationDeleteConflictError, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
-import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
-import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/storage/state-database.ts";
-import { SchemaMigrationError } from "../src/storage/schema-migration-ledger.ts";
-import { migrateRouterState } from "../src/storage/router-state-migrations.ts";
-import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/domain/contracts.ts";
+import { ControlPlaneStore, ConversationDeleteConflictError, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/router/persistence/control-plane-store.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
+import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
+import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/shared/persistence/state-database.ts";
+import { SchemaMigrationError } from "../src/shared/persistence/schema-migration-ledger.ts";
+import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
+import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/shared/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
@@ -471,12 +471,12 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
   assert.match(app, /const CONVERSATION_PAGE_SIZE = 30/);
-  assert.match(app, /let recoveredSessions = \[\];\s*let sessions = \[\]/);
-  assert.match(app, /recoveredSessions = sortSessions\(loadSessions\(sessionKey\(user\.id\)\)\)/);
+  assert.match(app, /const conversationState = createConversationState\(CONVERSATION_PAGE_SIZE\)/);
+  assert.match(app, /conversationState\.recovered = sortSessions\(loadSessions\(sessionKey\(user\.id\)\)\)/);
   assert.match(app, /mergeConversationSummaries\(body\.conversations, reset\)/);
-  assert.match(app, /if \(reset && sessions\.length === 0\)/);
+  assert.match(app, /if \(reset && conversationState\.sessions\.length === 0\)/);
   assert.match(app, /\/v1\/conversations\?limit=\$\{CONVERSATION_PAGE_SIZE\}&offset=\$\{offset\}/);
-  assert.match(app, /conversationVisibleLimit \+= CONVERSATION_PAGE_SIZE/);
+  assert.match(app, /conversationState\.visibleLimit \+= CONVERSATION_PAGE_SIZE/);
   assert.match(app, /加载更多对话/);
   assert.match(app, /\/v1\/conversations\/\$\{encodeURIComponent\(conversation\.id\)\}/);
   assert.match(app, /conversationMessagesFromTurns\(body\.turns\)/);
@@ -501,10 +501,12 @@ test("Runtime Host forwards deployment search endpoint and credentials to generi
 });
 
 test("Router and Runtime Host remain isolated deployment dependency closures", async () => {
-  const routerFiles = await localModuleClosure(fileURLToPath(new URL("../src/entrypoints/router-main.ts", import.meta.url)));
-  const hostFiles = await localModuleClosure(fileURLToPath(new URL("../src/entrypoints/runtime-host-main.ts", import.meta.url)));
-  assert.equal([...routerFiles].some((path) => path.includes("/src/runtime/")), false, "Router must not import Runtime Host execution");
-  assert.equal([...hostFiles].some((path) => path.includes("/src/control-plane/") || path.endsWith("/src/http/router-http.ts")), false, "Runtime Host must not import Router control-plane code");
+  const routerFiles = await localModuleClosure(fileURLToPath(new URL("../src/router/main.ts", import.meta.url)));
+  const hostFiles = await localModuleClosure(fileURLToPath(new URL("../src/runtime-host/main.ts", import.meta.url)));
+  const localAgentFiles = await localModuleClosure(fileURLToPath(new URL("../local-agent-runtime/src/main.ts", import.meta.url)));
+  assert.equal([...routerFiles].some((path) => path.includes("/src/runtime-host/")), false, "Router must not import Runtime Host execution");
+  assert.equal([...hostFiles].some((path) => path.includes("/src/router/")), false, "Runtime Host must not import Router code");
+  assert.equal([...localAgentFiles].some((path) => path.includes("/src/router/") || path.includes("/src/runtime-host/")), false, "Local Runtime Agent must use only shared contracts, never cloud role implementations");
 });
 
 test("local launcher gives Router and Runtime Hosts the same shared workspace mount", async () => {
@@ -874,10 +876,10 @@ test("conversation message copy actions are delegated for every message role", a
 
 test("Multi Runtime proxies full tool arguments and command output from the owning Host Run", async () => {
   const [routerHttp, hostHttp, persistentRouter, runtimeHost, app] = await Promise.all([
-    readFile(new URL("../src/http/router-http.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/http/runtime-host-http.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/control-plane/persistent-router.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/runtime/runtime-host.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/transport/http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/transport/http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/application/persistent-router.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/application/runtime-host.ts", import.meta.url), "utf8"),
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
   ]);
   for (const source of [routerHttp, hostHttp]) {
@@ -1254,12 +1256,12 @@ test("Web keeps Runtime directory authority above the composer and snapshots upl
 test("Web renews the Local Runtime capability before it expires and rotates it when login identity changes", async () => {
   const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
   assert.match(app, /const LOCAL_SESSION_REFRESH_AHEAD_MS = 5 \* 60 \* 1000;/);
-  assert.match(app, /let localSessionExpiresAt = 0;/);
+  assert.match(app, /const sessionState = createSessionState/);
   assert.match(app, /function clearLocalSession\(\)/);
   assert.match(app, /function scheduleLocalSessionRefresh\(deviceId, userId\)/);
-  assert.match(app, /if \(!localSessionToken \|\| localSessionExpiresAt - Date\.now\(\) <= LOCAL_SESSION_REFRESH_AHEAD_MS\) await refreshLocalSessionOnce\(\);/);
-  assert.match(app, /if \(authenticatedUser\?\.id !== user\.id\) \{[\s\S]*?clearLocalSession\(\);/);
-  assert.match(app, /if \(authenticatedUser\?\.id !== userId \|\| localDevice\?\.id !== deviceId\) throw new Error\("本机 Runtime 登录身份已更新，请重试"\);/);
+  assert.match(app, /if \(!sessionState\.localSessionToken \|\| sessionState\.localSessionExpiresAt - Date\.now\(\) <= LOCAL_SESSION_REFRESH_AHEAD_MS\) await refreshLocalSessionOnce\(\);/);
+  assert.match(app, /if \(sessionState\.user\?\.id !== user\.id\) \{[\s\S]*?clearLocalSession\(\);/);
+  assert.match(app, /if \(sessionState\.user\?\.id !== userId \|\| localDevice\?\.id !== deviceId\) throw new Error\("本机 Runtime 登录身份已更新，请重试"\);/);
 });
 
 test("Web persists question and terminal-response timing for the conversation stream", async () => {
