@@ -1,12 +1,12 @@
 {
   "defaultProvider": "my-provider",
-  "defaultModelKey": "deepseek-v4-pro",
+  "defaultModelKey": "deepseek-v4-flash",
   "providers": {
     "my-provider": {
       "kind": "openai-compatible",
       "baseUrl": "https://api.deepseek.com/v1",
       "apiKeyEnv": "MY_LLM_API_KEY",
-      "defaultModel": "deepseek-v4-pro",
+      "defaultModel": "deepseek-v4-flash",
       "contextWindowTokens": 128000,
       "maxOutputTokens": 8192,
       "timeoutMs": 120000,
@@ -33,12 +33,6 @@
     }
   },
   "models": {
-    "deepseek-v4-pro": {
-      "providerKey": "my-provider",
-      "providerModel": "deepseek-v4-pro",
-      "displayName": "DeepSeek v4 Pro",
-      "maxOutputTokens": 16384
-    },
     "deepseek-v4-flash": {
       "providerKey": "my-provider",
       "providerModel": "deepseek-v4-flash",
