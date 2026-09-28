@@ -7,7 +7,7 @@
       "baseUrl": "http://10.251.26.100:3000/v1",
       "protocol": "chat-completions",
       "apiKeyEnv": "MY_LLM_API_KEY",
-      "defaultModel": "deepseek-v4-pro",
+      "defaultModel": "deepseek-v4-flash",
       "contextWindowTokens": 128000,
       "maxOutputTokens": 16384,
       "timeoutMs": 300000,
@@ -31,15 +31,6 @@
     }
   },
   "models": {
-    "deepseek-v4-pro": {
-      "providerKey": "my-provider",
-      "providerModel": "deepseek-v4-pro",
-      "displayName": "DeepSeek v4 Pro",
-      "maxOutputTokens": 16384,
-      "thinkingMode": "enabled",
-      "thinkingEffort": "medium",
-      "reasoningVisibility": "hidden"
-    },
     "deepseek-v4-flash": {
       "providerKey": "my-provider",
       "providerModel": "deepseek-v4-flash",
@@ -73,16 +64,6 @@
       "displayName": "GPT-5.6 Terra",
       "reasoningEffort": "none",
       "reasoningVisibility": "hidden",
-      "protocol": "responses"
-    },
-    "gpt-5.5": {
-      "providerKey": "openai",
-      "providerModel": "gpt-5.5",
-      "displayName": "GPT5.5",
-      "timeoutMs": 180000,
-      "maxAttempts": 3,
-      "retryDelayMs": 250,
-      "toolChoiceMode": "named-as-required",
       "protocol": "responses"
     }
   }
