@@ -122,7 +122,7 @@ export function buildStepRuntimeContextSnapshot(input: {
         ...(hasStructuredJsonArtifactDependencies
           ? {
             structuredArtifactConsumptionDiscipline:
-              "A dependency result includes durable structured JSON artifacts. First inspect artifact schema and any manifest in stepDependencyContexts; for agentloop.tableExtractionArtifact/v1, use the manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
+              "A dependency result includes durable structured JSON artifacts. Use its resultBinding with read_result first to inspect the canonical artifact manifest; do not infer omitted tables, rows, or groups from step handoff metadata. For agentloop.tableExtractionArtifact/v1, use the returned manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
           }
           : {}),
         ...(requiresDerivedAggregation
@@ -551,7 +551,7 @@ function buildStepDependencyContexts(
         caveatedEvidenceKinds: [],
         failedEvidenceKinds: [],
         missingRequiredEvidenceKinds: [],
-        toolEvidence: [],
+        evidenceMetadata: [],
       };
       const summary = summarizeStepEvidence(dependency.evidence);
       const requiredKinds = dependency.evidenceContract?.requiredKinds ?? [];
@@ -579,7 +579,7 @@ function buildStepDependencyContexts(
         ...(summary.sourceSummaryCandidate === undefined
           ? {}
           : { sourceSummaryCandidate: summary.sourceSummaryCandidate }),
-        toolEvidence: summary.toolEvidence,
+        evidenceMetadata: summary.evidenceMetadata,
       };
     })
     .filter((binding): binding is StepDependencyContext => binding !== undefined);
@@ -587,7 +587,7 @@ function buildStepDependencyContexts(
   return {
     schema: "agentloop.stepDependencyContexts/v1",
     instruction:
-      "Each completed dependency publishes a formal Runtime result and binds it with relation=dependency. Treat the binding's ResultRef as the authoritative input identity for this step; use read_result when the bounded output projection is insufficient. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
+      "Each completed dependency publishes a formal Runtime result and binds it with relation=dependency. Treat the binding's ResultRef as the only authoritative content identity for this step; step handoff carries metadata only and never re-projects tool content. Use read_result with the binding's opaque resultId when facts or details are needed. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
     currentStepId: step.id,
     dependencies: bindings,
   };
@@ -605,7 +605,8 @@ interface StepDependencyContext {
   readonly missingRequiredEvidenceKinds: readonly EvidenceKind[];
   readonly completionCaveat?: StepEvidence["completionCaveat"];
   readonly sourceSummaryCandidate?: unknown;
-  readonly toolEvidence: readonly ProjectedToolEvidence[];
+  /** Step handoff carries metadata only; result content stays behind resultBinding. */
+  readonly evidenceMetadata: readonly ProjectedEvidenceMetadata[];
 }
 
 function collectResultBindings(
@@ -627,7 +628,7 @@ function collectResultBindings(
   });
 }
 
-interface ProjectedToolEvidence {
+interface ProjectedEvidenceMetadata {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly isError: boolean;
@@ -638,9 +639,6 @@ interface ProjectedToolEvidence {
     readonly failed: readonly string[];
   };
   readonly artifacts?: readonly ProjectedArtifactRef[];
-  readonly sourceRefs?: readonly unknown[];
-  readonly preview: string;
-  readonly previewTruncated: boolean;
 }
 
 interface ProjectedArtifactRef {
@@ -649,7 +647,6 @@ interface ProjectedArtifactRef {
   readonly sha256?: string;
   readonly schema?: string;
   readonly kind?: string;
-  readonly manifest?: unknown;
 }
 
 function summarizeStepEvidence(evidence: StepEvidence | undefined): {
@@ -657,14 +654,14 @@ function summarizeStepEvidence(evidence: StepEvidence | undefined): {
   readonly caveatedEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
   readonly sourceSummaryCandidate?: unknown;
-  readonly toolEvidence: readonly ProjectedToolEvidence[];
+  readonly evidenceMetadata: readonly ProjectedEvidenceMetadata[];
 } {
   const satisfied = new Set<string>();
   const caveated = new Set<string>();
   const failed = new Set<string>();
   const sourceSummaryCandidate = parseSourceSummaryCandidate(evidence?.candidateOutput);
   if (sourceSummaryCandidate !== undefined) satisfied.add("source_summary");
-  const toolEvidence = (evidence?.toolCalls ?? [])
+  const evidenceMetadata = (evidence?.toolCalls ?? [])
     .slice(-DEPENDENCY_TOOL_EVIDENCE_LIMIT)
     .map((toolCall) => {
       const parsed = parseJsonRecord(toolCall.result);
@@ -679,9 +676,6 @@ function summarizeStepEvidence(evidence: StepEvidence | undefined): {
         resultSchemas: projection.resultSchemas,
         ...(projection.evidenceKinds === undefined ? {} : { evidenceKinds: projection.evidenceKinds }),
         ...(projection.artifacts.length === 0 ? {} : { artifacts: projection.artifacts }),
-        ...(projection.sourceRefs.length === 0 ? {} : { sourceRefs: projection.sourceRefs }),
-        preview: truncateContextText(compactToolResultPreview(toolCall.result, parsed), DEPENDENCY_TOOL_PREVIEW_LIMIT),
-        previewTruncated: toolCall.result.length > DEPENDENCY_TOOL_PREVIEW_LIMIT,
       };
     });
   return {
@@ -689,7 +683,7 @@ function summarizeStepEvidence(evidence: StepEvidence | undefined): {
     caveatedEvidenceKinds: [...caveated].sort(),
     failedEvidenceKinds: [...failed].sort(),
     ...(sourceSummaryCandidate === undefined ? {} : { sourceSummaryCandidate }),
-    toolEvidence,
+    evidenceMetadata,
   };
 }
 
@@ -729,16 +723,14 @@ function projectToolResult(result: Record<string, unknown> | undefined): {
     readonly failed: readonly string[];
   };
   readonly artifacts: readonly ProjectedArtifactRef[];
-  readonly sourceRefs: readonly unknown[];
 } {
-  if (result === undefined) return { resultSchemas: [], artifacts: [], sourceRefs: [] };
+  if (result === undefined) return { resultSchemas: [], artifacts: [] };
   const schemas = new Set<string>();
   const satisfied = new Set<string>();
   const caveated = new Set<string>();
   const failed = new Set<string>();
   const artifacts: ProjectedArtifactRef[] = [];
-  const sourceRefs: unknown[] = [];
-  collectReceiptProjection(result, schemas, satisfied, caveated, failed, artifacts, sourceRefs);
+  collectReceiptProjection(result, schemas, satisfied, caveated, failed, artifacts);
   const evidenceKinds = satisfied.size === 0 && caveated.size === 0 && failed.size === 0
     ? undefined
     : {
@@ -750,7 +742,6 @@ function projectToolResult(result: Record<string, unknown> | undefined): {
     resultSchemas: [...schemas].sort(),
     ...(evidenceKinds === undefined ? {} : { evidenceKinds }),
     artifacts,
-    sourceRefs,
   };
 }
 
@@ -761,17 +752,14 @@ function collectReceiptProjection(
   caveated: Set<string>,
   failed: Set<string>,
   artifacts: ProjectedArtifactRef[],
-  sourceRefs: unknown[],
 ): void {
   addStringField(record.schema, schemas);
   addEvidenceKinds(record.evidenceKinds, satisfied, caveated, failed);
   addArtifactRef(record.artifact, artifacts);
-  addSourceRefs(record.sourceRefs, sourceRefs);
   const evidenceReceipt = asRecord(record.evidenceReceipt);
   if (evidenceReceipt !== undefined) {
     addStringField(evidenceReceipt.schema, schemas);
     addEvidenceKinds(evidenceReceipt.evidenceKinds, satisfied, caveated, failed);
-    addSourceRefs(evidenceReceipt.sourceRefs, sourceRefs);
   }
   const artifactReceipt = asRecord(record.artifactReceipt);
   if (artifactReceipt !== undefined) {
@@ -807,7 +795,6 @@ function addArtifactRef(value: unknown, artifacts: ProjectedArtifactRef[]): void
     ...(typeof record.sha256 === "string" && record.sha256.trim().length > 0 ? { sha256: record.sha256 } : {}),
     ...(typeof record.schema === "string" && record.schema.trim().length > 0 ? { schema: record.schema } : {}),
     ...(typeof record.kind === "string" && record.kind.trim().length > 0 ? { kind: record.kind } : {}),
-    ...(record.manifest === undefined ? {} : { manifest: record.manifest }),
   });
 }
 
@@ -815,7 +802,7 @@ function hasStructuredJsonArtifacts(
   bindings: ReturnType<typeof buildStepDependencyContexts>,
 ): boolean {
   return bindings?.dependencies.some((binding) =>
-    binding.toolEvidence.some((evidence) =>
+    binding.evidenceMetadata.some((evidence) =>
       evidence.resultSchemas.includes("agentloop.visibleTableExtraction/v1")
       || evidence.resultSchemas.includes("agentloop.tableExtractionArtifact/v1")
       || evidence.artifacts?.some((artifact) =>
@@ -824,22 +811,6 @@ function hasStructuredJsonArtifacts(
       ) === true
     )
   ) === true;
-}
-
-function addSourceRefs(value: unknown, sourceRefs: unknown[]): void {
-  if (!Array.isArray(value)) return;
-  const remaining = DEPENDENCY_SOURCE_REF_LIMIT - sourceRefs.length;
-  if (remaining <= 0) return;
-  sourceRefs.push(...value.slice(0, remaining));
-}
-
-function compactToolResultPreview(raw: string, parsed: Record<string, unknown> | undefined): string {
-  if (parsed === undefined) return raw;
-  const compact: Record<string, unknown> = {};
-  for (const key of ["schema", "path", "rootId", "exitCode", "signal", "stdout", "stderr", "content", "artifact", "artifactReceipt", "evidenceReceipt", "evidenceKinds", "caveats"] as const) {
-    if (parsed[key] !== undefined) compact[key] = parsed[key];
-  }
-  return Object.keys(compact).length === 0 ? raw : JSON.stringify(compact);
 }
 
 function parseSourceSummaryCandidate(value: string | undefined): unknown {
@@ -906,8 +877,6 @@ const ARTIFACT_RUNTIME_EVIDENCE_KINDS = new Set<EvidenceKind>([
 ]);
 
 const DEPENDENCY_TOOL_EVIDENCE_LIMIT = 12;
-const DEPENDENCY_TOOL_PREVIEW_LIMIT = 900;
-const DEPENDENCY_SOURCE_REF_LIMIT = 12;
 const STEP_HANDOFF_OBJECTIVE_LIMIT = 600;
 const STEP_HANDOFF_NEXT_STEP_LIMIT = 3;
 const STEP_HANDOFF_INPUT_LIMIT = 12;
