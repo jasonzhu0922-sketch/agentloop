@@ -71,6 +71,8 @@ export interface StructuredTaskUnderstanding {
   readonly format?: string;
   readonly normalizedObjective: string;
   readonly operation: StructuredTaskOperation;
+  /** A collection-wide aggregate needs distinct evidence and conversation-delivery leaves. */
+  readonly analysisScope?: "collection_aggregation";
   readonly subject: {
     readonly text: string;
     readonly terms: readonly string[];
@@ -242,9 +244,13 @@ export function understandTask(input: TaskIntentInput & {
       wantsArtifact: true,
       wantsConversationAnswer: false,
     };
-  const operation = structuredTaskOperation(intent, normalizedObjective, readySources);
+  const collectionAggregation = isCollectionAggregationIntent(normalizedObjective);
+  const operation = structuredTaskOperation(intent, normalizedObjective, readySources, collectionAggregation);
   const workflow: StructuredTaskStage[] = [];
-  if (intent.sourceNeed !== "none") workflow.push("acquire");
+  // A request to aggregate a collection needs a source-acquisition boundary
+  // even when the collection is Runtime-authorized (for example a visible
+  // directory) rather than an external research source.
+  if (intent.sourceNeed !== "none" || collectionAggregation) workflow.push("acquire");
   if (operation === "analysis" || operation === "composite") workflow.push("analyze");
   if (operation === "transform_artifact") workflow.push("transform");
   if (intent.wantsArtifact) workflow.push("produce");
@@ -257,6 +263,7 @@ export function understandTask(input: TaskIntentInput & {
     ...(outputFormat === undefined ? {} : { format: outputFormat }),
     normalizedObjective,
     operation,
+    ...(collectionAggregation ? { analysisScope: "collection_aggregation" as const } : {}),
     subject: {
       // Source/domain recall is defined by the business task. The complete
       // normalized objective remains available for delivery planning, but an
@@ -417,9 +424,11 @@ function structuredTaskOperation(
   intent: TaskIntentClassification,
   objective: string,
   uploadedSources: readonly UploadedSourceSummary[],
+  collectionAggregation = false,
 ): StructuredTaskOperation {
   const uploadedInput = uploadedSources.length > 0;
-  const uploadedDataAnalysis = hasStructuredDataSource(uploadedSources) && isDataAnalysisIntent(objective);
+  const dataAnalysis = isDataAnalysisIntent(objective) || collectionAggregation;
+  const uploadedDataAnalysis = hasStructuredDataSource(uploadedSources) && dataAnalysis;
   if (intent.artifactAction === "transform" || (intent.artifactAction === "modify" && uploadedInput)) return "transform_artifact";
   if (intent.wantsArtifact && intent.sourceNeed !== "none") return "composite";
   // Uploaded tabular data is already Runtime-authorized source evidence. A
@@ -429,15 +438,27 @@ function structuredTaskOperation(
   if (uploadedDataAnalysis) return intent.wantsArtifact ? "composite" : "analysis";
   if (intent.wantsArtifact) return "create_artifact";
   if (intent.sourceNeed !== "none") {
-    return isDataAnalysisIntent(objective)
+    return dataAnalysis
       ? "analysis"
       : "lookup";
   }
-  return "answer";
+  return collectionAggregation ? "analysis" : "answer";
 }
 
 function isDataAnalysisIntent(value: string): boolean {
   return /(?:分析|评估|比较|走势|趋势|统计|汇总|总结|analy[sz]|compare|trend|summar)/iu.test(value);
+}
+
+/**
+ * Collection-wide grouping is analysis even when the requested output is
+ * prose rather than a tabular artifact.  Both signals are required: ordinary
+ * single-source summaries remain lookup/content work, while an aggregate over
+ * a corpus receives an explicit acquisition-and-delivery boundary.
+ */
+function isCollectionAggregationIntent(value: string): boolean {
+  const collectionScope = /(?:\b(?:all|entire|whole|across|collection|corpus|directory|folder|documents?|files?)\b|所有|全部|整个|全量|整批|一批|集合|语料|目录|文件夹|文档(?:库|集)?|文件(?:集)?|资料(?:库)?|知识库)/iu;
+  const aggregation = /(?:\b(?:analy[sz](?:e|is)|classif(?:y|ication)|categori[sz](?:e|ation)|cluster(?:ing)?|group(?:ed|ing)?|aggregate|distribution|summari[sz](?:e|ation))\b|分析|分类|归类|归纳|聚类|分组|汇集|汇总|统计|分布|排行|排名)/iu;
+  return collectionScope.test(value) && aggregation.test(value);
 }
 
 function hasStructuredDataSource(sources: readonly UploadedSourceSummary[]): boolean {

@@ -1332,6 +1332,21 @@ test("structured task understanding preserves subject, evidence, deliverable, an
   assert.deepEqual(understanding.operationProfiles, ["data_analysis", "web_research", "artifact_build"]);
 });
 
+test("collection-wide classification is analysis rather than a bounded lookup", () => {
+  const understanding = understandTask({
+    objective: "整理可见目录中的所有文档，归纳主要分类并在对话中给出总结。",
+  });
+
+  assert.equal(understanding.operation, "analysis");
+  assert.equal(understanding.analysisScope, "collection_aggregation");
+  assert.deepEqual(understanding.workflow, ["acquire", "analyze", "deliver"]);
+  assert.ok(understanding.operationProfiles.includes("data_analysis"));
+
+  const ordinarySummary = understandTask({ objective: "阅读这篇文档并提炼要点。" });
+  assert.equal(ordinarySummary.operation, "answer");
+  assert.doesNotMatch(ordinarySummary.workflow.join(","), /analyze/);
+});
+
 test("structured task understanding separates business task from requested output format", () => {
   const understanding = understandTask({
     objective: "采集 AI 信息，用 HTML 格式做一个报告",
@@ -3065,7 +3080,7 @@ test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analys
             dependencies: [],
             role: "fact_acquisition",
             skillIds: [],
-            requiredCapabilities: ["visible_directory_read"],
+            requiredCapabilities: ["visible_table_extraction"],
             evidenceContract: {
               requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
               caveatPolicy: "mark_unverified_facts",
@@ -3090,7 +3105,7 @@ test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analys
   const plan = await planner.plan({
       get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-visible-spreadsheet-analysis-fact-then-produce",
-    input: "帮我分析一下这里面的绩效评价情况，直接在对话里回答就行",
+    input: "分析可见目录中所有绩效评价文件的整体情况，直接在对话里回答就行",
     availableSkills: [],
     availableToolNames: ["visible_index_directory", "visible_extract_tables", "visible_find_files", "visible_read_files"],
     responseOnly: true,
@@ -3103,10 +3118,88 @@ test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analys
 
   assert.equal(calls, 1);
   assert.deepEqual(plan.steps.map((step) => step.id), ["profile_visible_spreadsheets", "deliver_analysis_reply"]);
-  assert.deepEqual(plan.steps[0].requiredCapabilities, ["visible_directory_read"]);
+  assert.deepEqual(plan.steps[0].requiredCapabilities, ["visible_table_extraction"]);
   assert.deepEqual(plan.steps[1].dependencies, ["profile_visible_spreadsheets"]);
   assert.deepEqual(plan.steps[1].evidenceContract?.requiredKinds, ["explicit_caveats"]);
   assert.deepEqual(plan.steps[1].successCriteria.map((criterion) => criterion.id), ["explicit_caveats"]);
+});
+
+test("ModelPlanner requires an acquisition-to-delivery boundary for collection-wide classification", async () => {
+  let calls = 0;
+  let observedContext = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      observedContext = request.runtimeContext?.content ?? "";
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [submitOutcomePlanToolCall("collection-classification-too-short", {
+            goal: "Classify the complete visible document collection.",
+            shape: "single_leaf",
+            steps: [{
+              id: "acquire_only",
+              objective: "Profile the complete visible document collection with source scope and caveats.",
+              dependencies: [],
+              role: "fact_acquisition",
+              skillIds: [],
+              requiredCapabilities: ["visible_directory_read"],
+              evidenceContract: {
+                requiredKinds: ["source_summary", "explicit_caveats"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+            }],
+          })],
+        };
+      }
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("collection-classification", {
+          goal: "Classify the complete visible document collection and deliver the result.",
+          shape: "fact_then_produce",
+          steps: [{
+            id: "acquire_collection_profile",
+            objective: "Profile the complete visible document collection and preserve bounded category counts with source scope and caveats.",
+            dependencies: [],
+            role: "fact_acquisition",
+            skillIds: [],
+            requiredCapabilities: ["visible_directory_read"],
+            evidenceContract: {
+              requiredKinds: ["source_summary", "record_counts", "explicit_caveats"],
+              caveatPolicy: "mark_unverified_facts",
+            },
+          }, {
+            id: "deliver_collection_classification",
+            objective: "Give the user a collection-wide classification summary using the acquired evidence.",
+            dependencies: ["acquire_collection_profile"],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: [],
+            evidenceContract: { requiredKinds: ["explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+          }],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-collection-classification-delivery-boundary",
+    input: "整理可见目录中的所有文档，归纳主要分类并在对话中给出总结。",
+    availableSkills: [],
+    availableToolNames: ["visible_index_directory", "visible_find_files", "visible_read_files"],
+    responseOnly: true,
+    visibleDirectories: [{ id: "visible_dir_1", name: "文档库", path: "/tmp/documents" }],
+  });
+
+  assert.match(observedContext, /"operation":"analysis"/);
+  assert.match(observedContext, /"planShape":"fact_then_produce"/);
+  assert.equal(calls, 2);
+  assert.deepEqual(plan.steps.map((step) => step.id), ["acquire_collection_profile", "deliver_collection_classification"]);
+  assert.deepEqual(plan.steps[1]?.dependencies, ["acquire_collection_profile"]);
 });
 
 test("ModelPlanner requires derived aggregation evidence for a structured dependency count question", async () => {
@@ -7405,6 +7498,44 @@ test("selectPlanningSkillRoles exposes semantic review candidates for an unsegme
     selected.find((item) => item.skill.id === analysis.id)?.selection.reason ?? "",
     /Low-confidence lexical recall candidate/,
   );
+});
+
+test("selectPlanningSkillRoles retains a domain candidate beside a generic source provider", () => {
+  const genericSource = skillFixture({
+    id: "generic-source",
+    name: "generic-source",
+    description: "通过公共 API 查询当前资讯、热点和日报。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["api"]),
+  });
+  const analysis = skillFixture({
+    id: "domain-analysis",
+    name: "domain-analysis",
+    description: "将可核验的行业数据库时序转为指定日期、地区和产品的价格或指标数值结论。",
+    agentLoop: {
+      ...agentLoopMetadata(["primary_builder"], ["none"], ["database"], ["content"]),
+      semanticTags: ["industry-market", "commodity-price", "time-series-analysis"],
+      intentExamples: ["查询指定日期、地区、产品和规格对应的市场价格或指标数值"],
+      requiredSkillNames: ["domain-data"],
+    },
+  });
+  const data = skillFixture({
+    id: "domain-data",
+    name: "domain-data",
+    description: "读取部署映射的行业指标目录和原始时序。",
+    agentLoop: agentLoopMetadata(["source_provider"], ["none"], ["database"]),
+  });
+
+  const selected = selectPlanningSkillRoles(
+    [genericSource, analysis, data],
+    understandTask({
+      objective: "查询并获取 2025 年 11 月 14 日唐山市盘螺产品的市场价格数据",
+    }),
+    [],
+    [],
+  );
+
+  assert.ok(selected.some((item) => item.skill.id === analysis.id));
+  assert.equal(selected.find((item) => item.skill.id === data.id)?.companionForSkillId, analysis.id);
 });
 
 test("selectPlanningSkillRoles keeps a source-grounded domain analysis candidate when HTML delivery is also requested", () => {
@@ -14804,6 +14935,23 @@ test("large structured source Tool results preserve receipts for evidence-gate a
       parse: () => ({}),
       execute: async () => ({
         schema: "agentloop.visibleTableExtraction/v1",
+        fieldProfiles: [{
+          field: "neutral-category-field",
+          observed: 1_600,
+          uniqueValues: 198,
+          topValues: Array.from({ length: 20 }, (_, index) => ({
+            value: `group-${index}`,
+            count: 80 - index,
+            samplePaths: [`sheet-${index}.xlsx`],
+          })),
+          hierarchy: {
+            delimiter: "/",
+            nodes: Array.from({ length: 20 }, (_, index) => ({
+              path: [`level-${index}`],
+              count: 80 - index,
+            })),
+          },
+        }],
         files: Array.from({ length: 80 }, (_, index) => ({
           path: `sheet-${index}.xlsx`,
           records: Array.from({ length: 20 }, (__, row) => ({ row, values: { name: `person-${index}-${row}`, score: row } })),
@@ -14910,10 +15058,27 @@ test("large structured source Tool results preserve receipts for evidence-gate a
     assert.match(String(completed?.data.result), /large_tool_result_receipt_preserved/);
     assert.match(String(completed?.data.result), /agentloop\.toolEvidenceReceipt\/v1/);
     const projected = JSON.parse(String(completed?.data.result)) as {
-      summary?: { totalRecords?: number };
+      summary?: {
+        totalRecords?: number;
+        fieldProfiles?: Array<{
+          field?: string;
+          topValues?: Array<{ value?: string; count?: number }>;
+          hierarchy?: { nodes?: Array<{ path?: string[]; count?: number }> };
+        }>;
+      };
       evidenceReceipt?: { evidenceKinds?: { satisfied?: string[]; caveated?: string[] } };
     };
     assert.equal(projected.summary?.totalRecords, 1_600);
+    assert.equal(projected.summary?.fieldProfiles?.[0]?.field, "neutral-category-field");
+    assert.deepEqual(projected.summary?.fieldProfiles?.[0]?.topValues?.[0], {
+      value: "group-0",
+      count: 80,
+      samplePaths: ["sheet-0.xlsx"],
+    });
+    assert.deepEqual(projected.summary?.fieldProfiles?.[0]?.hierarchy?.nodes?.[0], {
+      path: ["level-0"],
+      count: 80,
+    });
     assert.ok(projected.evidenceReceipt?.evidenceKinds?.satisfied?.includes("record_counts"));
     assert.ok(projected.evidenceReceipt?.evidenceKinds?.caveated?.includes("explicit_caveats"));
     const latestAssessment = (await runs.plan(owner.user.id, run.id)).assessments.at(-1);

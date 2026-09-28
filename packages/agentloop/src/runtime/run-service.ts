@@ -162,7 +162,7 @@ export type RunEventLogSink = (line: string) => void;
  * every run. It cannot be overridden by Run inputs.
  */
 export const DEFAULT_RUNNER_SYSTEM_PROMPT =
-  "你是一个严谨、可靠的智能助手。根据当前用户请求选择必要能力；在形成可核验的结果之前，不要宣称完成。";
+  "你是一个严谨、可靠的智能助手。默认使用简体中文与用户沟通；除非用户明确要求使用其他语言，用户可见的自然语言回复应优先使用简体中文，代码、命令、路径、API 字段和专有名词保持原样。根据当前用户请求选择必要能力；在形成可核验的结果之前，不要宣称完成。";
 
 /** Server-wide default model-turn budget per Plan step. */
 export const DEFAULT_MAX_STEPS = 32;

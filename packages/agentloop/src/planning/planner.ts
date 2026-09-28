@@ -1500,6 +1500,7 @@ function summarizePlanningError(message: string): string {
 
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
   const taskIntent = planningTaskIntent(task);
+  assertDataAnalysisConversationBoundary(proposal, task);
   const priorResultMaterialization = conversationResultInput(task) !== undefined
     && taskIntent.deliverySurface === "workspace_artifact";
   if (priorResultMaterialization && proposal.steps.some((step) => step.role === "fact_acquisition")) {
@@ -1570,6 +1571,55 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
       422,
     );
   }
+}
+
+/**
+ * Source-backed analysis and its user-facing conclusion are independently
+ * durable responsibilities.  Require a dependency boundary so bounded source
+ * reads cannot be mistaken for a delivered collection-wide conclusion.
+ */
+function assertDataAnalysisConversationBoundary(proposal: PlanProposal, task: TaskSpec): void {
+  const taskProfile = planningTaskProfile(task);
+  const sourceBackedCollectionAggregation = task.taskUnderstanding.analysisScope === "collection_aggregation"
+    && taskProfile.deliverySurface === "conversation"
+    && (taskHasVisibleDataSource(task) || taskHasUploadedDataSource(task));
+  if (!sourceBackedCollectionAggregation) return;
+  const acquisitionSteps = proposal.steps.filter((step) => step.role === "fact_acquisition");
+  const terminalSteps = proposal.steps.filter((step) =>
+    !proposal.steps.some((candidate) => candidate.dependencies.includes(step.id)),
+  );
+  const deliverySteps = terminalSteps.filter((step) => step.role === "deliver");
+  const deliveryDependsOnAcquisition = deliverySteps.some((delivery) =>
+    acquisitionSteps.some((acquisition) => stepDependsOn(delivery, acquisition.id, proposal.steps)),
+  );
+  if (
+    proposal.shape !== "fact_then_produce"
+    || acquisitionSteps.length === 0
+    || deliverySteps.length === 0
+    || !deliveryDependsOnAcquisition
+  ) {
+    throw new AppError(
+      "PLANNING_ERROR",
+      "A source-backed conversation data-analysis task must use fact_then_produce with a fact_acquisition leaf and a dependent deliver leaf; source collection evidence and the user-facing conclusion are separate contracts",
+      422,
+    );
+  }
+}
+
+function stepDependsOn(
+  step: PlanStepProposal,
+  ancestorId: string,
+  allSteps: readonly PlanStepProposal[],
+  seen = new Set<string>(),
+): boolean {
+  if (step.dependencies.includes(ancestorId)) return true;
+  for (const dependencyId of step.dependencies) {
+    if (seen.has(dependencyId)) continue;
+    seen.add(dependencyId);
+    const dependency = allSteps.find((candidate) => candidate.id === dependencyId);
+    if (dependency !== undefined && stepDependsOn(dependency, ancestorId, allSteps, seen)) return true;
+  }
+  return false;
 }
 
 function stepCanProduceObservableArtifact(step: PlanStepProposal): boolean {

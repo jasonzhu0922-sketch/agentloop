@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
-import { RunService } from "../src/runtime/run-service.ts";
+import { DEFAULT_RUNNER_SYSTEM_PROMPT, RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import {
@@ -33,6 +33,14 @@ test("RunService makes Simplified Chinese the default user-facing execution lang
     const run = await runs.execute(testOwner().user.id, "Summarize this briefly");
 
     assert.equal(run.status, "completed");
+    assert.match(
+      DEFAULT_RUNNER_SYSTEM_PROMPT,
+      /默认使用简体中文与用户沟通；除非用户明确要求使用其他语言，用户可见的自然语言回复应优先使用简体中文/,
+    );
+    assert.ok(
+      executionSystemPrompt.indexOf("默认使用简体中文与用户沟通") < executionSystemPrompt.indexOf("<runtime_contract>"),
+      "the default Chinese-language instruction must precede the runtime contract",
+    );
     assert.match(
       executionSystemPrompt,
       /Unless the user explicitly requests another language, all user-facing natural-language output must be in Simplified Chinese\./,

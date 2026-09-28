@@ -3354,7 +3354,11 @@ function compactOversizedStructuredToolResult(value: unknown, serialized: string
 function compactStructuredValue(value: unknown, depth = 0): unknown {
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") return value.length <= 512 ? value : `${value.slice(0, 509)}...`;
-  if (depth >= 3 || value === undefined) return undefined;
+  if (value === undefined) return undefined;
+  // The normal depth limit keeps arbitrary nested payloads bounded.  Count
+  // aggregates are different: their identity plus count is a compact neutral
+  // fact, so retain a small projection through an otherwise omitted branch.
+  if (depth >= 3) return compactNestedCountAggregate(value);
   if (Array.isArray(value)) {
     return value.slice(0, 12)
       .map((item) => compactStructuredValue(item, depth + 1))
@@ -3366,6 +3370,42 @@ function compactStructuredValue(value: unknown, depth = 0): unknown {
       .slice(0, 24)
       .map(([key, item]) => [key, compactStructuredValue(item, depth + 1)]),
   ));
+}
+
+/**
+ * Preserve bounded count-bearing aggregates below the generic depth limit.
+ * This recognizes only structural facts (a numeric `count` plus nearby scalar
+ * identity/path data); it deliberately has no Tool, Skill, field-name, or
+ * domain vocabulary.  It lets a model see value/count and path/count groups
+ * without copying an unbounded source collection into the prompt.
+ */
+function compactNestedCountAggregate(value: unknown, depth = 0): unknown {
+  if (depth >= 3 || value === null || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) {
+    const entries = value
+      .map((item) => compactNestedCountAggregate(item, depth + 1))
+      .filter((item) => item !== undefined)
+      .slice(0, 8);
+    return entries.length > 0 ? entries : undefined;
+  }
+  if (!isPlainRecord(value)) return undefined;
+  const hasCount = Number.isFinite(value.count);
+  const compact = Object.fromEntries(
+    Object.entries(value)
+      .slice(0, 24)
+      .map(([key, item]) => {
+        if (item === null || typeof item === "boolean" || typeof item === "number") return [key, item];
+        if (typeof item === "string") return [key, item.length <= 180 ? item : `${item.slice(0, 177)}...`];
+        if (Array.isArray(item) && hasCount) {
+          return [key, item.slice(0, 2).map((entry) => compactStructuredValue(entry, 0))];
+        }
+        return [key, compactNestedCountAggregate(item, depth + 1)];
+      }),
+  );
+  const projected = omitUndefinedRecord(compact);
+  return hasCount || Object.keys(projected).some((key) => projected[key] !== undefined && typeof projected[key] === "object")
+    ? projected
+    : undefined;
 }
 
 function compactEvidenceReceiptIdentity(value: Record<string, unknown>): Record<string, unknown> {
