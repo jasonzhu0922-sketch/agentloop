@@ -51,6 +51,7 @@ const router = new PersistentMultiRuntimeRouter({
   heartbeatTtlMs: positiveInteger(process.env.RUNTIME_HEARTBEAT_TTL_MS, 15_000),
   reservationTtlMs: positiveInteger(process.env.RUNTIME_RESERVATION_TTL_MS, 30_000),
   artifactsCatalog,
+  onDispatchFailure: (event) => process.stderr.write(`${JSON.stringify({ event: "router.dispatch_failed", ...event })}\n`),
 });
 // Attachment metadata is shared with every Router through the state database;
 // bytes require an RWX mount when Router replicas run on different machines.

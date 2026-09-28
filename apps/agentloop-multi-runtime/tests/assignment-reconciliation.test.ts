@@ -23,6 +23,42 @@ async function fixture(getRun: (id: string) => Promise<RuntimeRunStatus>) {
   return { database, store, router, submit, dispatches: () => dispatches };
 }
 
+test("a pre-admission dispatch failure is durable, replayable, and logged without its upstream secret", async () => {
+  const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ id: "host", endpoint: "http://host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }], 100);
+  await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  const logs: unknown[] = [];
+  const router = new PersistentMultiRuntimeRouter({
+    store,
+    now: () => 200,
+    endpointFactory: () => ({ dispatch: async () => { throw new Error("upstream rejected Authorization: Bearer dispatch-secret-token api_key=other-secret"); } }),
+    onDispatchFailure: (event) => { logs.push(event); },
+  });
+  try {
+    const assignment = await router.submit({ tenantId: "tenant", ownerUserId: "user", conversationId: "conversation", clientMessageId: "message", input: "fixture" });
+    assert.equal(assignment.status, "failed");
+    assert.equal(assignment.remoteRunId, "");
+    assert.equal(assignment.errorCode, "runtime_dispatch_failed");
+    assert.equal(assignment.errorMessage, "Runtime 未能接收本次任务，请稍后重试。");
+    assert.deepEqual(await store.assignment(assignment.id), assignment);
+    const projection = await store.conversation("tenant", "user", "conversation");
+    assert.equal(projection?.turns[0]?.assignment?.hasRun, false);
+    assert.equal(projection?.turns[0]?.assignment?.errorMessage, assignment.errorMessage);
+    const task = await database.prepare("SELECT status FROM mr_tasks WHERE conversation_id = ?").get("conversation") as { status: string };
+    assert.equal(task.status, "failed");
+    assert.deepEqual(logs, [{
+      assignmentId: assignment.id,
+      runtimeId: "host",
+      conversationId: "conversation",
+      dispatchKey: assignment.dispatchKey,
+      code: "runtime_dispatch_failed",
+      diagnostic: "Error: upstream rejected authorization=[redacted] api_key=[redacted]",
+    }]);
+    assert.doesNotMatch(JSON.stringify({ assignment, logs }), /dispatch-secret-token|other-secret/);
+  } finally { await database.close(); }
+});
+
 test("without any browser read, background reconciliation persists Host terminal status to assignment and task", async () => {
   const f = await fixture(async (remoteRunId) => ({ remoteRunId, status: "completed", finishedAt: 200 }));
   const assignment = await f.submit("one");

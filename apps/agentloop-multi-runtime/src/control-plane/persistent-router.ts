@@ -1,7 +1,17 @@
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import type { CommandOutputContent, ProcessArtifact, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
-import { RuntimeCapacityError, type ControlPlaneRepository, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
+import { RuntimeCapacityError, type ControlPlaneRepository, type DispatchFailure, type RuntimeCatalogEntry, type StoredAssignment } from "./control-plane-store.ts";
 import { SharedWorkspaceArtifactCatalog } from "../artifacts/shared-workspace-artifact-catalog.ts";
+
+export interface RouterDispatchFailureLog {
+  readonly assignmentId: string;
+  readonly runtimeId: string;
+  readonly conversationId: string;
+  readonly dispatchKey: string;
+  readonly code: string;
+  /** Redacted operational diagnostic. It is never stored in the control plane. */
+  readonly diagnostic: string;
+}
 
 export class PersistentMultiRuntimeRouter {
   private readonly store: ControlPlaneRepository;
@@ -10,6 +20,7 @@ export class PersistentMultiRuntimeRouter {
   private readonly reservationTtlMs: number;
   private readonly now: () => number;
   private readonly artifactsCatalog?: SharedWorkspaceArtifactCatalog;
+  private readonly onDispatchFailure?: (event: RouterDispatchFailureLog) => void;
   private observationCursor = "";
   private reconciliation?: Promise<void>;
 
@@ -20,6 +31,7 @@ export class PersistentMultiRuntimeRouter {
     readonly reservationTtlMs?: number;
     readonly now?: () => number;
     readonly artifactsCatalog?: SharedWorkspaceArtifactCatalog;
+    readonly onDispatchFailure?: (event: RouterDispatchFailureLog) => void;
   }) {
     this.store = input.store;
     this.endpointFactory = input.endpointFactory;
@@ -27,6 +39,7 @@ export class PersistentMultiRuntimeRouter {
     this.reservationTtlMs = input.reservationTtlMs ?? 30_000;
     this.now = input.now ?? Date.now;
     this.artifactsCatalog = input.artifactsCatalog;
+    this.onDispatchFailure = input.onDispatchFailure;
   }
 
   async submit(task: SubmitConversationTask): Promise<StoredAssignment> {
@@ -44,8 +57,19 @@ export class PersistentMultiRuntimeRouter {
       assignment = (await this.store.assignment(assignment.id)) ?? assignment;
       return assignment;
     } catch (error) {
-      await this.store.markDispatchFailure(assignment.id, this.now());
+      const failure = dispatchFailureFor(error);
+      await this.store.markDispatchFailure(assignment.id, failure, this.now());
+      this.emitDispatchFailure({
+        assignmentId: assignment.id,
+        runtimeId: assignment.runtimeId,
+        conversationId: assignment.conversationId,
+        dispatchKey: assignment.dispatchKey,
+        code: failure.code,
+        diagnostic: diagnosticFor(error),
+      });
       if (isRuntimeCapacityFailure(error)) throw new RuntimeCapacityError("runtime_capacity_exhausted");
+      const failed = await this.store.assignment(assignment.id);
+      if (failed?.status === "failed") return failed;
       throw error;
     }
   }
@@ -277,12 +301,36 @@ export class PersistentMultiRuntimeRouter {
     await this.store.observeRun(assignment.id, run, this.now());
   }
 
+  private emitDispatchFailure(event: RouterDispatchFailureLog): void {
+    try { this.onDispatchFailure?.(event); } catch {
+      // Logging cannot change the result of an already persisted dispatch failure.
+    }
+  }
+
 }
 
 export { RuntimeCapacityError };
 
 function isRuntimeCapacityFailure(error: unknown): boolean {
   return error instanceof Error && error.message === "runtime_capacity_exhausted";
+}
+
+function dispatchFailureFor(error: unknown): DispatchFailure {
+  if (isRuntimeCapacityFailure(error)) {
+    return { code: "runtime_capacity_exhausted", message: "Runtime 当前没有可用容量，请稍后重试。" };
+  }
+  return { code: "runtime_dispatch_failed", message: "Runtime 未能接收本次任务，请稍后重试。" };
+}
+
+function diagnosticFor(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const redacted = raw
+    .replace(/\bauthorization\b["']?\s*[:=]\s*Bearer\s+[^\s,;]+/gi, "authorization=[redacted]")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\b(authorization|token|api[_-]?key|secret|password|cookie|session)\b["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return redacted.length <= 512 ? redacted : `${redacted.slice(0, 511)}…`;
 }
 
 function terminalRunFromEvents(events: readonly RuntimeRunEvent[], remoteRunId: string): RuntimeRunStatus | undefined {

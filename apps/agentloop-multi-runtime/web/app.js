@@ -64,13 +64,14 @@ const uploadingByConversation = new Map();
 const cancellingAssignmentIds = new Set();
 const deletingConversationIds = new Set();
 const hydratedDetailAssignmentIds = new Set();
+const pendingLiveAssistantIds = new Set();
 let commandDetailSelection;
 let inlineArtifactPreview;
 let inlineArtifactPreviewUrl;
 let artifactPanelOpen = false;
 let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
-const liveUpdates = createCoalescedUpdater({ render, persist: saveSessions });
+const liveUpdates = createCoalescedUpdater({ render: renderPendingLiveAssistantMessages, persist: saveSessions });
 
 const nativeFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => {
@@ -1273,6 +1274,16 @@ async function submit() {
     assistantMessage.runtimeDisplayName = runtimeDisplayNameFor(body.assignment.runtimeId);
     assistantMessage.executionLocation = executionTarget === "local" ? "local" : "cloud";
     if (executionTarget === "local") assistantMessage.localRuntimeId = body.assignment.runtimeId;
+    if (body.assignment.status === "failed") {
+      assistantMessage.status = "failed";
+      assistantMessage.error = typeof body.assignment.errorMessage === "string" ? body.assignment.errorMessage : "该轮未成功创建 Runtime Run";
+      assistantMessage.text = assistantMessage.error;
+      completeAssistantMessage(assistantMessage);
+      setStatus(assistantMessage.error, "error");
+      saveSessions();
+      render();
+      return;
+    }
     setStatus(`${executionTarget === "local" ? "本机" : "云端"}已分配 ${assistantMessage.runtimeDisplayName || "未命名 Runtime"} · SSE 连接中`, "running");
     saveSessions();
     render();
@@ -1414,11 +1425,11 @@ async function streamAssignment(assignmentId, conversation, assistant, tenantId,
     onEvent: (event) => onEvent(event, conversation, assistant),
     onStatus: (run) => {
       applyRecoveredRunState(assistant, run);
-      liveUpdates.flush();
+      requestLiveAssistantUpdate(assistant);
     },
     onRun: (run) => {
       applyRecoveredRunState(assistant, run);
-      liveUpdates.flush();
+      flushTerminalAssistantUpdate(assistant);
       setStatus(run.status === "completed" ? "已完成" : run.status === "cancelled" ? "已停止" : "执行失败", run.status === "completed" ? "ok" : "error");
     },
     onConnection: (state, error) => {
@@ -1453,7 +1464,8 @@ async function observeStrictLocalRun(conversation, assistant, activeRun) {
         onEvent(event, conversation, assistant);
       }
       applyRecoveredRunState(assistant, runBody.run);
-      liveUpdates.flush();
+      if (["completed", "failed", "cancelled"].includes(assistant.status)) flushTerminalAssistantUpdate(assistant);
+      else requestLiveAssistantUpdate(assistant);
       if (assistant.status !== "running") break;
       await waitForStrictLocalPoll(activeRun.abortController.signal);
     } catch (error) {
@@ -1537,8 +1549,8 @@ function onEvent(event, conversation, assistant) {
     void refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => { if (changed) { saveSessions(); render(); } });
     setStatus("等待你的确认或补充信息", "running");
   }
-  if (terminal) { liveUpdates.flush(); setStatus(event.type === "run.completed" ? "已完成" : event.type === "run.cancelled" ? "已停止" : "执行失败", assistant.status === "completed" ? "ok" : "error"); return true; }
-  liveUpdates.request();
+  if (terminal) { flushTerminalAssistantUpdate(assistant); setStatus(event.type === "run.completed" ? "已完成" : event.type === "run.cancelled" ? "已停止" : "执行失败", assistant.status === "completed" ? "ok" : "error"); return true; }
+  requestLiveAssistantUpdate(assistant);
   return false;
 }
 
@@ -1629,7 +1641,56 @@ async function cancelActive() {
   }
 }
 
+/**
+ * A streaming event belongs to one assistant turn. Keep its repaint scoped
+ * to that card so an active later turn does not replace completed history.
+ */
+function requestLiveAssistantUpdate(assistant) {
+  if (typeof assistant?.id === "string") pendingLiveAssistantIds.add(assistant.id);
+  liveUpdates.request();
+}
+
+function flushTerminalAssistantUpdate(assistant) {
+  if (typeof assistant?.id === "string") pendingLiveAssistantIds.delete(assistant.id);
+  // Terminal state also changes the composer/action controls, so it is one of
+  // the deliberately full renders rather than a card-only streaming update.
+  liveUpdates.flush();
+}
+
+function renderPendingLiveAssistantMessages() {
+  const messageIds = [...pendingLiveAssistantIds];
+  pendingLiveAssistantIds.clear();
+  const conversation = activeConversation();
+  if (!conversation || renderedConversationId !== conversation.id) { render(); return; }
+  const messages = (conversation.messages || []).filter((message) => message?.role === "assistant" && messageIds.includes(message.id) && message.status === "running");
+  // Events for a background conversation have no visible surface to update.
+  if (messages.length === 0) return;
+  const cards = messages.map((message) => ({
+    message,
+    card: document.querySelector(`[data-assistant-message="${CSS.escape(message.id)}"]`),
+  }));
+  // A new conversation/card or an intervening structural render needs the
+  // normal path once; afterwards each event replaces only its own live card.
+  if (cards.some(({ card }) => card === null)) { render(); return; }
+  const conversationScroll = $("conversation-scroll");
+  const followConversation = isNearBottom(conversationScroll);
+  const previousConversationTop = conversationScroll.scrollTop;
+  for (const { message, card } of cards) {
+    const previousOutput = card.querySelector(".live-output-text");
+    const followOutput = previousOutput === null || isNearBottom(previousOutput);
+    const previousOutputTop = previousOutput?.scrollTop ?? 0;
+    card.outerHTML = renderMessage(message);
+    const replacement = document.querySelector(`[data-assistant-message="${CSS.escape(message.id)}"]`);
+    if (replacement === null) { render(); return; }
+    bindAssistantCard(replacement, conversation, conversation.messages || []);
+    const output = replacement.querySelector(".live-output-text");
+    if (output) output.scrollTop = nextScrollTop(output, followOutput, previousOutputTop);
+  }
+  conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, previousConversationTop);
+}
+
 function render() {
+  pendingLiveAssistantIds.clear();
   const conversation = activeConversation(); if (!conversation) return;
   applyArtifactPanelWidth();
   $("workspace")?.classList.toggle("artifact-open", artifactPanelOpen && inlineArtifactPreview !== undefined);
@@ -1665,41 +1726,7 @@ function render() {
   });
   const messages = conversation.messages || []; $("empty-state").hidden = messages.length > 0; $("messages").innerHTML = messages.map(renderMessage).join("");
   renderHumanLoopSurfaces(messages);
-  document.querySelectorAll("[data-assistant-message]").forEach((card) => {
-    const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
-    card.addEventListener("click", (event) => {
-      if (event.target.closest("button, input, label, a")) return;
-      // Selecting a reply fires click on mouse-up.  Rendering here would
-      // replace the DOM and discard the selection before the user can copy it.
-      if (hasSelectedTextWithin(window.getSelection(), card)) return;
-      select();
-    });
-    card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !event.target.closest("button, input, label, a")) { event.preventDefault(); select(); } });
-  });
-  document.querySelectorAll("[data-plan-toggle]").forEach((button) => button.addEventListener("click", () => {
-    const assistant = messages.find((message) => message.id === button.dataset.planToggle);
-    if (!assistant) return;
-    assistant.planOpen = assistant.planOpen !== true;
-    render();
-  }));
-  document.querySelectorAll("[data-trace-toggle]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const assistant = messages.find((message) => message.id === button.dataset.traceToggle);
-    if (!assistant) return;
-    assistant.traceOpen = assistant.traceOpen !== true;
-    render();
-  }));
-  document.querySelectorAll("[data-other-artifacts-toggle]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const assistant = messages.find((message) => message.id === button.dataset.otherArtifactsToggle);
-    if (!assistant) return;
-    assistant.otherArtifactsOpen = assistant.otherArtifactsOpen !== true;
-    render();
-  }));
-  document.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", () => {
-    const message = messages.find((item) => item.id === button.dataset.copyMessage);
-    if (message) void copyConversationMessage(message, button);
-  }));
+  document.querySelectorAll("[data-assistant-message]").forEach((card) => bindAssistantCard(card, conversation, messages));
   document.querySelectorAll("[data-human-loop-submit]").forEach((button) => button.addEventListener("click", () => submitHumanLoop(button.dataset.humanLoopSubmit)));
   document.querySelectorAll("[data-human-loop-option]").forEach((input) => input.addEventListener("change", () => {
     rememberHumanLoopSelection(
@@ -1758,6 +1785,42 @@ function render() {
     output.scrollTop = nextScrollTop(output, previous?.follow ?? true, previous?.scrollTop ?? 0);
   });
   renderedConversationId = conversation.id;
+}
+
+function bindAssistantCard(card, conversation, messages) {
+    const select = () => void selectAssistantTurn(conversation, card.dataset.assistantMessage);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, input, label, a")) return;
+      // Selecting a reply fires click on mouse-up.  Rendering here would
+      // replace the DOM and discard the selection before the user can copy it.
+      if (hasSelectedTextWithin(window.getSelection(), card)) return;
+      select();
+    });
+    card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !event.target.closest("button, input, label, a")) { event.preventDefault(); select(); } });
+  card.querySelectorAll("[data-plan-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const assistant = messages.find((message) => message.id === button.dataset.planToggle);
+    if (!assistant) return;
+    assistant.planOpen = assistant.planOpen !== true;
+    render();
+  }));
+  card.querySelectorAll("[data-trace-toggle]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const assistant = messages.find((message) => message.id === button.dataset.traceToggle);
+    if (!assistant) return;
+    assistant.traceOpen = assistant.traceOpen !== true;
+    render();
+  }));
+  card.querySelectorAll("[data-other-artifacts-toggle]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const assistant = messages.find((message) => message.id === button.dataset.otherArtifactsToggle);
+    if (!assistant) return;
+    assistant.otherArtifactsOpen = assistant.otherArtifactsOpen !== true;
+    render();
+  }));
+  card.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", () => {
+    const message = messages.find((item) => item.id === button.dataset.copyMessage);
+    if (message) void copyConversationMessage(message, button);
+  }));
 }
 
 async function deleteConversation(conversationId) {

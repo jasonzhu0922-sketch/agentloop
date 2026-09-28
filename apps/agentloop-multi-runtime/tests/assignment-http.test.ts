@@ -10,6 +10,46 @@ import { IdentityService } from "../src/auth/identity-service.ts";
 import { observeAssignment } from "../web/assignment-stream.js";
 import { projectAssistantEvent } from "../web/assistant-event-projection.js";
 
+test("HTTP Router returns a durable failed Assignment when a Runtime rejects dispatch before Run admission", async () => {
+  const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
+  await store.ready();
+  const identity = new IdentityService(database);
+  const session = await identity.register("dispatch-failure@example.test", "long-test-password-123");
+  await store.seedRuntimes([{ id: "host", endpoint: "http://fixture-host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }]);
+  await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: Date.now() });
+  const router = new PersistentMultiRuntimeRouter({
+    store,
+    endpointFactory: () => ({ dispatch: async () => { throw new Error("upstream api_key=never-return-this"); } }),
+  });
+  const server = createRouterHttpServer(router, { identity });
+  try {
+    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/v2/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        schema: "agentloop.task/v2", conversationId: "dispatch-failure", clientMessageId: "message", input: "fixture",
+        executionTarget: { kind: "cloud_pool" }, dataPolicy: { mode: "cloud" },
+      }),
+    });
+    const body = await response.json() as { assignment?: { status?: string; remoteRunId?: string; errorCode?: string; errorMessage?: string } };
+    assert.equal(response.status, 202);
+    assert.deepEqual(body.assignment, {
+      ...body.assignment,
+      status: "failed",
+      remoteRunId: "",
+      errorCode: "runtime_dispatch_failed",
+      errorMessage: "Runtime 未能接收本次任务，请稍后重试。",
+    });
+    assert.doesNotMatch(JSON.stringify(body), /never-return-this/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await database.close();
+  }
+});
+
 test("HTTP Router + browser observer survives upstream error and socket loss, reconciles final state without redispatch", { timeout: 10_000 }, async () => {
   const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
   await store.ready();

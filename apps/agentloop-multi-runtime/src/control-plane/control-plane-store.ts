@@ -23,6 +23,13 @@ export interface StoredAssignment extends RuntimeAssignment {
   readonly errorMessage?: string;
 }
 
+/** A Router-owned failure that occurred before a Runtime admitted a Run. */
+export interface DispatchFailure {
+  readonly code: string;
+  /** Safe, user-observable text. Never pass an upstream exception here. */
+  readonly message: string;
+}
+
 export interface StoredRuntimeEndpoint {
   readonly id: string;
   readonly endpoint: string;
@@ -102,7 +109,7 @@ export interface ControlPlaneRepository {
   deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
   reserve(task: SubmitConversationTask, input: { readonly heartbeatTtlMs: number; readonly reservationTtlMs: number; readonly now?: number }): Promise<StoredAssignment>;
   markAccepted(assignmentId: string, remoteRunId: string, now?: number): Promise<void>;
-  markDispatchFailure(assignmentId: string, now?: number): Promise<void>;
+  markDispatchFailure(assignmentId: string, failure: DispatchFailure, now?: number): Promise<void>;
   createContinuationAssignment(parentAssignmentId: string, remoteRunId: string, now?: number): Promise<StoredAssignment>;
   observeRun(assignmentId: string, run: RuntimeRunStatus, now?: number): Promise<void>;
   assignment(id: string): Promise<StoredAssignment | undefined>;
@@ -720,11 +727,16 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     });
   }
 
-  async markDispatchFailure(assignmentId: string, now = Date.now()): Promise<void> {
+  async markDispatchFailure(assignmentId: string, failure: DispatchFailure, now = Date.now()): Promise<void> {
+    if (!isSafeDispatchFailure(failure)) throw new TypeError("invalid dispatch failure");
     await this.database.transaction(async () => {
-      await this.database.prepare(`UPDATE mr_assignments SET status = 'failed', reservation_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'reserved'`)
-        .run(now, assignmentId);
-      await this.database.prepare(`UPDATE mr_tasks SET status = 'queued', updated_at = ? WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)`)
+      const result = await this.database.prepare(`
+        UPDATE mr_assignments
+        SET status = 'failed', reservation_expires_at = NULL, error_code = ?, error_message = ?, updated_at = ?
+        WHERE id = ? AND status = 'reserved'
+      `).run(failure.code, failure.message, now, assignmentId);
+      if (result.changes === 0) return;
+      await this.database.prepare(`UPDATE mr_tasks SET status = 'failed', updated_at = ? WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)`)
         .run(now, assignmentId);
     });
   }
@@ -986,7 +998,9 @@ function assignmentSelect(where: string): string {
 }
 
 function toStoredAssignment(row: AssignmentRow): StoredAssignment {
-  if (row.remote_run_id === null && row.status !== "reserved") throw new TypeError("non-reserved assignment is missing remoteRunId");
+  if (row.remote_run_id === null && row.status !== "reserved" && row.status !== "failed" && row.status !== "expired") {
+    throw new TypeError("non-admitted assignment has an invalid status");
+  }
   return {
     id: row.id,
     runtimeId: row.runtime_id,
@@ -1001,6 +1015,11 @@ function toStoredAssignment(row: AssignmentRow): StoredAssignment {
     ...(row.error_code === null ? {} : { errorCode: row.error_code }),
     ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
   };
+}
+
+function isSafeDispatchFailure(value: DispatchFailure): boolean {
+  return typeof value.code === "string" && value.code.length > 0 && value.code.length <= 128
+    && typeof value.message === "string" && value.message.trim().length > 0 && value.message.length <= 1_024;
 }
 
 function score(node: { active_run_count: number; queued_run_count: number; pending_admissions: number; max_concurrent_runs: number }): number {

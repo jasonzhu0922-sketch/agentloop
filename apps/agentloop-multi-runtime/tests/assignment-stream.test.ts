@@ -111,6 +111,70 @@ test("actual app error handler no longer converts connection errors into termina
   assert.deepEqual(assistant, { status: "running", text: "work remains visible", reasoning: "progress" });
 });
 
+test("a persisted pre-admission failure completes the submitted message without opening SSE", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.match(source, /if \(body\.assignment\.status === "failed"\) \{[\s\S]*?completeAssistantMessage\(assistantMessage\);[\s\S]*?return;/);
+  const failureBranch = source.match(/if \(body\.assignment\.status === "failed"\) \{[\s\S]*?\n\s*\}\n\s*setStatus/)?.[0] ?? "";
+  assert.doesNotMatch(failureBranch, /streamAssignment\(/);
+});
+
+test("a later turn's live event repaints only its own assistant card", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const conversation = {
+    id: "conversation",
+    messages: [
+      { id: "completed", role: "assistant", status: "completed" },
+      { id: "streaming", role: "assistant", status: "running" },
+    ],
+  };
+  let fullRenders = 0;
+  const bindings: string[] = [];
+  const writes = new Map<string, number>();
+  const outputs = new Map<string, { scrollTop: number; scrollHeight: number; clientHeight: number }>();
+  const cards = new Map<string, { outerHTMLWrites: number; querySelector(selector: string): unknown; outerHTML: string }>();
+  const card = (id: string) => {
+    const value = {
+      outerHTMLWrites: 0,
+      querySelector(selector: string) { return selector === ".live-output-text" ? outputs.get(id) ?? null : null; },
+      set outerHTML(_html: string) {
+        value.outerHTMLWrites += 1;
+        writes.set(id, (writes.get(id) || 0) + 1);
+        cards.set(id, card(id));
+      },
+    };
+    return value;
+  };
+  cards.set("completed", card("completed"));
+  cards.set("streaming", card("streaming"));
+  outputs.set("streaming", { scrollTop: 0, scrollHeight: 20, clientHeight: 20 });
+  const scroll = { scrollTop: 0, scrollHeight: 100, clientHeight: 100 };
+  const context = vm.createContext({
+    pendingLiveAssistantIds: new Set(["streaming"]),
+    activeConversation: () => conversation,
+    renderedConversationId: "conversation",
+    CSS: { escape: (value: string) => value },
+    document: { querySelector: (selector: string) => {
+      const messageId = /data-assistant-message="([^"]+)"/.exec(selector)?.[1];
+      return messageId === undefined ? null : cards.get(messageId) ?? null;
+    } },
+    $: () => scroll,
+    isNearBottom: () => true,
+    nextScrollTop: () => 0,
+    renderMessage: (message: { id: string }) => `<article>${message.id}</article>`,
+    bindAssistantCard: (_card: unknown, _conversation: unknown, messages: Array<{ id: string }>) => bindings.push(messages.find((message) => message.id === "streaming")?.id || "missing"),
+    render: () => { fullRenders += 1; },
+    liveUpdates: { request() {}, flush() {} },
+  });
+  vm.runInContext(source.slice(source.indexOf("function requestLiveAssistantUpdate("), source.indexOf("function render()")), context);
+
+  context.renderPendingLiveAssistantMessages();
+
+  assert.equal(writes.get("completed") || 0, 0);
+  assert.equal(writes.get("streaming"), 1);
+  assert.deepEqual(bindings, ["streaming"]);
+  assert.equal(fullRenders, 0);
+});
+
 test("actual app repairs legacy false failure but never regresses a confirmed terminal Run", async () => {
   const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
   const context = vm.createContext({ completeAssistantMessage() {}, recoveredFailureMessage: () => "Host failure" });
