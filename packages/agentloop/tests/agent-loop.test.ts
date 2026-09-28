@@ -3793,6 +3793,64 @@ test("artifact progress policy treats a successful PPTX acceptance receipt as th
   assert.equal(state?.nextAction, "submit_completion_candidate");
 });
 
+test("agent loop rejects an HTML acceptance profile before it can self-validate a presentation target", async () => {
+  let verificationExecutions = 0;
+  let turns = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      turns += 1;
+      if (turns === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "verify-html-deck",
+            name: "verify_artifact_acceptance",
+            arguments: { artifactPath: "output/game-recommendations.html", profileId: "html_ppt" },
+          }],
+        };
+      }
+      return { content: "The requested PPTX still needs to be produced.", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify artifact acceptance",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      verificationExecutions += 1;
+      return { schema: "agentloop.artifactAcceptance/v1" };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["verify_artifact_acceptance"]);
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce a PPTX presentation.",
+    input: "生成游戏推荐 PPT",
+    model,
+    tools: new ToolRegistry([verifyTool]),
+    grant,
+    maxSteps: 3,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      { expectedArtifactKind: "presentation", expectedArtifactFormat: "pptx" },
+    ),
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "The requested PPTX still needs to be produced.");
+  assert.equal(verificationExecutions, 0);
+  const rejected = events.find((event) => event.type === "tool.rejected");
+  assert.match(rejected?.data.reason ?? "", /target mismatch.*html_ppt.*pptx/);
+});
+
 test("artifact progress policy allows diagnostic-driven intermediate source repair before rerender", async () => {
   const executions: string[] = [];
   let renderAttempts = 0;

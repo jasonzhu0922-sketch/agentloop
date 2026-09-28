@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqlConnection } from "../storage/connection.ts";
+import { insertIfAbsentSql } from "../storage/dialect-sql.ts";
 import { AppError } from "../shared/errors.ts";
 
 export interface RunCheckpointRecord {
@@ -42,11 +43,12 @@ export class RunCheckpointRepository {
   }): Promise<RunCheckpointRecord> {
     const id = randomUUID();
     const createdAt = input.createdAt ?? Date.now();
-    await this.database.prepare(`
-      INSERT INTO run_checkpoints(id, run_id, plan_id, action_id, reason, snapshot_json, created_at)
-      VALUES (?, ?, ?, ?, 'execution_authority_lost', ?, ?)
-      ON CONFLICT(run_id) DO NOTHING
-    `).run(
+    await this.database.prepare(insertIfAbsentSql({
+      dialect: this.database.dialect,
+      insert: `INSERT INTO run_checkpoints(id, run_id, plan_id, action_id, reason, snapshot_json, created_at)
+        VALUES (?, ?, ?, ?, 'execution_authority_lost', ?, ?)`,
+      keyColumn: "run_id",
+    })).run(
       id,
       input.runId,
       input.planId ?? null,

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SqlConnection } from "@zhujun/agentloop";
+import { TIDB_CONTROL_PLANE_SCHEMA_SQL, sqlForDialect, upsertSql, type SqlConnection } from "@zhujun/agentloop";
 import type { ConversationAttachmentSnapshot, ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../domain/contracts.ts";
 import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
@@ -158,7 +158,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
 
   /** Invoked only by the versioned schema migration registry. */
   async installSchema(): Promise<void> {
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_runtime_nodes (
         id TEXT PRIMARY KEY,
         display_name TEXT,
@@ -248,7 +248,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       );
       CREATE INDEX IF NOT EXISTS mr_conversation_runtime_migrations_conversation_idx
         ON mr_conversation_runtime_migrations(tenant_id, owner_user_id, conversation_id, created_at DESC);
-    `);
+    `;
+    await this.database.exec(this.database.dialect === "tidb" ? TIDB_CONTROL_PLANE_SCHEMA_SQL : canonicalSchema);
     // PostgreSQL deployments always start from the canonical schema above.
     // PRAGMA is exclusively a SQLite legacy-schema inspection mechanism.
     if (this.database.dialect === "sqlite") {
@@ -313,16 +314,14 @@ export class ControlPlaneStore implements ControlPlaneRepository {
 
   async seedRuntimes(runtimes: readonly (RuntimeInstance & { readonly endpoint: string })[], now = Date.now()): Promise<void> {
     await this.database.transaction(async () => {
-      const statement = this.database.prepare(`
-        INSERT INTO mr_runtime_nodes(id, display_name, endpoint, kind, profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count, updated_at)
-        VALUES (?, ?, ?, 'cloud', ?, ?, ?, 'offline', 0, 0, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          display_name = excluded.display_name,
-          endpoint = excluded.endpoint,
-          profile = excluded.profile,
-          capabilities_json = excluded.capabilities_json,
-          updated_at = excluded.updated_at
-      `);
+      const statement = this.database.prepare(upsertSql({
+        dialect: this.database.dialect,
+        insert: `INSERT INTO mr_runtime_nodes(id, display_name, endpoint, kind, profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count, updated_at)
+          VALUES (?, ?, ?, 'cloud', ?, ?, ?, 'offline', 0, 0, ?)`,
+        conflictTarget: "id",
+        sqliteAndPostgresUpdate: "display_name = excluded.display_name, endpoint = excluded.endpoint, profile = excluded.profile, capabilities_json = excluded.capabilities_json, updated_at = excluded.updated_at",
+        tidbUpdate: "display_name = VALUES(display_name), endpoint = VALUES(endpoint), profile = VALUES(profile), capabilities_json = VALUES(capabilities_json), updated_at = VALUES(updated_at)",
+      }));
       for (const runtime of runtimes) {
         await statement.run(runtime.id, runtime.displayName ?? null, runtime.endpoint, runtime.profile, JSON.stringify(runtime.capabilities), runtime.maxConcurrentRuns, now);
       }
@@ -365,56 +364,39 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       now,
       now,
     ] as const;
-    if (this.database.dialect === "tidb") {
-      await this.database.transaction(async () => {
-        // TiDB's upsert has no PostgreSQL-style conflict WHERE clause. Lock an
-        // existing identity first so an arbitrary runtime ID can never be
-        // rebound from one device to another by a concurrent registration.
-        const existing = await this.database.prepare("SELECT kind, device_id FROM mr_runtime_nodes WHERE id = ? FOR UPDATE")
-          .get(input.runtimeId) as { kind: string; device_id: string | null } | undefined;
-        if (existing !== undefined && (existing.kind !== "local" || existing.device_id !== input.deviceId)) {
-          throw new TypeError("runtime_id_conflict");
-        }
-        if (existing === undefined) {
-          await this.database.prepare(`
-            INSERT INTO mr_runtime_nodes(
-              id, display_name, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
-              profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
-              last_heartbeat_at, updated_at
-            ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-          `).run(...params);
-          return;
-        }
+    await this.database.transaction(async () => {
+      // This identity invariant is a compare-and-write operation, not an
+      // upsert. SQLite's BEGIN IMMEDIATE serializes it; PostgreSQL and TiDB
+      // lock the existing row explicitly.
+      const existing = await this.database.prepare(sqlForDialect(this.database.dialect, {
+        sqlite: "SELECT kind, device_id FROM mr_runtime_nodes WHERE id = ?",
+        postgres: "SELECT kind, device_id FROM mr_runtime_nodes WHERE id = ? FOR UPDATE",
+        tidb: "SELECT kind, device_id FROM mr_runtime_nodes WHERE id = ? FOR UPDATE",
+      })).get(input.runtimeId) as { kind: string; device_id: string | null } | undefined;
+      if (existing !== undefined && (existing.kind !== "local" || existing.device_id !== input.deviceId)) {
+        throw new TypeError("runtime_id_conflict");
+      }
+      if (existing === undefined) {
         await this.database.prepare(`
-          UPDATE mr_runtime_nodes SET
-            display_name = COALESCE(?, display_name), endpoint = ?, tenant_id = ?, owner_user_id = ?, connection_id = ?, connection_epoch = ?, lease_expires_at = ?,
-            catalog_version = ?, profile = ?, capabilities_json = ?, max_concurrent_runs = ?, status = ?,
-            last_heartbeat_at = ?, updated_at = ?
-          WHERE id = ? AND kind = 'local' AND device_id = ?
-        `).run(
-          params[1], params[2], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11], params[12],
-          params[13], params[14], params[15], input.runtimeId, input.deviceId,
-        );
-      });
-      return;
-    }
-    const result = await this.database.prepare(`
-      INSERT INTO mr_runtime_nodes(
-        id, display_name, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
-        profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
-        last_heartbeat_at, updated_at
-      ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        display_name = COALESCE(excluded.display_name, mr_runtime_nodes.display_name), endpoint = excluded.endpoint, kind = 'local', device_id = excluded.device_id,
-        tenant_id = excluded.tenant_id, owner_user_id = excluded.owner_user_id,
-        connection_id = excluded.connection_id, connection_epoch = excluded.connection_epoch,
-        lease_expires_at = excluded.lease_expires_at, catalog_version = excluded.catalog_version,
-        profile = excluded.profile, capabilities_json = excluded.capabilities_json,
-        max_concurrent_runs = excluded.max_concurrent_runs, status = excluded.status,
-        last_heartbeat_at = excluded.last_heartbeat_at, updated_at = excluded.updated_at
-      WHERE mr_runtime_nodes.kind = 'local' AND mr_runtime_nodes.device_id = excluded.device_id
-    `).run(...params);
-    if (result.changes !== 1) throw new TypeError("runtime_id_conflict");
+          INSERT INTO mr_runtime_nodes(
+            id, display_name, endpoint, kind, device_id, tenant_id, owner_user_id, connection_id, connection_epoch, lease_expires_at, catalog_version,
+            profile, capabilities_json, max_concurrent_runs, status, active_run_count, queued_run_count,
+            last_heartbeat_at, updated_at
+          ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+        `).run(...params);
+        return;
+      }
+      await this.database.prepare(`
+        UPDATE mr_runtime_nodes SET
+          display_name = COALESCE(?, display_name), endpoint = ?, tenant_id = ?, owner_user_id = ?, connection_id = ?, connection_epoch = ?, lease_expires_at = ?,
+          catalog_version = ?, profile = ?, capabilities_json = ?, max_concurrent_runs = ?, status = ?,
+          last_heartbeat_at = ?, updated_at = ?
+        WHERE id = ? AND kind = 'local' AND device_id = ?
+      `).run(
+        params[1], params[2], params[4], params[5], params[6], params[7], params[8], params[9], params[10], params[11], params[12],
+        params[13], params[14], params[15], input.runtimeId, input.deviceId,
+      );
+    });
   }
 
   async disconnectLocalRuntimes(connectionId: string, now = Date.now()): Promise<void> {
@@ -586,13 +568,25 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         turn.model_key AS final_model_key,
         turn.completed_at AS final_completed_at
       FROM mr_tasks t
-      LEFT JOIN mr_assignments a ON a.id = (
-        SELECT latest_assignment.id
-        FROM mr_assignments latest_assignment
-        WHERE latest_assignment.task_id = t.id
-        ORDER BY latest_assignment.created_at DESC, latest_assignment.id DESC
-        LIMIT 1
-      )
+      LEFT JOIN (
+        SELECT id, task_id, runtime_id, remote_run_id, status, error_code, error_message
+        FROM (
+          SELECT
+            latest_assignment.id,
+            latest_assignment.task_id,
+            latest_assignment.runtime_id,
+            latest_assignment.remote_run_id,
+            latest_assignment.status,
+            latest_assignment.error_code,
+            latest_assignment.error_message,
+            ROW_NUMBER() OVER (
+              PARTITION BY latest_assignment.task_id
+              ORDER BY latest_assignment.created_at DESC, latest_assignment.id DESC
+            ) AS assignment_rank
+          FROM mr_assignments latest_assignment
+        ) ranked_assignments
+        WHERE assignment_rank = 1
+      ) a ON a.task_id = t.id
       LEFT JOIN mr_turns turn ON turn.assignment_id = a.id
       LEFT JOIN mr_runtime_nodes runtime ON runtime.id = a.runtime_id
       WHERE t.tenant_id = ? AND t.owner_user_id = ? AND t.conversation_id = ?
@@ -798,8 +792,9 @@ export class ControlPlaneStore implements ControlPlaneRepository {
           WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)
             AND ? = (SELECT latest.id FROM mr_assignments latest WHERE latest.task_id = mr_tasks.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`)
           .run(status, finishedAt, finishedAt, finishedAt, assignmentId, assignmentId);
-        await this.database.prepare(`
-          INSERT INTO mr_turns(
+        await this.database.prepare(upsertSql({
+          dialect: this.database.dialect,
+          insert: `INSERT INTO mr_turns(
             assignment_id, tenant_id, owner_user_id, conversation_id, client_message_id,
             runtime_id, execution_location, model_key, user_input, assistant_output, status, error_code, created_at, completed_at
           )
@@ -809,14 +804,11 @@ export class ControlPlaneStore implements ControlPlaneRepository {
             CASE WHEN t.data_policy_json = '{"mode":"strict_local"}' THEN NULL ELSE ? END,
             ?, ?, t.created_at, COALESCE(?, ?)
           FROM mr_assignments a JOIN mr_tasks t ON t.id = a.task_id
-          WHERE a.id = ? AND t.data_policy_json <> '{"mode":"strict_local"}'
-          ON CONFLICT(assignment_id) DO UPDATE SET
-            assistant_output = excluded.assistant_output,
-            status = excluded.status,
-            error_code = excluded.error_code,
-            model_key = COALESCE(excluded.model_key, mr_turns.model_key),
-            completed_at = excluded.completed_at
-        `).run(executionLocation, run.modelKey ?? null, run.output ?? run.partialOutput ?? null, status, run.errorCode ?? null, finishedAt, now, assignmentId);
+          WHERE a.id = ? AND t.data_policy_json <> '{"mode":"strict_local"}'`,
+          conflictTarget: "assignment_id",
+          sqliteAndPostgresUpdate: "assistant_output = excluded.assistant_output, status = excluded.status, error_code = excluded.error_code, model_key = COALESCE(excluded.model_key, mr_turns.model_key), completed_at = excluded.completed_at",
+          tidbUpdate: "assistant_output = VALUES(assistant_output), status = VALUES(status), error_code = VALUES(error_code), model_key = COALESCE(VALUES(model_key), model_key), completed_at = VALUES(completed_at)",
+        })).run(executionLocation, run.modelKey ?? null, run.output ?? run.partialOutput ?? null, status, run.errorCode ?? null, finishedAt, now, assignmentId);
       }
     });
   }

@@ -20,7 +20,7 @@ import { resolveCapabilityGaps } from "../src/planning/capability-resolution.ts"
 import { estimateTextTokens } from "../src/runtime/context-assembler.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse, UploadedSourceSummary } from "../src/runtime/contracts.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext } from "../src/runtime/dynamic-prompt.ts";
-import { operationProfileCatalogForPlanning } from "../src/runtime/operation-profiles.ts";
+import { executionOperationProfile, operationProfileCatalogForPlanning } from "../src/runtime/operation-profiles.ts";
 import {
   DEFAULT_FILE_OUTPUT_CONVERGENCE_GRACE_STEPS,
   DEFAULT_MAX_STEPS,
@@ -1343,6 +1343,13 @@ test("structured task understanding separates business task from requested outpu
   assert.doesNotMatch(understanding.task, /html/i);
   assert.equal(understanding.deliverable.kind, "html");
   assert.equal(understanding.evidence.need, "source_grounded");
+});
+
+test("structured task understanding normalizes a bare PPT request to the PPTX target", () => {
+  const understanding = understandTask({ objective: "帮我生成一个游戏推荐 ppt" });
+
+  assert.equal(understanding.format, "pptx");
+  assert.equal(understanding.deliverable.kind, "presentation");
 });
 
 test("structured task understanding keeps source work stable when only the requested format changes", () => {
@@ -4429,6 +4436,55 @@ test("ModelPlanner keeps HTML implementation generic", async () => {
   assert.deepEqual(plan.steps[0].requiredCapabilities, ["workspace_artifact_write", "artifact_acceptance"]);
   assert.match(planningContext, /Do not force a particular HTML implementation/);
   assert.doesNotMatch(planningContext, /structured page specification/);
+});
+
+test("artifact planning and execution profiles do not project HTML production into a presentation target", async () => {
+  let planningContext = "";
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      planningContext = request.runtimeContext?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [submitOutcomePlanToolCall("game-presentation-plan", {
+          goal: "生成游戏推荐 PPT",
+          steps: [{
+            id: "build-deck",
+            objective: "生成并交付游戏推荐 PPT 演示文稿。",
+            dependencies: [],
+            role: "produce",
+            skillIds: [],
+            requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+              caveatPolicy: "none",
+            },
+          }],
+        })],
+      };
+    },
+  });
+
+  await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-game-presentation",
+    input: "帮我生成一个游戏推荐 ppt",
+    availableSkills: [],
+    availableToolNames: ["computer_write_file", "verify_artifact_acceptance"],
+  });
+
+  assert.match(planningContext, /"artifactKind":"presentation"/);
+  assert.doesNotMatch(planningContext, /Do not force a particular HTML implementation/);
+
+  const profile = executionOperationProfile({
+    objective: "生成并交付游戏推荐 PPT 演示文稿。",
+    successCriteria: [],
+    toolNames: ["computer_write_file", "verify_artifact_acceptance"],
+    artifactKind: "presentation",
+  });
+  assert.match(profile.executionRules.join("\n"), /native \.pptx presentation artifact/);
+  assert.doesNotMatch(profile.executionRules.join("\n"), /Produce HTML artifacts/);
 });
 
 test("checked-in HTML Skills describe HTML implementation without naming Tools", async () => {

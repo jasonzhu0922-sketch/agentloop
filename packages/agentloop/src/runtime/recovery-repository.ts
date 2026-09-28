@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlConnection } from "../storage/connection.ts";
+import { upsertSql } from "../storage/dialect-sql.ts";
+import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
 import { AppError } from "../shared/errors.ts";
 import type { PlanProposal, PlanRevisionAssessment } from "../planning/contracts.ts";
 import type { RecoveryDecisionKind, RecoveryDecisionProposal } from "./recovery-planning.ts";
@@ -159,13 +161,13 @@ export class RecoveryRepository {
         await this.database.prepare("DELETE FROM run_recovery_states WHERE run_id = ? AND action_id = ?")
           .run(decision.run_id, decision.action_id);
       } else {
-        await this.database.prepare(`
-          INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(run_id) DO UPDATE SET
-            state = excluded.state, action_id = excluded.action_id,
-            question = excluded.question, updated_at = excluded.updated_at
-        `).run(decision.run_id, state.kind, decision.action_id, state.question ?? null, now);
+        await this.database.prepare(upsertSql({
+          dialect: this.database.dialect,
+          insert: "INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at) VALUES (?, ?, ?, ?, ?)",
+          conflictTarget: "run_id",
+          sqliteAndPostgresUpdate: "state = excluded.state, action_id = excluded.action_id, question = excluded.question, updated_at = excluded.updated_at",
+          tidbUpdate: "state = VALUES(state), action_id = VALUES(action_id), question = VALUES(question), updated_at = VALUES(updated_at)",
+        })).run(decision.run_id, state.kind, decision.action_id, state.question ?? null, now);
       }
       await this.appendEvent(decision.run_id, "recovery.decision_admitted", {
         decisionId,
@@ -256,13 +258,13 @@ export class RecoveryRepository {
       if (action?.state !== "recovery_required") {
         throw new AppError("CONFLICT", "Recovery Action is no longer available", 409);
       }
-      await this.database.prepare(`
-        INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
-        VALUES (?, 'waiting_recovery', ?, NULL, ?)
-        ON CONFLICT(run_id) DO UPDATE SET
-          state = excluded.state, action_id = excluded.action_id,
-          question = NULL, updated_at = excluded.updated_at
-      `).run(runId, actionId, now);
+      await this.database.prepare(upsertSql({
+        dialect: this.database.dialect,
+        insert: "INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at) VALUES (?, 'waiting_recovery', ?, NULL, ?)",
+        conflictTarget: "run_id",
+        sqliteAndPostgresUpdate: "state = excluded.state, action_id = excluded.action_id, question = NULL, updated_at = excluded.updated_at",
+        tidbUpdate: "state = VALUES(state), action_id = VALUES(action_id), question = NULL, updated_at = VALUES(updated_at)",
+      })).run(runId, actionId, now);
       await this.appendEvent(runId, "recovery.resume_interrupted", { actionId, reason }, now);
     });
   }
@@ -362,14 +364,8 @@ export class RecoveryRepository {
   }
 
   private async appendEvent(runId: string, type: string, data: Readonly<Record<string, unknown>>, createdAt: number): Promise<void> {
-    const sequence = await this.database.prepare(
-      "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?",
-    ).get(runId) as { seq: number };
-    await this.database.prepare(`
-      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(runId, sequence.seq, type, JSON.stringify(data), createdAt);
-    this.eventLogSink?.({ runId, seq: sequence.seq, type, data, createdAt });
+    const seq = await appendRunEvent(this.database, runId, { type, data, createdAt });
+    this.eventLogSink?.({ runId, seq, type, data, createdAt });
   }
 }
 

@@ -300,6 +300,12 @@ test("Router conversation index paginates newest conversations in stable pages o
       id, task_id, runtime_id, dispatch_key, remote_run_id, status,
       reservation_expires_at, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+  `).run("assignment-history-old", "task-64", "runtime-history", "dispatch-history-old", "run-history-old", "failed", 63, 63);
+  await database.prepare(`
+    INSERT INTO mr_assignments(
+      id, task_id, runtime_id, dispatch_key, remote_run_id, status,
+      reservation_expires_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
   `).run("assignment-history", "task-64", "runtime-history", "dispatch-history", "run-history", "completed", 64, 64);
   const detail = await store.conversation("tenant", "user", "conversation-64");
   assert.deepEqual(detail?.turns, [{
@@ -503,6 +509,10 @@ test("Router and Runtime Host remain isolated deployment dependency closures", a
 
 test("local launcher gives Router and Runtime Hosts the same shared workspace mount", async () => {
   const source = await readFile(new URL("../scripts/start-local.mjs", import.meta.url), "utf8");
+  assert.ok(
+    source.indexOf("let closing = false;") < source.indexOf('children.push(start("router"'),
+    "the launcher must initialize shutdown state before a Router child can fail",
+  );
   const routerEnvironment = source.slice(
     source.indexOf('children.push(start("router"'),
     source.indexOf("// The Router owns initial schema setup"),

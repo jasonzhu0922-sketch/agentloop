@@ -24,6 +24,8 @@ export interface OperationProfileInput {
   readonly successCriteria: readonly Pick<SuccessCriterion, "id" | "description">[];
   readonly toolNames: readonly string[];
   readonly skillNames?: readonly string[];
+  /** Runtime-owned delivery family when this is an artifact-producing step. */
+  readonly artifactKind?: StructuredTaskUnderstanding["deliverable"]["kind"];
 }
 
 const OPERATION_PROFILES: readonly OperationProfile[] = [
@@ -125,7 +127,7 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
       "Success criteria must name the required artifact type and observable delivery evidence.",
       "When the user requests an artifact format, treat its minimum usable shape as core evidence: openable/readable output, requested type, workspace path, and non-empty receipt.",
       "For browser-presentable, presentation-style, or document-like artifacts, basic openability and requested format/type are core delivery evidence; navigation, interaction, visual polish, and browser checks are Skill-owned QA or tool signals unless the user or loaded Skill explicitly requires them.",
-      "Do not force a particular HTML implementation. Plan only the requested artifact boundary; the loaded Skill and general-purpose file-production tools determine the authored HTML/CSS/JS implementation.",
+      "Do not force a particular renderer or implementation. Plan only the requested artifact boundary; the loaded Skill and general-purpose file-production tools determine the implementation appropriate to that target.",
       "Prefer one aggregate artifact_acceptance evidence object over separate QA leaves when the available Tool catalog exposes verify_artifact_acceptance.",
       "When the requested artifact transforms uploaded original files rather than their extracted text, require uploaded_source_materialization on the producing leaf and bind the concrete uploaded source IDs.",
       "Keep an uploaded artifact's native inspection, transformation, format-Skill workflow, repair, and acceptance in the same primary-builder leaf; source-summary leaves are only for independently reusable facts consumed by a different deliverable.",
@@ -135,7 +137,6 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
     executionRules: [
       "Establish the output path and expected format before producing the artifact.",
       "For merge, split, rotate, convert, archive, or other original-file operations, call materialize_source_file for each authorized uploaded operand and use only its returned relative workspace path; read_source text is not a substitute for original bytes.",
-      "Produce HTML artifacts through the general-purpose code/file production path, whether they are paginated, presentation-style, interactive, or standalone pages.",
       "After generation, record existence, size, and any format evidence required by the current leaf or loaded Skill contract.",
       "When verify_artifact_acceptance is available, call it once for the final artifact and preserve its checks, verdict, satisfied evidence kinds, failed evidence kinds, and explicit skipped_unavailable caveats.",
       "After artifact acceptance satisfies the required evidence, do not reread generated files merely to restate paths, hashes, size, or format facts already present in receipts.",
@@ -185,7 +186,15 @@ export function operationProfilesForTaskUnderstanding(
   understanding: StructuredTaskUnderstanding,
 ): ReturnType<typeof operationProfileCatalogForPlanning> {
   const selected = new Set(understanding.operationProfiles);
-  return operationProfileCatalogForPlanning().filter((item) => selected.has(item.id));
+  return operationProfileCatalogForPlanning()
+    .filter((item) => selected.has(item.id))
+    .map((item) => ({
+      ...item,
+      planningRules: [
+        ...item.planningRules,
+        ...artifactKindPlanningRules(item.id, understanding.deliverable.kind),
+      ],
+    }));
 }
 
 export function inferOperationProfile(input: OperationProfileInput): OperationProfile {
@@ -228,9 +237,42 @@ export function executionOperationProfile(input: OperationProfileInput): Readonl
     name: selected.name,
     description: selected.description,
     ...(selected.topLevelPrompt === undefined ? {} : { topLevelPrompt: selected.topLevelPrompt }),
-    executionRules: selected.executionRules,
+    executionRules: [
+      ...selected.executionRules,
+      ...artifactKindExecutionRules(selected.id, input.artifactKind),
+    ],
     successEvidence: selected.successEvidence,
   };
+}
+
+/**
+ * Operation profiles describe the work shape, while artifact kind owns the
+ * concrete production path. Keep HTML implementation guidance out of every
+ * other workspace-artifact task: an HTML slide deck is not a presentation
+ * deliverable merely because it looks presentation-like in a browser.
+ */
+function artifactKindPlanningRules(
+  operationProfileId: OperationProfileId,
+  artifactKind: StructuredTaskUnderstanding["deliverable"]["kind"],
+): readonly string[] {
+  if (operationProfileId !== "artifact_build" || artifactKind !== "html") return [];
+  return [
+    "Do not force a particular HTML implementation. For an HTML target, the loaded Skill and general-purpose file-production tools determine the authored HTML/CSS/JS implementation.",
+  ];
+}
+
+function artifactKindExecutionRules(
+  operationProfileId: OperationProfileId,
+  artifactKind: StructuredTaskUnderstanding["deliverable"]["kind"] | undefined,
+): readonly string[] {
+  if (operationProfileId !== "artifact_build") return [];
+  if (artifactKind === "html") {
+    return ["Produce HTML artifacts through the general-purpose code/file production path, whether they are paginated, interactive, or standalone pages."];
+  }
+  if (artifactKind === "presentation") {
+    return ["Produce a native .pptx presentation artifact. An HTML deck or browser page is not a substitute for the requested presentation deliverable."];
+  }
+  return [];
 }
 
 function profile(id: OperationProfileId): OperationProfile {

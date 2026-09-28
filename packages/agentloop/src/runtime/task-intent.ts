@@ -339,7 +339,10 @@ function structuredExplicitFormat(value: string): string | undefined {
   if (/\btxt\b|纯文本/iu.test(value)) return "txt";
   if (/\bxlsx\b/iu.test(value)) return "xlsx";
   if (/\bcsv\b/iu.test(value)) return "csv";
-  if (/\bpptx\b/iu.test(value)) return "pptx";
+  // Bare "ppt" is the common user-facing name for a modern PowerPoint
+  // deliverable. Normalize it to the concrete OOXML target rather than
+  // leaving the Runtime with only the broader presentation family.
+  if (/\bpptx?\b/iu.test(value)) return "pptx";
   if (/\bpng\b/iu.test(value)) return "png";
   if (/\bjpe?g\b/iu.test(value)) return "jpg";
   if (/\bwebp\b/iu.test(value)) return "webp";

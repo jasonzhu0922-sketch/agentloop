@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import type { AppDatabase, SqlConnection } from "@zhujun/agentloop";
+import { TIDB_IDENTITY_SCHEMA_SQL, type AppDatabase, type SqlConnection } from "@zhujun/agentloop";
 import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 const scrypt = promisify(scryptCallback);
@@ -153,7 +153,7 @@ export class IdentityService {
 
 /** Schema installer invoked only by the versioned migration registry. */
 export async function installIdentitySchema(database: SqlConnection): Promise<void> {
-  await database.exec(IDENTITY_SCHEMA_SQL);
+  await database.exec(database.dialect === "tidb" ? TIDB_IDENTITY_SCHEMA_SQL : IDENTITY_SCHEMA_SQL);
 }
 
 function normalizeEmail(value: unknown): string {

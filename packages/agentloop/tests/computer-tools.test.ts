@@ -3387,6 +3387,7 @@ test("visible directory indexing creates source summary evidence for large direc
         schema: string;
         sourceType: string;
         facts: Array<{ kind: string; indexRef: string }>;
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
       };
     };
 
@@ -3405,6 +3406,7 @@ test("visible directory indexing creates source summary evidence for large direc
     assert.ok(categoryProfile?.topValues[0]?.samplePaths.every((path) => /^kb\/KB-000[123] topic [123]\.md$/.test(path)));
     assert.ok(categoryProfile?.hierarchy?.nodes.some((node) => node.path.join(" > ") === "财税业务" && node.count === 3));
     assert.ok(result.evidenceKinds.satisfied.includes("source_summary"));
+    assert.ok(result.evidenceKinds.satisfied.includes("record_counts"));
     assert.ok(result.evidenceKinds.caveated.includes("explicit_caveats"));
     assert.equal(result.evidenceKinds.failed.length, 0);
     assert.ok(result.caveats.some((item) => /does not read every file body/.test(item)));
@@ -3412,6 +3414,37 @@ test("visible directory indexing creates source summary evidence for large direc
     assert.equal(result.evidenceReceipt.sourceType, "visible_directory");
     assert.equal(result.evidenceReceipt.facts[0]?.kind, "source_summary");
     assert.equal(result.evidenceReceipt.facts[0]?.indexRef, result.indexRef);
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("record_counts"));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("visible directory indexing does not claim complete record counts after a bounded scan", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-visible-index-truncated-"));
+  try {
+    for (let index = 1; index <= 3; index += 1) {
+      await fs.writeFile(join(root, `doc-${index}.md`), `# ${index}\n`);
+    }
+    const registry = new ToolRegistry(createVisibleDirectoryTools());
+    const allowed = registry.materialize(visibleGrant(["visible_index_directory"], root));
+    const prepared = allowed.prepare({
+      id: "index-visible-truncated",
+      name: "visible_index_directory",
+      arguments: { rootId: "visible_dir_1", path: ".", maxFiles: 2 },
+    });
+    const result = await prepared.tool.execute(
+      { grant: visibleGrant(["visible_index_directory"], root) },
+      prepared.input,
+    ) as {
+      truncated: boolean;
+      evidenceKinds: { satisfied: string[] };
+      evidenceReceipt: { evidenceKinds: { satisfied: string[] } };
+    };
+
+    assert.equal(result.truncated, true);
+    assert.equal(result.evidenceKinds.satisfied.includes("record_counts"), false);
+    assert.equal(result.evidenceReceipt.evidenceKinds.satisfied.includes("record_counts"), false);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

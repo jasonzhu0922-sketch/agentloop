@@ -3,9 +3,13 @@ import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { PgConnection, translatePlaceholders } from "../src/storage/pg-connection.ts";
 import type { PgClientLike, PgPoolLike } from "../src/storage/pg-connection.ts";
-import { TiDbConnection, splitSqlStatements, translateTiDbSql } from "../src/storage/tidb-connection.ts";
+import { TiDbConnection, splitSqlStatements } from "../src/storage/tidb-connection.ts";
+import { TIDB_IDENTITY_SCHEMA_SQL, TIDB_KERNEL_SCHEMA_SQL } from "../src/storage/tidb-schema-definitions.ts";
+import { insertIfAbsentSql, upsertSql } from "../src/storage/dialect-sql.ts";
 import type { TiDbClientLike, TiDbPoolLike } from "../src/storage/tidb-connection.ts";
 import type { SqlConnection, SqlRunResult, SqlStatement, SqlValue } from "../src/storage/connection.ts";
+import { SkillService } from "../src/skills/skill-service.ts";
+import { RunRepository } from "../src/storage/repositories/run-repository.ts";
 
 test("AppDatabase.open accepts an injected async connection and waits for schema creation", async () => {
   const connection = new RecordingConnection("postgres");
@@ -31,6 +35,42 @@ test("AppDatabase operations wait for injected connection migration", async () =
   try {
     await database.prepare("SELECT ? AS value").get("ready");
     assert.deepEqual(connection.calls.map((call) => call.kind), ["exec", "exec", "exec", "get"]);
+  } finally {
+    await database.close();
+  }
+});
+
+test("Run event allocation continues a retained legacy stream through the shared per-Run sequence", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const runs = new RunRepository(database);
+    await runs.insertRun({
+      id: "run-event-sequence",
+      ownerUserId: "owner",
+      allowDangerousTools: false,
+      input: "test",
+      createdAt: 1,
+    });
+    await database.prepare(`
+      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run("run-event-sequence", 7, "legacy.event", "{}", 1);
+
+    const first = await runs.appendEvent("run-event-sequence", {
+      type: "new.event",
+      data: { source: "repository" },
+      createdAt: 2,
+    });
+    const second = await runs.appendEvent("run-event-sequence", {
+      type: "next.event",
+      data: { source: "repository" },
+      createdAt: 3,
+    });
+    assert.deepEqual([first, second], [8, 9]);
+    const sequence = await database.prepare(
+      "SELECT next_seq FROM run_event_sequences WHERE run_id = ?",
+    ).get<{ next_seq: number }>("run-event-sequence");
+    assert.equal(sequence?.next_seq, 10);
   } finally {
     await database.close();
   }
@@ -76,16 +116,49 @@ test("AppDatabase accepts TiDB as an independent non-SQLite dialect", async () =
   try {
     assert.equal(database.dialect, "tidb");
     assert.ok(connection.execSql.every((sql) => !sql.includes("PRAGMA")));
+    assert.match(connection.execSql[0] ?? "", /id VARCHAR\(191\) PRIMARY KEY/);
+    assert.match(connection.execSql[0] ?? "", /instructions LONGTEXT NOT NULL/);
   } finally {
     await database.close();
   }
 });
 
-test("TiDB adapter keeps question-mark binding and pins transactions", async () => {
+test("SkillService selects portable SQL Skill storage for TiDB", () => {
+  assert.doesNotThrow(() => new SkillService(new RecordingConnection("tidb")));
+});
+
+test("repositories select conflict semantics before SQL reaches a connection", () => {
+  assert.equal(
+    insertIfAbsentSql({ dialect: "tidb", insert: "INSERT INTO event_sequences(run_id) VALUES (?)", keyColumn: "run_id" }),
+    "INSERT INTO event_sequences(run_id) VALUES (?) ON DUPLICATE KEY UPDATE run_id = run_id",
+  );
+  assert.equal(
+    upsertSql({
+      dialect: "postgres",
+      insert: "INSERT INTO recovery(run_id, state) VALUES (?, ?)",
+      conflictTarget: "run_id",
+      sqliteAndPostgresUpdate: "state = excluded.state",
+      tidbUpdate: "state = VALUES(state)",
+    }),
+    "INSERT INTO recovery(run_id, state) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET state = excluded.state",
+  );
+  assert.equal(
+    upsertSql({
+      dialect: "tidb",
+      insert: "INSERT INTO recovery(run_id, state) VALUES (?, ?)",
+      conflictTarget: "run_id",
+      sqliteAndPostgresUpdate: "state = excluded.state",
+      tidbUpdate: "state = VALUES(state)",
+    }),
+    "INSERT INTO recovery(run_id, state) VALUES (?, ?) ON DUPLICATE KEY UPDATE state = VALUES(state)",
+  );
+});
+
+test("TiDB adapter keeps question-mark binding, pins transactions, and never rewrites SQL", async () => {
   const pool = new RecordingTiDbPool();
   const connection = TiDbConnection.fromPool(pool);
   await connection.exec("CREATE TABLE demo(value TEXT); CREATE INDEX demo_value_idx ON demo(value)");
-  assert.deepEqual(pool.poolQueries.map((query) => query.sql), ["CREATE TABLE demo(value LONGTEXT)", "CREATE INDEX demo_value_idx ON demo(value)"]);
+  assert.deepEqual(pool.poolQueries.map((query) => query.sql), ["CREATE TABLE demo(value TEXT)", "CREATE INDEX demo_value_idx ON demo(value)"]);
   await connection.prepare("SELECT ? AS value").get("bound");
   assert.deepEqual(pool.poolQueries.at(-1), { sql: "SELECT ? AS value", values: ["bound"] });
   await connection.transaction(async () => {
@@ -94,46 +167,12 @@ test("TiDB adapter keeps question-mark binding and pins transactions", async () 
   assert.deepEqual(pool.clientQueries.map((query) => query.sql), ["START TRANSACTION", "UPDATE demo SET value = ?", "COMMIT"]);
   assert.equal(pool.released, 1);
   assert.deepEqual(splitSqlStatements("SELECT ';'; SELECT 2;"), ["SELECT ';'", "SELECT 2"]);
-  assert.equal(
-    translateTiDbSql("INSERT INTO demo(id, value) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value"),
-    "INSERT INTO demo(id, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-  );
-  assert.equal(
-    translateTiDbSql("INSERT INTO demo(id, value) VALUES (?, ?) ON CONFLICT(id) DO NOTHING"),
-    "INSERT INTO demo(id, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE id = id",
-  );
-  assert.equal(
-    translateTiDbSql("CREATE TABLE demo(kind TEXT NOT NULL DEFAULT 'inline', content TEXT NOT NULL)"),
-    "CREATE TABLE demo(kind LONGTEXT NOT NULL, content LONGTEXT NOT NULL)",
-  );
-  const schema = translateTiDbSql(`
-    CREATE TABLE skills (
-      id TEXT PRIMARY KEY,
-      owner_user_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      instructions TEXT NOT NULL,
-      visible_directories_json TEXT NOT NULL DEFAULT '[]',
-      UNIQUE(owner_user_id, name)
-    )
-  `);
-  assert.match(schema, /id VARCHAR\(191\) PRIMARY KEY/);
-  assert.match(schema, /owner_user_id VARCHAR\(191\) NOT NULL/);
-  assert.match(schema, /name VARCHAR\(255\) NOT NULL/);
-  assert.match(schema, /instructions LONGTEXT NOT NULL/);
-  assert.match(schema, /visible_directories_json LONGTEXT NOT NULL/);
-  assert.equal(
-    translateTiDbSql("CREATE TABLE timestamps(created_at INTEGER NOT NULL, sequence INTEGER)"),
-    "CREATE TABLE timestamps(created_at BIGINT NOT NULL, sequence BIGINT)",
-  );
-  const planTemplateSchema = translateTiDbSql(`
-    CREATE TABLE IF NOT EXISTS \`plan_templates\` (
-      id TEXT PRIMARY KEY,
-      plan_skeleton_json TEXT NOT NULL
-    )
-  `);
-  assert.match(planTemplateSchema, /\`plan_templates\`/);
-  assert.match(planTemplateSchema, /id VARCHAR\(191\) PRIMARY KEY/);
-  assert.match(planTemplateSchema, /plan_skeleton_json LONGTEXT NOT NULL/);
+  assert.match(TIDB_KERNEL_SCHEMA_SQL, /id VARCHAR\(191\) PRIMARY KEY/);
+  assert.match(TIDB_KERNEL_SCHEMA_SQL, /instructions LONGTEXT NOT NULL/);
+  assert.match(TIDB_IDENTITY_SCHEMA_SQL, /tenant_id VARCHAR\(191\) NOT NULL/);
+  assert.match(TIDB_IDENTITY_SCHEMA_SQL, /user_id VARCHAR\(191\) NOT NULL/);
+  assert.match(TIDB_KERNEL_SCHEMA_SQL, /kind LONGTEXT NOT NULL CHECK\(kind IN \('text', 'table', 'metadata'\)\)/);
+  assert.doesNotMatch(TIDB_KERNEL_SCHEMA_SQL, /'LONGTEXT'/);
 });
 
 class RecordingConnection implements SqlConnection {

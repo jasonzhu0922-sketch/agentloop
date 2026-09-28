@@ -1,4 +1,4 @@
-import { AppDatabase, type SqlConnection } from "@zhujun/agentloop";
+import { AppDatabase, insertIfAbsentSql, type SqlConnection } from "@zhujun/agentloop";
 import { installHostDispatchSchema } from "../runtime/host-dispatch-store.ts";
 import { applyVersionedMigrations, SchemaMigrationError, type SchemaMigration } from "./schema-migration-ledger.ts";
 
@@ -9,6 +9,7 @@ const MIGRATIONS: readonly SchemaMigration[] = [
   } },
   { id: "runtime/0002_host_dispatch_ledger", definition: "host-dispatch-ledger;run-executor-ownership:v1", apply: installHostDispatchSchema },
   { id: "runtime/0003_preserve_source_state_compatibility", definition: "repair-boundaries;recovery-leases;assessment-bindings;delivery-receipts:v1", apply: installSourceCompatibilityColumns },
+  { id: "runtime/0004_run_event_sequences", definition: "per-run-event-sequence;concurrent-runtime-writers:v1", apply: installRunEventSequences },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {
@@ -36,7 +37,37 @@ async function installSourceCompatibilityColumns(database: SqlConnection): Promi
       if (existing.some((entry) => entry.name === column)) continue;
       await database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     } else {
-      await database.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${type}`);
+      const tidbType = type === "TEXT" ? "LONGTEXT" : type;
+      await database.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${database.dialect === "tidb" ? tidbType : type}`);
     }
+  }
+}
+
+/** Establishes a per-Run allocation row before concurrent Runtime writers append events. */
+async function installRunEventSequences(database: SqlConnection): Promise<void> {
+  const sqliteAndPostgresSchema = `
+    CREATE TABLE IF NOT EXISTS run_event_sequences (
+      run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+      next_seq INTEGER NOT NULL
+    )
+  `;
+  const tidbSchema = `
+    CREATE TABLE IF NOT EXISTS run_event_sequences (
+      run_id VARCHAR(191) PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+      next_seq BIGINT NOT NULL
+    )
+  `;
+  await database.exec(database.dialect === "tidb" ? tidbSchema : sqliteAndPostgresSchema);
+  const rows = await database.prepare(`
+    SELECT run_id, COALESCE(MAX(seq), 0) + 1 AS next_seq
+    FROM run_events
+    GROUP BY run_id
+  `).all<{ run_id: string; next_seq: number }>();
+  for (const row of rows) {
+    await database.prepare(insertIfAbsentSql({
+      dialect: database.dialect,
+      insert: "INSERT INTO run_event_sequences(run_id, next_seq) VALUES (?, ?)",
+      keyColumn: "run_id",
+    })).run(row.run_id, row.next_seq);
   }
 }

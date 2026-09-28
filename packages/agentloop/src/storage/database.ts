@@ -1,5 +1,6 @@
 import type { SqlConnection, SqlDialect, SqlStatement } from "./connection.ts";
 import { SqliteConnection } from "./sqlite-connection.ts";
+import { TIDB_KERNEL_SCHEMA_SQL } from "./tidb-schema-definitions.ts";
 
 /**
  * Schema owner and connection facade. Wraps any `SqlConnection`; the default
@@ -95,7 +96,7 @@ export class AppDatabase implements SqlConnection {
   }
 
   private async migrate(): Promise<void> {
-    await this.connection.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL,
@@ -209,6 +210,11 @@ export class AppDatabase implements SqlConnection {
         payload_json TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY(run_id, seq)
+      );
+
+      CREATE TABLE IF NOT EXISTS run_event_sequences (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        next_seq INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS runtime_actions (
@@ -498,7 +504,8 @@ export class AppDatabase implements SqlConnection {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_events(actor_user_id, created_at DESC);
-    `);
+    `;
+    await this.connection.exec(this.dialect === "tidb" ? TIDB_KERNEL_SCHEMA_SQL : canonicalSchema);
 
     // Kernel boundary: business rows are owned by opaque host-provided user
     // ids, so business tables must not enforce foreign keys into any

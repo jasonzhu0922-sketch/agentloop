@@ -256,6 +256,44 @@ function automaticArtifactAcceptanceCall(input: {
   };
 }
 
+/**
+ * `verify_artifact_acceptance` is an observation tool, not an authority to
+ * redefine the target. The admitted Plan target is Runtime-owned; a model may
+ * choose a verifier profile only when that profile and its path can actually
+ * satisfy that target. This stops an HTML-local receipt from being presented
+ * as validation of a PPTX, PDF, or other incompatible deliverable.
+ */
+function assertArtifactAcceptanceCallMatchesTarget(
+  call: ModelToolCall,
+  policy: RuntimeToolProgressPolicy | undefined,
+): void {
+  if (call.name !== "verify_artifact_acceptance") return;
+  const expectedArtifactKind = policy?.expectedArtifactKind;
+  const expectedArtifactFormat = policy?.expectedArtifactFormat;
+  if (expectedArtifactKind === undefined && expectedArtifactFormat === undefined) return;
+  if (!isPlainRecord(call.arguments)) return;
+  const artifactPath = call.arguments.artifactPath;
+  if (typeof artifactPath !== "string" || artifactPath.trim().length === 0) return;
+  const profileId = typeof call.arguments.profileId === "string"
+    ? call.arguments.profileId
+    : typeof call.arguments.artifactKind === "string"
+      ? call.arguments.artifactKind
+      : undefined;
+  if (artifactMatchesExpectedTarget(
+    { path: artifactPath, ...(profileId === undefined ? {} : { artifactKind: profileId }) },
+    expectedArtifactKind,
+    expectedArtifactFormat,
+  )) return;
+  const target = expectedArtifactFormat ?? expectedArtifactKind ?? "admitted artifact target";
+  const declared = profileId === undefined ? artifactPath : `${artifactPath} (${profileId})`;
+  throw new AppError(
+    "TOOL_POLICY_DENIED",
+    `verify_artifact_acceptance target mismatch: ${declared} cannot verify the admitted ${target} deliverable`,
+    422,
+    { artifactPath, profileId, expectedArtifactKind, expectedArtifactFormat },
+  );
+}
+
 function toolEvidenceFromOutcome(outcome: ToolOutcome): AgentLoopToolEvidence {
   return {
     toolCallId: outcome.call.id,
@@ -799,6 +837,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const grantedMaterialized = options.tools.materialize(options.grant, {
       decisionLedger: options.runtimeContext?.decisionLedger,
     });
+    const prepareWithArtifactTarget = (call: ModelToolCall): PreparedToolCall => {
+      assertArtifactAcceptanceCallMatchesTarget(call, options.progressPolicy);
+      return grantedMaterialized.prepare(call);
+    };
     const workProductProjection = await workProducts?.project();
     const stepExecutionDecision = stepExecutionStrategy.prepareModelStep({
       modelStep: step,
@@ -861,7 +903,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       const prepared = (() => {
         try {
-          return { kind: "ready" as const, value: grantedMaterialized.prepare(automaticAcceptance.call) };
+          return { kind: "ready" as const, value: prepareWithArtifactTarget(automaticAcceptance.call) };
         } catch (error) {
           return { kind: "rejected" as const, call: automaticAcceptance.call, message: publicErrorMessage(error) };
         }
@@ -1024,7 +1066,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         runtimePromptAugmentationIds: assembly.runtimePromptAugmentationIds,
         signal: options.signal,
         grant: options.grant,
-        prepare: (call) => grantedMaterialized.prepare(call),
+        prepare: prepareWithArtifactTarget,
         maxToolResultCharacters,
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
@@ -1523,7 +1565,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
         admittedToolCalls.set(call.name, admittedCalls + 1);
         try {
-          const value = grantedMaterialized.prepare(call);
+          const value = prepareWithArtifactTarget(call);
           await emit({
             type: "tool.planned",
             data: {

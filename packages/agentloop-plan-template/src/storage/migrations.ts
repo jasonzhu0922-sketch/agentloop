@@ -40,7 +40,7 @@ export async function migratePlanTemplateStorage(input: {
   if (input.connection.dialect === "postgres") {
     await input.connection.exec(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(normalizeSchemaName(input.schemaName), "postgres")}`);
   }
-  await input.connection.exec(`
+  const templatesSchema = `
     CREATE TABLE IF NOT EXISTS ${tables.templates} (
       id TEXT PRIMARY KEY,
       version INTEGER NOT NULL,
@@ -60,8 +60,9 @@ export async function migratePlanTemplateStorage(input: {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `);
-  await input.connection.exec(`
+  `;
+  await input.connection.exec(input.connection.dialect === "tidb" ? tidbTemplatesSchema(tables) : templatesSchema);
+  const examplesSchema = `
     CREATE TABLE IF NOT EXISTS ${tables.examples} (
       id TEXT PRIMARY KEY,
       template_id TEXT NOT NULL,
@@ -74,8 +75,9 @@ export async function migratePlanTemplateStorage(input: {
       created_at TEXT NOT NULL,
       FOREIGN KEY (template_id) REFERENCES ${tables.templates}(id)
     )
-  `);
-  await input.connection.exec(`
+  `;
+  await input.connection.exec(input.connection.dialect === "tidb" ? tidbExamplesSchema(tables) : examplesSchema);
+  const matchesSchema = `
     CREATE TABLE IF NOT EXISTS ${tables.matches} (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
@@ -88,7 +90,8 @@ export async function migratePlanTemplateStorage(input: {
       outcome_status TEXT,
       created_at TEXT NOT NULL
     )
-  `);
+  `;
+  await input.connection.exec(input.connection.dialect === "tidb" ? tidbMatchesSchema(tables) : matchesSchema);
   await input.connection.exec(`CREATE INDEX IF NOT EXISTS ${indexName(input.connection.dialect, input.schemaName, "idx_plan_template_matches_run_id")} ON ${tables.matches} (run_id)`);
   await input.connection.exec(`CREATE INDEX IF NOT EXISTS ${indexName(input.connection.dialect, input.schemaName, "idx_plan_template_examples_template_id")} ON ${tables.examples} (template_id)`);
   return tables;
@@ -102,4 +105,35 @@ function quoteIdent(value: string, dialect: "sqlite" | "postgres" | "tidb"): str
 function indexName(dialect: SqlDialect, schemaName: string | undefined, name: string): string {
   if (dialect === "sqlite" || dialect === "tidb") return quoteIdent(name, dialect);
   return `${quoteIdent(normalizeSchemaName(schemaName), "postgres")}.${quoteIdent(name, "postgres")}`;
+}
+
+function tidbTemplatesSchema(tables: PlanTemplateTableNames): string {
+  return `CREATE TABLE IF NOT EXISTS ${tables.templates} (
+    id VARCHAR(191) PRIMARY KEY, version BIGINT NOT NULL, status LONGTEXT NOT NULL,
+    intent_family LONGTEXT NOT NULL, source_need LONGTEXT NOT NULL,
+    accepted_source_types_json LONGTEXT NOT NULL, artifact_kind LONGTEXT NOT NULL,
+    side_effect_kind LONGTEXT NOT NULL, required_capabilities_json LONGTEXT NOT NULL,
+    required_evidence_json LONGTEXT NOT NULL, risk_ceiling LONGTEXT NOT NULL,
+    plan_skeleton_json LONGTEXT NOT NULL, positive_example_refs_json LONGTEXT NOT NULL,
+    negative_example_refs_json LONGTEXT NOT NULL, reliability_json LONGTEXT NOT NULL,
+    created_at LONGTEXT NOT NULL, updated_at LONGTEXT NOT NULL
+  )`;
+}
+
+function tidbExamplesSchema(tables: PlanTemplateTableNames): string {
+  return `CREATE TABLE IF NOT EXISTS ${tables.examples} (
+    id VARCHAR(191) PRIMARY KEY, template_id VARCHAR(191) NOT NULL, run_id VARCHAR(191) NOT NULL,
+    example_type LONGTEXT NOT NULL, task_text_hash LONGTEXT NOT NULL, task_fingerprint_json LONGTEXT NOT NULL,
+    outcome_status LONGTEXT NOT NULL, evidence_summary_json LONGTEXT NOT NULL, created_at LONGTEXT NOT NULL,
+    FOREIGN KEY (template_id) REFERENCES ${tables.templates}(id)
+  )`;
+}
+
+function tidbMatchesSchema(tables: PlanTemplateTableNames): string {
+  return `CREATE TABLE IF NOT EXISTS ${tables.matches} (
+    id VARCHAR(191) PRIMARY KEY, run_id VARCHAR(191) NOT NULL, template_id VARCHAR(191),
+    task_fingerprint_json LONGTEXT NOT NULL, score REAL, decision LONGTEXT NOT NULL,
+    rejection_reasons_json LONGTEXT NOT NULL, admission_result_json LONGTEXT,
+    outcome_status LONGTEXT, created_at LONGTEXT NOT NULL
+  )`;
 }

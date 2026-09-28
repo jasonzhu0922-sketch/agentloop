@@ -1,5 +1,6 @@
 import { conflict } from "../../shared/errors.ts";
 import type { SqlConnection } from "../connection.ts";
+import { insertIfAbsentSql } from "../dialect-sql.ts";
 import type {
   DiscoveredSkillSnapshot,
   SkillInsertRecord,
@@ -47,14 +48,11 @@ const SKILL_COLUMNS = `
   content_hash, version, updated_at
 `;
 
-/** Default {@link SkillStore} over the kernel-owned SQLite schema. */
-export class SqliteSkillStore implements SkillStore {
+/** Default {@link SkillStore} over the kernel-owned portable SQL schema. */
+export class SqlSkillStore implements SkillStore {
   private readonly connection: SqlConnection;
 
   constructor(connection: SqlConnection) {
-    if (connection.dialect !== "sqlite") {
-      throw new TypeError("SqliteSkillStore requires a sqlite SqlConnection; provide a host SkillStore for other databases");
-    }
     this.connection = connection;
   }
 
@@ -122,7 +120,7 @@ export class SqliteSkillStore implements SkillStore {
         input.now,
       );
     } catch (error) {
-      if (String(error).includes("UNIQUE constraint failed")) {
+      if (isUniqueConstraintError(error)) {
         throw conflict(`A private skill named "${input.name}" already exists`);
       }
       throw error;
@@ -155,7 +153,7 @@ export class SqliteSkillStore implements SkillStore {
         input.id,
       );
     } catch (error) {
-      if (String(error).includes("UNIQUE constraint failed")) {
+      if (isUniqueConstraintError(error)) {
         throw conflict(`A private skill named "${input.name}" already exists`);
       }
       throw error;
@@ -167,13 +165,14 @@ export class SqliteSkillStore implements SkillStore {
   }
 
   async syncDiscoveredSkills(records: readonly DiscoveredSkillSnapshot[]): Promise<void> {
-    const upsert = this.connection.prepare(`
-      INSERT INTO discovered_skills(
+    const upsert = this.connection.prepare(insertIfAbsentSql({
+      dialect: this.connection.dialect,
+      insert: `INSERT INTO discovered_skills(
         name, description, source_directory, package_hash,
         file_count, total_bytes, agent_loop_json, version, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
-      ON CONFLICT(name) DO NOTHING
-    `);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      keyColumn: "name",
+    }));
     const selectByName = this.connection.prepare(
       "SELECT name, description, source_directory, package_hash, file_count, total_bytes, agent_loop_json, version, synced_at FROM discovered_skills WHERE name = ?",
     );
@@ -246,6 +245,26 @@ export class SqliteSkillStore implements SkillStore {
       syncedAt: row.synced_at,
     }));
   }
+}
+
+/**
+ * SQLite-only compatibility entry point for embeddings that intentionally
+ * require a local database. New hosts should use {@link SqlSkillStore}.
+ */
+export class SqliteSkillStore extends SqlSkillStore {
+  constructor(connection: SqlConnection) {
+    if (connection.dialect !== "sqlite") {
+      throw new TypeError("SqliteSkillStore requires a sqlite SqlConnection; use SqlSkillStore for portable SQL databases");
+    }
+    super(connection);
+  }
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  if (String(error).includes("UNIQUE constraint failed")) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const value = error as { code?: unknown; sqlState?: unknown };
+  return value.code === "ER_DUP_ENTRY" || value.sqlState === "23000";
 }
 
 function toRecord(row: SkillRow): SkillRecord {

@@ -6915,6 +6915,9 @@ function executionTaskProfileForStep(
   skills: readonly PrivateSkill[],
   taskSemantics?: StructuredTaskUnderstanding,
 ): TaskProfile {
+  const ownsArtifactTarget = taskSemantics?.deliverable.surface === "workspace_artifact"
+    && taskSemantics.deliverable.kind !== "none"
+    && (stepRequiresFileOutput(step) || stepAllowsSkillFileOutput(step));
   const input = {
     objective: step.objective,
     successCriteria: step.successCriteria,
@@ -6922,17 +6925,14 @@ function executionTaskProfileForStep(
     skillNames: skills.map((skill) => skill.name),
     allowResearchPolicy: stepAllowsResearchPolicy(step),
     practiceProfiles: taskSemantics?.practiceProfiles,
+    ...(ownsArtifactTarget ? { artifactKind: taskSemantics!.deliverable.kind } : {}),
   };
   const profile = executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
   // Planner's structured deliverable is the authority for a file-producing
   // leaf. Leaf objectives routinely mention generic words such as "page" or
   // "screen" as content instructions; those must never change PPTX/PDF/etc.
   // into an HTML deliverable during execution or assessment.
-  if (
-    taskSemantics?.deliverable.surface !== "workspace_artifact"
-    || taskSemantics.deliverable.kind === "none"
-    || (!stepRequiresFileOutput(step) && !stepAllowsSkillFileOutput(step))
-  ) return profile;
+  if (!ownsArtifactTarget) return profile;
   return {
     ...profile,
     deliverySurface: taskSemantics.deliverable.surface,

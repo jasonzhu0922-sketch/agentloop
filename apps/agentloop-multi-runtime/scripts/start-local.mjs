@@ -87,6 +87,9 @@ const config = {
 await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
 const children = [];
+// A Router can fail before the first health probe yields. Initialize this
+// before registering any child exit handler so that failure remains reportable.
+let closing = false;
 const common = localRuntimeHostEnvironment({
   ...process.env,
   RUNTIME_DISPATCH_TOKEN: dispatchToken,
@@ -172,7 +175,6 @@ process.stdout.write(`Starting multi-runtime locally with ${runtimeCount} Runtim
 process.stdout.write(`Router: http://${routerHost}:${routerPort}; Web: http://${routerHost}:${webPort}; Local Agent: http://127.0.0.1:${localAgentPort}\n`);
 process.stdout.write(`Shared workspace: ${sharedWorkspaceRoot}; shared state: ${sharedStateDatabasePath}\n`);
 
-let closing = false;
 function shutdown(signal) {
   if (closing) return;
   closing = true;

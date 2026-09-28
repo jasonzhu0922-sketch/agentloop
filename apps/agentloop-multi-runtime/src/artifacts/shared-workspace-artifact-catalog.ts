@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { previewProcessArtifact, type ProcessArtifact, type ProcessArtifactPreview, type SqlConnection } from "@zhujun/agentloop";
+import { previewProcessArtifact, upsertSql, type ProcessArtifact, type ProcessArtifactPreview, type SqlConnection } from "@zhujun/agentloop";
 import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
 export interface CatalogArtifact extends ProcessArtifact {
@@ -44,11 +44,13 @@ export class SharedWorkspaceArtifactCatalog {
       if (artifact.runId !== input.remoteRunId) continue;
       const content = await readCatalogArtifact(artifact, workspaceRoot);
       const sha256 = createHash("sha256").update(content).digest("hex");
-      await this.database.prepare(`
-        INSERT INTO mr_artifacts(id, assignment_id, tenant_id, owner_user_id, conversation_id, remote_run_id, path, name, byte_size, mime_type, role, source_tool, previewable, sha256, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(assignment_id, id) DO UPDATE SET byte_size = excluded.byte_size, mime_type = excluded.mime_type, role = excluded.role, source_tool = excluded.source_tool, previewable = excluded.previewable, sha256 = excluded.sha256
-      `).run(artifact.id, input.assignmentId, input.tenantId, input.ownerUserId, input.conversationId, input.remoteRunId, artifact.path, artifact.name, artifact.bytes, artifact.mimeType, artifact.role, artifact.sourceTool, artifact.previewable ? 1 : 0, sha256, Date.now());
+      await this.database.prepare(upsertSql({
+        dialect: this.database.dialect,
+        insert: "INSERT INTO mr_artifacts(id, assignment_id, tenant_id, owner_user_id, conversation_id, remote_run_id, path, name, byte_size, mime_type, role, source_tool, previewable, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        conflictTarget: "assignment_id, id",
+        sqliteAndPostgresUpdate: "byte_size = excluded.byte_size, mime_type = excluded.mime_type, role = excluded.role, source_tool = excluded.source_tool, previewable = excluded.previewable, sha256 = excluded.sha256",
+        tidbUpdate: "byte_size = VALUES(byte_size), mime_type = VALUES(mime_type), role = VALUES(role), source_tool = VALUES(source_tool), previewable = VALUES(previewable), sha256 = VALUES(sha256)",
+      })).run(artifact.id, input.assignmentId, input.tenantId, input.ownerUserId, input.conversationId, input.remoteRunId, artifact.path, artifact.name, artifact.bytes, artifact.mimeType, artifact.role, artifact.sourceTool, artifact.previewable ? 1 : 0, sha256, Date.now());
       captured.push({ ...artifact, sha256 });
     }
     return captured;
@@ -81,7 +83,7 @@ export class SharedWorkspaceArtifactCatalog {
   }
 
   private async initialize(): Promise<void> {
-    await this.database.exec(artifactTableSql(true));
+    await this.database.exec(this.database.dialect === "tidb" ? tidbArtifactTableSql(true) : artifactTableSql(true));
     // The catalog was introduced during this migration.  Keep early local
     // databases readable while correcting their accidental global artifact-ID
     // primary key; artifact IDs belong to a Run/Assignment namespace.
@@ -143,6 +145,30 @@ function artifactTableSql(ifNotExists: boolean): string {
       previewable INTEGER NOT NULL,
       sha256 TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      PRIMARY KEY(assignment_id, id)
+    )
+  `;
+}
+
+/** TiDB owns this DDL; do not derive it from the SQLite catalog schema. */
+function tidbArtifactTableSql(ifNotExists: boolean): string {
+  return `
+    CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}mr_artifacts (
+      id VARCHAR(191) NOT NULL,
+      assignment_id VARCHAR(191) NOT NULL,
+      tenant_id LONGTEXT NOT NULL,
+      owner_user_id LONGTEXT NOT NULL,
+      conversation_id LONGTEXT NOT NULL,
+      remote_run_id LONGTEXT NOT NULL,
+      path LONGTEXT NOT NULL,
+      name LONGTEXT NOT NULL,
+      byte_size BIGINT NOT NULL,
+      mime_type LONGTEXT NOT NULL,
+      role LONGTEXT NOT NULL,
+      source_tool LONGTEXT NOT NULL,
+      previewable BIGINT NOT NULL,
+      sha256 LONGTEXT NOT NULL,
+      created_at BIGINT NOT NULL,
       PRIMARY KEY(assignment_id, id)
     )
   `;

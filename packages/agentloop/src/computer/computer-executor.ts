@@ -753,7 +753,13 @@ export class ComputerExecutor {
       evidenceKinds: {
         satisfied: [
           "source_summary",
-          ...(spreadsheetProfile !== undefined && spreadsheetProfile.workbookCount > 0 ? ["schema_summary", "record_counts"] : []),
+          // A complete directory inventory has an authoritative file count.
+          // Do not advertise it when the scan hit its bound: totalFiles then
+          // represents only the observed prefix rather than the directory.
+          // Spreadsheet profiling retains its existing structured-count
+          // contract independently of the directory inventory count.
+          ...(spreadsheetProfile !== undefined && spreadsheetProfile.workbookCount > 0 ? ["schema_summary"] : []),
+          ...(!truncated || (spreadsheetProfile !== undefined && spreadsheetProfile.workbookCount > 0) ? ["record_counts"] : []),
         ],
         caveated: caveats.length === 0 ? [] : ["explicit_caveats"],
         failed: [],

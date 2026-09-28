@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
-import type { SqlConnection } from "@zhujun/agentloop";
+import { TIDB_DEVICE_SCHEMA_SQL, type SqlConnection } from "@zhujun/agentloop";
 import type { Principal } from "../auth/identity-service.ts";
 import { migrateRouterState } from "../storage/router-state-migrations.ts";
 
@@ -65,7 +65,7 @@ export class SqlDeviceRepository implements DeviceRepository {
 
   /** Invoked only by the versioned schema migration registry. */
   async installSchema(): Promise<void> {
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_devices (
         id TEXT PRIMARY KEY,
         tenant_id TEXT NOT NULL REFERENCES mr_identity_tenants(id) ON DELETE CASCADE,
@@ -100,7 +100,8 @@ export class SqlDeviceRepository implements DeviceRepository {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_device_local_sessions_expiry_idx ON mr_device_local_sessions(expires_at);
-    `);
+    `;
+    await this.database.exec(this.database.dialect === "tidb" ? TIDB_DEVICE_SCHEMA_SQL : canonicalSchema);
   }
 
   async issueRegistrationToken(principal: Principal): Promise<{ readonly token: string; readonly expiresAt: number }> {

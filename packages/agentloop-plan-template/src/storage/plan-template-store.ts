@@ -1,4 +1,4 @@
-import type { SqlConnection } from "@zhujun/agentloop";
+import { upsertSql, type SqlConnection } from "@zhujun/agentloop";
 import type {
   PlanTemplate,
   PlanTemplateExample,
@@ -125,31 +125,19 @@ export class SqlPlanTemplateStore {
 
   async upsertTemplate(template: PlanTemplate): Promise<void> {
     const now = new Date().toISOString();
-    await this.connection.prepare(`
-      INSERT INTO ${this.tables.templates} (
+    await this.connection.prepare(upsertSql({
+      dialect: this.connection.dialect,
+      insert: `INSERT INTO ${this.tables.templates} (
         id, version, status, intent_family, source_need,
         accepted_source_types_json, artifact_kind, side_effect_kind,
         required_capabilities_json, required_evidence_json, risk_ceiling,
         plan_skeleton_json, positive_example_refs_json, negative_example_refs_json,
         reliability_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        version = excluded.version,
-        status = excluded.status,
-        intent_family = excluded.intent_family,
-        source_need = excluded.source_need,
-        accepted_source_types_json = excluded.accepted_source_types_json,
-        artifact_kind = excluded.artifact_kind,
-        side_effect_kind = excluded.side_effect_kind,
-        required_capabilities_json = excluded.required_capabilities_json,
-        required_evidence_json = excluded.required_evidence_json,
-        risk_ceiling = excluded.risk_ceiling,
-        plan_skeleton_json = excluded.plan_skeleton_json,
-        positive_example_refs_json = excluded.positive_example_refs_json,
-        negative_example_refs_json = excluded.negative_example_refs_json,
-        reliability_json = excluded.reliability_json,
-        updated_at = excluded.updated_at
-    `).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      conflictTarget: "id",
+      sqliteAndPostgresUpdate: "version = excluded.version, status = excluded.status, intent_family = excluded.intent_family, source_need = excluded.source_need, accepted_source_types_json = excluded.accepted_source_types_json, artifact_kind = excluded.artifact_kind, side_effect_kind = excluded.side_effect_kind, required_capabilities_json = excluded.required_capabilities_json, required_evidence_json = excluded.required_evidence_json, risk_ceiling = excluded.risk_ceiling, plan_skeleton_json = excluded.plan_skeleton_json, positive_example_refs_json = excluded.positive_example_refs_json, negative_example_refs_json = excluded.negative_example_refs_json, reliability_json = excluded.reliability_json, updated_at = excluded.updated_at",
+      tidbUpdate: "version = VALUES(version), status = VALUES(status), intent_family = VALUES(intent_family), source_need = VALUES(source_need), accepted_source_types_json = VALUES(accepted_source_types_json), artifact_kind = VALUES(artifact_kind), side_effect_kind = VALUES(side_effect_kind), required_capabilities_json = VALUES(required_capabilities_json), required_evidence_json = VALUES(required_evidence_json), risk_ceiling = VALUES(risk_ceiling), plan_skeleton_json = VALUES(plan_skeleton_json), positive_example_refs_json = VALUES(positive_example_refs_json), negative_example_refs_json = VALUES(negative_example_refs_json), reliability_json = VALUES(reliability_json), updated_at = VALUES(updated_at)",
+    })).run(
       template.id,
       template.version,
       template.status,
@@ -171,20 +159,16 @@ export class SqlPlanTemplateStore {
   }
 
   async recordExample(example: PlanTemplateExample): Promise<void> {
-    await this.connection.prepare(`
-      INSERT INTO ${this.tables.examples} (
+    await this.connection.prepare(upsertSql({
+      dialect: this.connection.dialect,
+      insert: `INSERT INTO ${this.tables.examples} (
         id, template_id, run_id, example_type, task_text_hash,
         task_fingerprint_json, outcome_status, evidence_summary_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        template_id = excluded.template_id,
-        run_id = excluded.run_id,
-        example_type = excluded.example_type,
-        task_text_hash = excluded.task_text_hash,
-        task_fingerprint_json = excluded.task_fingerprint_json,
-        outcome_status = excluded.outcome_status,
-        evidence_summary_json = excluded.evidence_summary_json
-    `).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      conflictTarget: "id",
+      sqliteAndPostgresUpdate: "template_id = excluded.template_id, run_id = excluded.run_id, example_type = excluded.example_type, task_text_hash = excluded.task_text_hash, task_fingerprint_json = excluded.task_fingerprint_json, outcome_status = excluded.outcome_status, evidence_summary_json = excluded.evidence_summary_json",
+      tidbUpdate: "template_id = VALUES(template_id), run_id = VALUES(run_id), example_type = VALUES(example_type), task_text_hash = VALUES(task_text_hash), task_fingerprint_json = VALUES(task_fingerprint_json), outcome_status = VALUES(outcome_status), evidence_summary_json = VALUES(evidence_summary_json)",
+    })).run(
       example.id,
       example.templateId,
       example.runId,
@@ -198,20 +182,16 @@ export class SqlPlanTemplateStore {
   }
 
   async recordMatch(match: PlanTemplateMatch): Promise<void> {
-    await this.connection.prepare(`
-      INSERT INTO ${this.tables.matches} (
+    await this.connection.prepare(upsertSql({
+      dialect: this.connection.dialect,
+      insert: `INSERT INTO ${this.tables.matches} (
         id, run_id, template_id, task_fingerprint_json, score, decision,
         rejection_reasons_json, admission_result_json, outcome_status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        template_id = excluded.template_id,
-        task_fingerprint_json = excluded.task_fingerprint_json,
-        score = excluded.score,
-        decision = excluded.decision,
-        rejection_reasons_json = excluded.rejection_reasons_json,
-        admission_result_json = excluded.admission_result_json,
-        outcome_status = excluded.outcome_status
-    `).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      conflictTarget: "id",
+      sqliteAndPostgresUpdate: "template_id = excluded.template_id, task_fingerprint_json = excluded.task_fingerprint_json, score = excluded.score, decision = excluded.decision, rejection_reasons_json = excluded.rejection_reasons_json, admission_result_json = excluded.admission_result_json, outcome_status = excluded.outcome_status",
+      tidbUpdate: "template_id = VALUES(template_id), task_fingerprint_json = VALUES(task_fingerprint_json), score = VALUES(score), decision = VALUES(decision), rejection_reasons_json = VALUES(rejection_reasons_json), admission_result_json = VALUES(admission_result_json), outcome_status = VALUES(outcome_status)",
+    })).run(
       match.id,
       match.runId,
       match.templateId ?? null,

@@ -1,4 +1,4 @@
-import type { SqlConnection } from "@zhujun/agentloop";
+import { TIDB_HOST_DISPATCH_SCHEMA_SQL, upsertSql, type SqlConnection } from "@zhujun/agentloop";
 import { migrateRuntimeState } from "../storage/runtime-state-migrations.ts";
 
 export type DispatchClaim =
@@ -22,7 +22,7 @@ export class HostDispatchStore {
 
   /** Invoked only by the versioned schema migration registry. */
   async installSchema(): Promise<void> {
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_host_dispatches (
         dispatch_key TEXT PRIMARY KEY,
         assignment_id TEXT NOT NULL,
@@ -45,7 +45,8 @@ export class HostDispatchStore {
         accepted_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mr_run_executors_runtime_idx ON mr_run_executors(runtime_id, accepted_at DESC);
-    `);
+    `;
+    await this.database.exec(this.database.dialect === "tidb" ? TIDB_HOST_DISPATCH_SCHEMA_SQL : canonicalSchema);
   }
 
   async claim(input: { readonly dispatchKey: string; readonly assignmentId: string; readonly ownerUserId: string; readonly now: number; readonly leaseMs: number }): Promise<DispatchClaim> {
@@ -82,15 +83,13 @@ export class HostDispatchStore {
         SELECT owner_user_id FROM mr_host_dispatches WHERE dispatch_key = ? AND remote_run_id = ?
       `).get(dispatchKey, remoteRunId) as { owner_user_id: string } | undefined;
       if (dispatch === undefined) throw new Error("Host dispatch receipt is missing its owner");
-      await this.database.prepare(`
-        INSERT INTO mr_run_executors(remote_run_id, runtime_id, dispatch_key, owner_user_id, accepted_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(remote_run_id) DO UPDATE SET
-          runtime_id = excluded.runtime_id,
-          dispatch_key = excluded.dispatch_key,
-          owner_user_id = excluded.owner_user_id,
-          accepted_at = excluded.accepted_at
-      `).run(remoteRunId, this.runtimeId, dispatchKey, dispatch.owner_user_id, now);
+      await this.database.prepare(upsertSql({
+        dialect: this.database.dialect,
+        insert: "INSERT INTO mr_run_executors(remote_run_id, runtime_id, dispatch_key, owner_user_id, accepted_at) VALUES (?, ?, ?, ?, ?)",
+        conflictTarget: "remote_run_id",
+        sqliteAndPostgresUpdate: "runtime_id = excluded.runtime_id, dispatch_key = excluded.dispatch_key, owner_user_id = excluded.owner_user_id, accepted_at = excluded.accepted_at",
+        tidbUpdate: "runtime_id = VALUES(runtime_id), dispatch_key = VALUES(dispatch_key), owner_user_id = VALUES(owner_user_id), accepted_at = VALUES(accepted_at)",
+      })).run(remoteRunId, this.runtimeId, dispatchKey, dispatch.owner_user_id, now);
     });
   }
 

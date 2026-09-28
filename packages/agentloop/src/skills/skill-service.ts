@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import type { SqlConnection } from "../storage/connection.ts";
-import { SqliteSkillStore } from "../storage/stores/sqlite-skill-store.ts";
+import { SqlSkillStore } from "../storage/stores/sqlite-skill-store.ts";
 import type {
   SkillDiscoveryPersistence,
   SkillInsertRecord,
@@ -89,7 +89,7 @@ export interface SkillServiceOptions {
     readonly PrivateSkill[] | Promise<readonly PrivateSkill[]>;
   /**
    * Host-replaceable persistence boundary. When omitted, Skills persist into
-   * the kernel-owned SQLite schema over the provided connection; when
+   * the kernel-owned portable SQL schema over the provided connection; when
    * provided, the kernel performs every Skill read/write through this store
    * and never touches the default schema.
    */
@@ -132,7 +132,7 @@ export class SkillService {
     if (options.skillStore !== undefined) {
       this.store = options.skillStore;
     } else if (database !== undefined) {
-      this.store = new SqliteSkillStore(database);
+      this.store = new SqlSkillStore(database);
     } else {
       throw new TypeError("SkillService requires either a database connection or a skillStore");
     }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqlConnection } from "../storage/connection.ts";
+import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
 import { AppError, badRequest } from "../shared/errors.ts";
 import { createDecisionCommit } from "./decision-ledger.ts";
 
@@ -169,4 +170,6 @@ function validateRequirement(value: HumanLoopRequirement): void {
   if (!resume || !["continue_step", "replan_step", "recovery_review"].includes(resume.mode) || (resume.targetStepId !== undefined && (typeof resume.targetStepId !== "string" || !resume.targetStepId))) throw badRequest("Human-in-the-Loop resume is invalid");
 }
 function validateResponse(schema: HumanLoopResponseSchema, value: unknown): void { if (schema.type === "select") { if (!Array.isArray(value) || value.length < schema.minSelections || value.length > schema.maxSelections || value.some((x) => typeof x !== "string") || new Set(value).size !== value.length || value.some((x) => !schema.options.some((option) => option.id === x))) throw badRequest("Human-in-the-Loop selection is invalid"); return; } if (schema.type === "confirm") { if (value === true) return; if (value && typeof value === "object" && (value as { accepted?: unknown }).accepted === false) return; throw badRequest("Human-in-the-Loop confirmation is invalid"); } if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("Human-in-the-Loop form is invalid"); const form = value as Record<string, unknown>; for (const field of schema.fields) { const answer = form[field.id]; if (field.required && (typeof answer !== "string" || !answer.trim())) throw badRequest(`Human-in-the-Loop field ${field.id} is required`); if (typeof answer === "string" && answer.length > (field.maxLength ?? 20_000)) throw badRequest(`Human-in-the-Loop field ${field.id} is too long`); } }
-async function appendEvent(database: SqlConnection, runId: string, type: string, payload: Record<string, unknown>, createdAt: number): Promise<void> { const row = await database.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?").get(runId) as { seq: number }; await database.prepare("INSERT INTO run_events(run_id, seq, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, row.seq, type, JSON.stringify(payload), createdAt); }
+async function appendEvent(database: SqlConnection, runId: string, type: string, payload: Record<string, unknown>, createdAt: number): Promise<void> {
+  await appendRunEvent(database, runId, { type, data: payload, createdAt });
+}

@@ -1,4 +1,6 @@
 import type { SqlConnection } from "../storage/connection.ts";
+import { upsertSql } from "../storage/dialect-sql.ts";
+import { appendRunEvent } from "../storage/repositories/run-event-sequencer.ts";
 import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import {
@@ -542,15 +544,13 @@ export class RuntimeActionRepository {
     question: string | undefined,
     now: number,
   ): Promise<void> {
-    await this.database.prepare(`
-      INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(run_id) DO UPDATE SET
-        state = excluded.state,
-        action_id = excluded.action_id,
-        question = excluded.question,
-        updated_at = excluded.updated_at
-    `).run(runId, state, actionId, question ?? null, now);
+    await this.database.prepare(upsertSql({
+      dialect: this.database.dialect,
+      insert: "INSERT INTO run_recovery_states(run_id, state, action_id, question, updated_at) VALUES (?, ?, ?, ?, ?)",
+      conflictTarget: "run_id",
+      sqliteAndPostgresUpdate: "state = excluded.state, action_id = excluded.action_id, question = excluded.question, updated_at = excluded.updated_at",
+      tidbUpdate: "state = VALUES(state), action_id = VALUES(action_id), question = VALUES(question), updated_at = VALUES(updated_at)",
+    })).run(runId, state, actionId, question ?? null, now);
   }
 
   private async require(actionId: string): Promise<RuntimeActionRecord> {
@@ -565,13 +565,7 @@ export class RuntimeActionRepository {
   }
 
   private async appendEvent(runId: string, type: string, data: Readonly<Record<string, unknown>>, createdAt: number): Promise<void> {
-    const sequence = await this.database.prepare(
-      "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?",
-    ).get(runId) as { seq: number };
-    await this.database.prepare(`
-      INSERT INTO run_events(run_id, seq, type, payload_json, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(runId, sequence.seq, type, JSON.stringify(data), createdAt);
+    await appendRunEvent(this.database, runId, { type, data, createdAt });
   }
 }
 

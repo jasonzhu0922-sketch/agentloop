@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { SqlConnection } from "@zhujun/agentloop";
+import { TIDB_ATTACHMENT_SCHEMA_SQL, type SqlConnection } from "@zhujun/agentloop";
 import type { PortableResourceRef } from "../domain/contracts.ts";
 import type { ConversationAttachment } from "./attachment-broker.ts";
 import { migrateRouterState } from "../storage/router-state-migrations.ts";
@@ -40,7 +40,7 @@ export class SharedFilesystemAttachmentBroker {
 
   /** Invoked only by the versioned schema migration registry. */
   async installSchema(): Promise<void> {
-    await this.database.exec(`
+    const canonicalSchema = `
       CREATE TABLE IF NOT EXISTS mr_attachments (
         id TEXT PRIMARY KEY,
         tenant_id TEXT NOT NULL,
@@ -55,7 +55,8 @@ export class SharedFilesystemAttachmentBroker {
       );
       CREATE INDEX IF NOT EXISTS mr_attachments_subject_idx
         ON mr_attachments(tenant_id, owner_user_id, conversation_id, created_at DESC);
-    `);
+    `;
+    await this.database.exec(this.database.dialect === "tidb" ? TIDB_ATTACHMENT_SCHEMA_SQL : canonicalSchema);
   }
 
   async upload(input: Omit<ConversationAttachment, "id" | "byteSize" | "sha256"> & { readonly content: Buffer }): Promise<ConversationAttachment> {

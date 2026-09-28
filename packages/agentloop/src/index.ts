@@ -217,7 +217,17 @@ export type {
 export { AppDatabase } from "./storage/database.ts";
 export { SqliteConnection } from "./storage/sqlite-connection.ts";
 export { PgConnection, translatePlaceholders } from "./storage/pg-connection.ts";
-export { TiDbConnection, splitSqlStatements, translateTiDbSql } from "./storage/tidb-connection.ts";
+export { TiDbConnection, splitSqlStatements } from "./storage/tidb-connection.ts";
+export {
+  TIDB_ATTACHMENT_SCHEMA_SQL,
+  TIDB_CONTROL_PLANE_SCHEMA_SQL,
+  TIDB_DEVICE_SCHEMA_SQL,
+  TIDB_HOST_DISPATCH_SCHEMA_SQL,
+  TIDB_IDENTITY_SCHEMA_SQL,
+  TIDB_KERNEL_SCHEMA_SQL,
+} from "./storage/tidb-schema-definitions.ts";
+export { insertIfAbsentSql, insertIgnoreConflictsSql, sqlForDialect, upsertSql } from "./storage/dialect-sql.ts";
+export type { DialectSql } from "./storage/dialect-sql.ts";
 export type { TiDbClientLike, TiDbPoolLike } from "./storage/tidb-connection.ts";
 export type { SqlConnection, SqlDialect, SqlRunResult, SqlStatement, SqlValue } from "./storage/connection.ts";
 export type {
@@ -228,7 +238,7 @@ export type {
   SkillRecord,
   SkillStore,
 } from "./storage/stores/skill-store.ts";
-export { SqliteSkillStore } from "./storage/stores/sqlite-skill-store.ts";
+export { SqlSkillStore, SqliteSkillStore } from "./storage/stores/sqlite-skill-store.ts";
 export { BatchRepository } from "./storage/repositories/batch-repository.ts";
 export { RunOutcomeRepository } from "./storage/repositories/outcome-repository.ts";
 export { RunRepository } from "./storage/repositories/run-repository.ts";

@@ -1,4 +1,5 @@
 import type { SqlConnection } from "../storage/connection.ts";
+import { insertIgnoreConflictsSql } from "../storage/dialect-sql.ts";
 import { notFound } from "../shared/errors.ts";
 import type {
   AssessmentMethod,
@@ -389,10 +390,12 @@ export class PlanRepository {
         ...(step.retiredAt === undefined ? {} : { retiredAt: step.retiredAt }),
       })),
     };
-    await this.database.prepare(`
-      INSERT INTO plan_revision_snapshots(plan_id, version, proposal_json, reason, action_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
-    `).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);
+    await this.database.prepare(insertIgnoreConflictsSql({
+      dialect: this.database.dialect,
+      insert: `INSERT INTO plan_revision_snapshots(plan_id, version, proposal_json, reason, action_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+      tidbNoopColumn: "plan_id",
+    })).run(plan.id, plan.version, JSON.stringify(proposal), reason, actionId ?? null, createdAt);
   }
 }
 
