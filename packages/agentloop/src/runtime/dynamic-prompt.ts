@@ -15,6 +15,7 @@ export type ArtifactKind = "html" | "document" | "presentation" | "spreadsheet" 
 export type ArtifactAction = "none" | "create" | "modify" | "transform";
 export type SourceNeed = "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
 export type DeliverySurface = "conversation" | "workspace_artifact";
+export type PlanTopologyLeafRole = "fact_acquisition" | "produce" | "deliver" | "repair";
 export type ResearchDepth = "opportunistic" | "bounded" | "strict";
 export type ResearchAuthorityNeed = "none" | "quality_weighted" | "official_required";
 export type ResearchFreshnessNeed = "none" | "current";
@@ -29,6 +30,20 @@ export interface ResearchPolicy {
   readonly sourcePreference: readonly string[];
   readonly lowValueSourceSignals: readonly string[];
   readonly stopWhen: readonly string[];
+}
+
+/**
+ * Server-owned structural obligations for an OutcomePlan. They express only
+ * role/dependency topology, never domain, Skill, Tool, or source semantics.
+ */
+export interface PlanTopologyRequirement {
+  readonly schema: "agentloop.planTopology/v1";
+  readonly shape: PlanShape;
+  readonly requiredLeafRoles: readonly PlanTopologyLeafRole[];
+  readonly requiredDependencies: readonly {
+    readonly predecessorRole: PlanTopologyLeafRole;
+    readonly successorRole: PlanTopologyLeafRole;
+  }[];
 }
 
 export interface DynamicPromptProfile {
@@ -57,6 +72,7 @@ export interface TaskProfile {
   readonly evidenceProfile?: EvidenceProfile;
   readonly riskProfile?: RiskProfile;
   readonly planShape?: PlanShape;
+  readonly planTopology?: PlanTopologyRequirement;
   readonly artifactKind?: ArtifactKind;
   readonly artifactAction?: ArtifactAction;
   readonly sourceNeed?: SourceNeed;
@@ -76,6 +92,7 @@ export function buildTaskProfile(input: {
   readonly evidenceProfile?: EvidenceProfile;
   readonly riskProfile?: RiskProfile;
   readonly planShape?: PlanShape;
+  readonly planTopology?: PlanTopologyRequirement;
   readonly artifactKind?: ArtifactKind;
   readonly artifactAction?: ArtifactAction;
   readonly sourceNeed?: SourceNeed;
@@ -93,6 +110,7 @@ export function buildTaskProfile(input: {
     ...(input.evidenceProfile === undefined ? {} : { evidenceProfile: input.evidenceProfile }),
     ...(input.riskProfile === undefined ? {} : { riskProfile: input.riskProfile }),
     ...(input.planShape === undefined ? {} : { planShape: input.planShape }),
+    ...(input.planTopology === undefined ? {} : { planTopology: input.planTopology }),
     ...(input.artifactKind === undefined ? {} : { artifactKind: input.artifactKind }),
     ...(input.artifactAction === undefined ? {} : { artifactAction: input.artifactAction }),
     ...(input.sourceNeed === undefined ? {} : { sourceNeed: input.sourceNeed }),

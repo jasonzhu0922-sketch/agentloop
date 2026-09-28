@@ -97,6 +97,64 @@ export interface StructuredTaskUnderstanding {
   readonly practiceProfiles?: readonly PracticeProfileSelection[];
 }
 
+/**
+ * Runtime-owned lower bound for evidence gates.  This is deliberately derived
+ * from the resolved user task and its admitted input descriptors, rather than
+ * from a Planner leaf, available Tool, or selected Skill.  Those latter
+ * values decide whether a receipt can be produced; they do not make the
+ * receipt necessary to answer the task.
+ */
+export interface TaskEvidencePolicy {
+  readonly schema: "agentloop.taskEvidencePolicy/v1";
+  readonly sourceShape: "document_corpus" | "structured_data" | "unspecified";
+  readonly requiredKinds: {
+    readonly schemaSummary: boolean;
+    readonly recordCounts: boolean;
+    readonly structuredExtractionArtifact: boolean;
+    readonly derivedAggregation: boolean;
+    readonly tableCoverage: boolean;
+  };
+}
+
+/**
+ * Maps user-level evidence demand to the narrow receipt families that may be
+ * completion gates.  An uploaded workbook is an admitted structured input;
+ * a visible directory is intentionally not treated as a table merely because
+ * a table extractor happens to be available for it.
+ */
+export function taskEvidencePolicyForTaskUnderstanding(
+  understanding: StructuredTaskUnderstanding,
+  sources: readonly UploadedSourceSummary[] = [],
+): TaskEvidencePolicy {
+  const text = understanding.normalizedObjective;
+  const structuredByRequest = /(?:\b(?:csv|tsv|xlsx|xlsm|xls|excel|spreadsheet|workbook|worksheet|table|column|field|schema|database|sql)\b|表格|工作簿|工作表|字段|列(?:名)?|数据表|数据库)/iu.test(text);
+  const structuredUpload = sources.some((source) => /(?:csv|tsv|xlsx|xlsm|xls|parquet|ndjson|json)/iu.test([
+    source.originalName,
+    source.extension,
+    source.mimeType,
+  ].join(" ")));
+  const structuredData = structuredByRequest || structuredUpload;
+  const documentCorpus = understanding.analysisScope === "collection_aggregation"
+    && !structuredData
+    && /(?:\b(?:document|documents|file|files|directory|folder|corpus|knowledge base)\b|文档|文件|目录|文件夹|语料|资料(?:库)?|知识库)/iu.test(text);
+  const aggregation = /(?:\b(?:count|how many|group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total)\b|数量|多少|计数|统计|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|总数|合计|汇总|占比)/iu.test(text);
+  const schemaOrField = /(?:\b(?:schema|field|column|relationship|table structure|worksheet)\b|模式|字段|列(?:名)?|关系|表结构|工作表)/iu.test(text);
+  const reusableExtraction = /(?:\b(?:extract|export|reusable|structured output|json|csv)\b|抽取|提取|导出|可复用|结构化(?:输出|数据|结果)|保存为)/iu.test(text);
+  const tableCoverage = /(?:\b(?:all tables|every table|all sheets|every sheet)\b|所有表(?:格)?|全部表(?:格)?|每个表(?:格)?|所有工作表|全部工作表|每个工作表)/iu.test(text);
+  const needsStructuredArtifact = structuredData && (aggregation || schemaOrField || reusableExtraction);
+  return {
+    schema: "agentloop.taskEvidencePolicy/v1",
+    sourceShape: documentCorpus ? "document_corpus" : structuredData ? "structured_data" : "unspecified",
+    requiredKinds: {
+      schemaSummary: structuredData && schemaOrField,
+      recordCounts: structuredData && aggregation,
+      structuredExtractionArtifact: needsStructuredArtifact,
+      derivedAggregation: structuredData && aggregation,
+      tableCoverage: structuredData && tableCoverage,
+    },
+  };
+}
+
 export interface UploadedSourcePlanningContext {
   readonly schema: "agentloop.uploadedSourcePlanningContext/v1";
   readonly totalCount: number;

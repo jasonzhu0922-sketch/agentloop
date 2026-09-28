@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
-import type { StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
+import { taskEvidencePolicyForTaskUnderstanding, type StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 import type { ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
 import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import {
@@ -302,6 +302,7 @@ export function admitPlan(input: {
     ?? (input.availableTools === undefined
       ? planningCapabilitiesFromToolNames([...input.availableToolNames])
       : planningCapabilitiesFromTools(input.availableTools));
+  assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, input.taskSemantics);
   assertTerminalArtifactDelivery(admittedSteps, input.taskIntent);
   assertRequiredSourceGrounding(
     admittedSteps,
@@ -354,6 +355,31 @@ export function admitPlan(input: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * A visible directory is an authorization boundary, not a declaration that
+ * its contents are tables.  Reject a direct/ad-hoc Plan that attempts to
+ * bind a table extractor after Runtime semantics identified the input as a
+ * document corpus.  Normal Planner flow removes this incompatible binding;
+ * Admission keeps the invariant fail-closed for every other caller.
+ */
+function assertStructuredCapabilitiesMatchTaskSemantics(
+  steps: readonly PlanStep[],
+  taskSemantics: StructuredTaskUnderstanding | undefined,
+): void {
+  if (taskSemantics === undefined) return;
+  const policy = taskEvidencePolicyForTaskUnderstanding(taskSemantics);
+  if (policy.sourceShape !== "document_corpus") return;
+  const incompatible = steps.filter((step) => step.executionBinding.requiredCapabilities.some((capability) =>
+    capability === "visible_table_extraction"
+    || capability === "uploaded_table_extraction"
+    || capability === "workspace_structured_artifact_read",
+  ));
+  if (incompatible.length === 0) return;
+  reject(
+    `Document-corpus task semantics cannot bind structured extraction capabilities: ${incompatible.map((step) => step.id).join(", ")}`,
+  );
 }
 
 function assertSourceConstraintNamespaces(input: {

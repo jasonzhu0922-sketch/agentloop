@@ -4,8 +4,8 @@ import { requireRecord, requireString, requireStringArray } from "../shared/vali
 import type { ModelAdapter, ModelInvocation, ModelToolCall, RuntimeContextSnapshot, RuntimeEventSink } from "../runtime/contracts.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
 import { operationProfileCatalogForPlanning, operationProfilesForTaskUnderstanding } from "../runtime/operation-profiles.ts";
-import { uploadedSourcePlanningContext, type TaskIntentClassification } from "../runtime/task-intent.ts";
-import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
+import { taskEvidencePolicyForTaskUnderstanding, uploadedSourcePlanningContext, type TaskEvidencePolicy, type TaskIntentClassification } from "../runtime/task-intent.ts";
+import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type PlanTopologyRequirement, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type {
@@ -180,7 +180,7 @@ const SUBMIT_OUTCOME_PLAN_TOOL = {
   },
 } as const;
 
-type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "source_constraint_arguments" | "native_skill_binding" | "source_namespace" | "source_provider_contract" | "admission";
+type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "source_constraint_arguments" | "native_skill_binding" | "source_namespace" | "source_provider_contract" | "plan_topology" | "admission";
 
 interface PlannerContractRetry {
   readonly kind: PlannerContractRetryKind;
@@ -406,6 +406,7 @@ export class ModelPlanner implements Planner {
             sourceNeed: taskProfile.sourceNeed,
             evidenceDemand: planningTask.turnResolution?.evidenceDemand,
           },
+          taskSemantics: planningTask.taskUnderstanding,
         });
         await emit?.({
           type: "planning.outcome_plan.admitted",
@@ -551,6 +552,8 @@ function plannerContractRetryDirective(
   }
   const nativeSkillBinding = nativeTransformationSkillBindingRepair(planningError, task);
   if (nativeSkillBinding !== undefined) return nativeSkillBinding;
+  const planTopology = planTopologyRepair(planningError, planningTaskProfile(task).planTopology);
+  if (planTopology !== undefined) return planTopology;
   if (isSourceConstraintNamespaceFailure(planningError)) {
     return {
       kind: "source_namespace",
@@ -567,6 +570,23 @@ function plannerContractRetryDirective(
     };
   }
   return undefined;
+}
+
+function planTopologyRepair(
+  planningError: AppError,
+  topology: PlanTopologyRequirement | undefined,
+): PlannerContractRetry | undefined {
+  if (topology === undefined || !planningError.message.startsWith("OutcomePlan violates required plan topology:")) return undefined;
+  return {
+    kind: "plan_topology",
+    directive: [
+      "Your previous submit_outcome_plan call violated a server-owned OutcomePlan topology.",
+      `Validation error: ${summarizePlanningError(planningError.message)}.`,
+      `Required topology: ${JSON.stringify(topology)}.`,
+      "Submit exactly one corrected submit_outcome_plan call for the same goal.",
+      "Preserve the required shape, every required leaf role, and every required role-to-role dependency. These are Plan structure facts; do not replace them with a domain-specific workflow, Skill, Tool, source, artifact, or prose convention.",
+    ].join("\n"),
+  };
 }
 
 function isSourceConstraintArgumentFailure(error: AppError): boolean {
@@ -922,6 +942,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
         : artifactKind !== "none" && (sourceNeed === "source_grounded" || sourceNeed === "strict_user_source")
           ? "fact_then_produce"
           : "single_leaf";
+  const planTopology = requiredPlanTopologyForTask(task, planShape, taskIntent.deliverySurface);
   return buildTaskProfile({
     phase: "planning",
     intent: recovery ? "recover" : "execute",
@@ -934,6 +955,7 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
         : sourceNeed,
     riskProfile: inferRiskProfile(task.availableToolNames),
     planShape,
+    ...(planTopology === undefined ? {} : { planTopology }),
     artifactKind,
     artifactAction: taskIntent.artifactAction,
     sourceNeed,
@@ -942,6 +964,26 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     skillBound: task.availableSkills.length > 0,
     responseOnly: task.responseOnly === true,
   });
+}
+
+/** Derives typed structural obligations from resolved task semantics. */
+function requiredPlanTopologyForTask(
+  task: TaskSpec,
+  planShape: TaskProfile["planShape"],
+  deliverySurface: TaskProfile["deliverySurface"],
+): PlanTopologyRequirement | undefined {
+  if (
+    task.taskUnderstanding.analysisScope !== "collection_aggregation"
+    || planShape !== "fact_then_produce"
+    || deliverySurface !== "conversation"
+    || (!taskHasVisibleDataSource(task) && !taskHasUploadedDataSource(task))
+  ) return undefined;
+  return {
+    schema: "agentloop.planTopology/v1",
+    shape: "fact_then_produce",
+    requiredLeafRoles: ["fact_acquisition", "deliver"],
+    requiredDependencies: [{ predecessorRole: "fact_acquisition", successorRole: "deliver" }],
+  };
 }
 
 function taskHasVisibleDataSource(task: TaskSpec): boolean {
@@ -1244,6 +1286,7 @@ function evidenceContractPolicyForTask(
   taskProfile: TaskProfile,
   selectedSkillRoles: readonly SelectedSkillRole[],
 ): Record<string, unknown> {
+  const taskEvidencePolicy = taskEvidencePolicyForTaskUnderstanding(task.taskUnderstanding, task.sources);
   const capabilities = planningCapabilitiesForTask(task);
   const sourceBoundCapabilities = capabilitiesForSelectedSourceProviders(task, capabilities, selectedSkillRoles);
   const producibleSourceKinds = new Set(sourceBoundCapabilities.flatMap((capability) => capability.produces));
@@ -1273,6 +1316,7 @@ function evidenceContractPolicyForTask(
         availableEvidenceKinds: sourceKinds,
         recommendedRequiredKinds: requiredSourceKinds,
         ...(requiresSourceEvidence ? { requiredKinds: requiredSourceKinds } : {}),
+        taskEvidencePolicy,
         note: "A provider's available receipt kinds are not all completion gates. Require only kinds justified by the task semantics and produced by the source-provider bound to this acquisition leaf. Do not infer structured extraction from a later conversation or file deliverable.",
       },
       finalProduceOrDeliverLeaf: {
@@ -1291,6 +1335,7 @@ function evidenceContractPolicyForTask(
         useWhen: "the requested artifact depends on source-grounded facts or concrete source input",
         availableEvidenceKinds: sourceKinds,
         recommendedRequiredKinds: requiredSourceKinds,
+        taskEvidencePolicy,
         note: "A provider's available receipt kinds are not all completion gates. The acquisition leaf requires only task-justified evidence from its bound source-provider interface. A Markdown/document output belongs to the dependent produce leaf and does not upgrade source evidence requirements.",
       },
       finalProduceOrDeliverLeaf: {
@@ -1303,6 +1348,7 @@ function evidenceContractPolicyForTask(
   return {
     schema: "agentloop.evidenceContractPolicy/v1",
     principle: "Use the smallest evidence contract that matches the task semantics; do not add artifact evidence unless the user requested a workspace artifact.",
+    taskEvidencePolicy,
     finalProduceOrDeliverLeaf: {
       defaultRequiredKinds: [],
     },
@@ -1500,7 +1546,7 @@ function summarizePlanningError(message: string): string {
 
 function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): void {
   const taskIntent = planningTaskIntent(task);
-  assertDataAnalysisConversationBoundary(proposal, task);
+  assertRequiredPlanTopology(proposal, planningTaskProfile(task).planTopology);
   const priorResultMaterialization = conversationResultInput(task) !== undefined
     && taskIntent.deliverySurface === "workspace_artifact";
   if (priorResultMaterialization && proposal.steps.some((step) => step.role === "fact_acquisition")) {
@@ -1573,37 +1619,31 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
   }
 }
 
-/**
- * Source-backed analysis and its user-facing conclusion are independently
- * durable responsibilities.  Require a dependency boundary so bounded source
- * reads cannot be mistaken for a delivered collection-wide conclusion.
- */
-function assertDataAnalysisConversationBoundary(proposal: PlanProposal, task: TaskSpec): void {
-  const taskProfile = planningTaskProfile(task);
-  const sourceBackedCollectionAggregation = task.taskUnderstanding.analysisScope === "collection_aggregation"
-    && taskProfile.deliverySurface === "conversation"
-    && (taskHasVisibleDataSource(task) || taskHasUploadedDataSource(task));
-  if (!sourceBackedCollectionAggregation) return;
-  const acquisitionSteps = proposal.steps.filter((step) => step.role === "fact_acquisition");
-  const terminalSteps = proposal.steps.filter((step) =>
-    !proposal.steps.some((candidate) => candidate.dependencies.includes(step.id)),
+/** Validates server-owned role/dependency shape without inspecting domain content. */
+function assertRequiredPlanTopology(
+  proposal: PlanProposal,
+  topology: PlanTopologyRequirement | undefined,
+): void {
+  if (topology === undefined) return;
+  const missingRoles = topology.requiredLeafRoles.filter((role) => !proposal.steps.some((step) => step.role === role));
+  const missingDependencies = topology.requiredDependencies.filter(({ predecessorRole, successorRole }) => {
+    const predecessors = proposal.steps.filter((step) => step.role === predecessorRole);
+    const successors = proposal.steps.filter((step) => step.role === successorRole);
+    return !successors.some((successor) => predecessors.some((predecessor) =>
+      stepDependsOn(successor, predecessor.id, proposal.steps),
+    ));
+  });
+  if (proposal.shape === topology.shape && missingRoles.length === 0 && missingDependencies.length === 0) return;
+  throw new AppError(
+    "PLANNING_ERROR",
+    `OutcomePlan violates required plan topology: ${JSON.stringify({
+      required: topology,
+      receivedShape: proposal.shape,
+      missingRoles,
+      missingDependencies,
+    })}`,
+    422,
   );
-  const deliverySteps = terminalSteps.filter((step) => step.role === "deliver");
-  const deliveryDependsOnAcquisition = deliverySteps.some((delivery) =>
-    acquisitionSteps.some((acquisition) => stepDependsOn(delivery, acquisition.id, proposal.steps)),
-  );
-  if (
-    proposal.shape !== "fact_then_produce"
-    || acquisitionSteps.length === 0
-    || deliverySteps.length === 0
-    || !deliveryDependsOnAcquisition
-  ) {
-    throw new AppError(
-      "PLANNING_ERROR",
-      "A source-backed conversation data-analysis task must use fact_then_produce with a fact_acquisition leaf and a dependent deliver leaf; source collection evidence and the user-facing conclusion are separate contracts",
-      422,
-    );
-  }
 }
 
 function stepDependsOn(
@@ -1947,31 +1987,62 @@ function normalizeModelEvidenceGates(
   step: PlanStepProposal,
   task: TaskSpec,
 ): PlanStepProposal {
-  const contract = step.evidenceContract;
-  if (contract === undefined) return step;
-  const removedKinds = new Set(contract.requiredKinds.filter((kind) => !modelMayRequireEvidenceKind(kind, step, task)));
-  if (removedKinds.size === 0) return step;
+  const policy = taskEvidencePolicyForTaskUnderstanding(task.taskUnderstanding, task.sources);
+  const capabilityNormalized = normalizeIncompatibleStructuredSourceCapabilities(step, task, policy);
+  const contract = capabilityNormalized.evidenceContract;
+  if (contract === undefined) return capabilityNormalized;
+  const removedKinds = new Set(contract.requiredKinds.filter((kind) => !modelMayRequireEvidenceKind(kind, policy)));
+  if (removedKinds.size === 0) return capabilityNormalized;
   return {
-    ...step,
+    ...capabilityNormalized,
     evidenceContract: {
       ...contract,
       requiredKinds: contract.requiredKinds.filter((kind) => !removedKinds.has(kind)),
     },
-    successCriteria: step.successCriteria.filter((criterion) => !removedKinds.has(criterion.id as EvidenceKind)),
+    successCriteria: capabilityNormalized.successCriteria.filter((criterion) => !removedKinds.has(criterion.id as EvidenceKind)),
   };
 }
 
-function modelMayRequireEvidenceKind(kind: EvidenceKind, step: PlanStepProposal, task: TaskSpec): boolean {
-  if (kind === "record_counts") return stepRequiresRecordCounts(step, task);
+/** Capability selection is producer eligibility, never a reason to add a gate. */
+function modelMayRequireEvidenceKind(kind: EvidenceKind, policy: TaskEvidencePolicy): boolean {
+  if (kind === "schema_summary") return policy.requiredKinds.schemaSummary;
+  if (kind === "record_counts") return policy.requiredKinds.recordCounts;
+  if (kind === "structured_extraction_artifact") return policy.requiredKinds.structuredExtractionArtifact;
+  if (kind === "derived_aggregation") return policy.requiredKinds.derivedAggregation;
+  if (kind === "table_coverage") return policy.requiredKinds.tableCoverage;
   return true;
 }
 
-function stepRequiresRecordCounts(step: PlanStepProposal, task: TaskSpec): boolean {
-  return step.requiredCapabilities.some((capability) =>
-    capability === "uploaded_table_extraction"
-    || capability === "visible_table_extraction"
-    || capability === "workspace_structured_artifact_read"
-  ) || aggregationRequested(`${task.input}\n${step.objective}`);
+/**
+ * A document corpus cannot be silently reclassified as tables by an available
+ * extractor.  Preserve normal source acquisition by substituting the matching
+ * generic reader when the Runtime made one eligible for this Run.
+ */
+function normalizeIncompatibleStructuredSourceCapabilities(
+  step: PlanStepProposal,
+  task: TaskSpec,
+  policy: TaskEvidencePolicy,
+): PlanStepProposal {
+  if (policy.sourceShape !== "document_corpus") return step;
+  const structuredCapabilities = new Set([
+    "uploaded_table_extraction",
+    "visible_table_extraction",
+    "workspace_structured_artifact_read",
+  ]);
+  const requiredCapabilities = step.requiredCapabilities.filter((capability) => !structuredCapabilities.has(capability));
+  if (requiredCapabilities.length === step.requiredCapabilities.length) return step;
+  const available = new Set(planningCapabilitiesForTask(task).map((capability) => capability.id));
+  const needsSourceSummary = step.evidenceContract?.requiredKinds.includes("source_summary") === true;
+  if (needsSourceSummary && !requiredCapabilities.some((capability) =>
+    capability === "uploaded_source_read" || capability === "visible_directory_read" || capability === "workspace_file_read",
+  )) {
+    if ((task.visibleDirectories?.length ?? 0) > 0 && available.has("visible_directory_read")) {
+      requiredCapabilities.push("visible_directory_read");
+    } else if ((task.sources?.length ?? 0) > 0 && available.has("uploaded_source_read")) {
+      requiredCapabilities.push("uploaded_source_read");
+    }
+  }
+  return { ...step, requiredCapabilities };
 }
 
 /**
@@ -1984,9 +2055,10 @@ function normalizeStructuredAggregationLeaf(
   allSteps: readonly PlanStepProposal[],
   task: TaskSpec,
 ): PlanStepProposal {
+  const evidencePolicy = taskEvidencePolicyForTaskUnderstanding(task.taskUnderstanding, task.sources);
   if (
     step.role === "fact_acquisition"
-    || !aggregationRequested(`${task.input}\n${step.objective}`)
+    || !evidencePolicy.requiredKinds.derivedAggregation
     || !dependsOnStructuredExtraction(step, allSteps)
     || !task.availableToolNames.includes("computer_aggregate_table_artifact")
   ) return step;
@@ -2035,10 +2107,6 @@ function dependsOnStructuredExtraction(
     return candidate.dependencies.some(visit);
   };
   return step.dependencies.some(visit);
-}
-
-function aggregationRequested(value: string): boolean {
-  return /(?:\b(?:count|how many|group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total)\b|数量|多少|计数|统计|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|总数|合计|汇总|占比)/iu.test(value);
 }
 
 function uniqueEvidenceKinds(values: readonly EvidenceKind[]): EvidenceKind[] {

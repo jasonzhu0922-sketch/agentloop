@@ -155,7 +155,7 @@ test("ModelPlanner retains record-count gates for structured source extraction",
       content: "",
       finishReason: "tool_calls",
       toolCalls: [submitOutcomePlanToolCall("extract-table", {
-        goal: "分析上传表格的评分结果",
+        goal: "统计上传表格的评分字段及结果",
         shape: "single_leaf",
         selectedSkillRoles: [],
         steps: [{
@@ -178,14 +178,98 @@ test("ModelPlanner retains record-count gates for structured source extraction",
   const plan = await planner.plan({
     get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-structured-extraction-keeps-count",
-    input: "分析上传表格的评分结果",
+    input: "统计上传表格的评分字段及结果",
     availableSkills: [],
     availableToolNames: ["extract_source_tables"],
     sources: [source],
   });
 
-  assert.ok(plan.steps[0]?.evidenceContract?.requiredKinds.includes("record_counts"));
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, [
+    "source_summary",
+    "schema_summary",
+    "record_counts",
+    "structured_extraction_artifact",
+    "explicit_caveats",
+  ]);
   assert.ok(plan.steps[0]?.successCriteria.some((criterion) => criterion.id === "record_counts"));
+});
+
+test("ModelPlanner removes table bindings and structured gates from document-corpus classification", async () => {
+  const planner = new ModelPlanner(new StaticModel({
+    content: "",
+    finishReason: "tool_calls",
+    toolCalls: [submitOutcomePlanToolCall("classify-document-corpus", {
+      goal: "Classify the main knowledge categories across the visible document corpus.",
+      shape: "fact_then_produce",
+      steps: [{
+        id: "acquire-document-corpus",
+        objective: "Extract visible tables, schemas, counts, and a structured artifact for the document corpus.",
+        dependencies: [],
+        role: "fact_acquisition",
+        skillIds: [],
+        requiredCapabilities: ["visible_table_extraction"],
+        evidenceContract: {
+          requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
+          caveatPolicy: "mark_unverified_facts",
+        },
+      }, {
+        id: "deliver-document-categories",
+        objective: "Give the user the main knowledge categories from the acquired document evidence.",
+        dependencies: ["acquire-document-corpus"],
+        role: "deliver",
+        skillIds: [],
+        requiredCapabilities: [],
+        evidenceContract: { requiredKinds: ["explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+      }],
+    })],
+  }));
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-document-corpus-removes-structured-gates",
+    input: "归纳可见目录中所有文档的主要知识分类，并在对话中总结。",
+    availableSkills: [],
+    availableToolNames: ["visible_index_directory", "visible_extract_tables", "visible_read_files"],
+    responseOnly: true,
+    visibleDirectories: [{ id: "visible_docs", name: "知识文档", path: "/tmp/knowledge-docs" }],
+  });
+
+  assert.deepEqual(plan.steps[0]?.requiredCapabilities, ["visible_directory_read"]);
+  assert.deepEqual(plan.steps[0]?.evidenceContract?.requiredKinds, ["source_summary", "explicit_caveats"]);
+  assert.deepEqual(plan.steps[0]?.successCriteria.map((criterion) => criterion.id), ["source_summary", "explicit_caveats"]);
+});
+
+test("Plan admission rejects direct table extraction bindings for document-corpus semantics", () => {
+  assert.throws(
+    () => admitPlan({
+      runId: "run-document-corpus-table-binding-rejected",
+      proposal: {
+        goal: "Classify an authorized document corpus.",
+        selectedSkillIds: [],
+        steps: [{
+          id: "extract-as-tables",
+          objective: "Extract tables from the document corpus.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["visible_table_extraction"],
+          evidenceContract: {
+            requiredKinds: ["source_summary", "explicit_caveats"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+          successCriteria: [{ id: "source_summary", description: "Source evidence is available.", source: "planner" }],
+        }],
+      },
+      availableSkills: [],
+      availableToolNames: new Set(["visible_extract_tables"]),
+      taskSemantics: understandTask({
+        objective: "归纳可见目录中所有文档的主要知识分类，并在对话中总结。",
+        responseOnly: true,
+      }),
+    }),
+    (error: unknown) => error instanceof AppError
+      && /Document-corpus task semantics cannot bind structured extraction capabilities/.test(error.message),
+  );
 });
 
 function assertStrictProviderSchema(value: unknown, path = "schema"): void {
@@ -3105,7 +3189,7 @@ test("ModelPlanner prefers fact-then-produce for visible spreadsheet data analys
   const plan = await planner.plan({
       get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
     runId: "run-planner-visible-spreadsheet-analysis-fact-then-produce",
-    input: "分析可见目录中所有绩效评价文件的整体情况，直接在对话里回答就行",
+    input: "分析可见目录中所有绩效评价 XLSX 表格的字段和统计情况，直接在对话里回答就行",
     availableSkills: [],
     availableToolNames: ["visible_index_directory", "visible_extract_tables", "visible_find_files", "visible_read_files"],
     responseOnly: true,
@@ -3202,6 +3286,70 @@ test("ModelPlanner requires an acquisition-to-delivery boundary for collection-w
   assert.deepEqual(plan.steps[1]?.dependencies, ["acquire_collection_profile"]);
 });
 
+test("ModelPlanner preserves a required topology while repairing an unrelated capability error", async () => {
+  let calls = 0;
+  const contexts: string[] = [];
+  const planner = new ModelPlanner({
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      contexts.push(request.runtimeContext?.content ?? "");
+      const acquisition = {
+        id: "acquire_collection",
+        objective: "Read the bounded source collection and preserve source scope.",
+        dependencies: [],
+        role: "fact_acquisition" as const,
+        skillIds: [],
+        requiredCapabilities: calls === 1 ? ["unknown_capability"] : ["visible_directory_read"],
+        evidenceContract: {
+          requiredKinds: ["source_summary", "explicit_caveats"] as const,
+          caveatPolicy: "mark_unverified_facts" as const,
+        },
+      };
+      const terminal = {
+        id: "deliver_collection",
+        objective: "Give the user the source-backed collection conclusion.",
+        dependencies: ["acquire_collection"],
+        role: calls === 2 ? ("produce" as const) : ("deliver" as const),
+        skillIds: [],
+        requiredCapabilities: [],
+        evidenceContract: {
+          requiredKinds: ["explicit_caveats"] as const,
+          caveatPolicy: "mark_unverified_facts" as const,
+        },
+      };
+      return {
+        content: "",
+        finishReason: "tool_calls" as const,
+        toolCalls: [submitOutcomePlanToolCall(`topology-repair-${calls}`, {
+          goal: "Provide a collection-wide conclusion from the authorized source collection.",
+          shape: "fact_then_produce",
+          steps: [acquisition, terminal],
+        })],
+      };
+    },
+  });
+
+  const plan = await planner.plan({
+    get taskUnderstanding() { return plannerTestTaskUnderstanding(this); },
+    runId: "run-plan-topology-repair",
+    input: "整理可见目录中的所有文档，归纳主要分类并在对话中给出总结。",
+    availableSkills: [],
+    availableToolNames: ["visible_index_directory", "visible_find_files", "visible_read_files"],
+    responseOnly: true,
+    visibleDirectories: [{ id: "visible_dir_1", name: "文档库", path: "/tmp/documents" }],
+  });
+
+  assert.equal(calls, 3);
+  assert.match(contexts[0]!, /"planTopology":\{"schema":"agentloop\.planTopology\/v1","shape":"fact_then_produce","requiredLeafRoles":\["fact_acquisition","deliver"\]/);
+  assert.match(contexts[2]!, /Your previous submit_outcome_plan call violated a server-owned OutcomePlan topology\./);
+  assert.match(contexts[2]!, /"predecessorRole":"fact_acquisition","successorRole":"deliver"/);
+  assert.deepEqual(plan.steps.map((step) => [step.role, step.dependencies]), [
+    ["fact_acquisition", []],
+    ["deliver", ["acquire_collection"]],
+  ]);
+});
+
 test("ModelPlanner requires derived aggregation evidence for a structured dependency count question", async () => {
   const planner = new ModelPlanner(new StaticModel({
     content: "",
@@ -3215,7 +3363,7 @@ test("ModelPlanner requires derived aggregation evidence for a structured depend
         dependencies: [],
         role: "fact_acquisition",
         skillIds: [],
-        requiredCapabilities: ["uploaded_source_read"],
+        requiredCapabilities: ["uploaded_table_extraction"],
         evidenceContract: {
           requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"],
           caveatPolicy: "mark_unverified_facts",
@@ -3263,7 +3411,7 @@ test("ModelPlanner requires derived aggregation evidence for a structured depend
 
   const answer = plan.steps.find((step) => step.id === "answer_count");
   assert.ok(answer);
-  assert.ok(answer.requiredCapabilities.includes("workspace_file_read"));
+  assert.ok(answer.requiredCapabilities.includes("workspace_structured_artifact_read"));
   assert.deepEqual(answer.evidenceContract?.requiredKinds, ["explicit_caveats", "derived_aggregation"]);
   assert.deepEqual(answer.successCriteria.map((criterion) => criterion.id), ["explicit_caveats", "derived_aggregation"]);
 });
@@ -9732,6 +9880,50 @@ test("evidence-gate accepts structured source evidence and semantic caveats", as
 
   assert.equal(assessment.approved, true);
   assert.equal(assessment.feedback, "");
+});
+
+test("evidence-gate does not accept an ad hoc schemaSummary JSON property as a Runtime receipt", async () => {
+  const assessment = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run",
+    planId: "plan",
+    step: {
+      ...step("read-ad-hoc-json"),
+      kind: "leaf",
+      position: 0,
+      status: "running",
+      refinementState: "not_refinable",
+      requiredFacts: [],
+      evidenceContract: {
+        requiredKinds: ["schema_summary", "structured_extraction_artifact"],
+        caveatPolicy: "none",
+      },
+      successCriteria: [
+        { id: "schema_summary", description: "A Runtime schema receipt is present.", source: "planner" },
+        { id: "structured_extraction_artifact", description: "A Runtime extraction receipt is present.", source: "planner" },
+      ],
+    },
+    skills: [],
+    evidence: {
+      candidateOutput: "The JSON includes a schemaSummary field and an artifact path.",
+      toolCalls: [{
+        toolCallId: "read-json",
+        toolName: "computer_read_json",
+        isError: false,
+        result: JSON.stringify({
+          schemaSummary: { fields: ["category", "title"] },
+          artifact: { path: ".agentloop/ad-hoc.json" },
+        }),
+      }],
+      modelSteps: 1,
+    },
+    attempt: 1,
+  });
+
+  assert.equal(assessment.approved, false);
+  assert.deepEqual(assessment.failedBoundary?.missingEvidenceKinds, [
+    "schema_summary",
+    "structured_extraction_artifact",
+  ]);
 });
 
 test("RuleBasedStepAssessor accepts source summary receipts for directory analysis evidence gates", async () => {
