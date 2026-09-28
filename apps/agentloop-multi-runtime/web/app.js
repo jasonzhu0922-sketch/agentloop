@@ -90,6 +90,12 @@ $("theme-toggle")?.addEventListener("click", () => { document.documentElement.da
 $("new-chat").addEventListener("click", () => { activeId = newConversation().id; resetArtifactWorkspace(); render(); $("input").focus(); });
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
 $("submit").addEventListener("click", () => void runComposerAction());
+$("messages").addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-copy-message]") : null;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const message = activeConversation()?.messages?.find((item) => item.id === button.dataset.copyMessage);
+  if (message) void copyConversationMessage(message, button);
+});
 $("upload-file").addEventListener("click", () => $("attachment").click());
 $("attachment").addEventListener("change", () => void uploadAttachments($("attachment").files));
 $("workspace-resizer").addEventListener("pointerdown", beginWorkspaceResize);
@@ -1816,10 +1822,6 @@ function bindAssistantCard(card, conversation, messages) {
     if (!assistant) return;
     assistant.otherArtifactsOpen = assistant.otherArtifactsOpen !== true;
     render();
-  }));
-  card.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", () => {
-    const message = messages.find((item) => item.id === button.dataset.copyMessage);
-    if (message) void copyConversationMessage(message, button);
   }));
 }
 

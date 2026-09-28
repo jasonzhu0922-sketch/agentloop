@@ -864,6 +864,14 @@ test("selecting reply text does not activate the reply card", async () => {
   assert.match(app, /if \(hasSelectedTextWithin\(window\.getSelection\(\), card\)\) return;/);
 });
 
+test("conversation message copy actions are delegated for every message role", async () => {
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.match(app, /\$\("messages"\)\.addEventListener\("click", \(event\) => \{/);
+  assert.match(app, /event\.target instanceof Element \? event\.target\.closest\("\[data-copy-message\]"\) : null/);
+  assert.match(app, /activeConversation\(\)\?\.messages\?\.find\(\(item\) => item\.id === button\.dataset\.copyMessage\)/);
+  assert.doesNotMatch(app, /card\.querySelectorAll\("\[data-copy-message\]"\)/);
+});
+
 test("Multi Runtime proxies full tool arguments and command output from the owning Host Run", async () => {
   const [routerHttp, hostHttp, persistentRouter, runtimeHost, app] = await Promise.all([
     readFile(new URL("../src/http/router-http.ts", import.meta.url), "utf8"),
