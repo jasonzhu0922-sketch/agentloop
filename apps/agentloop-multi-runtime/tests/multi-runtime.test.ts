@@ -884,7 +884,7 @@ test("Multi Runtime proxies full tool arguments and command output from the owni
   assert.match(app, /Promise\.allSettled/);
 });
 
-test("live thought and conversation scroll only follow readers who remain near the bottom", async () => {
+test("live output, thought, and conversation scroll only follow readers who remain near the bottom", async () => {
   const [app, overrides] = await Promise.all([
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
@@ -895,6 +895,10 @@ test("live thought and conversation scroll only follow readers who remain near t
   assert.equal(nextScrollTop({ scrollHeight: 640, clientHeight: 240 }, false, 80), 80);
   assert.match(app, /const followConversation = renderedConversationId !== conversation\.id \|\| isNearBottom\(conversationScroll\)/);
   assert.match(app, /const followReasoning = previousReasoning === null \|\| isNearBottom\(previousReasoning\)/);
+  assert.match(app, /const previousLiveOutputs = new Map\(\[\.\.\.document\.querySelectorAll\("\.msg\.assistant\.live \.live-output-text"\)\]/);
+  assert.match(app, /follow: isNearBottom\(output\),/);
+  assert.match(app, /document\.querySelectorAll\("\.msg\.assistant\.live \.live-output-text"\)\.forEach\(\(output\) => \{/);
+  assert.match(app, /output\.scrollTop = nextScrollTop\(output, previous\?\.follow \?\? true, previous\?\.scrollTop \?\? 0\);/);
   assert.match(overrides, /\.reasoning-body\s*\{[^}]*max-height:\s*min\(240px, 36vh\);[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);
 });
 

@@ -1638,6 +1638,17 @@ function render() {
   const previousReasoning = document.querySelector(".reasoning-body");
   const followReasoning = previousReasoning === null || isNearBottom(previousReasoning);
   const previousReasoningTop = previousReasoning?.scrollTop ?? 0;
+  // Live output is deliberately capped inside its reply card. Snapshot each
+  // card separately before replacing the DOM so a running answer follows new
+  // output, while a reader who scrolled up to inspect earlier text stays put.
+  const previousLiveOutputs = new Map([...document.querySelectorAll(".msg.assistant.live .live-output-text")]
+    .flatMap((output) => {
+      const messageId = output.closest("[data-assistant-message]")?.dataset.assistantMessage;
+      return messageId === undefined ? [] : [[messageId, {
+        follow: isNearBottom(output),
+        scrollTop: output.scrollTop,
+      }]];
+    }));
   activeId = conversation.id; $("conversation-title").textContent = conversation.title; $("conversation-id").textContent = `conversation: ${conversation.id}`;
   const orderedSessions = sortSessions(sessions);
   const visibleSessions = orderedSessions.slice(0, conversationVisibleLimit);
@@ -1741,6 +1752,11 @@ function render() {
   conversationScroll.scrollTop = nextScrollTop(conversationScroll, followConversation, conversationScroll.scrollTop);
   const reasoningBody = document.querySelector(".reasoning-body");
   if (reasoningBody) reasoningBody.scrollTop = nextScrollTop(reasoningBody, followReasoning, previousReasoningTop);
+  document.querySelectorAll(".msg.assistant.live .live-output-text").forEach((output) => {
+    const messageId = output.closest("[data-assistant-message]")?.dataset.assistantMessage;
+    const previous = messageId === undefined ? undefined : previousLiveOutputs.get(messageId);
+    output.scrollTop = nextScrollTop(output, previous?.follow ?? true, previous?.scrollTop ?? 0);
+  });
   renderedConversationId = conversation.id;
 }
 
