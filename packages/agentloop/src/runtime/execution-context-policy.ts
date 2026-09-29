@@ -593,7 +593,7 @@ function buildStepDependencyContexts(
   return {
     schema: "agentloop.stepDependencyContexts/v1",
     instruction:
-      "Each completed dependency publishes a formal Runtime result and binds it with relation=dependency. Treat the binding's ResultRef as the only authoritative content identity for this step; step handoff carries metadata only and never re-projects tool content. Use read_result with the binding's opaque resultId when facts or details are needed. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
+      "Each completed dependency publishes a formal Runtime result and binds it with relation=dependency. Treat the binding's ResultRef as the only authoritative content identity for this step; step handoff carries metadata only and never re-projects tool content. Before using any dependency fact, first call read_result with only its opaque resultId (no pointer, offset, or limit); this works for both text and JSON Results. Use a pointer only in a later read after the initial Result content confirms that a JSON subvalue is needed. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
     currentStepId: step.id,
     dependencies: bindings,
     ...(earlyArtifactCandidates === undefined ? {} : { earlyArtifactCandidates }),

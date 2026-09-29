@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { TIDB_ATTACHMENT_SCHEMA_SQL, type SqlConnection } from "@zhujun/agentloop";
+import { type SqlConnection } from "@zhujun/agentloop";
+import { TIDB_ATTACHMENT_SCHEMA_SQL } from "./tidb-schema.ts";
 import type { PortableResourceRef } from "../../shared/contracts.ts";
 import type { ConversationAttachment } from "./attachment-broker.ts";
 import { migrateRouterState } from "../persistence/state-migrations.ts";

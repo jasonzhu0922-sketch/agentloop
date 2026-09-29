@@ -1,4 +1,5 @@
-import { TIDB_HOST_DISPATCH_SCHEMA_SQL, upsertSql, type SqlConnection } from "@zhujun/agentloop";
+import { upsertSql, type SqlConnection } from "@zhujun/agentloop";
+import { TIDB_HOST_DISPATCH_SCHEMA_SQL } from "./tidb-schema.ts";
 import { migrateRuntimeState } from "./state-migrations.ts";
 
 export type DispatchClaim =

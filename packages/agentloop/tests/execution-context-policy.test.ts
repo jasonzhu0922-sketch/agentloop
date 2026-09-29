@@ -5,7 +5,7 @@ import { createStepExecutionBinding } from "../src/planning/step-execution-bindi
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
 
-test("source semantics stay out of the global Runtime progress policy", () => {
+test("fact-acquisition progress policy keeps observable source evidence obligations", () => {
   const step = planStep({
     id: "extract-source",
     kind: "leaf",
@@ -31,7 +31,7 @@ test("source semantics stay out of the global Runtime progress policy", () => {
   });
 
   assert.notEqual(policy, undefined);
-  assert.deepEqual(policy?.requiredEvidenceKinds, ["delivery_receipt"]);
+  assert.deepEqual(policy?.requiredEvidenceKinds, ["source_summary", "record_counts", "structured_extraction_artifact", "delivery_receipt"]);
   assert.equal(policy?.maxExploratoryPrimarySteps, 8);
   assert.equal(policy?.exploratoryToolNames.includes("read_source"), true);
   assert.equal(policy?.evidenceProducingToolNames.includes("computer_write_file"), true);

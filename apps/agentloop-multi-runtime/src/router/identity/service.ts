@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import { TIDB_IDENTITY_SCHEMA_SQL, type AppDatabase, type SqlConnection } from "@zhujun/agentloop";
+import { type AppDatabase, type SqlConnection } from "@zhujun/agentloop";
+import { TIDB_IDENTITY_SCHEMA_SQL } from "./tidb-schema.ts";
 import { migrateRouterState } from "../persistence/state-migrations.ts";
 
 const scrypt = promisify(scryptCallback);

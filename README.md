@@ -319,7 +319,11 @@ npm run build:kernel
 npm run build:skills
 npm run build:plan-template
 npm run build:web
-npm run test
+npm run test                         # Unit + SQLite Kernel + Multi Runtime contracts
+npm run test:unit
+npm run test:kernel
+npm run test:multi-runtime:contracts
+npm run test:all-workspaces          # extended workspace suites
 npm run typecheck
 npm run init-db
 npm run dev

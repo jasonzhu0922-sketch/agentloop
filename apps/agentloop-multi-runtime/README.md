@@ -89,7 +89,8 @@ Runtime 选择、目录授权操作、执行状态和产物展示全部属于 `w
 
 ```bash
 npm run typecheck --workspace agentloop-multi-runtime
-npm run test --workspace agentloop-multi-runtime
+npm run test --workspace agentloop-multi-runtime       # Router / Host / DDL contracts
+npm run test:full --workspace agentloop-multi-runtime  # extended Web and integration coverage
 ```
 
 ## 本地启动

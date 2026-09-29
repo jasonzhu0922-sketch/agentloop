@@ -33,7 +33,9 @@
     "package:local-agent:mac": "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-macos.mjs",
     "package:local-agent:win": "node scripts/assert-windows-local-agent-build.mjs && npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-windows.mjs",
     "start:web": "node web/server.mjs",
-    "test": "node --test --test-isolation=process tests/*.test.ts",
+    "test": "npm run test:contracts",
+    "test:contracts": "node --test --test-isolation=process --test-name-pattern='^(shared state configuration switches between local SQLite and PostgreSQL without changing Host code|Router state never initializes Runtime kernel tables, while Runtime state does|role migrations record an immutable checksum and fail closed on history drift|PostgreSQL migration ledger stores millisecond timestamps without integer overflow|Runtime Host validates deployment-required commands before accepting Runs|persistent Router depends on control-plane and artifact ports, not their adapters|shared Router-Host contracts preserve artifact identity without importing Runtime kernel types|Multi Runtime TiDB DDL is owned by Router and Host persistence, not the AgentLoop kernel|local launcher gives Router and Runtime Hosts the same shared workspace mount)$' tests/multi-runtime.test.ts",
+    "test:full": "node --test --test-isolation=process tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   }
 }

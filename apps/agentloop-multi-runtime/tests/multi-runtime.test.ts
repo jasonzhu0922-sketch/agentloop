@@ -33,18 +33,19 @@ import {
   webToolsOptionsFromEnvironment,
 } from "../src/shared/config.ts";
 import { assertRuntimeDispatchEnvelope } from "../src/runtime-host/application/runtime-host.ts";
-import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, webOriginMatches } from "../src/router/transport/http.ts";
+import { assignmentIdFromPath, bindRouterEvents, HttpRuntimeEndpoint, streamEvents, taskFromRequest, webOriginMatches } from "../src/router/transport/http.ts";
 import { cancellationTarget, persistedCancellableAssistant } from "../web/cancellation-target.js";
 import { EventEmitter } from "node:events";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore, ConversationDeleteConflictError, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/router/persistence/control-plane-store.ts";
+import { ControlPlaneStore, ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
+import { RuntimeCapacityError as PersistentRuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/application/control-plane-contracts.ts";
 import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/shared/persistence/state-database.ts";
 import { SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatibilitySql, migrationLedgerSql } from "../src/shared/persistence/schema-migration-ledger.ts";
 import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
-import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/shared/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
@@ -520,6 +521,67 @@ test("Router and Runtime Host remain isolated deployment dependency closures", a
   assert.equal([...routerFiles].some((path) => path.includes("/src/runtime-host/")), false, "Router must not import Runtime Host execution");
   assert.equal([...hostFiles].some((path) => path.includes("/src/router/")), false, "Runtime Host must not import Router code");
   assert.equal([...localAgentFiles].some((path) => path.includes("/src/router/") || path.includes("/src/runtime-host/")), false, "Local Runtime Agent must use only shared contracts, never cloud role implementations");
+});
+
+test("persistent Router depends on control-plane and artifact ports, not their adapters", async () => {
+  const files = await localModuleClosure(fileURLToPath(new URL("../src/router/application/persistent-router.ts", import.meta.url)));
+  assert.equal([...files].some((path) => path.endsWith("/router/persistence/control-plane-store.ts")), false,
+    "Router application must not reach the SQL control-plane adapter");
+  assert.equal([...files].some((path) => path.endsWith("/router/artifacts/shared-workspace-artifact-catalog.ts")), false,
+    "Router application must not reach the shared-workspace artifact adapter");
+  assert.equal([...files].some((path) => path.endsWith("/router/application/control-plane-contracts.ts")), true,
+    "Router application must depend on its declared ports");
+});
+
+test("shared Router-Host contracts preserve artifact identity without importing Runtime kernel types", async () => {
+  const [contracts, persistentRouter, hostApplication, hostRunPort, hostMain, hostAdapter] = await Promise.all([
+    readFile(new URL("../src/shared/contracts.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/application/persistent-router.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/application/runtime-host.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/application/runtime-run-port.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/main.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/infrastructure/agentloop-runtime-run-port.ts", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(contracts, /@zhujun\/agentloop/,
+    "the process-boundary schema must be owned by shared contracts, not the Runtime package");
+  assert.doesNotMatch(persistentRouter, /@zhujun\/agentloop/,
+    "Router application must consume shared protocol DTOs rather than Runtime implementation types");
+  assert.doesNotMatch(hostApplication, /@zhujun\/agentloop|RunService/,
+    "Host application must depend on its runtime port rather than the kernel service class");
+  assert.match(hostApplication, /RuntimeHostRunPort/);
+  assert.match(hostRunPort, /export interface RuntimeHostRunPort/);
+  assert.match(hostAdapter, /class AgentLoopRuntimeRunPort implements RuntimeHostRunPort/,
+    "the kernel integration belongs in a Host infrastructure adapter");
+  assert.match(hostMain, /new AgentLoopRuntimeHost\(new AgentLoopRuntimeRunPort\(runs\)/,
+    "deployment composition must inject the port adapter, not RunService directly");
+
+  const artifact: RuntimeArtifact = {
+    id: "artifact-final", runId: "run-terminal", path: "deliveries/report.pdf", name: "report.pdf",
+    bytes: 128, mimeType: "application/pdf", role: "final", sourceTool: "verify_artifact_acceptance", previewable: true,
+  };
+  assert.deepEqual(artifact, {
+    id: "artifact-final", runId: "run-terminal", path: "deliveries/report.pdf", name: "report.pdf",
+    bytes: 128, mimeType: "application/pdf", role: "final", sourceTool: "verify_artifact_acceptance", previewable: true,
+  });
+});
+
+test("Multi Runtime TiDB DDL is owned by Router and Host persistence, not the AgentLoop kernel", async () => {
+  const [kernelSchema, routerControlPlaneSchema, routerAttachmentSchema, routerIdentitySchema, routerDeviceSchema, hostSchema] = await Promise.all([
+    readFile(new URL("../../../packages/agentloop/src/storage/tidb-schema-definitions.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/persistence/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/attachments/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/identity/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/devices/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/persistence/tidb-schema.ts", import.meta.url), "utf8"),
+  ]);
+  const routerSchema = [routerControlPlaneSchema, routerAttachmentSchema, routerIdentitySchema, routerDeviceSchema].join("\n");
+  assert.doesNotMatch(kernelSchema, /mr_(?:runtime_nodes|tasks|assignments|turns|attachments|identity_|devices|device_|host_dispatches|run_executors)/,
+    "the kernel schema module must not own Multi Runtime application tables");
+  assert.match(routerSchema, /mr_runtime_nodes/);
+  assert.match(routerSchema, /mr_attachments/);
+  assert.match(routerSchema, /mr_identity_users/);
+  assert.match(routerSchema, /mr_devices/);
+  assert.match(hostSchema, /mr_host_dispatches/);
 });
 
 test("local launcher gives Router and Runtime Hosts the same shared workspace mount", async () => {
@@ -1506,6 +1568,54 @@ test("resource importer stops unsupported Sources before they can be bound to a 
   }
 });
 
+test("HTTP dispatch preserves an Assignment reservation when the Host acknowledgement is lost", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("connection_reset_after_request"); };
+  try {
+    const endpoint = new HttpRuntimeEndpoint("http://runtime.test");
+    await assert.rejects(endpoint.dispatch({
+      schema: "agentloop.runtimeDispatch/v1",
+      assignmentId: "assignment-ack-lost",
+      dispatchKey: "dispatch-ack-lost",
+      subject: { tenantId: "tenant-a", userId: "user-a" },
+      conversationId: "conversation-a",
+      input: "continue safely",
+      executionTarget: { kind: "cloud_pool" },
+      dataPolicy: { mode: "cloud" },
+      allowDangerousTools: false,
+      resourceRefs: [],
+    }), RuntimeDispatchOutcomeUnknownError);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("HTTP dispatch treats an explicit Host rejection as definitive", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "runtime_input_invalid" }), {
+    status: 400, headers: { "content-type": "application/json" },
+  });
+  try {
+    const endpoint = new HttpRuntimeEndpoint("http://runtime.test");
+    await assert.rejects(endpoint.dispatch({
+      schema: "agentloop.runtimeDispatch/v1",
+      assignmentId: "assignment-rejected",
+      dispatchKey: "dispatch-rejected",
+      subject: { tenantId: "tenant-a", userId: "user-a" },
+      conversationId: "conversation-a",
+      input: "invalid by Host",
+      executionTarget: { kind: "cloud_pool" },
+      dataPolicy: { mode: "cloud" },
+      allowDangerousTools: false,
+      resourceRefs: [],
+    }), (error: unknown) => error instanceof Error
+      && !(error instanceof RuntimeDispatchOutcomeUnknownError)
+      && error.message === "runtime_input_invalid");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("cloud runtime configuration accepts deployable Hosts but rejects desktop and local-directory settings", () => {
   const config = parseMultiRuntimeConfig(JSON.stringify({
     schema: "agentloop.multiRuntimeConfig/v1",
@@ -2269,7 +2379,10 @@ test("persistent Router forwards recovery advance and resume to the assigned Hos
   });
   const assignment = await router.submit(task("user-recovery", "message-recovery"));
   const advanced = await router.advanceRecovery(assignment.id);
-  assert.equal(advanced?.recovery.state?.state, "ready_to_resume");
+  assert.deepEqual(advanced?.recovery, {
+    state: { runId: "run-recovery", actionId: "action-recovery", state: "ready_to_resume", updatedAt: 200 },
+    decisions: [], planRevisionAssessments: [], userResponses: [],
+  });
   const resumed = await router.resumeRecovery(assignment.id);
   assert.equal(resumed?.run.status, "running");
   assert.deepEqual(calls, ["advance:run-recovery", "resume:run-recovery"]);

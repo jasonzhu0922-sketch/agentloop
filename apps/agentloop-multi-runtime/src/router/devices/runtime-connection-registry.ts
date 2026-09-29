@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
-import type { ControlPlaneRepository } from "../persistence/control-plane-store.ts";
-import type { RuntimeEndpoint, RuntimeProfile } from "../../shared/contracts.ts";
+import { RuntimeDispatchOutcomeUnknownError, type ControlPlaneRepository } from "../application/control-plane-contracts.ts";
+import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeEndpoint, RuntimeProfile } from "../../shared/contracts.ts";
 import type { AuthenticatedDeviceAgent, DeviceRepository } from "./device-service.ts";
 
 interface RuntimeAdvertisement {
@@ -22,7 +21,7 @@ interface ConnectionState {
   readonly socket: WebSocket;
   readonly device: AuthenticatedDeviceAgent;
   readonly runtimeIds: Set<string>;
-  readonly pending: Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>;
+  readonly pending: Map<string, { readonly method: string; resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>;
 }
 
 /** Router-side registry for outbound Local Runtime Agent connections. */
@@ -62,13 +61,13 @@ export class DeviceRuntimeConnectionRegistry {
       cancelRun: (remoteRunId) => rpc("cancelRun", { remoteRunId }),
       artifacts: (remoteRunId) => rpc("artifacts", { remoteRunId }),
       readArtifact: async (remoteRunId, artifactId) => {
-        const result = await rpc<{ readonly artifact: ProcessArtifact; readonly contentBase64: string }>("readArtifact", { remoteRunId, artifactId });
+        const result = await rpc<{ readonly artifact: RuntimeArtifact; readonly contentBase64: string }>("readArtifact", { remoteRunId, artifactId });
         if (result === null || typeof result !== "object" || typeof result.contentBase64 !== "string" || result.artifact === undefined) {
           throw new TypeError("local_runtime_artifact_response_invalid");
         }
         return { artifact: result.artifact, content: new Uint8Array(Buffer.from(result.contentBase64, "base64")) };
       },
-      previewArtifact: (remoteRunId, artifactId) => rpc<ProcessArtifactPreview>("previewArtifact", { remoteRunId, artifactId }),
+      previewArtifact: (remoteRunId, artifactId) => rpc<RuntimeArtifactPreview>("previewArtifact", { remoteRunId, artifactId }),
       commandOutput: (remoteRunId, toolCallId, stream) => rpc("commandOutput", { remoteRunId, toolCallId, stream }),
       toolArguments: (remoteRunId, toolCallId) => rpc("toolArguments", { remoteRunId, toolCallId }),
       currentHumanLoop: (remoteRunId) => rpc("currentHumanLoop", { remoteRunId }),
@@ -175,7 +174,9 @@ export class DeviceRuntimeConnectionRegistry {
     }
     for (const pending of state.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error("device_unavailable"));
+      pending.reject(pending.method === "dispatch"
+        ? new RuntimeDispatchOutcomeUnknownError("local_runtime_dispatch_ack_lost")
+        : new Error("device_unavailable"));
     }
     state.pending.clear();
     await this.store.disconnectLocalRuntimes(state.id);
@@ -192,10 +193,20 @@ export class DeviceRuntimeConnectionRegistry {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         state.pending.delete(messageId);
-        reject(new Error("local_runtime_rpc_timeout"));
+        reject(method === "dispatch"
+          ? new RuntimeDispatchOutcomeUnknownError("local_runtime_dispatch_ack_lost")
+          : new Error("local_runtime_rpc_timeout"));
       }, 30_000);
-      state.pending.set(messageId, { resolve: resolve as (value: unknown) => void, reject, timer });
-      state.socket.send(JSON.stringify({ type: "rpc.request", messageId, connectionEpoch: state.epoch, ...(runtimeId === undefined ? {} : { runtimeId }), method, payload }));
+      state.pending.set(messageId, { method, resolve: resolve as (value: unknown) => void, reject, timer });
+      try {
+        state.socket.send(JSON.stringify({ type: "rpc.request", messageId, connectionEpoch: state.epoch, ...(runtimeId === undefined ? {} : { runtimeId }), method, payload }));
+      } catch {
+        clearTimeout(timer);
+        state.pending.delete(messageId);
+        reject(method === "dispatch"
+          ? new RuntimeDispatchOutcomeUnknownError("local_runtime_dispatch_ack_lost")
+          : new Error("device_unavailable"));
+      }
     });
   }
 }

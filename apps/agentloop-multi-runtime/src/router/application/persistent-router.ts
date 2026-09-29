@@ -1,7 +1,13 @@
-import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../../shared/contracts.ts";
-import type { CommandOutputContent, ProcessArtifact, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
-import { RuntimeCapacityError, type ControlPlaneRepository, type DispatchFailure, type RuntimeCatalogEntry, type StoredAssignment } from "../persistence/control-plane-store.ts";
-import { SharedWorkspaceArtifactCatalog } from "../artifacts/shared-workspace-artifact-catalog.ts";
+import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import {
+  RuntimeCapacityError,
+  RuntimeDispatchOutcomeUnknownError,
+  type ControlPlaneRepository,
+  type DispatchFailure,
+  type RouterArtifactCatalog,
+  type RuntimeCatalogEntry,
+  type StoredAssignment,
+} from "./control-plane-contracts.ts";
 
 export interface RouterDispatchFailureLog {
   readonly assignmentId: string;
@@ -19,7 +25,7 @@ export class PersistentMultiRuntimeRouter {
   private readonly heartbeatTtlMs: number;
   private readonly reservationTtlMs: number;
   private readonly now: () => number;
-  private readonly artifactsCatalog?: SharedWorkspaceArtifactCatalog;
+  private readonly artifactsCatalog?: RouterArtifactCatalog;
   private readonly onDispatchFailure?: (event: RouterDispatchFailureLog) => void;
   private observationCursor = "";
   private reconciliation?: Promise<void>;
@@ -30,7 +36,7 @@ export class PersistentMultiRuntimeRouter {
     readonly heartbeatTtlMs?: number;
     readonly reservationTtlMs?: number;
     readonly now?: () => number;
-    readonly artifactsCatalog?: SharedWorkspaceArtifactCatalog;
+    readonly artifactsCatalog?: RouterArtifactCatalog;
     readonly onDispatchFailure?: (event: RouterDispatchFailureLog) => void;
   }) {
     this.store = input.store;
@@ -57,6 +63,7 @@ export class PersistentMultiRuntimeRouter {
       assignment = (await this.store.assignment(assignment.id)) ?? assignment;
       return assignment;
     } catch (error) {
+      if (error instanceof RuntimeDispatchOutcomeUnknownError) throw error;
       const failure = dispatchFailureFor(error);
       await this.store.markDispatchFailure(assignment.id, failure, this.now());
       this.emitDispatchFailure({
@@ -146,7 +153,7 @@ export class PersistentMultiRuntimeRouter {
     }
   }
 
-  async artifacts(id: string): Promise<{ readonly assignment: StoredAssignment; readonly artifacts: readonly ProcessArtifact[] } | undefined> {
+  async artifacts(id: string): Promise<{ readonly assignment: StoredAssignment; readonly artifacts: readonly RuntimeArtifact[] } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined) return undefined;
     if (assignment.remoteRunId.length === 0) return { assignment, artifacts: [] };
@@ -157,7 +164,7 @@ export class PersistentMultiRuntimeRouter {
     return { assignment, artifacts: await this.captureArtifacts(assignment, artifacts) };
   }
 
-  async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: StoredAssignment; readonly artifact: ProcessArtifact; readonly content: Uint8Array } | undefined> {
+  async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: StoredAssignment; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
     const catalogued = await this.artifactsCatalog?.read(assignment.id, artifactId);
@@ -202,21 +209,21 @@ export class PersistentMultiRuntimeRouter {
     return { assignment: (await this.store.assignment(id)) ?? assignment, events };
   }
 
-  async commandOutput(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: StoredAssignment; readonly output: CommandOutputContent } | undefined> {
+  async commandOutput(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: StoredAssignment; readonly output: RuntimeCommandOutput } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
     const output = await this.endpointFactory(assignment.runtimeEndpoint).commandOutput?.(assignment.remoteRunId, toolCallId, stream);
     return output === undefined ? undefined : { assignment, output };
   }
 
-  async toolArguments(id: string, toolCallId: string): Promise<{ readonly assignment: StoredAssignment; readonly arguments: ToolArgumentsContent } | undefined> {
+  async toolArguments(id: string, toolCallId: string): Promise<{ readonly assignment: StoredAssignment; readonly arguments: RuntimeToolArguments } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
     const argumentsContent = await this.endpointFactory(assignment.runtimeEndpoint).toolArguments?.(assignment.remoteRunId, toolCallId);
     return argumentsContent === undefined ? undefined : { assignment, arguments: argumentsContent };
   }
 
-  async advanceRecovery(id: string): Promise<{ readonly assignment: StoredAssignment; readonly recovery: RecoveryDetail } | undefined> {
+  async advanceRecovery(id: string): Promise<{ readonly assignment: StoredAssignment; readonly recovery: RuntimeRecoveryDetail } | undefined> {
     const assignment = await this.store.assignment(id);
     if (assignment === undefined || assignment.remoteRunId.length === 0) return undefined;
     const advanceRecovery = this.endpointFactory(assignment.runtimeEndpoint).advanceRecovery;
@@ -262,7 +269,7 @@ export class PersistentMultiRuntimeRouter {
     await this.store.heartbeat(input);
   }
 
-  private async captureArtifacts(assignment: StoredAssignment, artifacts: readonly ProcessArtifact[]): Promise<readonly ProcessArtifact[]> {
+  private async captureArtifacts(assignment: StoredAssignment, artifacts: readonly RuntimeArtifact[]): Promise<readonly RuntimeArtifact[]> {
     if (this.artifactsCatalog === undefined || artifacts.length === 0) return artifacts;
     return await this.artifactsCatalog.capture({
       assignmentId: assignment.id, tenantId: assignment.tenantId, ownerUserId: assignment.ownerUserId,
@@ -309,7 +316,7 @@ export class PersistentMultiRuntimeRouter {
 
 }
 
-export { RuntimeCapacityError };
+export { RuntimeCapacityError } from "./control-plane-contracts.ts";
 
 function isRuntimeCapacityFailure(error: unknown): boolean {
   return error instanceof Error && error.message === "runtime_capacity_exhausted";

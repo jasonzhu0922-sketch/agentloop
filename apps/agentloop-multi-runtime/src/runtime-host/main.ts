@@ -4,6 +4,7 @@ import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionS
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../shared/config.ts";
 import { HttpResourceImporter } from "./infrastructure/http-resource-importer.ts";
+import { AgentLoopRuntimeRunPort } from "./infrastructure/agentloop-runtime-run-port.ts";
 import { HostDispatchStore } from "./persistence/host-dispatch-store.ts";
 import { createRuntimeHostHttpServer } from "./transport/http.ts";
 import { AgentLoopRuntimeHost } from "./application/runtime-host.ts";
@@ -107,7 +108,7 @@ const reconcileOwnedRuns = async (): Promise<void> => {
   await runs.reconcileInterruptedRuns(await dispatchStore.ownedRunIds());
 };
 await reconcileOwnedRuns();
-const runtimeHost = new AgentLoopRuntimeHost(runs, new HttpResourceImporter(runs, routerAttachmentToken), {
+const runtimeHost = new AgentLoopRuntimeHost(new AgentLoopRuntimeRunPort(runs), new HttpResourceImporter(runs, routerAttachmentToken), {
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
 }, dispatchStore);

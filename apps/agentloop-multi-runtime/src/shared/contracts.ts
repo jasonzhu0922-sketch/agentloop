@@ -1,5 +1,3 @@
-import type { CommandOutputContent, HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RecoveryDetail, ToolArgumentsContent } from "@zhujun/agentloop";
-
 export type RuntimeProfile = "general" | "artifact";
 export type RuntimeStatus = "ready" | "draining" | "offline";
 export type RuntimeKind = "cloud" | "local";
@@ -89,6 +87,89 @@ export interface RuntimeDispatchResult {
   readonly remoteRunId: string;
 }
 
+/**
+ * Stable Router-to-Host artifact projection. Runtime-only filesystem helpers
+ * and acceptance implementation types never cross the process boundary.
+ */
+export interface RuntimeArtifact {
+  readonly runId: string;
+  readonly id: string;
+  readonly path: string;
+  readonly name: string;
+  readonly bytes: number;
+  readonly mimeType: string;
+  readonly role: "final" | "process";
+  readonly sourceTool: "computer_write_file" | "computer_patch_file" | "computer_run_command" | "convert_artifact" | "verify_artifact_acceptance";
+  readonly previewable: boolean;
+}
+
+/** Preview bodies are rendered by the browser artifact component; Router does not interpret their format-specific structure. */
+export type RuntimeArtifactPreview = unknown;
+
+/** Stable command-output reference projection. */
+export interface RuntimeCommandOutput {
+  readonly toolCallId: string;
+  readonly stream: "stdout" | "stderr";
+  readonly content: string;
+  readonly path?: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+}
+
+/** Stable tool-argument reference projection. The arguments remain JSON data rather than Runtime objects. */
+export interface RuntimeToolArguments {
+  readonly toolCallId: string;
+  readonly arguments: unknown;
+  readonly content: string;
+  readonly path?: string;
+  readonly sha256?: string;
+  readonly bytes?: number;
+  readonly characters?: number;
+}
+
+/** Router may address an open HIL request but never evaluates its Runtime-owned response schema. */
+export interface RuntimeHumanLoopRequest {
+  readonly schema: "agentloop.humanLoopRequest/v1";
+  readonly id: string;
+  readonly runId: string;
+  readonly planId?: string;
+  readonly stepId?: string;
+  readonly actionId?: string;
+  readonly origin: string;
+  readonly kind: string;
+  readonly title: string;
+  readonly prompt: string;
+  readonly rationale: string;
+  readonly evidenceRefs: readonly string[];
+  readonly responseSchema: unknown;
+  readonly resume: unknown;
+  readonly status: string;
+  readonly revision: number;
+  readonly createdAt: number;
+  readonly resolvedAt?: number;
+}
+
+export interface RuntimeHumanLoopResponse {
+  readonly schema: "agentloop.humanLoopResponse/v1";
+  readonly id: string;
+  readonly requestId: string;
+  readonly runId: string;
+  readonly requestRevision: number;
+  readonly value: unknown;
+  readonly actorUserId: string;
+  readonly createdAt: number;
+}
+
+/** Recovery policy is Host-owned. Router transports this opaque, JSON-compatible observation without interpreting it. */
+export interface RuntimeRecoveryDetail {
+  readonly state?: unknown;
+  readonly action?: unknown;
+  readonly decisions: readonly unknown[];
+  readonly planRevisionAssessments: readonly unknown[];
+  readonly userResponses: readonly unknown[];
+}
+
 export interface RuntimeRunStatus {
   readonly remoteRunId: string;
   readonly status: "running" | "completed" | "failed" | "cancelled";
@@ -107,7 +188,7 @@ export interface RuntimeRunStatus {
   /** User-observable terminal failure text projected from the Host Run event. */
   readonly errorMessage?: string;
   readonly finishedAt?: number;
-  readonly artifacts?: readonly ProcessArtifact[];
+  readonly artifacts?: readonly RuntimeArtifact[];
   readonly checkpoint?: {
     readonly id: string;
     readonly reason: "execution_authority_lost";
@@ -132,21 +213,21 @@ export interface RuntimeEndpoint {
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
   getRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
-  artifacts?(remoteRunId: string): Promise<readonly ProcessArtifact[]>;
-  readArtifact?(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: ProcessArtifact; readonly content: Uint8Array }>;
-  previewArtifact?(remoteRunId: string, artifactId: string): Promise<ProcessArtifactPreview>;
+  artifacts?(remoteRunId: string): Promise<readonly RuntimeArtifact[]>;
+  readArtifact?(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }>;
+  previewArtifact?(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview>;
   cancelRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
   events?(remoteRunId: string, afterSeq: number): Promise<readonly RuntimeRunEvent[]>;
-  commandOutput?(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<CommandOutputContent>;
-  toolArguments?(remoteRunId: string, toolCallId: string): Promise<ToolArgumentsContent>;
+  commandOutput?(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput>;
+  toolArguments?(remoteRunId: string, toolCallId: string): Promise<RuntimeToolArguments>;
   /** Advances the Host-owned recovery planner for a paused Run. */
-  advanceRecovery?(remoteRunId: string): Promise<RecoveryDetail>;
+  advanceRecovery?(remoteRunId: string): Promise<RuntimeRecoveryDetail>;
   /** Resumes a Host-admitted, replay-safe recovery action. */
   resumeRecovery?(remoteRunId: string): Promise<RuntimeRunStatus>;
   /** Starts a new child Run from the failed Run's persisted checkpoint. */
   startFromCheckpoint?(remoteRunId: string): Promise<RuntimeRunStatus>;
-  currentHumanLoop?(remoteRunId: string): Promise<HumanLoopRequest | undefined>;
-  respondHumanLoop?(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<HumanLoopResponse>;
+  currentHumanLoop?(remoteRunId: string): Promise<RuntimeHumanLoopRequest | undefined>;
+  respondHumanLoop?(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<RuntimeHumanLoopResponse>;
 }
 
 /**

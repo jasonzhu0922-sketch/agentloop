@@ -135,9 +135,8 @@ test("delivery receipt is projected from the canonical Run Result input chain", 
       publication: { status: "published" },
       createdAt: now,
     });
-    // Simulate an older database that still has the abandoned projection
-    // column. The canonical accessor must remain independent of it.
-    await database.prepare("ALTER TABLE run_outcomes ADD COLUMN delivery_receipt_json TEXT").run();
+    // Current schema retains the legacy projection column for migration
+    // compatibility. The canonical accessor must remain independent of it.
     await database.prepare(`
       INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at, finished_at)
       VALUES (?, 'receipt-owner', NULL, 0, 0, 'completed', 'produce artifact', ?, ?)

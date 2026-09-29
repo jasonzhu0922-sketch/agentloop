@@ -37,11 +37,11 @@ test("Batch enforces concurrency, idempotency, continue, and fail-fast policies"
     assert.equal(first.completed, 2);
     assert.equal(first.failed, 1);
     assert.ok(tracker.maximum <= 2);
-    assert.equal(tracker.calls, 3);
+    assert.equal(tracker.calls, 4, "the failed item receives the Runtime's bounded model retry");
 
     const repeated = await batches.create(owner.user.id, request);
     assert.equal(repeated.id, first.id);
-    assert.equal(tracker.calls, 3);
+    assert.equal(tracker.calls, 4);
 
     const failFast = await batches.create(owner.user.id, {
       idempotencyKey: "fail-fast-1",
@@ -56,7 +56,7 @@ test("Batch enforces concurrency, idempotency, continue, and fail-fast policies"
     assert.equal(failFast.status, "failed");
     assert.equal(failFast.failed, 1);
     assert.equal(failFast.cancelled, 2);
-    assert.equal(tracker.calls, 4);
+    assert.equal(tracker.calls, 6, "fail-fast cancels pending items after the failed item's bounded retry");
   } finally {
     database.close();
   }

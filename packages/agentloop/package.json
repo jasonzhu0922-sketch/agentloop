@@ -21,7 +21,10 @@
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node -e \"require('node:fs').cpSync('src/assets', 'dist/assets', { recursive: true })\"",
-    "test": "node --test --test-isolation=process tests/*.test.ts"
+    "test": "npm run test:unit && npm run test:kernel",
+    "test:unit": "node scripts/run-test-suite.mjs unit",
+    "test:kernel": "node scripts/run-test-suite.mjs kernel",
+    "test:full": "node --test --test-isolation=process tests/*.test.ts"
   },
   "dependencies": {
     "docx": "^9.7.1",

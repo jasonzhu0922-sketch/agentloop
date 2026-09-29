@@ -1,6 +1,5 @@
 import { WebSocket } from "ws";
-import type { ProcessArtifact } from "@zhujun/agentloop";
-import type { RuntimeDispatchEnvelope, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
 import { LocalRuntimeSupervisor, type LocalRuntimeControl } from "../application/runtime-supervisor.ts";
 
 export interface DeviceCredential {
@@ -232,7 +231,8 @@ function toStatus(run: { readonly id: string; readonly status: "running" | "comp
   };
 }
 
-function localArtifact(artifact: ProcessArtifact): ProcessArtifact {
+/** Convert the Runtime-owned filesystem path into the shared transport identity. */
+function localArtifact(artifact: RuntimeArtifact): RuntimeArtifact {
   return { ...artifact, path: `local-artifact:${artifact.id}` };
 }
 

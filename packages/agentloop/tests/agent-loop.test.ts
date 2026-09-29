@@ -2130,6 +2130,83 @@ test("a length-truncated execution turn with tools receives a forward-action rep
   assert.equal(calls, 3);
 });
 
+test("modify-artifact writes overwrite a same-Run read target without another model turn", async () => {
+  const writeModes: string[] = [];
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  const read: RuntimeTool<unknown> = {
+    name: "computer_read_file",
+    description: "Read a workspace file",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({ path: "report.html", content: "old report" }),
+  };
+  const write: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write a workspace file",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, value) => {
+      writeModes.push((value as { mode?: string }).mode ?? "create");
+      return { path: "report.html", bytes: 20, sha256: "replacement" };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "read-existing", name: "computer_read_file", arguments: { path: "report.html" } }],
+        };
+      }
+      if (calls === 2) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "replace-existing",
+            name: "computer_write_file",
+            arguments: { path: "report.html", content: "new report", mode: "create" },
+          }],
+        };
+      }
+      return { content: "report replaced", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["computer_read_file", "computer_write_file"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Replace the report.",
+    input: "regenerate the report",
+    model,
+    tools: new ToolRegistry([read, write]),
+    grant,
+    maxSteps: 3,
+    artifactWritePolicy: "overwrite_observed_existing",
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "report replaced");
+  assert.equal(calls, 3);
+  assert.deepEqual(writeModes, ["overwrite"]);
+  assert.deepEqual(events.filter((event) => event.type === "tool.arguments.normalized").map((event) => event.data), [{
+    step: 2,
+    toolCallId: "replace-existing",
+    toolName: "computer_write_file",
+    path: "report.html",
+    originalMode: "create",
+    effectiveMode: "overwrite",
+    reason: "modify_artifact_overwrite_observed_existing",
+  }]);
+});
+
 test("prepare-stage argument rejection receives a schema repair directive", async () => {
   let calls = 0;
   let executions = 0;

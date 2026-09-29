@@ -1,9 +1,8 @@
 import { createServer, type Server } from "node:http";
-import { assertUploadedSourceContent, type CommandOutputContent, type HumanLoopRequest, type HumanLoopResponse, type RecoveryDetail, type ToolArgumentsContent } from "@zhujun/agentloop";
-import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRunEvent, RuntimeRunStatus, SubmitConversationTask } from "../../shared/contracts.ts";
-import type { ProcessArtifact, ProcessArtifactPreview } from "@zhujun/agentloop";
+import { assertUploadedSourceContent } from "@zhujun/agentloop";
+import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import { IdentityError, type IdentityService, type Principal } from "../identity/service.ts";
-import { RuntimeCapacityError } from "../persistence/control-plane-store.ts";
+import { RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../application/control-plane-contracts.ts";
 import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
 import { identityFromRequest, taskFromRequest, type RouterAttachmentBroker } from "../application/task-submission.ts";
 
@@ -49,19 +48,19 @@ interface RouterTaskApi {
   } | undefined>;
   deleteConversation?(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
   assignment(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run?: RuntimeRunStatus } | undefined>;
-  artifacts?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifacts: readonly ProcessArtifact[] } | undefined>;
-  readArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifact: ProcessArtifact; readonly content: Uint8Array } | undefined>;
-  previewArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly preview: unknown } | undefined>;
+  artifacts?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifacts: readonly RuntimeArtifact[] } | undefined>;
+  readArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined>;
+  previewArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly preview: RuntimeArtifactPreview } | undefined>;
   heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
   cancel?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus }>;
   events?(id: string, afterSeq: number): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>;
-  commandOutput?(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly output: CommandOutputContent } | undefined>;
-  toolArguments?(id: string, toolCallId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly arguments: ToolArgumentsContent } | undefined>;
-  advanceRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly recovery: RecoveryDetail } | undefined>;
+  commandOutput?(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly output: RuntimeCommandOutput } | undefined>;
+  toolArguments?(id: string, toolCallId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly arguments: RuntimeToolArguments } | undefined>;
+  advanceRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly recovery: RuntimeRecoveryDetail } | undefined>;
   resumeRecovery?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus } | undefined>;
   startFromCheckpoint?(id: string): Promise<{ readonly assignment: { readonly id: string; readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus } | undefined>;
-  currentHumanLoop?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly request: HumanLoopRequest | undefined } | undefined>;
-  respondHumanLoop?(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly response: HumanLoopResponse } | undefined>;
+  currentHumanLoop?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly request: RuntimeHumanLoopRequest | undefined } | undefined>;
+  respondHumanLoop?(id: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly response: RuntimeHumanLoopResponse } | undefined>;
 }
 
 export interface LocalAgentRelease {
@@ -439,16 +438,31 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
   }
 
   async dispatch(envelope: RuntimeDispatchEnvelope) {
-    const response = await fetch(new URL("/v1/runtime-dispatches", `${this.endpoint.replace(/\/$/, "")}/`), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(this.authorization === undefined ? {} : { authorization: this.authorization }),
-      },
-      body: JSON.stringify(envelope),
-    });
-    const body = await response.json() as { remoteRunId?: string; error?: string };
-    if (!response.ok || typeof body.remoteRunId !== "string") {
+    const dispatchUrl = new URL("/v1/runtime-dispatches", `${this.endpoint.replace(/\/$/, "")}/`);
+    let response: Response;
+    try {
+      response = await fetch(dispatchUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.authorization === undefined ? {} : { authorization: this.authorization }),
+        },
+        body: JSON.stringify(envelope),
+      });
+    } catch {
+      throw new RuntimeDispatchOutcomeUnknownError("runtime_dispatch_ack_lost");
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `runtime dispatch failed with HTTP ${response.status}`);
+    }
+    let body: { remoteRunId?: string; error?: string };
+    try {
+      body = await response.json() as { remoteRunId?: string; error?: string };
+    } catch {
+      throw new RuntimeDispatchOutcomeUnknownError("runtime_dispatch_ack_lost");
+    }
+    if (typeof body.remoteRunId !== "string") {
       throw new Error(body.error ?? `runtime dispatch failed with HTTP ${response.status}`);
     }
     return { remoteRunId: body.remoteRunId };
@@ -466,7 +480,7 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
 
   async artifacts(remoteRunId: string) {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/artifacts`, `${this.endpoint.replace(/\/$/, "")}/`), { headers: this.authorization === undefined ? {} : { authorization: this.authorization } });
-    const body = await response.json() as { artifacts?: ProcessArtifact[]; error?: string };
+    const body = await response.json() as { artifacts?: RuntimeArtifact[]; error?: string };
     if (!response.ok || !Array.isArray(body.artifacts)) throw new Error(body.error ?? `runtime artifacts failed with HTTP ${response.status}`);
     return body.artifacts;
   }
@@ -479,9 +493,9 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     return { artifact, content: new Uint8Array(await response.arrayBuffer()) };
   }
 
-  async previewArtifact(remoteRunId: string, artifactId: string): Promise<ProcessArtifactPreview> {
+  async previewArtifact(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/artifacts/${encodeURIComponent(artifactId)}/preview`, `${this.endpoint.replace(/\/$/, "")}/`), { headers: this.authorization === undefined ? {} : { authorization: this.authorization } });
-    const body = await response.json() as ProcessArtifactPreview & { error?: string };
+    const body = await response.json() as { error?: string };
     if (!response.ok) throw new Error(body.error ?? `runtime artifact preview failed with HTTP ${response.status}`);
     return body;
   }
@@ -515,30 +529,30 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     return body.events;
   }
 
-  async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<CommandOutputContent> {
+  async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/commands/${encodeURIComponent(toolCallId)}/${stream}`, `${this.endpoint.replace(/\/$/, "")}/`), {
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },
     });
-    const body = await response.json() as { output?: CommandOutputContent; error?: string };
+    const body = await response.json() as { output?: RuntimeCommandOutput; error?: string };
     if (!response.ok || body.output === undefined) throw new Error(body.error ?? `runtime command output failed with HTTP ${response.status}`);
     return body.output;
   }
 
-  async toolArguments(remoteRunId: string, toolCallId: string): Promise<ToolArgumentsContent> {
+  async toolArguments(remoteRunId: string, toolCallId: string): Promise<RuntimeToolArguments> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/tool-arguments/${encodeURIComponent(toolCallId)}`, `${this.endpoint.replace(/\/$/, "")}/`), {
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },
     });
-    const body = await response.json() as { arguments?: ToolArgumentsContent; error?: string };
+    const body = await response.json() as { arguments?: RuntimeToolArguments; error?: string };
     if (!response.ok || body.arguments === undefined) throw new Error(body.error ?? `runtime tool arguments failed with HTTP ${response.status}`);
     return body.arguments;
   }
 
-  async advanceRecovery(remoteRunId: string): Promise<RecoveryDetail> {
+  async advanceRecovery(remoteRunId: string): Promise<RuntimeRecoveryDetail> {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/recovery/advance`, `${this.endpoint.replace(/\/$/, "")}/`), {
       method: "POST",
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },
     });
-    const body = await response.json() as { recovery?: RecoveryDetail; error?: string };
+    const body = await response.json() as { recovery?: RuntimeRecoveryDetail; error?: string };
     if (!response.ok || body.recovery === undefined) throw new Error(body.error ?? `runtime recovery advance failed with HTTP ${response.status}`);
     return body.recovery;
   }
@@ -567,7 +581,7 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/human-loop/current`, `${this.endpoint.replace(/\/$/, "")}/`), {
       headers: this.authorization === undefined ? {} : { authorization: this.authorization },
     });
-    const body = await response.json() as { request?: import("@zhujun/agentloop").HumanLoopRequest; error?: string };
+    const body = await response.json() as { request?: RuntimeHumanLoopRequest; error?: string };
     if (!response.ok) throw new Error(body.error ?? `runtime Human-in-the-Loop query failed with HTTP ${response.status}`);
     return body.request;
   }
@@ -576,7 +590,7 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/human-loop/${encodeURIComponent(requestId)}/respond`, `${this.endpoint.replace(/\/$/, "")}/`), {
       method: "POST", headers: { "content-type": "application/json", ...(this.authorization === undefined ? {} : { authorization: this.authorization }) }, body: JSON.stringify(input),
     });
-    const body = await response.json() as { response?: import("@zhujun/agentloop").HumanLoopResponse; error?: string };
+    const body = await response.json() as { response?: RuntimeHumanLoopResponse; error?: string };
     if (!response.ok || body.response === undefined) throw new Error(body.error ?? `runtime Human-in-the-Loop response failed with HTTP ${response.status}`);
     return body.response;
   }

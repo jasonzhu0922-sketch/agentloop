@@ -9,6 +9,8 @@ import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ContextAssembler } from "../src/runtime/context-assembler.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import type { ModelMessage, RuntimeEvent } from "../src/runtime/contracts.ts";
+import { RuntimeToolArgumentsQueryService } from "../src/runtime/runtime-tool-arguments-query-service.ts";
+import { ToolArgumentsReferenceStore } from "../src/runtime/tool-arguments-reference-store.ts";
 import { createComputerTools } from "../src/tools/computer-tools.ts";
 import { createWebTools } from "../src/tools/web-tools.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
@@ -118,6 +120,52 @@ test("command refs survive 2048/800 projection for both small and large stdout/s
       assert.equal(read.complete, true);
     }
   }
+});
+
+test("durable tool-argument references restore through the same store used by query and recovery", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "tool-arguments-reference-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new ToolArgumentsReferenceStore(root);
+  const original = { command: "node", script: "console.log('evidence');\n".repeat(1200) };
+  const projected = store.project(original);
+  assert.ok(projected.argumentsRef, "large arguments must be stored outside the durable event payload");
+
+  const events = [{
+    type: "assistant.committed",
+    data: { toolCalls: [{ id: "call-large", name: "computer_run_command", arguments: projected.arguments, argumentsRef: projected.argumentsRef }] },
+  }];
+  const queries = new RuntimeToolArgumentsQueryService({
+    run: async () => ({ ownerUserId: "user", conversationId: "conversation" }),
+    events: async () => events,
+    store: () => store,
+  });
+  const content = await queries.read("user", "run", "call-large");
+  assert.deepEqual(content.arguments, original);
+  assert.equal(content.path, projected.argumentsRef.path);
+
+  const inlineQueries = new RuntimeToolArgumentsQueryService({
+    run: async () => ({ ownerUserId: "user" }),
+    events: async () => [{ type: "tool.planned", data: { toolCallId: "call-inline", arguments: { cwd: ".", command: "node" } } }],
+    store: () => store,
+  });
+  assert.deepEqual((await inlineQueries.read("user", "run", "call-inline")).arguments, { cwd: ".", command: "node" });
+
+  const restored = await store.resolveEventData({ toolCallId: "call-large", argumentsRef: projected.argumentsRef });
+  assert.deepEqual(restored.arguments, original);
+});
+
+test("tool-argument references reject tampering and paths outside the Runtime-owned store", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "tool-arguments-integrity-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new ToolArgumentsReferenceStore(root);
+  const projected = store.project({ payload: "integrity ".repeat(1200) });
+  assert.ok(projected.argumentsRef);
+  await fs.writeFile(join(root, projected.argumentsRef.path), "{\"payload\":\"changed\"}");
+  await assert.rejects(store.read("call-tampered", projected.argumentsRef), /Tool arguments/);
+  await assert.rejects(store.read("call-outside", {
+    schema: "agentloop.toolArgumentsReference/v1",
+    path: "../outside.json",
+  }), /Tool arguments/);
 });
 
 test("reference windows page exactly, report Runtime-owned digests, and reject invalid ranges and root escape", async (t) => {

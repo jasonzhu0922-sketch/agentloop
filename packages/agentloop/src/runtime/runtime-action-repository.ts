@@ -392,6 +392,54 @@ export class RuntimeActionRepository {
     return this.requireRecoveryReviewWithPolicy({ ...input, reason: "human_loop_requested" }, "safe");
   }
 
+  /**
+   * A resumed Step can itself pause for new human input.  That is a new
+   * recovery boundary, not a second use of the Action that resumed the prior
+   * Step.  Rotate the durable Action atomically so the new request always
+   * resumes the Step that actually asked for it.
+   */
+  async replaceRecoveryReviewWithHumanLoopResume(input: {
+    readonly previousActionId: string;
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  }): Promise<RuntimeActionRecord> {
+    const now = Date.now();
+    let actionId = "";
+    await this.database.transaction(async () => {
+      const previous = await this.requireRow(input.previousActionId);
+      if (
+        previous.run_id !== input.runId
+        || previous.kind !== "recovery_review"
+        || previous.state !== "recovery_required"
+      ) {
+        throw new AppError("CONFLICT", "Recovery review is no longer pending for Human-in-the-Loop replacement", 409);
+      }
+      const closed = await this.database.prepare(`
+        UPDATE runtime_actions
+        SET state = 'succeeded', revision = revision + 1, updated_at = ?, closed_at = ?
+        WHERE id = ? AND kind = 'recovery_review' AND state = 'recovery_required' AND revision = ?
+      `).run(now, now, previous.id, previous.revision) as { changes: number };
+      if (closed.changes !== 1) throw new AppError("CONFLICT", "Recovery review changed before Human-in-the-Loop replacement", 409);
+      await this.appendEvent(previous.run_id, "action.result_committed", {
+        actionId: previous.id,
+        fence: previous.fence,
+        effectState: "applied",
+      }, now);
+      actionId = await this.createRecoveryReview({
+        runId: input.runId,
+        planId: input.planId,
+        stepId: input.stepId,
+        reason: "human_loop_requested",
+        metadata: input.metadata,
+        replayPolicy: "safe",
+        createdAt: now,
+      });
+    });
+    return await this.require(actionId);
+  }
+
   private async requireRecoveryReviewWithPolicy(input: {
     readonly runId: string;
     readonly planId?: string;

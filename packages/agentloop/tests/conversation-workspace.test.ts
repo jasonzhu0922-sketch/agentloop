@@ -250,6 +250,50 @@ test("Conversation entry classifies with Runtime-owned external context handles"
   }
 });
 
+test("a question about a prior artifact remains a direct reply despite an over-eager resolver", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const planner = new RecordingVisibleDirectoryPlanner();
+    const model = new OverEagerPriorArtifactResolverModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "deliver the prior presentation", {
+      allowDangerousTools: true,
+    });
+    const reply = await runs.executeConversation(owner.user.id, "我的意思是你回答我，你为什么能够这么快把 ppt 做好？", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    });
+
+    assert.equal(reply.status, "completed");
+    assert.match(reply.output ?? "", /直接解释/);
+    assert.deepEqual(planner.responseOnlyFlags, [false, true]);
+    const resolved = (await runs.events(owner.user.id, reply.id)).find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(resolved?.data.mode, "reply");
+    assert.equal(resolved?.data.inputMode, "none");
+    assert.equal(resolved?.data.targetArtifact, undefined);
+    assert.equal(resolved?.data.targetResult, undefined);
+
+    const mutation = await runs.executeConversation(owner.user.id, "请把上一轮的 PPT 改得更专业一些。", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    });
+    assert.equal(mutation.status, "completed");
+    assert.deepEqual(planner.responseOnlyFlags, [false, true, false]);
+    const mutationResolution = (await runs.events(owner.user.id, mutation.id)).find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(mutationResolution?.data.mode, "execute");
+  } finally {
+    await database.close();
+  }
+});
+
 test("Conversation resolver atomically binds only the visible directory selected as primary data", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-workspace-"));
   const unrelated = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-unrelated-"));
@@ -788,5 +832,39 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
       };
     }
     return { content: "conversation intent handled", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class OverEagerPriorArtifactResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.runId.startsWith("conversation-turn:")) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "over-eager-resolution",
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "execute",
+            relation: "continue_prior",
+            inputMode: "none",
+            targetGoalCandidateId: "goal_candidate_1",
+            effectiveGoal: "重新读取并验收上一轮 PPT，再解释为何生成得快。",
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: ["基于上一轮产物解释"],
+          },
+        }],
+      };
+    }
+    return {
+      content: request.messages.some((message) => message.content.includes("为什么能够这么快"))
+        ? "直接解释：这是对话问题，不会重新读取或修改上一轮产物。"
+        : "此前交付已经完成。",
+      finishReason: "stop",
+      toolCalls: [],
+    };
   }
 }

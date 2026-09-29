@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { HumanLoopRepository } from "../src/runtime/human-loop.ts";
+import { RunService } from "../src/runtime/run-service.ts";
+import { SkillService } from "../src/skills/skill-service.ts";
 import { RunRepository } from "../src/storage/repositories/run-repository.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
@@ -231,3 +233,94 @@ test("a copied HIL object in computer_read_file content is not a Runtime control
   assert.equal(modelCalls, 2);
   assert.equal(events.some((event) => event.type === "human_loop.required"), false);
 });
+
+test("a resumed Step that pauses again creates a new HIL Recovery Action for that Step", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = { user: { id: "user-two-hil" } };
+    let modelCalls = 0;
+    const requirement = (title: string) => ({
+      kind: "selection" as const,
+      title,
+      prompt: title,
+      rationale: "The user must select the target.",
+      evidenceRefs: [],
+      responseSchema: { type: "select" as const, minSelections: 1, maxSelections: 1, options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] },
+      resume: { mode: "continue_step" as const },
+    });
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      plannerFactory: () => ({
+        plan: async () => ({
+          schema: "agentloop.outcomePlan/v2" as const,
+          shape: "multi_leaf" as const,
+          goal: "two choices",
+          selectedSkillIds: [],
+          selectedSkillRoles: [],
+          steps: [
+            { id: "first", objective: "Get the first choice", dependencies: [], role: "deliver", skillIds: [], requiredCapabilities: [], successCriteria: [{ id: "first-output", description: "First continuation completes" }] },
+            { id: "second", objective: "Get the second choice", dependencies: [], role: "deliver", skillIds: [], requiredCapabilities: [], successCriteria: [{ id: "second-output", description: "Second continuation completes" }] },
+          ],
+        }),
+      }),
+      assessorFactory: () => ({
+        assess: async (input) => ({
+          id: `assessment-${input.step.id}-${input.attempt}`,
+          planId: input.planId,
+          stepId: input.step.id,
+          attempt: input.attempt,
+          approved: true,
+          criteria: input.step.successCriteria.map((criterion) => ({ criterionId: criterion.id, satisfied: true, evidenceRefs: ["candidate"] })),
+          skills: [],
+          evidenceDigest: "approved",
+          feedback: "approved",
+          createdAt: Date.now(),
+        }),
+      }),
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async () => {
+          modelCalls += 1;
+          if (modelCalls === 1) return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "ask-first", name: HUMAN_LOOP_TOOL_NAME, arguments: requirement("Choose first") }] };
+          if (modelCalls === 2) return { content: "first selected", finishReason: "stop" as const, toolCalls: [] };
+          if (modelCalls === 3) return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "ask-second", name: HUMAN_LOOP_TOOL_NAME, arguments: requirement("Choose second") }] };
+          return { content: "second selected", finishReason: "stop" as const, toolCalls: [] };
+        },
+      }),
+      maxSteps: 2,
+    });
+
+    const run = await runs.execute(owner.user.id, "make two choices");
+    const first = await waitForHumanLoop(runs, owner.user.id, run.id, "first");
+    await runs.respondHumanLoop(owner.user.id, run.id, first.id, ["a"], first.revision);
+    const second = await waitForHumanLoop(runs, owner.user.id, run.id, "second");
+    await runs.respondHumanLoop(owner.user.id, run.id, second.id, ["b"], second.revision);
+    const completed = await waitForRunCompletion(runs, owner.user.id, run.id);
+
+    assert.equal(completed.status, "completed");
+    const pauses = (await runs.actionsForRun(owner.user.id, run.id)).filter((action) => action.kind === "recovery_review");
+    assert.equal(pauses.length, 2);
+    assert.deepEqual(pauses.map((action) => action.stepId), ["first", "second"]);
+    assert.deepEqual(pauses.map((action) => action.state), ["succeeded", "succeeded"]);
+    assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "human_loop.resume_failed"), false);
+  } finally { database.close(); }
+});
+
+async function waitForHumanLoop(runs: RunService, userId: string, runId: string, stepId: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const request = await runs.currentHumanLoop(userId, runId);
+    if (request?.stepId === stepId) return request;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`Timed out waiting for Human-in-the-Loop request for ${stepId}`);
+}
+
+async function waitForRunCompletion(runs: RunService, userId: string, runId: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const run = await runs.get(userId, runId);
+    if (run.status !== "running") return run;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("Timed out waiting for Run completion");
+}

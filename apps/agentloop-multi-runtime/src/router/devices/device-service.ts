@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
-import { TIDB_DEVICE_SCHEMA_SQL, type SqlConnection } from "@zhujun/agentloop";
+import { type SqlConnection } from "@zhujun/agentloop";
+import { TIDB_DEVICE_SCHEMA_SQL } from "./tidb-schema.ts";
 import type { Principal } from "../identity/service.ts";
 import { migrateRouterState } from "../persistence/state-migrations.ts";
 

@@ -1,6 +1,6 @@
-import type { CommandOutputContent, HumanLoopRequest, HumanLoopResponse, ProcessArtifact, ProcessArtifactPreview, RecoveryDetail, RunService, ToolArgumentsContent } from "@zhujun/agentloop";
-import type { PortableResourceRef, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeRunEvent, RuntimeRunStatus } from "../../shared/contracts.ts";
+import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "../persistence/host-dispatch-store.ts";
+import type { RuntimeHostRunPort } from "./runtime-run-port.ts";
 
 export interface ResourceImporter {
   importForRun(input: {
@@ -19,14 +19,14 @@ export interface RuntimeCapacityGate {
 export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   private readonly dispatches = new Map<string, Promise<RuntimeDispatchResult>>();
   private readonly ownersByRunId = new Map<string, string>();
-  private readonly runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "readCommandOutput" | "readToolArguments" | "advanceRecovery" | "resumeRecovery" | "checkpointForRun" | "startFromCheckpoint" | "currentHumanLoop" | "respondHumanLoop">>;
+  private readonly runs: RuntimeHostRunPort;
   private readonly resourceImporter: ResourceImporter;
   private readonly capacity?: RuntimeCapacityGate;
   private readonly dispatchStore?: HostDispatchStore;
   private admissionTail: Promise<void> = Promise.resolve();
 
   constructor(
-    runs: Pick<RunService, "startConversation" | "get" | "ensureConversation"> & Partial<Pick<RunService, "cancel" | "events" | "processArtifacts" | "readProcessArtifact" | "previewProcessArtifact" | "readCommandOutput" | "readToolArguments" | "advanceRecovery" | "resumeRecovery" | "checkpointForRun" | "startFromCheckpoint" | "currentHumanLoop" | "respondHumanLoop">>,
+    runs: RuntimeHostRunPort,
     resourceImporter: ResourceImporter,
     capacity?: RuntimeCapacityGate,
     dispatchStore?: HostDispatchStore,
@@ -60,21 +60,21 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     };
   }
 
-  async artifacts(remoteRunId: string): Promise<readonly ProcessArtifact[]> {
+  async artifacts(remoteRunId: string): Promise<readonly RuntimeArtifact[]> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     if (this.runs.processArtifacts === undefined) throw new TypeError("runtime artifact query is not configured");
     return await this.runs.processArtifacts(ownerUserId, remoteRunId);
   }
 
-  async readArtifact(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: ProcessArtifact; readonly content: Uint8Array }> {
+  async readArtifact(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     if (this.runs.readProcessArtifact === undefined) throw new TypeError("runtime artifact read is not configured");
     return await this.runs.readProcessArtifact(ownerUserId, remoteRunId, artifactId);
   }
 
-  async previewArtifact(remoteRunId: string, artifactId: string): Promise<ProcessArtifactPreview> {
+  async previewArtifact(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     if (this.runs.previewProcessArtifact === undefined) throw new TypeError("runtime artifact preview is not configured");
@@ -105,21 +105,21 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       .map((event) => projectTerminalEvent(event));
   }
 
-  async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<CommandOutputContent> {
+  async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     if (this.runs.readCommandOutput === undefined) throw new TypeError("runtime command output query is not configured");
     return await this.runs.readCommandOutput(ownerUserId, remoteRunId, toolCallId, stream);
   }
 
-  async toolArguments(remoteRunId: string, toolCallId: string): Promise<ToolArgumentsContent> {
+  async toolArguments(remoteRunId: string, toolCallId: string): Promise<RuntimeToolArguments> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
     if (this.runs.readToolArguments === undefined) throw new TypeError("runtime tool arguments query is not configured");
     return await this.runs.readToolArguments(ownerUserId, remoteRunId, toolCallId);
   }
 
-  async advanceRecovery(remoteRunId: string): Promise<RecoveryDetail> {
+  async advanceRecovery(remoteRunId: string): Promise<RuntimeRecoveryDetail> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined || this.runs.advanceRecovery === undefined) throw new TypeError("runtime recovery advance is not configured");
     return await this.runs.advanceRecovery(ownerUserId, remoteRunId);
@@ -157,13 +157,13 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     };
   }
 
-  async currentHumanLoop(remoteRunId: string): Promise<HumanLoopRequest | undefined> {
+  async currentHumanLoop(remoteRunId: string): Promise<RuntimeHumanLoopRequest | undefined> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined || this.runs.currentHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop query is not configured");
     return this.runs.currentHumanLoop(ownerUserId, remoteRunId);
   }
 
-  async respondHumanLoop(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<HumanLoopResponse> {
+  async respondHumanLoop(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<RuntimeHumanLoopResponse> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined || this.runs.respondHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop response is not configured");
     return this.runs.respondHumanLoop(ownerUserId, remoteRunId, requestId, input.value, input.expectedRevision);

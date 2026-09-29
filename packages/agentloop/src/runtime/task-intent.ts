@@ -234,10 +234,13 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
   const artifactKind = detectRequestedArtifactKind(text, artifactAction);
   const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
   const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
-  const wantsArtifact = artifactAction !== "none" && artifactKind !== "none"
-    // Tool availability authorizes a possible workspace write, but it never
-    // turns a referenced input format into a requested output artifact.
-    && signals.action.length > 0
+  // `artifactAction` is the canonical action interpretation. It includes
+  // explicit native mutations (for example, "修改上一轮 PPT"), which need not
+  // also appear in the narrower creation/repair signal list. Requiring both
+  // would make the same user request simultaneously a modification and a
+  // conversation-only reply.
+  const wantsArtifact = artifactAction !== "none"
+    && artifactKind !== "none"
     && input.responseOnly !== true;
   const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0;
   return {
@@ -692,7 +695,7 @@ function detectArtifactKindSignal(text: string): ArtifactKind {
 }
 
 function explicitNativeArtifactMutationRequested(value: string): boolean {
-  return /(?:\b(?:edit|modify|update|revise|repair|fix|restyle|redesign|reformat|retouch|crop|resize|replace|remove|delete|insert|append|rename|reorder|sort|filter|apply)\b|修改|更改|改动|改为|改成|调整|优化|修复|更正|美化|重设计|重新排版|改版|替换|删除|移除|新增|添加|插入|重命名|排序|筛选|套用|应用|统一.{0,8}(?:视觉|主题|风格|样式|版式|布局|配色|颜色|字体|背景))/iu.test(value);
+  return /(?:\b(?:edit|modify|update|revise|repair|fix|restyle|redesign|reformat|retouch|crop|resize|replace|remove|delete|insert|append|rename|reorder|sort|filter|apply)\b|修改|更改|改动|改为|改成|调整|优化|修复|更正|美化|重设计|重新排版|改版|替换|删除|移除|新增|添加|插入|重命名|排序|筛选|套用|应用|统一.{0,8}(?:视觉|主题|风格|样式|版式|布局|配色|颜色|字体|背景)|(?:^|[，,。；;\n])\s*(?:请|麻烦|帮(?:我)?|给我|替我|需要|要|想要|希望|继续|务必|把|将)?\s*.{0,48}(?:改一下|改一改|改改|改得?|做得?|制作得?).{0,16}(?:更好|更专业|高级|高端|高大上|清晰|美观|丰富|精简|科技感))/iu.test(value);
 }
 
 function inferSourceNeedFromIntent(text: string): SourceNeed {

@@ -8,7 +8,7 @@ import type {
   RuntimeRunStatus,
   SubmitConversationTask,
 } from "../../shared/contracts.ts";
-import type { ProcessArtifact } from "@zhujun/agentloop";
+import type { RuntimeArtifact } from "../../shared/contracts.ts";
 
 interface RegisteredRuntime {
   readonly instance: RuntimeInstance;
@@ -64,14 +64,14 @@ export class MultiRuntimeRouter {
     return await this.getAssignmentProjection(id);
   }
 
-  async artifacts(id: string): Promise<{ readonly assignment: RuntimeAssignment; readonly artifacts: readonly ProcessArtifact[] } | undefined> {
+  async artifacts(id: string): Promise<{ readonly assignment: RuntimeAssignment; readonly artifacts: readonly RuntimeArtifact[] } | undefined> {
     const projection = await this.assignment(id);
     if (projection === undefined) return undefined;
     const endpoint = this.runtimes.get(projection.assignment.runtimeId)?.endpoint;
     return { assignment: projection.assignment, artifacts: await endpoint?.artifacts?.(projection.assignment.remoteRunId) ?? projection.run?.artifacts ?? [] };
   }
 
-  async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: RuntimeAssignment; readonly artifact: ProcessArtifact; readonly content: Uint8Array } | undefined> {
+  async readArtifact(id: string, artifactId: string): Promise<{ readonly assignment: RuntimeAssignment; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined> {
     const projection = await this.assignment(id);
     if (projection === undefined) return undefined;
     const endpoint = this.runtimes.get(projection.assignment.runtimeId)?.endpoint;

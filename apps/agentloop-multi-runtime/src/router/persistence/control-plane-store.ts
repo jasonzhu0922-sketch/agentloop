@@ -1,120 +1,29 @@
 import { randomUUID } from "node:crypto";
-import { TIDB_CONTROL_PLANE_SCHEMA_SQL, sqlForDialect, upsertSql, type SqlConnection, type SqlValue } from "@zhujun/agentloop";
-import type { ConversationAttachmentSnapshot, ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../../shared/contracts.ts";
+import { sqlForDialect, upsertSql, type SqlConnection, type SqlValue } from "@zhujun/agentloop";
+import { TIDB_CONTROL_PLANE_SCHEMA_SQL } from "./tidb-schema.ts";
+import type {
+  ConversationAttachmentSnapshot,
+  ExecutionLocation,
+  PortableResourceRef,
+  RuntimeInstance,
+  RuntimeKind,
+  RuntimeProfile,
+  RuntimeRunStatus,
+  SubmitConversationTask,
+} from "../../shared/contracts.ts";
+import {
+  RuntimeCapacityError,
+  type AssignmentStatus,
+  type ControlPlaneRepository,
+  type DispatchFailure,
+  type RuntimeCatalogEntry,
+  type RuntimeHeartbeat,
+  type StoredAssignment,
+  type StoredConversationPage,
+  type StoredConversationTurn,
+  type StoredRuntimeEndpoint,
+} from "../application/control-plane-contracts.ts";
 import { migrateRouterState } from "./state-migrations.ts";
-
-export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
-
-export interface RuntimeHeartbeat {
-  readonly runtimeId: string;
-  readonly status: "ready" | "draining" | "offline";
-  readonly activeRunCount: number;
-  readonly queuedRunCount: number;
-  /** The limit enforced by this Host's local admission gate. */
-  readonly maxConcurrentRuns?: number;
-  readonly observedAt: number;
-}
-
-export interface StoredAssignment extends RuntimeAssignment {
-  readonly status: AssignmentStatus;
-  readonly reservationExpiresAt?: number;
-  readonly runtimeEndpoint: string;
-  readonly errorCode?: string;
-  readonly errorMessage?: string;
-}
-
-/** A Router-owned failure that occurred before a Runtime admitted a Run. */
-export interface DispatchFailure {
-  readonly code: string;
-  /** Safe, user-observable text. Never pass an upstream exception here. */
-  readonly message: string;
-}
-
-export interface StoredRuntimeEndpoint {
-  readonly id: string;
-  readonly endpoint: string;
-}
-
-export interface RuntimeCatalogEntry {
-  readonly id: string;
-  readonly displayName?: string;
-  readonly profile: RuntimeProfile;
-  readonly kind: RuntimeKind;
-  readonly deviceId?: string;
-  readonly status: "ready" | "draining" | "offline";
-}
-
-export interface StoredConversationSummary {
-  readonly id: string;
-  readonly title: string;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly runCount: number;
-  readonly lastStatus: string;
-}
-
-export interface StoredConversationPage {
-  readonly conversations: readonly StoredConversationSummary[];
-  readonly hasMore: boolean;
-  readonly nextOffset?: number;
-}
-
-export interface StoredConversationTurn {
-  readonly clientMessageId: string;
-  readonly input: string;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly attachments: readonly ConversationAttachmentSnapshot[];
-  readonly finalTurn?: {
-    readonly status: "completed" | "failed" | "cancelled";
-    readonly assistantOutput?: string;
-    readonly errorCode?: string;
-    /** The actual model resolved by the owning Runtime, never a request hint. */
-    readonly modelKey?: string;
-    readonly completedAt: number;
-  };
-  readonly assignment?: {
-    readonly id: string;
-    readonly runtimeId: string;
-    readonly runtimeDisplayName?: string;
-    readonly executionLocation: ExecutionLocation;
-    readonly status: AssignmentStatus;
-    readonly hasRun: boolean;
-    readonly remoteRunId?: string;
-    readonly errorCode?: string;
-    readonly errorMessage?: string;
-  };
-}
-
-/**
- * Router's persistence port. It intentionally exposes atomic control-plane
- * operations rather than SQL primitives, so scheduling code is independent of
- * the selected relational engine.
- */
-export interface ControlPlaneRepository {
-  seedRuntimes(runtimes: readonly (RuntimeInstance & { readonly endpoint: string })[], now?: number): Promise<void>;
-  registerLocalRuntime(input: {
-    readonly runtimeId: string; readonly deviceId: string; readonly tenantId: string; readonly ownerUserId: string;
-    readonly connectionId: string; readonly connectionEpoch: number; readonly profile: RuntimeProfile;
-    readonly capabilities: readonly string[]; readonly maxConcurrentRuns: number; readonly status: "ready" | "draining";
-    readonly catalogVersion: string; readonly leaseExpiresAt: number; readonly now?: number;
-  }): Promise<void>;
-  unregisterLocalRuntime(runtimeId: string, connectionId: string, now?: number): Promise<void>;
-  disconnectLocalRuntimes(connectionId: string, now?: number): Promise<void>;
-  heartbeat(heartbeat: RuntimeHeartbeat): Promise<void>;
-  runtimeEndpoints(tenantId?: string, ownerUserId?: string): Promise<readonly StoredRuntimeEndpoint[]>;
-  runtimeCatalog(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeCatalogEntry[]>;
-  listConversations(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<StoredConversationPage>;
-  conversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<{ readonly turns: readonly StoredConversationTurn[] } | undefined>;
-  deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
-  reserve(task: SubmitConversationTask, input: { readonly heartbeatTtlMs: number; readonly reservationTtlMs: number; readonly now?: number }): Promise<StoredAssignment>;
-  markAccepted(assignmentId: string, remoteRunId: string, now?: number): Promise<void>;
-  markDispatchFailure(assignmentId: string, failure: DispatchFailure, now?: number): Promise<void>;
-  createContinuationAssignment(parentAssignmentId: string, remoteRunId: string, now?: number): Promise<StoredAssignment>;
-  observeRun(assignmentId: string, run: RuntimeRunStatus, now?: number): Promise<void>;
-  assignment(id: string): Promise<StoredAssignment | undefined>;
-  unsettledAssignments(afterId: string, limit: number): Promise<readonly StoredAssignment[]>;
-}
 
 interface TaskRow {
   id: string;
@@ -1007,11 +916,6 @@ export function terminalTurnCompletedAt(finishedAt: number | null, observedAt: n
 
 export async function installControlPlaneSchema(database: SqlConnection): Promise<void> {
   await new ControlPlaneStore(database).installSchema();
-}
-
-export class RuntimeCapacityError extends Error {
-  readonly statusCode = 429;
-  readonly code = "runtime_capacity_exhausted";
 }
 
 export class ConversationDeleteConflictError extends Error {

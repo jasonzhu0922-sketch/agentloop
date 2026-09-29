@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { previewProcessArtifact, upsertSql, type ProcessArtifact, type ProcessArtifactPreview, type SqlConnection } from "@zhujun/agentloop";
+import { previewProcessArtifact, upsertSql, type SqlConnection } from "@zhujun/agentloop";
+import type { RuntimeArtifact, RuntimeArtifactPreview } from "../../shared/contracts.ts";
 import { migrateRouterState } from "../persistence/state-migrations.ts";
 
-export interface CatalogArtifact extends ProcessArtifact {
+export interface CatalogArtifact extends RuntimeArtifact {
   readonly sha256: string;
 }
 
@@ -35,7 +36,7 @@ export class SharedWorkspaceArtifactCatalog {
 
   async capture(input: {
     readonly assignmentId: string; readonly tenantId: string; readonly ownerUserId: string;
-    readonly conversationId: string; readonly remoteRunId: string; readonly artifacts: readonly ProcessArtifact[];
+    readonly conversationId: string; readonly remoteRunId: string; readonly artifacts: readonly RuntimeArtifact[];
   }): Promise<readonly CatalogArtifact[]> {
     await this.ready();
     const workspaceRoot = join(this.workspaceRoot, "conversations", input.conversationId);
@@ -69,7 +70,7 @@ export class SharedWorkspaceArtifactCatalog {
     return { artifact, content };
   }
 
-  async preview(assignmentId: string, artifactId: string): Promise<ProcessArtifactPreview | undefined> {
+  async preview(assignmentId: string, artifactId: string): Promise<RuntimeArtifactPreview | undefined> {
     const artifact = (await this.list(assignmentId)).find((item) => item.id === artifactId);
     if (artifact === undefined) return undefined;
     await this.read(assignmentId, artifactId);
@@ -181,7 +182,7 @@ function rowToArtifact(row: Record<string, unknown>): CatalogArtifact {
   };
 }
 
-async function readCatalogArtifact(artifact: ProcessArtifact, workspaceRoot: string): Promise<Buffer> {
+async function readCatalogArtifact(artifact: RuntimeArtifact, workspaceRoot: string): Promise<Buffer> {
   if (artifact.path.length === 0 || artifact.path.includes("\0")) throw new Error("artifact_path_invalid");
   const root = await realpath(workspaceRoot);
   const target = await realpath(isAbsolute(artifact.path) ? artifact.path : resolve(root, artifact.path));
