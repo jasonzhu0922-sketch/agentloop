@@ -1965,7 +1965,7 @@ test("explicit Runtime selection uses that Host and rejects an unregistered ID",
   await database.close();
 });
 
-test("persistent Router keeps a conversation on its original Runtime Host", async () => {
+test("persistent Router keeps a conversation on its original Runtime Host without recording a migration", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -1983,6 +1983,10 @@ test("persistent Router keeps a conversation on its original Runtime Host", asyn
   const first = await router.submit(task("user-a", "message-a", "conversation-sticky"));
   const second = await router.submit(task("user-a", "message-b", "conversation-sticky"));
   assert.equal(second.runtimeId, first.runtimeId);
+  const migrations = await database.prepare(`
+    SELECT assignment_id FROM mr_conversation_runtime_migrations WHERE assignment_id = ?
+  `).all(second.id) as Array<{ assignment_id: string }>;
+  assert.deepEqual(migrations, []);
   await database.close();
 });
 

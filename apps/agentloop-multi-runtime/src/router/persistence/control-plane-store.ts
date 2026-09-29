@@ -862,8 +862,12 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       active_run_count: number; queued_run_count: number; pending_admissions: number;
     }>;
     const required = JSON.parse(task.required_capabilities_json) as string[];
+    // Keep the database-facing name snake_case. PostgreSQL folds unquoted
+    // camelCase aliases to lowercase, while SQLite and TiDB preserve them;
+    // reading `runtimeId` here would turn a real affinity into undefined only
+    // after switching the shared control plane to PostgreSQL.
     const affinity = await this.database.prepare(`
-      SELECT a.runtime_id AS runtimeId
+      SELECT a.runtime_id AS runtime_id
       FROM mr_assignments a JOIN mr_tasks t ON t.id = a.task_id
       WHERE t.tenant_id = ? AND t.owner_user_id = ? AND t.conversation_id = ?
         -- A reservation prevents capacity oversubscription while dispatch is
@@ -872,7 +876,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         -- Host has accepted the dispatch and supplied a remote Run id.
         AND a.remote_run_id IS NOT NULL
       ORDER BY a.created_at DESC LIMIT 1
-    `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { runtimeId: string } | undefined;
+    `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { runtime_id: string } | undefined;
     const eligible = candidates
       .filter((node) => (executionTarget.kind === "local_device"
         ? node.kind === "local" && node.device_id === executionTarget.deviceId && node.id === executionTarget.runtimeId
@@ -882,8 +886,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         && required.every((capability) => (JSON.parse(node.capabilities_json) as string[]).includes(capability)))
       .filter((node) => node.active_run_count + Number(node.pending_admissions) < node.max_concurrent_runs)
       .sort((left, right) => {
-        if (affinity !== undefined && left.id === affinity.runtimeId) return -1;
-        if (affinity !== undefined && right.id === affinity.runtimeId) return 1;
+        if (affinity !== undefined && left.id === affinity.runtime_id) return -1;
+        if (affinity !== undefined && right.id === affinity.runtime_id) return 1;
         return score(left) - score(right) || left.id.localeCompare(right.id);
       });
     // Affinity is deliberately a preference, never an availability gate.  The
@@ -902,7 +906,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       INSERT INTO mr_assignments(id, task_id, runtime_id, dispatch_key, status, reservation_expires_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)
     `).run(id, task.id, selected.id, dispatchKey, expires, now, now);
-    if (affinity !== undefined && affinity.runtimeId !== selected.id) {
+    if (affinity !== undefined && affinity.runtime_id !== selected.id) {
       await this.database.prepare(`
         INSERT INTO mr_conversation_runtime_migrations(
           id, tenant_id, owner_user_id, conversation_id, assignment_id,
@@ -914,7 +918,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         task.owner_user_id,
         task.conversation_id,
         id,
-        affinity.runtimeId,
+        affinity.runtime_id,
         selected.id,
         now,
       );
