@@ -57,6 +57,17 @@ export interface StepSemanticFrame {
   readonly evidenceSources: readonly StepEvidenceSource[];
   readonly firstAction: StepFirstAction;
   readonly completionBoundary: readonly EvidenceKind[];
+  /**
+   * Separates the result this step must publish from work that may be useful
+   * to a later step. This is execution guidance, not an authorization gate:
+   * an acquisition step may still materialize a useful candidate artifact.
+   */
+  readonly outcomePolicy: {
+    readonly primaryResult: "source_evidence" | "analysis" | "artifact" | "delivery" | "repair";
+    readonly currentStepInstruction: string;
+    readonly earlyDownstreamArtifactPolicy: "not_applicable" | "preserve_as_candidate" | "current_step_owned";
+    readonly earlyDownstreamArtifactInstruction: string;
+  };
   readonly forbiddenMoves: readonly string[];
   readonly qaOwnership: {
     readonly runtimeCore: readonly EvidenceKind[];
@@ -110,6 +121,7 @@ export function deriveStepSemanticFrame(input: {
   const evidenceSources = deriveEvidenceSources(input, completionBoundary);
   const evidenceMode = deriveEvidenceMode(input.step, evidenceSources, phaseRole, input.requiresFileOutput);
   const firstAction = deriveFirstAction(input.step, evidenceSources, evidenceMode, phaseRole, operation);
+  const outcomePolicy = outcomePolicyForFrame(phaseRole, input.requiresFileOutput);
   const toolSignals = toolSignalKinds(input.step.evidenceContract?.requiredKinds ?? [], input.step.successCriteria);
   const skillRubric = [...new Set(input.skills.flatMap((skill) => skill.agentLoop?.qaKinds ?? []))].sort();
   return {
@@ -121,6 +133,7 @@ export function deriveStepSemanticFrame(input: {
     evidenceSources: evidenceSources.length === 0 ? [{ kind: "none", required: false }] : evidenceSources,
     firstAction,
     completionBoundary,
+    outcomePolicy,
     forbiddenMoves: forbiddenMovesForFrame({
       phaseRole,
       evidenceMode,
@@ -133,6 +146,55 @@ export function deriveStepSemanticFrame(input: {
       skillRubric,
       toolSignals,
     },
+  };
+}
+
+function outcomePolicyForFrame(
+  phaseRole: StepPhaseRole,
+  requiresFileOutput: boolean,
+): StepSemanticFrame["outcomePolicy"] {
+  if (phaseRole === "evidence_acquisition") {
+    return {
+      primaryResult: "source_evidence",
+      currentStepInstruction:
+        "Publish a canonical, reusable source-evidence result for this step: supported facts, source references, coverage, and caveats. The global final deliverable provides context but does not replace this required result.",
+      earlyDownstreamArtifactPolicy: "preserve_as_candidate",
+      earlyDownstreamArtifactInstruction:
+        "If work also materializes a report, page, file, or other downstream-looking artifact, preserve it as a candidate work product with its receipt and provenance. It is optional reusable input for a later producer, never a substitute for this step's source-evidence result or evidence contract.",
+    };
+  }
+  if (phaseRole === "artifact_production") {
+    return {
+      primaryResult: "artifact",
+      currentStepInstruction:
+        "Produce and validate the current step's artifact from canonical inputs and bound dependency results.",
+      earlyDownstreamArtifactPolicy: requiresFileOutput ? "current_step_owned" : "not_applicable",
+      earlyDownstreamArtifactInstruction:
+        "Artifacts produced here are current-step work products; preserve their receipts so a later delivery or repair step can reuse them.",
+    };
+  }
+  if (phaseRole === "delivery") {
+    return {
+      primaryResult: "delivery",
+      currentStepInstruction:
+        "Deliver the current step's requested result using the bound evidence and already available work products.",
+      earlyDownstreamArtifactPolicy: "not_applicable",
+      earlyDownstreamArtifactInstruction: "No separate downstream artifact policy applies to this delivery step.",
+    };
+  }
+  if (phaseRole === "repair") {
+    return {
+      primaryResult: "repair",
+      currentStepInstruction: "Repair the named failed boundary and publish the evidence that resolves it.",
+      earlyDownstreamArtifactPolicy: "not_applicable",
+      earlyDownstreamArtifactInstruction: "No separate downstream artifact policy applies while repairing the current boundary.",
+    };
+  }
+  return {
+    primaryResult: "analysis",
+    currentStepInstruction: "Publish the current step's reusable analysis result and its supporting evidence.",
+    earlyDownstreamArtifactPolicy: "not_applicable",
+    earlyDownstreamArtifactInstruction: "No separate downstream artifact policy applies to this analysis step.",
   };
 }
 
@@ -372,7 +434,7 @@ function forbiddenMovesForFrame(input: {
     moves.add("do not answer from assumptions when authorized source material is available");
   }
   if (input.phaseRole === "evidence_acquisition") {
-    moves.add("do not write the downstream final artifact before source evidence is captured");
+    moves.add("do not let a downstream-looking candidate artifact replace the required source-evidence result");
   }
   if (input.evidenceMode === "reuse_dependency_evidence" || input.evidenceMode === "reuse_conversation_evidence") {
     moves.add("do not reacquire source data solely to recreate already satisfied prior evidence");

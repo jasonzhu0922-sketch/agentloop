@@ -903,6 +903,14 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
 
 function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> | undefined {
   const policy: Record<string, unknown> = {};
+  if (input.step.role === "fact_acquisition") {
+    policy.stageSemantics = {
+      primaryResult:
+        "Assess the current step as source-evidence publication: supported facts, source references, coverage, and caveats remain its completion boundary.",
+      earlyArtifactHandling:
+        "A report, page, file, or other downstream-looking artifact may appear in the tool evidence. Treat it as a preserved candidate work product: neither approve the fact-acquisition step solely because it exists nor reject the step solely because it was produced. Assess the admitted source-evidence contract independently.",
+    };
+  }
   if (input.skills.length > 0) {
     policy.skillCaveats = {
       unavailableValidation:

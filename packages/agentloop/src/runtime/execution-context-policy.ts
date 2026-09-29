@@ -39,12 +39,6 @@ export function buildStepRuntimeContextSnapshot(input: {
   const usesWebTools = stepHasSourceKind(input.step, "web");
   const usesVisibleDirectoryTools = stepHasSourceKind(input.step, "visible_directory");
   const usesSourceTools = stepHasSourceKind(input.step, "uploaded_source");
-  const stepDependencyContexts = buildStepDependencyContexts(input.step, input.plan);
-  const resultBindings = collectResultBindings(input.plan.resultBindings ?? [], stepDependencyContexts);
-  const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(stepDependencyContexts);
-  const requiresDerivedAggregation = input.step.evidenceContract?.requiredKinds.includes("derived_aggregation") === true;
-  const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
-  const boundOutcomeConversion = boundOutcomeConversionDirective(input);
   const stepSemanticFrame = deriveStepSemanticFrame({
     step: input.step,
     plan: input.plan,
@@ -56,6 +50,12 @@ export function buildStepRuntimeContextSnapshot(input: {
     requiresFileOutput: input.requiresFileOutput,
     conversationWorkingSet: input.conversationWorkingSet,
   });
+  const stepDependencyContexts = buildStepDependencyContexts(input.step, input.plan, stepSemanticFrame);
+  const resultBindings = collectResultBindings(input.plan.resultBindings ?? [], stepDependencyContexts);
+  const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(stepDependencyContexts);
+  const requiresDerivedAggregation = input.step.evidenceContract?.requiredKinds.includes("derived_aggregation") === true;
+  const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
+  const boundOutcomeConversion = boundOutcomeConversionDirective(input);
   const planStepHandoffFrame = buildPlanStepHandoffFrame(input.step, input.plan, stepSemanticFrame);
   const evidenceAcquisitionDiscipline = buildEvidenceAcquisitionDiscipline({
     stepSemanticFrame,
@@ -242,7 +242,7 @@ function boundOutcomeConversionDirective(input: {
 function buildPlanStepHandoffFrame(
   step: ExecutionPlan["steps"][number],
   plan: ExecutionPlan,
-  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "completionBoundary" | "phaseRole" | "evidenceMode" | "firstAction">,
+  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "completionBoundary" | "phaseRole" | "evidenceMode" | "firstAction" | "outcomePolicy">,
 ):
   | {
       readonly schema: "agentloop.stepHandoffFrame/v1";
@@ -259,6 +259,7 @@ function buildPlanStepHandoffFrame(
         readonly resultPublicationPolicy: string;
         readonly currentStepBoundary: string;
         readonly nextStepBoundary: string;
+        readonly earlyDownstreamArtifactPolicy: string;
         readonly forbiddenMoves: readonly string[];
       };
     }
@@ -303,7 +304,7 @@ function buildPlanStepHandoffFrame(
     mode: "current_to_next",
     currentStepId: step.id,
     instruction:
-      "Complete only the current step so Assessment can publish one formal Step Result for the next Plan stage. Do not execute the next stage.",
+      "Complete the current step's primary result so Assessment can publish one formal Step Result for the next Plan stage. Preserve any early downstream-looking work product as a candidate rather than allowing it to replace the current result.",
     currentStep,
     nextStage,
     handoffContract: {
@@ -312,9 +313,10 @@ function buildPlanStepHandoffFrame(
         "The completion candidate should name reusable evidence, artifact paths, summaries, caveats, and missing facts so Assessment can publish one Step Result that the next stage consumes through ResultBinding.",
       currentStepBoundary: summarizeCurrentStepBoundary(frame),
       nextStepBoundary:
-        "The next stage is context for semantic continuity only; its objective and evidence contract must not be completed during the current step unless explicitly required by the current step.",
+        "The next stage is context for semantic continuity only. Its final deliverable does not replace the current step's primary result; any earlier work product is preserved as a candidate for the next stage to evaluate.",
+      earlyDownstreamArtifactPolicy: frame.outcomePolicy.earlyDownstreamArtifactInstruction,
       forbiddenMoves: [
-        "do not execute work whose only purpose is to satisfy the next step's completion boundary",
+        "do not let a downstream-looking work product replace the current step's primary result",
         "do not reacquire evidence already satisfied by the current step when handing off to the next step",
         ...handoffForbiddenMovesForFrame(frame),
       ],
@@ -425,12 +427,13 @@ function isReusableEvidenceKind(kind: EvidenceKind): boolean {
 }
 
 function summarizeCurrentStepBoundary(
-  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "completionBoundary" | "phaseRole" | "evidenceMode" | "firstAction">,
+  frame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "completionBoundary" | "phaseRole" | "evidenceMode" | "firstAction" | "outcomePolicy">,
 ): string {
   return [
     `phaseRole=${frame.phaseRole}`,
     `evidenceMode=${frame.evidenceMode}`,
     `firstAction=${frame.firstAction}`,
+    `primaryResult=${frame.outcomePolicy.primaryResult}`,
     `completionBoundary=${frame.completionBoundary.join(",") || "none"}`,
   ].join("; ");
 }
@@ -440,7 +443,7 @@ function handoffForbiddenMovesForFrame(
 ): string[] {
   const result: string[] = [];
   if (frame.phaseRole === "evidence_acquisition") {
-    result.push("do not write the downstream artifact before the acquisition boundary is accepted");
+    result.push("do not present a downstream-looking artifact as completion of the acquisition boundary");
   }
   if (frame.evidenceMode === "reuse_dependency_evidence") {
     result.push("do not redo dependency acquisition when the handoff evidence is already bound");
@@ -532,6 +535,7 @@ function skillArtifactWorkflowDiscipline(
 function buildStepDependencyContexts(
   step: ExecutionPlan["steps"][number],
   plan: ExecutionPlan,
+  currentStepSemanticFrame: Pick<ReturnType<typeof deriveStepSemanticFrame>, "phaseRole">,
 ):
   | {
       readonly schema: "agentloop.stepDependencyContexts/v1";
@@ -560,6 +564,7 @@ function buildStepDependencyContexts(
       return {
         stepId: dependency.id,
         objective: dependency.objective,
+        ...(dependency.role === undefined ? {} : { role: dependency.role }),
         status: dependency.status,
         ...(dependency.evidence?.publishedResult === undefined ? {} : {
           resultBinding: {
@@ -584,18 +589,21 @@ function buildStepDependencyContexts(
     })
     .filter((binding): binding is StepDependencyContext => binding !== undefined);
   if (bindings.length === 0) return undefined;
+  const earlyArtifactCandidates = candidateArtifactsFromDependencies(bindings, currentStepSemanticFrame);
   return {
     schema: "agentloop.stepDependencyContexts/v1",
     instruction:
       "Each completed dependency publishes a formal Runtime result and binds it with relation=dependency. Treat the binding's ResultRef as the only authoritative content identity for this step; step handoff carries metadata only and never re-projects tool content. Use read_result with the binding's opaque resultId when facts or details are needed. Preserve caveats and acquire only missing, stale, unresolved conflicts, or explicitly refreshed evidence. A successful scope-matched result obtained in the current step resolves a conflict for this step; retain the dependency as provenance instead of re-acquiring data solely to reconcile it.",
     currentStepId: step.id,
     dependencies: bindings,
+    ...(earlyArtifactCandidates === undefined ? {} : { earlyArtifactCandidates }),
   };
 }
 
 interface StepDependencyContext {
   readonly stepId: string;
   readonly objective?: string;
+  readonly role?: ExecutionPlan["steps"][number]["role"];
   readonly status: ExecutionPlan["steps"][number]["status"] | "missing";
   readonly resultBinding?: RuntimeResultBinding;
   readonly requiredEvidenceKinds?: readonly EvidenceKind[];
@@ -607,6 +615,38 @@ interface StepDependencyContext {
   readonly sourceSummaryCandidate?: unknown;
   /** Step handoff carries metadata only; result content stays behind resultBinding. */
   readonly evidenceMetadata: readonly ProjectedEvidenceMetadata[];
+}
+
+interface EarlyArtifactCandidate {
+  readonly sourceStepId: string;
+  readonly resultBinding?: RuntimeResultBinding;
+  readonly artifact: ProjectedArtifactRef;
+}
+
+function candidateArtifactsFromDependencies(
+  dependencies: readonly StepDependencyContext[],
+  current: Pick<ReturnType<typeof deriveStepSemanticFrame>, "phaseRole">,
+): {
+  readonly instruction: string;
+  readonly artifacts: readonly EarlyArtifactCandidate[];
+} | undefined {
+  if (current.phaseRole !== "artifact_production" && current.phaseRole !== "delivery") return undefined;
+  const artifacts = dependencies.flatMap((dependency) => {
+    if (dependency.role !== "fact_acquisition") return [];
+    return dependency.evidenceMetadata.flatMap((metadata) =>
+      (metadata.artifacts ?? []).map((artifact) => ({
+        sourceStepId: dependency.stepId,
+        ...(dependency.resultBinding === undefined ? {} : { resultBinding: dependency.resultBinding }),
+        artifact,
+      }))
+    );
+  });
+  if (artifacts.length === 0) return undefined;
+  return {
+    instruction:
+      "These artifacts were materialized while an upstream fact-acquisition step was completing its primary evidence boundary. They are candidate work products, not already accepted final delivery. Before recreating or overwriting an equivalent artifact, inspect the dependency ResultRef and candidate receipt, then reuse, refine, or replace it only when the current step's requirements or acceptance evidence justify that choice.",
+    artifacts,
+  };
 }
 
 function collectResultBindings(

@@ -7393,7 +7393,10 @@ async function resolveConversationTurn(
       const resultBound = bindUnambiguousPriorResult(artifactBound, input, context.conversationWorkingSet);
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
-        return applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet);
+        return applyConversationTurnArtifactExecutionFloor(
+          applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet),
+          input,
+        );
       }
       repairFeedback = semanticFeedback;
       continue;
@@ -7673,6 +7676,31 @@ function applyConversationTurnEvidenceFloor(
     mode: "execute",
     evidenceStrategy: conversationEvidenceStrategyForDemand(guardedSourceNeed, resolution.sourceBinding),
     evidenceDemand: guardedSourceNeed,
+    source: "model_guarded",
+  };
+}
+
+/**
+ * A resolver may summarize an explicit file request as a conversational goal,
+ * but it cannot downgrade the user-owned delivery surface. Without execution,
+ * the Runtime deliberately withholds Skills and workspace writers, making a
+ * real artifact impossible before Planner admission can enforce its receipt.
+ */
+function applyConversationTurnArtifactExecutionFloor(
+  resolution: ConversationTurnResolution,
+  input: string,
+): ConversationTurnResolution {
+  if (resolution.mode !== "reply") return resolution;
+  const intent = classifyTaskIntent({
+    objective: input,
+    userConstraints: resolution.userConstraints,
+  });
+  if (!intent.wantsArtifact) return resolution;
+  return {
+    ...resolution,
+    mode: "execute",
+    evidenceStrategy: conversationEvidenceStrategyForDemand(intent.sourceNeed, resolution.sourceBinding),
+    evidenceDemand: intent.sourceNeed,
     source: "model_guarded",
   };
 }

@@ -257,6 +257,11 @@ test("execution context binds dependency evidence before downstream reacquisitio
     readonly firstAction: string;
     readonly evidenceSources: readonly Array<{ readonly kind: string; readonly reusePolicy?: string }>;
     readonly completionBoundary: readonly string[];
+    readonly outcomePolicy: {
+      readonly primaryResult: string;
+      readonly earlyDownstreamArtifactPolicy: string;
+      readonly currentStepInstruction: string;
+    };
   };
   assert.equal(frame.schema, "agentloop.stepSemanticFrame/v1");
   assert.equal(frame.phaseRole, "artifact_production");
@@ -267,6 +272,24 @@ test("execution context binds dependency evidence before downstream reacquisitio
     source.kind === "dependency_step" && source.reusePolicy === "must_reuse_first"
   ), true);
   assert.equal(frame.completionBoundary.includes("artifact_acceptance"), true);
+  assert.equal(frame.outcomePolicy.primaryResult, "artifact");
+  assert.equal(frame.outcomePolicy.earlyDownstreamArtifactPolicy, "current_step_owned");
+  const dependencyContexts = payload.stepDependencyContexts as {
+    readonly earlyArtifactCandidates?: {
+      readonly instruction: string;
+      readonly artifacts: readonly Array<{
+        readonly sourceStepId: string;
+        readonly resultBinding?: { readonly result: { readonly resultId: string } };
+        readonly artifact: { readonly path: string };
+      }>;
+    };
+  };
+  assert.equal(dependencyContexts.earlyArtifactCandidates?.artifacts.some((candidate) =>
+    candidate.sourceStepId === "inspect_data"
+    && candidate.resultBinding?.result.resultId === "rr_inspect_data"
+    && candidate.artifact.path === "data_inspection_report.md"
+  ), true);
+  assert.match(dependencyContexts.earlyArtifactCandidates?.instruction ?? "", /Before recreating or overwriting/i);
   const handoff = payload.planStepHandoffFrame as {
     readonly schema: string;
     readonly mode: string;
@@ -488,6 +511,7 @@ test("execution context carries current-to-next handoff for non-terminal steps",
       readonly resultPublicationPolicy: string;
       readonly currentStepBoundary: string;
       readonly nextStepBoundary: string;
+      readonly earlyDownstreamArtifactPolicy: string;
       readonly forbiddenMoves: readonly string[];
     };
   };
@@ -495,7 +519,7 @@ test("execution context carries current-to-next handoff for non-terminal steps",
   assert.equal(handoff.schema, "agentloop.stepHandoffFrame/v1");
   assert.equal(handoff.mode, "current_to_next");
   assert.equal(handoff.currentStepId, "extract_data");
-  assert.match(handoff.instruction, /Do not execute the next stage/);
+  assert.match(handoff.instruction, /current step's primary result/);
   assert.equal(handoff.nextStage.kind, "direct_dependents");
   assert.equal(handoff.nextStage.steps[0]?.id, "write_report");
   assert.equal(handoff.nextStage.steps[0]?.dependsOnCurrent, true);
@@ -504,9 +528,20 @@ test("execution context carries current-to-next handoff for non-terminal steps",
   assert.equal(handoff.handoffContract.reusableEvidenceKinds.includes("record_counts"), true);
   assert.match(handoff.handoffContract.currentStepBoundary, /phaseRole=evidence_acquisition/);
   assert.match(handoff.handoffContract.nextStepBoundary, /context for semantic continuity only/);
+  assert.match(handoff.handoffContract.earlyDownstreamArtifactPolicy, /candidate work product/);
   assert.equal(handoff.handoffContract.forbiddenMoves.some((item) =>
-    item.includes("downstream artifact")
+    item.includes("downstream-looking artifact")
   ), true);
+  const acquisitionFrame = payload.stepSemanticFrame as {
+    readonly outcomePolicy: {
+      readonly primaryResult: string;
+      readonly earlyDownstreamArtifactPolicy: string;
+      readonly currentStepInstruction: string;
+    };
+  };
+  assert.equal(acquisitionFrame.outcomePolicy.primaryResult, "source_evidence");
+  assert.equal(acquisitionFrame.outcomePolicy.earlyDownstreamArtifactPolicy, "preserve_as_candidate");
+  assert.match(acquisitionFrame.outcomePolicy.currentStepInstruction, /global final deliverable/i);
 });
 
 test("execution context prefers structured JSON reads for table extraction artifacts", () => {

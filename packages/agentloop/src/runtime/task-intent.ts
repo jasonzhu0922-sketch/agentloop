@@ -624,12 +624,36 @@ function explicitDeliveryFormatKind(text: string, deliveryTarget: string): Artif
     const kind = explicitArtifactFormatKind(qualifier);
     if (kind !== "none") return kind;
   }
+  // A request may name its concrete target before a later creation verb that
+  // only describes content (for example, "make a PPTX ... then make an
+  // introduction"). Preserve every creation-clause target rather than
+  // treating the final verb as the sole authority. Each target is bounded at
+  // content/source markers, so referenced inputs still cannot become outputs.
+  for (const target of artifactCreationDeliveryTargets(text)) {
+    const kind = explicitArtifactFormatKind(target);
+    if (kind !== "none") return kind;
+  }
   return explicitArtifactFormatKind(deliveryTarget);
 }
 
 function explicitDeliveryFormatQualifiers(text: string): string[] {
-  return [...text.matchAll(/(?:以|用)\s*([^，,。；;\n]{1,48}?)\s*(?:格式|文件(?:形式)?|文档)(?:形式)?\s*(?:来|去)?\s*(?:输出|生成|创建|制作|交付|呈现|写|设计|实现|搭建|构建|导出|做|落成)/giu)]
-    .map((match) => match[1] ?? "");
+  return [
+    ...text.matchAll(/(?:以|用)\s*([^，,。；;\n]{1,48}?)\s*(?:格式|文件(?:形式)?|文档)(?:形式)?\s*(?:来|去)?\s*(?:输出|生成|创建|制作|交付|呈现|写|设计|实现|搭建|构建|导出|做|落成)/giu),
+    // The conversation resolver records compact constraints such as
+    // "Deliverable format: PPTX". These labels are output-owned and therefore
+    // safe to recognize; a bare "format:" remains intentionally ambiguous.
+    ...text.matchAll(/(?:\b(?:deliverable|output)\b|交付(?:物|格式)?|输出格式)\s*(?:format)?\s*[:：]\s*([^，,。；;\n]{1,120})/giu),
+  ].map((match) => match[1] ?? "");
+}
+
+function artifactCreationDeliveryTargets(text: string): string[] {
+  const matches = [...text.matchAll(/\b(?:make|create|build|generate|produce|deliver|write|export|design|implement|materialize|form)\b|做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出|落成/giu)];
+  return matches.map((match, index) => {
+    const end = matches[index + 1]?.index ?? text.length;
+    const clause = text.slice(match.index, end);
+    const boundary = /[，,。；;\n]|基于|根据|来自|从|读取|解析|提取|包含|包括|字段|来源|输入|上传|参考|关于/iu.exec(clause);
+    return boundary?.index === undefined ? clause : clause.slice(0, boundary.index);
+  });
 }
 
 function artifactCreationDeliveryTarget(text: string): string {

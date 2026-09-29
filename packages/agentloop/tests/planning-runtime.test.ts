@@ -1323,6 +1323,22 @@ test("Task intent keeps an explicit PPTX deliverable when slide content mentions
   assert.equal(intent.deliverySurface, "workspace_artifact");
 });
 
+test("Task intent retains an explicit artifact target across later creation wording and resolver constraints", () => {
+  const intent = classifyTaskIntent({
+    objective: "给我们的 agentloop 做一份介绍 pptx，主要是给高校的老师做一个介绍。",
+    userConstraints: [
+      "Deliverable format: PPTX presentation",
+      "Deliverable: a real .pptx file (not just an outline)",
+      "Use the pptx skill/capability to generate the file",
+    ],
+  });
+
+  assert.equal(intent.artifactAction, "create");
+  assert.equal(intent.artifactKind, "presentation");
+  assert.equal(intent.deliverySurface, "workspace_artifact");
+  assert.equal(intent.wantsArtifact, true);
+});
+
 test("Plan repository persists the canonical task semantics used to admit an artifact Plan", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -13142,6 +13158,85 @@ test("RunService retries malformed conversation intent output and defaults uncer
     assert.equal(classifierCalls, 2);
     assert.equal(capturedTask?.responseOnly, undefined);
     assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService keeps an explicit workspace artifact request in execution", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database);
+    const owner = testOwner();
+    const conversationId = "conversation-artifact-reply-floor";
+    const now = Date.now();
+    await database.prepare(`
+      INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(conversationId, owner.user.id, "Artifact reply floor", now - 10_000, now - 1_000);
+    await database.prepare(`
+      INSERT INTO runs(
+        id, owner_user_id, conversation_id, parent_run_id, depth, allow_dangerous_tools,
+        model_key, status, input, output, error_code, created_at, finished_at
+      ) VALUES (?, ?, ?, NULL, 0, 1, NULL, 'completed', ?, ?, NULL, ?, ?)
+    `).run(
+      "prior-conversation-message",
+      owner.user.id,
+      conversationId,
+      "上一轮讨论了 AgentLoop 的高校科研定位。",
+      "已了解。",
+      now - 9_000,
+      now - 8_000,
+    );
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request) => {
+          assert.equal(request.tools[0]?.name, "resolve_conversation_turn");
+          return {
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [{
+              id: "incorrectly-reply-to-deck",
+              name: "resolve_conversation_turn",
+              arguments: {
+                mode: "reply",
+                relation: "new_goal",
+                inputMode: "none",
+                effectiveGoal: "Give the user an introduction outline.",
+                evidenceStrategy: "none",
+                sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+                evidenceDemand: "none",
+                userConstraints: [],
+              },
+            }],
+          };
+        },
+      }),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          throw new AppError("PLANNING_ERROR", "Stop after capturing artifact execution floor", 400);
+        },
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "给 AgentLoop 做一份面向高校教师的介绍 PPTX。", {
+        conversationId,
+        allowDangerousTools: true,
+      }),
+      (error: unknown) => error instanceof AppError && error.code === "PLANNING_ERROR",
+    );
+
+    assert.equal(capturedTask?.responseOnly, undefined);
+    assert.equal(capturedTask?.taskUnderstanding.intent.deliverySurface, "workspace_artifact");
+    assert.equal(capturedTask?.taskUnderstanding.intent.artifactKind, "presentation");
+    assert.equal(capturedTask?.turnResolution?.mode, "execute");
+    assert.equal(capturedTask?.turnResolution?.source, "model_guarded");
   } finally {
     database.close();
   }
