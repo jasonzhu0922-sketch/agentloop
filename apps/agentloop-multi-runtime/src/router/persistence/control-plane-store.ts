@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { TIDB_CONTROL_PLANE_SCHEMA_SQL, sqlForDialect, upsertSql, type SqlConnection } from "@zhujun/agentloop";
+import { TIDB_CONTROL_PLANE_SCHEMA_SQL, sqlForDialect, upsertSql, type SqlConnection, type SqlValue } from "@zhujun/agentloop";
 import type { ConversationAttachmentSnapshot, ExecutionLocation, PortableResourceRef, RuntimeAssignment, RuntimeInstance, RuntimeKind, RuntimeProfile, RuntimeRunStatus, SubmitConversationTask } from "../../shared/contracts.ts";
 import { migrateRouterState } from "./state-migrations.ts";
 
@@ -765,6 +765,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   async observeRun(assignmentId: string, run: RuntimeRunStatus, now = Date.now()): Promise<void> {
     const status = run.status === "running" ? "accepted" : run.status;
     const finishedAt = Number.isSafeInteger(run.finishedAt) && run.finishedAt! >= 0 ? run.finishedAt! : null;
+    const completedAt = terminalTurnCompletedAt(finishedAt, now);
     const provenance = await this.database.prepare(`
       SELECT t.data_policy_json FROM mr_assignments a JOIN mr_tasks t ON t.id = a.task_id WHERE a.id = ?
     `).get(assignmentId) as { data_policy_json: string } | undefined;
@@ -798,12 +799,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         // Observation time belongs to the assignment. Conversation recency must
         // use the Host's activity time, never the time a poll happens to discover it.
         // An unknown finish time must not manufacture new user-visible activity.
-        await this.database.prepare(`UPDATE mr_tasks SET status = ?, updated_at = CASE
-          WHEN ? IS NULL THEN updated_at
-          WHEN ? < created_at THEN created_at ELSE ? END
-          WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)
-            AND ? = (SELECT latest.id FROM mr_assignments latest WHERE latest.task_id = mr_tasks.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`)
-          .run(status, finishedAt, finishedAt, finishedAt, assignmentId, assignmentId);
+        const taskProjection = terminalTaskProjectionUpdate(status, assignmentId, finishedAt);
+        await this.database.prepare(taskProjection.sql).run(...taskProjection.params);
         await this.database.prepare(upsertSql({
           dialect: this.database.dialect,
           insert: `INSERT INTO mr_turns(
@@ -814,13 +811,13 @@ export class ControlPlaneStore implements ControlPlaneRepository {
             a.runtime_id, ?, ?,
             CASE WHEN t.data_policy_json = '{"mode":"strict_local"}' THEN NULL ELSE t.input END,
             CASE WHEN t.data_policy_json = '{"mode":"strict_local"}' THEN NULL ELSE ? END,
-            ?, ?, t.created_at, COALESCE(?, ?)
+            ?, ?, t.created_at, ?
           FROM mr_assignments a JOIN mr_tasks t ON t.id = a.task_id
           WHERE a.id = ? AND t.data_policy_json <> '{"mode":"strict_local"}'`,
           conflictTarget: "assignment_id",
           sqliteAndPostgresUpdate: "assistant_output = excluded.assistant_output, status = excluded.status, error_code = excluded.error_code, model_key = COALESCE(excluded.model_key, mr_turns.model_key), completed_at = excluded.completed_at",
           tidbUpdate: "assistant_output = VALUES(assistant_output), status = VALUES(status), error_code = VALUES(error_code), model_key = COALESCE(VALUES(model_key), model_key), completed_at = VALUES(completed_at)",
-        })).run(executionLocation, run.modelKey ?? null, run.output ?? run.partialOutput ?? null, status, run.errorCode ?? null, finishedAt, now, assignmentId);
+        })).run(executionLocation, run.modelKey ?? null, run.output ?? run.partialOutput ?? null, status, run.errorCode ?? null, completedAt, assignmentId);
       }
     });
   }
@@ -971,6 +968,37 @@ export class ControlPlaneStore implements ControlPlaneRepository {
   private async latestAssignment(taskId: string): Promise<AssignmentRow | undefined> {
     return await this.database.prepare(assignmentSelect("WHERE a.task_id = ? ORDER BY a.created_at DESC LIMIT 1")).get(taskId) as AssignmentRow | undefined;
   }
+}
+
+/**
+ * A PostgreSQL parameter used only in `? IS NULL` has no inferred type.  Keep
+ * the unknown-finish branch free of timestamp parameters rather than asking a
+ * database driver to manufacture a timestamp from NULL.
+ */
+export function terminalTaskProjectionUpdate(
+  status: Exclude<AssignmentStatus, "reserved" | "accepted" | "unknown" | "expired">,
+  assignmentId: string,
+  finishedAt: number | null,
+): { readonly sql: string; readonly params: readonly SqlValue[] } {
+  const latestAssignment = `
+    id = (SELECT task_id FROM mr_assignments WHERE id = ?)
+      AND ? = (SELECT latest.id FROM mr_assignments latest WHERE latest.task_id = mr_tasks.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+  `;
+  if (finishedAt === null) {
+    return {
+      sql: `UPDATE mr_tasks SET status = ? WHERE ${latestAssignment}`,
+      params: [status, assignmentId, assignmentId],
+    };
+  }
+  return {
+    sql: `UPDATE mr_tasks SET status = ?, updated_at = CASE WHEN ? < created_at THEN created_at ELSE ? END WHERE ${latestAssignment}`,
+    params: [status, finishedAt, finishedAt, assignmentId, assignmentId],
+  };
+}
+
+/** Resolve the terminal instant before SQL binding so PostgreSQL sees one typed value. */
+export function terminalTurnCompletedAt(finishedAt: number | null, observedAt: number): number {
+  return finishedAt ?? observedAt;
 }
 
 export async function installControlPlaneSchema(database: SqlConnection): Promise<void> {

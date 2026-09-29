@@ -42,7 +42,7 @@ import { PersistentMultiRuntimeRouter } from "../src/router/application/persiste
 import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/shared/persistence/state-database.ts";
-import { SchemaMigrationError } from "../src/shared/persistence/schema-migration-ledger.ts";
+import { SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatibilitySql, migrationLedgerSql } from "../src/shared/persistence/schema-migration-ledger.ts";
 import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
 import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/shared/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
@@ -186,6 +186,19 @@ test("role migrations record an immutable checksum and fail closed on history dr
   } finally {
     await database.close();
   }
+});
+
+test("PostgreSQL migration ledger stores millisecond timestamps without integer overflow", () => {
+  assert.match(migrationLedgerSql({ dialect: "postgres" }), /applied_at BIGINT NOT NULL/);
+  assert.equal(
+    migrationLedgerCompatibilitySql({ dialect: "postgres" }),
+    "ALTER TABLE mr_schema_migrations ALTER COLUMN applied_at TYPE BIGINT",
+  );
+  assert.equal(migrationLedgerCompatibilitySql({ dialect: "sqlite" }), undefined);
+  assert.equal(isEpochMillisecondColumn("created_at"), true);
+  assert.equal(isEpochMillisecondColumn("lease_until"), true);
+  assert.equal(isEpochMillisecondColumn("connection_epoch"), true);
+  assert.equal(isEpochMillisecondColumn("next_seq"), false);
 });
 
 test("Runtime Host validates deployment-required commands before accepting Runs", () => {

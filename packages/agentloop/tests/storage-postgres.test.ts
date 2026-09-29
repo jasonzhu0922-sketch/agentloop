@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
-import { PgConnection, translatePlaceholders } from "../src/storage/pg-connection.ts";
+import { PgConnection, configurePgInt8Parser, parsePgInt8, pgPoolConfig, translatePlaceholders } from "../src/storage/pg-connection.ts";
 import type { PgClientLike, PgPoolLike } from "../src/storage/pg-connection.ts";
 import { TiDbConnection, splitSqlStatements } from "../src/storage/tidb-connection.ts";
 import { TIDB_IDENTITY_SCHEMA_SQL, TIDB_KERNEL_SCHEMA_SQL } from "../src/storage/tidb-schema-definitions.ts";
@@ -127,6 +127,25 @@ test("translatePlaceholders skips quoted literals and identifiers", () => {
     translatePlaceholders("SELECT '?', \"?\", ? FROM demo WHERE note = 'it''s ?' AND id = ?"),
     "SELECT '?', \"?\", $1 FROM demo WHERE note = 'it''s ?' AND id = $2",
   );
+});
+
+test("PgConnection passes a URI to pg as a connectionString option", () => {
+  assert.deepEqual(
+    pgPoolConfig("postgresql://agentloop@db/agentloop"),
+    { connectionString: "postgresql://agentloop@db/agentloop" },
+  );
+  const options = { host: "db", database: "agentloop" };
+  assert.equal(pgPoolConfig(options), options);
+});
+
+test("PgConnection normalizes safe PostgreSQL int8 values without losing unsafe values", () => {
+  assert.equal(parsePgInt8("1759123456789"), 1_759_123_456_789);
+  assert.equal(parsePgInt8("9007199254740992"), "9007199254740992");
+  let oid: number | undefined;
+  let parser: ((value: string) => unknown) | undefined;
+  configurePgInt8Parser({ setTypeParser(nextOid, nextParser) { oid = nextOid; parser = nextParser; } });
+  assert.equal(oid, 20);
+  assert.equal(parser?.("1759123456789"), 1_759_123_456_789);
 });
 
 test("AppDatabase accepts TiDB as an independent non-SQLite dialect", async () => {
