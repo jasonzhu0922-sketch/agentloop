@@ -1469,9 +1469,10 @@ export class RunService {
       if (!responseOnly && this.skills.skillDirectories.length > 0) {
         await this.skills.refreshSkillDirectory();
       }
-      const privateSkills = responseOnly
-        ? []
-        : await this.skills.resolveForConversation(actorUserId);
+      // A reply-only turn does not require Skills, but it must not erase the
+      // Runtime's authorized capability catalog. The catalog stays inert in
+      // capabilityRecovery; the reply Plan still receives no Skills or Tools.
+      const privateSkills = await this.skills.resolveForConversation(actorUserId);
       const discoveredByName = new Map(this.skills.discovered().map((skill) => [skill.name, skill]));
       for (const skill of privateSkills) {
         if (skill.sourceKind !== "package" || skill.package === undefined) continue;
@@ -1518,11 +1519,10 @@ export class RunService {
         uploadedSources: availableSources,
       });
       assertNoDuplicateTools(allTools);
-      const allowedToolNames = responseOnly
-        ? []
-        : [...allTools.map((tool) => tool.name)].filter((name) =>
+      const catalogToolNames = [...allTools.map((tool) => tool.name)].filter((name) =>
           executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)
         );
+      const allowedToolNames = responseOnly ? [] : catalogToolNames;
       const effectiveGoal = turnResolution?.effectiveGoal ?? input;
       // Visible directories are capabilities offered to the resolver, never
       // implicit task input.  Only its atomic source binding is propagated to
@@ -1571,7 +1571,9 @@ export class RunService {
         ...taskIntent,
         ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
       };
-      const planningAllowedToolNames = turnResolution === undefined || planningVisibleDirectories.length > 0
+      const planningAllowedToolNames = responseOnly
+        ? []
+        : turnResolution === undefined || planningVisibleDirectories.length > 0
         ? allowedToolNames
         : allowedToolNames.filter((name) => !isVisibleDirectoryToolName(name));
       const allowedToolSummaries = toolSummaries(allTools, new Set(planningAllowedToolNames));
@@ -1651,7 +1653,7 @@ export class RunService {
         capabilityRecovery: {
           availableSkills: privateSkills,
           availableCapabilities: [
-            ...planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
+            ...planningCapabilitiesFromTools(toolSummaries(allTools, new Set(catalogToolNames)), availableSources),
             ...planningCapabilitiesFromSkills(privateSkills),
           ],
         },
@@ -7288,10 +7290,29 @@ function applyConversationTurnDirectReplyFloor(
 
 function isDirectConversationReply(input: string): boolean {
   const intent = classifyTaskIntent({ objective: input });
-  return intent.wantsConversationAnswer
-    && !intent.wantsArtifact
-    && intent.sourceNeed === "none"
-    && !requiresExternalState(input);
+  if (intent.sourceNeed !== "none" || requiresExternalState(input)) return false;
+  // An artifact action can occur inside a proposition (for example, an
+  // explanation of how a product was generated). The current utterance, not
+  // the artifact vocabulary or prior work, decides whether that action is
+  // requested from Runtime.
+  return (intent.wantsConversationAnswer && !intent.wantsArtifact)
+    || isQuestionAboutDescribedAction(input);
+}
+
+/**
+ * A self-contained question can describe any operation without asking Runtime
+ * to perform it. Keep this independent of formats, Skills, and prior results;
+ * questions that address an operation to the assistant remain executable.
+ */
+function isQuestionAboutDescribedAction(input: string): boolean {
+  const text = input.trim();
+  if (text.length === 0) return false;
+  const question = /[?？]\s*$/u.test(text)
+    || /(?:为什么|为何|怎么|如何|是否|是不是|能否|可否|多少|哪些|什么|what|why|how|whether)/iu.test(text);
+  if (!question) return false;
+  const directedExecution = /(?:^|[，,。；;]\s*)(?:请|麻烦|帮(?:我)?|给我|替我|为我|can\s+you|could\s+you|please)\s*(?:再|重新|继续)?\s*(?:生成|制作|创建|输出|交付|导出|修改|优化|转换|写|设计|实现|build|create|generate|make|modify|edit|convert|write|design)/iu.test(text)
+    || /(?:你|您|助手|agent|runtime)\s*(?:能|可以|可否|能否|能不能|是否能|can|could|will)\s*(?:帮(?:我)?|给我|替我|为我)?\s*(?:生成|制作|创建|输出|交付|导出|修改|优化|转换|写|设计|实现|build|create|generate|make|modify|edit|convert|write|design)/iu.test(text);
+  return !directedExecution;
 }
 
 function strongerConversationEvidenceDemand(

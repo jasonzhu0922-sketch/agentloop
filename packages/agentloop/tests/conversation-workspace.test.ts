@@ -281,12 +281,26 @@ test("a question about a prior artifact remains a direct reply despite an over-e
     assert.equal(resolved?.data.targetArtifact, undefined);
     assert.equal(resolved?.data.targetResult, undefined);
 
+    const implementationQuestion = await runs.executeConversation(owner.user.id, "那所有的 pptx 制作都是使用你这个 Python 脚本来生成吗？", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    });
+    assert.equal(implementationQuestion.status, "completed");
+    assert.match(implementationQuestion.output ?? "", /直接解释/);
+    assert.deepEqual(planner.responseOnlyFlags, [false, true, true]);
+    const implementationResolution = (await runs.events(owner.user.id, implementationQuestion.id))
+      .find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(implementationResolution?.data.mode, "reply");
+    assert.equal(implementationResolution?.data.inputMode, "none");
+    assert.equal(implementationResolution?.data.targetArtifact, undefined);
+    assert.equal(implementationResolution?.data.targetResult, undefined);
+
     const mutation = await runs.executeConversation(owner.user.id, "请把上一轮的 PPT 改得更专业一些。", {
       allowDangerousTools: true,
       conversationId: prior.conversationId,
     });
     assert.equal(mutation.status, "completed");
-    assert.deepEqual(planner.responseOnlyFlags, [false, true, false]);
+    assert.deepEqual(planner.responseOnlyFlags, [false, true, true, false]);
     const mutationResolution = (await runs.events(owner.user.id, mutation.id)).find((event) => event.type === "conversation.turn.resolved");
     assert.equal(mutationResolution?.data.mode, "execute");
   } finally {
@@ -860,7 +874,7 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
       };
     }
     return {
-      content: request.messages.some((message) => message.content.includes("为什么能够这么快"))
+      content: request.messages.some((message) => /为什么能够这么快|所有的 pptx 制作/u.test(message.content))
         ? "直接解释：这是对话问题，不会重新读取或修改上一轮产物。"
         : "此前交付已经完成。",
       finishReason: "stop",
