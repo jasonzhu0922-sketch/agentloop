@@ -1,6 +1,6 @@
 import type {
   ApplyReceipt, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand,
-  ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TargetAssignment, TransitionReleaseCommand,
+  ControlPlaneResource, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TargetAssignment, TransitionReleaseCommand,
 } from "../contracts/index.ts";
 
 /** Ports describe later persistence/delivery work without selecting SQL, HTTP, or a secret provider. */
@@ -12,6 +12,13 @@ export interface ReleaseRepositoryPort {
 export interface ConfigurationDeliveryPort {
   desiredSnapshot(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot | undefined>;
   recordReceipt(receipt: ApplyReceipt): Promise<void>;
+}
+
+/** Read side used to resolve a target snapshot without exposing SQL to the domain/application layer. */
+export interface ConfigurationSnapshotRepositoryPort extends ReleaseRepositoryPort {
+  listResources(): Promise<readonly ControlPlaneResource[]>;
+  configurationRevision(): Promise<number>;
+  skillPackageHash(releaseId: string): Promise<string | undefined>;
 }
 
 /** Write boundary used by application services; adapters own transactions and audit persistence. */

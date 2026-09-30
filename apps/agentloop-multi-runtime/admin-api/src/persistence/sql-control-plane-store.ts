@@ -1,10 +1,10 @@
 import type { SqlConnection } from "@zhujun/agentloop";
 import type {
-  ApplyReceipt, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand,
+  ApplyReceipt, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand,
   ResourceRelease, TargetAssignment, TransitionReleaseCommand,
 } from "../../../control-plane/contracts/index.ts";
 import { assertAssignmentShape, assertNoAssignmentConflict, ControlPlaneError, transitionRelease } from "../../../control-plane/domain/index.ts";
-import type { ControlPlaneWritePort } from "../../../control-plane/domain/ports.ts";
+import type { ConfigurationSnapshotRepositoryPort, ControlPlaneWritePort } from "../../../control-plane/domain/ports.ts";
 
 type ResourceRow = { id: string; kind: ResourceRelease["kind"]; revision: number | string | bigint };
 type ReleaseRow = {
@@ -18,7 +18,7 @@ type AssignmentRow = {
 };
 
 /** SQL adapter for the Admin-owned cp_* tables. It never queries or writes mr_* or Runtime tables. */
-export class SqlControlPlaneStore implements ControlPlaneWritePort {
+export class SqlControlPlaneStore implements ControlPlaneWritePort, ConfigurationSnapshotRepositoryPort {
   private readonly database: SqlConnection;
 
   public constructor(database: SqlConnection) { this.database = database; }
@@ -31,6 +31,22 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort {
   public async listAssignments(resourceId: string): Promise<readonly TargetAssignment[]> {
     const rows = await this.database.prepare("SELECT id, resource_id, release_id, plane, target_kind, tenant_id, runtime_class, runtime_id, device_id, priority, rollout_state, revision FROM cp_target_assignments WHERE resource_id = ?").all<AssignmentRow>(resourceId);
     return rows.map(assignmentFromRow);
+  }
+
+  public async listResources(): Promise<readonly ControlPlaneResource[]> {
+    const rows = await this.database.prepare("SELECT id, kind, revision FROM cp_resources ORDER BY id").all<ResourceRow>();
+    return rows.map((row) => ({ resourceId: row.id, kind: row.kind, revision: asNumber(row.revision) }));
+  }
+
+  public async configurationRevision(): Promise<number> {
+    const row = await this.database.prepare("SELECT revision FROM cp_configuration_revision_sequence WHERE id = 1").get<{ revision: number | string | bigint }>();
+    if (row === undefined) throw new ControlPlaneError("migration_not_ready", "Control-plane configuration revision sequence is unavailable");
+    return asNumber(row.revision);
+  }
+
+  public async skillPackageHash(releaseId: string): Promise<string | undefined> {
+    const row = await this.database.prepare("SELECT package_hash FROM cp_skill_artifacts WHERE release_id = ?").get<{ package_hash: string }>(releaseId);
+    return row?.package_hash;
   }
 
   public async publishRelease(command: PublishReleaseCommand): Promise<ResourceRelease> {
@@ -84,6 +100,7 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort {
       await this.database.prepare("UPDATE cp_resources SET revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
         .run(revision + 1, now, assignment.resourceId, revision);
       await this.audit(command.auditEventId, command.actorId, "target-assignment.created", assignment.resourceId, assignment.releaseId, undefined, assignment.assignmentId, now);
+      if (assignment.rolloutState === "active" && release.state === "active") await this.advanceConfigurationRevision();
       return assignment;
     });
   }
@@ -102,6 +119,7 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort {
       await this.database.prepare("UPDATE cp_resources SET revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
         .run(revision + 1, now, current.resourceId, revision);
       await this.audit(command.auditEventId, command.actorId, "release.transitioned", current.resourceId, current.releaseId, current.state, next.state, now);
+      if (current.state === "active" || next.state === "active") await this.advanceConfigurationRevision();
       return next;
     });
   }
@@ -126,6 +144,14 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort {
   private async lockResource(resourceId: string): Promise<ResourceRow | undefined> {
     const suffix = this.database.dialect === "sqlite" ? "" : " FOR UPDATE";
     return await this.database.prepare(`SELECT id, kind, revision FROM cp_resources WHERE id = ?${suffix}`).get<ResourceRow>(resourceId);
+  }
+
+  private async advanceConfigurationRevision(): Promise<void> {
+    const suffix = this.database.dialect === "sqlite" ? "" : " FOR UPDATE";
+    const row = await this.database.prepare(`SELECT revision FROM cp_configuration_revision_sequence WHERE id = 1${suffix}`).get<{ revision: number | string | bigint }>();
+    if (row === undefined) throw new ControlPlaneError("migration_not_ready", "Control-plane configuration revision sequence is unavailable");
+    const revision = asNumber(row.revision);
+    await this.database.prepare("UPDATE cp_configuration_revision_sequence SET revision = ? WHERE id = 1 AND revision = ?").run(revision + 1, revision);
   }
 
   private async audit(id: string, actorId: string, action: string, resourceId: string, releaseId: string | undefined, beforeRef: string | undefined, afterRef: string | undefined, createdAt: number): Promise<void> {

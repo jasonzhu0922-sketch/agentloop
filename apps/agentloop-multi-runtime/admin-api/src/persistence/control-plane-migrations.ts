@@ -18,6 +18,10 @@ const migrations: readonly ExecutableControlPlaneMigration[] = [{
   id: "control-plane/0001_resources_releases_assignments_receipts_audit",
   definition: "cp_schema_migrations;cp_resources;cp_releases;cp_target_assignments;cp_apply_receipts;cp_integration_bindings;cp_skill_artifacts;cp_secret_references;cp_audit_events;cp_delivery_cursors:v1",
   apply: async (database) => { await database.exec(controlPlaneSchemaSql(database.dialect)); },
+}, {
+  id: "control-plane/0002_configuration_revision_sequence",
+  definition: "cp_configuration_revision_sequence:v1",
+  apply: async (database) => { await database.exec(configurationRevisionSequenceSql(database.dialect)); },
 }];
 
 /** Standalone migration entry point. No Router, Host, or Admin API startup code calls this. */
@@ -114,6 +118,21 @@ export function controlPlaneSchemaSql(dialect: SqlConnection["dialect"]): string
     revision ${epoch} NOT NULL, idempotency_key ${text} NOT NULL, updated_at ${epoch} NOT NULL,
     PRIMARY KEY(target_plane, tenant_id, runtime_id)
   );`;
+}
+
+function configurationRevisionSequenceSql(dialect: SqlConnection["dialect"]): string {
+  if (dialect === "tidb") return String.raw`CREATE TABLE IF NOT EXISTS cp_configuration_revision_sequence (
+    id BIGINT PRIMARY KEY, revision BIGINT NOT NULL
+  );
+  INSERT IGNORE INTO cp_configuration_revision_sequence(id, revision) VALUES (1, 0);`;
+  if (dialect === "postgres") return String.raw`CREATE TABLE IF NOT EXISTS cp_configuration_revision_sequence (
+    id BIGINT PRIMARY KEY, revision BIGINT NOT NULL
+  );
+  INSERT INTO cp_configuration_revision_sequence(id, revision) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;`;
+  return String.raw`CREATE TABLE IF NOT EXISTS cp_configuration_revision_sequence (
+    id INTEGER PRIMARY KEY, revision INTEGER NOT NULL
+  );
+  INSERT OR IGNORE INTO cp_configuration_revision_sequence(id, revision) VALUES (1, 0);`;
 }
 
 function tidbSchemaSql(): string {

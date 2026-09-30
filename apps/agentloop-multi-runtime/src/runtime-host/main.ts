@@ -18,6 +18,7 @@ import {
 } from "./application/runtime-command-preflight.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
+import { createRuntimeConfigurationShadowOrchestrator } from "./application/configuration/runtime-configuration-shadow-orchestrator.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 // This non-sensitive path is the only Enterprise Info setting passed to
@@ -112,10 +113,24 @@ const runtimeHost = new AgentLoopRuntimeHost(new AgentLoopRuntimeRunPort(runs), 
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
 }, dispatchStore);
+// Shadow delivery is strictly opt-in and observational. The existing file
+// loaders above remain the sole source of the dependencies passed to RunService.
+const configurationShadow = createRuntimeConfigurationShadowOrchestrator({
+  environment: process.env,
+  runtimeId,
+  baseline: {
+    modelKeys: providers.modelKeys(),
+    skillDirectoryCount: skillDirectories.length,
+    practiceProfileCount: practiceProfileCatalog.profiles.length,
+    stepExecutionStrategyProfile: stepExecutionStrategyConfig.profile,
+  },
+  log: (entry) => process.stderr.write(`${JSON.stringify(entry)}\n`),
+});
 const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, models: providers.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) });
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop Runtime Host ${runtimeId} listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}\n`);
   void sendHeartbeat();
+  configurationShadow?.start();
 });
 const heartbeatTimer = setInterval(() => { void sendHeartbeat(); }, heartbeatIntervalMs);
 let reconciliationInFlight = false;
@@ -133,6 +148,7 @@ function shutdown(): void {
   closing = true;
   clearInterval(heartbeatTimer);
   clearInterval(reconciliationTimer);
+  configurationShadow?.stop();
   server.close(() => {
     database.close();
     process.exitCode = 0;

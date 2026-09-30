@@ -9,7 +9,8 @@ export type AssignmentPlane = RuntimePlane | "both";
 export type ResourceKind = "integration" | "model_route" | "skill" | "policy";
 export type ReleaseState = "draft" | "validated" | "observe" | "canary" | "active" | "superseded" | "rolled_back" | "retired";
 export type RolloutState = "planned" | "observe" | "canary" | "active" | "suspended" | "revoked";
-export type ApplyStatus = "loaded" | "failed" | "rejected";
+/** validated does not mean effective: only a loaded receipt permits a later admission cutover. */
+export type ApplyStatus = "validated" | "loaded" | "failed" | "rejected";
 
 export type ScopeTarget =
   | { readonly kind: "platform" }
@@ -98,6 +99,13 @@ export interface RuntimeConfigurationSnapshot {
   readonly policies: readonly ReleaseReference[];
 }
 
+/** Public resource metadata used only for control-plane resolution; it carries no secret reference/value. */
+export interface ControlPlaneResource {
+  readonly resourceId: string;
+  readonly kind: ResourceKind;
+  readonly revision: number;
+}
+
 export interface ReleaseReference {
   readonly releaseId: string;
   readonly contentHash: string;
@@ -110,6 +118,8 @@ export interface IntegrationBindingReference extends ReleaseReference {
 export interface SkillReleaseReference {
   readonly releaseId: string;
   readonly packageHash: string;
+  /** Release content hash remains the receipt/audit integrity key; packageHash verifies the artifact. */
+  readonly contentHash: string;
 }
 
 export interface ApplyReceipt {

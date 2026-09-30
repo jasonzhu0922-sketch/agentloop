@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
+import type { CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
 import { ControlPlaneError } from "../../../../control-plane/domain/index.ts";
 import type { AdminAuthorizationPort } from "../../authorization/ports.ts";
 import type { ReleaseApplicationService } from "../../application/release-service.ts";
@@ -9,6 +9,12 @@ export interface AdminHttpDependencies {
   readonly authorization: AdminAuthorizationPort;
   /** Undefined means the process has no configured, migration-ready control-plane database. */
   readonly releases?: ReleaseApplicationService;
+  readonly snapshots?: RuntimeConfigurationSnapshotPort;
+}
+
+/** Delivery transport depends on the snapshot capability, not its application-service implementation. */
+export interface RuntimeConfigurationSnapshotPort {
+  desiredSnapshot(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot>;
 }
 
 /** HTTP does only decoding, principal derivation, and response encoding. Release rules stay in application/domain. */
@@ -17,6 +23,11 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
     try {
       const url = new URL(request.url ?? "/", "http://admin-api.invalid");
       if (request.method === "GET" && url.pathname === "/healthz") return respond(response, 200, adminApiHealth());
+      if (request.method === "GET" && url.pathname === "/delivery/v1/desired-configuration") {
+        const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.snapshots === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        return respond(response, 200, await dependencies.snapshots.desiredSnapshot(principal.target));
+      }
       if (dependencies.releases === undefined) return respond(response, 503, { code: "migration_not_ready" });
       const auditEventId = request.headers["x-request-id"];
       if (typeof auditEventId !== "string" || auditEventId.trim() === "") return respond(response, 400, { code: "invalid_contract", message: "x-request-id is required" });
@@ -73,8 +84,8 @@ async function jsonBody(request: IncomingMessage): Promise<unknown> {
   return parsed;
 }
 
-function sameTarget(left: { plane: string; tenantId: string; runtimeId: string; deviceId?: string }, right: { plane: string; tenantId: string; runtimeId: string; deviceId?: string }): boolean {
-  return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.deviceId === right.deviceId;
+function sameTarget(left: { plane: string; tenantId: string; runtimeId: string; runtimeClass?: string; deviceId?: string }, right: { plane: string; tenantId: string; runtimeId: string; runtimeClass?: string; deviceId?: string }): boolean {
+  return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId;
 }
 
 function statusFor(code: ControlPlaneError["code"]): number {

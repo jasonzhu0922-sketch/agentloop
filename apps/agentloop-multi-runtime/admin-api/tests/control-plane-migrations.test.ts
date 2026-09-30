@@ -18,7 +18,7 @@ test("control-plane migrations own cp schema history and never use the Router le
     await assertControlPlaneMigrationsReady(database);
     const tables = await database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
     const names = new Set(tables.map((table) => table.name));
-    for (const table of ["cp_schema_migrations", "cp_resources", "cp_releases", "cp_target_assignments", "cp_apply_receipts", "cp_audit_events"]) {
+    for (const table of ["cp_schema_migrations", "cp_configuration_revision_sequence", "cp_resources", "cp_releases", "cp_target_assignments", "cp_apply_receipts", "cp_audit_events"]) {
       assert.equal(names.has(table), true, table);
     }
     assert.equal(names.has("mr_schema_migrations"), false);
