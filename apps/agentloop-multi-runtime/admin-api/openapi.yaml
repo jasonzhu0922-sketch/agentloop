@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: AgentLoop Admin API
-  version: 0.0.0-wp0
+  version: 0.0.0-wp6
   description: >-
-    WP-0 process scaffold. Only healthz is wired. Administrative and delivery
-    resources remain a contract draft until the release/persistence work package.
+    Independent Admin API and workload/device delivery contracts. Secret values
+    and package bytes are never exposed to the Kernel or ordinary user tokens.
 paths:
   /healthz:
     get:
@@ -53,6 +53,25 @@ paths:
       responses:
         '201': { description: Receipt persisted }
         '403': { description: Workload identity is missing or names a different target }
+  /delivery/v1/skill-artifacts/{packageHash}:
+    get:
+      operationId: downloadSkillArtifact
+      description: Requires workload or paired device identity; package digest is part of the authorized path.
+      parameters:
+        - name: packageHash
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{64}$' }
+      responses:
+        '200': { description: Authorized immutable Skill package bytes }
+        '403': { description: Workload or device identity is missing }
+  /delivery/v1/skill-install-receipts:
+    post:
+      operationId: recordSkillInstallReceipt
+      description: Records target-local verification/load state after a signed Skill package is installed.
+      responses:
+        '201': { description: Skill install receipt persisted }
+        '403': { description: Workload or device identity is missing or names a different target }
   /delivery/v1/credential-grants:
     post:
       operationId: requestCredentialGrant
@@ -84,3 +103,6 @@ components:
     ApplyReceipt:
       type: object
       required: [contractVersion, receiptId, target, releaseId, contentHash, status, observedAt]
+    SkillInstallReceipt:
+      type: object
+      required: [contractVersion, receiptId, target, releaseId, packageHash, signer, status, observedAt]

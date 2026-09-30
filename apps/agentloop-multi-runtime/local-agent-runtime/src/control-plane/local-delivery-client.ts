@@ -1,4 +1,4 @@
-import type { ApplyReceipt, RuntimeConfigurationSnapshot, RuntimeTarget } from "../../../control-plane/contracts/index.ts";
+import type { ApplyReceipt, RuntimeConfigurationSnapshot, RuntimeTarget, SkillArtifactManifest, SkillInstallReceipt } from "../../../control-plane/contracts/index.ts";
 import { parseRuntimeConfigurationSnapshot } from "../../../control-plane/contracts/index.ts";
 
 /** Device-authenticated delivery client. The target is checked locally but never sent in request input. */
@@ -22,6 +22,17 @@ export class LocalDeliveryClient {
       const response = await this.fetch("/delivery/v1/apply-receipts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ receipt }) });
       if (!response.ok) throw new LocalDeliveryError(response.status === 403 ? "target_not_authorized" : "configuration_unavailable");
     }
+  }
+
+  async downloadSkillArtifact(manifest: SkillArtifactManifest): Promise<Uint8Array> {
+    const response = await this.fetch(`/delivery/v1/skill-artifacts/${encodeURIComponent(manifest.packageHash)}`);
+    if (!response.ok) throw new LocalDeliveryError(response.status === 403 ? "target_not_authorized" : "configuration_unavailable");
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  async reportSkillInstallReceipt(receipt: SkillInstallReceipt): Promise<void> {
+    const response = await this.fetch("/delivery/v1/skill-install-receipts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ receipt: { ...receipt, target: this.input.target } }) });
+    if (!response.ok) throw new LocalDeliveryError(response.status === 403 ? "target_not_authorized" : "configuration_unavailable");
   }
 
   private async fetch(path: string, init: RequestInit = {}): Promise<Response> { return await (this.input.request ?? fetch)(new URL(path, `${this.input.deliveryUrl.replace(/\/$/, "")}/`), { ...init, headers: { authorization: `Bearer ${this.input.deviceToken}`, ...init.headers } }); }

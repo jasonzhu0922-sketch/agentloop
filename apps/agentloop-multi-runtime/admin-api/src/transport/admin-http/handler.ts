@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { CredentialGrant, CredentialGrantRequest, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
+import type { CredentialGrant, CredentialGrantRequest, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
 import { ControlPlaneError } from "../../../../control-plane/domain/index.ts";
 import type { AdminAuthorizationPort } from "../../authorization/ports.ts";
 import type { ReleaseApplicationService } from "../../application/release-service.ts";
@@ -11,6 +11,7 @@ export interface AdminHttpDependencies {
   readonly releases?: ReleaseApplicationService;
   readonly snapshots?: RuntimeConfigurationSnapshotPort;
   readonly integrations?: IntegrationDeliveryPort;
+  readonly skillArtifacts?: SkillArtifactDeliveryPort;
 }
 
 /** Delivery transport depends on the snapshot capability, not its application-service implementation. */
@@ -22,6 +23,11 @@ export interface RuntimeConfigurationSnapshotPort {
 export interface IntegrationDeliveryPort {
   requestGrant(target: RuntimeTarget, request: CredentialGrantRequest): Promise<CredentialGrant>;
   invoke(target: RuntimeTarget, request: IntegrationInvocationRequest): Promise<IntegrationInvocationResponse>;
+}
+
+/** Artifact bytes are supplied by an adapter; the HTTP layer only authorizes the target and package digest. */
+export interface SkillArtifactDeliveryPort {
+  download(target: RuntimeTarget, packageHash: string): Promise<{ readonly bytes: Uint8Array; readonly contentType?: string }>;
 }
 
 /** HTTP does only decoding, principal derivation, and response encoding. Release rules stay in application/domain. */
@@ -48,6 +54,13 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         const body = await jsonBody(request) as { request?: IntegrationInvocationRequest };
         if (body.request === undefined) throw new ControlPlaneError("invalid_contract", "integration invocation request is required");
         return respond(response, 200, await dependencies.integrations.invoke(principal.target, body.request));
+      }
+      const artifact = /^\/delivery\/v1\/skill-artifacts\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (request.method === "GET" && artifact !== null) {
+        const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.skillArtifacts === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const downloaded = await dependencies.skillArtifacts.download(principal.target, artifact[1]!);
+        return respondBytes(response, 200, downloaded.bytes, downloaded.contentType ?? "application/octet-stream");
       }
       if (dependencies.releases === undefined) return respond(response, 503, { code: "migration_not_ready" });
       const auditEventId = request.headers["x-request-id"];
@@ -81,6 +94,14 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         const body = await jsonBody(request) as Omit<RecordApplyReceiptCommand, "actorId" | "auditEventId">;
         if (!sameTarget(body.receipt.target, principal.target)) return respond(response, 403, { code: "target_not_authorized" });
         await dependencies.releases.recordReceipt({ ...body, receipt: { ...body.receipt, target: principal.target }, actorId: principal.actorId, auditEventId });
+        return respond(response, 201, { status: "recorded" });
+      }
+      if (request.method === "POST" && url.pathname === "/delivery/v1/skill-install-receipts") {
+        const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
+        if (principal === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const body = await jsonBody(request) as Omit<RecordSkillInstallReceiptCommand, "actorId" | "auditEventId">;
+        if (body.receipt === undefined || !sameTarget(body.receipt.target, principal.target)) return respond(response, 403, { code: "target_not_authorized" });
+        await dependencies.releases.recordSkillInstallReceipt({ ...body, receipt: { ...body.receipt, target: principal.target }, actorId: principal.actorId, auditEventId });
         return respond(response, 201, { status: "recorded" });
       }
       return respond(response, 404, { code: "not_found" });
@@ -118,4 +139,9 @@ function statusFor(code: ControlPlaneError["code"]): number {
 function respond(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+function respondBytes(response: ServerResponse, status: number, body: Uint8Array, contentType: string): void {
+  response.writeHead(status, { "content-type": contentType, "content-length": body.byteLength.toString() });
+  response.end(Buffer.from(body));
 }

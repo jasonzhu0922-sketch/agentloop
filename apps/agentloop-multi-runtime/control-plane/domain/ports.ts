@@ -1,5 +1,5 @@
 import type {
-  ApplyReceipt, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand,
+  ApplyReceipt, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand,
   ControlPlaneResource, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TargetAssignment, TransitionReleaseCommand,
 } from "../contracts/index.ts";
 
@@ -38,6 +38,7 @@ export interface ControlPlaneWritePort extends ReleaseRepositoryPort {
   createTargetAssignment(command: CreateTargetAssignmentCommand): Promise<TargetAssignment>;
   transitionRelease(command: TransitionReleaseCommand): Promise<ResourceRelease>;
   recordApplyReceipt(command: RecordApplyReceiptCommand): Promise<void>;
+  recordSkillInstallReceipt(command: RecordSkillInstallReceiptCommand): Promise<void>;
 }
 
 export type ControlPlaneDialect = "sqlite" | "postgres" | "tidb";

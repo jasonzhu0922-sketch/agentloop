@@ -1,6 +1,6 @@
 import type { SqlConnection } from "@zhujun/agentloop";
 import type {
-  ApplyReceipt, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand,
+  ApplyReceipt, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand,
   ResourceRelease, TargetAssignment, TransitionReleaseCommand,
 } from "../../../control-plane/contracts/index.ts";
 import { assertAssignmentShape, assertNoAssignmentConflict, ControlPlaneError, transitionRelease } from "../../../control-plane/domain/index.ts";
@@ -157,6 +157,22 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort, Configuratio
         .run(receipt.receiptId, receipt.target.plane, receipt.target.tenantId, receipt.target.runtimeId, receipt.target.deviceId ?? null,
           receipt.releaseId, receipt.contentHash, receipt.status, receipt.reasonCode ?? null, receipt.observedAt);
       await this.audit(command.auditEventId, command.actorId, "apply-receipt.recorded", release.resourceId, receipt.releaseId, undefined, receipt.status, receipt.observedAt);
+    });
+  }
+
+  public async recordSkillInstallReceipt(command: RecordSkillInstallReceiptCommand): Promise<void> {
+    const receipt = command.receipt;
+    const release = await this.getRelease(receipt.releaseId);
+    if (release === undefined || release.kind !== "skill") throw new ControlPlaneError("skill_artifact_not_found", "Skill install receipt names an unknown Skill release");
+    if (release.state === "draft" || release.state === "retired") throw new ControlPlaneError("release_not_active", "Draft or retired Skill releases cannot be acknowledged");
+    const artifact = await this.skillArtifact(receipt.releaseId);
+    if (artifact === undefined) throw new ControlPlaneError("skill_artifact_not_found", "Skill release has no registered artifact");
+    if (artifact.packageHash !== receipt.packageHash || artifact.signer !== receipt.signer) throw new ControlPlaneError("skill_artifact_hash_mismatch", "Skill install receipt does not match the registered artifact");
+    await this.database.transaction(async () => {
+      await this.database.prepare("INSERT INTO cp_skill_install_receipts(id, target_plane, tenant_id, runtime_id, device_id, release_id, package_hash, signer, status, reason_code, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(receipt.receiptId, receipt.target.plane, receipt.target.tenantId, receipt.target.runtimeId, receipt.target.deviceId ?? null,
+          receipt.releaseId, receipt.packageHash, receipt.signer, receipt.status, receipt.reasonCode ?? null, receipt.observedAt);
+      await this.audit(command.auditEventId, command.actorId, "skill-install-receipt.recorded", release.resourceId, receipt.releaseId, undefined, receipt.status, receipt.observedAt);
     });
   }
 

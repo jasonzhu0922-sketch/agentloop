@@ -1,4 +1,4 @@
-import { parseRuntimeConfigurationSnapshot as parseContractSnapshot, type ApplyReceipt, type RuntimeConfigurationSnapshot, type RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
+import { parseRuntimeConfigurationSnapshot as parseContractSnapshot, type ApplyReceipt, type RuntimeConfigurationSnapshot, type RuntimeTarget, type SkillArtifactManifest, type SkillInstallReceipt } from "../../../../control-plane/contracts/index.ts";
 
 export class RuntimeConfigurationClientError extends Error {
   public readonly code = "configuration_unavailable" as const;
@@ -52,6 +52,21 @@ export class RuntimeConfigurationClient {
   /** Reports a successfully constructed in-memory Run Environment; it does not imply a live Model invocation. */
   public async reportLoaded(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string): Promise<void> {
     await this.reportApplyStatus(snapshot, "loaded", receiptIdFor);
+  }
+
+  public async downloadSkillArtifact(manifest: SkillArtifactManifest): Promise<Uint8Array> {
+    const response = await this.request(new URL(`/delivery/v1/skill-artifacts/${encodeURIComponent(manifest.packageHash)}`, `${this.deliveryUrl}/`), {
+      headers: { authorization: `Bearer ${this.workloadToken}` },
+    });
+    if (!response.ok) throw new RuntimeConfigurationClientError(`Delivery skill-artifact returned HTTP ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  public async reportSkillInstallReceipt(receipt: SkillInstallReceipt): Promise<void> {
+    const response = await this.request(new URL("/delivery/v1/skill-install-receipts", `${this.deliveryUrl}/`), {
+      method: "POST", headers: { authorization: `Bearer ${this.workloadToken}`, "content-type": "application/json" }, body: JSON.stringify({ receipt: { ...receipt, target: this.target } }),
+    });
+    if (!response.ok) throw new RuntimeConfigurationClientError(`Delivery skill-install-receipts returned HTTP ${response.status}`);
   }
 
   private async reportApplyStatus(snapshot: RuntimeConfigurationSnapshot, status: ApplyReceipt["status"], receiptIdFor: (releaseId: string) => string): Promise<void> {

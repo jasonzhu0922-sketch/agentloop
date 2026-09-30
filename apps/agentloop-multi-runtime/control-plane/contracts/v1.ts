@@ -86,6 +86,12 @@ export interface RecordApplyReceiptCommand {
   readonly auditEventId: string;
 }
 
+export interface RecordSkillInstallReceiptCommand {
+  readonly receipt: SkillInstallReceipt;
+  readonly actorId: string;
+  readonly auditEventId: string;
+}
+
 export interface RuntimeConfigurationSnapshot {
   readonly contractVersion: typeof CONTROL_PLANE_CONTRACT_VERSION;
   readonly snapshotId: string;
@@ -271,6 +277,9 @@ export const CONTROL_PLANE_ERROR_CODES = [
   "integration_upstream_failed",
   "integration_response_invalid",
   "credential_envelope_expired",
+  "skill_artifact_not_found",
+  "skill_artifact_hash_mismatch",
+  "skill_artifact_signature_invalid",
 ] as const;
 
 export type ControlPlaneErrorCode = (typeof CONTROL_PLANE_ERROR_CODES)[number];

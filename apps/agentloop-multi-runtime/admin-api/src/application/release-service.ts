@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
-  CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, ResourceRelease, TransitionReleaseCommand,
+  CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand, ResourceRelease, TransitionReleaseCommand,
 } from "../../../control-plane/contracts/index.ts";
 import { assertReleaseShape, ControlPlaneError, freezeRelease } from "../../../control-plane/domain/index.ts";
 import type { ControlPlaneWritePort } from "../../../control-plane/domain/ports.ts";
@@ -44,6 +44,15 @@ export class ReleaseApplicationService {
       throw new ControlPlaneError("invalid_contract", "Receipt identity and observedAt are invalid");
     }
     await this.store.recordApplyReceipt(command);
+  }
+
+  public async recordSkillInstallReceipt(command: RecordSkillInstallReceiptCommand): Promise<void> {
+    const receipt = command.receipt;
+    if (!receipt.receiptId.trim() || !/^[a-f0-9]{64}$/.test(receipt.packageHash) || !receipt.signer.trim()
+      || !Number.isSafeInteger(receipt.observedAt) || receipt.observedAt < 0) {
+      throw new ControlPlaneError("invalid_contract", "Skill install receipt identity is invalid");
+    }
+    await this.store.recordSkillInstallReceipt(command);
   }
 }
 
