@@ -15,7 +15,7 @@ const releases = store === undefined ? undefined : new ReleaseApplicationService
 const snapshots = store === undefined ? undefined : new RuntimeConfigurationSnapshotService({
   repository: store, now: () => Date.now(), ttlMs: positiveInteger(process.env.CONTROL_PLANE_SNAPSHOT_TTL_MS, 60_000),
 });
-const server = createAdminApiServer({ authorization: new DenyAllAuthorization(), ...(releases === undefined ? {} : { releases }), ...(snapshots === undefined ? {} : { snapshots }) });
+const server = createAdminApiServer({ authorization: new DenyAllAuthorization(), ...(releases === undefined ? {} : { releases }), ...(snapshots === undefined ? {} : { snapshots }), ...(store === undefined ? {} : { identity: store, audit: store, catalog: store }) });
 server.listen(port, "127.0.0.1", () => {
   process.stdout.write(`AgentLoop Admin API scaffold listening on 127.0.0.1:${port}\n`);
 });

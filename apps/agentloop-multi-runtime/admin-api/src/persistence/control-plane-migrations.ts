@@ -16,7 +16,7 @@ export class ControlPlaneMigrationError extends Error {
 
 const migrations: readonly ExecutableControlPlaneMigration[] = [{
   id: "control-plane/0001_resources_releases_assignments_receipts_audit",
-  definition: "cp_schema_migrations;cp_resources;cp_releases;cp_target_assignments;cp_apply_receipts;cp_skill_install_receipts;cp_integration_bindings;cp_skill_artifacts;cp_secret_references;cp_audit_events;cp_delivery_cursors:v1",
+  definition: "cp_schema_migrations;cp_resources;cp_releases;cp_target_assignments;cp_apply_receipts;cp_skill_install_receipts;cp_members;cp_integration_bindings;cp_skill_artifacts;cp_secret_references;cp_audit_events;cp_delivery_cursors:v1",
   apply: async (database) => { await database.exec(controlPlaneSchemaSql(database.dialect)); },
 }, {
   id: "control-plane/0002_configuration_revision_sequence",
@@ -125,6 +125,12 @@ export function controlPlaneSchemaSql(dialect: SqlConnection["dialect"]): string
     id ${text} PRIMARY KEY, provider ${text} NOT NULL, secret_key ${text} NOT NULL, secret_version ${text} NOT NULL,
     rotation_state ${text} NOT NULL, created_at ${epoch} NOT NULL, updated_at ${epoch} NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS cp_members (
+    id ${text} PRIMARY KEY, tenant_id ${text} NOT NULL, subject ${text} NOT NULL, display_name ${text} NOT NULL,
+    role ${text} NOT NULL, status ${text} NOT NULL, revision ${epoch} NOT NULL, created_at ${epoch} NOT NULL, updated_at ${epoch} NOT NULL,
+    UNIQUE(tenant_id, subject)
+  );
+  CREATE INDEX IF NOT EXISTS cp_members_tenant_idx ON cp_members(tenant_id, status);
   CREATE TABLE IF NOT EXISTS cp_audit_events (
     id ${text} PRIMARY KEY, actor_id ${text} NOT NULL, action ${text} NOT NULL, resource_id ${text} NOT NULL,
     release_id ${text}, before_ref ${text}, after_ref ${text}, created_at ${epoch} NOT NULL
@@ -228,6 +234,12 @@ function tidbSchemaSql(): string {
     id VARCHAR(191) PRIMARY KEY, provider VARCHAR(191) NOT NULL, secret_key VARCHAR(191) NOT NULL, secret_version VARCHAR(191) NOT NULL,
     rotation_state VARCHAR(32) NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS cp_members (
+    id VARCHAR(191) PRIMARY KEY, tenant_id VARCHAR(191) NOT NULL, subject VARCHAR(191) NOT NULL, display_name VARCHAR(191) NOT NULL,
+    role VARCHAR(32) NOT NULL, status VARCHAR(32) NOT NULL, revision BIGINT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+    UNIQUE KEY cp_members_tenant_subject (tenant_id, subject)
+  );
+  CREATE INDEX cp_members_tenant_idx ON cp_members(tenant_id, status);
   CREATE TABLE IF NOT EXISTS cp_audit_events (
     id VARCHAR(191) PRIMARY KEY, actor_id VARCHAR(191) NOT NULL, action VARCHAR(64) NOT NULL, resource_id VARCHAR(191) NOT NULL,
     release_id VARCHAR(191), before_ref VARCHAR(191), after_ref VARCHAR(191), created_at BIGINT NOT NULL

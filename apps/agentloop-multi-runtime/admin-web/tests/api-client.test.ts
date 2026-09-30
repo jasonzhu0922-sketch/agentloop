@@ -11,3 +11,21 @@ test("Admin Web client is scoped to the Admin API origin", async () => {
   assert.deepEqual(await client.health(), { status: "ok" });
   assert.equal(requested, "https://admin.example.test/healthz");
 });
+
+test("Admin Web uses typed Admin API reads and never a database transport", async () => {
+  const requests: string[] = [];
+  const client = new AdminApiClient("https://admin.example.test", async (input) => {
+    requests.push(String(input));
+    if (String(input).includes("members")) return new Response(JSON.stringify({ members: [] }), { status: 200 });
+    if (String(input).includes("audit-events")) return new Response(JSON.stringify({ events: [] }), { status: 200 });
+    return new Response(JSON.stringify({ contractVersion: "control-plane/v1", runId: "run-a", facts: [], missingBoundaries: [{ source: "runtime", reason: "not_recorded" }] }), { status: 200 });
+  });
+  assert.deepEqual(await client.members("tenant-a"), []);
+  assert.deepEqual(await client.auditEvents(10), []);
+  assert.deepEqual((await client.trace("run-a")).missingBoundaries, [{ source: "runtime", reason: "not_recorded" }]);
+  assert.deepEqual(requests, [
+    "https://admin.example.test/admin/v1/members?tenantId=tenant-a",
+    "https://admin.example.test/admin/v1/audit-events?limit=10",
+    "https://admin.example.test/admin/v1/runs/run-a/trace",
+  ]);
+});

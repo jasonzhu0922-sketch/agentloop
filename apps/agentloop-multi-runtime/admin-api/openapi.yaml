@@ -22,6 +22,17 @@ paths:
                   service: { type: string, const: agentloop-admin-api }
                   phase: { type: string, const: wp-1-release-core }
   /admin/v1/releases:
+    get:
+      operationId: listReleases
+      description: Lists immutable release metadata for Admin Web read models.
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string, enum: [integration, model_route, skill, policy] }
+      responses:
+        '200': { description: Release list }
+        '403': { description: Missing or invalid admin principal }
     post:
       operationId: publishRelease
       description: Requires an independently authenticated admin principal and an x-request-id audit identifier.
@@ -46,6 +57,68 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: State transitioned without changing release content }
+  /admin/v1/members:
+    get:
+      operationId: listMembers
+      parameters:
+        - name: tenantId
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Member list without credential material }
+        '403': { description: Missing or invalid admin principal }
+    post:
+      operationId: createMember
+      responses:
+        '201': { description: Member created with revision one }
+        '409': { description: Revision or subject conflict }
+  /admin/v1/members/{memberId}/transitions:
+    post:
+      operationId: transitionMember
+      parameters:
+        - name: memberId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Member lifecycle state changed }
+        '409': { description: Expected revision conflict }
+  /admin/v1/audit-events:
+    get:
+      operationId: listAuditEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        '200': { description: Immutable audit event list }
+  /admin/v1/runs/{runId}/trace:
+    get:
+      operationId: readRunTrace
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Router/Runtime facts and explicit missing boundaries }
+  /admin/v1/runtimes/{runtimeId}/{operation}:
+    post:
+      operationId: operateRuntime
+      parameters:
+        - name: runtimeId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: operation
+          in: path
+          required: true
+          schema: { type: string, enum: [drain, recover] }
+      responses:
+        '200': { description: Runtime operation state readback }
+        '409': { description: Expected revision conflict }
   /delivery/v1/apply-receipts:
     post:
       operationId: recordApplyReceipt

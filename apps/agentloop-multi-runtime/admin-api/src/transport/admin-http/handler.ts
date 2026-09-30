@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { CredentialGrant, CredentialGrantRequest, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
+import type { AdminMember, CredentialGrant, CredentialGrantRequest, CreateMemberCommand, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionMemberCommand, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
 import { ControlPlaneError } from "../../../../control-plane/domain/index.ts";
 import type { AdminAuthorizationPort } from "../../authorization/ports.ts";
 import type { ReleaseApplicationService } from "../../application/release-service.ts";
+import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort, AdminTracePort, RuntimeOperationPort } from "../../application/admin-ports.ts";
 import { adminApiHealth } from "./health.ts";
 
 export interface AdminHttpDependencies {
@@ -12,6 +13,11 @@ export interface AdminHttpDependencies {
   readonly snapshots?: RuntimeConfigurationSnapshotPort;
   readonly integrations?: IntegrationDeliveryPort;
   readonly skillArtifacts?: SkillArtifactDeliveryPort;
+  readonly identity?: AdminIdentityPort;
+  readonly audit?: AdminAuditPort;
+  readonly catalog?: AdminCatalogPort;
+  readonly trace?: AdminTracePort;
+  readonly runtimeOperations?: RuntimeOperationPort;
 }
 
 /** Delivery transport depends on the snapshot capability, not its application-service implementation. */
@@ -40,6 +46,35 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
         if (principal === undefined || dependencies.snapshots === undefined) return respond(response, 403, { code: "target_not_authorized" });
         return respond(response, 200, await dependencies.snapshots.desiredSnapshot(principal.target));
+      }
+      if (request.method === "GET" && url.pathname === "/admin/v1/members") {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const tenantId = url.searchParams.get("tenantId");
+        if (tenantId === null || tenantId.trim() === "") throw new ControlPlaneError("invalid_contract", "tenantId is required");
+        if (principal.tenantId !== undefined && principal.tenantId !== tenantId) return respond(response, 403, { code: "target_not_authorized" });
+        return respond(response, 200, { members: await dependencies.identity.listMembers(tenantId) });
+      }
+      if (request.method === "GET" && url.pathname === "/admin/v1/releases") {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.catalog === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const kind = url.searchParams.get("kind");
+        if (kind !== null && !["integration", "model_route", "skill", "policy"].includes(kind)) throw new ControlPlaneError("invalid_contract", "Unknown release kind");
+        return respond(response, 200, { releases: await dependencies.catalog.listReleases(kind as ResourceRelease["kind"] | undefined) });
+      }
+      if (request.method === "GET" && url.pathname === "/admin/v1/audit-events") {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.audit === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit === null ? 50 : Number(rawLimit);
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new ControlPlaneError("invalid_contract", "limit must be between 1 and 200");
+        return respond(response, 200, { events: await dependencies.audit.listAuditEvents(limit) });
+      }
+      const trace = /^\/admin\/v1\/runs\/([^/]+)\/trace$/.exec(url.pathname);
+      if (request.method === "GET" && trace !== null) {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.trace === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        return respond(response, 200, await dependencies.trace.trace(decodeURIComponent(trace[1]!)));
       }
       if (request.method === "POST" && url.pathname === "/delivery/v1/credential-grants") {
         const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
@@ -80,6 +115,19 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         await dependencies.releases.assign({ ...(body as Omit<CreateTargetAssignmentCommand, "actorId" | "auditEventId">), actorId: principal.actorId, auditEventId });
         return respond(response, 201, { status: "created" });
       }
+      if (request.method === "POST" && url.pathname === "/admin/v1/members") {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const body = await jsonBody(request) as Omit<CreateMemberCommand, "auditEventId">;
+        return respond(response, 201, await dependencies.identity.createMember(body.member, body.expectedRevision, principal.actorId, auditEventId));
+      }
+      const memberTransition = /^\/admin\/v1\/members\/([^/]+)\/transitions$/.exec(url.pathname);
+      if (request.method === "POST" && memberTransition !== null) {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const body = await jsonBody(request) as Omit<TransitionMemberCommand, "memberId" | "auditEventId">;
+        return respond(response, 200, await dependencies.identity.transitionMember(decodeURIComponent(memberTransition[1]!), body.status, body.expectedRevision, principal.actorId, auditEventId));
+      }
       const transition = /^\/admin\/v1\/releases\/([^/]+)\/transitions$/.exec(url.pathname);
       if (request.method === "POST" && transition !== null) {
         const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
@@ -103,6 +151,16 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         if (body.receipt === undefined || !sameTarget(body.receipt.target, principal.target)) return respond(response, 403, { code: "target_not_authorized" });
         await dependencies.releases.recordSkillInstallReceipt({ ...body, receipt: { ...body.receipt, target: principal.target }, actorId: principal.actorId, auditEventId });
         return respond(response, 201, { status: "recorded" });
+      }
+      const operation = /^\/admin\/v1\/runtimes\/([^/]+)\/(drain|recover)$/.exec(url.pathname);
+      if (request.method === "POST" && operation !== null) {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.runtimeOperations === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const body = await jsonBody(request) as { target?: RuntimeTarget; expectedRevision?: number };
+        const expectedRevision = body.expectedRevision;
+        if (body.target === undefined || body.target.runtimeId !== decodeURIComponent(operation[1]!) || typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new ControlPlaneError("invalid_contract", "Runtime operation target and expectedRevision are required");
+        const input = { target: body.target, expectedRevision, actorId: principal.actorId, auditEventId };
+        return respond(response, 200, operation[2] === "drain" ? await dependencies.runtimeOperations.drain(input) : await dependencies.runtimeOperations.recover(input));
       }
       return respond(response, 404, { code: "not_found" });
     } catch (error) {

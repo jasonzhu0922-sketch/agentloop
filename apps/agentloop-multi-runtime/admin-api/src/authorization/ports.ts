@@ -2,6 +2,8 @@ import type { RuntimeTarget } from "../../../control-plane/contracts/index.ts";
 
 export interface AdminPrincipal {
   readonly actorId: string;
+  /** Tenant scope from the Admin identity provider; omitted only for platform-wide administrators. */
+  readonly tenantId?: string;
 }
 
 export interface WorkloadPrincipal {

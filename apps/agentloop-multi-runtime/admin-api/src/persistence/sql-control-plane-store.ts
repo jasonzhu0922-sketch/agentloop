@@ -1,10 +1,11 @@
 import type { SqlConnection } from "@zhujun/agentloop";
 import type {
-  ApplyReceipt, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand,
+  AdminMember, ApplyReceipt, AuditEvent, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand,
   ResourceRelease, TargetAssignment, TransitionReleaseCommand,
 } from "../../../control-plane/contracts/index.ts";
 import { assertAssignmentShape, assertNoAssignmentConflict, ControlPlaneError, transitionRelease } from "../../../control-plane/domain/index.ts";
 import type { ConfigurationSnapshotRepositoryPort, ControlPlaneWritePort, SkillArtifactMetadata } from "../../../control-plane/domain/ports.ts";
+import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort } from "../application/admin-ports.ts";
 
 type ResourceRow = { id: string; kind: ResourceRelease["kind"]; revision: number | string | bigint };
 type ReleaseRow = {
@@ -16,9 +17,11 @@ type AssignmentRow = {
   tenant_id: string | null; runtime_class: string | null; runtime_id: string | null; device_id: string | null;
   priority: number | string | bigint; rollout_state: TargetAssignment["rolloutState"]; revision: number | string | bigint;
 };
+type MemberRow = { id: string; tenant_id: string; subject: string; display_name: string; role: AdminMember["role"]; status: AdminMember["status"]; revision: number | string | bigint; created_at: number | string | bigint; updated_at: number | string | bigint };
+type AuditEventRow = { id: string; actor_id: string; action: string; resource_id: string; release_id: string | null; before_ref: string | null; after_ref: string | null; created_at: number | string | bigint };
 
 /** SQL adapter for the Admin-owned cp_* tables. It never queries or writes mr_* or Runtime tables. */
-export class SqlControlPlaneStore implements ControlPlaneWritePort, ConfigurationSnapshotRepositoryPort {
+export class SqlControlPlaneStore implements ControlPlaneWritePort, ConfigurationSnapshotRepositoryPort, AdminIdentityPort, AdminAuditPort, AdminCatalogPort {
   private readonly database: SqlConnection;
 
   public constructor(database: SqlConnection) { this.database = database; }
@@ -176,6 +179,51 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort, Configuratio
     });
   }
 
+  public async listMembers(tenantId: string): Promise<readonly AdminMember[]> {
+    const rows = await this.database.prepare("SELECT id, tenant_id, subject, display_name, role, status, revision, created_at, updated_at FROM cp_members WHERE tenant_id = ? ORDER BY id").all<MemberRow>(tenantId);
+    return rows.map(memberFromRow);
+  }
+
+  public async createMember(member: AdminMember, expectedRevision: number, actorId: string, auditEventId: string): Promise<AdminMember> {
+    if (expectedRevision !== 0 || member.revision !== 1) throw new ControlPlaneError("revision_conflict", "New members require revision zero and start at revision one");
+    await this.database.transaction(async () => {
+      const existing = await this.database.prepare("SELECT id FROM cp_members WHERE id = ?").get<{ id: string }>(member.memberId);
+      if (existing !== undefined) throw new ControlPlaneError("duplicate_release", `Member ${member.memberId} already exists`);
+      await this.database.prepare("INSERT INTO cp_members(id, tenant_id, subject, display_name, role, status, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(member.memberId, member.tenantId, member.subject, member.displayName, member.role, member.status, member.revision, member.createdAt, member.updatedAt);
+      await this.audit(auditEventId, actorId, "member.created", member.tenantId, undefined, undefined, member.memberId, member.createdAt);
+    });
+    return member;
+  }
+
+  public async transitionMember(memberId: string, status: AdminMember["status"], expectedRevision: number, actorId: string, auditEventId: string): Promise<AdminMember> {
+    const current = await this.database.prepare("SELECT id, tenant_id, subject, display_name, role, status, revision, created_at, updated_at FROM cp_members WHERE id = ?").get<MemberRow>(memberId);
+    if (current === undefined) throw new ControlPlaneError("invalid_contract", `Unknown member ${memberId}`);
+    if (asNumber(current.revision) !== expectedRevision) throw revisionConflict(memberId, expectedRevision, asNumber(current.revision));
+    if (!memberStatusTransition(current.status, status)) throw new ControlPlaneError("invalid_release_transition", `Cannot transition member ${memberId} from ${current.status} to ${status}`);
+    const now = Date.now();
+    const next = { ...memberFromRow(current), status, revision: expectedRevision + 1, updatedAt: now } satisfies AdminMember;
+    await this.database.transaction(async () => {
+      await this.database.prepare("UPDATE cp_members SET status = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
+        .run(status, next.revision, now, memberId, expectedRevision);
+      await this.audit(auditEventId, actorId, "member.transitioned", next.tenantId, undefined, current.status, status, now);
+    });
+    return next;
+  }
+
+  public async listAuditEvents(limit: number): Promise<readonly AuditEvent[]> {
+    const bounded = Math.min(Math.max(Math.trunc(limit), 1), 200);
+    const rows = await this.database.prepare("SELECT id, actor_id, action, resource_id, release_id, before_ref, after_ref, created_at FROM cp_audit_events ORDER BY created_at DESC, id DESC LIMIT ?").all<AuditEventRow>(bounded);
+    return rows.map((row) => ({ eventId: row.id, actorId: row.actor_id, action: row.action, resourceId: row.resource_id, ...(row.release_id === null ? {} : { releaseId: row.release_id }), ...(row.before_ref === null ? {} : { beforeRef: row.before_ref }), ...(row.after_ref === null ? {} : { afterRef: row.after_ref }), createdAt: asNumber(row.created_at) }));
+  }
+
+  public async listReleases(kind?: ResourceRelease["kind"]): Promise<readonly ResourceRelease[]> {
+    const rows = kind === undefined
+      ? await this.database.prepare("SELECT id, resource_id, version, kind, schema_version, content_hash, author_id, created_at, state, payload_json FROM cp_releases ORDER BY created_at DESC, id DESC").all<ReleaseRow>()
+      : await this.database.prepare("SELECT id, resource_id, version, kind, schema_version, content_hash, author_id, created_at, state, payload_json FROM cp_releases WHERE kind = ? ORDER BY created_at DESC, id DESC").all<ReleaseRow>(kind);
+    return rows.map(releaseFromRow);
+  }
+
   private async lockResource(resourceId: string): Promise<ResourceRow | undefined> {
     const suffix = this.database.dialect === "sqlite" ? "" : " FOR UPDATE";
     return await this.database.prepare(`SELECT id, kind, revision FROM cp_resources WHERE id = ?${suffix}`).get<ResourceRow>(resourceId);
@@ -202,6 +250,17 @@ function releaseFromRow(row: ReleaseRow): ResourceRelease {
     contractVersion: "control-plane/v1", resourceId: row.resource_id, releaseId: row.id, version: asNumber(row.version), kind: row.kind,
     schemaVersion: row.schema_version, contentHash: row.content_hash, authorId: row.author_id, createdAt: asNumber(row.created_at), state: row.state, payload,
   };
+}
+
+function memberFromRow(row: MemberRow): AdminMember {
+  return { contractVersion: "control-plane/v1", memberId: row.id, tenantId: row.tenant_id, subject: row.subject, displayName: row.display_name, role: row.role, status: row.status, revision: asNumber(row.revision), createdAt: asNumber(row.created_at), updatedAt: asNumber(row.updated_at) };
+}
+
+function memberStatusTransition(from: AdminMember["status"], to: AdminMember["status"]): boolean {
+  if (from === to) return false;
+  return from === "invited" ? to === "active" || to === "removed"
+    : from === "active" ? to === "suspended" || to === "removed"
+      : from === "suspended" ? to === "active" || to === "removed" : false;
 }
 
 function assignmentFromRow(row: AssignmentRow): TargetAssignment {
