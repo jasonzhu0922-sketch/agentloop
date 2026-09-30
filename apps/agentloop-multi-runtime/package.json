@@ -38,7 +38,7 @@
     "typecheck:admin-web": "tsc -p admin-web/tsconfig.json",
     "test:admin-web": "node --test --test-isolation=process admin-web/tests/*.test.ts",
     "typecheck:control-plane": "tsc -p control-plane/tsconfig.json",
-    "test:control-plane": "node --test --test-isolation=process control-plane/tests/*.test.ts tests/control-plane-boundaries.test.ts",
+    "test:control-plane": "node --test --test-isolation=process control-plane/tests/*.test.ts tests/control-plane-boundaries.test.ts tests/control-plane-wp6.test.ts",
     "migrate:control-plane": "node admin-api/scripts/migrate.mjs",
     "start:local": "node scripts/start-local.mjs",
     "package:local-agent:mac": "npm run build --workspace @zhujun/agentloop && npm run build --workspace @zhujun/agentloop-skills && node scripts/package-local-agent-macos.mjs",

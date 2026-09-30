@@ -96,7 +96,7 @@ export interface RuntimeConfigurationSnapshot {
   readonly modelRoute?: ModelRouteReference;
   readonly integrations: readonly IntegrationBindingReference[];
   readonly skills: readonly SkillReleaseReference[];
-  readonly policies: readonly ReleaseReference[];
+  readonly policies: readonly PolicyReleaseReference[];
 }
 
 /** Public resource metadata used only for control-plane resolution; it carries no secret reference/value. */
@@ -132,6 +132,42 @@ export interface SkillReleaseReference {
   readonly packageHash: string;
   /** Release content hash remains the receipt/audit integrity key; packageHash verifies the artifact. */
   readonly contentHash: string;
+  /** Signed artifact metadata is public; package bytes remain target-local. */
+  readonly artifact?: SkillArtifactManifest;
+}
+
+export interface SkillArtifactManifest {
+  readonly packageUri: string;
+  readonly packageHash: string;
+  readonly signer: string;
+  readonly signatureAlgorithm: "ed25519" | "minisign";
+  readonly signature: string;
+  readonly compatibility?: Readonly<Record<string, unknown>>;
+}
+
+export interface PolicyReleaseReference extends ReleaseReference {
+  /** Public policy payload; it contains guidance/strategy metadata only. */
+  readonly policy?: RuntimePolicyManifest;
+}
+
+export interface RuntimePolicyManifest {
+  readonly practiceProfileCatalog?: Readonly<Record<string, unknown>>;
+  readonly stepExecutionStrategy?: Readonly<Record<string, unknown>>;
+  readonly planTemplates?: readonly Readonly<Record<string, unknown>>[];
+}
+
+export type SkillInstallStatus = "verified" | "loaded" | "failed" | "rejected";
+
+export interface SkillInstallReceipt {
+  readonly contractVersion: typeof CONTROL_PLANE_CONTRACT_VERSION;
+  readonly receiptId: string;
+  readonly target: RuntimeTarget;
+  readonly releaseId: string;
+  readonly packageHash: string;
+  readonly signer: string;
+  readonly status: SkillInstallStatus;
+  readonly observedAt: number;
+  readonly reasonCode?: ControlPlaneErrorCode;
 }
 
 export interface ApplyReceipt {

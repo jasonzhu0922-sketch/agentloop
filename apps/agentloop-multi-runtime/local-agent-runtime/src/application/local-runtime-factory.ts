@@ -8,7 +8,8 @@ import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.t
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { LocalDeliveryClient, LocalDeliveryError } from "../control-plane/local-delivery-client.ts";
 import { LocalSnapshotCache } from "../control-plane/local-snapshot-cache.ts";
-import type { RuntimeConfigurationSnapshot } from "../../../control-plane/contracts/index.ts";
+import { assertSkillArtifactsReady, type RuntimeConfigurationSnapshot } from "../../../control-plane/contracts/index.ts";
+import { resolveControlPlanePolicy } from "../../../src/shared/control-plane-policy.ts";
 
 /** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
 export class LocalRuntimeFactory {
@@ -35,10 +36,6 @@ export class LocalRuntimeFactory {
     `);
     const scopes = new LocalDirectoryScopeStore(database);
     await scopes.ready();
-    const resolved = await this.resolveConfiguration(definition, runtimeRoot, integrationEnvironment);
-    const provider = resolved === undefined
-      ? await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment)
-      : LlmProviderRegistry.fromConfigObject(resolved.snapshot.modelRoute!.providerConfiguration, integrationEnvironment);
     const custom = await loadSkillDirectoriesConfig({ appRoot: this.input.appRoot, configPath: this.input.skillDirectoriesConfigPath });
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {
@@ -46,14 +43,19 @@ export class LocalRuntimeFactory {
       skillDirectories: mergeSkillDirectories(packaged?.length ? packaged : bundledSkillDirectories(), custom),
     });
     await skills.syncSkillDirectories();
-    const strategy = await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath);
-    const practiceProfiles = await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json"));
+    const resolved = await this.resolveConfiguration(definition, runtimeRoot, integrationEnvironment, () => skills.discovered().map((item) => item.packageHash));
+    const provider = resolved === undefined
+      ? await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment)
+      : LlmProviderRegistry.fromConfigObject(resolved.snapshot.modelRoute!.providerConfiguration, integrationEnvironment);
+    const strategy = resolved === undefined ? await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath) : undefined;
+    const practiceProfiles = resolved === undefined ? await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json")) : undefined;
+    const controlPlanePolicy = resolved === undefined ? undefined : resolveControlPlanePolicy(resolved.snapshot.policies);
     const runs = new RunService({
       database, skills, modelFactory: (onRetry, modelKey) => provider.create(modelKey, onRetry),
       defaultModelKey: provider.defaultModelKey, modelKeys: provider.modelKeys(), workspaceRoot: sharedStorageRoot, sourceStorageRoot,
       ownerScopedWorkspace: true,
-      stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
-      practiceProfileCatalog: practiceProfiles,
+      stepExecutionStrategy: controlPlanePolicy === undefined ? createStepExecutionStrategyProfile(strategy!.profile, strategy!.projection) : controlPlanePolicy.stepExecutionStrategy === undefined ? undefined : createStepExecutionStrategyProfile(controlPlanePolicy.stepExecutionStrategy.profile, controlPlanePolicy.stepExecutionStrategy.projection),
+      practiceProfileCatalog: controlPlanePolicy === undefined ? practiceProfiles : controlPlanePolicy.practiceProfileCatalog,
       tools: integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment)),
       computerCommandEnvironment: resolved === undefined ? this.input.computerCommandEnvironment : withoutEnterpriseInfoPath(this.input.computerCommandEnvironment),
       ...(resolved === undefined ? {} : { configurationSnapshot: resolved.reference }),
@@ -68,7 +70,7 @@ export class LocalRuntimeFactory {
     return { ...definition, database, scopes, runs, modelKeys: provider.modelKeys(), activeRunIds };
   }
 
-  private async resolveConfiguration(definition: LocalRuntimeDefinition, runtimeRoot: string, environment: Readonly<Record<string, string | undefined>>): Promise<{ readonly snapshot: import("../../../control-plane/contracts/index.ts").RuntimeConfigurationSnapshot; readonly reference: RuntimeConfigurationSnapshotReference } | undefined> {
+  private async resolveConfiguration(definition: LocalRuntimeDefinition, runtimeRoot: string, environment: Readonly<Record<string, string | undefined>>, loadedSkillPackageHashes: () => readonly string[]): Promise<{ readonly snapshot: import("../../../control-plane/contracts/index.ts").RuntimeConfigurationSnapshot; readonly reference: RuntimeConfigurationSnapshotReference } | undefined> {
     const controlPlane = this.input.controlPlane;
     if (controlPlane === undefined) return undefined;
     const target = { plane: "local" as const, tenantId: controlPlane.tenantId, runtimeId: definition.id, deviceId: controlPlane.deviceId };
@@ -88,6 +90,8 @@ export class LocalRuntimeFactory {
     }
     const modelRoute = snapshot.modelRoute;
     if (modelRoute === undefined) throw new LocalRuntimeSupervisorError(503, "configuration_unavailable");
+    try { assertSkillArtifactsReady(snapshot, loadedSkillPackageHashes(), true); }
+    catch { throw new LocalRuntimeSupervisorError(503, "configuration_unavailable"); }
     return { snapshot, reference: { snapshotId: snapshot.snapshotId, configurationRevision: snapshot.configurationRevision, releases: [
       { kind: "model_route", releaseId: modelRoute.releaseId, contentHash: modelRoute.contentHash },
       ...snapshot.integrations.map((item) => ({ kind: "integration" as const, releaseId: item.releaseId, contentHash: item.contentHash })),

@@ -86,3 +86,24 @@ test("snapshot resolver refuses a selected skill release without a verified pack
     await database.close();
   }
 });
+
+test("snapshot resolver includes only signed Skill artifact metadata", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateControlPlane(database);
+    const store = new SqlControlPlaneStore(database);
+    const releases = new ReleaseApplicationService(store);
+    const packageHash = "b".repeat(64);
+    const content = { kind: "skill" as const, schemaVersion: "skill/v1", payload: { name: "signed-skill", packageHash } };
+    const skill: ResourceRelease = { contractVersion: "control-plane/v1", resourceId: "skill", releaseId: "skill-signed-r1", version: 1, ...content, contentHash: contentHashForRelease(content), authorId: "admin-1", createdAt: 10, state: "draft" };
+    await activate(releases, skill, { plane: "cloud", target: { kind: "platform" } }, "signed-skill");
+    await database.prepare("INSERT INTO cp_skill_artifacts(release_id, package_uri, package_hash, signer, compatibility_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(skill.releaseId, "https://artifacts.example.test/signed-skill.tgz", packageHash, "platform-signer", JSON.stringify({ signatureAlgorithm: "ed25519", signature: "signature-bytes" }), 10);
+    const snapshot = await new RuntimeConfigurationSnapshotService({ repository: store, now: () => 1_000, ttlMs: 500 }).desiredSnapshot({ plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" });
+    assert.deepEqual(snapshot.skills[0]?.artifact, {
+      packageUri: "https://artifacts.example.test/signed-skill.tgz", packageHash, signer: "platform-signer", signatureAlgorithm: "ed25519", signature: "signature-bytes",
+    });
+  } finally {
+    await database.close();
+  }
+});

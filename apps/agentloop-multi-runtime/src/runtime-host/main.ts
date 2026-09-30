@@ -90,14 +90,14 @@ const skills = new SkillService(database, {
   skillDirectories,
 });
 const skillDirectorySync = await skills.syncSkillDirectories();
-const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnapshot?: import("@zhujun/agentloop").RuntimeConfigurationSnapshotReference, computerCommandEnvironmentForInvocation?: import("@zhujun/agentloop").ComputerExecutorOptions["commandEnvironmentForInvocation"]): RunService => new RunService({
+const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnapshot?: import("@zhujun/agentloop").RuntimeConfigurationSnapshotReference, computerCommandEnvironmentForInvocation?: import("@zhujun/agentloop").ComputerExecutorOptions["commandEnvironmentForInvocation"], policy?: { readonly practiceProfileCatalog?: import("@zhujun/agentloop").PracticeProfileCatalog; readonly stepExecutionStrategy?: import("../shared/config.ts").StepExecutionStrategyProfileConfig }): RunService => new RunService({
   database,
   skills,
   modelFactory: registry === undefined ? () => { throw new Error("configuration_unavailable"); } : (onRetry, modelKey) => registry.create(modelKey, onRetry),
   ...(registry === undefined ? {} : { defaultModelKey: registry.defaultModelKey, modelKeys: registry.modelKeys() }),
   workspaceRoot,
-  stepExecutionStrategy,
-  practiceProfileCatalog,
+  stepExecutionStrategy: policy === undefined ? stepExecutionStrategy : policy.stepExecutionStrategy === undefined ? undefined : createStepExecutionStrategyProfile(policy.stepExecutionStrategy.profile, policy.stepExecutionStrategy.projection),
+  practiceProfileCatalog: policy === undefined ? practiceProfileCatalog : policy.practiceProfileCatalog,
   tools: integrationTools,
   computerCommandEnvironment: {
     STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
@@ -199,7 +199,7 @@ function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
   const tenantId = requiredEnv("CONTROL_PLANE_TENANT_ID");
   const target = { plane: "cloud" as const, tenantId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
   const client = new RuntimeConfigurationClient({ deliveryUrl, workloadToken, target });
-  const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID });
+  const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID, loadedSkillPackageHashes: () => skills.discovered().map((item) => item.packageHash), requireSignedSkillArtifacts: true });
   const integrationDelivery = new RuntimeIntegrationDeliveryClient({ deliveryUrl, workloadToken });
   return new ControlPlaneAdmissionRunResolver(target, environments, async (environment) => {
     const broker = new CloudIntegrationSecretBroker({
@@ -208,7 +208,7 @@ function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
     });
     await broker.start();
     integrationBrokers.add(broker);
-    return new AgentLoopRuntimeRunPort(createRuns(environment.providers, environment.configurationSnapshot, (context) => broker.commandEnvironment(context)));
+    return new AgentLoopRuntimeRunPort(createRuns(environment.providers, environment.configurationSnapshot, (context) => broker.commandEnvironment(context), environment));
   });
 }
 

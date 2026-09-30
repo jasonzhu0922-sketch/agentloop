@@ -25,14 +25,20 @@ export class RuntimeConfigurationSnapshotService {
     const modelRoutes = active.filter((entry) => entry.resource.kind === "model_route");
     if (modelRoutes.length > 1) throw new ControlPlaneError("configuration_unavailable", "More than one active model-route resource applies to this target");
     const skills = await Promise.all(active.filter((entry) => entry.resource.kind === "skill").map(async ({ release }) => {
-      const packageHash = await this.repository.skillPackageHash(release.releaseId);
-      if (packageHash === undefined) throw new ControlPlaneError("configuration_unavailable", `Skill release ${release.releaseId} has no verified package artifact`);
-      return { releaseId: release.releaseId, packageHash, contentHash: release.contentHash };
+      const artifact = this.repository.skillArtifact === undefined ? undefined : await this.repository.skillArtifact(release.releaseId);
+      if (artifact === undefined || artifact.packageHash !== artifactHash(release, artifact.packageHash)) {
+        throw new ControlPlaneError("configuration_unavailable", `Skill release ${release.releaseId} has no verified signed package artifact`);
+      }
+      return { releaseId: release.releaseId, packageHash: artifact.packageHash, contentHash: release.contentHash, artifact: {
+        packageUri: artifact.packageUri, packageHash: artifact.packageHash, signer: artifact.signer,
+        signatureAlgorithm: artifact.signatureAlgorithm, signature: artifact.signature,
+        ...(artifact.compatibility === undefined ? {} : { compatibility: artifact.compatibility }),
+      } };
     }));
     const integrations = active.filter((entry) => entry.resource.kind === "integration")
       .map(({ release, assignmentId }) => integrationReference(release, assignmentId));
     const policies = active.filter((entry) => entry.resource.kind === "policy")
-      .map(({ release }) => ({ releaseId: release.releaseId, contentHash: release.contentHash }));
+      .map(({ release }) => ({ releaseId: release.releaseId, contentHash: release.contentHash, ...(policyManifest(release.payload) === undefined ? {} : { policy: policyManifest(release.payload) }) }));
     const resolvedAt = this.now();
     const configurationRevision = await this.repository.configurationRevision();
     const snapshot: Omit<RuntimeConfigurationSnapshot, "snapshotId"> = {
@@ -65,6 +71,34 @@ function integrationReference(release: ResourceRelease, bindingId: string): { re
   const allowedActions = Array.isArray(release.payload.allowedActions) && release.payload.allowedActions.every((item) => typeof item === "string")
     ? release.payload.allowedActions as readonly string[] : undefined;
   return { bindingId, releaseId: release.releaseId, contentHash: release.contentHash, ...(integration === undefined || allowedActions === undefined ? {} : { integration, allowedActions }) };
+}
+
+function artifactHash(release: ResourceRelease, packageHash: string): string {
+  const declared = release.payload.packageHash;
+  return typeof declared === "string" && declared.length > 0 ? declared : packageHash;
+}
+
+function policyManifest(payload: Readonly<Record<string, unknown>>): {
+  readonly practiceProfileCatalog?: Readonly<Record<string, unknown>>;
+  readonly stepExecutionStrategy?: Readonly<Record<string, unknown>>;
+  readonly planTemplates?: readonly Readonly<Record<string, unknown>>[];
+} | undefined {
+  const policy = payload.policy;
+  if (policy === null || typeof policy !== "object" || Array.isArray(policy)) return undefined;
+  const value = policy as Record<string, unknown>;
+  const result: {
+    practiceProfileCatalog?: Readonly<Record<string, unknown>>;
+    stepExecutionStrategy?: Readonly<Record<string, unknown>>;
+    planTemplates?: readonly Readonly<Record<string, unknown>>[];
+  } = {};
+  if (isRecord(value.practiceProfileCatalog)) result.practiceProfileCatalog = value.practiceProfileCatalog;
+  if (isRecord(value.stepExecutionStrategy)) result.stepExecutionStrategy = value.stepExecutionStrategy;
+  if (Array.isArray(value.planTemplates) && value.planTemplates.every(isRecord)) result.planTemplates = value.planTemplates;
+  return Object.keys(result).length === 0 ? undefined : result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function referenceOrder(left: { releaseId: string }, right: { releaseId: string }): number { return left.releaseId.localeCompare(right.releaseId); }

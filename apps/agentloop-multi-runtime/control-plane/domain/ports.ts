@@ -3,6 +3,16 @@ import type {
   ControlPlaneResource, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TargetAssignment, TransitionReleaseCommand,
 } from "../contracts/index.ts";
 
+export interface SkillArtifactMetadata {
+  readonly releaseId: string;
+  readonly packageUri: string;
+  readonly packageHash: string;
+  readonly signer: string;
+  readonly signatureAlgorithm: "ed25519" | "minisign";
+  readonly signature: string;
+  readonly compatibility?: Readonly<Record<string, unknown>>;
+}
+
 /** Ports describe later persistence/delivery work without selecting SQL, HTTP, or a secret provider. */
 export interface ReleaseRepositoryPort {
   getRelease(releaseId: string): Promise<ResourceRelease | undefined>;
@@ -19,6 +29,7 @@ export interface ConfigurationSnapshotRepositoryPort extends ReleaseRepositoryPo
   listResources(): Promise<readonly ControlPlaneResource[]>;
   configurationRevision(): Promise<number>;
   skillPackageHash(releaseId: string): Promise<string | undefined>;
+  skillArtifact?(releaseId: string): Promise<SkillArtifactMetadata | undefined>;
 }
 
 /** Write boundary used by application services; adapters own transactions and audit persistence. */

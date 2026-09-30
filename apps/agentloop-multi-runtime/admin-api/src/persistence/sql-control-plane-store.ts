@@ -4,7 +4,7 @@ import type {
   ResourceRelease, TargetAssignment, TransitionReleaseCommand,
 } from "../../../control-plane/contracts/index.ts";
 import { assertAssignmentShape, assertNoAssignmentConflict, ControlPlaneError, transitionRelease } from "../../../control-plane/domain/index.ts";
-import type { ConfigurationSnapshotRepositoryPort, ControlPlaneWritePort } from "../../../control-plane/domain/ports.ts";
+import type { ConfigurationSnapshotRepositoryPort, ControlPlaneWritePort, SkillArtifactMetadata } from "../../../control-plane/domain/ports.ts";
 
 type ResourceRow = { id: string; kind: ResourceRelease["kind"]; revision: number | string | bigint };
 type ReleaseRow = {
@@ -47,6 +47,25 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort, Configuratio
   public async skillPackageHash(releaseId: string): Promise<string | undefined> {
     const row = await this.database.prepare("SELECT package_hash FROM cp_skill_artifacts WHERE release_id = ?").get<{ package_hash: string }>(releaseId);
     return row?.package_hash;
+  }
+
+  public async skillArtifact(releaseId: string): Promise<SkillArtifactMetadata | undefined> {
+    const row = await this.database.prepare("SELECT release_id, package_uri, package_hash, signer, compatibility_json FROM cp_skill_artifacts WHERE release_id = ?").get<{
+      release_id: string; package_uri: string; package_hash: string; signer: string; compatibility_json: string;
+    }>(releaseId);
+    if (row === undefined) return undefined;
+    let compatibility: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(row.compatibility_json) as unknown;
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) compatibility = parsed as Record<string, unknown>;
+    } catch { throw new ControlPlaneError("invalid_contract", `Skill artifact ${releaseId} has invalid compatibility metadata`); }
+    const signature = compatibility.signature;
+    const signatureAlgorithm = compatibility.signatureAlgorithm;
+    if (typeof signature !== "string" || signature.trim() === "" || (signatureAlgorithm !== "ed25519" && signatureAlgorithm !== "minisign")) {
+      throw new ControlPlaneError("configuration_unavailable", `Skill artifact ${releaseId} has no supported signature metadata`);
+    }
+    const { signature: _signature, signatureAlgorithm: _signatureAlgorithm, ...rest } = compatibility;
+    return { releaseId: row.release_id, packageUri: row.package_uri, packageHash: row.package_hash, signer: row.signer, signature, signatureAlgorithm, ...(Object.keys(rest).length === 0 ? {} : { compatibility: rest }) };
   }
 
   public async publishRelease(command: PublishReleaseCommand): Promise<ResourceRelease> {

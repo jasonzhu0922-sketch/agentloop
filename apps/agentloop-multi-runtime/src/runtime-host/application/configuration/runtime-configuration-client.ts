@@ -1,4 +1,4 @@
-import type { ApplyReceipt, RuntimeConfigurationSnapshot, RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
+import { parseRuntimeConfigurationSnapshot as parseContractSnapshot, type ApplyReceipt, type RuntimeConfigurationSnapshot, type RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
 
 export class RuntimeConfigurationClientError extends Error {
   public readonly code = "configuration_unavailable" as const;
@@ -76,58 +76,8 @@ export class RuntimeConfigurationClient {
 
 /** Strict transport decoder reused by the durable Host snapshot cache. */
 export function parseRuntimeConfigurationSnapshot(value: unknown): RuntimeConfigurationSnapshot {
-  if (!record(value) || value.contractVersion !== "control-plane/v1") throw invalidSnapshot();
-  if (!text(value.snapshotId) || !integer(value.configurationRevision) || !integer(value.resolvedAt) || !integer(value.validUntil) || value.validUntil <= value.resolvedAt) throw invalidSnapshot();
-  const target = parseTarget(value.target);
-  const modelRoute = value.modelRoute === undefined ? undefined : parseModelRoute(value.modelRoute);
-  if (!Array.isArray(value.integrations) || !Array.isArray(value.skills) || !Array.isArray(value.policies)) throw invalidSnapshot();
-  const integrations = value.integrations.map((item) => {
-    const reference = parseReference(item);
-    if (!record(item) || !text(item.bindingId)) throw invalidSnapshot();
-    let integration: string | undefined;
-    let allowedActions: readonly string[] | undefined;
-    if (item.integration !== undefined) {
-      if (!text(item.integration)) throw invalidSnapshot();
-      integration = item.integration;
-    }
-    if (item.allowedActions !== undefined) {
-      if (!Array.isArray(item.allowedActions) || !item.allowedActions.every(text)) throw invalidSnapshot();
-      allowedActions = item.allowedActions;
-    }
-    return { bindingId: item.bindingId, ...reference, ...(integration === undefined || allowedActions === undefined ? {} : { integration, allowedActions }) };
-  });
-  const skills = value.skills.map((item) => {
-    if (!record(item) || !text(item.releaseId) || !hash(item.packageHash) || !hash(item.contentHash)) throw invalidSnapshot();
-    return { releaseId: item.releaseId, packageHash: item.packageHash, contentHash: item.contentHash };
-  });
-  return {
-    contractVersion: "control-plane/v1", snapshotId: value.snapshotId, configurationRevision: value.configurationRevision,
-    target, resolvedAt: value.resolvedAt, validUntil: value.validUntil, ...(modelRoute === undefined ? {} : { modelRoute }),
-    integrations, skills, policies: value.policies.map(parseReference),
-  };
+  try { return parseContractSnapshot(value); }
+  catch { throw new RuntimeConfigurationClientError("Delivery returned an invalid RuntimeConfigurationSnapshot"); }
 }
 
-function parseTarget(value: unknown): RuntimeTarget {
-  if (!record(value) || (value.plane !== "cloud" && value.plane !== "local") || !text(value.tenantId) || !text(value.runtimeId)) throw invalidSnapshot();
-  if (value.runtimeClass !== undefined && !text(value.runtimeClass)) throw invalidSnapshot();
-  if (value.deviceId !== undefined && !text(value.deviceId)) throw invalidSnapshot();
-  return { plane: value.plane, tenantId: value.tenantId, runtimeId: value.runtimeId, ...(value.runtimeClass === undefined ? {} : { runtimeClass: value.runtimeClass }), ...(value.deviceId === undefined ? {} : { deviceId: value.deviceId }) };
-}
-
-function parseReference(value: unknown): { readonly releaseId: string; readonly contentHash: string } {
-  if (!record(value) || !text(value.releaseId) || !hash(value.contentHash)) throw invalidSnapshot();
-  return { releaseId: value.releaseId, contentHash: value.contentHash };
-}
-
-function parseModelRoute(value: unknown): { readonly releaseId: string; readonly contentHash: string; readonly providerConfiguration: Readonly<Record<string, unknown>> } {
-  const reference = parseReference(value);
-  if (!record(value) || !record(value.providerConfiguration)) throw invalidSnapshot();
-  return { ...reference, providerConfiguration: value.providerConfiguration };
-}
-
-function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
-function text(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
-function hash(value: unknown): value is string { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
-function integer(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
-function invalidSnapshot(): RuntimeConfigurationClientError { return new RuntimeConfigurationClientError("Delivery returned an invalid RuntimeConfigurationSnapshot"); }
 function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }

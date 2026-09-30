@@ -1,5 +1,7 @@
-import { LlmProviderRegistry, type RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
-import type { RuntimeConfigurationSnapshot, RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
+import { LlmProviderRegistry, type PracticeProfileCatalog, type RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
+import { assertSkillArtifactsReady, type RuntimeConfigurationSnapshot, type RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
+import { resolveControlPlanePolicy } from "../../../shared/control-plane-policy.ts";
+import type { StepExecutionStrategyProfileConfig } from "../../../shared/config.ts";
 import type { RuntimeAdmissionRunResolver, RuntimeHostRunPort } from "../runtime-run-port.ts";
 
 export interface RuntimeConfigurationDeliveryPort {
@@ -18,6 +20,9 @@ export interface ResolvedRunEnvironment {
   readonly snapshot: RuntimeConfigurationSnapshot;
   readonly configurationSnapshot: RuntimeConfigurationSnapshotReference;
   readonly providers: LlmProviderRegistry;
+  readonly practiceProfileCatalog?: PracticeProfileCatalog;
+  readonly stepExecutionStrategy?: StepExecutionStrategyProfileConfig;
+  readonly planTemplates: readonly Readonly<Record<string, unknown>>[];
 }
 
 /** Stable admission failure: callers must not substitute file configuration in control-plane mode. */
@@ -35,17 +40,23 @@ export class RunEnvironmentResolver {
   private readonly cache: LoadedRuntimeConfigurationSnapshotCache;
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private readonly receiptId: () => string;
+  private readonly loadedSkillPackageHashes?: () => readonly string[];
+  private readonly requireSignedSkillArtifacts: boolean;
 
   public constructor(input: {
     readonly delivery: RuntimeConfigurationDeliveryPort;
     readonly cache: LoadedRuntimeConfigurationSnapshotCache;
     readonly environment: Readonly<Record<string, string | undefined>>;
     readonly createReceiptId: () => string;
+    readonly loadedSkillPackageHashes?: () => readonly string[];
+    readonly requireSignedSkillArtifacts?: boolean;
   }) {
     this.delivery = input.delivery;
     this.cache = input.cache;
     this.environment = input.environment;
     this.receiptId = input.createReceiptId;
+    this.loadedSkillPackageHashes = input.loadedSkillPackageHashes;
+    this.requireSignedSkillArtifacts = input.requireSignedSkillArtifacts === true;
   }
 
   /** Fetches, validates, constructs, receipts, then persists a new-admission environment in that order. */
@@ -97,13 +108,21 @@ export class RunEnvironmentResolver {
   private build(snapshot: RuntimeConfigurationSnapshot): ResolvedRunEnvironment {
     if (snapshot.modelRoute === undefined) throw new RunEnvironmentUnavailableError("Control-plane snapshot has no model route");
     try {
+      if (this.loadedSkillPackageHashes !== undefined) {
+        assertSkillArtifactsReady(snapshot, this.loadedSkillPackageHashes(), this.requireSignedSkillArtifacts);
+      }
+      const policy = resolveControlPlanePolicy(snapshot.policies);
       return {
         snapshot,
         configurationSnapshot: configurationSnapshotReference(snapshot),
         providers: LlmProviderRegistry.fromConfigObject(snapshot.modelRoute.providerConfiguration, this.environment),
+        ...(policy.practiceProfileCatalog === undefined ? {} : { practiceProfileCatalog: policy.practiceProfileCatalog }),
+        ...(policy.stepExecutionStrategy === undefined ? {} : { stepExecutionStrategy: policy.stepExecutionStrategy }),
+        planTemplates: policy.planTemplates,
       };
-    } catch {
-      throw new RunEnvironmentUnavailableError("Control-plane model route is not a valid provider configuration");
+    } catch (error) {
+      if (error instanceof RunEnvironmentUnavailableError) throw error;
+      throw new RunEnvironmentUnavailableError("Control-plane configuration is unavailable");
     }
   }
 }
