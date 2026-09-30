@@ -125,7 +125,7 @@ function configurationSnapshotReference(snapshot: RuntimeConfigurationSnapshot):
 export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunResolver {
   private readonly target: RuntimeTarget;
   private readonly environments: RunEnvironmentResolver;
-  private readonly portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort;
+  private readonly portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort | Promise<RuntimeHostRunPort>;
   private readonly portsBySnapshotId = new Map<string, {
     readonly configurationSnapshot: RuntimeConfigurationSnapshotReference;
     readonly port: Promise<RuntimeHostRunPort>;
@@ -133,14 +133,14 @@ export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunReso
   public constructor(
     target: RuntimeTarget,
     environments: RunEnvironmentResolver,
-    portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort,
+    portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort | Promise<RuntimeHostRunPort>,
   ) { this.target = target; this.environments = environments; this.portForEnvironment = portForEnvironment; }
 
   public async resolveForAdmission(subject: { readonly tenantId: string; readonly userId: string }): Promise<RuntimeHostRunPort> {
     if (subject.tenantId !== this.target.tenantId) {
       throw new RunEnvironmentUnavailableError("Dispatch tenant is not authorized for this control-plane Runtime target");
     }
-    return this.portForEnvironment(await this.environments.resolveForAdmission(this.target));
+    return await this.portForEnvironment(await this.environments.resolveForAdmission(this.target));
   }
 
   public async resolveForRun(configurationSnapshot: RuntimeConfigurationSnapshotReference): Promise<RuntimeHostRunPort> {
@@ -150,7 +150,7 @@ export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunReso
       return await existing.port;
     }
     const created = this.environments.restoreForRun(this.target, configurationSnapshot)
-      .then((environment) => this.portForEnvironment(environment));
+      .then(async (environment) => await this.portForEnvironment(environment));
     this.portsBySnapshotId.set(configurationSnapshot.snapshotId, { configurationSnapshot, port: created });
     try {
       return await created;

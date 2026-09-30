@@ -314,6 +314,7 @@ export class RunService {
     acceptanceProviders?: readonly ArtifactAcceptanceProvider[];
     computerExecutableAliases?: Readonly<Record<string, string>>;
     computerCommandEnvironment?: Readonly<Record<string, string>>;
+    computerCommandEnvironmentForInvocation?: import("../computer/computer-executor.ts").ComputerExecutorOptions["commandEnvironmentForInvocation"];
     tools?: readonly RuntimeTool<unknown>[];
     systemPrompt?: string;
     maxSteps?: number;
@@ -347,6 +348,7 @@ export class RunService {
     const computerExecutor = new ComputerExecutor(options.workspaceRoot ?? process.cwd(), {
       executableAliases: options.computerExecutableAliases,
       commandEnvironment: options.computerCommandEnvironment,
+      commandEnvironmentForInvocation: options.computerCommandEnvironmentForInvocation,
       readOnlyRoots: skillReadOnlyRoots,
     });
     this.workspaceRoot = computerExecutor.workspaceRoot;

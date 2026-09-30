@@ -22,6 +22,10 @@ const migrations: readonly ExecutableControlPlaneMigration[] = [{
   id: "control-plane/0002_configuration_revision_sequence",
   definition: "cp_configuration_revision_sequence:v1",
   apply: async (database) => { await database.exec(configurationRevisionSequenceSql(database.dialect)); },
+}, {
+  id: "control-plane/0003_credential_grants_and_integration_invocations",
+  definition: "cp_credential_grants;cp_integration_invocations:v1",
+  apply: async (database) => { await database.exec(integrationDeliverySchemaSql(database.dialect)); },
 }];
 
 /** Standalone migration entry point. No Router, Host, or Admin API startup code calls this. */
@@ -133,6 +137,42 @@ function configurationRevisionSequenceSql(dialect: SqlConnection["dialect"]): st
     id INTEGER PRIMARY KEY, revision INTEGER NOT NULL
   );
   INSERT OR IGNORE INTO cp_configuration_revision_sequence(id, revision) VALUES (1, 0);`;
+}
+
+/** Invocation tables retain opaque capability metadata and redacted receipts only. */
+export function integrationDeliverySchemaSql(dialect: SqlConnection["dialect"]): string {
+  if (dialect === "tidb") return String.raw`CREATE TABLE IF NOT EXISTS cp_credential_grants (
+    id VARCHAR(191) PRIMARY KEY, invocation_id VARCHAR(191) NOT NULL, target_plane VARCHAR(8) NOT NULL,
+    tenant_id VARCHAR(191) NOT NULL, runtime_id VARCHAR(191) NOT NULL, runtime_class VARCHAR(191), device_id VARCHAR(191),
+    binding_id VARCHAR(191) NOT NULL, release_id VARCHAR(191) NOT NULL, content_hash CHAR(64) NOT NULL,
+    secret_reference_id VARCHAR(191) NOT NULL, secret_reference_version VARCHAR(191) NOT NULL,
+    expires_at BIGINT NOT NULL, revoked_at BIGINT, used_at BIGINT, created_at BIGINT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS cp_credential_grants_binding_idx ON cp_credential_grants(binding_id, expires_at);
+  CREATE TABLE IF NOT EXISTS cp_integration_invocations (
+    id VARCHAR(191) PRIMARY KEY, grant_id VARCHAR(191) NOT NULL UNIQUE, invocation_id VARCHAR(191) NOT NULL,
+    binding_id VARCHAR(191) NOT NULL, release_id VARCHAR(191) NOT NULL, content_hash CHAR(64) NOT NULL,
+    action VARCHAR(191) NOT NULL, args_hash CHAR(64) NOT NULL, secret_reference_version VARCHAR(191) NOT NULL,
+    status VARCHAR(32) NOT NULL, reason_code VARCHAR(64), observed_at BIGINT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS cp_integration_invocations_binding_idx ON cp_integration_invocations(binding_id, observed_at);`;
+  const text = "TEXT";
+  const epoch = dialect === "postgres" ? "BIGINT" : "INTEGER";
+  return String.raw`CREATE TABLE IF NOT EXISTS cp_credential_grants (
+    id ${text} PRIMARY KEY, invocation_id ${text} NOT NULL, target_plane ${text} NOT NULL,
+    tenant_id ${text} NOT NULL, runtime_id ${text} NOT NULL, runtime_class ${text}, device_id ${text},
+    binding_id ${text} NOT NULL, release_id ${text} NOT NULL, content_hash ${text} NOT NULL,
+    secret_reference_id ${text} NOT NULL, secret_reference_version ${text} NOT NULL,
+    expires_at ${epoch} NOT NULL, revoked_at ${epoch}, used_at ${epoch}, created_at ${epoch} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS cp_credential_grants_binding_idx ON cp_credential_grants(binding_id, expires_at);
+  CREATE TABLE IF NOT EXISTS cp_integration_invocations (
+    id ${text} PRIMARY KEY, grant_id ${text} NOT NULL UNIQUE, invocation_id ${text} NOT NULL,
+    binding_id ${text} NOT NULL, release_id ${text} NOT NULL, content_hash ${text} NOT NULL,
+    action ${text} NOT NULL, args_hash ${text} NOT NULL, secret_reference_version ${text} NOT NULL,
+    status ${text} NOT NULL, reason_code ${text}, observed_at ${epoch} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS cp_integration_invocations_binding_idx ON cp_integration_invocations(binding_id, observed_at);`;
 }
 
 function tidbSchemaSql(): string {

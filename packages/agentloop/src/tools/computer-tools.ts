@@ -639,6 +639,15 @@ export function createComputerTools(
       execute: async (context, value) => executorForContext(executor, context).runCommand({
         ...withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
         signal: context.signal,
+        invocationContext: {
+          runId: context.grant.runId,
+          ...(context.grant.planId === undefined ? {} : { planId: context.grant.planId }),
+          ...(context.grant.stepId === undefined ? {} : { stepId: context.grant.stepId }),
+          skillNames: context.grant.skillExecutionRoots.map((root) => root.name),
+          command: (value as { command: string }).command,
+          args: (value as { args: string[] }).args,
+          cwd: (value as { cwd: string }).cwd,
+        },
       }),
     },
   ];

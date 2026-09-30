@@ -12,7 +12,9 @@ function release(resourceId: string, releaseId: string, kind: ResourceKind): Res
   const content = {
     kind,
     schemaVersion: kind === "model_route" ? "model-route/v1" : `${kind}/v1`,
-    payload: kind === "model_route" ? { providerConfiguration: { defaultProvider: "example", defaultModelKey: "example-model", providers: {}, models: {} } } : { name: resourceId },
+    payload: kind === "model_route" ? { providerConfiguration: { defaultProvider: "example", defaultModelKey: "example-model", providers: {}, models: {} } }
+      : kind === "integration" ? { name: resourceId, integration: "enterprise_info", allowedActions: ["search", "detail"] }
+        : { name: resourceId },
   };
   return {
     contractVersion: "control-plane/v1", resourceId, releaseId, version: 1, ...content,
@@ -51,7 +53,7 @@ test("snapshot resolver selects only active releases at the target scope and emi
     const snapshot = await resolver.desiredSnapshot({ plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" });
     assert.equal(snapshot.modelRoute?.releaseId, model.releaseId);
     assert.deepEqual(snapshot.modelRoute?.providerConfiguration, { defaultProvider: "example", defaultModelKey: "example-model", providers: {}, models: {} });
-    assert.deepEqual(snapshot.integrations, [{ bindingId: "search-assignment", releaseId: integration.releaseId, contentHash: integration.contentHash }]);
+    assert.deepEqual(snapshot.integrations, [{ bindingId: "search-assignment", releaseId: integration.releaseId, contentHash: integration.contentHash, integration: "enterprise_info", allowedActions: ["search", "detail"] }]);
     assert.deepEqual(snapshot.policies, [{ releaseId: policy.releaseId, contentHash: policy.contentHash }]);
     assert.equal(snapshot.skills.length, 0);
     assert.equal(snapshot.resolvedAt, 1_000);

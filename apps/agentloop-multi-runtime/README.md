@@ -187,17 +187,11 @@ SQLite 事务、PostgreSQL advisory transaction lock 或 TiDB advisory lock 串�
 
 所有 Host 必须能读取同一组目录，否则 Router 的能力路由无法判断某个实例是否缺少某个 Skill；不存在目录、非法 Skill 包或跨目录重名都会在 Host 启动同步时明确失败。
 
-### Enterprise Info 直连配置
+### Enterprise Info Broker 配置
 
-`custom-skills/enterprise-info` 是一个独立的 Skill 包：它通过自己的 `scripts/enterprise_info.py` 直接调用企业信息 API，不经过 Platform Gateway，也不会注册 `enterprise_info_query` Runtime Tool。将下列三项一起放入仅 Runtime Host 读取的 `.env` 或部署 secret store；所有 Host 必须配置相同的值。不要把它们写入 Skill 文件、`skill-directories.json`、Router 或浏览器环境。
+Cloud `custom-skills/enterprise-info` 仅通过 Runtime Host 的受保护 integration broker 请求 `enterprise_info.search` 或 `enterprise_info.detail`。Skill 子进程只拿到一次性 socket permit；它不会读取 `.env`、endpoint、client ID、client secret 或 access token，也不会注册 `enterprise_info_query` Runtime Tool。
 
-```dotenv
-ENTERPRISE_INFO_API_BASE_URL=https://enterprise-api.example
-ENTERPRISE_INFO_API_CLIENT_ID=replace-at-deploy
-ENTERPRISE_INFO_API_CLIENT_SECRET=replace-at-deploy
-```
-
-Host 只会向 Skill 子进程提供 `ENTERPRISE_INFO_ENV_FILE`（部署 `.env` 文件路径，不是密钥）；脚本自行读取并校验三项配置。三项缺失或部分配置时，脚本安全地失败。可用 `ENTERPRISE_INFO_ENV_FILE` 覆盖该路径，但该变量自身不得包含凭据。
+当 `RUNTIME_CONFIGURATION_SOURCE=control_plane` 时，Host 需要已认证的 delivery API、一个已确认的 `enterprise_info` binding（含 `search`/`detail` allowlist）以及部署侧 secret-provider adapter。缺少 binding、过期 grant 或不可用 provider 时会以稳定错误失败；不得回退到 `ENTERPRISE_INFO_ENV_FILE`。Local Agent 的旧路径由 WP-5 迁移，不能据此配置 Cloud Host。
 
 ```bash
 # 终端 1：Router（默认读取 config/runtimes.json）

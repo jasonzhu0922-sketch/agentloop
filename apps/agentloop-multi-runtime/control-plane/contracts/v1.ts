@@ -122,6 +122,9 @@ export interface ModelRouteReference extends ReleaseReference {
 
 export interface IntegrationBindingReference extends ReleaseReference {
   readonly bindingId: string;
+  /** Brokered releases declare their invocation vocabulary; legacy public references cannot authorize a call. */
+  readonly integration?: string;
+  readonly allowedActions?: readonly string[];
 }
 
 export interface SkillReleaseReference {
@@ -143,6 +146,61 @@ export interface ApplyReceipt {
   readonly reasonCode?: ControlPlaneErrorCode;
 }
 
+/** A workload asks for one short-lived capability, never a credential value. */
+export interface CredentialGrantRequest {
+  readonly contractVersion: typeof CONTROL_PLANE_CONTRACT_VERSION;
+  readonly invocationId: string;
+  readonly runId: string;
+  readonly planId?: string;
+  readonly stepId?: string;
+  readonly integration: string;
+  readonly action: string;
+  readonly bindingId: string;
+  readonly releaseId: string;
+  readonly contentHash: string;
+  readonly skillNames: readonly string[];
+  readonly requestedAt: number;
+}
+
+/** Opaque, single-operation capability metadata. It intentionally has no endpoint or secret value. */
+export interface CredentialGrant {
+  readonly contractVersion: typeof CONTROL_PLANE_CONTRACT_VERSION;
+  readonly grantId: string;
+  readonly invocationId: string;
+  readonly bindingId: string;
+  readonly releaseId: string;
+  readonly contentHash: string;
+  readonly secretReferenceVersion: string;
+  readonly expiresAt: number;
+}
+
+export interface IntegrationInvocationRequest {
+  readonly contractVersion: typeof CONTROL_PLANE_CONTRACT_VERSION;
+  readonly grantId: string;
+  readonly invocation: CredentialGrantRequest;
+  /** Integration-owned, schema-validated action input. Never contains a secret. */
+  readonly args: Readonly<Record<string, unknown>>;
+}
+
+/** Persistable, redacted proof of a brokered external invocation. */
+export interface IntegrationInvocationReceipt {
+  readonly contractVersion: typeof CONTROL_PLANE_CONTRACT_VERSION;
+  readonly receiptId: string;
+  readonly invocationId: string;
+  readonly bindingId: string;
+  readonly releaseId: string;
+  readonly contentHash: string;
+  readonly secretReferenceVersion: string;
+  readonly status: "completed" | "failed" | "rejected";
+  readonly reasonCode?: ControlPlaneErrorCode;
+  readonly observedAt: number;
+}
+
+export interface IntegrationInvocationResponse {
+  readonly result: Readonly<Record<string, unknown>>;
+  readonly receipt: IntegrationInvocationReceipt;
+}
+
 export const CONTROL_PLANE_ERROR_CODES = [
   "configuration_unavailable",
   "invalid_contract",
@@ -158,6 +216,10 @@ export const CONTROL_PLANE_ERROR_CODES = [
   "release_hash_mismatch",
   "duplicate_release",
   "assignment_conflict",
+  "integration_not_authorized",
+  "credential_grant_expired",
+  "integration_upstream_failed",
+  "integration_response_invalid",
 ] as const;
 
 export type ControlPlaneErrorCode = (typeof CONTROL_PLANE_ERROR_CODES)[number];

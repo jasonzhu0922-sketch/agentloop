@@ -256,6 +256,17 @@ export interface CommandRootMount {
   readonly path: string;
 }
 
+/** Opaque execution facts a Host may use to add non-secret per-command wiring. */
+export interface CommandInvocationContext {
+  readonly runId: string;
+  readonly planId?: string;
+  readonly stepId?: string;
+  readonly skillNames: readonly string[];
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+}
+
 export interface ComputerExecutorOptions {
   /**
    * Server-owned executable aliases. The model receives only the alias while
@@ -264,6 +275,8 @@ export interface ComputerExecutorOptions {
   readonly executableAliases?: Readonly<Record<string, string>>;
   /** Non-secret, server-owned variables made available to spawned tools. */
   readonly commandEnvironment?: Readonly<Record<string, string>>;
+  /** Host-owned per-command wiring. It may return only non-secret values. */
+  readonly commandEnvironmentForInvocation?: (context: CommandInvocationContext) => Readonly<Record<string, string>>;
   /** Server-managed trees that Computer write operations must never modify. */
   readonly readOnlyRoots?: readonly string[];
   /** Server-managed, read-only roots that may be used as command cwd aliases. */
@@ -276,6 +289,7 @@ export class ComputerExecutor {
   readonly workspaceRoot: string;
   private readonly executableAliases: ReadonlyMap<string, string>;
   private readonly commandEnvironment: Readonly<Record<string, string>>;
+  private readonly commandEnvironmentForInvocation?: ComputerExecutorOptions["commandEnvironmentForInvocation"];
   private readonly readOnlyRoots: readonly string[];
   private readonly commandRoots: readonly CommandRootMount[];
   private readonly fileRevisionScope?: string;
@@ -311,6 +325,7 @@ export class ComputerExecutor {
         return [name, value];
       })),
     );
+    this.commandEnvironmentForInvocation = options.commandEnvironmentForInvocation;
     this.readOnlyRoots = Object.freeze((options.readOnlyRoots ?? []).map((root) => realpathSync(resolve(root))));
     this.commandRoots = Object.freeze((options.commandRoots ?? []).map((root) => {
       if (!COMMAND_ROOT_ID_PATTERN.test(root.id)) {
@@ -335,6 +350,7 @@ export class ComputerExecutor {
     return new ComputerExecutor(workspaceRoot, {
       executableAliases: Object.fromEntries(this.executableAliases),
       commandEnvironment: this.commandEnvironment,
+      commandEnvironmentForInvocation: this.commandEnvironmentForInvocation,
       readOnlyRoots: this.readOnlyRoots,
       commandRoots: options.commandRoots ?? this.commandRoots,
       fileRevisionScope: options.fileRevisionScope ?? this.fileRevisionScope,
@@ -1408,6 +1424,8 @@ export class ComputerExecutor {
     computationInputs?: readonly CommandComputationInput[];
     workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
     signal?: AbortSignal;
+    /** Runtime-supplied opaque facts; callers never control the child environment directly. */
+    invocationContext?: CommandInvocationContext;
   }): Promise<{
     exitCode: number | null;
     signal: string | null;
@@ -1466,6 +1484,7 @@ export class ComputerExecutor {
     computationInputs?: readonly CommandComputationInput[];
     workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
     signal?: AbortSignal;
+    invocationContext?: CommandInvocationContext;
   }): Promise<{
     exitCode: number | null;
     signal: string | null;
@@ -1505,6 +1524,7 @@ export class ComputerExecutor {
         env: buildCommandEnvironment({
           ...commandRootEnvironment(this.commandRoots),
           ...this.commandEnvironment,
+          ...this.commandEnvironmentFor(input.invocationContext),
         }),
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1628,6 +1648,18 @@ export class ComputerExecutor {
         })();
       });
     });
+  }
+
+  private commandEnvironmentFor(context: CommandInvocationContext | undefined): Readonly<Record<string, string>> {
+    if (context === undefined || this.commandEnvironmentForInvocation === undefined) return {};
+    const environment = this.commandEnvironmentForInvocation(context);
+    return Object.freeze(Object.fromEntries(Object.entries(environment).map(([name, value]) => {
+      if (!ENVIRONMENT_NAME_PATTERN.test(name) || SENSITIVE_ENVIRONMENT_NAME_PATTERN.test(name)) {
+        throw new TypeError(`Per-command environment has an invalid or sensitive variable ${name}`);
+      }
+      if (typeof value !== "string" || value.includes("\0")) throw new TypeError(`Per-command environment ${name} must be a string without NUL bytes`);
+      return [name, value];
+    })));
   }
 
   private async captureCommandComputationInputs(

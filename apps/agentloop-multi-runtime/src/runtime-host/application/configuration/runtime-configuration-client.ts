@@ -84,7 +84,17 @@ export function parseRuntimeConfigurationSnapshot(value: unknown): RuntimeConfig
   const integrations = value.integrations.map((item) => {
     const reference = parseReference(item);
     if (!record(item) || !text(item.bindingId)) throw invalidSnapshot();
-    return { bindingId: item.bindingId, ...reference };
+    let integration: string | undefined;
+    let allowedActions: readonly string[] | undefined;
+    if (item.integration !== undefined) {
+      if (!text(item.integration)) throw invalidSnapshot();
+      integration = item.integration;
+    }
+    if (item.allowedActions !== undefined) {
+      if (!Array.isArray(item.allowedActions) || !item.allowedActions.every(text)) throw invalidSnapshot();
+      allowedActions = item.allowedActions;
+    }
+    return { bindingId: item.bindingId, ...reference, ...(integration === undefined || allowedActions === undefined ? {} : { integration, allowedActions }) };
   });
   const skills = value.skills.map((item) => {
     if (!record(item) || !text(item.releaseId) || !hash(item.packageHash) || !hash(item.contentHash)) throw invalidSnapshot();

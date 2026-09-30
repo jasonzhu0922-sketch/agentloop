@@ -5,7 +5,7 @@ import { AppDatabase } from "@zhujun/agentloop";
 import type { AdminAuthorizationPort, AdminPrincipal, WorkloadPrincipal } from "../src/authorization/ports.ts";
 import { createAdminApiServer } from "../src/bootstrap/server.ts";
 import { contentHashForRelease, ReleaseApplicationService } from "../src/application/release-service.ts";
-import type { RuntimeConfigurationSnapshotPort } from "../src/transport/admin-http/handler.ts";
+import type { IntegrationDeliveryPort, RuntimeConfigurationSnapshotPort } from "../src/transport/admin-http/handler.ts";
 import { migrateControlPlane } from "../src/persistence/control-plane-migrations.ts";
 import { SqlControlPlaneStore } from "../src/persistence/sql-control-plane-store.ts";
 
@@ -73,6 +73,38 @@ test("delivery target is derived solely from workload identity", async () => {
     assert.equal(response.status, 200);
     assert.deepEqual(resolvedTarget, { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
     assert.deepEqual((await response.json() as { target: WorkloadPrincipal["target"] }).target, resolvedTarget);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("integration delivery endpoints derive workload target and never accept a caller-supplied target", async () => {
+  const requests: unknown[] = [];
+  const integrations: IntegrationDeliveryPort = {
+    requestGrant: async (target, request) => {
+      requests.push({ target, request });
+      return { contractVersion: "control-plane/v1", grantId: "grant-a", invocationId: request.invocationId, bindingId: request.bindingId, releaseId: request.releaseId, contentHash: request.contentHash, secretReferenceVersion: "version-a", expiresAt: 2_000 };
+    },
+    invoke: async (target, request) => {
+      requests.push({ target, request });
+      return { result: { queries: [] }, receipt: { contractVersion: "control-plane/v1", receiptId: "receipt-a", invocationId: request.invocation.invocationId, bindingId: request.invocation.bindingId, releaseId: request.invocation.releaseId, contentHash: request.invocation.contentHash, secretReferenceVersion: "version-a", status: "completed", observedAt: 1_000 } };
+    },
+  };
+  const server = createAdminApiServer({ authorization: new TestAuthorization(), integrations });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const invocation = {
+      contractVersion: "control-plane/v1", invocationId: "invocation-a", runId: "run-a", integration: "enterprise_info", action: "search",
+      bindingId: "binding-a", releaseId: "release-a", contentHash: "a".repeat(64), skillNames: ["enterprise-info"], requestedAt: 1_000,
+    };
+    assert.equal((await fetch(`${baseUrl}/delivery/v1/credential-grants`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: invocation }) })).status, 403);
+    const grant = await fetch(`${baseUrl}/delivery/v1/credential-grants`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json" }, body: JSON.stringify({ request: { ...invocation, target: { tenantId: "attacker" } } }) });
+    assert.equal(grant.status, 201);
+    assert.equal((await fetch(`${baseUrl}/delivery/v1/integration-invocations`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json" }, body: JSON.stringify({ request: { contractVersion: "control-plane/v1", grantId: "grant-a", invocation, args: {} } }) })).status, 200);
+    assert.deepEqual((requests[0] as { target: WorkloadPrincipal["target"] }).target, { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
+    assert.deepEqual((requests[1] as { target: WorkloadPrincipal["target"] }).target, { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
   }

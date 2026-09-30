@@ -2045,6 +2045,36 @@ test("server-owned executable aliases expose a safe name instead of an arbitrary
   }
 });
 
+test("Host-owned per-command wiring receives opaque invocation facts and rejects sensitive environment names", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-invocation-"));
+  try {
+    const contexts: Array<{ runId: string; skillNames: readonly string[] }> = [];
+    const executor = new ComputerExecutor(root, {
+      executableAliases: { "trusted-node": process.execPath },
+      commandEnvironmentForInvocation: (context) => {
+        contexts.push(context);
+        return { AGENTLOOP_INTEGRATION_PERMIT: "opaque-one-shot-capability" };
+      },
+    });
+    const result = await executor.runCommand({
+      command: "trusted-node",
+      args: ["-e", "process.stdout.write(process.env.AGENTLOOP_INTEGRATION_PERMIT ?? 'missing')"],
+      cwd: ".",
+      timeoutMs: 2_000,
+      invocationContext: { runId: "run-a", skillNames: ["enterprise-info"], command: "node", args: [], cwd: "." },
+    });
+    assert.equal(result.stdout, "opaque-one-shot-capability");
+    assert.deepEqual(contexts, [{ runId: "run-a", skillNames: ["enterprise-info"], command: "node", args: [], cwd: "." }]);
+    const sensitive = new ComputerExecutor(root, { executableAliases: { "trusted-node": process.execPath }, commandEnvironmentForInvocation: () => ({ INTEGRATION_TOKEN: "must-not-cross" }) });
+    await assert.rejects(
+      () => sensitive.runCommand({ command: "trusted-node", args: ["-e", ""], cwd: ".", timeoutMs: 2_000, invocationContext: { runId: "run-a", skillNames: [], command: "node", args: [], cwd: "." } }),
+      /invalid or sensitive variable/,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("computer_run_command binds a standard computation artifact to immutable inputs", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-command-computation-"));
   try {

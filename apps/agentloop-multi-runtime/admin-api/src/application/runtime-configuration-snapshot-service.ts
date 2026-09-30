@@ -30,7 +30,7 @@ export class RuntimeConfigurationSnapshotService {
       return { releaseId: release.releaseId, packageHash, contentHash: release.contentHash };
     }));
     const integrations = active.filter((entry) => entry.resource.kind === "integration")
-      .map(({ release, assignmentId }) => ({ bindingId: assignmentId, releaseId: release.releaseId, contentHash: release.contentHash }));
+      .map(({ release, assignmentId }) => integrationReference(release, assignmentId));
     const policies = active.filter((entry) => entry.resource.kind === "policy")
       .map(({ release }) => ({ releaseId: release.releaseId, contentHash: release.contentHash }));
     const resolvedAt = this.now();
@@ -58,6 +58,13 @@ function modelRouteReference(release: ResourceRelease): { readonly releaseId: st
     throw new ControlPlaneError("configuration_unavailable", `Model route ${release.releaseId} does not contain a model-route/v1 provider configuration`);
   }
   return { releaseId: release.releaseId, contentHash: release.contentHash, providerConfiguration: release.payload.providerConfiguration };
+}
+
+function integrationReference(release: ResourceRelease, bindingId: string): { readonly bindingId: string; readonly releaseId: string; readonly contentHash: string; readonly integration?: string; readonly allowedActions?: readonly string[] } {
+  const integration = typeof release.payload.integration === "string" ? release.payload.integration : undefined;
+  const allowedActions = Array.isArray(release.payload.allowedActions) && release.payload.allowedActions.every((item) => typeof item === "string")
+    ? release.payload.allowedActions as readonly string[] : undefined;
+  return { bindingId, releaseId: release.releaseId, contentHash: release.contentHash, ...(integration === undefined || allowedActions === undefined ? {} : { integration, allowedActions }) };
 }
 
 function referenceOrder(left: { releaseId: string }, right: { releaseId: string }): number { return left.releaseId.localeCompare(right.releaseId); }

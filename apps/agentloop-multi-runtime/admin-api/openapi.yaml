@@ -53,6 +53,22 @@ paths:
       responses:
         '201': { description: Receipt persisted }
         '403': { description: Workload identity is missing or names a different target }
+  /delivery/v1/credential-grants:
+    post:
+      operationId: requestCredentialGrant
+      description: Requires workload identity and issues one short-lived opaque capability for an active integration binding. It never returns credential material.
+      responses:
+        '201': { description: Opaque grant metadata issued }
+        '400': { description: Invalid, unauthorized, or expired binding request }
+        '403': { description: Workload identity is missing }
+  /delivery/v1/integration-invocations:
+    post:
+      operationId: invokeIntegration
+      description: Consumes one credential grant and returns a schema-validated, redacted integration result plus receipt.
+      responses:
+        '200': { description: Invocation result and redacted receipt }
+        '400': { description: Expired grant, invalid response, or upstream failure }
+        '403': { description: Workload identity is missing }
 components:
   schemas:
     RuntimeConfigurationSnapshot:

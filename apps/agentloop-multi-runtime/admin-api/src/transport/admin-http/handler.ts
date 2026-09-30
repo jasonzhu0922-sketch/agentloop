@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
+import type { CredentialGrant, CredentialGrantRequest, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
 import { ControlPlaneError } from "../../../../control-plane/domain/index.ts";
 import type { AdminAuthorizationPort } from "../../authorization/ports.ts";
 import type { ReleaseApplicationService } from "../../application/release-service.ts";
@@ -10,11 +10,18 @@ export interface AdminHttpDependencies {
   /** Undefined means the process has no configured, migration-ready control-plane database. */
   readonly releases?: ReleaseApplicationService;
   readonly snapshots?: RuntimeConfigurationSnapshotPort;
+  readonly integrations?: IntegrationDeliveryPort;
 }
 
 /** Delivery transport depends on the snapshot capability, not its application-service implementation. */
 export interface RuntimeConfigurationSnapshotPort {
   desiredSnapshot(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot>;
+}
+
+/** Secret-provider implementation stays behind this Admin delivery port. */
+export interface IntegrationDeliveryPort {
+  requestGrant(target: RuntimeTarget, request: CredentialGrantRequest): Promise<CredentialGrant>;
+  invoke(target: RuntimeTarget, request: IntegrationInvocationRequest): Promise<IntegrationInvocationResponse>;
 }
 
 /** HTTP does only decoding, principal derivation, and response encoding. Release rules stay in application/domain. */
@@ -27,6 +34,20 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
         if (principal === undefined || dependencies.snapshots === undefined) return respond(response, 403, { code: "target_not_authorized" });
         return respond(response, 200, await dependencies.snapshots.desiredSnapshot(principal.target));
+      }
+      if (request.method === "POST" && url.pathname === "/delivery/v1/credential-grants") {
+        const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.integrations === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const body = await jsonBody(request) as { request?: CredentialGrantRequest };
+        if (body.request === undefined) throw new ControlPlaneError("invalid_contract", "credential grant request is required");
+        return respond(response, 201, await dependencies.integrations.requestGrant(principal.target, body.request));
+      }
+      if (request.method === "POST" && url.pathname === "/delivery/v1/integration-invocations") {
+        const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
+        if (principal === undefined || dependencies.integrations === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        const body = await jsonBody(request) as { request?: IntegrationInvocationRequest };
+        if (body.request === undefined) throw new ControlPlaneError("invalid_contract", "integration invocation request is required");
+        return respond(response, 200, await dependencies.integrations.invoke(principal.target, body.request));
       }
       if (dependencies.releases === undefined) return respond(response, 503, { code: "migration_not_ready" });
       const auditEventId = request.headers["x-request-id"];

@@ -1,0 +1,37 @@
+{
+  "schema": "agentloop.skillExecutors/v1",
+  "executors": [
+    {
+      "id": "enterprise-info-query",
+      "description": "Query current mainland China enterprise registration information.",
+      "command": "python3",
+      "script": "scripts/enterprise_info.py",
+      "integration": "enterprise_info",
+      "actions": [
+        {
+          "id": "search",
+          "description": "Find enterprise candidates from a name, abbreviation, or recognizable clue.",
+          "inputs": [
+            { "name": "name", "description": "The enterprise name or recognizable clue from the user.", "required": true }
+          ],
+          "args": ["--action", "search", "--name", "{{name}}"],
+          "result": "Candidate enterprises for confirmation or a no-result response."
+        },
+        {
+          "id": "detail",
+          "description": "Retrieve registration details for one exact identified enterprise. Use the selected candidate label verbatim and its identityRef as the result binding; do not shorten a branch name or substitute a parent/related entity.",
+          "inputs": [
+            { "name": "name", "description": "The exact selected candidate label. Preserve the full label verbatim.", "required": true },
+            { "name": "identity-ref", "description": "The selected candidate identityRef (normally its unified social credit code). The detail result must match it.", "required": true }
+          ],
+          "decisionBinding": {
+            "labelInputs": ["name"],
+            "identityRefInputs": ["identity-ref"]
+          },
+          "args": ["--action", "detail", "--name", "{{name}}", "--identity-ref", "{{identity-ref}}"],
+          "result": "A standardized registration summary only when the returned identity matches the supplied selected identityRef; otherwise a structured decision conflict."
+        }
+      ]
+    }
+  ]
+}

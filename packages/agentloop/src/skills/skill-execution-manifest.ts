@@ -41,6 +41,8 @@ export interface SkillExecutionEntrypoint {
   readonly description: string;
   readonly command: string;
   readonly script: string;
+  /** Optional capability namespace; it declares no credential or endpoint. */
+  readonly integration?: string;
   readonly actions: readonly SkillExecutionAction[];
 }
 
@@ -82,9 +84,16 @@ function parseEntrypoint(value: unknown): SkillExecutionEntrypoint {
   const command = text(entry.command, "Skill executor command", 120);
   if (command.includes("/") || command.includes("\\") || /\s/u.test(command)) throw new Error("Skill executor command must be a bare executable name");
   const script = relativePath(entry.script, "Skill executor script");
+  const integration = entry.integration === undefined ? undefined : integrationName(entry.integration);
   const actions = array(entry.actions, "Skill executor actions", 1, 32).map((action) => parseAction(action));
   if (new Set(actions.map((action) => action.id)).size !== actions.length) throw new Error("Skill executor action ids must be unique");
-  return { id, description, command, script, actions };
+  return { id, description, command, script, ...(integration === undefined ? {} : { integration }), actions };
+}
+
+function integrationName(value: unknown): string {
+  const name = text(value, "Skill executor integration", 80);
+  if (!/^[a-z][a-z0-9_]*$/u.test(name)) throw new Error("Skill executor integration must use lowercase underscore identifier syntax");
+  return name;
 }
 
 function parseAction(value: unknown): SkillExecutionAction {

@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
@@ -22,14 +23,10 @@ import { createRuntimeConfigurationShadowOrchestrator } from "./application/conf
 import { RuntimeConfigurationClient } from "./application/configuration/runtime-configuration-client.ts";
 import { ControlPlaneAdmissionRunResolver, RunEnvironmentResolver } from "./application/configuration/run-environment-resolver.ts";
 import { SqlRuntimeConfigurationSnapshotCache } from "./persistence/runtime-configuration-snapshot-cache.ts";
+import { CloudIntegrationSecretBroker } from "./application/integrations/integration-secret-broker.ts";
+import { RuntimeIntegrationDeliveryClient } from "./application/integrations/integration-delivery-client.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
-// This non-sensitive path is the only Enterprise Info setting passed to
-// Skill-owned commands. The script reads credentials from the deployment file.
-const enterpriseInfoEnvironmentFile = resolve(
-  appRoot,
-  process.env.ENTERPRISE_INFO_ENV_FILE ?? "./.env",
-);
 // Like other Skill-owned integrations, pass only the deployment configuration
 // path. The mysql Skill reads credentials itself; neither Planner nor model
 // context ever receives them.
@@ -93,7 +90,7 @@ const skills = new SkillService(database, {
   skillDirectories,
 });
 const skillDirectorySync = await skills.syncSkillDirectories();
-const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnapshot?: import("@zhujun/agentloop").RuntimeConfigurationSnapshotReference): RunService => new RunService({
+const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnapshot?: import("@zhujun/agentloop").RuntimeConfigurationSnapshotReference, computerCommandEnvironmentForInvocation?: import("@zhujun/agentloop").ComputerExecutorOptions["commandEnvironmentForInvocation"]): RunService => new RunService({
   database,
   skills,
   modelFactory: registry === undefined ? () => { throw new Error("configuration_unavailable"); } : (onRetry, modelKey) => registry.create(modelKey, onRetry),
@@ -103,13 +100,14 @@ const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnap
   practiceProfileCatalog,
   tools: integrationTools,
   computerCommandEnvironment: {
-    ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
     STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
   },
+  ...(computerCommandEnvironmentForInvocation === undefined ? {} : { computerCommandEnvironmentForInvocation }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
   ...(configurationSnapshot === undefined ? {} : { configurationSnapshot }),
 });
 const runs = createRuns(providers);
+const integrationBrokers = new Set<CloudIntegrationSecretBroker>();
 const controlPlaneAdmissionRuns = configurationSource === "file" ? undefined : createControlPlaneAdmissionRuns();
 const runtimeHost = new AgentLoopRuntimeHost(new AgentLoopRuntimeRunPort(runs), new HttpResourceImporter(runs, routerAttachmentToken), {
   maxConcurrentRuns,
@@ -149,19 +147,19 @@ const reconciliationTimer = setInterval(() => {
 }, heartbeatIntervalMs);
 
 let closing = false;
-function shutdown(): void {
+async function shutdown(): Promise<void> {
   if (closing) return;
   closing = true;
   clearInterval(heartbeatTimer);
   clearInterval(reconciliationTimer);
   configurationShadow?.stop();
-  server.close(() => {
-    database.close();
-    process.exitCode = 0;
-  });
+  await Promise.all([...integrationBrokers].map((broker) => broker.close()));
+  await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  await database.close();
+  process.exitCode = 0;
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => { void shutdown().catch(() => { process.exitCode = 1; }); });
+process.on("SIGTERM", () => { void shutdown().catch(() => { process.exitCode = 1; }); });
 
 function integer(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
@@ -202,7 +200,16 @@ function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
   const target = { plane: "cloud" as const, tenantId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
   const client = new RuntimeConfigurationClient({ deliveryUrl, workloadToken, target });
   const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID });
-  return new ControlPlaneAdmissionRunResolver(target, environments, (environment) => new AgentLoopRuntimeRunPort(createRuns(environment.providers, environment.configurationSnapshot)));
+  const integrationDelivery = new RuntimeIntegrationDeliveryClient({ deliveryUrl, workloadToken });
+  return new ControlPlaneAdmissionRunResolver(target, environments, async (environment) => {
+    const broker = new CloudIntegrationSecretBroker({
+      target, snapshot: environment.snapshot, delivery: integrationDelivery,
+      socketPath: join(tmpdir(), `al-int-${runtimeId.slice(0, 20)}-${environment.snapshot.snapshotId.slice(0, 16)}.sock`),
+    });
+    await broker.start();
+    integrationBrokers.add(broker);
+    return new AgentLoopRuntimeRunPort(createRuns(environment.providers, environment.configurationSnapshot, (context) => broker.commandEnvironment(context)));
+  });
 }
 
 function runtimeConfigurationSource(value: string | undefined): "file" | "control_plane" {

@@ -5,7 +5,9 @@
 // reference implementation).
 export { BatchService } from "./batch/batch-service.ts";
 export type { BatchItemRecord, BatchRecord } from "./batch/batch-service.ts";
-export { ComputerExecutor } from "./computer/computer-executor.ts";
+export { ComputerExecutor, type CommandInvocationContext, type ComputerExecutorOptions } from "./computer/computer-executor.ts";
+export { readSkillExecutionManifest } from "./skills/skill-execution-manifest.ts";
+export type { SkillExecutionAction, SkillExecutionEntrypoint, SkillExecutionInput } from "./skills/skill-execution-manifest.ts";
 export type { ComputerDriver, ComputerSnapshot } from "./computer/computer-driver.ts";
 export { ArtifactAcceptanceService } from "./acceptance/artifact-acceptance.ts";
 export { assertPracticeProfileCatalog, practiceGuidanceForPrompt, practiceInputFamiliesForSourceKinds, resolvePracticeProfileResolution, resolvePracticeProfiles } from "./runtime/practice-profiles.ts";

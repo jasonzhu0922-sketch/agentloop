@@ -4,6 +4,7 @@ import { AppDatabase } from "@zhujun/agentloop";
 import {
   controlPlaneMigrationLedgerSql,
   controlPlaneSchemaSql,
+  integrationDeliverySchemaSql,
   ControlPlaneMigrationError,
   assertControlPlaneMigrationsReady,
   migrateControlPlane,
@@ -18,7 +19,7 @@ test("control-plane migrations own cp schema history and never use the Router le
     await assertControlPlaneMigrationsReady(database);
     const tables = await database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
     const names = new Set(tables.map((table) => table.name));
-    for (const table of ["cp_schema_migrations", "cp_configuration_revision_sequence", "cp_resources", "cp_releases", "cp_target_assignments", "cp_apply_receipts", "cp_audit_events"]) {
+    for (const table of ["cp_schema_migrations", "cp_configuration_revision_sequence", "cp_resources", "cp_releases", "cp_target_assignments", "cp_apply_receipts", "cp_credential_grants", "cp_integration_invocations", "cp_audit_events"]) {
       assert.equal(names.has(table), true, table);
     }
     assert.equal(names.has("mr_schema_migrations"), false);
@@ -38,6 +39,10 @@ test("TiDB receives source-level schema with varchar keys, longtext payloads, an
   assert.match(sql, /created_at BIGINT NOT NULL/);
   assert.doesNotMatch(sql, /LONGTEXT[^,\n]*DEFAULT/);
   assert.match(sql, /CREATE INDEX IF NOT EXISTS cp_target_assignments_resource_idx/);
+  const deliverySql = integrationDeliverySchemaSql("tidb");
+  assert.match(deliverySql, /cp_credential_grants/);
+  assert.match(deliverySql, /expires_at BIGINT NOT NULL/);
+  assert.match(deliverySql, /cp_integration_invocations/);
 });
 
 test("SQLite and PostgreSQL keep explicit portable control-plane definitions", () => {
