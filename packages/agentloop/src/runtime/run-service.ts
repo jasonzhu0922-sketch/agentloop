@@ -190,6 +190,8 @@ export interface RunRecord {
   readonly errorCode?: string;
   readonly createdAt: number;
   readonly finishedAt?: number;
+  /** Immutable Host admission provenance, present only for a snapshot-bound Run. */
+  readonly configurationSnapshot?: RuntimeConfigurationSnapshotReference;
   readonly sources?: readonly UploadedSourceSummary[];
 }
 
@@ -810,7 +812,7 @@ export class RunService {
     const sources = await Promise.all(
       (await this.sources.listByRun(row.id)).map((source) => this.sourceIntake.summary(source)),
     );
-    return toRunRecord(row, sources);
+    return toRunRecord(row, sources, configurationSnapshotFromEvents(await this.runtimeEvents(row.id)));
   }
 
   async plan(actorUserId: string, runId: string): Promise<{
@@ -7903,7 +7905,7 @@ function titleFromInput(input: string): string {
   return compact.length <= 60 ? compact : `${compact.slice(0, 57)}…`;
 }
 
-function toRunRecord(row: RunRow, sources: readonly UploadedSourceSummary[] = []): RunRecord {
+function toRunRecord(row: RunRow, sources: readonly UploadedSourceSummary[] = [], configurationSnapshot?: RuntimeConfigurationSnapshotReference): RunRecord {
   return {
     id: row.id,
     ownerUserId: row.owner_user_id,
@@ -7918,6 +7920,23 @@ function toRunRecord(row: RunRow, sources: readonly UploadedSourceSummary[] = []
     ...(row.error_code === null ? {} : { errorCode: row.error_code }),
     createdAt: row.created_at,
     ...(row.finished_at === null ? {} : { finishedAt: row.finished_at }),
+    ...(configurationSnapshot === undefined ? {} : { configurationSnapshot }),
     ...(sources.length === 0 ? {} : { sources }),
   };
+}
+
+function configurationSnapshotFromEvents(events: readonly { readonly type: string; readonly data: Readonly<Record<string, unknown>> }[]): RuntimeConfigurationSnapshotReference | undefined {
+  const value = events.find((event) => event.type === "run.started")?.data.configurationSnapshot;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.snapshotId !== "string" || !Number.isSafeInteger(record.configurationRevision) || !Array.isArray(record.releases)) return undefined;
+  const releases = record.releases.map((release) => {
+    if (release === null || typeof release !== "object" || Array.isArray(release)) throw new Error("Persisted Run configuration snapshot is invalid");
+    const item = release as Record<string, unknown>;
+    if ((item.kind !== "model_route" && item.kind !== "integration" && item.kind !== "skill" && item.kind !== "policy") || typeof item.releaseId !== "string" || typeof item.contentHash !== "string" || (item.packageHash !== undefined && typeof item.packageHash !== "string")) {
+      throw new Error("Persisted Run configuration snapshot is invalid");
+    }
+    return { kind: item.kind, releaseId: item.releaseId, contentHash: item.contentHash, ...(item.packageHash === undefined ? {} : { packageHash: item.packageHash }) };
+  });
+  return { snapshotId: record.snapshotId, configurationRevision: record.configurationRevision, releases } as RuntimeConfigurationSnapshotReference;
 }
