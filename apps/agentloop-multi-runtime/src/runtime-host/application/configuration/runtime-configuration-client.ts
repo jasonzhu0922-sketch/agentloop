@@ -37,7 +37,7 @@ export class RuntimeConfigurationClient {
       headers: { authorization: `Bearer ${this.workloadToken}` },
     });
     if (!response.ok) throw new RuntimeConfigurationClientError(`Delivery desired-configuration returned HTTP ${response.status}`);
-    const snapshot = parseSnapshot(await response.json());
+    const snapshot = parseRuntimeConfigurationSnapshot(await response.json());
     if (!sameTarget(snapshot.target, this.target)) throw new RuntimeConfigurationClientError("Delivery snapshot target does not match this workload identity");
     if (snapshot.validUntil <= this.now()) throw new RuntimeConfigurationClientError("Delivery snapshot is expired");
     this.cached = snapshot;
@@ -74,7 +74,8 @@ export class RuntimeConfigurationClient {
   }
 }
 
-function parseSnapshot(value: unknown): RuntimeConfigurationSnapshot {
+/** Strict transport decoder reused by the durable Host snapshot cache. */
+export function parseRuntimeConfigurationSnapshot(value: unknown): RuntimeConfigurationSnapshot {
   if (!record(value) || value.contractVersion !== "control-plane/v1") throw invalidSnapshot();
   if (!text(value.snapshotId) || !integer(value.configurationRevision) || !integer(value.resolvedAt) || !integer(value.validUntil) || value.validUntil <= value.resolvedAt) throw invalidSnapshot();
   const target = parseTarget(value.target);
