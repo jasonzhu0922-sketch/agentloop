@@ -93,7 +93,7 @@ export interface RuntimeConfigurationSnapshot {
   readonly target: RuntimeTarget;
   readonly resolvedAt: number;
   readonly validUntil: number;
-  readonly modelRoute?: ReleaseReference;
+  readonly modelRoute?: ModelRouteReference;
   readonly integrations: readonly IntegrationBindingReference[];
   readonly skills: readonly SkillReleaseReference[];
   readonly policies: readonly ReleaseReference[];
@@ -109,6 +109,15 @@ export interface ControlPlaneResource {
 export interface ReleaseReference {
   readonly releaseId: string;
   readonly contentHash: string;
+}
+
+/**
+ * Public, versioned model-route manifest. `providerConfiguration` deliberately
+ * contains no credential value: legacy `apiKeyEnv` names remain Host-local
+ * references until the secret broker work package replaces them.
+ */
+export interface ModelRouteReference extends ReleaseReference {
+  readonly providerConfiguration: Readonly<Record<string, unknown>>;
 }
 
 export interface IntegrationBindingReference extends ReleaseReference {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ConfigurationSnapshotRepositoryPort } from "../../../control-plane/domain/ports.ts";
 import { ControlPlaneError, resolveEffectiveAssignment } from "../../../control-plane/domain/index.ts";
 import type {
-  ControlPlaneResource, ReleaseReference, RuntimeConfigurationSnapshot, RuntimeTarget,
+  ControlPlaneResource, ReleaseReference, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget,
 } from "../../../control-plane/contracts/index.ts";
 
 /** Resolves only active desired state. It never reads a secret reference/value or Runtime database. */
@@ -20,8 +20,8 @@ export class RuntimeConfigurationSnapshotService {
 
   public async desiredSnapshot(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot> {
     const resources = await this.repository.listResources();
-    const selected = await Promise.all(resources.map(async (resource) => ({ resource, release: await this.selectedRelease(resource, target) })));
-    const active = selected.filter((entry): entry is { resource: ControlPlaneResource; release: ReleaseReference & { assignmentId: string; kind: ControlPlaneResource["kind"] } } => entry.release !== undefined);
+    const selected = await Promise.all(resources.map(async (resource) => ({ resource, selection: await this.selectedRelease(resource, target) })));
+    const active = selected.flatMap(({ resource, selection }) => selection === undefined ? [] : [{ resource, ...selection }]);
     const modelRoutes = active.filter((entry) => entry.resource.kind === "model_route");
     if (modelRoutes.length > 1) throw new ControlPlaneError("configuration_unavailable", "More than one active model-route resource applies to this target");
     const skills = await Promise.all(active.filter((entry) => entry.resource.kind === "skill").map(async ({ release }) => {
@@ -30,27 +30,34 @@ export class RuntimeConfigurationSnapshotService {
       return { releaseId: release.releaseId, packageHash, contentHash: release.contentHash };
     }));
     const integrations = active.filter((entry) => entry.resource.kind === "integration")
-      .map(({ release }) => ({ bindingId: release.assignmentId, releaseId: release.releaseId, contentHash: release.contentHash }));
+      .map(({ release, assignmentId }) => ({ bindingId: assignmentId, releaseId: release.releaseId, contentHash: release.contentHash }));
     const policies = active.filter((entry) => entry.resource.kind === "policy")
       .map(({ release }) => ({ releaseId: release.releaseId, contentHash: release.contentHash }));
     const resolvedAt = this.now();
     const configurationRevision = await this.repository.configurationRevision();
     const snapshot: Omit<RuntimeConfigurationSnapshot, "snapshotId"> = {
       contractVersion: "control-plane/v1", configurationRevision, target, resolvedAt, validUntil: resolvedAt + this.ttlMs,
-      ...(modelRoutes.length === 0 ? {} : { modelRoute: { releaseId: modelRoutes[0]!.release.releaseId, contentHash: modelRoutes[0]!.release.contentHash } }),
+      ...(modelRoutes.length === 0 ? {} : { modelRoute: modelRouteReference(modelRoutes[0]!.release) }),
       integrations: integrations.sort(referenceOrder), skills: skills.sort(referenceOrder), policies: policies.sort(referenceOrder),
     };
     return { ...snapshot, snapshotId: snapshotHash(snapshot) };
   }
 
-  private async selectedRelease(resource: ControlPlaneResource, target: RuntimeTarget): Promise<(ReleaseReference & { assignmentId: string; kind: ControlPlaneResource["kind"] }) | undefined> {
+  private async selectedRelease(resource: ControlPlaneResource, target: RuntimeTarget): Promise<{ readonly release: ResourceRelease; readonly assignmentId: string } | undefined> {
     const assignments = await this.repository.listAssignments(resource.resourceId);
     const assignment = resolveEffectiveAssignment(assignments.filter((candidate) => candidate.rolloutState === "active"), target);
     if (assignment === undefined) return undefined;
     const release = await this.repository.getRelease(assignment.releaseId);
     if (release === undefined || release.state !== "active") return undefined;
-    return { releaseId: release.releaseId, contentHash: release.contentHash, assignmentId: assignment.assignmentId, kind: resource.kind };
+    return { release, assignmentId: assignment.assignmentId };
   }
+}
+
+function modelRouteReference(release: ResourceRelease): { readonly releaseId: string; readonly contentHash: string; readonly providerConfiguration: Readonly<Record<string, unknown>> } {
+  if (release.schemaVersion !== "model-route/v1" || !record(release.payload.providerConfiguration)) {
+    throw new ControlPlaneError("configuration_unavailable", `Model route ${release.releaseId} does not contain a model-route/v1 provider configuration`);
+  }
+  return { releaseId: release.releaseId, contentHash: release.contentHash, providerConfiguration: release.payload.providerConfiguration };
 }
 
 function referenceOrder(left: { releaseId: string }, right: { releaseId: string }): number { return left.releaseId.localeCompare(right.releaseId); }
@@ -64,4 +71,8 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
+
+function record(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

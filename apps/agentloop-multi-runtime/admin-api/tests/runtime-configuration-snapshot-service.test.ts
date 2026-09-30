@@ -9,7 +9,11 @@ import { migrateControlPlane } from "../src/persistence/control-plane-migrations
 import { SqlControlPlaneStore } from "../src/persistence/sql-control-plane-store.ts";
 
 function release(resourceId: string, releaseId: string, kind: ResourceKind): ResourceRelease {
-  const content = { kind, schemaVersion: `${kind}/v1`, payload: { name: resourceId } };
+  const content = {
+    kind,
+    schemaVersion: kind === "model_route" ? "model-route/v1" : `${kind}/v1`,
+    payload: kind === "model_route" ? { providerConfiguration: { defaultProvider: "example", defaultModelKey: "example-model", providers: {}, models: {} } } : { name: resourceId },
+  };
   return {
     contractVersion: "control-plane/v1", resourceId, releaseId, version: 1, ...content,
     contentHash: contentHashForRelease(content), authorId: "admin-1", createdAt: 10, state: "draft",
@@ -46,6 +50,7 @@ test("snapshot resolver selects only active releases at the target scope and emi
     const resolver = new RuntimeConfigurationSnapshotService({ repository: store, now: () => 1_000, ttlMs: 500 });
     const snapshot = await resolver.desiredSnapshot({ plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" });
     assert.equal(snapshot.modelRoute?.releaseId, model.releaseId);
+    assert.deepEqual(snapshot.modelRoute?.providerConfiguration, { defaultProvider: "example", defaultModelKey: "example-model", providers: {}, models: {} });
     assert.deepEqual(snapshot.integrations, [{ bindingId: "search-assignment", releaseId: integration.releaseId, contentHash: integration.contentHash }]);
     assert.deepEqual(snapshot.policies, [{ releaseId: policy.releaseId, contentHash: policy.contentHash }]);
     assert.equal(snapshot.skills.length, 0);

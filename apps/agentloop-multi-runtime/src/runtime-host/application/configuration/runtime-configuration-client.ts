@@ -46,6 +46,15 @@ export class RuntimeConfigurationClient {
 
   /** Reports validation only; this must not be used to claim that a Runtime loaded or applied configuration. */
   public async reportValidated(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string): Promise<void> {
+    await this.reportApplyStatus(snapshot, "validated", receiptIdFor);
+  }
+
+  /** Reports a successfully constructed in-memory Run Environment; it does not imply a live Model invocation. */
+  public async reportLoaded(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string): Promise<void> {
+    await this.reportApplyStatus(snapshot, "loaded", receiptIdFor);
+  }
+
+  private async reportApplyStatus(snapshot: RuntimeConfigurationSnapshot, status: ApplyReceipt["status"], receiptIdFor: (releaseId: string) => string): Promise<void> {
     const references = [
       ...(snapshot.modelRoute === undefined ? [] : [snapshot.modelRoute]),
       ...snapshot.integrations,
@@ -55,7 +64,7 @@ export class RuntimeConfigurationClient {
     for (const reference of references) {
       const receipt: ApplyReceipt = {
         contractVersion: "control-plane/v1", receiptId: receiptIdFor(reference.releaseId), target: this.target,
-        releaseId: reference.releaseId, contentHash: reference.contentHash, status: "validated", observedAt: this.now(),
+        releaseId: reference.releaseId, contentHash: reference.contentHash, status, observedAt: this.now(),
       };
       const response = await this.request(new URL("/delivery/v1/apply-receipts", `${this.deliveryUrl}/`), {
         method: "POST", headers: { authorization: `Bearer ${this.workloadToken}`, "content-type": "application/json" }, body: JSON.stringify({ receipt }),
@@ -69,7 +78,7 @@ function parseSnapshot(value: unknown): RuntimeConfigurationSnapshot {
   if (!record(value) || value.contractVersion !== "control-plane/v1") throw invalidSnapshot();
   if (!text(value.snapshotId) || !integer(value.configurationRevision) || !integer(value.resolvedAt) || !integer(value.validUntil) || value.validUntil <= value.resolvedAt) throw invalidSnapshot();
   const target = parseTarget(value.target);
-  const modelRoute = value.modelRoute === undefined ? undefined : parseReference(value.modelRoute);
+  const modelRoute = value.modelRoute === undefined ? undefined : parseModelRoute(value.modelRoute);
   if (!Array.isArray(value.integrations) || !Array.isArray(value.skills) || !Array.isArray(value.policies)) throw invalidSnapshot();
   const integrations = value.integrations.map((item) => {
     const reference = parseReference(item);
@@ -97,6 +106,12 @@ function parseTarget(value: unknown): RuntimeTarget {
 function parseReference(value: unknown): { readonly releaseId: string; readonly contentHash: string } {
   if (!record(value) || !text(value.releaseId) || !hash(value.contentHash)) throw invalidSnapshot();
   return { releaseId: value.releaseId, contentHash: value.contentHash };
+}
+
+function parseModelRoute(value: unknown): { readonly releaseId: string; readonly contentHash: string; readonly providerConfiguration: Readonly<Record<string, unknown>> } {
+  const reference = parseReference(value);
+  if (!record(value) || !record(value.providerConfiguration)) throw invalidSnapshot();
+  return { ...reference, providerConfiguration: value.providerConfiguration };
 }
 
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }

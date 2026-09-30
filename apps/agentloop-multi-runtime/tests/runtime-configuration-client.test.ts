@@ -4,6 +4,7 @@ import type { RuntimeConfigurationSnapshot, RuntimeTarget } from "../control-pla
 import { RuntimeConfigurationClient, RuntimeConfigurationClientError } from "../src/runtime-host/application/configuration/runtime-configuration-client.ts";
 import { compareRuntimeConfigurationShadow } from "../src/runtime-host/application/configuration/runtime-configuration-shadow.ts";
 import { createRuntimeConfigurationShadowOrchestrator, type RuntimeConfigurationShadowLogEntry } from "../src/runtime-host/application/configuration/runtime-configuration-shadow-orchestrator.ts";
+import { RunEnvironmentResolver, RunEnvironmentUnavailableError, type LoadedRuntimeConfigurationSnapshotCache } from "../src/runtime-host/application/configuration/run-environment-resolver.ts";
 
 const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
 const hash = "a".repeat(64);
@@ -11,7 +12,7 @@ const hash = "a".repeat(64);
 function snapshot(overrides: Partial<RuntimeConfigurationSnapshot> = {}): RuntimeConfigurationSnapshot {
   return {
     contractVersion: "control-plane/v1", snapshotId: "snapshot-a", configurationRevision: 7, target, resolvedAt: 100, validUntil: 200,
-    modelRoute: { releaseId: "model-r1", contentHash: hash }, integrations: [{ bindingId: "integration-a", releaseId: "integration-r1", contentHash: hash }], skills: [], policies: [], ...overrides,
+    modelRoute: { releaseId: "model-r1", contentHash: hash, providerConfiguration: {} }, integrations: [{ bindingId: "integration-a", releaseId: "integration-r1", contentHash: hash }], skills: [], policies: [], ...overrides,
   };
 }
 
@@ -89,3 +90,62 @@ test("shadow orchestration records a sanitized failure and leaves file-mode call
   shadow.stop();
   assert.deepEqual(logs, [{ event: "runtime_configuration_shadow", status: "failed", target, code: "configuration_unavailable" }]);
 });
+
+test("RunEnvironmentResolver freezes independently loaded provider registries and does not fall back to file configuration", async () => {
+  const snapshots = [
+    snapshot({ snapshotId: "snapshot-old", modelRoute: { releaseId: "model-old", contentHash: hash, providerConfiguration: providerConfiguration("old-model") } }),
+    snapshot({ snapshotId: "snapshot-new", modelRoute: { releaseId: "model-new", contentHash: hash, providerConfiguration: providerConfiguration("new-model") } }),
+  ];
+  const receipts: string[] = [];
+  const cache = new MemorySnapshotCache();
+  const resolver = new RunEnvironmentResolver({
+    delivery: {
+      desiredSnapshot: async () => snapshots.shift()!,
+      reportLoaded: async (value, receiptIdFor) => { receipts.push(`${value.snapshotId}:${receiptIdFor(value.modelRoute!.releaseId)}`); },
+    },
+    cache, environment: { TEST_API_KEY: "not-a-real-secret" }, createReceiptId: () => "receipt",
+  });
+  const oldEnvironment = await resolver.resolveForAdmission(target);
+  const newEnvironment = await resolver.resolveForAdmission(target);
+  assert.deepEqual(oldEnvironment.providers.modelKeys(), ["old-model"]);
+  assert.deepEqual(newEnvironment.providers.modelKeys(), ["new-model"]);
+  assert.deepEqual(receipts, ["snapshot-old:loaded:snapshot-old:model-old:receipt", "snapshot-new:loaded:snapshot-new:model-new:receipt"]);
+  const unavailable = new RunEnvironmentResolver({
+    delivery: { desiredSnapshot: async () => { throw new Error("offline"); }, reportLoaded: async () => {} },
+    cache, environment: {}, createReceiptId: () => "receipt",
+  });
+  await assert.rejects(() => unavailable.resolveForAdmission(target), RunEnvironmentUnavailableError);
+});
+
+test("RunEnvironmentResolver rebuilds and re-receipts an unexpired confirmed snapshot after restart", async () => {
+  const cached = snapshot({ validUntil: 500, modelRoute: { releaseId: "model-r1", contentHash: hash, providerConfiguration: providerConfiguration("restored-model") } });
+  const cache = new MemorySnapshotCache([cached]);
+  let reported = 0;
+  const resolver = new RunEnvironmentResolver({
+    delivery: { desiredSnapshot: async () => cached, reportLoaded: async () => { reported += 1; } },
+    cache, environment: { TEST_API_KEY: "not-a-real-secret" }, createReceiptId: () => "receipt",
+  });
+  assert.deepEqual((await resolver.restoreConfirmed(target, () => 400)).providers.modelKeys(), ["restored-model"]);
+  assert.equal(reported, 1);
+  await assert.rejects(() => resolver.restoreConfirmed(target, () => 500), RunEnvironmentUnavailableError);
+});
+
+function providerConfiguration(modelKey: string): Record<string, unknown> {
+  return {
+    defaultProvider: "test", defaultModelKey: modelKey,
+    providers: {
+      test: { kind: "openai-compatible", baseUrl: "https://models.example.test/v1", apiKeyEnv: "TEST_API_KEY", defaultModel: modelKey, protocol: "chat-completions" },
+    },
+    models: { [modelKey]: { providerKey: "test", providerModel: modelKey, displayName: modelKey } },
+  };
+}
+
+class MemorySnapshotCache implements LoadedRuntimeConfigurationSnapshotCache {
+  private readonly snapshots = new Map<string, RuntimeConfigurationSnapshot>();
+  public constructor(initial: readonly RuntimeConfigurationSnapshot[] = []) { for (const value of initial) this.putSync(value); }
+  public async get(candidate: RuntimeTarget): Promise<RuntimeConfigurationSnapshot | undefined> { return this.snapshots.get(targetKey(candidate)); }
+  public async put(value: RuntimeConfigurationSnapshot): Promise<void> { this.putSync(value); }
+  private putSync(value: RuntimeConfigurationSnapshot): void { this.snapshots.set(targetKey(value.target), value); }
+}
+
+function targetKey(value: RuntimeTarget): string { return `${value.plane}:${value.tenantId}:${value.runtimeId}:${value.runtimeClass ?? ""}:${value.deviceId ?? ""}`; }
