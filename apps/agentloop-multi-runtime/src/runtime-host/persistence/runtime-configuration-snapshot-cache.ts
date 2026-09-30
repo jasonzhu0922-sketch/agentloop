@@ -5,7 +5,8 @@ import type { LoadedRuntimeConfigurationSnapshotCache } from "../application/con
 
 /** Host-owned cache: only loaded public manifests are durable; no delivery token or secret value is stored. */
 export class SqlRuntimeConfigurationSnapshotCache implements LoadedRuntimeConfigurationSnapshotCache {
-  public constructor(private readonly database: SqlConnection) {}
+  private readonly database: SqlConnection;
+  public constructor(database: SqlConnection) { this.database = database; }
 
   public async get(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot | undefined> {
     const row = await this.database.prepare(`SELECT snapshot_json FROM mr_runtime_configuration_snapshots WHERE target_plane = ? AND tenant_id = ? AND runtime_id = ? AND runtime_class = ? AND device_id = ?`).get<{ snapshot_json: string }>(target.plane, target.tenantId, target.runtimeId, target.runtimeClass ?? "", target.deviceId ?? "");

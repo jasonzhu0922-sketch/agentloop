@@ -1,6 +1,6 @@
 import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "../persistence/host-dispatch-store.ts";
-import type { RuntimeHostRunPort } from "./runtime-run-port.ts";
+import type { RuntimeAdmissionRunResolver, RuntimeHostRunPort } from "./runtime-run-port.ts";
 
 export interface ResourceImporter {
   importForRun(input: {
@@ -23,6 +23,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   private readonly resourceImporter: ResourceImporter;
   private readonly capacity?: RuntimeCapacityGate;
   private readonly dispatchStore?: HostDispatchStore;
+  private readonly admissionRuns?: RuntimeAdmissionRunResolver;
   private admissionTail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -30,11 +31,13 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     resourceImporter: ResourceImporter,
     capacity?: RuntimeCapacityGate,
     dispatchStore?: HostDispatchStore,
+    admissionRuns?: RuntimeAdmissionRunResolver,
   ) {
     this.runs = runs;
     this.resourceImporter = resourceImporter;
     this.capacity = capacity;
     this.dispatchStore = dispatchStore;
+    this.admissionRuns = admissionRuns;
   }
 
   async getRun(remoteRunId: string): Promise<RuntimeRunStatus> {
@@ -207,9 +210,14 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       conversationId: envelope.conversationId,
       resources: envelope.resourceRefs,
     });
+    // Resolve before Run creation. In control-plane mode this is a freshly
+    // frozen environment, never a mutation of the Host's default RunService.
+    const admissionRuns = this.admissionRuns === undefined
+      ? this.runs
+      : await this.admissionRuns.resolveForAdmission(envelope.subject);
     const run = await this.admit(async () => {
-      await this.runs.ensureConversation(envelope.subject.userId, envelope.conversationId, envelope.input);
-      return await this.runs.startConversation(envelope.subject.userId, envelope.input, {
+      await admissionRuns.ensureConversation(envelope.subject.userId, envelope.conversationId, envelope.input);
+      return await admissionRuns.startConversation(envelope.subject.userId, envelope.input, {
           conversationId: envelope.conversationId,
           sourceIds,
           allowDangerousTools: envelope.allowDangerousTools,

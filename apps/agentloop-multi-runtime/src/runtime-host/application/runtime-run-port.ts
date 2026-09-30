@@ -43,6 +43,11 @@ export interface RuntimeHostRunPort {
   respondHumanLoop?(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<RuntimeHumanLoopResponse>;
 }
 
+/** Host-only admission seam: selects a frozen Run port from a dispatch subject. */
+export interface RuntimeAdmissionRunResolver {
+  resolveForAdmission(subject: { readonly tenantId: string; readonly userId: string }): Promise<RuntimeHostRunPort>;
+}
+
 export interface RuntimeHostRun {
   readonly id: string;
   readonly status: "running" | "completed" | "failed" | "cancelled";
