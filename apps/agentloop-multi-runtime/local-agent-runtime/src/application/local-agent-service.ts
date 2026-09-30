@@ -48,7 +48,24 @@ export class LocalAgentService {
     }
     await mkdir(sharedStorageRoot.value, { recursive: true });
     await mkdir(uploadStorageRoot.value, { recursive: true });
-    const factory = new LocalRuntimeFactory(input);
+    let factoryInput: LocalAgentOptions = input;
+    if (input.controlPlaneDeliveryUrl !== undefined) {
+      const device = state.device;
+      if (device === undefined || device.tenantId === undefined) {
+        throw new LocalAgentApplicationError(409, "control_plane_device_identity_required");
+      }
+      factoryInput = {
+        ...input,
+        controlPlane: {
+          deliveryUrl: input.controlPlaneDeliveryUrl,
+          deviceId: device.id,
+          deviceToken: device.agentToken,
+          tenantId: device.tenantId,
+          devicePrivateKey: state.deviceIdentity.privateKey,
+        },
+      };
+    }
+    const factory = new LocalRuntimeFactory(factoryInput);
     // Device-local Runtime state deliberately remains SQLite-only. The shared
     // Router/Host database adapter is not a valid replacement at this boundary.
     const supervisorDatabase = new AppDatabase(input.supervisorDatabasePath ?? join(dirname(input.databasePath), "supervisor.db"));
@@ -91,7 +108,7 @@ export class LocalAgentService {
     if (!result.ok || typeof registered.agentToken !== "string" || typeof registered.device?.id !== "string") {
       throw new Error(typeof registered.error === "string" ? registered.error : `Router HTTP ${result.status}`);
     }
-    const device = { id: registered.device.id, agentToken: registered.agentToken, displayName: registered.device.displayName };
+    const device = { id: registered.device.id, agentToken: registered.agentToken, displayName: registered.device.displayName, ...(typeof registered.device.tenantId === "string" ? { tenantId: registered.device.tenantId } : {}) };
     await this.stateStore.write({ ...state, device });
     this.connection?.setDevice(device);
     return { device: registered.device, alreadyRegistered: false };

@@ -1,11 +1,14 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools } from "@zhujun/agentloop";
+import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, type RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "./local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
+import { LocalDeliveryClient, LocalDeliveryError } from "../control-plane/local-delivery-client.ts";
+import { LocalSnapshotCache } from "../control-plane/local-snapshot-cache.ts";
+import type { RuntimeConfigurationSnapshot } from "../../../control-plane/contracts/index.ts";
 
 /** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
 export class LocalRuntimeFactory {
@@ -32,7 +35,10 @@ export class LocalRuntimeFactory {
     `);
     const scopes = new LocalDirectoryScopeStore(database);
     await scopes.ready();
-    const provider = await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment);
+    const resolved = await this.resolveConfiguration(definition, runtimeRoot, integrationEnvironment);
+    const provider = resolved === undefined
+      ? await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment)
+      : LlmProviderRegistry.fromConfigObject(resolved.snapshot.modelRoute!.providerConfiguration, integrationEnvironment);
     const custom = await loadSkillDirectoriesConfig({ appRoot: this.input.appRoot, configPath: this.input.skillDirectoriesConfigPath });
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {
@@ -49,7 +55,8 @@ export class LocalRuntimeFactory {
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
       practiceProfileCatalog: practiceProfiles,
       tools: integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment)),
-      computerCommandEnvironment: this.input.computerCommandEnvironment,
+      computerCommandEnvironment: resolved === undefined ? this.input.computerCommandEnvironment : withoutEnterpriseInfoPath(this.input.computerCommandEnvironment),
+      ...(resolved === undefined ? {} : { configurationSnapshot: resolved.reference }),
       ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
     });
     const activeRunIds = new Set<string>();
@@ -59,6 +66,34 @@ export class LocalRuntimeFactory {
       catch { /* Orphaned ledger rows are not active admissions. */ }
     }
     return { ...definition, database, scopes, runs, modelKeys: provider.modelKeys(), activeRunIds };
+  }
+
+  private async resolveConfiguration(definition: LocalRuntimeDefinition, runtimeRoot: string, environment: Readonly<Record<string, string | undefined>>): Promise<{ readonly snapshot: import("../../../control-plane/contracts/index.ts").RuntimeConfigurationSnapshot; readonly reference: RuntimeConfigurationSnapshotReference } | undefined> {
+    const controlPlane = this.input.controlPlane;
+    if (controlPlane === undefined) return undefined;
+    const target = { plane: "local" as const, tenantId: controlPlane.tenantId, runtimeId: definition.id, deviceId: controlPlane.deviceId };
+    const cache = new LocalSnapshotCache(join(runtimeRoot, "control-plane-snapshot.json"));
+    const delivery = new LocalDeliveryClient({ deliveryUrl: controlPlane.deliveryUrl, deviceToken: controlPlane.deviceToken, target });
+    let snapshot: RuntimeConfigurationSnapshot;
+    try {
+      snapshot = await delivery.desiredSnapshot();
+      if (snapshot.modelRoute === undefined) throw new LocalRuntimeSupervisorError(503, "configuration_unavailable");
+      await delivery.reportLoaded(snapshot, (releaseId) => `local-loaded:${snapshot.snapshotId}:${releaseId}`);
+      await cache.put(snapshot);
+    } catch (error) {
+      if (error instanceof LocalDeliveryError && error.code === "target_not_authorized") throw new LocalRuntimeSupervisorError(403, "device_not_authorized");
+      const cached = await cache.get(target);
+      if (cached === undefined || cached.modelRoute === undefined) throw new LocalRuntimeSupervisorError(503, "configuration_unavailable");
+      snapshot = cached;
+    }
+    const modelRoute = snapshot.modelRoute;
+    if (modelRoute === undefined) throw new LocalRuntimeSupervisorError(503, "configuration_unavailable");
+    return { snapshot, reference: { snapshotId: snapshot.snapshotId, configurationRevision: snapshot.configurationRevision, releases: [
+      { kind: "model_route", releaseId: modelRoute.releaseId, contentHash: modelRoute.contentHash },
+      ...snapshot.integrations.map((item) => ({ kind: "integration" as const, releaseId: item.releaseId, contentHash: item.contentHash })),
+      ...snapshot.skills.map((item) => ({ kind: "skill" as const, releaseId: item.releaseId, contentHash: item.contentHash, packageHash: item.packageHash })),
+      ...snapshot.policies.map((item) => ({ kind: "policy" as const, releaseId: item.releaseId, contentHash: item.contentHash })),
+    ] } };
   }
 
   runtimeRootFor(definition: LocalRuntimeDefinition): string | undefined {
@@ -82,4 +117,10 @@ export class LocalRuntimeFactory {
       throw new LocalRuntimeSupervisorError(500, message);
     }
   }
+}
+
+function withoutEnterpriseInfoPath(environment: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> | undefined {
+  if (environment === undefined) return undefined;
+  const { ENTERPRISE_INFO_ENV_FILE: _removed, ...remaining } = environment;
+  return remaining;
 }

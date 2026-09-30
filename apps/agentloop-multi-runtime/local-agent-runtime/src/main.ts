@@ -43,6 +43,9 @@ const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, p
 await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
 const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
 const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
+const localConfigurationSource = process.env.LOCAL_RUNTIME_CONFIGURATION_SOURCE ?? "file";
+if (localConfigurationSource !== "file" && localConfigurationSource !== "control_plane") throw new Error("LOCAL_RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
+const controlPlaneDeliveryUrl = localConfigurationSource === "control_plane" ? requiredEnv("CONTROL_PLANE_DELIVERY_URL") : undefined;
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));
 const practiceProfileConfigPath = resolve(process.env.PRACTICE_PROFILE_CONFIG_PATH ?? join(appRoot, "config", "practice-profiles.json"));
@@ -55,6 +58,7 @@ const logColorOptions = {
 const server = await createLocalAgentServer({
   appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath, maxConcurrentRuns,
   providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath, practiceProfileConfigPath,
+  ...(controlPlaneDeliveryUrl === undefined ? {} : { controlPlaneDeliveryUrl }),
   computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
   integrationEnvironment,
   runEventLogSink: (runtime, line) => process.stdout.write(`${localRuntimeTerminalLogLine(runtime.id, line, logColorOptions)}\n`),
@@ -62,6 +66,8 @@ const server = await createLocalAgentServer({
 });
 server.listen(port, host, () => process.stdout.write(`AgentLoop Local Runtime Agent listening on http://${host}:${port}${routerUrl === undefined ? " (Router not configured)" : ""}\n`));
 }
+
+function requiredEnv(name: string): string { const value = process.env[name]; if (value === undefined || value.trim() === "") throw new Error(`${name} must be configured`); return value; }
 
 function positiveInteger(value: string | undefined, fallback: number, name = "LOCAL_AGENT_PORT"): number {
   const result = Number(value ?? fallback);

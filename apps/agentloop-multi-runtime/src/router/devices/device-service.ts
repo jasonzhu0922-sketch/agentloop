@@ -19,6 +19,7 @@ export interface RegisteredDevice {
 
 export interface RegisteredDeviceAgent extends RegisteredDevice {
   readonly agentToken: string;
+  readonly tenantId: string;
 }
 
 export interface LocalDeviceSession {
@@ -140,7 +141,7 @@ export class SqlDeviceRepository implements DeviceRepository {
       `).run(id, token.tenant_id, token.owner_user_id, displayName, publicKey, now, now);
       await this.database.prepare(`INSERT INTO mr_device_agent_sessions(device_id, token_hash, created_at) VALUES (?, ?, ?)`)
         .run(id, hashToken(agentToken), now);
-      return { id, displayName, status: "active", lastSeenAt: now, createdAt: now, agentToken };
+      return { id, displayName, status: "active", lastSeenAt: now, createdAt: now, agentToken, tenantId: token.tenant_id };
     });
   }
 

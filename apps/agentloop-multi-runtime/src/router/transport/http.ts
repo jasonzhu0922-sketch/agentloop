@@ -103,7 +103,7 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
         const body = record(await readJson(request), "request body");
         const device = await options.devices.registerAgent({ registrationToken: body.registrationToken, displayName: body.displayName, publicKey: body.publicKey });
-        return json(response, 201, { device: { id: device.id, displayName: device.displayName, status: device.status, lastSeenAt: device.lastSeenAt, createdAt: device.createdAt }, agentToken: device.agentToken });
+        return json(response, 201, { device: { id: device.id, displayName: device.displayName, status: device.status, lastSeenAt: device.lastSeenAt, createdAt: device.createdAt, tenantId: device.tenantId }, agentToken: device.agentToken });
       }
       if (request.method === "POST" && url.pathname === "/v1/device-agent/heartbeat") {
         if (options.devices === undefined) return json(response, 503, { error: "devices_not_configured" });
