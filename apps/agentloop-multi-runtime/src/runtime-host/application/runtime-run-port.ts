@@ -8,6 +8,7 @@ import type {
   RuntimeRunEvent,
   RuntimeToolArguments,
 } from "../../shared/contracts.ts";
+import type { RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
 
 /**
  * The Host application's view of a local Runtime.
@@ -41,11 +42,13 @@ export interface RuntimeHostRunPort {
   startFromCheckpoint?(actorUserId: string, checkpointId: string): Promise<RuntimeHostRun>;
   currentHumanLoop?(actorUserId: string, runId: string): Promise<RuntimeHumanLoopRequest | undefined>;
   respondHumanLoop?(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<RuntimeHumanLoopResponse>;
+  reconcileInterruptedRuns?(runIds?: readonly string[]): Promise<number>;
 }
 
 /** Host-only admission seam: selects a frozen Run port from a dispatch subject. */
 export interface RuntimeAdmissionRunResolver {
   resolveForAdmission(subject: { readonly tenantId: string; readonly userId: string }): Promise<RuntimeHostRunPort>;
+  resolveForRun(configurationSnapshot: RuntimeConfigurationSnapshotReference): Promise<RuntimeHostRunPort>;
 }
 
 export interface RuntimeHostRun {
@@ -55,6 +58,8 @@ export interface RuntimeHostRun {
   readonly output?: string;
   readonly errorCode?: string;
   readonly finishedAt?: number;
+  /** Neutral admission provenance persisted by the Runtime kernel. */
+  readonly configurationSnapshot?: RuntimeConfigurationSnapshotReference;
 }
 
 export interface RuntimeRunCheckpoint {

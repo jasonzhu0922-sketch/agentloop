@@ -87,4 +87,8 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
   async respondHumanLoop(actorUserId: string, runId: string, requestId: string, value: unknown, expectedRevision: unknown): Promise<RuntimeHumanLoopResponse> {
     return await this.runs.respondHumanLoop(actorUserId, runId, requestId, value, expectedRevision);
   }
+
+  async reconcileInterruptedRuns(runIds?: readonly string[]): Promise<number> {
+    return await this.runs.reconcileInterruptedRuns(runIds);
+  }
 }

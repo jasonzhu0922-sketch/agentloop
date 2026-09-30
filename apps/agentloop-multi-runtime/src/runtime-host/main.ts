@@ -111,14 +111,14 @@ const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnap
 });
 const runs = createRuns(providers);
 const controlPlaneAdmissionRuns = configurationSource === "file" ? undefined : createControlPlaneAdmissionRuns();
-const reconcileOwnedRuns = async (): Promise<void> => {
-  await runs.reconcileInterruptedRuns(await dispatchStore.ownedRunIds());
-};
-await reconcileOwnedRuns();
 const runtimeHost = new AgentLoopRuntimeHost(new AgentLoopRuntimeRunPort(runs), new HttpResourceImporter(runs, routerAttachmentToken), {
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
 }, dispatchStore, controlPlaneAdmissionRuns);
+const reconcileOwnedRuns = async (): Promise<void> => {
+  await runtimeHost.reconcileOwnedRuns(await dispatchStore.ownedRunIds());
+};
+await reconcileOwnedRuns();
 // Shadow delivery is strictly opt-in and observational. The existing file
 // loaders above remain the sole source of the dependencies passed to RunService.
 const configurationShadow = createRuntimeConfigurationShadowOrchestrator({

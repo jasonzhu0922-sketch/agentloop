@@ -43,8 +43,9 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   async getRun(remoteRunId: string): Promise<RuntimeRunStatus> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    const run = await this.runs.get(ownerUserId, remoteRunId);
-    const checkpoint = await this.runs.checkpointForRun?.(ownerUserId, remoteRunId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    const run = await runs.get(ownerUserId, remoteRunId);
+    const checkpoint = await runs.checkpointForRun?.(ownerUserId, remoteRunId);
     return {
       remoteRunId: run.id,
       status: run.status,
@@ -52,7 +53,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       ...(run.output === undefined ? {} : { output: run.output }),
       ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
       ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
-      ...(this.runs.processArtifacts === undefined ? {} : { artifacts: await this.runs.processArtifacts(ownerUserId, remoteRunId) }),
+      ...(runs.processArtifacts === undefined ? {} : { artifacts: await runs.processArtifacts(ownerUserId, remoteRunId) }),
       ...(checkpoint === undefined ? {} : {
         checkpoint: {
           id: checkpoint.id,
@@ -66,29 +67,33 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   async artifacts(remoteRunId: string): Promise<readonly RuntimeArtifact[]> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.processArtifacts === undefined) throw new TypeError("runtime artifact query is not configured");
-    return await this.runs.processArtifacts(ownerUserId, remoteRunId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.processArtifacts === undefined) throw new TypeError("runtime artifact query is not configured");
+    return await runs.processArtifacts(ownerUserId, remoteRunId);
   }
 
   async readArtifact(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.readProcessArtifact === undefined) throw new TypeError("runtime artifact read is not configured");
-    return await this.runs.readProcessArtifact(ownerUserId, remoteRunId, artifactId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.readProcessArtifact === undefined) throw new TypeError("runtime artifact read is not configured");
+    return await runs.readProcessArtifact(ownerUserId, remoteRunId, artifactId);
   }
 
   async previewArtifact(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.previewProcessArtifact === undefined) throw new TypeError("runtime artifact preview is not configured");
-    return await this.runs.previewProcessArtifact(ownerUserId, remoteRunId, artifactId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.previewProcessArtifact === undefined) throw new TypeError("runtime artifact preview is not configured");
+    return await runs.previewProcessArtifact(ownerUserId, remoteRunId, artifactId);
   }
 
   async cancelRun(remoteRunId: string): Promise<RuntimeRunStatus> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.cancel === undefined) throw new TypeError("runtime cancellation is not configured");
-    const run = await this.runs.cancel(ownerUserId, remoteRunId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.cancel === undefined) throw new TypeError("runtime cancellation is not configured");
+    const run = await runs.cancel(ownerUserId, remoteRunId);
     return {
       remoteRunId: run.id,
       status: run.status,
@@ -102,8 +107,9 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   async events(remoteRunId: string, afterSeq: number): Promise<readonly RuntimeRunEvent[]> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.events === undefined) throw new TypeError("runtime event query is not configured");
-    return (await this.runs.events(ownerUserId, remoteRunId))
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.events === undefined) throw new TypeError("runtime event query is not configured");
+    return (await runs.events(ownerUserId, remoteRunId))
       .filter((event) => event.seq > afterSeq)
       .map((event) => projectTerminalEvent(event));
   }
@@ -111,27 +117,33 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
   async commandOutput(remoteRunId: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<RuntimeCommandOutput> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.readCommandOutput === undefined) throw new TypeError("runtime command output query is not configured");
-    return await this.runs.readCommandOutput(ownerUserId, remoteRunId, toolCallId, stream);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.readCommandOutput === undefined) throw new TypeError("runtime command output query is not configured");
+    return await runs.readCommandOutput(ownerUserId, remoteRunId, toolCallId, stream);
   }
 
   async toolArguments(remoteRunId: string, toolCallId: string): Promise<RuntimeToolArguments> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
     if (ownerUserId === undefined) throw new TypeError("runtime run not found");
-    if (this.runs.readToolArguments === undefined) throw new TypeError("runtime tool arguments query is not configured");
-    return await this.runs.readToolArguments(ownerUserId, remoteRunId, toolCallId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.readToolArguments === undefined) throw new TypeError("runtime tool arguments query is not configured");
+    return await runs.readToolArguments(ownerUserId, remoteRunId, toolCallId);
   }
 
   async advanceRecovery(remoteRunId: string): Promise<RuntimeRecoveryDetail> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
-    if (ownerUserId === undefined || this.runs.advanceRecovery === undefined) throw new TypeError("runtime recovery advance is not configured");
-    return await this.runs.advanceRecovery(ownerUserId, remoteRunId);
+    if (ownerUserId === undefined) throw new TypeError("runtime recovery advance is not configured");
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.advanceRecovery === undefined) throw new TypeError("runtime recovery advance is not configured");
+    return await runs.advanceRecovery(ownerUserId, remoteRunId);
   }
 
   async resumeRecovery(remoteRunId: string): Promise<RuntimeRunStatus> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
-    if (ownerUserId === undefined || this.runs.resumeRecovery === undefined) throw new TypeError("runtime recovery resume is not configured");
-    const run = await this.runs.resumeRecovery(ownerUserId, remoteRunId);
+    if (ownerUserId === undefined) throw new TypeError("runtime recovery resume is not configured");
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.resumeRecovery === undefined) throw new TypeError("runtime recovery resume is not configured");
+    const run = await runs.resumeRecovery(ownerUserId, remoteRunId);
     return {
       remoteRunId: run.id,
       status: run.status,
@@ -144,12 +156,14 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
 
   async startFromCheckpoint(remoteRunId: string): Promise<RuntimeRunStatus> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
-    if (ownerUserId === undefined || this.runs.checkpointForRun === undefined || this.runs.startFromCheckpoint === undefined) {
+    if (ownerUserId === undefined) {
       throw new TypeError("runtime checkpoint continuation is not configured");
     }
-    const checkpoint = await this.runs.checkpointForRun(ownerUserId, remoteRunId);
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.checkpointForRun === undefined || runs.startFromCheckpoint === undefined) throw new TypeError("runtime checkpoint continuation is not configured");
+    const checkpoint = await runs.checkpointForRun(ownerUserId, remoteRunId);
     if (checkpoint === undefined) throw new TypeError("runtime checkpoint not found");
-    const run = await this.admit(() => this.runs.startFromCheckpoint!(ownerUserId, checkpoint.id));
+    const run = await this.admit(() => runs.startFromCheckpoint!(ownerUserId, checkpoint.id));
     this.ownersByRunId.set(run.id, ownerUserId);
     return {
       remoteRunId: run.id,
@@ -162,14 +176,31 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
 
   async currentHumanLoop(remoteRunId: string): Promise<RuntimeHumanLoopRequest | undefined> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
-    if (ownerUserId === undefined || this.runs.currentHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop query is not configured");
-    return this.runs.currentHumanLoop(ownerUserId, remoteRunId);
+    if (ownerUserId === undefined) throw new TypeError("runtime Human-in-the-Loop query is not configured");
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.currentHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop query is not configured");
+    return runs.currentHumanLoop(ownerUserId, remoteRunId);
   }
 
   async respondHumanLoop(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<RuntimeHumanLoopResponse> {
     const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
-    if (ownerUserId === undefined || this.runs.respondHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop response is not configured");
-    return this.runs.respondHumanLoop(ownerUserId, remoteRunId, requestId, input.value, input.expectedRevision);
+    if (ownerUserId === undefined) throw new TypeError("runtime Human-in-the-Loop response is not configured");
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.respondHumanLoop === undefined) throw new TypeError("runtime Human-in-the-Loop response is not configured");
+    return runs.respondHumanLoop(ownerUserId, remoteRunId, requestId, input.value, input.expectedRevision);
+  }
+
+  /** Reconciliation must execute each control-plane Run through its persisted environment. */
+  async reconcileOwnedRuns(runIds: readonly string[]): Promise<number> {
+    if (this.admissionRuns === undefined) return await this.runs.reconcileInterruptedRuns?.(runIds) ?? 0;
+    let reconciled = 0;
+    for (const runId of runIds) {
+      const ownerUserId = this.ownersByRunId.get(runId) ?? await this.dispatchStore?.ownerForRun(runId);
+      if (ownerUserId === undefined) continue;
+      const runs = await this.runsForExistingRun(ownerUserId, runId);
+      reconciled += await runs.reconcileInterruptedRuns?.([runId]) ?? 0;
+    }
+    return reconciled;
   }
 
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult> {
@@ -211,7 +242,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
       resources: envelope.resourceRefs,
     });
     // Resolve before Run creation. In control-plane mode this is a freshly
-    // frozen environment, never a mutation of the Host's default RunService.
+    // frozen environment, never a mutation of the Host's default execution port.
     const admissionRuns = this.admissionRuns === undefined
       ? this.runs
       : await this.admissionRuns.resolveForAdmission(envelope.subject);
@@ -227,6 +258,19 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     await this.dispatchStore?.accept(envelope.dispatchKey, run.id);
     this.ownersByRunId.set(run.id, envelope.subject.userId);
     return { remoteRunId: run.id };
+  }
+
+  /**
+   * The default port may inspect neutral Run provenance, but control-plane
+   * Runs always rebind through their original immutable snapshot before use.
+   */
+  private async runsForExistingRun(ownerUserId: string, runId: string): Promise<RuntimeHostRunPort> {
+    if (this.admissionRuns === undefined) return this.runs;
+    const record = await this.runs.get(ownerUserId, runId);
+    if (record.configurationSnapshot === undefined) {
+      throw new TypeError("control-plane Run is missing its configuration snapshot provenance");
+    }
+    return await this.admissionRuns.resolveForRun(record.configurationSnapshot);
   }
 
   private async admit<T>(operation: () => Promise<T>): Promise<T> {

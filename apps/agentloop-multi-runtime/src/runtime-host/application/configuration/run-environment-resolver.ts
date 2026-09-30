@@ -10,6 +10,7 @@ export interface RuntimeConfigurationDeliveryPort {
 /** Only a successfully loaded snapshot may enter this cache. Implementations may persist it across Host restart. */
 export interface LoadedRuntimeConfigurationSnapshotCache {
   get(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot | undefined>;
+  getBySnapshotId(target: RuntimeTarget, snapshotId: string): Promise<RuntimeConfigurationSnapshot | undefined>;
   put(snapshot: RuntimeConfigurationSnapshot): Promise<void>;
 }
 
@@ -78,6 +79,21 @@ export class RunEnvironmentResolver {
     return resolved;
   }
 
+  /** Rebuilds the exact acknowledged snapshot that an existing Run persisted at admission. */
+  public async restoreForRun(target: RuntimeTarget, reference: RuntimeConfigurationSnapshotReference): Promise<ResolvedRunEnvironment> {
+    const snapshot = await this.cache.getBySnapshotId(target, reference.snapshotId);
+    if (snapshot === undefined) throw new RunEnvironmentUnavailableError("The configuration snapshot bound to this Run is unavailable");
+    assertTarget(snapshot.target, target);
+    const resolved = this.build(snapshot);
+    assertSnapshotReference(resolved.configurationSnapshot, reference);
+    try {
+      await this.delivery.reportLoaded(snapshot, (releaseId) => `recovered:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`);
+    } catch {
+      throw new RunEnvironmentUnavailableError("Run-bound control-plane configuration snapshot could not be re-receipted");
+    }
+    return resolved;
+  }
+
   private build(snapshot: RuntimeConfigurationSnapshot): ResolvedRunEnvironment {
     if (snapshot.modelRoute === undefined) throw new RunEnvironmentUnavailableError("Control-plane snapshot has no model route");
     try {
@@ -110,6 +126,10 @@ export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunReso
   private readonly target: RuntimeTarget;
   private readonly environments: RunEnvironmentResolver;
   private readonly portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort;
+  private readonly portsBySnapshotId = new Map<string, {
+    readonly configurationSnapshot: RuntimeConfigurationSnapshotReference;
+    readonly port: Promise<RuntimeHostRunPort>;
+  }>();
   public constructor(
     target: RuntimeTarget,
     environments: RunEnvironmentResolver,
@@ -122,6 +142,23 @@ export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunReso
     }
     return this.portForEnvironment(await this.environments.resolveForAdmission(this.target));
   }
+
+  public async resolveForRun(configurationSnapshot: RuntimeConfigurationSnapshotReference): Promise<RuntimeHostRunPort> {
+    const existing = this.portsBySnapshotId.get(configurationSnapshot.snapshotId);
+    if (existing !== undefined) {
+      assertSnapshotReference(existing.configurationSnapshot, configurationSnapshot);
+      return await existing.port;
+    }
+    const created = this.environments.restoreForRun(this.target, configurationSnapshot)
+      .then((environment) => this.portForEnvironment(environment));
+    this.portsBySnapshotId.set(configurationSnapshot.snapshotId, { configurationSnapshot, port: created });
+    try {
+      return await created;
+    } catch (error) {
+      this.portsBySnapshotId.delete(configurationSnapshot.snapshotId);
+      throw error;
+    }
+  }
 }
 
 function assertTarget(actual: RuntimeTarget, expected: RuntimeTarget): void {
@@ -132,4 +169,19 @@ function assertTarget(actual: RuntimeTarget, expected: RuntimeTarget): void {
     || actual.runtimeClass !== expected.runtimeClass
     || actual.deviceId !== expected.deviceId
   ) throw new RunEnvironmentUnavailableError("Control-plane snapshot target does not match this admission target");
+}
+
+function assertSnapshotReference(actual: RuntimeConfigurationSnapshotReference, expected: RuntimeConfigurationSnapshotReference): void {
+  if (actual.snapshotId !== expected.snapshotId || actual.configurationRevision !== expected.configurationRevision) {
+    throw new RunEnvironmentUnavailableError("Control-plane snapshot does not match the Run's persisted configuration reference");
+  }
+  const actualReleases = new Set(actual.releases.map(releaseKey));
+  const expectedReleases = new Set(expected.releases.map(releaseKey));
+  if (actualReleases.size !== expectedReleases.size || [...expectedReleases].some((key) => !actualReleases.has(key))) {
+    throw new RunEnvironmentUnavailableError("Control-plane snapshot releases do not match the Run's persisted configuration reference");
+  }
+}
+
+function releaseKey(release: RuntimeConfigurationSnapshotReference["releases"][number]): string {
+  return `${release.kind}:${release.releaseId}:${release.contentHash}:${release.packageHash ?? ""}`;
 }

@@ -1,6 +1,6 @@
 import { AppDatabase, insertIfAbsentSql, type SqlConnection } from "@zhujun/agentloop";
 import { installHostDispatchSchema } from "./host-dispatch-store.ts";
-import { installRuntimeConfigurationSnapshotCache } from "./runtime-configuration-snapshot-cache.ts";
+import { installRuntimeConfigurationSnapshotCache, installRuntimeConfigurationSnapshotHistory } from "./runtime-configuration-snapshot-cache.ts";
 import { applyVersionedMigrations, SchemaMigrationError, type SchemaMigration } from "../../shared/persistence/schema-migration-ledger.ts";
 
 const MIGRATIONS: readonly SchemaMigration[] = [
@@ -12,6 +12,7 @@ const MIGRATIONS: readonly SchemaMigration[] = [
   { id: "runtime/0003_preserve_source_state_compatibility", definition: "repair-boundaries;recovery-leases;assessment-bindings;delivery-receipts:v1", apply: installSourceCompatibilityColumns },
   { id: "runtime/0004_run_event_sequences", definition: "per-run-event-sequence;concurrent-runtime-writers:v1", apply: installRunEventSequences },
   { id: "runtime/0005_loaded_configuration_snapshot_cache", definition: "loaded-runtime-configuration-snapshot-cache:v1", apply: installRuntimeConfigurationSnapshotCache },
+  { id: "runtime/0006_loaded_configuration_snapshot_history", definition: "loaded-runtime-configuration-snapshot-history:v1", apply: installRuntimeConfigurationSnapshotHistory },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {

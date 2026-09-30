@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AppDatabase } from "@zhujun/agentloop";
 import type { RuntimeConfigurationSnapshot, RuntimeTarget } from "../control-plane/contracts/index.ts";
 import { RuntimeConfigurationClient, RuntimeConfigurationClientError } from "../src/runtime-host/application/configuration/runtime-configuration-client.ts";
 import { compareRuntimeConfigurationShadow } from "../src/runtime-host/application/configuration/runtime-configuration-shadow.ts";
 import { createRuntimeConfigurationShadowOrchestrator, type RuntimeConfigurationShadowLogEntry } from "../src/runtime-host/application/configuration/runtime-configuration-shadow-orchestrator.ts";
 import { ControlPlaneAdmissionRunResolver, RunEnvironmentResolver, RunEnvironmentUnavailableError, type LoadedRuntimeConfigurationSnapshotCache } from "../src/runtime-host/application/configuration/run-environment-resolver.ts";
+import { AgentLoopRuntimeHost } from "../src/runtime-host/application/runtime-host.ts";
+import { SqlRuntimeConfigurationSnapshotCache, installRuntimeConfigurationSnapshotCache, installRuntimeConfigurationSnapshotHistory } from "../src/runtime-host/persistence/runtime-configuration-snapshot-cache.ts";
+import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
 
 const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
 const hash = "a".repeat(64);
@@ -110,11 +114,92 @@ test("RunEnvironmentResolver freezes independently loaded provider registries an
   assert.deepEqual(oldEnvironment.providers.modelKeys(), ["old-model"]);
   assert.deepEqual(newEnvironment.providers.modelKeys(), ["new-model"]);
   assert.deepEqual(receipts, ["snapshot-old:loaded:snapshot-old:model-old:receipt", "snapshot-new:loaded:snapshot-new:model-new:receipt"]);
+  const restoredOld = await resolver.restoreForRun(target, oldEnvironment.configurationSnapshot);
+  assert.deepEqual(restoredOld.providers.modelKeys(), ["old-model"]);
+  await assert.rejects(() => resolver.restoreForRun(target, {
+    ...oldEnvironment.configurationSnapshot,
+    releases: [{ kind: "model_route", releaseId: "model-old", contentHash: "b".repeat(64) }],
+  }), RunEnvironmentUnavailableError);
   const unavailable = new RunEnvironmentResolver({
     delivery: { desiredSnapshot: async () => { throw new Error("offline"); }, reportLoaded: async () => {} },
     cache, environment: {}, createReceiptId: () => "receipt",
   });
   await assert.rejects(() => unavailable.resolveForAdmission(target), RunEnvironmentUnavailableError);
+});
+
+test("Host rebinds existing Run queries to the persisted snapshot port instead of its default port", async () => {
+  const configurationSnapshot = {
+    snapshotId: "snapshot-old", configurationRevision: 7,
+    releases: [{ kind: "model_route" as const, releaseId: "model-old", contentHash: hash }],
+  };
+  let recovered = 0;
+  const defaultPort = {
+    async ensureConversation() {},
+    async startConversation() { return { id: "run-old", status: "running" as const }; },
+    async get() { return { id: "run-old", status: "running" as const, configurationSnapshot }; },
+  };
+  const oldSnapshotPort = {
+    async ensureConversation() {},
+    async startConversation() { return { id: "run-old", status: "running" as const }; },
+    async get() { recovered += 1; return { id: "run-old", status: "running" as const, modelKey: "old-model", configurationSnapshot }; },
+  };
+  const host = new AgentLoopRuntimeHost(defaultPort, { async importForRun() { return []; } }, undefined, undefined, {
+    async resolveForAdmission() { return defaultPort; },
+    async resolveForRun(reference) { assert.deepEqual(reference, configurationSnapshot); return oldSnapshotPort; },
+  });
+  await host.dispatch({
+    schema: "agentloop.runtimeDispatch/v1", assignmentId: "assignment-old", dispatchKey: "dispatch-old",
+    subject: { tenantId: "tenant-a", userId: "user-a" }, conversationId: "conversation-a", input: "continue", allowDangerousTools: false, resourceRefs: [],
+  });
+  assert.deepEqual(await host.getRun("run-old"), { remoteRunId: "run-old", status: "running", modelKey: "old-model" });
+  assert.equal(recovered, 1);
+});
+
+test("durable snapshot history preserves old and new Run bindings while the target pointer advances", async () => {
+  const database = new AppDatabase(":memory:");
+  await installRuntimeConfigurationSnapshotCache(database);
+  await installRuntimeConfigurationSnapshotHistory(database);
+  const cache = new SqlRuntimeConfigurationSnapshotCache(database);
+  const oldSnapshot = snapshot({ snapshotId: "snapshot-old", modelRoute: { releaseId: "model-old", contentHash: hash, providerConfiguration: providerConfiguration("old-model") } });
+  const newSnapshot = snapshot({ snapshotId: "snapshot-new", modelRoute: { releaseId: "model-new", contentHash: hash, providerConfiguration: providerConfiguration("new-model") } });
+  await cache.put(oldSnapshot);
+  await cache.put(newSnapshot);
+  assert.equal((await cache.get(target))?.snapshotId, "snapshot-new");
+  assert.equal((await cache.getBySnapshotId(target, "snapshot-old"))?.modelRoute?.releaseId, "model-old");
+  await assert.rejects(() => cache.put({ ...oldSnapshot, validUntil: oldSnapshot.validUntil + 1 }), /immutable/);
+  await database.close();
+});
+
+test("a restarted Host restores an owned Run through its exact historical snapshot and re-receipts it", async () => {
+  const database = new AppDatabase(":memory:");
+  const dispatches = new HostDispatchStore(database, "runtime-a");
+  await dispatches.ready();
+  await dispatches.claim({ dispatchKey: "dispatch-old", assignmentId: "assignment-old", ownerUserId: "user-a", now: 100, leaseMs: 1_000 });
+  await dispatches.accept("dispatch-old", "run-old", 101);
+  const oldSnapshot = snapshot({ snapshotId: "snapshot-old", modelRoute: { releaseId: "model-old", contentHash: hash, providerConfiguration: providerConfiguration("old-model") } });
+  const newSnapshot = snapshot({ snapshotId: "snapshot-new", modelRoute: { releaseId: "model-new", contentHash: hash, providerConfiguration: providerConfiguration("new-model") } });
+  let recoveryReceipts = 0;
+  const environments = new RunEnvironmentResolver({
+    delivery: {
+      desiredSnapshot: async () => newSnapshot,
+      reportLoaded: async (_value, receiptIdFor) => { if (receiptIdFor("model-old").startsWith("recovered:")) recoveryReceipts += 1; },
+    },
+    cache: new MemorySnapshotCache([oldSnapshot, newSnapshot]), environment: { TEST_API_KEY: "not-a-real-secret" }, createReceiptId: () => "receipt",
+  });
+  const admissions = new ControlPlaneAdmissionRunResolver(target, environments, (environment) => ({
+    async ensureConversation() {},
+    async startConversation() { return { id: "run-old", status: "running" as const }; },
+    async get() { return { id: "run-old", status: "running" as const, modelKey: environment.providers.defaultModelKey, configurationSnapshot: configurationReference(oldSnapshot) }; },
+  }));
+  const defaultPort = {
+    async ensureConversation() {},
+    async startConversation() { return { id: "run-old", status: "running" as const }; },
+    async get() { return { id: "run-old", status: "running" as const, configurationSnapshot: configurationReference(oldSnapshot) }; },
+  };
+  const restarted = new AgentLoopRuntimeHost(defaultPort, { async importForRun() { return []; } }, undefined, dispatches, admissions);
+  assert.equal((await restarted.getRun("run-old")).modelKey, "old-model");
+  assert.equal(recoveryReceipts, 1);
+  await database.close();
 });
 
 test("RunEnvironmentResolver rebuilds and re-receipts an unexpired confirmed snapshot after restart", async () => {
@@ -151,12 +236,33 @@ function providerConfiguration(modelKey: string): Record<string, unknown> {
   };
 }
 
+function configurationReference(value: RuntimeConfigurationSnapshot) {
+  return {
+    snapshotId: value.snapshotId,
+    configurationRevision: value.configurationRevision,
+    releases: [
+      ...(value.modelRoute === undefined ? [] : [{ kind: "model_route" as const, releaseId: value.modelRoute.releaseId, contentHash: value.modelRoute.contentHash }]),
+      ...value.integrations.map((item) => ({ kind: "integration" as const, releaseId: item.releaseId, contentHash: item.contentHash })),
+      ...value.skills.map((item) => ({ kind: "skill" as const, releaseId: item.releaseId, contentHash: item.contentHash, packageHash: item.packageHash })),
+      ...value.policies.map((item) => ({ kind: "policy" as const, releaseId: item.releaseId, contentHash: item.contentHash })),
+    ],
+  };
+}
+
 class MemorySnapshotCache implements LoadedRuntimeConfigurationSnapshotCache {
   private readonly snapshots = new Map<string, RuntimeConfigurationSnapshot>();
+  private readonly history = new Map<string, RuntimeConfigurationSnapshot>();
   public constructor(initial: readonly RuntimeConfigurationSnapshot[] = []) { for (const value of initial) this.putSync(value); }
   public async get(candidate: RuntimeTarget): Promise<RuntimeConfigurationSnapshot | undefined> { return this.snapshots.get(targetKey(candidate)); }
+  public async getBySnapshotId(candidate: RuntimeTarget, snapshotId: string): Promise<RuntimeConfigurationSnapshot | undefined> {
+    const value = this.history.get(snapshotId);
+    return value !== undefined && targetKey(value.target) === targetKey(candidate) ? value : undefined;
+  }
   public async put(value: RuntimeConfigurationSnapshot): Promise<void> { this.putSync(value); }
-  private putSync(value: RuntimeConfigurationSnapshot): void { this.snapshots.set(targetKey(value.target), value); }
+  private putSync(value: RuntimeConfigurationSnapshot): void {
+    this.snapshots.set(targetKey(value.target), value);
+    this.history.set(value.snapshotId, value);
+  }
 }
 
 function targetKey(value: RuntimeTarget): string { return `${value.plane}:${value.tenantId}:${value.runtimeId}:${value.runtimeClass ?? ""}:${value.deviceId ?? ""}`; }
