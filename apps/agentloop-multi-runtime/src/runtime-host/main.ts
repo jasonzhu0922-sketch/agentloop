@@ -19,6 +19,9 @@ import {
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 import { createRuntimeConfigurationShadowOrchestrator } from "./application/configuration/runtime-configuration-shadow-orchestrator.ts";
+import { RuntimeConfigurationClient } from "./application/configuration/runtime-configuration-client.ts";
+import { ControlPlaneAdmissionRunResolver, RunEnvironmentResolver } from "./application/configuration/run-environment-resolver.ts";
+import { SqlRuntimeConfigurationSnapshotCache } from "./persistence/runtime-configuration-snapshot-cache.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 // This non-sensitive path is the only Enterprise Info setting passed to
@@ -53,6 +56,7 @@ const maxConcurrentRuns = positiveInteger(process.env.MAX_CONCURRENT_RUNS, 2);
 const heartbeatIntervalMs = positiveInteger(process.env.HEARTBEAT_INTERVAL_MS, 5_000);
 const logColorOptions = terminalLogColorOptions();
 const runtimeLogLabel = colorizeTerminalLogLabel(`[${runtimeId}]`, runtimeId, logColorOptions);
+const configurationSource = runtimeConfigurationSource(process.env.RUNTIME_CONFIGURATION_SOURCE);
 // Deployment-owned requirements fail before state initialization or Run dispatch.
 // A Skill may use a command only after the Runtime Host has proved it exists.
 assertRequiredRuntimeCommands(requiredRuntimeCommands(process.env.RUNTIME_REQUIRED_COMMANDS));
@@ -82,19 +86,18 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
 await migrateRuntimeState(database);
 const dispatchStore = new HostDispatchStore(database, runtimeId);
 await dispatchStore.ready();
-const providers = await LlmProviderRegistry.fromConfigFile(providerConfigPath);
+const providers = configurationSource === "file" ? await LlmProviderRegistry.fromConfigFile(providerConfigPath) : undefined;
 const skills = new SkillService(database, {
   // Do not make Skill package synchronization contend on the shared task volume.
   packageStoreRoot: skillPackageStoreRoot,
   skillDirectories,
 });
 const skillDirectorySync = await skills.syncSkillDirectories();
-const runs = new RunService({
+const createRuns = (registry: LlmProviderRegistry | undefined): RunService => new RunService({
   database,
   skills,
-  modelFactory: (onRetry, modelKey) => providers.create(modelKey, onRetry),
-  defaultModelKey: providers.defaultModelKey,
-  modelKeys: providers.modelKeys(),
+  modelFactory: registry === undefined ? () => { throw new Error("configuration_unavailable"); } : (onRetry, modelKey) => registry.create(modelKey, onRetry),
+  ...(registry === undefined ? {} : { defaultModelKey: registry.defaultModelKey, modelKeys: registry.modelKeys() }),
   workspaceRoot,
   stepExecutionStrategy,
   practiceProfileCatalog,
@@ -105,6 +108,8 @@ const runs = new RunService({
   },
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
+const runs = createRuns(providers);
+const controlPlaneAdmissionRuns = configurationSource === "file" ? undefined : createControlPlaneAdmissionRuns();
 const reconcileOwnedRuns = async (): Promise<void> => {
   await runs.reconcileInterruptedRuns(await dispatchStore.ownedRunIds());
 };
@@ -112,21 +117,21 @@ await reconcileOwnedRuns();
 const runtimeHost = new AgentLoopRuntimeHost(new AgentLoopRuntimeRunPort(runs), new HttpResourceImporter(runs, routerAttachmentToken), {
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
-}, dispatchStore);
+}, dispatchStore, controlPlaneAdmissionRuns);
 // Shadow delivery is strictly opt-in and observational. The existing file
 // loaders above remain the sole source of the dependencies passed to RunService.
 const configurationShadow = createRuntimeConfigurationShadowOrchestrator({
   environment: process.env,
   runtimeId,
   baseline: {
-    modelKeys: providers.modelKeys(),
+    modelKeys: providers?.modelKeys() ?? [],
     skillDirectoryCount: skillDirectories.length,
     practiceProfileCount: practiceProfileCatalog.profiles.length,
     stepExecutionStrategyProfile: stepExecutionStrategyConfig.profile,
   },
   log: (entry) => process.stderr.write(`${JSON.stringify(entry)}\n`),
 });
-const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, models: providers.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) });
+const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, models: providers?.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) ?? [] });
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop Runtime Host ${runtimeId} listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}\n`);
   void sendHeartbeat();
@@ -187,6 +192,22 @@ function terminalLogColorOptions(): { readonly colorMode: string | undefined; re
 
 async function activeRunCount(): Promise<number> {
   return await dispatchStore.activeRunCount();
+}
+
+function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
+  const deliveryUrl = requiredEnv("CONTROL_PLANE_DELIVERY_URL");
+  const workloadToken = requiredEnv("CONTROL_PLANE_WORKLOAD_TOKEN");
+  const tenantId = requiredEnv("CONTROL_PLANE_TENANT_ID");
+  const target = { plane: "cloud" as const, tenantId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
+  const client = new RuntimeConfigurationClient({ deliveryUrl, workloadToken, target });
+  const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID });
+  return new ControlPlaneAdmissionRunResolver(target, environments, (environment) => new AgentLoopRuntimeRunPort(createRuns(environment.providers)));
+}
+
+function runtimeConfigurationSource(value: string | undefined): "file" | "control_plane" {
+  if (value === undefined || value === "file") return "file";
+  if (value === "control_plane") return value;
+  throw new Error("RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
 }
 
 async function sendHeartbeat(): Promise<void> {

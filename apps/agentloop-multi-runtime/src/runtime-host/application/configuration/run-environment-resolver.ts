@@ -1,5 +1,6 @@
 import { LlmProviderRegistry } from "@zhujun/agentloop";
 import type { RuntimeConfigurationSnapshot, RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
+import type { RuntimeAdmissionRunResolver, RuntimeHostRunPort } from "../runtime-run-port.ts";
 
 export interface RuntimeConfigurationDeliveryPort {
   desiredSnapshot(): Promise<RuntimeConfigurationSnapshot>;
@@ -86,6 +87,25 @@ export class RunEnvironmentResolver {
     } catch {
       throw new RunEnvironmentUnavailableError("Control-plane model route is not a valid provider configuration");
     }
+  }
+}
+
+/** Binds the explicit workload target to Router-provided tenant identity at admission. */
+export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunResolver {
+  private readonly target: RuntimeTarget;
+  private readonly environments: RunEnvironmentResolver;
+  private readonly portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort;
+  public constructor(
+    target: RuntimeTarget,
+    environments: RunEnvironmentResolver,
+    portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort,
+  ) { this.target = target; this.environments = environments; this.portForEnvironment = portForEnvironment; }
+
+  public async resolveForAdmission(subject: { readonly tenantId: string; readonly userId: string }): Promise<RuntimeHostRunPort> {
+    if (subject.tenantId !== this.target.tenantId) {
+      throw new RunEnvironmentUnavailableError("Dispatch tenant is not authorized for this control-plane Runtime target");
+    }
+    return this.portForEnvironment(await this.environments.resolveForAdmission(this.target));
   }
 }
 

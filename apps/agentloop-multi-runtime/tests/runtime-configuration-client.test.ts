@@ -4,7 +4,7 @@ import type { RuntimeConfigurationSnapshot, RuntimeTarget } from "../control-pla
 import { RuntimeConfigurationClient, RuntimeConfigurationClientError } from "../src/runtime-host/application/configuration/runtime-configuration-client.ts";
 import { compareRuntimeConfigurationShadow } from "../src/runtime-host/application/configuration/runtime-configuration-shadow.ts";
 import { createRuntimeConfigurationShadowOrchestrator, type RuntimeConfigurationShadowLogEntry } from "../src/runtime-host/application/configuration/runtime-configuration-shadow-orchestrator.ts";
-import { RunEnvironmentResolver, RunEnvironmentUnavailableError, type LoadedRuntimeConfigurationSnapshotCache } from "../src/runtime-host/application/configuration/run-environment-resolver.ts";
+import { ControlPlaneAdmissionRunResolver, RunEnvironmentResolver, RunEnvironmentUnavailableError, type LoadedRuntimeConfigurationSnapshotCache } from "../src/runtime-host/application/configuration/run-environment-resolver.ts";
 
 const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
 const hash = "a".repeat(64);
@@ -128,6 +128,17 @@ test("RunEnvironmentResolver rebuilds and re-receipts an unexpired confirmed sna
   assert.deepEqual((await resolver.restoreConfirmed(target, () => 400)).providers.modelKeys(), ["restored-model"]);
   assert.equal(reported, 1);
   await assert.rejects(() => resolver.restoreConfirmed(target, () => 500), RunEnvironmentUnavailableError);
+});
+
+test("control-plane admission rejects another tenant instead of selecting the file-mode port", async () => {
+  const loaded = snapshot({ modelRoute: { releaseId: "model-r1", contentHash: hash, providerConfiguration: providerConfiguration("admission-model") } });
+  const environments = new RunEnvironmentResolver({
+    delivery: { desiredSnapshot: async () => loaded, reportLoaded: async () => {} }, cache: new MemorySnapshotCache(), environment: { TEST_API_KEY: "not-a-real-secret" }, createReceiptId: () => "receipt",
+  });
+  const port = { async ensureConversation() {}, async startConversation() { return { id: "run" as string, status: "running" as const }; }, async get() { return { id: "run", status: "running" as const }; } };
+  const admissions = new ControlPlaneAdmissionRunResolver(target, environments, () => port);
+  assert.equal(await admissions.resolveForAdmission({ tenantId: "tenant-a", userId: "user-a" }), port);
+  await assert.rejects(() => admissions.resolveForAdmission({ tenantId: "tenant-other", userId: "user-a" }), RunEnvironmentUnavailableError);
 });
 
 function providerConfiguration(modelKey: string): Record<string, unknown> {
