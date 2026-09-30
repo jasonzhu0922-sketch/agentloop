@@ -1,0 +1,38 @@
+openapi: 3.1.0
+info:
+  title: AgentLoop Admin API
+  version: 0.0.0-wp0
+  description: >-
+    WP-0 process scaffold. Only healthz is wired. Administrative and delivery
+    resources remain a contract draft until the release/persistence work package.
+paths:
+  /healthz:
+    get:
+      operationId: adminApiHealth
+      responses:
+        '200':
+          description: Independent Admin API process is reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, service, phase]
+                properties:
+                  status: { type: string, const: ok }
+                  service: { type: string, const: agentloop-admin-api }
+                  phase: { type: string, const: wp-0-scaffold }
+components:
+  schemas:
+    RuntimeConfigurationSnapshot:
+      description: Versioned DTO draft; the authoritative TypeScript contract is control-plane/contracts/v1.ts.
+      type: object
+      required: [contractVersion, snapshotId, configurationRevision, target, resolvedAt, validUntil, integrations, skills, policies]
+    ResourceRelease:
+      type: object
+      required: [contractVersion, resourceId, releaseId, version, kind, schemaVersion, contentHash, authorId, createdAt, state, payload]
+    TargetAssignment:
+      type: object
+      required: [contractVersion, assignmentId, resourceId, releaseId, scope, priority, rolloutState, expectedRevision]
+    ApplyReceipt:
+      type: object
+      required: [contractVersion, receiptId, target, releaseId, contentHash, status, observedAt]
