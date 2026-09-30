@@ -54,7 +54,35 @@ export interface TargetAssignment {
   readonly scope: ConfigurationScope;
   readonly priority: number;
   readonly rolloutState: RolloutState;
+  readonly revision: number;
+}
+
+export interface PublishReleaseCommand {
+  readonly release: ResourceRelease;
   readonly expectedRevision: number;
+  readonly actorId: string;
+  readonly auditEventId: string;
+}
+
+export interface CreateTargetAssignmentCommand {
+  readonly assignment: TargetAssignment;
+  readonly expectedRevision: number;
+  readonly actorId: string;
+  readonly auditEventId: string;
+}
+
+export interface TransitionReleaseCommand {
+  readonly releaseId: string;
+  readonly state: ReleaseState;
+  readonly expectedRevision: number;
+  readonly actorId: string;
+  readonly auditEventId: string;
+}
+
+export interface RecordApplyReceiptCommand {
+  readonly receipt: ApplyReceipt;
+  readonly actorId: string;
+  readonly auditEventId: string;
 }
 
 export interface RuntimeConfigurationSnapshot {
@@ -107,6 +135,10 @@ export const CONTROL_PLANE_ERROR_CODES = [
   "target_not_authorized",
   "receipt_hash_mismatch",
   "migration_not_ready",
+  "revision_conflict",
+  "release_hash_mismatch",
+  "duplicate_release",
+  "assignment_conflict",
 ] as const;
 
 export type ControlPlaneErrorCode = (typeof CONTROL_PLANE_ERROR_CODES)[number];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ResourceRelease, RuntimeTarget, TargetAssignment } from "../contracts/index.ts";
-import { ControlPlaneError, freezeRelease, resolveEffectiveAssignment, transitionRelease } from "../domain/index.ts";
+import { assertNoAssignmentConflict, ControlPlaneError, freezeRelease, resolveEffectiveAssignment, transitionRelease } from "../domain/index.ts";
 
 const target: RuntimeTarget = {
   plane: "local",
@@ -20,7 +20,7 @@ function assignment(id: string, scope: TargetAssignment["scope"], priority = 0):
     scope,
     priority,
     rolloutState: "active",
-    expectedRevision: 1,
+    revision: 1,
   };
 }
 
@@ -75,6 +75,10 @@ test("same precedence and priority is a publish-time conflict", () => {
     (error: unknown) => error instanceof ControlPlaneError && error.code === "scope_conflict",
   );
   assert.equal(resolveEffectiveAssignment([assignments[0]!, { ...assignments[1]!, priority: 11 }], target)?.assignmentId, "two");
+  assert.throws(
+    () => assertNoAssignmentConflict([assignments[0]!], assignments[1]!),
+    (error: unknown) => error instanceof ControlPlaneError && error.code === "assignment_conflict",
+  );
 });
 
 test("invalid device scopes and release transitions fail with stable errors", () => {

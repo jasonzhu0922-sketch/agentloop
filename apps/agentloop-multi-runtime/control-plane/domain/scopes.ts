@@ -21,6 +21,16 @@ export function assertValidScope(scope: ConfigurationScope): void {
   }
 }
 
+export function assertAssignmentShape(assignment: TargetAssignment): void {
+  assertValidScope(assignment.scope);
+  if (!assignment.assignmentId.trim() || !assignment.resourceId.trim() || !assignment.releaseId.trim()) {
+    throw new ControlPlaneError("invalid_contract", "Assignment identifiers must be non-empty");
+  }
+  if (!Number.isSafeInteger(assignment.priority) || !Number.isSafeInteger(assignment.revision) || assignment.revision < 0) {
+    throw new ControlPlaneError("invalid_contract", "Assignment priority and revision must be safe integers");
+  }
+}
+
 export function scopeMatches(scope: ConfigurationScope, target: RuntimeTarget): boolean {
   assertValidScope(scope);
   if (scope.plane !== "both" && scope.plane !== target.plane) return false;
@@ -58,4 +68,42 @@ export function resolveEffectiveAssignment(assignments: readonly TargetAssignmen
     throw new ControlPlaneError("scope_conflict", `Conflicting assignments apply to ${target.plane}/${target.tenantId}/${target.runtimeId}`);
   }
   return winners[0]?.assignment;
+}
+
+/**
+ * Rejects equal-rank overlaps before persistence. A runtime/device pair is
+ * conservatively treated as overlapping: the control plane has no device to
+ * runtime ownership fact with which to prove that they are disjoint.
+ */
+export function assignmentsConflict(existing: TargetAssignment, proposed: TargetAssignment): boolean {
+  assertAssignmentShape(existing);
+  assertAssignmentShape(proposed);
+  if (existing.resourceId !== proposed.resourceId) return false;
+  if (existing.priority !== proposed.priority) return false;
+  if (!rolloutEligible.has(existing.rolloutState) || !rolloutEligible.has(proposed.rolloutState)) return false;
+  if (scopePrecedence(existing.scope) !== scopePrecedence(proposed.scope)) return false;
+  if (!planesOverlap(existing.scope.plane, proposed.scope.plane)) return false;
+  return targetsOverlap(existing.scope, proposed.scope);
+}
+
+export function assertNoAssignmentConflict(existing: readonly TargetAssignment[], proposed: TargetAssignment): void {
+  if (existing.some((assignment) => assignmentsConflict(assignment, proposed))) {
+    throw new ControlPlaneError("assignment_conflict", `Assignment ${proposed.assignmentId} overlaps an existing equal-priority assignment`);
+  }
+}
+
+function planesOverlap(left: ConfigurationScope["plane"], right: ConfigurationScope["plane"]): boolean {
+  return left === "both" || right === "both" || left === right;
+}
+
+function targetsOverlap(left: ConfigurationScope, right: ConfigurationScope): boolean {
+  if (left.target.kind === "platform" || right.target.kind === "platform") return true;
+  if (left.target.tenantId !== right.target.tenantId) return false;
+  if (left.target.kind === "tenant" || right.target.kind === "tenant") return true;
+  if (left.target.kind === right.target.kind) {
+    if (left.target.kind === "runtime_class" && right.target.kind === "runtime_class") return left.target.runtimeClass === right.target.runtimeClass;
+    if (left.target.kind === "runtime_id" && right.target.kind === "runtime_id") return left.target.runtimeId === right.target.runtimeId;
+    if (left.target.kind === "device_id" && right.target.kind === "device_id") return left.target.deviceId === right.target.deviceId;
+  }
+  return true;
 }

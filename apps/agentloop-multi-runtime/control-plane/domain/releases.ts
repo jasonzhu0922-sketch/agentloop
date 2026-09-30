@@ -29,8 +29,23 @@ export function transitionRelease(release: ResourceRelease, state: ReleaseState)
  * Hashing and persistence are intentionally ports in later work packages.
  */
 export function freezeRelease(release: ResourceRelease): ResourceRelease {
+  assertReleaseShape(release);
   return deepFreeze({ ...release, payload: cloneJsonObject(release.payload) });
 }
+
+export function assertReleaseShape(release: ResourceRelease): void {
+  if (!nonBlank(release.resourceId) || !nonBlank(release.releaseId) || !nonBlank(release.authorId) || !nonBlank(release.schemaVersion)) {
+    throw new ControlPlaneError("invalid_contract", "Release identity, author, and schema version must be non-empty");
+  }
+  if (!Number.isSafeInteger(release.version) || release.version < 1 || !Number.isSafeInteger(release.createdAt) || release.createdAt < 0) {
+    throw new ControlPlaneError("invalid_contract", "Release version and createdAt must be non-negative safe integers");
+  }
+  if (!/^[a-f0-9]{64}$/.test(release.contentHash)) {
+    throw new ControlPlaneError("invalid_contract", "Release contentHash must be a SHA-256 hex digest");
+  }
+}
+
+function nonBlank(value: string): boolean { return value.trim().length > 0; }
 
 function cloneJsonObject(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;

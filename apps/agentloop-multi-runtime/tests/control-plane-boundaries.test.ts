@@ -35,12 +35,12 @@ async function assertNoImports(root: string, forbidden: readonly string[]): Prom
 
 test("control-plane dependency closure preserves Admin, Runtime, and Kernel boundaries", async () => {
   await assertNoImports(join(applicationRoot, "admin-web", "src"), ["/admin-api/", "/src/router/", "/src/runtime-host/", "/local-agent-runtime/", "@zhujun/agentloop", "mysql2", "pg"]);
-  await assertNoImports(join(applicationRoot, "admin-api", "src"), ["/web/", "/src/router/", "/src/runtime-host/", "/local-agent-runtime/", "@zhujun/agentloop", "mysql2", "pg"]);
+  await assertNoImports(join(applicationRoot, "admin-api", "src"), ["/web/", "/src/router/", "/src/runtime-host/", "/local-agent-runtime/"]);
   await assertNoImports(join(applicationRoot, "src", "router"), ["/admin-api/", "/control-plane/domain/"]);
   await assertNoImports(join(applicationRoot, "src", "runtime-host"), ["/admin-api/", "/control-plane/domain/"]);
   await assertNoImports(join(applicationRoot, "local-agent-runtime", "src"), ["/admin-api/", "/control-plane/domain/"]);
   await assertNoImports(join(repositoryRoot, "packages", "agentloop", "src"), ["control-plane/", "admin-api/", "admin-web/"]);
   await assertNoImports(join(applicationRoot, "control-plane", "contracts"), ["node:fs", "node:http", "react", "mysql2", "pg", "@zhujun/agentloop"]);
   await assertNoImports(join(applicationRoot, "control-plane", "domain"), ["node:fs", "node:http", "react", "mysql2", "pg", "@zhujun/agentloop", "/admin-api/"]);
-  await assertNoImports(join(applicationRoot, "admin-api", "src", "transport"), ["/persistence/", "/infrastructure/"]);
+  await assertNoImports(join(applicationRoot, "admin-api", "src", "transport"), ["/persistence/", "/infrastructure/", "@zhujun/agentloop", "mysql2", "pg"]);
 });

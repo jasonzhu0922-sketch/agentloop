@@ -20,7 +20,39 @@ paths:
                 properties:
                   status: { type: string, const: ok }
                   service: { type: string, const: agentloop-admin-api }
-                  phase: { type: string, const: wp-0-scaffold }
+                  phase: { type: string, const: wp-1-release-core }
+  /admin/v1/releases:
+    post:
+      operationId: publishRelease
+      description: Requires an independently authenticated admin principal and an x-request-id audit identifier.
+      responses:
+        '201': { description: Immutable release persisted }
+        '403': { description: Missing or invalid admin principal }
+        '409': { description: Optimistic revision or immutable release conflict }
+  /admin/v1/target-assignments:
+    post:
+      operationId: createTargetAssignment
+      description: Requires an independently authenticated admin principal and expectedRevision.
+      responses:
+        '201': { description: Assignment persisted }
+        '409': { description: Scope or revision conflict }
+  /admin/v1/releases/{releaseId}/transitions:
+    post:
+      operationId: transitionRelease
+      parameters:
+        - name: releaseId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: State transitioned without changing release content }
+  /delivery/v1/apply-receipts:
+    post:
+      operationId: recordApplyReceipt
+      description: Requires workload identity; target scope is derived from that identity, not trusted from the body.
+      responses:
+        '201': { description: Receipt persisted }
+        '403': { description: Workload identity is missing or names a different target }
 components:
   schemas:
     RuntimeConfigurationSnapshot:

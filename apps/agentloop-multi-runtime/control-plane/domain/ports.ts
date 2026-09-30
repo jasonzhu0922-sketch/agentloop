@@ -1,4 +1,7 @@
-import type { ApplyReceipt, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TargetAssignment } from "../contracts/index.ts";
+import type {
+  ApplyReceipt, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand,
+  ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TargetAssignment, TransitionReleaseCommand,
+} from "../contracts/index.ts";
 
 /** Ports describe later persistence/delivery work without selecting SQL, HTTP, or a secret provider. */
 export interface ReleaseRepositoryPort {
@@ -9,6 +12,14 @@ export interface ReleaseRepositoryPort {
 export interface ConfigurationDeliveryPort {
   desiredSnapshot(target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot | undefined>;
   recordReceipt(receipt: ApplyReceipt): Promise<void>;
+}
+
+/** Write boundary used by application services; adapters own transactions and audit persistence. */
+export interface ControlPlaneWritePort extends ReleaseRepositoryPort {
+  publishRelease(command: PublishReleaseCommand): Promise<ResourceRelease>;
+  createTargetAssignment(command: CreateTargetAssignmentCommand): Promise<TargetAssignment>;
+  transitionRelease(command: TransitionReleaseCommand): Promise<ResourceRelease>;
+  recordApplyReceipt(command: RecordApplyReceiptCommand): Promise<void>;
 }
 
 export type ControlPlaneDialect = "sqlite" | "postgres" | "tidb";
