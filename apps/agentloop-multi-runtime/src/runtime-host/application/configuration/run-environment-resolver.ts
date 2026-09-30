@@ -1,4 +1,4 @@
-import { LlmProviderRegistry } from "@zhujun/agentloop";
+import { LlmProviderRegistry, type RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
 import type { RuntimeConfigurationSnapshot, RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
 import type { RuntimeAdmissionRunResolver, RuntimeHostRunPort } from "../runtime-run-port.ts";
 
@@ -15,6 +15,7 @@ export interface LoadedRuntimeConfigurationSnapshotCache {
 
 export interface ResolvedRunEnvironment {
   readonly snapshot: RuntimeConfigurationSnapshot;
+  readonly configurationSnapshot: RuntimeConfigurationSnapshotReference;
   readonly providers: LlmProviderRegistry;
 }
 
@@ -82,12 +83,26 @@ export class RunEnvironmentResolver {
     try {
       return {
         snapshot,
+        configurationSnapshot: configurationSnapshotReference(snapshot),
         providers: LlmProviderRegistry.fromConfigObject(snapshot.modelRoute.providerConfiguration, this.environment),
       };
     } catch {
       throw new RunEnvironmentUnavailableError("Control-plane model route is not a valid provider configuration");
     }
   }
+}
+
+function configurationSnapshotReference(snapshot: RuntimeConfigurationSnapshot): RuntimeConfigurationSnapshotReference {
+  return {
+    snapshotId: snapshot.snapshotId,
+    configurationRevision: snapshot.configurationRevision,
+    releases: [
+      ...(snapshot.modelRoute === undefined ? [] : [{ kind: "model_route" as const, releaseId: snapshot.modelRoute.releaseId, contentHash: snapshot.modelRoute.contentHash }]),
+      ...snapshot.integrations.map((item) => ({ kind: "integration" as const, releaseId: item.releaseId, contentHash: item.contentHash })),
+      ...snapshot.skills.map((item) => ({ kind: "skill" as const, releaseId: item.releaseId, contentHash: item.contentHash, packageHash: item.packageHash })),
+      ...snapshot.policies.map((item) => ({ kind: "policy" as const, releaseId: item.releaseId, contentHash: item.contentHash })),
+    ],
+  };
 }
 
 /** Binds the explicit workload target to Router-provided tenant identity at admission. */

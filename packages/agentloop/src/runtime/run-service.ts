@@ -88,6 +88,7 @@ import type {
   ModelRetryReporter,
   ModelStreamSink,
   RuntimeContextSnapshot,
+  RuntimeConfigurationSnapshotReference,
   RuntimeEvent,
   SkillExecutionRootGrant,
   UploadedSourceSummary,
@@ -292,6 +293,7 @@ export class RunService {
   private readonly stepExecutionStrategy?: StepExecutionStrategy;
   private readonly toolExecutionPlugins: readonly ToolExecutionPlugin[];
   private readonly practiceProfileCatalog?: PracticeProfileCatalog;
+  private readonly configurationSnapshot?: RuntimeConfigurationSnapshotReference;
 
   constructor(options: {
     database: SqlConnection;
@@ -321,6 +323,8 @@ export class RunService {
     toolExecutionPlugins?: readonly ToolExecutionPlugin[];
     /** Deployment-owned guidance profiles. They cannot grant capabilities or completion authority. */
     practiceProfileCatalog?: PracticeProfileCatalog;
+    /** Opaque Host admission provenance; Kernel only persists it with Run/Plan facts. */
+    configurationSnapshot?: RuntimeConfigurationSnapshotReference;
   }) {
     this.database = options.database;
     this.skills = options.skills;
@@ -426,6 +430,7 @@ export class RunService {
     this.stepExecutionStrategy = options.stepExecutionStrategy;
     this.toolExecutionPlugins = Object.freeze([...(options.toolExecutionPlugins ?? [])]);
     this.practiceProfileCatalog = options.practiceProfileCatalog;
+    this.configurationSnapshot = options.configurationSnapshot;
   }
 
   async execute(
@@ -1366,6 +1371,7 @@ export class RunService {
         }),
         allowDangerousTools: executeOptions.allowDangerousTools,
         ...(modelKey === undefined ? {} : { modelKey }),
+        ...(this.configurationSnapshot === undefined ? {} : { configurationSnapshot: this.configurationSnapshot }),
         input,
         createdAt,
       });
@@ -1775,7 +1781,7 @@ export class RunService {
       }, emit);
       await emit({
         type: "plan.admitted",
-        data: { planId: plan.id, version: plan.version, goal: plan.goal, steps: plan.steps },
+        data: { planId: plan.id, version: plan.version, goal: plan.goal, steps: plan.steps, ...(this.configurationSnapshot === undefined ? {} : { configurationSnapshot: this.configurationSnapshot }) },
       });
 
       const assessor = this.assessorFactory(model);

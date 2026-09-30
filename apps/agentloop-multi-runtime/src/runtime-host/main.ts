@@ -93,7 +93,7 @@ const skills = new SkillService(database, {
   skillDirectories,
 });
 const skillDirectorySync = await skills.syncSkillDirectories();
-const createRuns = (registry: LlmProviderRegistry | undefined): RunService => new RunService({
+const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnapshot?: import("@zhujun/agentloop").RuntimeConfigurationSnapshotReference): RunService => new RunService({
   database,
   skills,
   modelFactory: registry === undefined ? () => { throw new Error("configuration_unavailable"); } : (onRetry, modelKey) => registry.create(modelKey, onRetry),
@@ -107,6 +107,7 @@ const createRuns = (registry: LlmProviderRegistry | undefined): RunService => ne
     STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
   },
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
+  ...(configurationSnapshot === undefined ? {} : { configurationSnapshot }),
 });
 const runs = createRuns(providers);
 const controlPlaneAdmissionRuns = configurationSource === "file" ? undefined : createControlPlaneAdmissionRuns();
@@ -201,7 +202,7 @@ function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
   const target = { plane: "cloud" as const, tenantId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
   const client = new RuntimeConfigurationClient({ deliveryUrl, workloadToken, target });
   const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID });
-  return new ControlPlaneAdmissionRunResolver(target, environments, (environment) => new AgentLoopRuntimeRunPort(createRuns(environment.providers)));
+  return new ControlPlaneAdmissionRunResolver(target, environments, (environment) => new AgentLoopRuntimeRunPort(createRuns(environment.providers, environment.configurationSnapshot)));
 }
 
 function runtimeConfigurationSource(value: string | undefined): "file" | "control_plane" {

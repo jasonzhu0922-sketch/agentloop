@@ -3,6 +3,22 @@ import type { RuntimeResultRef } from "./runtime-result.ts";
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
 /**
+ * Opaque, server-authored environment provenance bound before admission.
+ * The Kernel transports this fact but never resolves a control plane, secret,
+ * database connection, or provider configuration from it.
+ */
+export interface RuntimeConfigurationSnapshotReference {
+  readonly snapshotId: string;
+  readonly configurationRevision: number;
+  readonly releases: readonly {
+    readonly kind: "model_route" | "integration" | "skill" | "policy";
+    readonly releaseId: string;
+    readonly contentHash: string;
+    readonly packageHash?: string;
+  }[];
+}
+
+/**
  * Server-authored state that is relevant to the next model turn but is not a
  * user message. It is encoded into the provider's native protocol only at the
  * model boundary. The Runtime, not the model, owns its content and version.
