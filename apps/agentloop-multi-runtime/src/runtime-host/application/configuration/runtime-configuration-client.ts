@@ -64,7 +64,7 @@ export class RuntimeConfigurationClient {
 
   public async reportSkillInstallReceipt(receipt: SkillInstallReceipt): Promise<void> {
     const response = await this.request(new URL("/delivery/v1/skill-install-receipts", `${this.deliveryUrl}/`), {
-      method: "POST", headers: { authorization: `Bearer ${this.workloadToken}`, "content-type": "application/json" }, body: JSON.stringify({ receipt: { ...receipt, target: this.target } }),
+      method: "POST", headers: { authorization: `Bearer ${this.workloadToken}`, "content-type": "application/json", "x-request-id": receipt.receiptId }, body: JSON.stringify({ receipt: { ...receipt, target: this.target } }),
     });
     if (!response.ok) throw new RuntimeConfigurationClientError(`Delivery skill-install-receipts returned HTTP ${response.status}`);
   }
@@ -82,7 +82,7 @@ export class RuntimeConfigurationClient {
         releaseId: reference.releaseId, contentHash: reference.contentHash, status, observedAt: this.now(),
       };
       const response = await this.request(new URL("/delivery/v1/apply-receipts", `${this.deliveryUrl}/`), {
-        method: "POST", headers: { authorization: `Bearer ${this.workloadToken}`, "content-type": "application/json" }, body: JSON.stringify({ receipt }),
+        method: "POST", headers: { authorization: `Bearer ${this.workloadToken}`, "content-type": "application/json", "x-request-id": receipt.receiptId }, body: JSON.stringify({ receipt }),
       });
       if (!response.ok) throw new RuntimeConfigurationClientError(`Delivery apply-receipts returned HTTP ${response.status}`);
     }

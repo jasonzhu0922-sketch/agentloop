@@ -19,7 +19,7 @@ export class LocalDeliveryClient {
     const references = [...(snapshot.modelRoute === undefined ? [] : [snapshot.modelRoute]), ...snapshot.integrations, ...snapshot.skills, ...snapshot.policies];
     for (const reference of references) {
       const receipt: ApplyReceipt = { contractVersion: "control-plane/v1", receiptId: receiptIdFor(reference.releaseId), target: this.input.target, releaseId: reference.releaseId, contentHash: reference.contentHash, status: "loaded", observedAt: this.now() };
-      const response = await this.fetch("/delivery/v1/apply-receipts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ receipt }) });
+      const response = await this.fetch("/delivery/v1/apply-receipts", { method: "POST", headers: { "content-type": "application/json", "x-request-id": receipt.receiptId }, body: JSON.stringify({ receipt }) });
       if (!response.ok) throw new LocalDeliveryError(response.status === 403 ? "target_not_authorized" : "configuration_unavailable");
     }
   }
@@ -31,7 +31,7 @@ export class LocalDeliveryClient {
   }
 
   async reportSkillInstallReceipt(receipt: SkillInstallReceipt): Promise<void> {
-    const response = await this.fetch("/delivery/v1/skill-install-receipts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ receipt: { ...receipt, target: this.input.target } }) });
+    const response = await this.fetch("/delivery/v1/skill-install-receipts", { method: "POST", headers: { "content-type": "application/json", "x-request-id": receipt.receiptId }, body: JSON.stringify({ receipt: { ...receipt, target: this.input.target } }) });
     if (!response.ok) throw new LocalDeliveryError(response.status === 403 ? "target_not_authorized" : "configuration_unavailable");
   }
 
