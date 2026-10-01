@@ -38,6 +38,7 @@
     "typecheck:admin-web": "tsc -p admin-web/tsconfig.json",
     "test:admin-web": "node --test --test-isolation=process admin-web/tests/*.test.ts",
     "create:admin": "node admin-api/scripts/create-admin.mjs",
+    "provision:admin-database": "node admin-api/scripts/provision-admin-database.mjs",
     "typecheck:control-plane": "tsc -p control-plane/tsconfig.json",
     "test:control-plane": "node --test --test-isolation=process control-plane/tests/*.test.ts tests/control-plane-boundaries.test.ts tests/control-plane-wp6.test.ts tests/control-plane-wp8.test.ts",
     "migrate:control-plane": "node admin-api/scripts/migrate.mjs",

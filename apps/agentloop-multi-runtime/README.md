@@ -132,6 +132,23 @@ Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/
 
 ### TiDB role databases
 
+The Admin control plane has its own TiDB database, `agentloop_admin`. It is provisioned
+and migrated separately from Router and Runtime; application startup only checks its
+migration ledger and never creates the database or `cp_*` tables.
+
+```dotenv
+AGENTLOOP_ADMIN_DATABASE_URL=mysql://user:password@tidb:4000/agentloop_admin
+```
+
+Provision and migrate it explicitly:
+
+```bash
+AGENTLOOP_ADMIN_SERVER_URL='mysql://user:password@tidb:4000' \
+  npm run provision:admin-database -- --apply
+AGENTLOOP_ADMIN_DATABASE_URL='mysql://user:password@tidb:4000/agentloop_admin' \
+  npm run migrate:control-plane -- --apply
+```
+
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host
 分到两个 database：`agentloop_router` 保存身份、设备、附件、Assignment 与 Router
 投影；`agentloop_runtime` 保存 Run、Plan、事件与 Host dispatch ledger。Router 经

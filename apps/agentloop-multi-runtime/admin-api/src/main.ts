@@ -9,7 +9,7 @@ import { SqlControlPlaneStore } from "./persistence/sql-control-plane-store.ts";
 const port = Number(process.env.ADMIN_API_PORT ?? "8792");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new TypeError("ADMIN_API_PORT must be a TCP port");
 
-const connectionString = process.env.CONTROL_PLANE_DATABASE_URL;
+const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL;
 const database = connectionString === undefined ? undefined : await openReadyControlPlaneDatabase(connectionString);
 const store = database === undefined ? undefined : new SqlControlPlaneStore(database);
 const releases = store === undefined ? undefined : new ReleaseApplicationService(store);
