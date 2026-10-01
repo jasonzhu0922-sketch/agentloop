@@ -39,6 +39,6 @@ function authorizationFromEnvironment() {
   const token = process.env.ADMIN_AUTH_TOKEN;
   if (token === undefined) throw new TypeError("ADMIN_AUTH_TOKEN is required when ADMIN_AUTH_MODE=static");
   const role = process.env.ADMIN_AUTH_ROLE;
-  if (role !== "platform_admin" && role !== "tenant_admin" && role !== "operator" && role !== "auditor") throw new TypeError("ADMIN_AUTH_ROLE must be platform_admin, tenant_admin, operator, or auditor");
+  if (role !== "platform_admin" && role !== "operator" && role !== "skill_operator" && role !== "auditor" && role !== "member") throw new TypeError("ADMIN_AUTH_ROLE must be platform_admin, operator, skill_operator, auditor, or member");
   return new StaticTokenAuthorization({ token, role, actorId: process.env.ADMIN_AUTH_ACTOR_ID ?? "bootstrap-admin", ...(process.env.ADMIN_AUTH_TENANT_ID === undefined ? {} : { tenantId: process.env.ADMIN_AUTH_TENANT_ID }) });
 }

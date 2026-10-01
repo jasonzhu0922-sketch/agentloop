@@ -14,7 +14,7 @@ const subject = required(args.subject, "--subject");
 const displayName = required(args["display-name"] ?? subject, "--display-name");
 const memberId = args["member-id"] ?? `admin-${subject.replace(/[^a-zA-Z0-9._-]+/g, "-")}`;
 const role = args.role ?? "platform_admin";
-if (!["platform_admin", "tenant_admin", "operator", "auditor"].includes(role)) throw new Error("--role must be platform_admin, tenant_admin, operator, or auditor");
+if (!["platform_admin", "operator", "skill_operator", "auditor", "member"].includes(role)) throw new Error("--role must be platform_admin, operator, skill_operator, auditor, or member");
 
 const database = await TiDbConnection.create(connectionString);
 try {
