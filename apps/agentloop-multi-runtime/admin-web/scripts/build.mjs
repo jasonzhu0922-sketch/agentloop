@@ -13,3 +13,4 @@ await build({
   outfile: resolve(output, "app.js"),
 });
 await cp(resolve(root, "index.html"), resolve(output, "index.html"));
+await cp(resolve(root, "styles.css"), resolve(output, "styles.css"));

@@ -40,6 +40,38 @@ paths:
         '201': { description: Immutable release persisted }
         '403': { description: Missing or invalid admin principal }
         '409': { description: Optimistic revision or immutable release conflict }
+  /admin/v1/session:
+    get:
+      operationId: adminSession
+      description: Returns only the authenticated Admin actor, role, effective permissions, and optional execution scope.
+      responses:
+        '200': { description: Admin session projection without token material }
+        '403': { description: Missing or invalid admin principal }
+  /admin/v1/auth/login:
+    post:
+      operationId: adminLogin
+      description: Exchanges an Admin username/password for a short-lived Admin API session token. Workload tokens and Router user sessions are not accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 1 }
+                password: { type: string, minLength: 1, writeOnly: true }
+      responses:
+        '200': { description: Short-lived opaque Admin session token }
+        '401': { description: Invalid Admin credentials }
+        '503': { description: Interactive login is not configured }
+  /admin/v1/resources:
+    get:
+      operationId: listResources
+      description: Lists public resource identities and revisions needed for optimistic Admin operations.
+      responses:
+        '200': { description: Resource list }
+        '403': { description: Missing or invalid admin principal }
   /admin/v1/target-assignments:
     post:
       operationId: createTargetAssignment

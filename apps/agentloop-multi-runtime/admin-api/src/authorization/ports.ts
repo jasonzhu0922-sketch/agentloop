@@ -25,4 +25,6 @@ export interface WorkloadPrincipal {
 export interface AdminAuthorizationPort {
   adminPrincipal(authorization: string | undefined): Promise<AdminPrincipal | undefined>;
   workloadPrincipal(authorization: string | undefined): Promise<WorkloadPrincipal | undefined>;
+  /** Optional interactive Admin login. Workload and Router authentication never use this seam. */
+  login?(username: string, password: string): Promise<{ readonly accessToken: string; readonly expiresAt: number } | undefined>;
 }

@@ -22,7 +22,10 @@ test("Admin management routes keep ordinary user tokens out and retain expected 
   };
   const trace: AdminTracePort = { trace: async (runId) => ({ contractVersion: "control-plane/v1", runId, facts: [{ source: "router", kind: "run", ref: runId }], missingBoundaries: [{ source: "runtime", reason: "not_recorded" }] }) };
   const audit: AdminAuditPort = { listAuditEvents: async (limit) => [{ eventId: "audit-a", actorId: "admin-a", action: "runtime.drain", resourceId: `limit:${limit}`, createdAt: 1 }] };
-  const catalog: AdminCatalogPort = { listReleases: async (kind) => { assert.equal(kind, "skill"); return []; } };
+  const catalog: AdminCatalogPort = {
+    listResources: async () => [{ resourceId: "resource-a", kind: "skill", revision: 3 }],
+    listReleases: async (kind) => { assert.equal(kind, "skill"); return []; },
+  };
   const operations: RuntimeOperationPort = {
     drain: async (input) => result(input.target, "drain", input.expectedRevision),
     recover: async (input) => result(input.target, "recover", input.expectedRevision),
@@ -34,6 +37,12 @@ test("Admin management routes keep ordinary user tokens out and retain expected 
     assert.equal((await fetch(`${baseUrl}/admin/v1/members?scopeId=tenant-a`, { headers: { authorization: "Bearer user" } })).status, 403);
     const members = await fetch(`${baseUrl}/admin/v1/members?scopeId=tenant-a`, { headers: { authorization: "Bearer admin" } });
     assert.deepEqual((await members.json() as { members: readonly AdminMember[] }).members, [member]);
+    assert.deepEqual(await (await fetch(`${baseUrl}/admin/v1/session`, { headers: { authorization: "Bearer admin" } })).json(), {
+      actorId: "admin-a", role: "platform_admin", permissions: ["audit.read", "member.read", "member.write", "release.read", "release.write", "runtime.operate", "skill.read", "skill.write", "trace.read"],
+    });
+    assert.deepEqual(await (await fetch(`${baseUrl}/admin/v1/resources`, { headers: { authorization: "Bearer admin" } })).json(), {
+      resources: [{ resourceId: "resource-a", kind: "skill", revision: 3 }],
+    });
     assert.deepEqual((await (await fetch(`${baseUrl}/admin/v1/releases?kind=skill`, { headers: { authorization: "Bearer admin" } })).json() as { releases: unknown[] }).releases, []);
     const traceResponse = await fetch(`${baseUrl}/admin/v1/runs/run-a/trace`, { headers: { authorization: "Bearer admin" } });
     assert.deepEqual((await traceResponse.json() as { missingBoundaries: unknown }).missingBoundaries, [{ source: "runtime", reason: "not_recorded" }]);

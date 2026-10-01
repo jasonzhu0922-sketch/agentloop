@@ -26,4 +26,6 @@ export class StaticTokenAuthorization implements AdminAuthorizationPort {
   public async workloadPrincipal(_authorization: string | undefined): Promise<WorkloadPrincipal | undefined> {
     return undefined;
   }
+
+  public async login(_username: string, _password: string): Promise<undefined> { return undefined; }
 }

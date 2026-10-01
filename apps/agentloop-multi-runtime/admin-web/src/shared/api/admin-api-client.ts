@@ -1,4 +1,25 @@
-import type { AdminMember, AdminMemberStatus, ApplyReceipt, AuditEvent, ResourceKind, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeOperationResult, RuntimeTarget, RuntimeTrace } from "../../../../control-plane/contracts/index.ts";
+import type { AdminMember, AdminMemberRole, AdminMemberStatus, ApplyReceipt, AuditEvent, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, ResourceKind, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeOperationResult, RuntimeTarget, RuntimeTrace, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
+export type AdminPermission = "member.read" | "member.write" | "release.read" | "release.write" | "skill.read" | "skill.write" | "runtime.operate" | "trace.read" | "audit.read";
+
+export interface AdminSession {
+  readonly actorId: string;
+  readonly role: AdminMemberRole;
+  readonly permissions: readonly AdminPermission[];
+  readonly scopeId?: string;
+}
+export interface AdminLoginSession { readonly accessToken: string; readonly expiresAt: number; }
+
+export class AdminApiError extends Error {
+  public readonly status: number;
+  public readonly code?: string;
+
+  public constructor(status: number, code?: string) {
+    super(code === undefined ? `Admin API request failed: HTTP ${status}` : `Admin API request failed: ${code}`);
+    this.name = "AdminApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
 
 /** The Admin Web can only speak to the independently deployed Admin API. */
 export class AdminApiClient {
@@ -15,6 +36,21 @@ export class AdminApiClient {
   public async health(): Promise<{ readonly status: string }> {
     const response = await this.call("/healthz");
     return await response.json() as { readonly status: string };
+  }
+
+  public async session(): Promise<AdminSession> {
+    const response = await this.call("/admin/v1/session");
+    return await response.json() as AdminSession;
+  }
+
+  public async login(username: string, password: string): Promise<AdminLoginSession> {
+    const response = await this.call("/admin/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
+    return await response.json() as AdminLoginSession;
+  }
+
+  public async resources(): Promise<readonly ControlPlaneResource[]> {
+    const response = await this.call("/admin/v1/resources");
+    return (await response.json() as { resources: readonly ControlPlaneResource[] }).resources;
   }
 
   public async members(scopeId: string): Promise<readonly AdminMember[]> {
@@ -47,11 +83,33 @@ export class AdminApiClient {
     return await response.json() as RuntimeOperationResult;
   }
 
+  public async createMember(member: AdminMember, expectedRevision: number, requestId: string): Promise<AdminMember> {
+    const response = await this.call("/admin/v1/members", { method: "POST", headers: { "content-type": "application/json", "x-request-id": requestId }, body: JSON.stringify({ member, expectedRevision }) });
+    return await response.json() as AdminMember;
+  }
+
+  public async publishRelease(command: Omit<PublishReleaseCommand, "actorId" | "auditEventId">, requestId: string): Promise<ResourceRelease> {
+    const response = await this.call("/admin/v1/releases", { method: "POST", headers: { "content-type": "application/json", "x-request-id": requestId }, body: JSON.stringify(command) });
+    return await response.json() as ResourceRelease;
+  }
+
+  public async transitionRelease(releaseId: string, command: Omit<TransitionReleaseCommand, "releaseId" | "actorId" | "auditEventId">, requestId: string): Promise<ResourceRelease> {
+    const response = await this.call(`/admin/v1/releases/${encodeURIComponent(releaseId)}/transitions`, { method: "POST", headers: { "content-type": "application/json", "x-request-id": requestId }, body: JSON.stringify(command) });
+    return await response.json() as ResourceRelease;
+  }
+
+  public async createTargetAssignment(command: Omit<CreateTargetAssignmentCommand, "actorId" | "auditEventId">, requestId: string): Promise<void> {
+    await this.call("/admin/v1/target-assignments", { method: "POST", headers: { "content-type": "application/json", "x-request-id": requestId }, body: JSON.stringify(command) });
+  }
+
   private async call(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
     if (this.authorization !== undefined) headers.set("authorization", this.authorization);
     const response = await this.request(new URL(path, this.baseUrl), { ...init, headers });
-    if (!response.ok) throw new Error(`Admin API request failed: HTTP ${response.status}`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => undefined) as { code?: string } | undefined;
+      throw new AdminApiError(response.status, body?.code);
+    }
     return response;
   }
 }

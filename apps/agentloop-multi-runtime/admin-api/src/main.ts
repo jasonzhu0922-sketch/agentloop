@@ -1,6 +1,7 @@
 import { createAdminApiServer } from "./bootstrap/server.ts";
 import { DenyAllAuthorization } from "./authorization/deny-all-authorization.ts";
 import { StaticTokenAuthorization } from "./authorization/static-token-authorization.ts";
+import { PasswordAuthorization } from "./authorization/password-authorization.ts";
 import { ReleaseApplicationService } from "./application/release-service.ts";
 import { RuntimeConfigurationSnapshotService } from "./application/runtime-configuration-snapshot-service.ts";
 import { openReadyControlPlaneDatabase } from "./infrastructure/control-plane-database.ts";
@@ -35,10 +36,22 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 }
 
 function authorizationFromEnvironment() {
+  if (process.env.ADMIN_AUTH_MODE === "password") {
+    const username = process.env.ADMIN_AUTH_USERNAME;
+    const passwordHash = process.env.ADMIN_AUTH_PASSWORD_HASH;
+    if (username === undefined || passwordHash === undefined) throw new TypeError("ADMIN_AUTH_USERNAME and ADMIN_AUTH_PASSWORD_HASH are required when ADMIN_AUTH_MODE=password");
+    return new PasswordAuthorization({ username, passwordHash, role: adminRole(), actorId: process.env.ADMIN_AUTH_ACTOR_ID ?? username, ...(process.env.ADMIN_AUTH_SCOPE_ID === undefined ? {} : { scopeId: process.env.ADMIN_AUTH_SCOPE_ID }), sessionTtlMs: positiveInteger(process.env.ADMIN_AUTH_SESSION_TTL_MS, 8 * 60 * 60 * 1000) });
+  }
   if (process.env.ADMIN_AUTH_MODE !== "static") return new DenyAllAuthorization();
   const token = process.env.ADMIN_AUTH_TOKEN;
   if (token === undefined) throw new TypeError("ADMIN_AUTH_TOKEN is required when ADMIN_AUTH_MODE=static");
   const role = process.env.ADMIN_AUTH_ROLE;
   if (role !== "platform_admin" && role !== "operator" && role !== "skill_operator" && role !== "auditor" && role !== "member") throw new TypeError("ADMIN_AUTH_ROLE must be platform_admin, operator, skill_operator, auditor, or member");
   return new StaticTokenAuthorization({ token, role, actorId: process.env.ADMIN_AUTH_ACTOR_ID ?? "bootstrap-admin", ...(process.env.ADMIN_AUTH_SCOPE_ID === undefined ? {} : { scopeId: process.env.ADMIN_AUTH_SCOPE_ID }) });
+}
+
+function adminRole() {
+  const role = process.env.ADMIN_AUTH_ROLE;
+  if (role !== "platform_admin" && role !== "operator" && role !== "skill_operator" && role !== "auditor" && role !== "member") throw new TypeError("ADMIN_AUTH_ROLE must be platform_admin, operator, skill_operator, auditor, or member");
+  return role;
 }

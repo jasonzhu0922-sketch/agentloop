@@ -1,4 +1,4 @@
-import type { AdminMember, AuditEvent, ResourceKind, ResourceRelease, RuntimeOperationResult, RuntimeTarget, RuntimeTrace } from "../../../control-plane/contracts/index.ts";
+import type { AdminMember, AuditEvent, ControlPlaneResource, ResourceKind, ResourceRelease, RuntimeOperationResult, RuntimeTarget, RuntimeTrace } from "../../../control-plane/contracts/index.ts";
 
 /** Independent identity boundary; neither Router sessions nor user tokens implement it directly. */
 export interface AdminIdentityPort {
@@ -17,6 +17,7 @@ export interface AdminAuditPort {
 }
 
 export interface AdminCatalogPort {
+  listResources(): Promise<readonly ControlPlaneResource[]>;
   listReleases(kind?: ResourceKind): Promise<readonly ResourceRelease[]>;
 }
 

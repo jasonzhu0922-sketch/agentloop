@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AdminMember, CredentialGrant, CredentialGrantRequest, CreateMemberCommand, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionMemberCommand, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
 import { ControlPlaneError } from "../../../../control-plane/domain/index.ts";
-import { hasAdminPermission } from "../../authorization/rbac.ts";
+import { hasAdminPermission, permissionsForRole } from "../../authorization/rbac.ts";
 import type { AdminAuthorizationPort, AdminPermission, AdminPrincipal } from "../../authorization/ports.ts";
 import type { ReleaseApplicationService } from "../../application/release-service.ts";
 import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort, AdminTracePort, RuntimeOperationPort } from "../../application/admin-ports.ts";
@@ -43,6 +43,24 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
     try {
       const url = new URL(request.url ?? "/", "http://admin-api.invalid");
       if (request.method === "GET" && url.pathname === "/healthz") return respond(response, 200, adminApiHealth());
+      if (request.method === "POST" && url.pathname === "/admin/v1/auth/login") {
+        const body = await jsonBody(request) as { username?: string; password?: string };
+        if (body.username === undefined || body.password === undefined) throw new ControlPlaneError("invalid_contract", "username and password are required");
+        if (dependencies.authorization.login === undefined) return respond(response, 503, { code: "admin_login_not_configured" });
+        const session = await dependencies.authorization.login(body.username, body.password);
+        if (session === undefined) return respond(response, 401, { code: "admin_credentials_invalid" });
+        return respond(response, 200, session);
+      }
+      if (request.method === "GET" && url.pathname === "/admin/v1/session") {
+        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        if (principal === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        return respond(response, 200, {
+          actorId: principal.actorId,
+          role: principal.role,
+          permissions: [...new Set([...permissionsForRole(principal.role), ...(principal.permissions ?? [])])].sort(),
+          ...(principal.scopeId === undefined ? {} : { scopeId: principal.scopeId }),
+        });
+      }
       if (request.method === "GET" && url.pathname === "/delivery/v1/desired-configuration") {
         const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
         if (principal === undefined || dependencies.snapshots === undefined) return respond(response, 403, { code: "target_not_authorized" });
@@ -62,6 +80,11 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, kind === "skill" ? "skill.read" : "release.read");
         if (principal === undefined || dependencies.catalog === undefined) return respond(response, 403, { code: "target_not_authorized" });
         return respond(response, 200, { releases: await dependencies.catalog.listReleases(kind as ResourceRelease["kind"] | undefined) });
+      }
+      if (request.method === "GET" && url.pathname === "/admin/v1/resources") {
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "release.read");
+        if (principal === undefined || dependencies.catalog === undefined) return respond(response, 403, { code: "target_not_authorized" });
+        return respond(response, 200, { resources: await dependencies.catalog.listResources() });
       }
       if (request.method === "GET" && url.pathname === "/admin/v1/audit-events") {
         const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "audit.read");
