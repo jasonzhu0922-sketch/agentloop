@@ -6,7 +6,7 @@ import { ControlPlaneError } from "../../control-plane/domain/index.ts";
 import { SqlIntegrationDeliveryService, type IntegrationSecretProviderPort } from "../src/application/integration-delivery-service.ts";
 import { migrateControlPlane } from "../src/persistence/control-plane-migrations.ts";
 
-const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
+const target: RuntimeTarget = { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" };
 const contentHash = "a".repeat(64);
 const snapshot: RuntimeConfigurationSnapshot = {
   contractVersion: "control-plane/v1", snapshotId: "snapshot-a", configurationRevision: 1, target,

@@ -47,10 +47,10 @@ test("snapshot resolver selects only active releases at the target scope and emi
     const integration = release("search", "search-r1", "integration");
     const policy = release("policy", "policy-r1", "policy");
     await activate(releases, model, { plane: "both", target: { kind: "platform" } }, "model");
-    await activate(releases, integration, { plane: "cloud", target: { kind: "tenant", tenantId: "tenant-a" } }, "integration");
-    await activate(releases, policy, { plane: "cloud", target: { kind: "runtime_id", tenantId: "tenant-a", runtimeId: "runtime-a" } }, "policy");
+    await activate(releases, integration, { plane: "cloud", target: { kind: "tenant", scopeId: "tenant-a" } }, "integration");
+    await activate(releases, policy, { plane: "cloud", target: { kind: "runtime_id", scopeId: "tenant-a", runtimeId: "runtime-a" } }, "policy");
     const resolver = new RuntimeConfigurationSnapshotService({ repository: store, now: () => 1_000, ttlMs: 500 });
-    const snapshot = await resolver.desiredSnapshot({ plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" });
+    const snapshot = await resolver.desiredSnapshot({ plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" });
     assert.equal(snapshot.modelRoute?.releaseId, model.releaseId);
     assert.deepEqual(snapshot.modelRoute?.providerConfiguration, { defaultProvider: "example", defaultModelKey: "example-model", providers: {}, models: {} });
     assert.deepEqual(snapshot.integrations, [{ bindingId: "search-assignment", releaseId: integration.releaseId, contentHash: integration.contentHash, integration: "enterprise_info", allowedActions: ["search", "detail"] }]);
@@ -60,7 +60,7 @@ test("snapshot resolver selects only active releases at the target scope and emi
     assert.equal(snapshot.validUntil, 1_500);
     assert.match(snapshot.snapshotId, /^[a-f0-9]{64}$/);
     assert.ok(snapshot.configurationRevision > 0);
-    const otherTenant = await resolver.desiredSnapshot({ plane: "cloud", tenantId: "tenant-b", runtimeId: "runtime-a" });
+    const otherTenant = await resolver.desiredSnapshot({ plane: "cloud", scopeId: "tenant-b", runtimeId: "runtime-a" });
     assert.equal(otherTenant.modelRoute?.releaseId, model.releaseId);
     assert.deepEqual(otherTenant.integrations, []);
     assert.deepEqual(otherTenant.policies, []);
@@ -79,7 +79,7 @@ test("snapshot resolver refuses a selected skill release without a verified pack
     await activate(releases, skill, { plane: "cloud", target: { kind: "platform" } }, "skill");
     const resolver = new RuntimeConfigurationSnapshotService({ repository: store, now: () => 1_000, ttlMs: 500 });
     await assert.rejects(
-      () => resolver.desiredSnapshot({ plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" }),
+      () => resolver.desiredSnapshot({ plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" }),
       (error: unknown) => error instanceof ControlPlaneError && error.code === "configuration_unavailable",
     );
   } finally {
@@ -99,7 +99,7 @@ test("snapshot resolver includes only signed Skill artifact metadata", async () 
     await activate(releases, skill, { plane: "cloud", target: { kind: "platform" } }, "signed-skill");
     await database.prepare("INSERT INTO cp_skill_artifacts(release_id, package_uri, package_hash, signer, compatibility_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(skill.releaseId, "https://artifacts.example.test/signed-skill.tgz", packageHash, "platform-signer", JSON.stringify({ signatureAlgorithm: "ed25519", signature: "signature-bytes" }), 10);
-    const snapshot = await new RuntimeConfigurationSnapshotService({ repository: store, now: () => 1_000, ttlMs: 500 }).desiredSnapshot({ plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" });
+    const snapshot = await new RuntimeConfigurationSnapshotService({ repository: store, now: () => 1_000, ttlMs: 500 }).desiredSnapshot({ plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" });
     assert.deepEqual(snapshot.skills[0]?.artifact, {
       packageUri: "https://artifacts.example.test/signed-skill.tgz", packageHash, signer: "platform-signer", signatureAlgorithm: "ed25519", signature: "signature-bytes",
     });

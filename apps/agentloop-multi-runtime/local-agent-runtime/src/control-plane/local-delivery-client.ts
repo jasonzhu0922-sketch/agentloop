@@ -40,4 +40,4 @@ export class LocalDeliveryClient {
 }
 
 export class LocalDeliveryError extends Error { public readonly code: "configuration_unavailable" | "target_not_authorized"; public constructor(code: "configuration_unavailable" | "target_not_authorized") { super(code); this.name = "LocalDeliveryError"; this.code = code; } }
-function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }
+function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.scopeId === right.scopeId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }

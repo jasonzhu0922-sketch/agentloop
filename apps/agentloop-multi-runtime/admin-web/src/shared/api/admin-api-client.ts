@@ -17,8 +17,8 @@ export class AdminApiClient {
     return await response.json() as { readonly status: string };
   }
 
-  public async members(tenantId: string): Promise<readonly AdminMember[]> {
-    const response = await this.call(`/admin/v1/members?tenantId=${encodeURIComponent(tenantId)}`);
+  public async members(scopeId: string): Promise<readonly AdminMember[]> {
+    const response = await this.call(`/admin/v1/members?scopeId=${encodeURIComponent(scopeId)}`);
     return (await response.json() as { members: readonly AdminMember[] }).members;
   }
 

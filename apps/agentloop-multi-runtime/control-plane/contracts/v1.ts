@@ -14,10 +14,10 @@ export type ApplyStatus = "validated" | "loaded" | "failed" | "rejected";
 
 export type ScopeTarget =
   | { readonly kind: "platform" }
-  | { readonly kind: "tenant"; readonly tenantId: string }
-  | { readonly kind: "runtime_class"; readonly tenantId: string; readonly runtimeClass: string }
-  | { readonly kind: "runtime_id"; readonly tenantId: string; readonly runtimeId: string }
-  | { readonly kind: "device_id"; readonly tenantId: string; readonly deviceId: string };
+  | { readonly kind: "tenant"; readonly scopeId: string }
+  | { readonly kind: "runtime_class"; readonly scopeId: string; readonly runtimeClass: string }
+  | { readonly kind: "runtime_id"; readonly scopeId: string; readonly runtimeId: string }
+  | { readonly kind: "device_id"; readonly scopeId: string; readonly deviceId: string };
 
 export interface ConfigurationScope {
   readonly plane: AssignmentPlane;
@@ -26,7 +26,7 @@ export interface ConfigurationScope {
 
 export interface RuntimeTarget {
   readonly plane: RuntimePlane;
-  readonly tenantId: string;
+  readonly scopeId: string;
   readonly runtimeClass?: string;
   readonly runtimeId: string;
   readonly deviceId?: string;

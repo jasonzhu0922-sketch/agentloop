@@ -11,8 +11,8 @@ export interface AdminPrincipal {
   readonly role: AdminMemberRole;
   /** Optional identity-provider grants; role permissions are always included. */
   readonly permissions?: readonly AdminPermission[];
-  /** Tenant scope from the Admin identity provider; omitted only for platform-wide administrators. */
-  readonly tenantId?: string;
+  /** Execution scope from the Admin identity provider; omitted only for platform-wide administrators. */
+  readonly scopeId?: string;
 }
 
 export interface WorkloadPrincipal {

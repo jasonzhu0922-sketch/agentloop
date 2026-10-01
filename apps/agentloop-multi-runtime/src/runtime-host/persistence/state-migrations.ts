@@ -13,10 +13,29 @@ const MIGRATIONS: readonly SchemaMigration[] = [
   { id: "runtime/0004_run_event_sequences", definition: "per-run-event-sequence;concurrent-runtime-writers:v1", apply: installRunEventSequences },
   { id: "runtime/0005_loaded_configuration_snapshot_cache", definition: "loaded-runtime-configuration-snapshot-cache:v1", apply: installRuntimeConfigurationSnapshotCache },
   { id: "runtime/0006_loaded_configuration_snapshot_history", definition: "loaded-runtime-configuration-snapshot-history:v1", apply: installRuntimeConfigurationSnapshotHistory },
+  { id: "runtime/0007_scope_id_columns", definition: "runtime-configuration-snapshot-tenant-id-to-scope-id:v1", apply: installRuntimeConfigurationScopeRename },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {
   await applyVersionedMigrations(database, "runtime", MIGRATIONS);
+}
+
+/** Keeps pre-scope Host caches readable without introducing a compatibility field in the contract. */
+async function installRuntimeConfigurationScopeRename(database: SqlConnection): Promise<void> {
+  for (const table of ["mr_runtime_configuration_snapshots", "mr_runtime_configuration_snapshot_history"]) {
+    const hasLegacy = await hasColumn(database, table, "tenant_id");
+    const hasScope = await hasColumn(database, table, "scope_id");
+    if (hasLegacy && !hasScope) await database.exec(`ALTER TABLE ${table} RENAME COLUMN tenant_id TO scope_id`);
+  }
+}
+
+async function hasColumn(database: SqlConnection, table: string, column: string): Promise<boolean> {
+  if (database.dialect === "sqlite") {
+    const rows = await database.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+    return rows.some((row) => row.name === column);
+  }
+  const rows = await database.prepare(`SELECT column_name FROM information_schema.columns WHERE table_schema = ${database.dialect === "tidb" ? "DATABASE()" : "current_schema()"} AND table_name = ? AND column_name = ?`).all<{ column_name: string }>(table, column);
+  return rows.length > 0;
 }
 
 /** Preserves fields found in authoritative SQLite state but not yet read by this checkout. */

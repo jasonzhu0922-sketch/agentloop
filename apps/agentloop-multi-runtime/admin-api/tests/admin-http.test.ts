@@ -15,7 +15,7 @@ class TestAuthorization implements AdminAuthorizationPort {
   }
 
   public async workloadPrincipal(value: string | undefined): Promise<WorkloadPrincipal | undefined> {
-    return value === "Bearer workload" ? { actorId: "workload:runtime-a", target: { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" } } : undefined;
+    return value === "Bearer workload" ? { actorId: "workload:runtime-a", target: { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" } } : undefined;
   }
 }
 
@@ -68,10 +68,10 @@ test("delivery target is derived solely from workload identity", async () => {
   try {
     const address = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${address.port}`;
-    assert.equal((await fetch(`${baseUrl}/delivery/v1/desired-configuration?tenantId=attacker`)).status, 403);
-    const response = await fetch(`${baseUrl}/delivery/v1/desired-configuration?tenantId=attacker`, { headers: { authorization: "Bearer workload" } });
+    assert.equal((await fetch(`${baseUrl}/delivery/v1/desired-configuration?scopeId=attacker`)).status, 403);
+    const response = await fetch(`${baseUrl}/delivery/v1/desired-configuration?scopeId=attacker`, { headers: { authorization: "Bearer workload" } });
     assert.equal(response.status, 200);
-    assert.deepEqual(resolvedTarget, { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
+    assert.deepEqual(resolvedTarget, { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
     assert.deepEqual((await response.json() as { target: WorkloadPrincipal["target"] }).target, resolvedTarget);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
@@ -100,11 +100,11 @@ test("integration delivery endpoints derive workload target and never accept a c
       bindingId: "binding-a", releaseId: "release-a", contentHash: "a".repeat(64), skillNames: ["enterprise-info"], requestedAt: 1_000,
     };
     assert.equal((await fetch(`${baseUrl}/delivery/v1/credential-grants`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: invocation }) })).status, 403);
-    const grant = await fetch(`${baseUrl}/delivery/v1/credential-grants`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json" }, body: JSON.stringify({ request: { ...invocation, target: { tenantId: "attacker" } } }) });
+    const grant = await fetch(`${baseUrl}/delivery/v1/credential-grants`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json" }, body: JSON.stringify({ request: { ...invocation, target: { scopeId: "attacker" } } }) });
     assert.equal(grant.status, 201);
     assert.equal((await fetch(`${baseUrl}/delivery/v1/integration-invocations`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json" }, body: JSON.stringify({ request: { contractVersion: "control-plane/v1", grantId: "grant-a", invocation, args: {} } }) })).status, 200);
-    assert.deepEqual((requests[0] as { target: WorkloadPrincipal["target"] }).target, { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
-    assert.deepEqual((requests[1] as { target: WorkloadPrincipal["target"] }).target, { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
+    assert.deepEqual((requests[0] as { target: WorkloadPrincipal["target"] }).target, { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
+    assert.deepEqual((requests[1] as { target: WorkloadPrincipal["target"] }).target, { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
   }
@@ -127,7 +127,7 @@ test("Skill artifact download and install receipt endpoints are workload-targete
     .run("skill-release", "https://artifacts.example.test/skill.tgz", packageHash, "platform-signer", JSON.stringify({ signature: "sig", signatureAlgorithm: "ed25519" }), 1);
   const server = createAdminApiServer({
     authorization: new TestAuthorization(), releases,
-    skillArtifacts: { download: async (target, requestedHash) => { assert.equal(target.tenantId, "tenant-a"); assert.equal(requestedHash, packageHash); return { bytes: new TextEncoder().encode("skill-package") }; } },
+    skillArtifacts: { download: async (target, requestedHash) => { assert.equal(target.scopeId, "tenant-a"); assert.equal(requestedHash, packageHash); return { bytes: new TextEncoder().encode("skill-package") }; } },
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -138,10 +138,10 @@ test("Skill artifact download and install receipt endpoints are workload-targete
     assert.equal(artifact.status, 200);
     assert.equal(await artifact.text(), "skill-package");
     const receipt = {
-      contractVersion: "control-plane/v1", receiptId: "skill-receipt-a", target: { plane: "cloud", tenantId: "attacker", runtimeId: "runtime-a", runtimeClass: "standard" }, releaseId: "skill-release", packageHash, signer: "platform-signer", status: "loaded", observedAt: 2_000,
+      contractVersion: "control-plane/v1", receiptId: "skill-receipt-a", target: { plane: "cloud", scopeId: "attacker", runtimeId: "runtime-a", runtimeClass: "standard" }, releaseId: "skill-release", packageHash, signer: "platform-signer", status: "loaded", observedAt: 2_000,
     } as const;
     assert.equal((await fetch(`${baseUrl}/delivery/v1/skill-install-receipts`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json", "x-request-id": "skill-receipt-audit" }, body: JSON.stringify({ receipt }) })).status, 403);
-    const accepted = await fetch(`${baseUrl}/delivery/v1/skill-install-receipts`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json", "x-request-id": "skill-receipt-audit" }, body: JSON.stringify({ receipt: { ...receipt, target: { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" } } }) });
+    const accepted = await fetch(`${baseUrl}/delivery/v1/skill-install-receipts`, { method: "POST", headers: { authorization: "Bearer workload", "content-type": "application/json", "x-request-id": "skill-receipt-audit" }, body: JSON.stringify({ receipt: { ...receipt, target: { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a", runtimeClass: "standard" } } }) });
     assert.equal(accepted.status, 201);
     const stored = await database.prepare("SELECT package_hash, signer, status FROM cp_skill_install_receipts WHERE id = ?").get<{ package_hash: string; signer: string; status: string }>("skill-receipt-a");
     assert.deepEqual({ ...stored }, { package_hash: packageHash, signer: "platform-signer", status: "loaded" });

@@ -8,7 +8,7 @@ import type { CredentialGrantRequest, RuntimeConfigurationSnapshot, RuntimeTarge
 import { LocalIntegrationBroker, type LocalIntegrationDeliveryPort } from "../local-agent-runtime/src/control-plane/local-integration-broker.ts";
 import { LocalSecureEnvelopeStore } from "../local-agent-runtime/src/control-plane/local-secure-envelope-store.ts";
 
-const target: RuntimeTarget = { plane: "local", tenantId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" };
+const target: RuntimeTarget = { plane: "local", scopeId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" };
 const hash = "c".repeat(64);
 const snapshot: RuntimeConfigurationSnapshot = { contractVersion: "control-plane/v1", snapshotId: "snapshot-a", configurationRevision: 1, target, resolvedAt: 1_000, validUntil: 5_000, integrations: [{ bindingId: "binding-a", releaseId: "release-a", contentHash: hash, integration: "enterprise_info", allowedActions: ["search"] }], skills: [], policies: [] };
 function call(path: string, payload: unknown): Promise<Record<string, unknown>> { return new Promise((resolve, reject) => { const client = createConnection(path); let result = ""; client.setEncoding("utf8"); client.once("connect", () => client.end(JSON.stringify(payload))); client.on("data", (part: string) => { result += part; }); client.once("error", reject); client.once("end", () => { try { resolve(JSON.parse(result) as Record<string, unknown>); } catch (error) { reject(error); } }); }); }

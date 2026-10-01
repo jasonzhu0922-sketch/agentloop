@@ -2,7 +2,7 @@ import type { AdminMember, AuditEvent, ResourceKind, ResourceRelease, RuntimeOpe
 
 /** Independent identity boundary; neither Router sessions nor user tokens implement it directly. */
 export interface AdminIdentityPort {
-  listMembers(tenantId: string): Promise<readonly AdminMember[]>;
+  listMembers(scopeId: string): Promise<readonly AdminMember[]>;
   createMember(member: AdminMember, expectedRevision: number, actorId: string, auditEventId: string): Promise<AdminMember>;
   transitionMember(memberId: string, status: AdminMember["status"], expectedRevision: number, actorId: string, auditEventId: string): Promise<AdminMember>;
 }

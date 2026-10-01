@@ -10,7 +10,7 @@ import { AgentLoopRuntimeHost } from "../src/runtime-host/application/runtime-ho
 import { SqlRuntimeConfigurationSnapshotCache, installRuntimeConfigurationSnapshotCache, installRuntimeConfigurationSnapshotHistory } from "../src/runtime-host/persistence/runtime-configuration-snapshot-cache.ts";
 import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
 
-const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
+const target: RuntimeTarget = { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" };
 const hash = "a".repeat(64);
 
 function snapshot(overrides: Partial<RuntimeConfigurationSnapshot> = {}): RuntimeConfigurationSnapshot {
@@ -37,6 +37,18 @@ test("RuntimeConfigurationClient verifies target and expiry before caching a del
     request: (async () => new Response(JSON.stringify(snapshot()), { status: 200 })) as typeof fetch,
   });
   await assert.rejects(() => expired.desiredSnapshot(), RuntimeConfigurationClientError);
+});
+
+test("TiDB runtime snapshot cache uses a bounded target key instead of an oversized composite primary key", async () => {
+  const ddl: string[] = [];
+  const database = {
+    dialect: "tidb" as const,
+    exec: async (sql: string) => { ddl.push(sql); },
+  } as unknown as import("@zhujun/agentloop").SqlConnection;
+  await installRuntimeConfigurationSnapshotCache(database);
+  assert.match(ddl[0] ?? "", /target_key CHAR\(64\) NOT NULL/);
+  assert.match(ddl[0] ?? "", /PRIMARY KEY\(target_key\)/);
+  assert.doesNotMatch(ddl[0] ?? "", /PRIMARY KEY\(target_plane, scope_id, runtime_id, runtime_class, device_id\)/);
 });
 
 test("validation receipts retain release content hashes and never claim loaded", async () => {
@@ -83,7 +95,7 @@ test("shadow orchestration records a sanitized failure and leaves file-mode call
   const baseline = { modelKeys: ["model-a"], skillDirectoryCount: 1, practiceProfileCount: 1, stepExecutionStrategyProfile: "action-aware" };
   const shadow = createRuntimeConfigurationShadowOrchestrator({
     environment: {
-      CONTROL_PLANE_DELIVERY_URL: "https://admin.example.test", CONTROL_PLANE_WORKLOAD_TOKEN: "not-logged", CONTROL_PLANE_SHADOW_TENANT_ID: "tenant-a",
+      CONTROL_PLANE_DELIVERY_URL: "https://admin.example.test", CONTROL_PLANE_WORKLOAD_TOKEN: "not-logged", CONTROL_PLANE_SHADOW_SCOPE_ID: "tenant-a",
     },
     runtimeId: "runtime-a", baseline, log: (entry) => logs.push(entry),
     request: (async () => { throw new Error("contains a delivery URL and token-like data"); }) as typeof fetch,
@@ -222,8 +234,8 @@ test("control-plane admission rejects another tenant instead of selecting the fi
   });
   const port = { async ensureConversation() {}, async startConversation() { return { id: "run" as string, status: "running" as const }; }, async get() { return { id: "run", status: "running" as const }; } };
   const admissions = new ControlPlaneAdmissionRunResolver(target, environments, () => port);
-  assert.equal(await admissions.resolveForAdmission({ tenantId: "tenant-a", userId: "user-a" }), port);
-  await assert.rejects(() => admissions.resolveForAdmission({ tenantId: "tenant-other", userId: "user-a" }), RunEnvironmentUnavailableError);
+  assert.equal(await admissions.resolveForAdmission({ scopeId: "tenant-a", userId: "user-a" }), port);
+  await assert.rejects(() => admissions.resolveForAdmission({ scopeId: "tenant-other", userId: "user-a" }), RunEnvironmentUnavailableError);
 });
 
 function providerConfiguration(modelKey: string): Record<string, unknown> {
@@ -265,4 +277,4 @@ class MemorySnapshotCache implements LoadedRuntimeConfigurationSnapshotCache {
   }
 }
 
-function targetKey(value: RuntimeTarget): string { return `${value.plane}:${value.tenantId}:${value.runtimeId}:${value.runtimeClass ?? ""}:${value.deviceId ?? ""}`; }
+function targetKey(value: RuntimeTarget): string { return `${value.plane}:${value.scopeId}:${value.runtimeId}:${value.runtimeClass ?? ""}:${value.deviceId ?? ""}`; }

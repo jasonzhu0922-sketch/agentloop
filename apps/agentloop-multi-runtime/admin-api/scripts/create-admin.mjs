@@ -9,7 +9,7 @@ if (connectionString === undefined || !connectionString.startsWith("mysql://")) 
 }
 
 const args = parseArgs(process.argv.slice(2));
-const tenantId = required(args["tenant-id"], "--tenant-id");
+const scopeId = required(args["scope-id"], "--scope-id");
 const subject = required(args.subject, "--subject");
 const displayName = required(args["display-name"] ?? subject, "--display-name");
 const memberId = args["member-id"] ?? `admin-${subject.replace(/[^a-zA-Z0-9._-]+/g, "-")}`;
@@ -22,10 +22,10 @@ try {
   const store = new SqlControlPlaneStore(database);
   const now = Date.now();
   await store.createMember({
-    contractVersion: "control-plane/v1", memberId, tenantId, subject, displayName,
+    contractVersion: "control-plane/v1", memberId, scopeId, subject, displayName,
     role, status: "active", revision: 1, createdAt: now, updatedAt: now,
   }, 0, `bootstrap:${subject}`, `admin-bootstrap:${randomUUID()}`);
-  process.stdout.write(`${JSON.stringify({ status: "created", memberId, tenantId, subject, role })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "created", memberId, scopeId, subject, role })}\n`);
 } finally {
   await database.close();
 }

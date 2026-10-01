@@ -45,7 +45,7 @@ test("delivery snapshot decoding preserves signed Skill artifact metadata across
     contractVersion: "control-plane/v1",
     snapshotId: "snapshot-signed-skill",
     configurationRevision: 1,
-    target: { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" },
+    target: { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" },
     resolvedAt: 100,
     validUntil: 200,
     integrations: [],
@@ -89,7 +89,7 @@ test("Skill artifact installer rejects an unverified package and emits a loaded 
     const manifest = { packageUri: "https://artifacts.example.test/signed-skill.tgz", packageHash: inspection.packageHash, signer: "platform-signer", signatureAlgorithm: "ed25519" as const, signature: "signature-bytes" };
     installedHash = manifest.packageHash;
     const common = {
-      target: { plane: "local" as const, tenantId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" }, releaseId: "skill-release", manifest,
+      target: { plane: "local" as const, scopeId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" }, releaseId: "skill-release", manifest,
       destinationRoot: join(root, "installed"), download: { download: async () => source }, receiptId: "receipt-a", now: () => 2_000,
     };
     await assert.rejects(() => installSignedSkillArtifact({ ...common, verifier: { verify: () => false } }), (error: unknown) => error instanceof SkillArtifactInstallError && error.code === "skill_artifact_signature_invalid");
@@ -111,7 +111,7 @@ test("Cloud and Local delivery clients expose authorized Skill download and inst
   const manifest = { packageUri: "https://artifacts.example.test/skill.tgz", packageHash, signer: "platform-signer", signatureAlgorithm: "ed25519" as const, signature: "signature" };
   const cloudBodies: unknown[] = [];
   const cloud = new RuntimeConfigurationClient({
-    deliveryUrl: "https://delivery.example.test", workloadToken: "workload-token", target: { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" },
+    deliveryUrl: "https://delivery.example.test", workloadToken: "workload-token", target: { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" },
     request: (async (input, init) => {
       if (String(input).includes("skill-artifacts")) return new Response(new TextEncoder().encode("package-bytes"), { status: 200 });
       cloudBodies.push(JSON.parse(String(init?.body)));
@@ -119,12 +119,12 @@ test("Cloud and Local delivery clients expose authorized Skill download and inst
     }) as typeof fetch,
   });
   assert.equal(new TextDecoder().decode(await cloud.downloadSkillArtifact(manifest)), "package-bytes");
-  await cloud.reportSkillInstallReceipt({ contractVersion: "control-plane/v1", receiptId: "cloud-receipt", target: { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" }, releaseId: "skill-release", packageHash, signer: "platform-signer", status: "loaded", observedAt: 10 });
+  await cloud.reportSkillInstallReceipt({ contractVersion: "control-plane/v1", receiptId: "cloud-receipt", target: { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" }, releaseId: "skill-release", packageHash, signer: "platform-signer", status: "loaded", observedAt: 10 });
   assert.equal((cloudBodies[0] as { receipt: { packageHash: string } }).receipt.packageHash, packageHash);
 
   const localBodies: unknown[] = [];
   const local = new LocalDeliveryClient({
-    deliveryUrl: "https://delivery.example.test", deviceToken: "device-token", target: { plane: "local", tenantId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" },
+    deliveryUrl: "https://delivery.example.test", deviceToken: "device-token", target: { plane: "local", scopeId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" },
     request: (async (input, init) => {
       if (String(input).includes("skill-artifacts")) return new Response(new TextEncoder().encode("local-package"), { status: 200 });
       localBodies.push(JSON.parse(String(init?.body)));
@@ -132,6 +132,6 @@ test("Cloud and Local delivery clients expose authorized Skill download and inst
     }) as typeof fetch,
   });
   assert.equal(new TextDecoder().decode(await local.downloadSkillArtifact(manifest)), "local-package");
-  await local.reportSkillInstallReceipt({ contractVersion: "control-plane/v1", receiptId: "local-receipt", target: { plane: "local", tenantId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" }, releaseId: "skill-release", packageHash, signer: "platform-signer", status: "loaded", observedAt: 11 });
+  await local.reportSkillInstallReceipt({ contractVersion: "control-plane/v1", receiptId: "local-receipt", target: { plane: "local", scopeId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" }, releaseId: "skill-release", packageHash, signer: "platform-signer", status: "loaded", observedAt: 11 });
   assert.equal((localBodies[0] as { receipt: { target: { deviceId: string } } }).receipt.target.deviceId, "device-a");
 });

@@ -14,6 +14,9 @@ export class ControlPlaneMigrationError extends Error {
   }
 }
 
+// 0001-0003 are immutable historical definitions. Their legacy tenant column
+// names remain byte-for-byte stable for checksum verification; 0004 performs
+// the one-way rename to the current scope vocabulary.
 const migrations: readonly ExecutableControlPlaneMigration[] = [{
   id: "control-plane/0001_resources_releases_assignments_receipts_audit",
   definition: "cp_schema_migrations;cp_resources;cp_releases;cp_target_assignments;cp_apply_receipts;cp_skill_install_receipts;cp_members;cp_integration_bindings;cp_skill_artifacts;cp_secret_references;cp_audit_events;cp_delivery_cursors:v1",
@@ -26,6 +29,10 @@ const migrations: readonly ExecutableControlPlaneMigration[] = [{
   id: "control-plane/0003_credential_grants_and_integration_invocations",
   definition: "cp_credential_grants;cp_integration_invocations:v1",
   apply: async (database) => { await database.exec(integrationDeliverySchemaSql(database.dialect)); },
+}, {
+  id: "control-plane/0004_scope_id_rename",
+  definition: "owner_tenant_id->owner_scope_id;tenant_id->scope_id:v1",
+  apply: async (database) => { await database.exec(scopeIdRenameSql(database.dialect)); },
 }];
 
 /** Standalone migration entry point. No Router, Host, or Admin API startup code calls this. */
@@ -192,6 +199,17 @@ export function integrationDeliverySchemaSql(dialect: SqlConnection["dialect"]):
     status ${text} NOT NULL, reason_code ${text}, observed_at ${epoch} NOT NULL
   );
   CREATE INDEX IF NOT EXISTS cp_integration_invocations_binding_idx ON cp_integration_invocations(binding_id, observed_at);`;
+}
+
+/** Renames the Admin-owned scope columns without rewriting any applied migration definition. */
+export function scopeIdRenameSql(_dialect: SqlConnection["dialect"]): string {
+  return String.raw`ALTER TABLE cp_resources RENAME COLUMN owner_tenant_id TO owner_scope_id;
+  ALTER TABLE cp_target_assignments RENAME COLUMN tenant_id TO scope_id;
+  ALTER TABLE cp_apply_receipts RENAME COLUMN tenant_id TO scope_id;
+  ALTER TABLE cp_skill_install_receipts RENAME COLUMN tenant_id TO scope_id;
+  ALTER TABLE cp_members RENAME COLUMN tenant_id TO scope_id;
+  ALTER TABLE cp_delivery_cursors RENAME COLUMN tenant_id TO scope_id;
+  ALTER TABLE cp_credential_grants RENAME COLUMN tenant_id TO scope_id;`;
 }
 
 function tidbSchemaSql(): string {

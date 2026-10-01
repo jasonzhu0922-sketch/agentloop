@@ -8,7 +8,7 @@ import { LocalDeliveryClient, LocalDeliveryError } from "../local-agent-runtime/
 import { LocalSecureEnvelopeStore } from "../local-agent-runtime/src/control-plane/local-secure-envelope-store.ts";
 import { LocalSnapshotCache } from "../local-agent-runtime/src/control-plane/local-snapshot-cache.ts";
 
-const target: RuntimeTarget = { plane: "local", tenantId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" };
+const target: RuntimeTarget = { plane: "local", scopeId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" };
 const snapshot: RuntimeConfigurationSnapshot = { contractVersion: "control-plane/v1", snapshotId: "snapshot-a", configurationRevision: 1, target, resolvedAt: 1_000, validUntil: 2_000, integrations: [], skills: [], policies: [] };
 
 test("Local delivery derives device target from client identity and records no caller target", async () => {

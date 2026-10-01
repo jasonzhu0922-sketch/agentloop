@@ -24,7 +24,7 @@ export async function applyVersionedMigrations(
     if (compatibilitySql !== undefined) await database.exec(compatibilitySql);
     for (const migration of migrations) {
       const checksum = checksumFor(migration);
-      const applied = await database.prepare("SELECT checksum FROM mr_schema_migrations WHERE id = ?").get<{ checksum: string }>(migration.id);
+      const applied = await database.prepare(migrationLedgerEntrySql(database)).get<{ checksum: string }>(migration.id);
       if (applied !== undefined) {
         if (applied.checksum !== checksum) throw new SchemaMigrationError(`Migration checksum mismatch for ${migration.id}; refusing to run against an unknown schema history`);
         continue;
@@ -62,6 +62,13 @@ export function migrationLedgerSql(database: Pick<SqlConnection, "dialect">): st
     : database.dialect === "postgres"
       ? "CREATE TABLE IF NOT EXISTS mr_schema_migrations (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at BIGINT NOT NULL)"
       : "CREATE TABLE IF NOT EXISTS mr_schema_migrations (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at INTEGER NOT NULL)";
+}
+
+/** TiDB locking reads bypass a stale repeatable-read snapshot after GET_LOCK. */
+export function migrationLedgerEntrySql(database: Pick<SqlConnection, "dialect">): string {
+  return database.dialect === "tidb"
+    ? "SELECT checksum FROM mr_schema_migrations WHERE id = ? FOR UPDATE"
+    : "SELECT checksum FROM mr_schema_migrations WHERE id = ?";
 }
 
 /** Repairs the original PostgreSQL ledger, whose INTEGER timestamp overflowed at millisecond precision. */

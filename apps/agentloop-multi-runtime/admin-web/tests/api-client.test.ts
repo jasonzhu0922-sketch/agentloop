@@ -24,7 +24,7 @@ test("Admin Web uses typed Admin API reads and never a database transport", asyn
   assert.deepEqual(await client.auditEvents(10), []);
   assert.deepEqual((await client.trace("run-a")).missingBoundaries, [{ source: "runtime", reason: "not_recorded" }]);
   assert.deepEqual(requests, [
-    "https://admin.example.test/admin/v1/members?tenantId=tenant-a",
+    "https://admin.example.test/admin/v1/members?scopeId=tenant-a",
     "https://admin.example.test/admin/v1/audit-events?limit=10",
     "https://admin.example.test/admin/v1/runs/run-a/trace",
   ]);

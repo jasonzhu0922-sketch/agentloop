@@ -9,7 +9,7 @@ test("member identity store uses revisions, explicit lifecycle transitions, and 
   const database = new AppDatabase(":memory:");
   await migrateControlPlane(database);
   const store = new SqlControlPlaneStore(database);
-  const member: AdminMember = { contractVersion: "control-plane/v1", memberId: "member-a", tenantId: "tenant-a", subject: "subject-a", displayName: "Member A", role: "platform_admin", status: "invited", revision: 1, createdAt: 1, updatedAt: 1 };
+  const member: AdminMember = { contractVersion: "control-plane/v1", memberId: "member-a", scopeId: "tenant-a", subject: "subject-a", displayName: "Member A", role: "platform_admin", status: "invited", revision: 1, createdAt: 1, updatedAt: 1 };
   await store.createMember(member, 0, "admin-a", "audit-member-create");
   assert.deepEqual(await store.listMembers("tenant-a"), [member]);
   const active = await store.transitionMember("member-a", "active", 1, "admin-a", "audit-member-active");

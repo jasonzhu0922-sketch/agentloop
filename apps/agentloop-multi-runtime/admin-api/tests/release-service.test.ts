@@ -18,7 +18,7 @@ function release(state: ResourceRelease["state"] = "draft"): ResourceRelease {
 function assignment(): TargetAssignment {
   return {
     contractVersion: "control-plane/v1", assignmentId: "assignment-tenant-a", resourceId: "resource-policy", releaseId: "release-policy-1",
-    scope: { plane: "local", target: { kind: "tenant", tenantId: "tenant-a" } }, priority: 10, rolloutState: "active", revision: 1,
+    scope: { plane: "local", target: { kind: "tenant", scopeId: "tenant-a" } }, priority: 10, rolloutState: "active", revision: 1,
   };
 }
 
@@ -48,7 +48,7 @@ test("release application preserves content hash, optimistic revisions, scope co
     );
 
     const receipt: ApplyReceipt = {
-      contractVersion: "control-plane/v1", receiptId: "receipt-1", target: { plane: "local", tenantId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" },
+      contractVersion: "control-plane/v1", receiptId: "receipt-1", target: { plane: "local", scopeId: "tenant-a", runtimeId: "runtime-a", deviceId: "device-a" },
       releaseId: draft.releaseId, contentHash: draft.contentHash, status: "loaded", observedAt: 200,
     };
     await service.recordReceipt({ receipt, actorId: "device:device-a", auditEventId: "audit-receipt" });
@@ -87,7 +87,7 @@ test("new releases must enter through draft and receipts cannot acknowledge draf
     await service.publish({ release: draft, expectedRevision: 0, actorId: "admin-1", auditEventId: "audit-draft" });
     await assert.rejects(
       () => service.recordReceipt({
-        receipt: { contractVersion: "control-plane/v1", receiptId: "draft-receipt", target: { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" }, releaseId: draft.releaseId, contentHash: draft.contentHash, status: "loaded", observedAt: 1 },
+        receipt: { contractVersion: "control-plane/v1", receiptId: "draft-receipt", target: { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" }, releaseId: draft.releaseId, contentHash: draft.contentHash, status: "loaded", observedAt: 1 },
         actorId: "workload", auditEventId: "audit-draft-receipt",
       }),
       (error: unknown) => error instanceof ControlPlaneError && error.code === "release_not_active",

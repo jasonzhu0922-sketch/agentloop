@@ -271,7 +271,7 @@ Admin API 的首批资源接口：
 
 ## 9. 权限与安全
 
-当前角色收敛为 `platform_admin`、`operator`、`skill_operator`、`auditor`、`member`。`RuntimeTarget.tenantId` 只是运行目标的作用域/隔离键，尚未形成独立的租户管理域，因此不定义 `tenant_admin`。管理员登录态必须有独立 audience，不能复用用户 Web token 作为万能管理凭据。
+当前角色收敛为 `platform_admin`、`operator`、`skill_operator`、`auditor`、`member`。`RuntimeTarget.scopeId` 只是运行目标的作用域/隔离键，尚未形成独立的租户管理域，因此不定义 `tenant_admin`。管理员登录态必须有独立 audience，不能复用用户 Web token 作为万能管理凭据。Router 用户身份域中的 `tenantId` 保持不变，并在 Runtime admission 边界显式映射为 `scopeId`。
 
 - 最小权限：用户、租户、平台、设备和 workload identity 分开授权。
 - 密钥：外部 secret provider 优先；若过渡期加密入库，采用 envelope encryption、版本化 DEK/KEK、轮换和访问审计。

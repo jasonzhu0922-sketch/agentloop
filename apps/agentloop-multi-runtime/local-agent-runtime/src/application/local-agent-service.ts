@@ -51,7 +51,7 @@ export class LocalAgentService {
     let factoryInput: LocalAgentOptions = input;
     if (input.controlPlaneDeliveryUrl !== undefined) {
       const device = state.device;
-      if (device === undefined || device.tenantId === undefined) {
+      if (device === undefined || device.scopeId === undefined) {
         throw new LocalAgentApplicationError(409, "control_plane_device_identity_required");
       }
       factoryInput = {
@@ -60,7 +60,7 @@ export class LocalAgentService {
           deliveryUrl: input.controlPlaneDeliveryUrl,
           deviceId: device.id,
           deviceToken: device.agentToken,
-          tenantId: device.tenantId,
+          scopeId: device.scopeId,
           devicePrivateKey: state.deviceIdentity.privateKey,
         },
       };
@@ -108,7 +108,7 @@ export class LocalAgentService {
     if (!result.ok || typeof registered.agentToken !== "string" || typeof registered.device?.id !== "string") {
       throw new Error(typeof registered.error === "string" ? registered.error : `Router HTTP ${result.status}`);
     }
-    const device = { id: registered.device.id, agentToken: registered.agentToken, displayName: registered.device.displayName, ...(typeof registered.device.tenantId === "string" ? { tenantId: registered.device.tenantId } : {}) };
+    const device = { id: registered.device.id, agentToken: registered.agentToken, displayName: registered.device.displayName, ...(typeof registered.device.scopeId === "string" ? { scopeId: registered.device.scopeId } : {}) };
     await this.stateStore.write({ ...state, device });
     this.connection?.setDevice(device);
     return { device: registered.device, alreadyRegistered: false };

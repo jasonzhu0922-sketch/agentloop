@@ -194,8 +194,8 @@ async function activeRunCount(): Promise<number> {
 function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
   const deliveryUrl = requiredEnv("CONTROL_PLANE_DELIVERY_URL");
   const workloadToken = requiredEnv("CONTROL_PLANE_WORKLOAD_TOKEN");
-  const tenantId = requiredEnv("CONTROL_PLANE_TENANT_ID");
-  const target = { plane: "cloud" as const, tenantId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
+  const scopeId = requiredEnv("CONTROL_PLANE_SCOPE_ID");
+  const target = { plane: "cloud" as const, scopeId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
   const client = new RuntimeConfigurationClient({ deliveryUrl, workloadToken, target });
   const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID, loadedSkillPackageHashes: () => skills.discovered().map((item) => item.packageHash), requireSignedSkillArtifacts: true });
   const integrationDelivery = new RuntimeIntegrationDeliveryClient({ deliveryUrl, workloadToken });

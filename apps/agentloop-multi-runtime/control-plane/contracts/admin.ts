@@ -1,13 +1,13 @@
 import type { RuntimeTarget } from "./v1.ts";
 
 export type AdminMemberStatus = "invited" | "active" | "suspended" | "removed";
-/** Platform roles; RuntimeTarget.tenantId is an execution scope key, not an Admin tenant role. */
+/** Platform roles; RuntimeTarget.scopeId is an execution scope key, not an Admin tenant role. */
 export type AdminMemberRole = "platform_admin" | "operator" | "skill_operator" | "auditor" | "member";
 
 export interface AdminMember {
   readonly contractVersion: "control-plane/v1";
   readonly memberId: string;
-  readonly tenantId: string;
+  readonly scopeId: string;
   readonly subject: string;
   readonly displayName: string;
   readonly role: AdminMemberRole;

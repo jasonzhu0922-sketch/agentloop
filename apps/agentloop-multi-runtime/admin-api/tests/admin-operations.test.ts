@@ -6,7 +6,7 @@ import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort, AdminTracePor
 import type { AdminAuthorizationPort, AdminPrincipal, WorkloadPrincipal } from "../src/authorization/ports.ts";
 import { createAdminApiServer } from "../src/bootstrap/server.ts";
 
-const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
+const target: RuntimeTarget = { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" };
 
 class Authorization implements AdminAuthorizationPort {
   public async adminPrincipal(value: string | undefined): Promise<AdminPrincipal | undefined> { return value === "Bearer admin" ? { actorId: "admin-a", role: "platform_admin" } : undefined; }
@@ -14,9 +14,9 @@ class Authorization implements AdminAuthorizationPort {
 }
 
 test("Admin management routes keep ordinary user tokens out and retain expected revision/audit operation facts", async () => {
-  const member: AdminMember = { contractVersion: "control-plane/v1", memberId: "member-a", tenantId: "tenant-a", subject: "subject-a", displayName: "Member A", role: "operator", status: "active", revision: 1, createdAt: 1, updatedAt: 1 };
+  const member: AdminMember = { contractVersion: "control-plane/v1", memberId: "member-a", scopeId: "tenant-a", subject: "subject-a", displayName: "Member A", role: "operator", status: "active", revision: 1, createdAt: 1, updatedAt: 1 };
   const identity: AdminIdentityPort = {
-    listMembers: async (tenantId) => { assert.equal(tenantId, "tenant-a"); return [member]; },
+    listMembers: async (scopeId) => { assert.equal(scopeId, "tenant-a"); return [member]; },
     createMember: async (value, revision, actorId, auditEventId) => { assert.equal(revision, 0); assert.equal(actorId, "admin-a"); assert.equal(auditEventId, "member-create"); return value; },
     transitionMember: async (memberId, status, revision, actorId, auditEventId) => { assert.equal(memberId, "member-a"); assert.equal(status, "suspended"); assert.equal(revision, 1); assert.equal(actorId, "admin-a"); assert.equal(auditEventId, "member-transition"); return { ...member, status, revision: 2, updatedAt: 2 }; },
   };
@@ -31,8 +31,8 @@ test("Admin management routes keep ordinary user tokens out and retain expected 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    assert.equal((await fetch(`${baseUrl}/admin/v1/members?tenantId=tenant-a`, { headers: { authorization: "Bearer user" } })).status, 403);
-    const members = await fetch(`${baseUrl}/admin/v1/members?tenantId=tenant-a`, { headers: { authorization: "Bearer admin" } });
+    assert.equal((await fetch(`${baseUrl}/admin/v1/members?scopeId=tenant-a`, { headers: { authorization: "Bearer user" } })).status, 403);
+    const members = await fetch(`${baseUrl}/admin/v1/members?scopeId=tenant-a`, { headers: { authorization: "Bearer admin" } });
     assert.deepEqual((await members.json() as { members: readonly AdminMember[] }).members, [member]);
     assert.deepEqual((await (await fetch(`${baseUrl}/admin/v1/releases?kind=skill`, { headers: { authorization: "Bearer admin" } })).json() as { releases: unknown[] }).releases, []);
     const traceResponse = await fetch(`${baseUrl}/admin/v1/runs/run-a/trace`, { headers: { authorization: "Bearer admin" } });

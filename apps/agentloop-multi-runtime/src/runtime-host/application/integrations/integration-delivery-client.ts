@@ -3,7 +3,11 @@ import { IntegrationBrokerError, type IntegrationDeliveryPort } from "./integrat
 
 /** Workload-authenticated delivery adapter. It transports no secret material. */
 export class RuntimeIntegrationDeliveryClient implements IntegrationDeliveryPort {
-  public constructor(private readonly input: { readonly deliveryUrl: string; readonly workloadToken: string; readonly request?: typeof fetch }) {}
+  private readonly input: { readonly deliveryUrl: string; readonly workloadToken: string; readonly request?: typeof fetch };
+
+  public constructor(input: { readonly deliveryUrl: string; readonly workloadToken: string; readonly request?: typeof fetch }) {
+    this.input = input;
+  }
 
   public async requestGrant(request: CredentialGrantRequest): Promise<CredentialGrant> {
     return await this.post<CredentialGrant>("/delivery/v1/credential-grants", { request });

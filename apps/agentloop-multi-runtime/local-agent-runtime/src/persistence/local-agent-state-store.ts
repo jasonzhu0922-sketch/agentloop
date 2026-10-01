@@ -7,7 +7,7 @@ export interface LocalAgentState {
   readonly defaultRuntimeId: string;
   readonly sharedStorageRoot?: string;
   readonly uploadStorageRoot?: string;
-  readonly device?: { readonly id: string; readonly agentToken: string; readonly displayName: string; readonly tenantId?: string };
+  readonly device?: { readonly id: string; readonly agentToken: string; readonly displayName: string; readonly scopeId?: string };
 }
 
 /** Device-private state. This file is never exposed through Router or HTTP responses. */

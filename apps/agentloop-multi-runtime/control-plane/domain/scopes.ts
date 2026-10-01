@@ -7,8 +7,8 @@ export function assertValidScope(scope: ConfigurationScope): void {
   if (scope.target.kind === "device_id" && scope.plane !== "local") {
     throw new ControlPlaneError("invalid_scope", "device_id scope must be local-only");
   }
-  if (scope.target.kind !== "platform" && scope.target.tenantId.trim().length === 0) {
-    throw new ControlPlaneError("invalid_scope", "non-platform scope requires a tenantId");
+  if (scope.target.kind !== "platform" && scope.target.scopeId.trim().length === 0) {
+    throw new ControlPlaneError("invalid_scope", "non-platform scope requires a scopeId");
   }
   if (scope.target.kind === "runtime_class" && scope.target.runtimeClass.trim().length === 0) {
     throw new ControlPlaneError("invalid_scope", "runtime_class scope requires runtimeClass");
@@ -36,10 +36,10 @@ export function scopeMatches(scope: ConfigurationScope, target: RuntimeTarget): 
   if (scope.plane !== "both" && scope.plane !== target.plane) return false;
   switch (scope.target.kind) {
     case "platform": return true;
-    case "tenant": return scope.target.tenantId === target.tenantId;
-    case "runtime_class": return scope.target.tenantId === target.tenantId && scope.target.runtimeClass === target.runtimeClass;
-    case "runtime_id": return scope.target.tenantId === target.tenantId && scope.target.runtimeId === target.runtimeId;
-    case "device_id": return target.plane === "local" && scope.target.tenantId === target.tenantId && scope.target.deviceId === target.deviceId;
+    case "tenant": return scope.target.scopeId === target.scopeId;
+    case "runtime_class": return scope.target.scopeId === target.scopeId && scope.target.runtimeClass === target.runtimeClass;
+    case "runtime_id": return scope.target.scopeId === target.scopeId && scope.target.runtimeId === target.runtimeId;
+    case "device_id": return target.plane === "local" && scope.target.scopeId === target.scopeId && scope.target.deviceId === target.deviceId;
   }
 }
 
@@ -65,7 +65,7 @@ export function resolveEffectiveAssignment(assignments: readonly TargetAssignmen
   const highestPriority = Math.max(...atPrecedence.map((candidate) => candidate.assignment.priority));
   const winners = atPrecedence.filter((candidate) => candidate.assignment.priority === highestPriority);
   if (winners.length !== 1) {
-    throw new ControlPlaneError("scope_conflict", `Conflicting assignments apply to ${target.plane}/${target.tenantId}/${target.runtimeId}`);
+    throw new ControlPlaneError("scope_conflict", `Conflicting assignments apply to ${target.plane}/${target.scopeId}/${target.runtimeId}`);
   }
   return winners[0]?.assignment;
 }
@@ -98,7 +98,7 @@ function planesOverlap(left: ConfigurationScope["plane"], right: ConfigurationSc
 
 function targetsOverlap(left: ConfigurationScope, right: ConfigurationScope): boolean {
   if (left.target.kind === "platform" || right.target.kind === "platform") return true;
-  if (left.target.tenantId !== right.target.tenantId) return false;
+  if (left.target.scopeId !== right.target.scopeId) return false;
   if (left.target.kind === "tenant" || right.target.kind === "tenant") return true;
   if (left.target.kind === right.target.kind) {
     if (left.target.kind === "runtime_class" && right.target.kind === "runtime_class") return left.target.runtimeClass === right.target.runtimeClass;

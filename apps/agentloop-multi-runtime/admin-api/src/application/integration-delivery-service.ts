@@ -24,7 +24,7 @@ export interface IntegrationSecretProviderPort {
 }
 
 type GrantRow = {
-  id: string; invocation_id: string; target_plane: string; tenant_id: string; runtime_id: string; runtime_class: string | null; device_id: string | null;
+  id: string; invocation_id: string; target_plane: string; scope_id: string; runtime_id: string; runtime_class: string | null; device_id: string | null;
   binding_id: string; release_id: string; content_hash: string; secret_reference_id: string; secret_reference_version: string;
   expires_at: number | string | bigint; revoked_at: number | string | bigint | null; used_at: number | string | bigint | null;
 };
@@ -79,10 +79,10 @@ export class SqlIntegrationDeliveryService {
       secretReferenceVersion: secret.secret_version, expiresAt,
     };
     await this.input.database.prepare(`INSERT INTO cp_credential_grants(
-      id, invocation_id, target_plane, tenant_id, runtime_id, runtime_class, device_id, binding_id, release_id, content_hash,
+      id, invocation_id, target_plane, scope_id, runtime_id, runtime_class, device_id, binding_id, release_id, content_hash,
       secret_reference_id, secret_reference_version, expires_at, revoked_at, used_at, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`)
-      .run(grant.grantId, grant.invocationId, target.plane, target.tenantId, target.runtimeId, target.runtimeClass ?? null, target.deviceId ?? null,
+      .run(grant.grantId, grant.invocationId, target.plane, target.scopeId, target.runtimeId, target.runtimeClass ?? null, target.deviceId ?? null,
         grant.bindingId, grant.releaseId, grant.contentHash, secret.id, grant.secretReferenceVersion, grant.expiresAt, now);
     return grant;
   }
@@ -90,7 +90,7 @@ export class SqlIntegrationDeliveryService {
   public async invoke(target: RuntimeTarget, request: IntegrationInvocationRequest): Promise<IntegrationInvocationResponse> {
     assertInvocationRequest(request);
     const now = this.now();
-    const grant = await this.input.database.prepare(`SELECT id, invocation_id, target_plane, tenant_id, runtime_id, runtime_class, device_id,
+    const grant = await this.input.database.prepare(`SELECT id, invocation_id, target_plane, scope_id, runtime_id, runtime_class, device_id,
       binding_id, release_id, content_hash, secret_reference_id, secret_reference_version, expires_at, revoked_at, used_at
       FROM cp_credential_grants WHERE id = ?`).get<GrantRow>(request.grantId);
     if (grant === undefined || !matchesGrant(grant, target, request) || asNumber(grant.expires_at) <= now || grant.revoked_at !== null || grant.used_at !== null) {
@@ -154,7 +154,7 @@ function authorizedBinding(snapshot: RuntimeConfigurationSnapshot, target: Runti
 function matchesGrant(grant: GrantRow, target: RuntimeTarget, request: IntegrationInvocationRequest): boolean {
   const invocation = request.invocation;
   return grant.invocation_id === invocation.invocationId && grant.binding_id === invocation.bindingId && grant.release_id === invocation.releaseId
-    && grant.content_hash === invocation.contentHash && grant.target_plane === target.plane && grant.tenant_id === target.tenantId
+    && grant.content_hash === invocation.contentHash && grant.target_plane === target.plane && grant.scope_id === target.scopeId
     && grant.runtime_id === target.runtimeId && grant.runtime_class === (target.runtimeClass ?? null) && grant.device_id === (target.deviceId ?? null);
 }
 
@@ -201,7 +201,7 @@ function canonicalJson(value: unknown): string {
   const recordValue = value as Record<string, unknown>;
   return `{${Object.keys(recordValue).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(recordValue[key])}`).join(",")}}`;
 }
-function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }
+function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.scopeId === right.scopeId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }
 function text(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 function hash(value: unknown): value is string { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
 function record(value: unknown): value is Readonly<Record<string, unknown>> { return value !== null && typeof value === "object" && !Array.isArray(value); }

@@ -5,7 +5,7 @@ import { reconcileRuntimeConfigurationShadow, type RuntimeFileConfigurationBasel
 
 const deliveryUrlVariable = "CONTROL_PLANE_DELIVERY_URL";
 const workloadTokenVariable = "CONTROL_PLANE_WORKLOAD_TOKEN";
-const tenantIdVariable = "CONTROL_PLANE_SHADOW_TENANT_ID";
+const scopeIdVariable = "CONTROL_PLANE_SHADOW_SCOPE_ID";
 
 export interface RuntimeConfigurationShadowOrchestrator {
   /** Starts non-blocking shadow reconciliation after the Host has started listening. */
@@ -39,11 +39,11 @@ export function createRuntimeConfigurationShadowOrchestrator(input: {
 }): RuntimeConfigurationShadowOrchestrator | undefined {
   const deliveryUrl = requiredShadowSetting(input.environment, deliveryUrlVariable);
   const workloadToken = requiredShadowSetting(input.environment, workloadTokenVariable);
-  const tenantId = requiredShadowSetting(input.environment, tenantIdVariable);
-  if (deliveryUrl === undefined || workloadToken === undefined || tenantId === undefined) return undefined;
+  const scopeId = requiredShadowSetting(input.environment, scopeIdVariable);
+  if (deliveryUrl === undefined || workloadToken === undefined || scopeId === undefined) return undefined;
   const target: RuntimeTarget = {
     plane: "cloud",
-    tenantId,
+    scopeId,
     runtimeId: nonEmpty("RUNTIME_ID", input.runtimeId),
     ...optionalRuntimeClass(input.environment.CONTROL_PLANE_SHADOW_RUNTIME_CLASS),
   };

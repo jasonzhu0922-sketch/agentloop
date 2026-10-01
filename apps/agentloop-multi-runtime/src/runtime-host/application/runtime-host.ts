@@ -245,7 +245,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     // frozen environment, never a mutation of the Host's default execution port.
     const admissionRuns = this.admissionRuns === undefined
       ? this.runs
-      : await this.admissionRuns.resolveForAdmission(envelope.subject);
+      : await this.admissionRuns.resolveForAdmission({ scopeId: envelope.subject.tenantId, userId: envelope.subject.userId });
     const run = await this.admit(async () => {
       await admissionRuns.ensureConversation(envelope.subject.userId, envelope.conversationId, envelope.input);
       return await admissionRuns.startConversation(envelope.subject.userId, envelope.input, {

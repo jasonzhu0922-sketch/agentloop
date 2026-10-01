@@ -12,9 +12,9 @@ export interface LocalAgentOptions {
   readonly runtimeDataRoot?: string;
   readonly supervisorDatabasePath?: string;
   readonly providerConfigPath: string;
-  /** Optional device delivery endpoint. Its token/tenant identity comes from LocalAgentState, never this configuration. */
+  /** Optional device delivery endpoint. Its token/scope identity comes from LocalAgentState, never this configuration. */
   readonly controlPlaneDeliveryUrl?: string;
-  readonly controlPlane?: { readonly deliveryUrl: string; readonly deviceId: string; readonly deviceToken: string; readonly tenantId: string; readonly devicePrivateKey: string };
+  readonly controlPlane?: { readonly deliveryUrl: string; readonly deviceId: string; readonly deviceToken: string; readonly scopeId: string; readonly devicePrivateKey: string };
   readonly skillDirectoriesConfigPath: string;
   readonly stepExecutionStrategyConfigPath: string;
   readonly practiceProfileConfigPath?: string;

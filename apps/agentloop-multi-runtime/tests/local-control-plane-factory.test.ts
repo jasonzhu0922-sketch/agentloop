@@ -48,7 +48,7 @@ test("Local Runtime Factory admits a control-plane snapshot, restores only an un
       environment: { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: join(root, "empty-skills") },
       integrationEnvironment: { TEST_API_KEY: "local-test-key", WEB_SEARCH_DISABLED: "1" },
       computerCommandEnvironment: { ENTERPRISE_INFO_ENV_FILE: "/never-forward-this-path" },
-      controlPlane: { deliveryUrl: "https://control-plane.example.test", deviceId: "device-local", deviceToken: "device-token", tenantId: "tenant-local", devicePrivateKey: "device-private-key" },
+      controlPlane: { deliveryUrl: "https://control-plane.example.test", deviceId: "device-local", deviceToken: "device-token", scopeId: "tenant-local", devicePrivateKey: "device-private-key" },
     } as const;
 
     const first = await new LocalRuntimeFactory(base).create(definition, join(root, "workspace"), join(root, "uploads"));
@@ -81,7 +81,7 @@ test("Local Runtime Factory admits a control-plane snapshot, restores only an un
 function makeSnapshot(snapshotId: string, modelKey: string, resolvedAt: number, validUntil: number): RuntimeConfigurationSnapshot {
   return {
     contractVersion: "control-plane/v1", snapshotId, configurationRevision: 1,
-    target: { plane: "local", tenantId: "tenant-local", runtimeId: "runtime-local", deviceId: "device-local" },
+    target: { plane: "local", scopeId: "tenant-local", runtimeId: "runtime-local", deviceId: "device-local" },
     resolvedAt, validUntil,
     modelRoute: {
       releaseId: "model-release", contentHash: hash,

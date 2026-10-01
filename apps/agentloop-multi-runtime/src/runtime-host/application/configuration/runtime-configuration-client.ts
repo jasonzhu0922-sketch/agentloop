@@ -95,4 +95,4 @@ export function parseRuntimeConfigurationSnapshot(value: unknown): RuntimeConfig
   catch { throw new RuntimeConfigurationClientError("Delivery returned an invalid RuntimeConfigurationSnapshot"); }
 }
 
-function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }
+function sameTarget(left: RuntimeTarget, right: RuntimeTarget): boolean { return left.plane === right.plane && left.scopeId === right.scopeId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId; }

@@ -13,16 +13,16 @@ import type { ResourceKind, ResourceRelease, RuntimeTarget, TargetAssignment, Ru
 import { RuntimeConfigurationClient } from "../../src/runtime-host/application/configuration/runtime-configuration-client.ts";
 import { LocalDeliveryClient } from "../../local-agent-runtime/src/control-plane/local-delivery-client.ts";
 
-const cloud: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-cloud", runtimeClass: "standard" };
-const local: RuntimeTarget = { plane: "local", tenantId: "tenant-a", runtimeId: "runtime-local", runtimeClass: "standard", deviceId: "device-a" };
+const cloud: RuntimeTarget = { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-cloud", runtimeClass: "standard" };
+const local: RuntimeTarget = { plane: "local", scopeId: "tenant-a", runtimeId: "runtime-local", runtimeClass: "standard", deviceId: "device-a" };
 const packageHash = "d".repeat(64);
 let nextCreatedAt = 100;
 
 class AcceptanceAuthorization implements AdminAuthorizationPort {
   public async adminPrincipal(value: string | undefined): Promise<AdminPrincipal | undefined> {
-    if (value === "Bearer admin") return { actorId: "admin-acceptance", role: "platform_admin", tenantId: "tenant-a" };
-    if (value === "Bearer operator") return { actorId: "operator-acceptance", role: "operator", tenantId: "tenant-a" };
-    if (value === "Bearer skill-operator") return { actorId: "skill-operator-acceptance", role: "skill_operator", tenantId: "tenant-a" };
+    if (value === "Bearer admin") return { actorId: "admin-acceptance", role: "platform_admin", scopeId: "tenant-a" };
+    if (value === "Bearer operator") return { actorId: "operator-acceptance", role: "operator", scopeId: "tenant-a" };
+    if (value === "Bearer skill-operator") return { actorId: "skill-operator-acceptance", role: "skill_operator", scopeId: "tenant-a" };
     return undefined;
   }
 
@@ -70,7 +70,7 @@ test("admin closure: releases resolve to Cloud/Local snapshots, receipts, Skill 
   };
   const server = createAdminApiServer({ authorization: new AcceptanceAuthorization(), releases,
     snapshots, skillArtifacts: { download: async (target, requestedHash) => {
-      assert.equal(target.tenantId, "tenant-a"); assert.equal(requestedHash, packageHash);
+      assert.equal(target.scopeId, "tenant-a"); assert.equal(requestedHash, packageHash);
       return { bytes: new TextEncoder().encode("signed-skill-package"), contentType: "application/gzip" };
     } }, identity: store, audit: store, catalog: store, trace, runtimeOperations });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -105,7 +105,7 @@ test("admin closure: releases resolve to Cloud/Local snapshots, receipts, Skill 
       schemaVersion: "model-route/v1", providerConfiguration: providerConfiguration("new-model"),
     });
     await releases.assign({ expectedRevision: newModel.resourceRevision, actorId: "admin-acceptance", auditEventId: "assign-model-new",
-      assignment: { ...platformAssignment("model-resource", "model-new"), assignmentId: "assignment-model-runtime", priority: 20, scope: { plane: "cloud", target: { kind: "runtime_id", tenantId: "tenant-a", runtimeId: "runtime-cloud" } } } });
+      assignment: { ...platformAssignment("model-resource", "model-new"), assignmentId: "assignment-model-runtime", priority: 20, scope: { plane: "cloud", target: { kind: "runtime_id", scopeId: "tenant-a", runtimeId: "runtime-cloud" } } } });
     const newCloudSnapshot = await cloudClient.desiredSnapshot();
     assert.equal(oldCloudSnapshot.modelRoute?.releaseId, "model-old", "an admitted Run keeps its old immutable snapshot");
     assert.equal(newCloudSnapshot.modelRoute?.releaseId, "model-new", "a fresh admission resolves the higher-priority target assignment");

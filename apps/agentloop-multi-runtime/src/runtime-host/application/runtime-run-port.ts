@@ -47,7 +47,7 @@ export interface RuntimeHostRunPort {
 
 /** Host-only admission seam: selects a frozen Run port from a dispatch subject. */
 export interface RuntimeAdmissionRunResolver {
-  resolveForAdmission(subject: { readonly tenantId: string; readonly userId: string }): Promise<RuntimeHostRunPort>;
+  resolveForAdmission(subject: { readonly scopeId: string; readonly userId: string }): Promise<RuntimeHostRunPort>;
   resolveForRun(configurationSnapshot: RuntimeConfigurationSnapshotReference): Promise<RuntimeHostRunPort>;
 }
 

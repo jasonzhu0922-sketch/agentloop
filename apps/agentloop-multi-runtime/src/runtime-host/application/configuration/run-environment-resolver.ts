@@ -155,8 +155,8 @@ export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunReso
     portForEnvironment: (environment: ResolvedRunEnvironment) => RuntimeHostRunPort | Promise<RuntimeHostRunPort>,
   ) { this.target = target; this.environments = environments; this.portForEnvironment = portForEnvironment; }
 
-  public async resolveForAdmission(subject: { readonly tenantId: string; readonly userId: string }): Promise<RuntimeHostRunPort> {
-    if (subject.tenantId !== this.target.tenantId) {
+  public async resolveForAdmission(subject: { readonly scopeId: string; readonly userId: string }): Promise<RuntimeHostRunPort> {
+    if (subject.scopeId !== this.target.scopeId) {
       throw new RunEnvironmentUnavailableError("Dispatch tenant is not authorized for this control-plane Runtime target");
     }
     return await this.portForEnvironment(await this.environments.resolveForAdmission(this.target));
@@ -183,7 +183,7 @@ export class ControlPlaneAdmissionRunResolver implements RuntimeAdmissionRunReso
 function assertTarget(actual: RuntimeTarget, expected: RuntimeTarget): void {
   if (
     actual.plane !== expected.plane
-    || actual.tenantId !== expected.tenantId
+    || actual.scopeId !== expected.scopeId
     || actual.runtimeId !== expected.runtimeId
     || actual.runtimeClass !== expected.runtimeClass
     || actual.deviceId !== expected.deviceId

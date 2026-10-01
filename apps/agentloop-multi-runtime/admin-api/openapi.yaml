@@ -61,7 +61,7 @@ paths:
     get:
       operationId: listMembers
       parameters:
-        - name: tenantId
+        - name: scopeId
           in: query
           required: true
           schema: { type: string }

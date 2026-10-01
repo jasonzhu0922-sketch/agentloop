@@ -51,10 +51,10 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
       if (request.method === "GET" && url.pathname === "/admin/v1/members") {
         const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "member.read");
         if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
-        const tenantId = url.searchParams.get("tenantId");
-        if (tenantId === null || tenantId.trim() === "") throw new ControlPlaneError("invalid_contract", "tenantId is required");
-        if (principal.tenantId !== undefined && principal.tenantId !== tenantId) return respond(response, 403, { code: "target_not_authorized" });
-        return respond(response, 200, { members: await dependencies.identity.listMembers(tenantId) });
+        const scopeId = url.searchParams.get("scopeId");
+        if (scopeId === null || scopeId.trim() === "") throw new ControlPlaneError("invalid_contract", "scopeId is required");
+        if (principal.scopeId !== undefined && principal.scopeId !== scopeId) return respond(response, 403, { code: "target_not_authorized" });
+        return respond(response, 200, { members: await dependencies.identity.listMembers(scopeId) });
       }
       if (request.method === "GET" && url.pathname === "/admin/v1/releases") {
         const kind = url.searchParams.get("kind");
@@ -192,8 +192,8 @@ async function jsonBody(request: IncomingMessage): Promise<unknown> {
   return parsed;
 }
 
-function sameTarget(left: { plane: string; tenantId: string; runtimeId: string; runtimeClass?: string; deviceId?: string }, right: { plane: string; tenantId: string; runtimeId: string; runtimeClass?: string; deviceId?: string }): boolean {
-  return left.plane === right.plane && left.tenantId === right.tenantId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId;
+function sameTarget(left: { plane: string; scopeId: string; runtimeId: string; runtimeClass?: string; deviceId?: string }, right: { plane: string; scopeId: string; runtimeId: string; runtimeClass?: string; deviceId?: string }): boolean {
+  return left.plane === right.plane && left.scopeId === right.scopeId && left.runtimeId === right.runtimeId && left.runtimeClass === right.runtimeClass && left.deviceId === right.deviceId;
 }
 
 function statusFor(code: ControlPlaneError["code"]): number {

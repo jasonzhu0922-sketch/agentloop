@@ -3,8 +3,10 @@ import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import {
   controlPlaneMigrationLedgerSql,
+  controlPlaneMigrationEntrySql,
   controlPlaneSchemaSql,
   integrationDeliverySchemaSql,
+  scopeIdRenameSql,
   ControlPlaneMigrationError,
   assertControlPlaneMigrationsReady,
   migrateControlPlane,
@@ -45,8 +47,20 @@ test("TiDB receives source-level schema with varchar keys, longtext payloads, an
   assert.match(deliverySql, /cp_integration_invocations/);
 });
 
+test("TiDB control-plane migration checks use a current locking read", () => {
+  assert.match(controlPlaneMigrationEntrySql({ dialect: "tidb" }), /FOR UPDATE$/);
+  assert.doesNotMatch(controlPlaneMigrationEntrySql({ dialect: "sqlite" }), /FOR UPDATE/);
+});
+
 test("SQLite and PostgreSQL keep explicit portable control-plane definitions", () => {
   assert.match(controlPlaneMigrationLedgerSql({ dialect: "sqlite" }), /applied_at INTEGER/);
   assert.match(controlPlaneMigrationLedgerSql({ dialect: "postgres" }), /applied_at BIGINT/);
   assert.match(controlPlaneSchemaSql("postgres"), /created_at BIGINT NOT NULL/);
+});
+
+test("scope rename is an additive migration and never changes the historical schema definition", () => {
+  const sql = scopeIdRenameSql("tidb");
+  assert.match(sql, /owner_tenant_id TO owner_scope_id/);
+  assert.match(sql, /cp_target_assignments RENAME COLUMN tenant_id TO scope_id/);
+  assert.match(sql, /cp_credential_grants RENAME COLUMN tenant_id TO scope_id/);
 });

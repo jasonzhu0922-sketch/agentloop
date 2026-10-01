@@ -5,7 +5,7 @@ import { assertNoAssignmentConflict, ControlPlaneError, freezeRelease, resolveEf
 
 const target: RuntimeTarget = {
   plane: "local",
-  tenantId: "tenant-a",
+  scopeId: "tenant-a",
   runtimeClass: "analysis",
   runtimeId: "runtime-a",
   deviceId: "device-a",
@@ -44,11 +44,11 @@ test("scope resolver honors plane, tenant, runtime and device precedence", () =>
   const assignments = [
     assignment("platform", { plane: "both", target: { kind: "platform" } }),
     assignment("plane", { plane: "local", target: { kind: "platform" } }),
-    assignment("tenant", { plane: "local", target: { kind: "tenant", tenantId: "tenant-a" } }),
-    assignment("class", { plane: "local", target: { kind: "runtime_class", tenantId: "tenant-a", runtimeClass: "analysis" } }),
-    assignment("runtime", { plane: "local", target: { kind: "runtime_id", tenantId: "tenant-a", runtimeId: "runtime-a" } }),
+    assignment("tenant", { plane: "local", target: { kind: "tenant", scopeId: "tenant-a" } }),
+    assignment("class", { plane: "local", target: { kind: "runtime_class", scopeId: "tenant-a", runtimeClass: "analysis" } }),
+    assignment("runtime", { plane: "local", target: { kind: "runtime_id", scopeId: "tenant-a", runtimeId: "runtime-a" } }),
     // runtime and device are the same terminal scope layer; priority selects an intentional device override.
-    assignment("device", { plane: "local", target: { kind: "device_id", tenantId: "tenant-a", deviceId: "device-a" } }, 1),
+    assignment("device", { plane: "local", target: { kind: "device_id", scopeId: "tenant-a", deviceId: "device-a" } }, 1),
   ];
   assert.equal(resolveEffectiveAssignment(assignments, target)?.assignmentId, "device");
   assert.equal(resolveEffectiveAssignment(assignments.slice(0, -1), target)?.assignmentId, "runtime");
@@ -59,16 +59,16 @@ test("scope resolver honors plane, tenant, runtime and device precedence", () =>
 });
 
 test("scope resolution blocks cross-tenant and cloud/device matches", () => {
-  const tenantAssignment = assignment("tenant-a", { plane: "both", target: { kind: "tenant", tenantId: "tenant-a" } });
-  assert.equal(resolveEffectiveAssignment([tenantAssignment], { ...target, tenantId: "tenant-b" }), undefined);
-  const deviceAssignment = assignment("device", { plane: "local", target: { kind: "device_id", tenantId: "tenant-a", deviceId: "device-a" } });
+  const tenantAssignment = assignment("tenant-a", { plane: "both", target: { kind: "tenant", scopeId: "tenant-a" } });
+  assert.equal(resolveEffectiveAssignment([tenantAssignment], { ...target, scopeId: "tenant-b" }), undefined);
+  const deviceAssignment = assignment("device", { plane: "local", target: { kind: "device_id", scopeId: "tenant-a", deviceId: "device-a" } });
   assert.equal(resolveEffectiveAssignment([deviceAssignment], { ...target, plane: "cloud", deviceId: undefined }), undefined);
 });
 
 test("same precedence and priority is a publish-time conflict", () => {
   const assignments = [
-    assignment("one", { plane: "local", target: { kind: "tenant", tenantId: "tenant-a" } }, 10),
-    assignment("two", { plane: "both", target: { kind: "tenant", tenantId: "tenant-a" } }, 10),
+    assignment("one", { plane: "local", target: { kind: "tenant", scopeId: "tenant-a" } }, 10),
+    assignment("two", { plane: "both", target: { kind: "tenant", scopeId: "tenant-a" } }, 10),
   ];
   assert.throws(
     () => resolveEffectiveAssignment(assignments, target),
@@ -83,7 +83,7 @@ test("same precedence and priority is a publish-time conflict", () => {
 
 test("invalid device scopes and release transitions fail with stable errors", () => {
   assert.throws(
-    () => resolveEffectiveAssignment([assignment("bad", { plane: "both", target: { kind: "device_id", tenantId: "tenant-a", deviceId: "device-a" } })], target),
+    () => resolveEffectiveAssignment([assignment("bad", { plane: "both", target: { kind: "device_id", scopeId: "tenant-a", deviceId: "device-a" } })], target),
     (error: unknown) => error instanceof ControlPlaneError && error.code === "invalid_scope",
   );
   assert.throws(

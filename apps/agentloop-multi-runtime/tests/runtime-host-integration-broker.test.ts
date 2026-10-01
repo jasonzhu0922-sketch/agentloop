@@ -7,7 +7,7 @@ import test from "node:test";
 import type { CredentialGrant, CredentialGrantRequest, IntegrationInvocationResponse, RuntimeConfigurationSnapshot, RuntimeTarget } from "../control-plane/contracts/index.ts";
 import { CloudIntegrationSecretBroker, type IntegrationDeliveryPort } from "../src/runtime-host/application/integrations/integration-secret-broker.ts";
 
-const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
+const target: RuntimeTarget = { plane: "cloud", scopeId: "tenant-a", runtimeId: "runtime-a" };
 const hash = "b".repeat(64);
 const snapshot: RuntimeConfigurationSnapshot = {
   contractVersion: "control-plane/v1", snapshotId: "snapshot-a", configurationRevision: 1, target, resolvedAt: 1_000, validUntil: 10_000,

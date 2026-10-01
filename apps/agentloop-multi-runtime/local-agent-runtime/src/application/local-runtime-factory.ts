@@ -74,7 +74,7 @@ export class LocalRuntimeFactory {
   private async resolveConfiguration(definition: LocalRuntimeDefinition, runtimeRoot: string, environment: Readonly<Record<string, string | undefined>>, loadedSkillPackageHashes: () => readonly string[]): Promise<{ readonly snapshot: import("../../../control-plane/contracts/index.ts").RuntimeConfigurationSnapshot; readonly reference: RuntimeConfigurationSnapshotReference } | undefined> {
     const controlPlane = this.input.controlPlane;
     if (controlPlane === undefined) return undefined;
-    const target = { plane: "local" as const, tenantId: controlPlane.tenantId, runtimeId: definition.id, deviceId: controlPlane.deviceId };
+    const target = { plane: "local" as const, scopeId: controlPlane.scopeId, runtimeId: definition.id, deviceId: controlPlane.deviceId };
     const cache = new LocalSnapshotCache(join(runtimeRoot, "control-plane-snapshot.json"));
     const delivery = new LocalDeliveryClient({ deliveryUrl: controlPlane.deliveryUrl, deviceToken: controlPlane.deviceToken, target });
     let snapshot: RuntimeConfigurationSnapshot;
