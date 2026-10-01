@@ -1,5 +1,6 @@
 import { createAdminApiServer } from "./bootstrap/server.ts";
 import { DenyAllAuthorization } from "./authorization/deny-all-authorization.ts";
+import { StaticTokenAuthorization } from "./authorization/static-token-authorization.ts";
 import { ReleaseApplicationService } from "./application/release-service.ts";
 import { RuntimeConfigurationSnapshotService } from "./application/runtime-configuration-snapshot-service.ts";
 import { openReadyControlPlaneDatabase } from "./infrastructure/control-plane-database.ts";
@@ -15,7 +16,7 @@ const releases = store === undefined ? undefined : new ReleaseApplicationService
 const snapshots = store === undefined ? undefined : new RuntimeConfigurationSnapshotService({
   repository: store, now: () => Date.now(), ttlMs: positiveInteger(process.env.CONTROL_PLANE_SNAPSHOT_TTL_MS, 60_000),
 });
-const server = createAdminApiServer({ authorization: new DenyAllAuthorization(), ...(releases === undefined ? {} : { releases }), ...(snapshots === undefined ? {} : { snapshots }), ...(store === undefined ? {} : { identity: store, audit: store, catalog: store }) });
+const server = createAdminApiServer({ authorization: authorizationFromEnvironment(), ...(releases === undefined ? {} : { releases }), ...(snapshots === undefined ? {} : { snapshots }), ...(store === undefined ? {} : { identity: store, audit: store, catalog: store }) });
 server.listen(port, "127.0.0.1", () => {
   process.stdout.write(`AgentLoop Admin API scaffold listening on 127.0.0.1:${port}\n`);
 });
@@ -31,4 +32,13 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 86_400_000) throw new TypeError("CONTROL_PLANE_SNAPSHOT_TTL_MS must be a positive millisecond duration");
   return parsed;
+}
+
+function authorizationFromEnvironment() {
+  if (process.env.ADMIN_AUTH_MODE !== "static") return new DenyAllAuthorization();
+  const token = process.env.ADMIN_AUTH_TOKEN;
+  if (token === undefined) throw new TypeError("ADMIN_AUTH_TOKEN is required when ADMIN_AUTH_MODE=static");
+  const role = process.env.ADMIN_AUTH_ROLE;
+  if (role !== "platform_admin" && role !== "tenant_admin" && role !== "operator" && role !== "auditor") throw new TypeError("ADMIN_AUTH_ROLE must be platform_admin, tenant_admin, operator, or auditor");
+  return new StaticTokenAuthorization({ token, role, actorId: process.env.ADMIN_AUTH_ACTOR_ID ?? "bootstrap-admin", ...(process.env.ADMIN_AUTH_TENANT_ID === undefined ? {} : { tenantId: process.env.ADMIN_AUTH_TENANT_ID }) });
 }

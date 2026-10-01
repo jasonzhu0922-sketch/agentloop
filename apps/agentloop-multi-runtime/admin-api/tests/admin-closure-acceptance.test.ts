@@ -20,7 +20,9 @@ let nextCreatedAt = 100;
 
 class AcceptanceAuthorization implements AdminAuthorizationPort {
   public async adminPrincipal(value: string | undefined): Promise<AdminPrincipal | undefined> {
-    return value === "Bearer admin" ? { actorId: "admin-acceptance", tenantId: "tenant-a" } : undefined;
+    if (value === "Bearer admin") return { actorId: "admin-acceptance", role: "platform_admin", tenantId: "tenant-a" };
+    if (value === "Bearer operator") return { actorId: "operator-acceptance", role: "operator", tenantId: "tenant-a" };
+    return undefined;
   }
 
   public async workloadPrincipal(value: string | undefined): Promise<WorkloadPrincipal | undefined> {
@@ -74,6 +76,8 @@ test("admin closure: releases resolve to Cloud/Local snapshots, receipts, Skill 
   try {
     const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     assert.equal((await fetch(`${baseUrl}/admin/v1/releases?kind=skill`, { headers: { authorization: "Bearer ordinary-user" } })).status, 403);
+    assert.equal((await fetch(`${baseUrl}/admin/v1/releases?kind=skill`, { headers: { authorization: "Bearer operator" } })).status, 200, "operator may inspect Skill releases");
+    assert.equal((await fetch(`${baseUrl}/admin/v1/releases`, { method: "POST", headers: { authorization: "Bearer operator", "content-type": "application/json", "x-request-id": "operator-skill-write" }, body: JSON.stringify({ release: { kind: "skill" } }) })).status, 403, "operator may not publish Skill releases");
 
     const cloudClient = new RuntimeConfigurationClient({ deliveryUrl: baseUrl, workloadToken: "cloud", target: cloud, now: () => 1_100 });
     const oldCloudSnapshot = await cloudClient.desiredSnapshot();

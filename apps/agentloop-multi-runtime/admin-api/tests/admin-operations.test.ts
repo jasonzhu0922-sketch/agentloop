@@ -9,7 +9,7 @@ import { createAdminApiServer } from "../src/bootstrap/server.ts";
 const target: RuntimeTarget = { plane: "cloud", tenantId: "tenant-a", runtimeId: "runtime-a" };
 
 class Authorization implements AdminAuthorizationPort {
-  public async adminPrincipal(value: string | undefined): Promise<AdminPrincipal | undefined> { return value === "Bearer admin" ? { actorId: "admin-a" } : undefined; }
+  public async adminPrincipal(value: string | undefined): Promise<AdminPrincipal | undefined> { return value === "Bearer admin" ? { actorId: "admin-a", role: "platform_admin" } : undefined; }
   public async workloadPrincipal(_value: string | undefined): Promise<WorkloadPrincipal | undefined> { return undefined; }
 }
 

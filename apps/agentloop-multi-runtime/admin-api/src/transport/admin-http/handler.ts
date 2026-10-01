@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AdminMember, CredentialGrant, CredentialGrantRequest, CreateMemberCommand, CreateTargetAssignmentCommand, IntegrationInvocationRequest, IntegrationInvocationResponse, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget, TransitionMemberCommand, TransitionReleaseCommand } from "../../../../control-plane/contracts/index.ts";
 import { ControlPlaneError } from "../../../../control-plane/domain/index.ts";
-import type { AdminAuthorizationPort } from "../../authorization/ports.ts";
+import { hasAdminPermission } from "../../authorization/rbac.ts";
+import type { AdminAuthorizationPort, AdminPermission, AdminPrincipal } from "../../authorization/ports.ts";
 import type { ReleaseApplicationService } from "../../application/release-service.ts";
 import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort, AdminTracePort, RuntimeOperationPort } from "../../application/admin-ports.ts";
 import { adminApiHealth } from "./health.ts";
@@ -48,7 +49,7 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         return respond(response, 200, await dependencies.snapshots.desiredSnapshot(principal.target));
       }
       if (request.method === "GET" && url.pathname === "/admin/v1/members") {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "member.read");
         if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const tenantId = url.searchParams.get("tenantId");
         if (tenantId === null || tenantId.trim() === "") throw new ControlPlaneError("invalid_contract", "tenantId is required");
@@ -56,14 +57,14 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
         return respond(response, 200, { members: await dependencies.identity.listMembers(tenantId) });
       }
       if (request.method === "GET" && url.pathname === "/admin/v1/releases") {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
-        if (principal === undefined || dependencies.catalog === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const kind = url.searchParams.get("kind");
         if (kind !== null && !["integration", "model_route", "skill", "policy"].includes(kind)) throw new ControlPlaneError("invalid_contract", "Unknown release kind");
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, kind === "skill" ? "skill.read" : "release.read");
+        if (principal === undefined || dependencies.catalog === undefined) return respond(response, 403, { code: "target_not_authorized" });
         return respond(response, 200, { releases: await dependencies.catalog.listReleases(kind as ResourceRelease["kind"] | undefined) });
       }
       if (request.method === "GET" && url.pathname === "/admin/v1/audit-events") {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "audit.read");
         if (principal === undefined || dependencies.audit === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const rawLimit = url.searchParams.get("limit");
         const limit = rawLimit === null ? 50 : Number(rawLimit);
@@ -72,7 +73,7 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
       }
       const trace = /^\/admin\/v1\/runs\/([^/]+)\/trace$/.exec(url.pathname);
       if (request.method === "GET" && trace !== null) {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "trace.read");
         if (principal === undefined || dependencies.trace === undefined) return respond(response, 403, { code: "target_not_authorized" });
         return respond(response, 200, await dependencies.trace.trace(decodeURIComponent(trace[1]!)));
       }
@@ -101,40 +102,42 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
       const auditEventId = request.headers["x-request-id"];
       if (typeof auditEventId !== "string" || auditEventId.trim() === "") return respond(response, 400, { code: "invalid_contract", message: "x-request-id is required" });
       if (request.method === "POST" && url.pathname === "/admin/v1/releases") {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const body = await jsonBody(request) as { release?: Pick<ResourceRelease, "kind"> };
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, body.release?.kind === "skill" ? "skill.write" : "release.write");
         if (principal === undefined) return respond(response, 403, { code: "target_not_authorized" });
-        const body = await jsonBody(request);
         const command = body as Omit<PublishReleaseCommand, "actorId" | "auditEventId">;
         const release = await dependencies.releases.publish({ ...command, actorId: principal.actorId, auditEventId });
         return respond(response, 201, release);
       }
       if (request.method === "POST" && url.pathname === "/admin/v1/target-assignments") {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const body = await jsonBody(request) as Omit<CreateTargetAssignmentCommand, "actorId" | "auditEventId">;
+        const release = await dependencies.releases.getRelease(body.assignment?.releaseId ?? "");
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, release?.kind === "skill" ? "skill.write" : "release.write");
         if (principal === undefined) return respond(response, 403, { code: "target_not_authorized" });
-        const body = await jsonBody(request);
-        await dependencies.releases.assign({ ...(body as Omit<CreateTargetAssignmentCommand, "actorId" | "auditEventId">), actorId: principal.actorId, auditEventId });
+        await dependencies.releases.assign({ ...body, actorId: principal.actorId, auditEventId });
         return respond(response, 201, { status: "created" });
       }
       if (request.method === "POST" && url.pathname === "/admin/v1/members") {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "member.write");
         if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const body = await jsonBody(request) as Omit<CreateMemberCommand, "auditEventId">;
         return respond(response, 201, await dependencies.identity.createMember(body.member, body.expectedRevision, principal.actorId, auditEventId));
       }
       const memberTransition = /^\/admin\/v1\/members\/([^/]+)\/transitions$/.exec(url.pathname);
       if (request.method === "POST" && memberTransition !== null) {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "member.write");
         if (principal === undefined || dependencies.identity === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const body = await jsonBody(request) as Omit<TransitionMemberCommand, "memberId" | "auditEventId">;
         return respond(response, 200, await dependencies.identity.transitionMember(decodeURIComponent(memberTransition[1]!), body.status, body.expectedRevision, principal.actorId, auditEventId));
       }
       const transition = /^\/admin\/v1\/releases\/([^/]+)\/transitions$/.exec(url.pathname);
       if (request.method === "POST" && transition !== null) {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const currentRelease = await dependencies.releases.getRelease(decodeURIComponent(transition[1]!));
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, currentRelease?.kind === "skill" ? "skill.write" : "release.write");
         if (principal === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const body = await jsonBody(request) as Omit<TransitionReleaseCommand, "releaseId" | "actorId" | "auditEventId">;
-        const release = await dependencies.releases.transition({ ...body, releaseId: decodeURIComponent(transition[1]!), actorId: principal.actorId, auditEventId });
-        return respond(response, 200, release);
+        const transitionedRelease = await dependencies.releases.transition({ ...body, releaseId: decodeURIComponent(transition[1]!), actorId: principal.actorId, auditEventId });
+        return respond(response, 200, transitionedRelease);
       }
       if (request.method === "POST" && url.pathname === "/delivery/v1/apply-receipts") {
         const principal = await dependencies.authorization.workloadPrincipal(request.headers.authorization);
@@ -154,7 +157,7 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
       }
       const operation = /^\/admin\/v1\/runtimes\/([^/]+)\/(drain|recover)$/.exec(url.pathname);
       if (request.method === "POST" && operation !== null) {
-        const principal = await dependencies.authorization.adminPrincipal(request.headers.authorization);
+        const principal = await authorizedAdmin(dependencies.authorization, request.headers.authorization, "runtime.operate");
         if (principal === undefined || dependencies.runtimeOperations === undefined) return respond(response, 403, { code: "target_not_authorized" });
         const body = await jsonBody(request) as { target?: RuntimeTarget; expectedRevision?: number };
         const expectedRevision = body.expectedRevision;
@@ -168,6 +171,11 @@ export function createAdminHttpHandler(dependencies: AdminHttpDependencies): (re
       return respond(response, 400, { code: "invalid_contract" });
     }
   };
+}
+
+async function authorizedAdmin(authorization: AdminAuthorizationPort, header: string | undefined, permission: AdminPermission): Promise<AdminPrincipal | undefined> {
+  const principal = await authorization.adminPrincipal(header);
+  return principal !== undefined && hasAdminPermission(principal, permission) ? principal : undefined;
 }
 
 async function jsonBody(request: IncomingMessage): Promise<unknown> {

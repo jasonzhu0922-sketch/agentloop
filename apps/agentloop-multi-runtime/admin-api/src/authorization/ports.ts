@@ -1,7 +1,16 @@
-import type { RuntimeTarget } from "../../../control-plane/contracts/index.ts";
+import type { AdminMemberRole, RuntimeTarget } from "../../../control-plane/contracts/index.ts";
+
+export type AdminPermission =
+  | "member.read" | "member.write"
+  | "release.read" | "release.write"
+  | "skill.read" | "skill.write"
+  | "runtime.operate" | "trace.read" | "audit.read";
 
 export interface AdminPrincipal {
   readonly actorId: string;
+  readonly role: AdminMemberRole;
+  /** Optional identity-provider grants; role permissions are always included. */
+  readonly permissions?: readonly AdminPermission[];
   /** Tenant scope from the Admin identity provider; omitted only for platform-wide administrators. */
   readonly tenantId?: string;
 }

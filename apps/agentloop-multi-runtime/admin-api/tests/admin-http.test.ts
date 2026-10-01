@@ -11,7 +11,7 @@ import { SqlControlPlaneStore } from "../src/persistence/sql-control-plane-store
 
 class TestAuthorization implements AdminAuthorizationPort {
   public async adminPrincipal(value: string | undefined): Promise<AdminPrincipal | undefined> {
-    return value === "Bearer admin" ? { actorId: "admin-1" } : undefined;
+    return value === "Bearer admin" ? { actorId: "admin-1", role: "platform_admin" } : undefined;
   }
 
   public async workloadPrincipal(value: string | undefined): Promise<WorkloadPrincipal | undefined> {

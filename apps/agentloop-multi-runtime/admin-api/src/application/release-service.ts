@@ -25,6 +25,10 @@ export class ReleaseApplicationService {
     return await this.store.publishRelease({ ...command, release: freezeRelease(command.release) });
   }
 
+  public async getRelease(releaseId: string): Promise<ResourceRelease | undefined> {
+    return await this.store.getRelease(releaseId);
+  }
+
   public async assign(command: CreateTargetAssignmentCommand): Promise<void> {
     if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0) {
       throw new ControlPlaneError("invalid_contract", "expectedRevision must be a non-negative safe integer");
