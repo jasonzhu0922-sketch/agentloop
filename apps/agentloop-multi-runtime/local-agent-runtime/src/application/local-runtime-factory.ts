@@ -36,19 +36,20 @@ export class LocalRuntimeFactory {
     `);
     const scopes = new LocalDirectoryScopeStore(database);
     await scopes.ready();
-    const custom = await loadSkillDirectoriesConfig({ appRoot: this.input.appRoot, configPath: this.input.skillDirectoriesConfigPath });
+    const fileConfigurationMode = this.input.controlPlane === undefined;
+    const custom = fileConfigurationMode ? await loadSkillDirectoriesConfig({ appRoot: this.input.appRoot, configPath: this.input.skillDirectoriesConfigPath }) : [];
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {
       packageStoreRoot: this.input.skillPackageStoreRoot,
-      skillDirectories: mergeSkillDirectories(packaged?.length ? packaged : bundledSkillDirectories(), custom),
+      skillDirectories: fileConfigurationMode ? mergeSkillDirectories(packaged?.length ? packaged : bundledSkillDirectories(), custom) : (packaged?.length ? packaged : bundledSkillDirectories()),
     });
     await skills.syncSkillDirectories();
     const resolved = await this.resolveConfiguration(definition, runtimeRoot, integrationEnvironment, () => skills.discovered().map((item) => item.packageHash));
     const provider = resolved === undefined
       ? await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment)
       : LlmProviderRegistry.fromConfigObject(resolved.snapshot.modelRoute!.providerConfiguration, integrationEnvironment);
-    const strategy = resolved === undefined ? await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath) : undefined;
-    const practiceProfiles = resolved === undefined ? await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json")) : undefined;
+    const strategy = fileConfigurationMode ? await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath) : undefined;
+    const practiceProfiles = fileConfigurationMode ? await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json")) : undefined;
     const controlPlanePolicy = resolved === undefined ? undefined : resolveControlPlanePolicy(resolved.snapshot.policies);
     const runs = new RunService({
       database, skills, modelFactory: (onRetry, modelKey) => provider.create(modelKey, onRetry),
@@ -57,7 +58,7 @@ export class LocalRuntimeFactory {
       stepExecutionStrategy: controlPlanePolicy === undefined ? createStepExecutionStrategyProfile(strategy!.profile, strategy!.projection) : controlPlanePolicy.stepExecutionStrategy === undefined ? undefined : createStepExecutionStrategyProfile(controlPlanePolicy.stepExecutionStrategy.profile, controlPlanePolicy.stepExecutionStrategy.projection),
       practiceProfileCatalog: controlPlanePolicy === undefined ? practiceProfiles : controlPlanePolicy.practiceProfileCatalog,
       tools: integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment)),
-      computerCommandEnvironment: resolved === undefined ? this.input.computerCommandEnvironment : withoutEnterpriseInfoPath(this.input.computerCommandEnvironment),
+      computerCommandEnvironment: resolved === undefined ? this.input.computerCommandEnvironment : {},
       ...(resolved === undefined ? {} : { configurationSnapshot: resolved.reference }),
       ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
     });
@@ -121,10 +122,4 @@ export class LocalRuntimeFactory {
       throw new LocalRuntimeSupervisorError(500, message);
     }
   }
-}
-
-function withoutEnterpriseInfoPath(environment: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> | undefined {
-  if (environment === undefined) return undefined;
-  const { ENTERPRISE_INFO_ENV_FILE: _removed, ...remaining } = environment;
-  return remaining;
 }

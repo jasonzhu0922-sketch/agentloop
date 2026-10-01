@@ -39,12 +39,15 @@ const skillPackageStoreRoot = resolve(process.env.LOCAL_AGENT_SKILL_PACKAGE_STOR
 const runtimeDataRoot = resolve(process.env.LOCAL_AGENT_RUNTIME_DATA_ROOT ?? join(dataRoot, "runtimes"));
 const supervisorDatabasePath = resolve(process.env.LOCAL_AGENT_SUPERVISOR_DATABASE_PATH ?? join(dataRoot, "supervisor.db"));
 const maxConcurrentRuns = positiveInteger(process.env.LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, 10, "LOCAL_RUNTIME_MAX_CONCURRENT_RUNS");
+const localConfigurationSource = process.env.LOCAL_RUNTIME_CONFIGURATION_SOURCE ?? "control_plane";
+if (localConfigurationSource !== "file" && localConfigurationSource !== "control_plane") throw new Error("LOCAL_RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
 const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, process.env);
 await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
-const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
+// A control-plane target does not read the deployment .env as a runtime
+// configuration source. Its provider, policy and integration grants arrive
+// through the signed snapshot/broker; file mode remains explicit bootstrap/dev.
+const integrationEnvironment = localConfigurationSource === "file" ? await readLocalAgentIntegrationEnvironment(runtimeConfiguration) : {};
 const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
-const localConfigurationSource = process.env.LOCAL_RUNTIME_CONFIGURATION_SOURCE ?? "file";
-if (localConfigurationSource !== "file" && localConfigurationSource !== "control_plane") throw new Error("LOCAL_RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
 const controlPlaneDeliveryUrl = localConfigurationSource === "control_plane" ? requiredEnv("CONTROL_PLANE_DELIVERY_URL") : undefined;
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));

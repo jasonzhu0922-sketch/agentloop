@@ -18,10 +18,12 @@ docker build --target web -f apps/agentloop-multi-runtime/Dockerfile -t REGISTRY
 
 Before applying the base, replace all `registry.example.invalid` image names,
 the public URL in both `runtime-config.yaml` and `ingress.yaml`, and configure
-an RWX storage class or pre-provision the three claims. Create the three
-Secrets from the platform secret manager; `secret.example.yaml` must not be
-applied. Copy `provider-config.example.yaml`, set the non-secret provider
-configuration, and add the copied file to `kustomization.yaml`.
+an RWX storage class or pre-provision the three claims. Create the runtime
+auth/state Secrets from the platform secret manager; `secret.example.yaml`
+must not be applied. The runtime Host is control-plane sourced by default:
+provide the `agentloop-admin-api` Service and the
+`control-plane-workload-token` key before rollout. Provider, Skill-directory,
+and Policy JSON files are not mounted into the production Host.
 
 ```bash
 kubectl apply -k apps/agentloop-multi-runtime/deploy/kubernetes

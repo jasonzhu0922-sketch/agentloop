@@ -42,16 +42,20 @@ spec:
                 fieldRef: { fieldPath: metadata.name }
             - name: ROUTER_URL
               value: http://agentloop-router
+            - name: RUNTIME_CONFIGURATION_SOURCE
+              value: control_plane
+            - name: CONTROL_PLANE_DELIVERY_URL
+              value: http://agentloop-admin-api:8792
+            - name: CONTROL_PLANE_TENANT_ID
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            - name: CONTROL_PLANE_WORKLOAD_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentloop-runtime-auth, key: control-plane-workload-token }
             - name: WORKSPACE_ROOT
               value: /var/lib/agentloop/workspace
             - name: SKILL_PACKAGE_STORE_ROOT
               value: /var/lib/agentloop/skill-cache
-            - name: SKILL_DIRECTORIES_CONFIG_PATH
-              value: /etc/agentloop/skill-directories.json
-            - name: STEP_EXECUTION_STRATEGY_CONFIG_PATH
-              value: /etc/agentloop/step-execution-strategy.json
-            - name: LLM_PROVIDER_CONFIG_PATH
-              value: /etc/agentloop-provider/llm-providers.json
             - name: AGENTLOOP_STATE_DRIVER
               value: postgres
             - name: AGENTLOOP_STATE_DATABASE_URL
@@ -63,14 +67,9 @@ spec:
             - name: RUNTIME_ATTACHMENT_TOKEN
               valueFrom:
                 secretKeyRef: { name: agentloop-runtime-auth, key: attachment-token }
-          envFrom:
-            - secretRef: { name: agentloop-provider-env }
           volumeMounts:
             - name: runtime-config
               mountPath: /etc/agentloop
-              readOnly: true
-            - name: provider-config
-              mountPath: /etc/agentloop-provider
               readOnly: true
             - name: workspace
               mountPath: /var/lib/agentloop/workspace
@@ -84,8 +83,6 @@ spec:
       volumes:
         - name: runtime-config
           configMap: { name: agentloop-runtime-config }
-        - name: provider-config
-          configMap: { name: agentloop-provider-config }
         - name: workspace
           persistentVolumeClaim: { claimName: agentloop-workspace-rwx }
         - name: skills

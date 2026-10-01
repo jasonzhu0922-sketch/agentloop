@@ -59,14 +59,14 @@ const configurationSource = runtimeConfigurationSource(process.env.RUNTIME_CONFI
 assertRequiredRuntimeCommands(requiredRuntimeCommands(process.env.RUNTIME_REQUIRED_COMMANDS));
 assertRequiredRuntimePythonModules(requiredRuntimePythonModules(process.env.RUNTIME_REQUIRED_PYTHON_MODULES));
 assertRequiredRuntimeNodeModules(requiredRuntimeNodeModules(process.env.RUNTIME_REQUIRED_NODE_MODULES));
-// Skill roots are application configuration, not a Router or task input. Load
-// them before creating runtime state so a bad deployment fails without a
-// partially initialized Host database.
-const customSkillDirectories = await loadSkillDirectoriesConfig({ appRoot, configPath: skillDirectoriesConfigPath });
-const skillDirectories = mergeSkillDirectories(bundledSkillDirectories(), customSkillDirectories);
-const stepExecutionStrategyConfig = await loadStepExecutionStrategyProfileConfig(stepExecutionStrategyConfigPath);
-const practiceProfileCatalog = await loadPracticeProfileConfig(practiceProfileConfigPath);
-const stepExecutionStrategy = createStepExecutionStrategyProfile(
+// File configuration is an explicit development/bootstrap mode only. A
+// control-plane target starts from bundled immutable Skill baselines and waits
+// for its signed snapshot at admission; it never reads target JSON files.
+const customSkillDirectories = configurationSource === "file" ? await loadSkillDirectoriesConfig({ appRoot, configPath: skillDirectoriesConfigPath }) : [];
+const skillDirectories = configurationSource === "file" ? mergeSkillDirectories(bundledSkillDirectories(), customSkillDirectories) : bundledSkillDirectories();
+const stepExecutionStrategyConfig = configurationSource === "file" ? await loadStepExecutionStrategyProfileConfig(stepExecutionStrategyConfigPath) : undefined;
+const practiceProfileCatalog = configurationSource === "file" ? await loadPracticeProfileConfig(practiceProfileConfigPath) : undefined;
+const stepExecutionStrategy = stepExecutionStrategyConfig === undefined ? undefined : createStepExecutionStrategyProfile(
   stepExecutionStrategyConfig.profile,
   stepExecutionStrategyConfig.projection,
 );
@@ -99,9 +99,7 @@ const createRuns = (registry: LlmProviderRegistry | undefined, configurationSnap
   stepExecutionStrategy: policy === undefined ? stepExecutionStrategy : policy.stepExecutionStrategy === undefined ? undefined : createStepExecutionStrategyProfile(policy.stepExecutionStrategy.profile, policy.stepExecutionStrategy.projection),
   practiceProfileCatalog: policy === undefined ? practiceProfileCatalog : policy.practiceProfileCatalog,
   tools: integrationTools,
-  computerCommandEnvironment: {
-    STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
-  },
+  computerCommandEnvironment: configurationSource === "file" ? { STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile } : {},
   ...(computerCommandEnvironmentForInvocation === undefined ? {} : { computerCommandEnvironmentForInvocation }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
   ...(configurationSnapshot === undefined ? {} : { configurationSnapshot }),
@@ -117,19 +115,19 @@ const reconcileOwnedRuns = async (): Promise<void> => {
   await runtimeHost.reconcileOwnedRuns(await dispatchStore.ownedRunIds());
 };
 await reconcileOwnedRuns();
-// Shadow delivery is strictly opt-in and observational. The existing file
-// loaders above remain the sole source of the dependencies passed to RunService.
-const configurationShadow = createRuntimeConfigurationShadowOrchestrator({
+// Shadow delivery is a file-mode migration aid only; a control-plane target
+// must not compare against or depend on a local JSON source at runtime.
+const configurationShadow = configurationSource === "file" ? createRuntimeConfigurationShadowOrchestrator({
   environment: process.env,
   runtimeId,
   baseline: {
     modelKeys: providers?.modelKeys() ?? [],
     skillDirectoryCount: skillDirectories.length,
-    practiceProfileCount: practiceProfileCatalog.profiles.length,
-    stepExecutionStrategyProfile: stepExecutionStrategyConfig.profile,
+    practiceProfileCount: practiceProfileCatalog?.profiles.length ?? 0,
+    stepExecutionStrategyProfile: stepExecutionStrategyConfig?.profile ?? "control-plane",
   },
   log: (entry) => process.stderr.write(`${JSON.stringify(entry)}\n`),
-});
+}) : undefined;
 const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtimeDispatchToken, models: providers?.modelCatalog().map(({ key, displayName }) => ({ key, displayName })) ?? [] });
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop Runtime Host ${runtimeId} listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}\n`);
@@ -213,8 +211,8 @@ function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
 }
 
 function runtimeConfigurationSource(value: string | undefined): "file" | "control_plane" {
-  if (value === undefined || value === "file") return "file";
-  if (value === "control_plane") return value;
+  if (value === undefined || value === "control_plane") return "control_plane";
+  if (value === "file") return value;
   throw new Error("RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
 }
 

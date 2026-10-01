@@ -193,6 +193,8 @@ Cloud `custom-skills/enterprise-info` 仅通过 Runtime Host 的受保护 integr
 
 当 `RUNTIME_CONFIGURATION_SOURCE=control_plane` 时，Host 需要已认证的 delivery API、一个已确认的 `enterprise_info` binding（含 `search`/`detail` allowlist）以及部署侧 secret-provider adapter。缺少 binding、过期 grant 或不可用 provider 时会以稳定错误失败；不得回退到 `ENTERPRISE_INFO_ENV_FILE`。Local Agent 的旧路径由 WP-5 迁移，不能据此配置 Cloud Host。
 
+WP-8 起，Cloud Host 与 Local Agent 的 source 默认是 `control_plane`；Provider、Skill directory、Step strategy、Practice Profile JSON 以及运行时 `.env` 不再作为 control-plane target 的权威来源。`RUNTIME_CONFIGURATION_SOURCE=file` 或 `LOCAL_RUNTIME_CONFIGURATION_SOURCE=file` 只用于明确的本地开发、安装 bootstrap 或受控 emergency rollback。
+
 ```bash
 # 终端 1：Router（默认读取 config/runtimes.json）
 RUNTIME_DISPATCH_TOKEN=development-dispatch-token-123 \

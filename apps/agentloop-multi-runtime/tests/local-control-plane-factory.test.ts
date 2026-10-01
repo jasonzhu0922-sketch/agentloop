@@ -39,10 +39,12 @@ test("Local Runtime Factory admits a control-plane snapshot, restores only an un
       workspaceRoot: join(root, "workspace"),
       skillPackageStoreRoot: join(root, "skill-packages"),
       runtimeDataRoot: join(root, "runtimes"),
-      providerConfigPath: join(appRoot, "config", "llm-providers.json"),
-      skillDirectoriesConfigPath: join(root, "skill-directories.json"),
-      stepExecutionStrategyConfigPath: join(appRoot, "config", "step-execution-strategy.json"),
-      practiceProfileConfigPath: join(appRoot, "config", "practice-profiles.json"),
+      // These paths deliberately do not exist: a control-plane target must
+      // admit from its snapshot/cache and bundled baseline only.
+      providerConfigPath: join(root, "missing-provider.json"),
+      skillDirectoriesConfigPath: join(root, "missing-skill-directories.json"),
+      stepExecutionStrategyConfigPath: join(root, "missing-step-strategy.json"),
+      practiceProfileConfigPath: join(root, "missing-practice-profiles.json"),
       environment: { AGENTLOOP_BUNDLED_SKILL_DIRECTORIES: join(root, "empty-skills") },
       integrationEnvironment: { TEST_API_KEY: "local-test-key", WEB_SEARCH_DISABLED: "1" },
       computerCommandEnvironment: { ENTERPRISE_INFO_ENV_FILE: "/never-forward-this-path" },

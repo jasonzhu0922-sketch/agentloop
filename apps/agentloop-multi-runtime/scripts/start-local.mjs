@@ -16,6 +16,12 @@ const localAgentPort = positiveInteger(process.env.LOCAL_AGENT_PORT, 8790);
 const runtimePort = positiveInteger(process.env.RUNTIME_BASE_PORT, 8791);
 const runtimeHost = process.env.RUNTIME_HOST ?? "127.0.0.1";
 const routerHost = process.env.HOST ?? "127.0.0.1";
+const runtimeConfigurationSource = process.env.RUNTIME_CONFIGURATION_SOURCE ?? "file";
+const localConfigurationSource = process.env.LOCAL_RUNTIME_CONFIGURATION_SOURCE ?? "file";
+if (!["file", "control_plane"].includes(runtimeConfigurationSource) || !["file", "control_plane"].includes(localConfigurationSource)) {
+  throw new Error("RUNTIME_CONFIGURATION_SOURCE and LOCAL_RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
+}
+const needsFileConfiguration = runtimeConfigurationSource === "file" || localConfigurationSource === "file";
 const publicRouterHost = process.env.PUBLIC_HOST ?? (routerHost === "0.0.0.0" ? "127.0.0.1" : routerHost);
 const publicRouterUrl = process.env.ROUTER_URL ?? `http://${publicRouterHost}:${routerPort}`;
 const dispatchToken = process.env.RUNTIME_DISPATCH_TOKEN ?? "development-dispatch-token-123";
@@ -27,21 +33,21 @@ const providerConfigPath = resolve(
   appRoot,
   process.env.LLM_PROVIDER_CONFIG_PATH ?? "./config/llm-providers.json",
 );
-if (!existsSync(providerConfigPath)) {
+if (needsFileConfiguration && !existsSync(providerConfigPath)) {
   throw new Error(`LLM_PROVIDER_CONFIG_PATH does not exist: ${providerConfigPath}. Copy config/llm-providers.example.json first.`);
 }
 const stepExecutionStrategyConfigPath = resolve(
   appRoot,
   process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? "./config/step-execution-strategy.json",
 );
-if (!existsSync(stepExecutionStrategyConfigPath)) {
+if (needsFileConfiguration && !existsSync(stepExecutionStrategyConfigPath)) {
   throw new Error(`STEP_EXECUTION_STRATEGY_CONFIG_PATH does not exist: ${stepExecutionStrategyConfigPath}.`);
 }
 const practiceProfileConfigPath = resolve(
   appRoot,
   process.env.PRACTICE_PROFILE_CONFIG_PATH ?? "./config/practice-profiles.json",
 );
-if (!existsSync(practiceProfileConfigPath)) {
+if (needsFileConfiguration && !existsSync(practiceProfileConfigPath)) {
   throw new Error(`PRACTICE_PROFILE_CONFIG_PATH does not exist: ${practiceProfileConfigPath}.`);
 }
 const providerEnvFileSetting = process.env.LLM_PROVIDER_ENV_FILE;
@@ -49,7 +55,7 @@ const providerEnvFile = resolve(appRoot, providerEnvFileSetting ?? "./.env");
 if (providerEnvFileSetting !== undefined && !existsSync(providerEnvFile)) {
   throw new Error(`LLM_PROVIDER_ENV_FILE does not exist: ${providerEnvFile}`);
 }
-const providerEnvFiles = existsSync(providerEnvFile) ? [providerEnvFile] : [];
+const providerEnvFiles = needsFileConfiguration && existsSync(providerEnvFile) ? [providerEnvFile] : [];
 const localEnvFiles = existsSync(join(appRoot, ".env")) ? [join(appRoot, ".env")] : [];
 // Local development has no container image to own execution dependencies.
 // Provision them before launching Hosts, then make the venv the first PATH entry.
@@ -142,6 +148,7 @@ children.push(start("local-agent", "local-agent-runtime/src/main.ts", {
   PRACTICE_PROFILE_CONFIG_PATH: practiceProfileConfigPath,
   SKILL_DIRECTORIES_CONFIG_PATH: process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json",
   LLM_PROVIDER_ENV_FILE: providerEnvFile,
+  LOCAL_RUNTIME_CONFIGURATION_SOURCE: localConfigurationSource,
 }, providerEnvFiles));
 
 for (let index = 0; index < runtimeCount; index += 1) {
@@ -155,6 +162,7 @@ for (let index = 0; index < runtimeCount; index += 1) {
     PORT: String(runtimePort + index),
     RUNTIME_ID: runtimeId,
     ROUTER_URL: publicRouterUrl,
+    RUNTIME_CONFIGURATION_SOURCE: runtimeConfigurationSource,
     LLM_PROVIDER_CONFIG_PATH: providerConfigPath,
     STEP_EXECUTION_STRATEGY_CONFIG_PATH: stepExecutionStrategyConfigPath,
     AGENTLOOP_STATE_DRIVER: process.env.AGENTLOOP_STATE_DRIVER ?? "sqlite",

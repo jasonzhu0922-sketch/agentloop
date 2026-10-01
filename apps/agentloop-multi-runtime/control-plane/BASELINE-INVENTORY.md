@@ -6,7 +6,7 @@ This is a path-and-consumer inventory, not a configuration import. No `.env` fil
 | --- | --- | --- | --- |
 | `config/llm-providers.example.json` | `66f252ec09ed16efb4fd5a53a623da726ed54e0fe7396e87384651c63e08c59d` | Cloud Runtime bootstrap/package examples | Cloud Integration/Model Route baseline release |
 | `local-agent-runtime/config/llm-providers.example.json` | `66f252ec09ed16efb4fd5a53a623da726ed54e0fe7396e87384651c63e08c59d` | Local Agent bootstrap/package examples | Local Integration/Model Route baseline release |
-| `config/skill-directories.json` and `local-agent-runtime/config/skill-directories.json` | `cb367ae3a0a18f48c4ffe035520b726491594e0069968ceec7f83ea9b335391c` | Cloud Host and Local Agent skill-directory loaders | Cloud/Local Skill assignment baseline |
+| `config/skill-directories.json` and `local-agent-runtime/config/skill-directories.json` | `cb367ae3a0a18f48c4ffe035520b726491594e006996e87384651c63e08c59c` | Explicit file-mode/bootstrap loader only | Cloud/Local Skill assignment baseline |
 | `config/step-execution-strategy.json` and `local-agent-runtime/config/step-execution-strategy.json` | `39af8e7470267e2ed3d9a8cfad6dcd3eb6d2d0d0f2b91a9965a14be475016862` | Cloud Host and Local Agent strategy loaders | Policy release baseline |
 | `config/practice-profiles.json` | `43fbb17436db3c7e0701ceefa3879b178e78a1b65ccffe96d8070d607854966a` | Cloud/Local runtime composition | Policy release baseline |
 
@@ -24,9 +24,13 @@ This is a path-and-consumer inventory, not a configuration import. No `.env` fil
 | --- | --- | --- |
 | `LLM_PROVIDER_CONFIG_PATH` / `LOCAL_AGENT_PROVIDER_CONFIG_PATH` | Cloud Host, Local Agent, Compose/Kubernetes manifests | Cloud/Local Integration + Model Route binding |
 | `SKILL_DIRECTORIES_CONFIG_PATH` | Cloud Host, Local Agent, local launcher, Kubernetes manifest | Cloud/Local Skill assignment |
-| `STEP_EXECUTION_STRATEGY_CONFIG_PATH` | Cloud Host, Local Agent, local launcher, Compose/Kubernetes manifests | Cloud/Local Policy release |
-| `PRACTICE_PROFILE_CONFIG_PATH` | Cloud Host and Local Agent composition | Cloud/Local Policy release |
+| `STEP_EXECUTION_STRATEGY_CONFIG_PATH` | Explicit file-mode/local launcher only | Cloud/Local Policy release |
+| `PRACTICE_PROFILE_CONFIG_PATH` | Explicit file-mode/local launcher only | Cloud/Local Policy release |
 | `ENTERPRISE_INFO_ENV_FILE` | Local Agent runtime configuration; historical Cloud Host path | Cloud `enterprise_info` now uses brokered binding; Local migration remains WP-5 |
 | `STEEL_MARKET_DB_ENV_FILE` | Cloud Host command environment and Local Agent runtime configuration | Future data-source Integration binding; no secret/path delivery to Skills |
 
-WP-0 does not register these baselines as releases, create `cp_*` tables, call a delivery API, or change any loader. A later explicit importer may hash approved, non-secret baseline payloads through a controlled deployment job.
+## WP-8 source policy
+
+`RUNTIME_CONFIGURATION_SOURCE` and `LOCAL_RUNTIME_CONFIGURATION_SOURCE` now default to `control_plane`. The `file` value is an explicit development/bootstrap mode only. In `control_plane` mode Cloud Host and Local Agent do not load the Provider, Skill-directory, Step-strategy, Practice Profile JSON paths or deployment `.env` as runtime configuration; they use the signed delivery snapshot, target-local Skill catalog, and brokered credentials. Existing JSON and `.env` paths remain documented only for explicit bootstrap/rollback workflows and are not a per-field fallback.
+
+Production Kubernetes manifests set `RUNTIME_CONFIGURATION_SOURCE=control_plane`, remove Provider config/env mounts, and require delivery workload identity. Compose remains an explicit local `file` profile unless overridden for a control-plane canary.

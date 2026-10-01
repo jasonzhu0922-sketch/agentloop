@@ -1,6 +1,9 @@
 x-runtime-environment: &runtime_environment
   HOST: 0.0.0.0
   ROUTER_URL: http://router:8788
+  # Compose is an explicit development/bootstrap profile. Production targets
+  # must set RUNTIME_CONFIGURATION_SOURCE=control_plane and use delivery.
+  RUNTIME_CONFIGURATION_SOURCE: ${RUNTIME_CONFIGURATION_SOURCE:-file}
   RUNTIME_DISPATCH_TOKEN: ${RUNTIME_DISPATCH_TOKEN:?set in environment}
   RUNTIME_ATTACHMENT_TOKEN: ${RUNTIME_ATTACHMENT_TOKEN:?set in environment}
   LLM_PROVIDER_CONFIG_PATH: /run/config/llm-providers.json
