@@ -140,13 +140,17 @@ migration ledger and never creates the database or `cp_*` tables.
 AGENTLOOP_ADMIN_DATABASE_URL=mysql://user:password@tidb:4000/agentloop_admin
 ```
 
+Admin-only local settings belong in `admin-api/.env`, copied from
+`admin-api/.env.example`. This file is ignored by Git and is not shared with
+Router, Runtime Host, or Local Agent configuration.
+
 Provision and migrate it explicitly:
 
 ```bash
-AGENTLOOP_ADMIN_SERVER_URL='mysql://user:password@tidb:4000' \
-  npm run provision:admin-database -- --apply
-AGENTLOOP_ADMIN_DATABASE_URL='mysql://user:password@tidb:4000/agentloop_admin' \
-  npm run migrate:control-plane -- --apply
+cp admin-api/.env.example admin-api/.env
+# Edit admin-api/.env with the local TiDB connection values.
+npm run provision:admin-database -- --apply
+npm run migrate:control-plane -- --apply
 ```
 
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host
