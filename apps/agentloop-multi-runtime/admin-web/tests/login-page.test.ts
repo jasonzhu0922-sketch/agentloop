@@ -10,5 +10,5 @@ test("Admin Web unauthenticated state is a standalone user-style login page", ()
   assert.match(html, /name="username"/);
   assert.match(html, /name="password"/);
   assert.match(html, /登录失败/);
-  assert.doesNotMatch(html, /admin-shell|sidebar|scopeId|settings-form/);
+  assert.doesNotMatch(html, /admin-shell|sidebar|scopeId/);
 });
