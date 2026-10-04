@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { TiDbConnection } from "@zhujun/agentloop";
+import { openControlPlaneDatabase } from "../src/infrastructure/control-plane-database.ts";
 import { assertControlPlaneMigrationsReady } from "../src/persistence/control-plane-migrations.ts";
 import { SqlControlPlaneStore } from "../src/persistence/sql-control-plane-store.ts";
 
-const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL;
-if (connectionString === undefined || !connectionString.startsWith("mysql://")) {
-  throw new Error("AGENTLOOP_ADMIN_DATABASE_URL must be an explicit TiDB mysql:// URL for the dedicated admin database; no default target is used");
-}
+const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL ?? process.env.AGENTLOOP_ADMIN_DATABASE_PATH;
+if (connectionString === undefined || connectionString.trim() === "") throw new Error("Set AGENTLOOP_ADMIN_DATABASE_URL or AGENTLOOP_ADMIN_DATABASE_PATH; no default target is used");
 if (process.env.ADMIN_AUTH_MODE !== "password") throw new Error("ADMIN_AUTH_MODE=password is required to bootstrap the configured Admin user");
 const username = required(process.env.ADMIN_AUTH_USERNAME, "ADMIN_AUTH_USERNAME");
 const passwordHash = required(process.env.ADMIN_AUTH_PASSWORD_HASH, "ADMIN_AUTH_PASSWORD_HASH");
@@ -14,7 +12,7 @@ const role = required(process.env.ADMIN_AUTH_ROLE, "ADMIN_AUTH_ROLE");
 if (!["platform_admin", "operator", "skill_operator", "auditor", "member"].includes(role)) throw new Error("ADMIN_AUTH_ROLE is invalid");
 const userId = process.env.ADMIN_AUTH_ACTOR_ID ?? `admin-user-${username.replace(/[^a-zA-Z0-9._-]+/g, "-")}`;
 
-const database = await TiDbConnection.create(connectionString);
+const database = await openControlPlaneDatabase(connectionString);
 try {
   await assertControlPlaneMigrationsReady(database);
   const store = new SqlControlPlaneStore(database);

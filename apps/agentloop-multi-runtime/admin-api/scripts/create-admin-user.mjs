@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { TiDbConnection } from "@zhujun/agentloop";
+import { openControlPlaneDatabase } from "../src/infrastructure/control-plane-database.ts";
 import { assertControlPlaneMigrationsReady } from "../src/persistence/control-plane-migrations.ts";
 import { hashAdminPassword } from "../src/authorization/password-authorization.ts";
 import { SqlControlPlaneStore } from "../src/persistence/sql-control-plane-store.ts";
 
-const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL;
-if (connectionString === undefined || !connectionString.startsWith("mysql://")) {
-  throw new Error("AGENTLOOP_ADMIN_DATABASE_URL must be an explicit TiDB mysql:// URL for the dedicated admin database; no default target is used");
-}
+const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL ?? process.env.AGENTLOOP_ADMIN_DATABASE_PATH;
+if (connectionString === undefined || connectionString.trim() === "") throw new Error("Set AGENTLOOP_ADMIN_DATABASE_URL or AGENTLOOP_ADMIN_DATABASE_PATH; no default target is used");
 
 const args = parseArgs(process.argv.slice(2));
 const username = required(args.username, "--username");
@@ -17,7 +15,7 @@ const userId = args["user-id"] ?? `admin-user-${username.replace(/[^a-zA-Z0-9._-
 const role = args.role ?? "platform_admin";
 if (!["platform_admin", "operator", "skill_operator", "auditor", "member"].includes(role)) throw new Error("--role must be platform_admin, operator, skill_operator, auditor, or member");
 
-const database = await TiDbConnection.create(connectionString);
+const database = await openControlPlaneDatabase(connectionString);
 try {
   await assertControlPlaneMigrationsReady(database);
   const store = new SqlControlPlaneStore(database);

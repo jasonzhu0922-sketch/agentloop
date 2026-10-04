@@ -132,14 +132,17 @@ Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备�
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
-### TiDB role databases
+### Admin role database
 
-The Admin control plane has its own TiDB database, `agentloop_admin`. It is provisioned
+The Admin control plane has its own database, `agentloop_admin` in production. It is provisioned
 and migrated separately from Router and Runtime; application startup only checks its
 migration ledger and never creates the database or `cp_*` tables.
 
 ```dotenv
-AGENTLOOP_ADMIN_DATABASE_URL=mysql://user:password@tidb:4000/agentloop_admin
+# PostgreSQL production
+AGENTLOOP_ADMIN_DATABASE_URL=postgresql://user:password@postgres:5432/agentloop_admin
+# SQLite local development (use this instead of DATABASE_URL)
+# AGENTLOOP_ADMIN_DATABASE_PATH=./data/admin.db
 ```
 
 Admin-only local settings belong in `admin-api/.env`, copied from
@@ -163,8 +166,10 @@ Provision and migrate it explicitly:
 
 ```bash
 cp admin-api/.env.example admin-api/.env
-# Edit admin-api/.env with the local TiDB connection values.
+# For TiDB, edit the server/database values and provision the database first.
 npm run provision:admin-database -- --apply
+# For PostgreSQL or SQLite, provision the database/file through the platform
+# and omit the TiDB-only provision command above.
 npm run migrate:control-plane -- --apply
 # When password mode is enabled, explicitly copy the configured bootstrap hash
 # into cp_admin_users so the account appears in Admin Web 管理端用户。
@@ -175,7 +180,7 @@ Admin Web 分开提供“管理端用户”和“业务端用户”两个入口�
 登录用户（`cp_admin_users`），包括角色、Scope、状态和密码重置；后者读取 Router 的
 `mr_*` 身份数据，管理 Multi Runtime 的普通使用用户。两者使用独立的身份边界，管理端用户
 页面不会读取或修改 Router/Runtime 用户数据，业务端用户页面也不会修改 `cp_admin_users`。
-登录认证优先查询 Admin TiDB 表，环境变量账号只作为未完成 bootstrap 时的临时 fallback。
+登录认证优先查询 Admin 数据库表，环境变量账号只作为未完成 bootstrap 时的临时 fallback。
 
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host
 分到两个 database：`agentloop_router` 保存身份、设备、附件、Assignment 与 Router
@@ -197,6 +202,25 @@ database 都有 `mr_schema_migrations(id, checksum, applied_at)`：已安装 mig
 checksum 必须与当前代码一致，否则进程会拒绝继续启动。SQLite 旧库会先执行既有的
 前向兼容升级，再写入当前基线；PostgreSQL/TiDB 从同一有序清单建库。迁移期间使用
 SQLite 事务、PostgreSQL advisory transaction lock 或 TiDB advisory lock 串行化。
+
+也可以在启动 Router/Host 前显式执行同一套迁移（默认只做 dry-run，写入必须显式加
+`--apply`），三种后端共用一个入口，不复制业务 DDL：
+
+```bash
+# SQLite：单机共享 WAL 文件
+AGENTLOOP_STATE_DRIVER=sqlite \
+AGENTLOOP_STATE_SQLITE_PATH=./data/local/agentloop.db \
+npm run migrate:shared:sqlite -- --role both --apply
+
+# PostgreSQL：Router/Runtime 可分别使用角色变量
+AGENTLOOP_ROUTER_STATE_DRIVER=postgres \
+AGENTLOOP_ROUTER_STATE_DATABASE_URL=postgresql://user:password@postgres/agentloop_router \
+npm run migrate:shared:postgres -- --role router --apply
+```
+
+`--role` 可取 `router`、`runtime` 或 `both`；TiDB 也可用
+`npm run migrate:shared:tidb` 执行同一入口。脚本只负责迁移，不启动任何应用进程，且
+保留迁移账本 checksum 与各后端的锁语义。
 
 当前生产部署基线将附件元数据写入共享 PostgreSQL，并把不可变附件字节放在仅 Router 共享的 RWX 挂载；Host 始终经 Router 的受控下载接口读取附件，而不会拿到存储路径。对象存储 BlobStore 是下一步替换此挂载的演进点，不是已经宣称完成的能力。可直接使用 [Kubernetes 多主机部署清单](deploy/kubernetes/README.md) 构建并独立发布 `router`、`runtime-host`、`web` 三个镜像目标。
 

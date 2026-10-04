@@ -21,7 +21,7 @@ import type { AdminMemberRole } from "../../control-plane/contracts/index.ts";
 const port = Number(process.env.ADMIN_API_PORT ?? "8892");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new TypeError("ADMIN_API_PORT must be a TCP port");
 
-const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL;
+const connectionString = process.env.AGENTLOOP_ADMIN_DATABASE_URL ?? process.env.AGENTLOOP_ADMIN_DATABASE_PATH;
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const customSkills = new CustomSkillCatalogApplicationService([resolve(appRoot, process.env.ADMIN_CUSTOM_SKILLS_PATH ?? "./custom-skills")]);
 const database = connectionString === undefined ? undefined : await openReadyControlPlaneDatabase(connectionString);
