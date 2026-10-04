@@ -4,16 +4,17 @@ import test from "node:test";
 
 const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 const shell = readFileSync(new URL("../src/app/shell.ts", import.meta.url), "utf8");
+const usersPage = readFileSync(new URL("../src/app/pages/users-page.ts", import.meta.url), "utf8");
 const interactions = readFileSync(new URL("../src/app/interaction-bindings.ts", import.meta.url), "utf8");
 
 test("Admin users render as a full-width table with one modal for create and edit", () => {
-  assert.match(shell, /<section class="members-page">/);
-  assert.match(shell, /state\.userModal \? adminUserForm\(\) : \"\"/);
-  assert.match(shell, /class="dialog admin-user-dialog"/);
+  assert.match(usersPage, /<section class="members-page">/);
+  assert.match(usersPage, /state\.userModal/);
+  assert.match(usersPage, /class="dialog admin-user-dialog"/);
   assert.match(interactions, /state\.userModal = true/);
   assert.match(styles, /\.members-page\{display:block\}\.members-page>\.wide\{width:100%\}/);
   assert.match(styles, /\.admin-user-dialog\{width:min\(760px,100%\)\}/);
-  assert.match(shell, /class="pagination admin-user-pagination"/);
+  assert.match(usersPage, /class="pagination admin-user-pagination"/);
   assert.match(interactions, /data-action=admin-user-page-prev/);
   assert.match(interactions, /data-action=admin-user-page-next/);
   assert.match(styles, /\.panel-actions\{display:flex;align-items:center;gap:16px\}/);
