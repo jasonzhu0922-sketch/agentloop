@@ -17,6 +17,7 @@ test("WP-8 keeps file configuration behind explicit development mode", async () 
   assert.match(localMain, /localConfigurationSource === "file" \? await readLocalAgentIntegrationEnvironment/);
   assert.match(localFactory, /const fileConfigurationMode = this\.input\.controlPlane === undefined/);
   assert.match(localFactory, /fileConfigurationMode \? await loadPracticeProfileConfig/);
-  assert.match(launcher, /RUNTIME_CONFIGURATION_SOURCE \?\? "file"/);
+  assert.match(launcher, /RUNTIME_CONFIGURATION_SOURCE \?\? "control_plane"/);
+  assert.match(launcher, /LOCAL_RUNTIME_CONFIGURATION_SOURCE \?\? "control_plane"/);
   assert.match(launcher, /RUNTIME_CONFIGURATION_SOURCE: runtimeConfigurationSource/);
 });

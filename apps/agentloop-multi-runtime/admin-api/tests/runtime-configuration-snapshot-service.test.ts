@@ -69,6 +69,33 @@ test("snapshot resolver selects only active releases at the target scope and emi
   }
 });
 
+test("snapshot resolver uses the Router-owned model catalog for both Cloud and Local targets", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateControlPlane(database);
+    const store = new SqlControlPlaneStore(database);
+    const providerConfiguration = {
+      defaultProvider: "router", defaultModelKey: "router-model",
+      providers: { router: { kind: "openai-compatible", baseUrl: "https://models.example.test/v1", protocol: "chat-completions", models: { "router-model": { providerModel: "router-model" } } } },
+    };
+    const resolver = new RuntimeConfigurationSnapshotService({
+      repository: store, now: () => 1_000, ttlMs: 500,
+      modelConfiguration: { configuration: async () => ({ revision: 7, contentHash: "router-hash", providerConfiguration }) },
+    });
+    for (const target of [
+      { plane: "cloud" as const, scopeId: "tenant-a", runtimeId: "runtime-cloud" },
+      { plane: "local" as const, scopeId: "tenant-a", runtimeId: "runtime-local", deviceId: "device-a" },
+    ]) {
+      const snapshot = await resolver.desiredSnapshot(target);
+      assert.equal(snapshot.modelRoute?.releaseId, "router-model-catalog:7");
+      assert.equal(snapshot.modelRoute?.contentHash, "router-hash");
+      assert.deepEqual(snapshot.modelRoute?.providerConfiguration, providerConfiguration);
+    }
+  } finally {
+    await database.close();
+  }
+});
+
 test("snapshot resolver refuses a selected skill release without a verified package hash", async () => {
   const database = new AppDatabase(":memory:");
   try {

@@ -32,13 +32,14 @@ const routerUrl = process.env.ADMIN_ROUTER_URL;
 const routerToken = process.env.RUNTIME_DISPATCH_TOKEN;
 const routerConfigured = routerUrl !== undefined && routerToken !== undefined;
 if ((routerUrl === undefined) !== (routerToken === undefined)) throw new TypeError("ADMIN_ROUTER_URL and RUNTIME_DISPATCH_TOKEN must be configured together");
-const snapshots = store === undefined ? undefined : new RuntimeConfigurationSnapshotService({
-  repository: store, now: () => Date.now(), ttlMs: positiveInteger(process.env.CONTROL_PLANE_SNAPSHOT_TTL_MS, 60_000),
-});
 // Provider/model configuration has exactly one authority: Router. Admin is
 // only its authenticated management surface; it never falls back to
 // cp_releases for a second model catalog.
 const models = routerConfigured ? new RouterModelCatalogService({ baseUrl: routerUrl!, token: routerToken! }) : undefined;
+const snapshots = store === undefined ? undefined : new RuntimeConfigurationSnapshotService({
+  repository: store, now: () => Date.now(), ttlMs: positiveInteger(process.env.CONTROL_PLANE_SNAPSHOT_TTL_MS, 60_000),
+  ...(models === undefined ? {} : { modelConfiguration: models }),
+});
 const runOperations = routerConfigured ? new RouterRunOperationsService({ baseUrl: routerUrl!, token: routerToken! }) : undefined;
 const runtimeInventory = routerConfigured ? new RouterRuntimeInventoryService({ baseUrl: routerUrl!, token: routerToken! }) : undefined;
 const businessUsers = routerConfigured ? new RouterBusinessUserOperationsService({ baseUrl: routerUrl!, token: routerToken! }) : undefined;

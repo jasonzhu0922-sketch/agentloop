@@ -25,6 +25,12 @@ interface RouterCatalogView {
   }[];
 }
 
+export interface RouterModelConfiguration {
+  readonly revision: number;
+  readonly contentHash: string;
+  readonly providerConfiguration: Readonly<Record<string, unknown>>;
+}
+
 /** Admin adapter for the Router-owned model catalog. It never persists model state in cp_releases. */
 export class RouterModelCatalogService implements ModelCatalogPort {
   private readonly baseUrl: string;
@@ -84,6 +90,11 @@ export class RouterModelCatalogService implements ModelCatalogPort {
   }
 
   private async view(): Promise<RouterCatalogView> { return await this.call("/v1/internal/model-catalog") as RouterCatalogView; }
+
+  /** Full workload configuration used when building Local/Cloud snapshots. */
+  public async configuration(): Promise<RouterModelConfiguration> {
+    return await this.call("/v1/internal/model-configuration") as RouterModelConfiguration;
+  }
 
   private modelSummary(view: RouterCatalogView, provider: RouterCatalogView["providers"][number], model: RouterCatalogView["providers"][number]["models"][number]): AdminModelSummary {
     return {

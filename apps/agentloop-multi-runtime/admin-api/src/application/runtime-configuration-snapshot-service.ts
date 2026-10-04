@@ -5,16 +5,22 @@ import type {
   ControlPlaneResource, ReleaseReference, ResourceRelease, RuntimeConfigurationSnapshot, RuntimeTarget,
 } from "../../../control-plane/contracts/index.ts";
 
+export interface RuntimeModelConfigurationPort {
+  configuration(): Promise<{ readonly revision: number; readonly contentHash: string; readonly providerConfiguration: Readonly<Record<string, unknown>> }>;
+}
+
 /** Resolves only active desired state. It never reads a secret reference/value or Runtime database. */
 export class RuntimeConfigurationSnapshotService {
   private readonly repository: ConfigurationSnapshotRepositoryPort;
   private readonly now: () => number;
   private readonly ttlMs: number;
+  private readonly modelConfiguration?: RuntimeModelConfigurationPort;
 
-  public constructor(input: { readonly repository: ConfigurationSnapshotRepositoryPort; readonly now: () => number; readonly ttlMs: number }) {
+  public constructor(input: { readonly repository: ConfigurationSnapshotRepositoryPort; readonly now: () => number; readonly ttlMs: number; readonly modelConfiguration?: RuntimeModelConfigurationPort }) {
     this.repository = input.repository;
     this.now = input.now;
     this.ttlMs = input.ttlMs;
+    this.modelConfiguration = input.modelConfiguration;
     if (!Number.isSafeInteger(this.ttlMs) || this.ttlMs < 1) throw new TypeError("snapshot ttlMs must be a positive safe integer");
   }
 
@@ -22,7 +28,7 @@ export class RuntimeConfigurationSnapshotService {
     const resources = await this.repository.listResources();
     const selected = await Promise.all(resources.map(async (resource) => ({ resource, selection: await this.selectedRelease(resource, target) })));
     const active = selected.flatMap(({ resource, selection }) => selection === undefined ? [] : [{ resource, ...selection }]);
-    const modelRoutes = active.filter((entry) => entry.resource.kind === "model_route");
+    const modelRoutes = this.modelConfiguration === undefined ? active.filter((entry) => entry.resource.kind === "model_route") : [];
     if (modelRoutes.length > 1) throw new ControlPlaneError("configuration_unavailable", "More than one active model-route resource applies to this target");
     const skills = await Promise.all(active.filter((entry) => entry.resource.kind === "skill").map(async ({ release }) => {
       const artifact = this.repository.skillArtifact === undefined ? undefined : await this.repository.skillArtifact(release.releaseId);
@@ -41,12 +47,20 @@ export class RuntimeConfigurationSnapshotService {
       .map(({ release }) => ({ releaseId: release.releaseId, contentHash: release.contentHash, ...(policyManifest(release.payload) === undefined ? {} : { policy: policyManifest(release.payload) }) }));
     const resolvedAt = this.now();
     const configurationRevision = await this.repository.configurationRevision();
+    const modelRoute = this.modelConfiguration === undefined
+      ? (modelRoutes.length === 0 ? undefined : modelRouteReference(modelRoutes[0]!.release))
+      : await this.routerModelRoute();
     const snapshot: Omit<RuntimeConfigurationSnapshot, "snapshotId"> = {
       contractVersion: "control-plane/v1", configurationRevision, target, resolvedAt, validUntil: resolvedAt + this.ttlMs,
-      ...(modelRoutes.length === 0 ? {} : { modelRoute: modelRouteReference(modelRoutes[0]!.release) }),
+      ...(modelRoute === undefined ? {} : { modelRoute }),
       integrations: integrations.sort(referenceOrder), skills: skills.sort(referenceOrder), policies: policies.sort(referenceOrder),
     };
     return { ...snapshot, snapshotId: snapshotHash(snapshot) };
+  }
+
+  private async routerModelRoute(): Promise<RuntimeConfigurationSnapshot["modelRoute"]> {
+    const model = await this.modelConfiguration!.configuration();
+    return { releaseId: `router-model-catalog:${model.revision}`, contentHash: model.contentHash, providerConfiguration: model.providerConfiguration };
   }
 
   private async selectedRelease(resource: ControlPlaneResource, target: RuntimeTarget): Promise<{ readonly release: ResourceRelease; readonly assignmentId: string } | undefined> {

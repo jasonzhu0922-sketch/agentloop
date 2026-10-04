@@ -47,6 +47,7 @@ const skillPackageStoreRoot = resolve(appRoot, process.env.SKILL_PACKAGE_STORE_R
 const skillDirectoriesConfigPath = resolve(appRoot, process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json");
 const stepExecutionStrategyConfigPath = resolve(appRoot, process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? "./config/step-execution-strategy.json");
 const practiceProfileConfigPath = resolve(appRoot, process.env.PRACTICE_PROFILE_CONFIG_PATH ?? "./config/practice-profiles.json");
+const providerConfigPath = resolve(appRoot, process.env.LLM_PROVIDER_CONFIG_PATH ?? "./config/llm-providers.json");
 const routerAttachmentToken = requiredEnv("RUNTIME_ATTACHMENT_TOKEN");
 const runtimeDispatchToken = requiredEnv("RUNTIME_DISPATCH_TOKEN");
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
@@ -84,15 +85,12 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
 await migrateRuntimeState(database);
 const dispatchStore = new HostDispatchStore(database, runtimeId);
 await dispatchStore.ready();
-// Router is the model authority in both modes. File mode remains a local
-// development compatibility mode for Skills/Policies only; it must not create
-// a second Provider registry from a Host-local JSON file.
-const routerModelConfiguration = configurationSource === "file"
-  ? await new RouterModelConfigurationClient({ routerUrl, workloadToken: runtimeDispatchToken }).current()
+// Control-plane mode resolves a fresh Router-owned model route at admission.
+// File mode is explicit development/bootstrap and reads only its local file;
+// it must never silently fall back between the two sources.
+const providers = configurationSource === "file"
+  ? await LlmProviderRegistry.fromConfigFile(providerConfigPath, process.env)
   : undefined;
-const providers = routerModelConfiguration === undefined
-  ? undefined
-  : LlmProviderRegistry.fromConfigObject(routerModelConfiguration.providerConfiguration, process.env);
 const skills = new SkillService(database, {
   // Do not make Skill package synchronization contend on the shared task volume.
   packageStoreRoot: skillPackageStoreRoot,

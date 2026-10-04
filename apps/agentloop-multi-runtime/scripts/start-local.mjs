@@ -16,8 +16,8 @@ const localAgentPort = positiveInteger(process.env.LOCAL_AGENT_PORT, 8790);
 const runtimePort = positiveInteger(process.env.RUNTIME_BASE_PORT, 8791);
 const runtimeHost = process.env.RUNTIME_HOST ?? "127.0.0.1";
 const routerHost = process.env.HOST ?? "127.0.0.1";
-const runtimeConfigurationSource = process.env.RUNTIME_CONFIGURATION_SOURCE ?? "file";
-const localConfigurationSource = process.env.LOCAL_RUNTIME_CONFIGURATION_SOURCE ?? "file";
+const runtimeConfigurationSource = process.env.RUNTIME_CONFIGURATION_SOURCE ?? "control_plane";
+const localConfigurationSource = process.env.LOCAL_RUNTIME_CONFIGURATION_SOURCE ?? "control_plane";
 if (!["file", "control_plane"].includes(runtimeConfigurationSource) || !["file", "control_plane"].includes(localConfigurationSource)) {
   throw new Error("RUNTIME_CONFIGURATION_SOURCE and LOCAL_RUNTIME_CONFIGURATION_SOURCE must be file or control_plane");
 }

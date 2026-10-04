@@ -95,9 +95,11 @@ npm run test:full --workspace agentloop-multi-runtime  # extended Web and integr
 
 ## 本地启动
 
-前置条件：根目录已执行 `npm install`；先复制 `config/llm-providers.example.json` 为 `config/llm-providers.json` 作为 Router 的一次性 bootstrap。Runtime Host 不直接读取该文件，而是从 Router 模型目录读取配置。从本目录启动下列四个进程。示例中的两个共享令牌只适用于本地开发，生产应使用工作负载身份或 mTLS，并为每个环境独立配置密钥。
+前置条件：根目录已执行 `npm install`；`config/llm-providers.example.json` 复制为 `config/llm-providers.json` 仅用于 Router/Runtime 的显式 `file` 开发模式及 Router 的一次性 bootstrap。正式 `control_plane` 模式下 Cloud Host 与 Local Agent 都从控制面快照读取模型配置。从本目录启动下列四个进程。示例中的两个共享令牌只适用于本地开发，生产应使用工作负载身份或 mTLS，并为每个环境独立配置密钥。
 
-也可以从仓库根目录用一个命令启动 Router、Web 和指定数量的 Runtime Host。默认启动 2 个 Host。启动器的 `RUNTIME_CONFIGURATION_SOURCE=file` 仅是本地兼容模式；正式 control-plane 模式下 Runtime 不读取 Provider 文件或 `.env`，而是在任务准入时从 Router 获取模型配置：
+也可以从仓库根目录用一个命令启动 Router、Web 和指定数量的 Runtime Host。默认启动 2 个 Host。启动器默认让 Cloud Host 与 Local Agent 都使用 `control_plane`；`RUNTIME_CONFIGURATION_SOURCE=file` 或 `LOCAL_RUNTIME_CONFIGURATION_SOURCE=file` 只用于明确的本地兼容模式。正式 control-plane 模式下两者都不读取 Provider 文件或 `.env`，而是消费带目标和版本的控制面快照：
+
+使用 `control_plane` 启动时，Cloud Host 需要配置 `CONTROL_PLANE_DELIVERY_URL`、`CONTROL_PLANE_WORKLOAD_TOKEN`、`CONTROL_PLANE_SCOPE_ID`，Local Agent 还需要已注册的设备身份；如果只启动本地 Router/Host 而未启动 Admin delivery API，应显式设置对应的 `file` 模式。
 
 ```bash
 npm run start:multi-runtime
@@ -165,14 +167,15 @@ cp admin-api/.env.example admin-api/.env
 npm run provision:admin-database -- --apply
 npm run migrate:control-plane -- --apply
 # When password mode is enabled, explicitly copy the configured bootstrap hash
-# into cp_admin_users so the account appears in Admin Web 用户管理。
+# into cp_admin_users so the account appears in Admin Web 管理端用户。
 npm run bootstrap:admin-user
 ```
 
-Admin Web 的“用户管理”只管理 Admin API 自己的登录用户（`cp_admin_users`），包括
-角色、Scope、状态和密码重置；它不读取或修改 Router/Runtime 的普通使用用户，也不访问
-`mr_*` 表。登录认证优先查询这个 Admin TiDB 表，环境变量账号只作为未完成 bootstrap
-时的临时 fallback。
+Admin Web 分开提供“管理端用户”和“业务端用户”两个入口：前者只管理 Admin API 自己的
+登录用户（`cp_admin_users`），包括角色、Scope、状态和密码重置；后者读取 Router 的
+`mr_*` 身份数据，管理 Multi Runtime 的普通使用用户。两者使用独立的身份边界，管理端用户
+页面不会读取或修改 Router/Runtime 用户数据，业务端用户页面也不会修改 `cp_admin_users`。
+登录认证优先查询 Admin TiDB 表，环境变量账号只作为未完成 bootstrap 时的临时 fallback。
 
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host
 分到两个 database：`agentloop_router` 保存身份、设备、附件、Assignment 与 Router
