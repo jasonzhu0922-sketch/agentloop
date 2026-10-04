@@ -1,0 +1,11 @@
+import type { AdminMember, AdminUser, ControlPlaneResource, ResourceRelease, RuntimeInventoryPage } from "../../../control-plane/contracts/index.ts";
+import type { RouterRunDetail, RouterRunPage } from "../../../src/shared/contracts.ts";
+import type { AdminModelSummary, AdminProviderSummary, AdminSession, AdminSkillDetail, AdminSkillPage, BusinessUserPage } from "../shared/api/admin-api-client.ts";
+import type { Page } from "./navigation.ts";
+
+export type AuditRow = { eventId: string; actorId: string; action: string; resourceId: string; releaseId?: string; createdAt: number };
+export type UiState = { page: Page; token: string; username: string; scopeId: string; session?: AdminSession; healthy?: boolean; resources: readonly ControlPlaneResource[]; releases: readonly ResourceRelease[]; models: readonly AdminModelSummary[]; providers: readonly AdminProviderSummary[]; skills: AdminSkillPage; skillDetail?: AdminSkillDetail; skillPage: number; members: readonly AdminMember[]; users: readonly AdminUser[]; userPage: number; userPageSize: number; userEditingId?: string; userModal?: boolean; businessUsers: BusinessUserPage; businessUserPasswordId?: string; audit: readonly AuditRow[]; runs: RouterRunPage; runDetail?: RouterRunDetail; runPage: number; runtimes: RuntimeInventoryPage; runtimePage: number; error?: string; degradedErrors: readonly string[]; notice?: string; modelEditingKey?: string; modelProviderKey?: string; modelModal?: boolean; providerEditingKey?: string; providerModal?: boolean };
+
+export function createInitialUiState(): UiState {
+  return { page: "overview", token: localStorage.getItem("agentloop.admin.token") ?? "", username: localStorage.getItem("agentloop.admin.username") ?? "", scopeId: localStorage.getItem("agentloop.admin.scope") ?? "platform", resources: [], releases: [], models: [], providers: [], skills: { items: [], page: 1, pageSize: 12, total: 0, pageCount: 1 }, skillPage: 1, members: [], users: [], userPage: 1, userPageSize: 20, businessUsers: { items: [], page: 1, pageSize: 20, total: 0, pageCount: 1 }, audit: [], runs: { items: [], page: 1, pageSize: 20, total: 0, pageCount: 1 }, runPage: 1, runtimes: { items: [], page: 1, pageSize: 20, total: 0, pageCount: 1 }, runtimePage: 1, degradedErrors: [] };
+}

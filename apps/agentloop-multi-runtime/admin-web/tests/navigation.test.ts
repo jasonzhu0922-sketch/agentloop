@@ -18,6 +18,7 @@ test("UI permission checks distinguish read and write operations", () => {
 });
 
 test("Admin user navigation is gated by user.read, not member.read", () => {
-  assert.deepEqual(visibleNavigation(session(["user.read"])).map((item) => item.id), ["overview", "business-users"]);
+  assert.deepEqual(visibleNavigation(session(["user.read"])).map((item) => item.id), ["overview", "admin-users", "business-users"]);
+  assert.deepEqual(visibleNavigation(session(["user.read"])).filter((item) => item.id.endsWith("users")).map((item) => item.label), ["管理端用户", "业务端用户"]);
   assert.deepEqual(visibleNavigation(session(["member.read"])).map((item) => item.id), ["overview"]);
 });

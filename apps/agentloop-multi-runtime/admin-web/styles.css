@@ -19,6 +19,8 @@
 .skill-tree>.skill-tree-branch{border:1px solid #edf0f4;border-radius:8px;background:#fbfcfe;padding:8px 10px}.skill-tree-branch{list-style:none;margin:0;display:grid;gap:4px}.skill-tree-directory>.skill-tree-branch,.skill-tree-directory details>.skill-tree-branch{margin:6px 0 2px 8px;padding:5px 0 0 14px;border-top:0;border-left:1px solid #e2e6ed}.skill-tree-directory details{border:0;border-radius:0;padding:0;background:transparent}.skill-tree-directory summary{padding:3px 0}.skill-tree-directory summary strong:before{content:"▸";display:inline-block;margin-right:7px;color:#8d80ef;transition:transform .15s ease}.skill-tree-directory details[open]>summary strong:before{transform:rotate(90deg)}.skill-tree-file{display:flex;align-items:center;gap:8px;min-width:0;padding:3px 0;color:#a4acba}.skill-tree-file code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#687489}.skill-tree-file span{color:#b5bdc9}
 /* Admin users use a full-width table; create and edit share one modal form. */
 .members-page{display:block}.members-page>.wide{width:100%}.admin-user-dialog{width:min(760px,100%)}
+.panel-actions{display:flex;align-items:center;gap:16px}
+.admin-user-pagination{margin-top:18px;padding-top:16px;border-top:1px solid #edf0f4}
 
 /* Skills use a bounded two-pane workspace: each pane owns its vertical scroll. */
 .admin-shell{height:100vh}
@@ -34,3 +36,18 @@
 .run-operations{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(430px,1fr);gap:20px;align-items:start}.run-list-panel,.run-detail-panel{min-width:0}.run-row{cursor:pointer}.run-row:hover,.run-row.selected{background:#faf9ff}.run-result{display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.run-detail-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:1px solid #edf0f4;padding-bottom:16px}.run-detail-head h2{margin:0 0 7px;font-size:20px;word-break:break-all}.run-detail-head p:not(.panel-kicker){margin:0;color:#788398;white-space:pre-wrap;max-height:100px;overflow:auto}.run-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:14px 0;border-bottom:1px solid #edf0f4}.run-facts span{display:grid;gap:3px;color:#4d5870;font-size:12px}.run-facts b{color:#8993a6;font-size:10px;text-transform:uppercase;letter-spacing:.08em}.run-steps{display:grid;gap:8px}.run-step{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;padding:10px;border:1px solid #edf0f4;border-radius:8px;background:#fbfcfe}.run-step p{grid-column:span 2;margin:0;color:#788398;font-size:12px;white-space:pre-wrap}.run-step .danger-text{color:#c2525b}.outcome-card{padding:12px;border-radius:8px;border:1px solid #dfe3eb}.outcome-card.success{background:#f0fbf5;border-color:#bfe8cf}.outcome-card.failed{background:#fff5f5;border-color:#f0c7ca}.outcome-card strong{display:block;text-transform:uppercase}.outcome-card p{margin:5px 0;color:#59657a;white-space:pre-wrap}.outcome-card small{color:#8c96a6}.artifact-list{list-style:none;margin:0;padding:0;display:grid;gap:7px}.artifact-list li{display:flex;justify-content:space-between;gap:10px;padding:9px 10px;border:1px solid #edf0f4;border-radius:8px}.artifact-list strong{font-size:12px}.artifact-list small{color:#8993a6;font-size:11px}.boundary-warning{display:flex;gap:10px;margin-top:20px;padding:10px;border-radius:8px;background:#fff7e7;color:#a87517;font-size:12px}.danger-text{color:#c2525b}@media(max-width:1150px){.run-operations{grid-template-columns:1fr}.run-detail-panel{order:-1}}@media(max-width:620px){.run-facts{grid-template-columns:1fr}.run-step{grid-template-columns:1fr}.run-step p{grid-column:auto}}
 .run-tracking-page{display:block}.run-tracking-page .run-list-panel{width:100%}.run-detail-dialog{width:min(980px,calc(100vw - 64px));max-height:calc(100vh - 64px)}.run-detail-dialog>.run-detail-head{padding-right:24px}
 .runtime-page{display:block}.runtime-list-panel{width:100%;margin-bottom:20px}.runtime-list-panel .table-wrap{overflow-x:auto}.runtime-list-panel table{min-width:980px}.runtime-list-panel .actions{min-width:270px}.runtime-list-panel .actions .text-button{margin-right:4px}.runtime-list-panel .pagination{margin-top:16px}
+
+/* Sidebar groups are interactive hierarchy, not decorative labels. */
+.nav{align-content:start}
+.nav-group{display:grid;gap:3px}
+.nav-group-toggle{border:0;background:transparent;color:#7f8ca1;display:flex;align-items:center;justify-content:space-between;width:100%;padding:13px 10px 7px;font:inherit;font-size:12px;font-weight:700;text-align:left;cursor:pointer}
+.nav-group-toggle:hover{color:#e4e8f2}
+.nav-group-chevron{font-size:16px;line-height:1;transition:transform .15s ease;color:#71809c}
+.nav-group.collapsed .nav-group-chevron{transform:rotate(-90deg)}
+.nav-group.collapsed .nav-group-items{display:none}
+.nav-group-items{display:grid;gap:5px}
+.nav-item-label{min-width:0}
+
+/* Keep the icon column narrow without constraining the navigation label. */
+.nav-item>span:first-child{flex:0 0 18px;width:18px;text-align:center;color:#7583a0;font-size:17px}
+.nav-item>.nav-item-label{flex:1 1 auto;width:auto;min-width:0;text-align:left}
