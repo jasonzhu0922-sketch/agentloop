@@ -2,7 +2,7 @@
   "name": "@zhujun/agentloop-skills",
   "version": "0.1.0",
   "description": "Bundled Skill packages for AgentLoop hosts and reference apps",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=26"

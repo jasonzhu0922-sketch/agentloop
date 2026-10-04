@@ -45,6 +45,8 @@ export interface OpenAICompatibleModelOptions {
   readonly planningThinkingMode?: "enabled" | "disabled";
   /** Server-configured OpenAI Chat Completions template extensions. */
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  /** Additional provider-specific JSON fields configured for this model. */
+  readonly providerParameters?: Readonly<Record<string, unknown>>;
   /** Optional server-authored reporter invoked before each retry attempt. */
   readonly onRetry?: ModelRetryReporter;
 }
@@ -153,6 +155,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly thinkingEffort?: "low" | "medium" | "high";
   private readonly planningThinkingMode?: "enabled" | "disabled";
   private readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  private readonly providerParameters?: Readonly<Record<string, unknown>>;
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -190,6 +193,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     this.thinkingEffort = options.thinkingEffort;
     this.planningThinkingMode = options.planningThinkingMode;
     this.chatTemplateKwargs = options.chatTemplateKwargs;
+    this.providerParameters = options.providerParameters;
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -450,6 +454,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       ? this.planningThinkingMode
       : this.thinkingMode;
     const body = JSON.stringify({
+      ...(this.providerParameters ?? {}),
       model: this.model,
       messages: prompt.messages,
       tools: providerTools,
@@ -646,6 +651,7 @@ export class ResponsesModel implements ModelAdapter {
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto";
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  private readonly providerParameters?: Readonly<Record<string, unknown>>;
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -679,6 +685,7 @@ export class ResponsesModel implements ModelAdapter {
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
     this.reasoningEffort = options.reasoningEffort;
+    this.providerParameters = options.providerParameters;
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -822,6 +829,7 @@ export class ResponsesModel implements ModelAdapter {
       ? undefined
       : toResponsesToolChoice(invocation.toolChoice ?? "auto", this.toolChoiceMode, invocation.tools.length);
     const body = JSON.stringify({
+      ...(this.providerParameters ?? {}),
       model: this.model,
       ...(instructions.length === 0 ? {} : { instructions }),
       input,

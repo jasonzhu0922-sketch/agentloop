@@ -1,4 +1,4 @@
-import type { RunService } from "@zhujun/agentloop";
+import type { HostRunProjection, RunService } from "@zhujun/agentloop";
 import type {
   RuntimeArtifact,
   RuntimeArtifactPreview,
@@ -7,6 +7,7 @@ import type {
   RuntimeHumanLoopResponse,
   RuntimeRecoveryDetail,
   RuntimeRunEvent,
+  RuntimeRunOperationsProjection,
   RuntimeToolArguments,
 } from "../../shared/contracts.ts";
 import type { RuntimeHostRun, RuntimeHostRunPort, RuntimeRunCheckpoint } from "../application/runtime-run-port.ts";
@@ -34,6 +35,10 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
 
   async get(actorUserId: string, runId: string): Promise<RuntimeHostRun> {
     return await this.runs.get(actorUserId, runId);
+  }
+
+  async hostRun(actorUserId: string, runId: string): Promise<RuntimeRunOperationsProjection> {
+    return projectHostRun(await this.runs.hostRun(actorUserId, runId));
   }
 
   async cancel(actorUserId: string, runId: string): Promise<RuntimeHostRun> {
@@ -91,4 +96,55 @@ export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {
   async reconcileInterruptedRuns(runIds?: readonly string[]): Promise<number> {
     return await this.runs.reconcileInterruptedRuns(runIds);
   }
+}
+
+function projectHostRun(projection: HostRunProjection): RuntimeRunOperationsProjection {
+  const run = projection.run;
+  return {
+    schema: "agentloop.hostRun/v1",
+    run: {
+      id: run.id,
+      status: run.status,
+      ...(run.input.trim() === "" ? {} : { input: run.input }),
+      ...(run.modelKey === undefined ? {} : { modelKey: run.modelKey }),
+      ...(run.output === undefined ? {} : { output: run.output }),
+      ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }),
+      ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+      createdAt: run.createdAt,
+      ...(run.conversationId === undefined ? {} : { conversationId: run.conversationId }),
+    },
+    ...(projection.outcome === undefined ? {} : { outcome: projection.outcome }),
+    plan: {
+      state: projection.plan.state,
+      id: projection.plan.id,
+      version: projection.plan.version,
+      status: projection.plan.status,
+      goal: projection.plan.goal,
+      selectedSkillIds: projection.plan.selectedSkillIds,
+      steps: projection.plan.steps.map((step) => ({
+        id: step.id,
+        status: step.status,
+        objective: step.objective,
+        dependencies: step.dependencies,
+        skillIds: step.skillIds,
+        requiredCapabilities: step.requiredCapabilities,
+        ...(step.output === undefined ? {} : { output: step.output }),
+        ...(step.error === undefined ? {} : { error: step.error }),
+      })),
+      assessmentCount: projection.plan.assessmentCount,
+      approvedAssessmentCount: projection.plan.approvedAssessmentCount,
+    },
+    artifacts: projection.artifacts.map((artifact) => ({
+      runId: artifact.runId,
+      id: artifact.id,
+      path: artifact.path,
+      name: artifact.name,
+      bytes: artifact.bytes,
+      mimeType: artifact.mimeType,
+      role: artifact.role,
+      sourceTool: artifact.sourceTool,
+      previewable: artifact.previewable,
+    })),
+    eventCursor: projection.eventCursor,
+  };
 }

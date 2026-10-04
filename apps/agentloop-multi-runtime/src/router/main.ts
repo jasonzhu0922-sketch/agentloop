@@ -12,6 +12,9 @@ import { IdentityService } from "./identity/service.ts";
 import { SharedWorkspaceArtifactCatalog } from "./artifacts/shared-workspace-artifact-catalog.ts";
 import { SqlDeviceRepository } from "./devices/device-service.ts";
 import { DeviceRuntimeConnectionRegistry } from "./devices/runtime-connection-registry.ts";
+import { RouterModelCatalog } from "./model-catalog/model-catalog.ts";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const host = process.env.HOST ?? "127.0.0.1";
@@ -33,6 +36,9 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
 await migrateRouterState(database);
 const store = new ControlPlaneStore(database);
 await store.ready();
+const modelCatalog = new RouterModelCatalog(database);
+const modelConfigPath = resolve(appRoot, process.env.LLM_PROVIDER_CONFIG_PATH ?? "./config/llm-providers.json");
+if (existsSync(modelConfigPath)) await modelCatalog.seed(JSON.parse(await readFile(modelConfigPath, "utf8")) as unknown);
 const identity = new IdentityService(database, positiveInteger(process.env.IDENTITY_SESSION_TTL_MS, 7 * 24 * 60 * 60 * 1000));
 await identity.ready();
 const devices = new SqlDeviceRepository(database);
@@ -45,6 +51,7 @@ await artifactsCatalog.ready();
 await store.seedRuntimes(config.runtimes.map((runtime) => ({ ...toRuntimeInstance(runtime), endpoint: runtime.endpoint })));
 const router = new PersistentMultiRuntimeRouter({
   store,
+  modelCatalog,
   endpointFactory: (endpoint) => endpoint.startsWith("local-runtime://")
     ? runtimeConnections.endpoint(decodeURIComponent(endpoint.slice("local-runtime://".length)))
     : new HttpRuntimeEndpoint(endpoint, `Bearer ${runtimeDispatchToken}`),

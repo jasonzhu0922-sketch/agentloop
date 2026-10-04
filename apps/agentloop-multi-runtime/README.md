@@ -95,9 +95,9 @@ npm run test:full --workspace agentloop-multi-runtime  # extended Web and integr
 
 ## 本地启动
 
-前置条件：根目录已执行 `npm install`；先复制 `config/llm-providers.example.json` 为 `config/llm-providers.json` 并按部署环境修改。两个 Runtime Host 都读取这份多 Runtime 自有的 Provider 配置。从本目录启动下列四个进程。示例中的两个共享令牌只适用于本地开发，生产应使用工作负载身份或 mTLS，并为每个环境独立配置密钥。
+前置条件：根目录已执行 `npm install`；先复制 `config/llm-providers.example.json` 为 `config/llm-providers.json` 作为 Router 的一次性 bootstrap。Runtime Host 不直接读取该文件，而是从 Router 模型目录读取配置。从本目录启动下列四个进程。示例中的两个共享令牌只适用于本地开发，生产应使用工作负载身份或 mTLS，并为每个环境独立配置密钥。
 
-也可以从仓库根目录用一个命令启动 Router、Web 和指定数量的 Runtime Host。默认启动 2 个 Host。启动器默认读取 `apps/agentloop-multi-runtime/.env` 中 Provider 配置引用的环境变量（例如 `OPENAI_API_KEY`）；也可以用 `LLM_PROVIDER_ENV_FILE` 指定其他环境文件。Provider 密钥只注入 Runtime Host，不会注入 Router 或 Web：
+也可以从仓库根目录用一个命令启动 Router、Web 和指定数量的 Runtime Host。默认启动 2 个 Host。启动器的 `RUNTIME_CONFIGURATION_SOURCE=file` 仅是本地兼容模式；正式 control-plane 模式下 Runtime 不读取 Provider 文件或 `.env`，而是在任务准入时从 Router 获取模型配置：
 
 ```bash
 npm run start:multi-runtime
@@ -144,6 +144,19 @@ Admin-only local settings belong in `admin-api/.env`, copied from
 `admin-api/.env.example`. This file is ignored by Git and is not shared with
 Router, Runtime Host, or Local Agent configuration.
 
+Provider / Model configuration is Router-owned. Admin Web only calls Admin API;
+Admin API proxies model, business-user, Run, and Runtime operations to Router
+with `ADMIN_ROUTER_URL` and the shared `RUNTIME_DISPATCH_TOKEN`. Router persists the nested configuration in
+`mr_model_catalog`, and Runtime Host reads the workload-only model configuration
+from Router at admission. Admin `cp_releases` is not a model authority and is
+not seeded for this purpose.
+
+`config/llm-providers.json` remains a one-time, non-secret bootstrap document for
+Router migration and uses `providers.<provider>.models`. API keys are entered
+directly in the Admin Provider dialog and stored only in Router. Any
+`apiKeyEnv` fields in older bootstrap files are migration compatibility only;
+new Admin writes never create them.
+
 Provision and migrate it explicitly:
 
 ```bash
@@ -151,7 +164,15 @@ cp admin-api/.env.example admin-api/.env
 # Edit admin-api/.env with the local TiDB connection values.
 npm run provision:admin-database -- --apply
 npm run migrate:control-plane -- --apply
+# When password mode is enabled, explicitly copy the configured bootstrap hash
+# into cp_admin_users so the account appears in Admin Web 用户管理。
+npm run bootstrap:admin-user
 ```
+
+Admin Web 的“用户管理”只管理 Admin API 自己的登录用户（`cp_admin_users`），包括
+角色、Scope、状态和密码重置；它不读取或修改 Router/Runtime 的普通使用用户，也不访问
+`mr_*` 表。登录认证优先查询这个 Admin TiDB 表，环境变量账号只作为未完成 bootstrap
+时的临时 fallback。
 
 TiDB 中的 schema 即 database。生产或真实联调可将 Router 与云端 Runtime Host
 分到两个 database：`agentloop_router` 保存身份、设备、附件、Assignment 与 Router
@@ -227,7 +248,6 @@ npm run start:router --workspace agentloop-multi-runtime
 # 终端 2：Runtime Host general-01
 RUNTIME_ID=general-01 PORT=8791 \
 ROUTER_URL=http://127.0.0.1:8788 MAX_CONCURRENT_RUNS=2 \
-LLM_PROVIDER_CONFIG_PATH=./config/llm-providers.json \
 STEP_EXECUTION_STRATEGY_CONFIG_PATH=./config/step-execution-strategy.json \
 RUNTIME_DISPATCH_TOKEN=development-dispatch-token-123 \
 RUNTIME_ATTACHMENT_TOKEN=development-attachment-token-123 \
@@ -236,7 +256,6 @@ npm run start:runtime-host --workspace agentloop-multi-runtime
 # 终端 3：Runtime Host general-02（共享状态库与共享任务工作区）
 RUNTIME_ID=general-02 PORT=8792 \
 ROUTER_URL=http://127.0.0.1:8788 MAX_CONCURRENT_RUNS=2 \
-LLM_PROVIDER_CONFIG_PATH=./config/llm-providers.json \
 STEP_EXECUTION_STRATEGY_CONFIG_PATH=./config/step-execution-strategy.json \
 RUNTIME_DISPATCH_TOKEN=development-dispatch-token-123 \
 RUNTIME_ATTACHMENT_TOKEN=development-attachment-token-123 \
@@ -261,19 +280,13 @@ cp apps/agentloop-multi-runtime/.env.docker.example \
   apps/agentloop-multi-runtime/.env.docker
 ```
 
-Provider 密钥单独放在多 Runtime 自己的环境文件中：
+模型 API Key 不再通过 `.env` 或 `apiKeyEnv` 注入。先启动 Router 与 Admin API，
+再在 Admin Web 的 Provider 弹窗中直接录入 Key；Router 会将其持久化到
+`mr_model_catalog`，Runtime Host 只通过 Router 内部接口读取。
 
-```bash
-cp apps/agentloop-multi-runtime/.env.example \
-  apps/agentloop-multi-runtime/.env
-```
+默认示例只需要一个 Router bootstrap 文件：
 
-然后在该文件中填写 `OPENAI_API_KEY` 或配置文件中 `apiKeyEnv` 指定的变量。不要把密钥写入 `.env.docker`；`.env.docker` 只保存 Compose 路径和服务参数。
-
-默认示例假设你已有单 Runtime 开发环境中的两个本地文件：
-
-- `apps/agentloop-multi-runtime/config/llm-providers.json`：模型提供方的非密钥配置；会以只读方式挂载进两个 Runtime Host。
-- `apps/agentloop-multi-runtime/.env`：该配置所引用的 API Key 环境变量；只注入两个 Runtime Host，绝不会注入 Router 或 Web。
+- `apps/agentloop-multi-runtime/config/llm-providers.json`：Provider 与嵌套 Model 的非密钥 bootstrap 配置；Router 仅在 `mr_model_catalog` 为空时导入。
 
 基础镜像使用官方名称 `node:26-bookworm`，实际下载地址由 Colima 的 `docker.registry-mirrors` 决定。如果网络不能访问 Docker Hub，应在 Colima 中配置阿里云或企业批准的镜像加速器；不要把加速器地址拼进 `NODE_IMAGE`。受控生产环境应改用企业内部镜像仓库。
 

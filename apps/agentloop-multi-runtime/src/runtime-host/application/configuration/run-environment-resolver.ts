@@ -1,4 +1,5 @@
 import { LlmProviderRegistry, type PracticeProfileCatalog, type RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
+import { createHash } from "node:crypto";
 import { assertSkillArtifactsReady, type RuntimeConfigurationSnapshot, type RuntimeTarget } from "../../../../control-plane/contracts/index.ts";
 import { resolveControlPlanePolicy } from "../../../shared/control-plane-policy.ts";
 import type { StepExecutionStrategyProfileConfig } from "../../../shared/config.ts";
@@ -6,7 +7,11 @@ import type { RuntimeAdmissionRunResolver, RuntimeHostRunPort } from "../runtime
 
 export interface RuntimeConfigurationDeliveryPort {
   desiredSnapshot(): Promise<RuntimeConfigurationSnapshot>;
-  reportLoaded(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string): Promise<void>;
+  reportLoaded(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string, options?: { readonly includeModelRoute?: boolean }): Promise<void>;
+}
+
+export interface RuntimeModelConfigurationPort {
+  current(target?: RuntimeTarget): Promise<{ readonly revision: number; readonly contentHash: string; readonly providerConfiguration: Readonly<Record<string, unknown>> }>;
 }
 
 /** Only a successfully loaded snapshot may enter this cache. Implementations may persist it across Host restart. */
@@ -42,6 +47,7 @@ export class RunEnvironmentResolver {
   private readonly receiptId: () => string;
   private readonly loadedSkillPackageHashes?: () => readonly string[];
   private readonly requireSignedSkillArtifacts: boolean;
+  private readonly modelConfiguration?: RuntimeModelConfigurationPort;
 
   public constructor(input: {
     readonly delivery: RuntimeConfigurationDeliveryPort;
@@ -50,6 +56,7 @@ export class RunEnvironmentResolver {
     readonly createReceiptId: () => string;
     readonly loadedSkillPackageHashes?: () => readonly string[];
     readonly requireSignedSkillArtifacts?: boolean;
+    readonly modelConfiguration?: RuntimeModelConfigurationPort;
   }) {
     this.delivery = input.delivery;
     this.cache = input.cache;
@@ -57,17 +64,19 @@ export class RunEnvironmentResolver {
     this.receiptId = input.createReceiptId;
     this.loadedSkillPackageHashes = input.loadedSkillPackageHashes;
     this.requireSignedSkillArtifacts = input.requireSignedSkillArtifacts === true;
+    this.modelConfiguration = input.modelConfiguration;
   }
 
   /** Fetches, validates, constructs, receipts, then persists a new-admission environment in that order. */
   public async resolveForAdmission(target: RuntimeTarget): Promise<ResolvedRunEnvironment> {
-    const snapshot = await this.delivery.desiredSnapshot().catch(() => {
+    const delivered = await this.delivery.desiredSnapshot().catch(() => {
       throw new RunEnvironmentUnavailableError("No current control-plane configuration snapshot is available");
     });
+    const snapshot = await this.withRouterModelConfiguration(delivered, target);
     assertTarget(snapshot.target, target);
-    const resolved = this.build(snapshot);
+    const resolved = await this.build(snapshot);
     try {
-      await this.delivery.reportLoaded(snapshot, (releaseId) => `loaded:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`);
+      await this.delivery.reportLoaded(snapshot, (releaseId) => `loaded:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`, this.modelConfiguration === undefined ? undefined : { includeModelRoute: false });
     } catch {
       throw new RunEnvironmentUnavailableError("Control-plane configuration snapshot could not be confirmed loaded");
     }
@@ -81,9 +90,9 @@ export class RunEnvironmentResolver {
     if (snapshot === undefined || snapshot.validUntil <= now()) {
       throw new RunEnvironmentUnavailableError("No unexpired confirmed control-plane configuration snapshot is available");
     }
-    const resolved = this.build(snapshot);
+    const resolved = await this.build(snapshot);
     try {
-      await this.delivery.reportLoaded(snapshot, (releaseId) => `recovered:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`);
+      await this.delivery.reportLoaded(snapshot, (releaseId) => `recovered:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`, this.modelConfiguration === undefined ? undefined : { includeModelRoute: false });
     } catch {
       throw new RunEnvironmentUnavailableError("Confirmed control-plane configuration snapshot could not be re-receipted");
     }
@@ -95,17 +104,17 @@ export class RunEnvironmentResolver {
     const snapshot = await this.cache.getBySnapshotId(target, reference.snapshotId);
     if (snapshot === undefined) throw new RunEnvironmentUnavailableError("The configuration snapshot bound to this Run is unavailable");
     assertTarget(snapshot.target, target);
-    const resolved = this.build(snapshot);
+    const resolved = await this.build(snapshot);
     assertSnapshotReference(resolved.configurationSnapshot, reference);
     try {
-      await this.delivery.reportLoaded(snapshot, (releaseId) => `recovered:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`);
+      await this.delivery.reportLoaded(snapshot, (releaseId) => `recovered:${snapshot.snapshotId}:${releaseId}:${this.receiptId()}`, this.modelConfiguration === undefined ? undefined : { includeModelRoute: false });
     } catch {
       throw new RunEnvironmentUnavailableError("Run-bound control-plane configuration snapshot could not be re-receipted");
     }
     return resolved;
   }
 
-  private build(snapshot: RuntimeConfigurationSnapshot): ResolvedRunEnvironment {
+  private async build(snapshot: RuntimeConfigurationSnapshot): Promise<ResolvedRunEnvironment> {
     if (snapshot.modelRoute === undefined) throw new RunEnvironmentUnavailableError("Control-plane snapshot has no model route");
     try {
       if (this.loadedSkillPackageHashes !== undefined) {
@@ -124,6 +133,16 @@ export class RunEnvironmentResolver {
       if (error instanceof RunEnvironmentUnavailableError) throw error;
       throw new RunEnvironmentUnavailableError("Control-plane configuration is unavailable");
     }
+  }
+
+  private async withRouterModelConfiguration(snapshot: RuntimeConfigurationSnapshot, target: RuntimeTarget): Promise<RuntimeConfigurationSnapshot> {
+    if (this.modelConfiguration === undefined) return snapshot;
+    const model = await this.modelConfiguration.current(target);
+    const next: Omit<RuntimeConfigurationSnapshot, "snapshotId"> = {
+      ...snapshot,
+      modelRoute: { releaseId: `router-model-catalog:${model.revision}`, contentHash: model.contentHash, providerConfiguration: model.providerConfiguration },
+    };
+    return { ...next, snapshotId: snapshotHash(next) };
   }
 }
 
@@ -203,4 +222,15 @@ function assertSnapshotReference(actual: RuntimeConfigurationSnapshotReference, 
 
 function releaseKey(release: RuntimeConfigurationSnapshotReference["releases"][number]): string {
   return `${release.kind}:${release.releaseId}:${release.contentHash}:${release.packageHash ?? ""}`;
+}
+
+function snapshotHash(snapshot: Omit<RuntimeConfigurationSnapshot, "snapshotId">): string {
+  return createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }

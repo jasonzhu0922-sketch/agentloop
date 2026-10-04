@@ -3,7 +3,10 @@ export const TIDB_IDENTITY_SCHEMA_SQL = String.raw`CREATE TABLE IF NOT EXISTS mr
     id VARCHAR(191) PRIMARY KEY,
     email VARCHAR(254) NOT NULL UNIQUE,
     password_hash LONGTEXT NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    updated_at BIGINT NOT NULL DEFAULT 0,
+    last_active_at BIGINT NULL
   );
 CREATE TABLE IF NOT EXISTS mr_identity_tenants (
     id VARCHAR(191) PRIMARY KEY,

@@ -67,6 +67,7 @@ test("admin closure: releases resolve to Cloud/Local snapshots, receipts, Skill 
   const runtimeOperations: RuntimeOperationPort = {
     drain: async (input): Promise<RuntimeOperationResult> => operation(input.target, "drain", input.expectedRevision),
     recover: async (input): Promise<RuntimeOperationResult> => operation(input.target, "recover", input.expectedRevision),
+    restart: async (input): Promise<RuntimeOperationResult> => operation(input.target, "restart", input.expectedRevision),
   };
   const server = createAdminApiServer({ authorization: new AcceptanceAuthorization(), releases,
     snapshots, skillArtifacts: { download: async (target, requestedHash) => {
@@ -149,6 +150,6 @@ function providerConfiguration(modelKey: string): Record<string, unknown> {
   return { defaultProvider: "test", defaultModelKey: modelKey, providers: { test: { kind: "openai-compatible", baseUrl: "https://models.example.test/v1", apiKeyEnv: "TEST_API_KEY", defaultModel: modelKey, protocol: "chat-completions" } }, models: { [modelKey]: { providerKey: "test", providerModel: modelKey, displayName: modelKey } } };
 }
 
-function operation(target: RuntimeTarget, operationName: "drain" | "recover", revision: number): RuntimeOperationResult {
-  return { contractVersion: "control-plane/v1", runtimeId: target.runtimeId, target, operation: operationName, state: operationName === "drain" ? "draining" : "ready", revision: revision + 1, observedAt: 1_500 };
+function operation(target: RuntimeTarget, operationName: "drain" | "recover" | "restart", revision: number): RuntimeOperationResult {
+  return { contractVersion: "control-plane/v1", runtimeId: target.runtimeId, target, operation: operationName, state: operationName === "drain" ? "draining" : operationName === "restart" ? "restarting" : "ready", revision: revision + 1, observedAt: 1_500 };
 }

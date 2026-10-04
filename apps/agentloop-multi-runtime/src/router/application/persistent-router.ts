@@ -1,13 +1,16 @@
-import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import type { RouterRunDetail, RouterRunPage, RouterRunSummary, RuntimeArtifact, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunOperationsProjection, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import {
   RuntimeCapacityError,
   RuntimeDispatchOutcomeUnknownError,
   type ControlPlaneRepository,
+  type PersistedRunOperations,
   type DispatchFailure,
   type RouterArtifactCatalog,
   type RuntimeCatalogEntry,
+  type RuntimeCatalogPage,
   type StoredAssignment,
 } from "./control-plane-contracts.ts";
+import { RouterModelCatalog, type RouterModelCatalogView, type RouterModelConfiguration, type UpsertRouterModelInput, type UpsertRouterProviderInput } from "../model-catalog/model-catalog.ts";
 
 export interface RouterDispatchFailureLog {
   readonly assignmentId: string;
@@ -27,6 +30,7 @@ export class PersistentMultiRuntimeRouter {
   private readonly now: () => number;
   private readonly artifactsCatalog?: RouterArtifactCatalog;
   private readonly onDispatchFailure?: (event: RouterDispatchFailureLog) => void;
+  private readonly modelCatalogStore?: RouterModelCatalog;
   private observationCursor = "";
   private reconciliation?: Promise<void>;
 
@@ -38,6 +42,7 @@ export class PersistentMultiRuntimeRouter {
     readonly now?: () => number;
     readonly artifactsCatalog?: RouterArtifactCatalog;
     readonly onDispatchFailure?: (event: RouterDispatchFailureLog) => void;
+    readonly modelCatalog?: RouterModelCatalog;
   }) {
     this.store = input.store;
     this.endpointFactory = input.endpointFactory;
@@ -46,6 +51,7 @@ export class PersistentMultiRuntimeRouter {
     this.now = input.now ?? Date.now;
     this.artifactsCatalog = input.artifactsCatalog;
     this.onDispatchFailure = input.onDispatchFailure;
+    this.modelCatalogStore = input.modelCatalog;
   }
 
   async submit(task: SubmitConversationTask): Promise<StoredAssignment> {
@@ -82,12 +88,41 @@ export class PersistentMultiRuntimeRouter {
   }
 
   async models(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]> {
+    if (this.modelCatalogStore !== undefined) {
+      const catalog = await this.modelCatalogStore.view();
+      return catalog.providers.flatMap((provider) => provider.models.map((model) => ({ key: model.key, displayName: model.displayName }))).sort((left, right) => left.key.localeCompare(right.key));
+    }
     const seen = new Map<string, RuntimeModelSummary>();
     const catalogs = await Promise.all((await this.store.runtimeEndpoints(tenantId, ownerUserId)).map(async (runtime) => {
       try { return await this.endpointFactory(runtime.endpoint).models?.() ?? []; } catch { return []; }
     }));
     for (const models of catalogs) for (const model of models) if (!seen.has(model.key)) seen.set(model.key, model);
     return [...seen.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  async modelCatalog(): Promise<RouterModelCatalogView> {
+    if (this.modelCatalogStore === undefined) throw new Error("Router model catalog is not configured");
+    return await this.modelCatalogStore.view();
+  }
+
+  async modelConfiguration(): Promise<RouterModelConfiguration> {
+    if (this.modelCatalogStore === undefined) throw new Error("Router model catalog is not configured");
+    return await this.modelCatalogStore.configuration();
+  }
+
+  async upsertModelProvider(input: UpsertRouterProviderInput): Promise<RouterModelCatalogView> {
+    if (this.modelCatalogStore === undefined) throw new Error("Router model catalog is not configured");
+    return await this.modelCatalogStore.upsertProvider(input);
+  }
+
+  async upsertModel(input: UpsertRouterModelInput): Promise<RouterModelCatalogView> {
+    if (this.modelCatalogStore === undefined) throw new Error("Router model catalog is not configured");
+    return await this.modelCatalogStore.upsertModel(input);
+  }
+
+  async removeModel(modelKey: string): Promise<RouterModelCatalogView> {
+    if (this.modelCatalogStore === undefined) throw new Error("Router model catalog is not configured");
+    return await this.modelCatalogStore.removeModel(modelKey);
   }
 
   /** Reconcile projection only. Never dispatch, resume, cancel, or infer failure from transport errors. */
@@ -120,6 +155,11 @@ export class PersistentMultiRuntimeRouter {
     return await this.store.runtimeCatalog(tenantId, ownerUserId);
   }
 
+  /** Privileged Admin projection; caller authorization is enforced by Router HTTP. */
+  async adminRuntimes(input: { readonly scopeId?: string; readonly limit: number; readonly offset: number }): Promise<RuntimeCatalogPage> {
+    return await this.store.adminRuntimeCatalog(input);
+  }
+
   async conversations(
     tenantId: string,
     ownerUserId: string,
@@ -130,6 +170,85 @@ export class PersistentMultiRuntimeRouter {
 
   async conversation(tenantId: string, ownerUserId: string, conversationId: string) {
     return await this.store.conversation(tenantId, ownerUserId, conversationId);
+  }
+
+  /** Admin-only read model. Router facts are always returned even when Host hydration is unavailable. */
+  async adminRuns(page: { readonly limit: number; readonly offset: number }): Promise<RouterRunPage> {
+    const result = await this.store.listAdminRuns(page);
+    const items = await Promise.all(result.items.map(async (summary) => {
+      const projection = await this.hostProjection(summary).catch(() => undefined);
+      if (projection === undefined) {
+        const artifacts = await this.cataloguedArtifacts(summary);
+        return artifacts.length === 0 ? summary : { ...summary, artifactCount: artifacts.length };
+      }
+      return {
+        ...summary,
+        status: projection.run.status,
+        ...(projection.run.modelKey === undefined ? {} : { modelKey: projection.run.modelKey }),
+        ...(projection.outcome?.output ?? projection.run.output) === undefined ? {} : { output: projection.outcome?.output ?? projection.run.output },
+        ...(projection.run.errorCode === undefined ? {} : { errorCode: projection.run.errorCode }),
+        planState: projection.plan.state,
+        planStepCount: projection.plan.steps.length,
+        artifactCount: projection.artifacts.length,
+      };
+    }));
+    return { ...result, items };
+  }
+
+  async adminRun(id: string): Promise<RouterRunDetail | undefined> {
+    const summary = await this.store.adminRun(id);
+    if (summary === undefined) return undefined;
+    const missingBoundaries: Array<"router" | "runtime"> = [];
+    const projection = await this.hostProjection(summary).catch(() => undefined);
+    if (projection !== undefined && summary.assignmentId !== undefined) await this.store.persistRunOperations(summary.assignmentId, projection);
+    let persistedOperations = summary.assignmentId === undefined ? undefined : await this.store.readRunOperations(summary.assignmentId);
+    if (persistedOperations === undefined && projection === undefined && summary.assignmentId !== undefined) {
+      const replay = await this.events(summary.assignmentId, 0).catch(() => undefined);
+      const replayedOperations = replay === undefined ? undefined : operationsFromEvents(replay.events);
+      if (replayedOperations !== undefined) {
+        await this.store.persistRunOperations(summary.assignmentId, { plan: replayedOperations.plan, ...(replayedOperations.outcome === undefined ? {} : { outcome: replayedOperations.outcome }), schema: "agentloop.hostRun/v1", run: { id: summary.id, status: summary.status, createdAt: summary.createdAt } } as RuntimeRunOperationsProjection);
+        persistedOperations = replayedOperations;
+      }
+    }
+    if (summary.remoteRunId !== undefined && projection === undefined && persistedOperations === undefined) missingBoundaries.push("runtime");
+    if (summary.remoteRunId === undefined && persistedOperations === undefined) missingBoundaries.push("runtime");
+    return {
+      ...summary,
+      ...(projection === undefined ? (persistedOperations === undefined ? {} : {
+        plan: persistedOperations.plan,
+        ...(persistedOperations.outcome === undefined ? {} : { outcome: persistedOperations.outcome }),
+        planState: persistedOperations.plan.state,
+        planStepCount: persistedOperations.plan.steps.length,
+      }) : {
+        status: projection.run.status,
+        ...(projection.run.modelKey === undefined ? {} : { modelKey: projection.run.modelKey }),
+        ...(projection.outcome?.output ?? projection.run.output) === undefined ? {} : { output: projection.outcome?.output ?? projection.run.output },
+        ...(projection.run.errorCode === undefined ? {} : { errorCode: projection.run.errorCode }),
+        plan: projection.plan,
+        outcome: projection.outcome,
+        artifacts: projection.artifacts,
+        eventCursor: projection.eventCursor,
+        planState: projection.plan.state,
+        planStepCount: projection.plan.steps.length,
+        artifactCount: projection.artifacts.length,
+      }),
+      artifacts: projection?.artifacts ?? await this.cataloguedArtifacts(summary),
+      missingBoundaries,
+    };
+  }
+
+  private async hostProjection(summary: RouterRunSummary) {
+    if (summary.assignmentId === undefined || summary.remoteRunId === undefined) return undefined;
+    const assignment = await this.store.assignment(summary.assignmentId);
+    if (assignment === undefined || assignment.remoteRunId !== summary.remoteRunId) return undefined;
+    const hostRun = this.endpointFactory(assignment.runtimeEndpoint).hostRun;
+    if (hostRun === undefined) return undefined;
+    return await hostRun(summary.remoteRunId);
+  }
+
+  private async cataloguedArtifacts(summary: RouterRunSummary): Promise<readonly RuntimeArtifact[]> {
+    if (summary.assignmentId === undefined || this.artifactsCatalog === undefined) return [];
+    try { return await this.artifactsCatalog.list(summary.assignmentId); } catch { return []; }
   }
 
   async deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void> {
@@ -306,6 +425,9 @@ export class PersistentMultiRuntimeRouter {
   private async observeHostRun(assignment: StoredAssignment, run: RuntimeRunStatus): Promise<void> {
     if (run.artifacts !== undefined && run.artifacts.length > 0) await this.captureArtifacts(assignment, run.artifacts);
     await this.store.observeRun(assignment.id, run, this.now());
+    const endpoint = this.endpointFactory(assignment.runtimeEndpoint);
+    const operations = endpoint.hostRun === undefined ? undefined : await endpoint.hostRun(assignment.remoteRunId).catch(() => undefined);
+    if (operations !== undefined) await this.store.persistRunOperations(assignment.id, operations);
   }
 
   private emitDispatchFailure(event: RouterDispatchFailureLog): void {
@@ -314,6 +436,28 @@ export class PersistentMultiRuntimeRouter {
     }
   }
 
+}
+
+function operationsFromEvents(events: readonly RuntimeRunEvent[]): PersistedRunOperations | undefined {
+  const planEvent = [...events].reverse().find((event) => event.type === "plan.admitted" || event.type === "plan.proposed");
+  const data = planEvent?.data ?? {};
+  if (!Array.isArray(data.steps)) return undefined;
+  const stepEvents = new Map<string, string>();
+  for (const event of events) {
+    const stepId = typeof event.data.stepId === "string" ? event.data.stepId : undefined;
+    if (stepId === undefined) continue;
+    const status = event.type === "plan.step.started" ? "running" : event.type === "plan.step.completed" ? "completed" : event.type === "plan.step.failed" ? "failed" : undefined;
+    if (status !== undefined) stepEvents.set(stepId, status);
+  }
+  const steps = data.steps.map((step, index) => {
+    const item = step !== null && typeof step === "object" ? step as Record<string, unknown> : {};
+    const id = typeof item.id === "string" ? item.id : `step_${index + 1}`;
+    return { id, status: stepEvents.get(id) ?? (typeof item.status === "string" ? item.status : "pending"), objective: typeof item.objective === "string" ? item.objective : "", dependencies: Array.isArray(item.dependencies) ? item.dependencies.filter((value): value is string => typeof value === "string") : [], skillIds: Array.isArray(item.skillIds) ? item.skillIds.filter((value): value is string => typeof value === "string") : [], requiredCapabilities: Array.isArray(item.requiredCapabilities) ? item.requiredCapabilities.filter((value): value is string => typeof value === "string") : [] };
+  });
+  const terminal = [...events].reverse().find((event) => event.type === "terminal.delivery_committed" || event.type === "run.failed" || event.type === "run.cancelled");
+  const terminalData = terminal?.data ?? {};
+  const outcome = terminal === undefined ? undefined : { schema: "agentloop.hostOutcome/v1" as const, status: terminal.type === "terminal.delivery_committed" ? "completed" : terminal.type === "run.cancelled" ? "cancelled" : "failed", reasonCode: typeof terminalData.reasonCode === "string" ? terminalData.reasonCode : typeof terminalData.code === "string" ? terminalData.code : terminal.type, ...(typeof terminalData.planId === "string" ? { planId: terminalData.planId } : {}), ...(typeof terminalData.output === "string" ? { output: terminalData.output } : {}), committedAt: terminal.createdAt };
+  return { plan: { state: "available", id: typeof data.id === "string" ? data.id : typeof data.planId === "string" ? data.planId : "replayed-plan", version: typeof data.version === "number" ? data.version : 1, status: terminal?.type === "terminal.delivery_committed" ? "completed" : "available", goal: typeof data.goal === "string" ? data.goal : "", selectedSkillIds: Array.isArray(data.selectedSkillIds) ? data.selectedSkillIds.filter((value): value is string => typeof value === "string") : [], steps, assessmentCount: 0, approvedAssessmentCount: 0 }, ...(outcome === undefined ? {} : { outcome }) };
 }
 
 export { RuntimeCapacityError } from "./control-plane-contracts.ts";

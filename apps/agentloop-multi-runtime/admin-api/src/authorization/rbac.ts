@@ -2,10 +2,10 @@ import type { AdminMemberRole } from "../../../control-plane/contracts/index.ts"
 import type { AdminPermission, AdminPrincipal } from "./ports.ts";
 
 const rolePermissions: Readonly<Record<AdminMemberRole, readonly AdminPermission[]>> = {
-  platform_admin: ["member.read", "member.write", "release.read", "release.write", "skill.read", "skill.write", "runtime.operate", "trace.read", "audit.read"],
+  platform_admin: ["user.read", "user.write", "member.read", "member.write", "release.read", "release.write", "skill.read", "skill.write", "runtime.operate", "trace.read", "audit.read"],
   operator: ["release.read", "release.write", "runtime.operate", "trace.read"],
   skill_operator: ["release.read", "skill.read", "skill.write", "trace.read"],
-  auditor: ["member.read", "release.read", "skill.read", "trace.read", "audit.read"],
+  auditor: ["user.read", "member.read", "release.read", "skill.read", "trace.read", "audit.read"],
   member: [],
 };
 

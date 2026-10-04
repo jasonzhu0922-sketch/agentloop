@@ -13,7 +13,10 @@ const IDENTITY_SCHEMA_SQL = `
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    last_active_at INTEGER
   );
   CREATE TABLE IF NOT EXISTS mr_identity_tenants (
     id TEXT PRIMARY KEY,
@@ -50,6 +53,17 @@ export interface IdentitySession {
   readonly principal: Principal;
 }
 
+export interface BusinessUserSummary {
+  readonly id: string;
+  readonly email: string;
+  readonly tenantId: string;
+  readonly status: "active" | "suspended";
+  readonly createdAt: number;
+  readonly lastActiveAt?: number;
+  readonly usageAvailable: false;
+}
+export interface BusinessUserPage { readonly items: readonly BusinessUserSummary[]; readonly page: number; readonly pageSize: number; readonly total: number; readonly pageCount: number; }
+
 export class IdentityError extends Error {
   readonly status: number;
   readonly code: string;
@@ -85,8 +99,8 @@ export class IdentityService {
     const now = Date.now();
     try {
       await this.database.transaction(async () => {
-        await this.database.prepare("INSERT INTO mr_identity_users(id, email, password_hash, created_at) VALUES (?, ?, ?, ?)")
-          .run(userId, email, passwordHash, now);
+        await this.database.prepare("INSERT INTO mr_identity_users(id, email, password_hash, created_at, status, updated_at) VALUES (?, ?, ?, ?, 'active', ?)")
+          .run(userId, email, passwordHash, now, now);
         await this.database.prepare("INSERT INTO mr_identity_tenants(id, name, created_at) VALUES (?, ?, ?)")
           .run(tenantId, `${email} workspace`, now);
         await this.database.prepare("INSERT INTO mr_identity_memberships(tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)")
@@ -104,13 +118,13 @@ export class IdentityService {
     const email = normalizeEmail(emailInput);
     if (typeof passwordInput !== "string") throw new IdentityError(401, "invalid_credentials", "Invalid email or password");
     const user = await this.database.prepare(`
-      SELECT u.id, u.email, u.password_hash, m.tenant_id
+      SELECT u.id, u.email, u.password_hash, u.status, m.tenant_id
       FROM mr_identity_users u
       JOIN mr_identity_memberships m ON m.user_id = u.id
       WHERE u.email = ? AND m.role = 'owner'
       ORDER BY m.created_at ASC LIMIT 1
-    `).get(email) as { id: string; email: string; password_hash: string; tenant_id: string } | undefined;
-    if (user === undefined || !(await verifyPassword(passwordInput, user.password_hash))) {
+    `).get(email) as { id: string; email: string; password_hash: string; status: "active" | "suspended"; tenant_id: string } | undefined;
+    if (user === undefined || user.status !== "active" || !(await verifyPassword(passwordInput, user.password_hash))) {
       throw new IdentityError(401, "invalid_credentials", "Invalid email or password");
     }
     return this.issueSession({ userId: user.id, tenantId: user.tenant_id, email: user.email });
@@ -122,14 +136,15 @@ export class IdentityService {
     const match = header?.match(/^Bearer\s+([A-Za-z0-9_-]{32,})$/i);
     if (match === undefined || match === null) throw new IdentityError(401, "authentication_required", "Authentication required");
     const row = await this.database.prepare(`
-      SELECT u.id, u.email, m.tenant_id
+      SELECT u.id, u.email, u.status, m.tenant_id
       FROM mr_identity_sessions s
       JOIN mr_identity_users u ON u.id = s.user_id
       JOIN mr_identity_memberships m ON m.user_id = u.id AND m.role = 'owner'
-      WHERE s.token_hash = ? AND s.expires_at > ?
+      WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = 'active'
       ORDER BY m.created_at ASC LIMIT 1
     `).get(hashToken(match[1]), Date.now()) as { id: string; email: string; tenant_id: string } | undefined;
     if (row === undefined) throw new IdentityError(401, "session_invalid", "Session is invalid or expired");
+    await this.database.prepare("UPDATE mr_identity_users SET last_active_at = ?, updated_at = ? WHERE id = ?").run(Date.now(), Date.now(), row.id);
     return { userId: row.id, tenantId: row.tenant_id, email: row.email };
   }
 
@@ -140,6 +155,54 @@ export class IdentityService {
     await this.database.prepare("DELETE FROM mr_identity_sessions WHERE token_hash = ?").run(hashToken(match[1]));
   }
 
+  async listBusinessUsers(page: number, pageSize: number): Promise<BusinessUserPage> {
+    await this.ready();
+    const offset = (page - 1) * pageSize;
+    const rows = await this.database.prepare(`
+      SELECT u.id, u.email, u.status, u.created_at, u.last_active_at, m.tenant_id,
+        (SELECT MAX(t.updated_at) FROM mr_tasks t WHERE t.owner_user_id = u.id) AS task_last_active_at
+      FROM mr_identity_users u JOIN mr_identity_memberships m ON m.user_id = u.id AND m.role = 'owner'
+      ORDER BY u.created_at DESC, u.id DESC LIMIT ? OFFSET ?
+    `).all(pageSize, offset) as Array<{ id: string; email: string; status: "active" | "suspended"; created_at: number; last_active_at?: number | null; task_last_active_at?: number | null; tenant_id: string }>;
+    const totalRow = await this.database.prepare("SELECT COUNT(*) AS total FROM mr_identity_users").get() as { total: number };
+    return { items: rows.map((row) => ({ id: row.id, email: row.email, tenantId: row.tenant_id, status: row.status, createdAt: row.created_at, ...(Math.max(row.last_active_at ?? 0, row.task_last_active_at ?? 0) > 0 ? { lastActiveAt: Math.max(row.last_active_at ?? 0, row.task_last_active_at ?? 0) } : {}), usageAvailable: false })), page, pageSize, total: Number(totalRow.total), pageCount: Math.max(1, Math.ceil(Number(totalRow.total) / pageSize)) };
+  }
+
+  async suspendBusinessUser(userId: string): Promise<BusinessUserSummary> {
+    await this.ready();
+    const now = Date.now();
+    await this.database.transaction(async () => {
+      const result = await this.database.prepare("UPDATE mr_identity_users SET status = 'suspended', updated_at = ? WHERE id = ?").run(now, userId);
+      if (result.changes === 0) throw new IdentityError(404, "user_not_found", "Business user not found");
+      await this.database.prepare("DELETE FROM mr_identity_sessions WHERE user_id = ?").run(userId);
+    });
+    const user = await this.businessUserById(userId);
+    if (user === undefined) throw new IdentityError(404, "user_not_found", "Business user not found");
+    return user;
+  }
+
+  async resetBusinessUserPassword(userId: string, passwordInput: unknown): Promise<BusinessUserSummary> {
+    await this.ready();
+    const passwordHash = await hashPassword(validatePassword(passwordInput));
+    const result = await this.database.prepare("UPDATE mr_identity_users SET password_hash = ?, updated_at = ? WHERE id = ?").run(passwordHash, Date.now(), userId);
+    if (result.changes === 0) throw new IdentityError(404, "user_not_found", "Business user not found");
+    await this.database.prepare("DELETE FROM mr_identity_sessions WHERE user_id = ?").run(userId);
+    const user = await this.businessUserById(userId);
+    if (user === undefined) throw new IdentityError(404, "user_not_found", "Business user not found");
+    return user;
+  }
+
+  private async businessUserById(userId: string): Promise<BusinessUserSummary> {
+    const row = await this.database.prepare(`
+      SELECT u.id, u.email, u.status, u.created_at, u.last_active_at, m.tenant_id,
+        (SELECT MAX(t.updated_at) FROM mr_tasks t WHERE t.owner_user_id = u.id) AS task_last_active_at
+      FROM mr_identity_users u JOIN mr_identity_memberships m ON m.user_id = u.id AND m.role = 'owner' WHERE u.id = ? LIMIT 1
+    `).get(userId) as { id: string; email: string; status: "active" | "suspended"; created_at: number; last_active_at?: number | null; task_last_active_at?: number | null; tenant_id: string } | undefined;
+    if (row === undefined) throw new IdentityError(404, "user_not_found", "Business user not found");
+    const lastActiveAt = Math.max(row.last_active_at ?? 0, row.task_last_active_at ?? 0);
+    return { id: row.id, email: row.email, tenantId: row.tenant_id, status: row.status, createdAt: row.created_at, ...(lastActiveAt > 0 ? { lastActiveAt } : {}), usageAvailable: false };
+  }
+
   private async issueSession(principal: Principal): Promise<IdentitySession> {
     const token = randomBytes(SESSION_TOKEN_BYTES).toString("base64url");
     const now = Date.now();
@@ -148,6 +211,7 @@ export class IdentityService {
       INSERT INTO mr_identity_sessions(id, user_id, token_hash, expires_at, created_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(`session_${randomUUID()}`, principal.userId, hashToken(token), expiresAt, now);
+    await this.database.prepare("UPDATE mr_identity_users SET last_active_at = ?, updated_at = ? WHERE id = ?").run(now, now, principal.userId);
     return { token, expiresAt, principal };
   }
 }

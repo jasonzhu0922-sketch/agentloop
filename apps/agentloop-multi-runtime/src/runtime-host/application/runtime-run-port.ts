@@ -6,6 +6,7 @@ import type {
   RuntimeHumanLoopResponse,
   RuntimeRecoveryDetail,
   RuntimeRunEvent,
+  RuntimeRunOperationsProjection,
   RuntimeToolArguments,
 } from "../../shared/contracts.ts";
 import type { RuntimeConfigurationSnapshotReference } from "@zhujun/agentloop";
@@ -26,6 +27,7 @@ export interface RuntimeHostRunPort {
     readonly modelKey?: string;
   }): Promise<RuntimeHostRun>;
   get(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
+  hostRun?(actorUserId: string, runId: string): Promise<RuntimeRunOperationsProjection>;
   cancel?(actorUserId: string, runId: string): Promise<RuntimeHostRun>;
   events?(actorUserId: string, runId: string): Promise<readonly RuntimeRunEvent[]>;
   processArtifacts?(actorUserId: string, runId: string): Promise<readonly RuntimeArtifact[]>;

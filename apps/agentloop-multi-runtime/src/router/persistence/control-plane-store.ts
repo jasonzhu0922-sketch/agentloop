@@ -9,6 +9,9 @@ import type {
   RuntimeKind,
   RuntimeProfile,
   RuntimeRunStatus,
+  RuntimeRunOperationsProjection,
+  RouterRunPage,
+  RouterRunSummary,
   SubmitConversationTask,
 } from "../../shared/contracts.ts";
 import {
@@ -17,11 +20,13 @@ import {
   type ControlPlaneRepository,
   type DispatchFailure,
   type RuntimeCatalogEntry,
+  type RuntimeCatalogPage,
   type RuntimeHeartbeat,
   type StoredAssignment,
   type StoredConversationPage,
   type StoredConversationTurn,
   type StoredRuntimeEndpoint,
+  type PersistedRunOperations,
 } from "../application/control-plane-contracts.ts";
 import { migrateRouterState } from "./state-migrations.ts";
 
@@ -60,9 +65,35 @@ interface AssignmentRow {
   conversation_id: string;
 }
 
+interface AdminRunRow {
+  task_id: string;
+  task_input: string;
+  task_status: string;
+  task_created_at: number;
+  task_updated_at: number;
+  data_policy_json: string;
+  assignment_id: string | null;
+  remote_run_id: string | null;
+  assignment_status: string | null;
+  assignment_error_code: string | null;
+  assignment_error_message: string | null;
+  runtime_id: string | null;
+  runtime_name: string | null;
+  turn_model_key: string | null;
+  turn_output: string | null;
+  turn_status: string | null;
+  turn_error_code: string | null;
+  turn_completed_at: number | null;
+  plan_json: string | null;
+  outcome_json: string | null;
+}
+
 /** Durable Router control-plane state. It owns neither AgentLoop Runs nor their Evidence. */
 export class ControlPlaneStore implements ControlPlaneRepository {
   private readonly database: SqlConnection;
+  /** Ephemeral liveness/capacity snapshots; heartbeat pings never write SQL. */
+  private readonly runtimeHeartbeats = new Map<string, RuntimeHeartbeat>();
+  private readonly registeredRuntimeIds = new Set<string>();
 
   constructor(database: SqlConnection) {
     this.database = database;
@@ -70,6 +101,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
 
   async ready(): Promise<void> {
     await migrateRouterState(this.database);
+    const runtimes = await this.database.prepare("SELECT id FROM mr_runtime_nodes").all() as Array<{ id: string }>;
+    for (const runtime of runtimes) this.registeredRuntimeIds.add(runtime.id);
   }
 
   /** Invoked only by the versioned schema migration registry. */
@@ -113,6 +146,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         resource_refs_json TEXT NOT NULL,
         message_attachments_json TEXT NOT NULL DEFAULT '[]',
         local_directory_scope_ids_json TEXT NOT NULL DEFAULT '[]',
+        plan_json TEXT,
+        outcome_json TEXT,
         status TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -240,6 +275,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       }));
       for (const runtime of runtimes) {
         await statement.run(runtime.id, runtime.displayName ?? null, runtime.endpoint, runtime.profile, JSON.stringify(runtime.capabilities), runtime.maxConcurrentRuns, now);
+        this.registeredRuntimeIds.add(runtime.id);
       }
     });
   }
@@ -313,6 +349,15 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         params[13], params[14], params[15], input.runtimeId, input.deviceId,
       );
     });
+    this.registeredRuntimeIds.add(input.runtimeId);
+    this.runtimeHeartbeats.set(input.runtimeId, {
+      runtimeId: input.runtimeId,
+      status: input.status,
+      activeRunCount: 0,
+      queuedRunCount: 0,
+      maxConcurrentRuns: input.maxConcurrentRuns,
+      observedAt: now,
+    });
   }
 
   async disconnectLocalRuntimes(connectionId: string, now = Date.now()): Promise<void> {
@@ -320,6 +365,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       UPDATE mr_runtime_nodes SET status = 'offline', lease_expires_at = ?, updated_at = ?
       WHERE kind = 'local' AND connection_id = ?
     `).run(now, now, connectionId);
+    const runtimes = await this.database.prepare("SELECT id FROM mr_runtime_nodes WHERE kind = 'local' AND connection_id = ?").all(connectionId) as Array<{ id: string }>;
+    for (const runtime of runtimes) this.runtimeHeartbeats.delete(runtime.id);
   }
 
   async unregisterLocalRuntime(runtimeId: string, connectionId: string, now = Date.now()): Promise<void> {
@@ -327,6 +374,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       UPDATE mr_runtime_nodes SET status = 'offline', lease_expires_at = ?, updated_at = ?
       WHERE id = ? AND kind = 'local' AND connection_id = ?
     `).run(now, now, runtimeId, connectionId);
+    this.runtimeHeartbeats.delete(runtimeId);
+    this.registeredRuntimeIds.delete(runtimeId);
   }
 
   async heartbeat(heartbeat: RuntimeHeartbeat): Promise<void> {
@@ -335,22 +384,9 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     if (heartbeat.maxConcurrentRuns !== undefined && (!Number.isSafeInteger(heartbeat.maxConcurrentRuns) || heartbeat.maxConcurrentRuns < 1)) {
       throw new TypeError("maxConcurrentRuns must be a positive integer");
     }
-    const result = await this.database.prepare(`
-      UPDATE mr_runtime_nodes
-      SET status = ?, active_run_count = ?, queued_run_count = ?,
-        max_concurrent_runs = COALESCE(?, max_concurrent_runs),
-        last_heartbeat_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      heartbeat.status,
-      heartbeat.activeRunCount,
-      heartbeat.queuedRunCount,
-      heartbeat.maxConcurrentRuns ?? null,
-      heartbeat.observedAt,
-      heartbeat.observedAt,
-      heartbeat.runtimeId,
-    );
-    if (result.changes === 0) throw new TypeError("runtime is not statically registered");
+    if (heartbeat.startedAt !== undefined && (!Number.isSafeInteger(heartbeat.startedAt) || heartbeat.startedAt < 0)) throw new TypeError("startedAt must be a non-negative integer");
+    if (!this.registeredRuntimeIds.has(heartbeat.runtimeId)) throw new TypeError("runtime is not statically registered");
+    this.runtimeHeartbeats.set(heartbeat.runtimeId, heartbeat);
   }
 
   async runtimeEndpoints(tenantId?: string, ownerUserId?: string): Promise<readonly StoredRuntimeEndpoint[]> {
@@ -385,9 +421,66 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       ...(row.display_name === null ? {} : { displayName: row.display_name }),
       profile: row.profile,
       kind: row.kind,
-      status: row.status,
+      status: this.runtimeHeartbeats.get(row.id)?.status ?? row.status,
       ...(row.device_id === null ? {} : { deviceId: row.device_id }),
     }));
+  }
+
+  /** Full Router-owned Runtime inventory for the separately authenticated Admin plane. */
+  async adminRuntimeCatalog(input: { readonly scopeId?: string; readonly limit: number; readonly offset: number }): Promise<RuntimeCatalogPage> {
+    const scopeFilter = input.scopeId === undefined ? "" : "WHERE kind = 'cloud' OR tenant_id = ?";
+    const scopeParams = input.scopeId === undefined ? [] : [input.scopeId];
+    const rows = await this.database.prepare(`
+      SELECT id, display_name, profile, kind, device_id, tenant_id, status,
+        capabilities_json, max_concurrent_runs, active_run_count, queued_run_count,
+        catalog_version, last_heartbeat_at, lease_expires_at, updated_at
+      FROM mr_runtime_nodes
+      ${scopeFilter}
+      ORDER BY updated_at DESC, id DESC
+    `).all(...scopeParams) as Array<{
+      id: string;
+      display_name: string | null;
+      profile: RuntimeProfile;
+      kind: RuntimeKind;
+      device_id: string | null;
+      tenant_id: string | null;
+      status: "ready" | "draining" | "offline";
+      capabilities_json: string;
+      max_concurrent_runs: number | string;
+      active_run_count: number | string;
+      queued_run_count: number | string;
+      catalog_version: string | null;
+      last_heartbeat_at: number | string | null;
+      lease_expires_at: number | string | null;
+      updated_at: number | string;
+    }>;
+    // Heartbeat status is intentionally process-local. Filter the resolved
+    // status here so both persisted and freshly observed offline Runtimes are
+    // removed before pagination.
+    const inventory = rows.map((row) => {
+      const heartbeat = this.runtimeHeartbeats.get(row.id);
+      return {
+        id: row.id,
+        ...(row.display_name === null ? {} : { displayName: row.display_name }),
+        profile: row.profile,
+        kind: row.kind,
+        status: heartbeat?.status ?? row.status,
+        ...(row.device_id === null ? {} : { deviceId: row.device_id }),
+        ...(row.tenant_id === null ? {} : { scopeId: row.tenant_id }),
+        capabilities: parseStringArray(row.capabilities_json),
+        maxConcurrentRuns: heartbeat?.maxConcurrentRuns ?? integerValue(row.max_concurrent_runs),
+        activeRunCount: heartbeat?.activeRunCount ?? integerValue(row.active_run_count),
+        queuedRunCount: heartbeat?.queuedRunCount ?? integerValue(row.queued_run_count),
+        ...(row.catalog_version === null ? {} : { catalogVersion: row.catalog_version }),
+        startedAt: heartbeat?.startedAt ?? integerValue(row.updated_at),
+        ...(heartbeat === undefined ? (row.last_heartbeat_at === null ? {} : { lastHeartbeatAt: integerValue(row.last_heartbeat_at) }) : { lastHeartbeatAt: heartbeat.observedAt }),
+        ...(row.lease_expires_at === null ? {} : { leaseExpiresAt: integerValue(row.lease_expires_at) }),
+      };
+    }).filter((runtime) => runtime.status !== "offline");
+    const total = inventory.length;
+    const pageCount = Math.max(1, Math.ceil(total / input.limit));
+    const page = Math.min(Math.floor(input.offset / input.limit) + 1, pageCount);
+    return { items: inventory.slice(input.offset, input.offset + input.limit), page, pageSize: input.limit, total, pageCount };
   }
 
   /** Router-owned conversation index, ordered by the latest task activity. */
@@ -562,6 +655,20 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     };
   }
 
+  async listAdminRuns(page: { readonly limit: number; readonly offset: number }): Promise<RouterRunPage> {
+    const rows = await this.database.prepare(adminRunSelect("ORDER BY t.updated_at DESC, t.id DESC LIMIT ? OFFSET ?")).all(page.limit, page.offset) as AdminRunRow[];
+    const totalRow = await this.database.prepare("SELECT COUNT(*) AS total FROM mr_tasks").get() as { total: number };
+    const total = Number(totalRow.total);
+    const pageCount = Math.max(1, Math.ceil(total / page.limit));
+    const normalizedPage = Math.min(Math.floor(page.offset / page.limit) + 1, pageCount);
+    return { items: rows.map(toAdminRunSummary), page: normalizedPage, pageSize: page.limit, total, pageCount };
+  }
+
+  async adminRun(id: string): Promise<RouterRunSummary | undefined> {
+    const row = await this.database.prepare(adminRunSelect("WHERE t.id = ? OR a.remote_run_id = ? LIMIT 1")).get(id, id) as AdminRunRow | undefined;
+    return row === undefined ? undefined : toAdminRunSummary(row);
+  }
+
   /** Remove one persisted conversation only when no Runtime may still mutate it. */
   async deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void> {
     await this.database.transaction(async () => {
@@ -731,6 +838,19 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     });
   }
 
+  async persistRunOperations(assignmentId: string, projection: RuntimeRunOperationsProjection): Promise<void> {
+    await this.database.prepare(`
+      UPDATE mr_tasks SET plan_json = ?, outcome_json = ?, updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END
+      WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)
+    `).run(JSON.stringify(projection.plan), projection.outcome === undefined ? null : JSON.stringify(projection.outcome), projection.run.createdAt, projection.run.createdAt, assignmentId);
+  }
+
+  async readRunOperations(assignmentId: string): Promise<PersistedRunOperations | undefined> {
+    const row = await this.database.prepare("SELECT plan_json, outcome_json FROM mr_tasks WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)").get(assignmentId) as { plan_json?: string | null; outcome_json?: string | null } | undefined;
+    if (row?.plan_json === undefined || row.plan_json === null) return undefined;
+    return { plan: JSON.parse(row.plan_json) as PersistedRunOperations["plan"], ...(row.outcome_json === null || row.outcome_json === undefined ? {} : { outcome: JSON.parse(row.outcome_json) as PersistedRunOperations["outcome"] }) };
+  }
+
   async assignment(id: string): Promise<StoredAssignment | undefined> {
     const row = await this.database.prepare(assignmentSelect("WHERE a.id = ?")).get(id) as AssignmentRow | undefined;
     return row === undefined ? undefined : toStoredAssignment(row);
@@ -753,22 +873,10 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       if (configured === undefined) throw new TypeError(`Runtime \"${selectedRuntimeId}\" is not registered`);
     }
     const candidates = await this.database.prepare(`
-      SELECT n.id, n.endpoint, n.kind, n.device_id, n.tenant_id, n.owner_user_id, n.profile, n.capabilities_json, n.max_concurrent_runs, n.active_run_count, n.queued_run_count,
-        COALESCE(SUM(CASE
-          WHEN a.status = 'reserved' THEN 1
-          -- A Host heartbeat is authoritative for already accepted Runs. Keep
-          -- only admissions accepted after that snapshot as a local safety
-          -- reservation until the Host reports them in active_run_count.
-          WHEN a.status = 'accepted' AND a.updated_at > n.last_heartbeat_at THEN 1
-          ELSE 0
-        END), 0) AS pending_admissions
+      SELECT n.id, n.endpoint, n.kind, n.device_id, n.tenant_id, n.owner_user_id, n.profile, n.capabilities_json, n.max_concurrent_runs
       FROM mr_runtime_nodes n
-      LEFT JOIN mr_assignments a ON a.runtime_id = n.id AND a.status IN ('reserved', 'accepted')
-      WHERE n.status = 'ready' AND n.last_heartbeat_at IS NOT NULL AND n.last_heartbeat_at >= ?
-      GROUP BY n.id
-    `).all(now - heartbeatTtlMs) as Array<{
+    `).all() as Array<{
       id: string; endpoint: string; kind: RuntimeKind; device_id: string | null; tenant_id: string | null; owner_user_id: string | null; profile: RuntimeProfile; capabilities_json: string; max_concurrent_runs: number;
-      active_run_count: number; queued_run_count: number; pending_admissions: number;
     }>;
     const required = JSON.parse(task.required_capabilities_json) as string[];
     // Keep the database-facing name snake_case. PostgreSQL folds unquoted
@@ -786,7 +894,19 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         AND a.remote_run_id IS NOT NULL
       ORDER BY a.created_at DESC LIMIT 1
     `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { runtime_id: string } | undefined;
-    const eligible = candidates
+    const eligibleCandidates = [];
+    for (const node of candidates) {
+      const heartbeat = this.runtimeHeartbeats.get(node.id);
+      if (heartbeat === undefined || heartbeat.status !== "ready" || heartbeat.observedAt < now - heartbeatTtlMs) continue;
+      eligibleCandidates.push({
+        ...node,
+        active_run_count: heartbeat.activeRunCount,
+        queued_run_count: heartbeat.queuedRunCount,
+        max_concurrent_runs: heartbeat.maxConcurrentRuns ?? node.max_concurrent_runs,
+        pending_admissions: await this.pendingAdmissionCount(node.id, heartbeat.observedAt),
+      });
+    }
+    const eligible = eligibleCandidates
       .filter((node) => (executionTarget.kind === "local_device"
         ? node.kind === "local" && node.device_id === executionTarget.deviceId && node.id === executionTarget.runtimeId
           && node.tenant_id === task.tenant_id && node.owner_user_id === task.owner_user_id
@@ -848,12 +968,10 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     heartbeatTtlMs: number,
     reservationTtlMs: number,
   ): Promise<StoredAssignment> {
-    const runtime = await this.database.prepare(`
-      SELECT id FROM mr_runtime_nodes
-      WHERE id = ? AND kind = 'local' AND status = 'ready'
-        AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at >= ?
-    `).get(current.runtime_id, now - heartbeatTtlMs) as { id: string } | undefined;
-    if (runtime === undefined) throw new RuntimeCapacityError(`Runtime \"${current.runtime_id}\" is not ready or has no reservable capacity slot`);
+    const heartbeat = this.runtimeHeartbeats.get(current.runtime_id);
+    if (heartbeat === undefined || heartbeat.status !== "ready" || heartbeat.observedAt < now - heartbeatTtlMs) {
+      throw new RuntimeCapacityError(`Runtime \"${current.runtime_id}\" is not ready or has no reservable capacity slot`);
+    }
     await this.database.prepare(`
       UPDATE mr_assignments
       SET status = 'reserved', reservation_expires_at = ?, error_code = NULL, error_message = NULL, updated_at = ?
@@ -862,6 +980,15 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     await this.database.prepare("UPDATE mr_tasks SET status = 'dispatching', updated_at = ? WHERE id = ?").run(now, task.id);
     const row = await this.database.prepare(assignmentSelect("WHERE a.id = ?")).get(current.id) as AssignmentRow;
     return toStoredAssignment(row);
+  }
+
+  private async pendingAdmissionCount(runtimeId: string, heartbeatObservedAt: number): Promise<number> {
+    const row = await this.database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM mr_assignments
+      WHERE runtime_id = ? AND (status = 'reserved' OR (status = 'accepted' AND updated_at > ?))
+    `).get(runtimeId, heartbeatObservedAt) as { count: number | string };
+    return Number(row.count);
   }
 
   private async expireReservations(now: number): Promise<void> {
@@ -931,6 +1058,59 @@ function assignmentSelect(where: string): string {
     FROM mr_assignments a JOIN mr_runtime_nodes n ON n.id = a.runtime_id JOIN mr_tasks t ON t.id = a.task_id
     ${where}
   `;
+}
+
+function adminRunSelect(where: string): string {
+  return `
+    WITH latest_assignment AS (
+      SELECT a.*, ROW_NUMBER() OVER (PARTITION BY a.task_id ORDER BY a.created_at DESC, a.id DESC) AS rn
+      FROM mr_assignments a
+    )
+    SELECT
+      t.id AS task_id, t.input AS task_input, t.status AS task_status, t.created_at AS task_created_at,
+      t.updated_at AS task_updated_at, t.data_policy_json, t.plan_json, t.outcome_json,
+      a.id AS assignment_id, a.remote_run_id, a.status AS assignment_status,
+      a.error_code AS assignment_error_code, a.error_message AS assignment_error_message,
+      n.id AS runtime_id, n.display_name AS runtime_name,
+      tr.model_key AS turn_model_key, tr.assistant_output AS turn_output,
+      tr.status AS turn_status, tr.error_code AS turn_error_code, tr.completed_at AS turn_completed_at
+    FROM mr_tasks t
+    LEFT JOIN latest_assignment a ON a.task_id = t.id AND a.rn = 1
+    LEFT JOIN mr_runtime_nodes n ON n.id = a.runtime_id
+    LEFT JOIN mr_turns tr ON tr.assignment_id = a.id
+    ${where}
+  `;
+}
+
+function toAdminRunSummary(row: AdminRunRow): RouterRunSummary {
+  const status = adminRunStatus(row);
+  const input = row.data_policy_json === '{"mode":"strict_local"}' || row.task_input.trim() === "" ? undefined : row.task_input;
+  const modelKey = row.turn_model_key ?? undefined;
+  const output = row.turn_output ?? undefined;
+  const errorCode = row.turn_error_code ?? row.assignment_error_code ?? undefined;
+  const errorMessage = row.assignment_error_message ?? undefined;
+  return {
+    id: row.remote_run_id ?? row.task_id,
+    ...(input === undefined ? {} : { input }),
+    status,
+    createdAt: row.task_created_at,
+    updatedAt: row.task_updated_at,
+    ...(row.assignment_id === null ? {} : { assignmentId: row.assignment_id }),
+    ...(row.remote_run_id === null ? {} : { remoteRunId: row.remote_run_id }),
+    ...(row.runtime_id === null ? {} : { runtimeId: row.runtime_id }),
+    ...(row.runtime_name === null ? {} : { runtimeName: row.runtime_name }),
+    ...(modelKey === undefined ? {} : { modelKey }),
+    ...(output === undefined ? {} : { output }),
+    ...(errorCode === undefined ? {} : { errorCode }),
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+  };
+}
+
+function adminRunStatus(row: AdminRunRow): RouterRunSummary["status"] {
+  const value = row.turn_status ?? row.task_status ?? row.assignment_status;
+  if (value === "completed" || value === "failed" || value === "cancelled" || value === "running" || value === "queued") return value;
+  if (value === "accepted" || value === "reserved" || value === "dispatching") return "running";
+  return "unknown";
 }
 
 function toStoredAssignment(row: AssignmentRow): StoredAssignment {
@@ -1019,4 +1199,18 @@ function parseAttachmentSnapshots(value: string): StoredConversationTurn["attach
   } catch {
     return [];
   }
+}
+
+function parseStringArray(value: string): readonly string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function integerValue(value: number | string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
 }

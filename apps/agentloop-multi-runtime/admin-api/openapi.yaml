@@ -47,6 +47,212 @@ paths:
       responses:
         '200': { description: Admin session projection without token material }
         '403': { description: Missing or invalid admin principal }
+  /admin/v1/users:
+    get:
+      operationId: listAdminUsers
+      description: Lists Admin API login users from the independent Admin control-plane database. Router/Runtime end users are not included.
+      responses:
+        '200':
+          description: Admin user list without password hashes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users: { type: array, items: { $ref: '#/components/schemas/AdminUser' } }
+        '403': { description: Missing user.read permission }
+    post:
+      operationId: createAdminUser
+      description: Creates an Admin API login user. The password is accepted only in the request and persisted as a server-side scrypt hash.
+      responses:
+        '201': { description: Admin user created }
+        '403': { description: Missing user.write permission }
+        '409': { description: Username or revision conflict }
+  /admin/v1/users/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: updateAdminUser
+      description: Updates an Admin user's display name, scope, or role with optimistic revision checking.
+      responses:
+        '200': { description: Admin user updated }
+        '403': { description: Missing user.write permission }
+        '409': { description: Expected revision conflict }
+  /admin/v1/users/{userId}/transitions:
+    post:
+      operationId: transitionAdminUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Admin user lifecycle state changed }
+        '403': { description: Missing user.write permission }
+        '409': { description: Expected revision conflict }
+  /admin/v1/users/{userId}/password:
+    post:
+      operationId: resetAdminUserPassword
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Admin user password reset; password hash is never returned }
+        '403': { description: Missing user.write permission }
+        '409': { description: Expected revision conflict }
+  /admin/v1/models:
+    get:
+      operationId: listModels
+      description: Lists the current model catalog projected from the latest Model Route Release. Provider connection credentials are never returned; only configuration status is exposed.
+      responses:
+        '200':
+          description: Current registered models
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [models]
+                properties:
+                  models:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdminModelSummary' }
+        '403': { description: Missing or invalid admin principal }
+    post:
+      operationId: registerModel
+      description: Registers a model in the configured model catalog. In production the catalog is Router-owned; parameter values are JSON values, so nested objects such as chatTemplateKwargs are preserved without stringification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelMutationRequest'
+      responses:
+        '201': { description: Model catalog mutation persisted }
+        '400': { description: Invalid model or parameter contract }
+        '403': { description: Missing or invalid admin principal }
+        '409': { description: Optimistic revision conflict }
+  /admin/v1/providers:
+    get:
+      operationId: listProviders
+      description: Lists Providers with their nested model summaries. Provider credentials are never returned.
+      responses:
+        '200': { description: Current Provider catalog }
+        '403': { description: Missing or invalid admin principal }
+    post:
+      operationId: registerProvider
+      description: Registers or updates a Provider connection in the configured model catalog. The direct API key is accepted only on this write boundary and is never returned.
+      responses:
+        '201': { description: Provider configuration persisted }
+        '400': { description: Invalid Provider contract }
+        '403': { description: Missing or invalid admin principal }
+        '409': { description: Optimistic revision conflict }
+  /admin/v1/models/{modelKey}:
+    parameters:
+      - name: modelKey
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[a-z0-9]+(?:[.-][a-z0-9]+)*$' }
+    put:
+      operationId: updateModel
+      description: Replaces one registered model in the configured model catalog.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelMutationRequest'
+      responses:
+        '200': { description: Model catalog mutation persisted }
+        '400': { description: Invalid model or parameter contract }
+        '403': { description: Missing or invalid admin principal }
+        '409': { description: Optimistic revision conflict }
+    delete:
+      operationId: deleteModel
+      description: Removes one model from the configured model catalog. The final registered model cannot be deleted.
+      parameters:
+        - name: x-expected-revision
+          in: header
+          required: false
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200': { description: Model catalog mutation persisted }
+        '400': { description: Invalid model key or deletion would remove the final model }
+        '403': { description: Missing or invalid admin principal }
+        '409': { description: Optimistic revision conflict }
+  /admin/v1/skills:
+    get:
+      operationId: listCustomSkills
+      description: Lists read-only custom-skills packages with stable pagination. Package paths are never exposed as host filesystem paths.
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 12 }
+      responses:
+        '200':
+          description: Paginated custom Skill catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSkillPage'
+        '403': { description: Missing or invalid admin principal }
+        '503': { description: Custom Skill directory is unavailable }
+  /admin/v1/skills/{name}:
+    get:
+      operationId: readCustomSkill
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Skill metadata, key SKILL.md content, and package-relative file tree
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSkillDetail'
+        '403': { description: Missing or invalid admin principal }
+        '404': { description: Skill not found }
+        '503': { description: Custom Skill directory is unavailable }
+  /admin/v1/runs:
+    get:
+      operationId: listRuns
+      description: Lists paginated Router Run operations projections. Runtime plan and outcome facts are hydrated by the Router from the Runtime Host.
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200': { description: Paginated Run summaries }
+        '403': { description: Missing or invalid admin principal }
+        '503': { description: Router operations projection unavailable }
+  /admin/v1/runs/{runId}:
+    get:
+      operationId: readRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Run detail with Plan, canonical Outcome, Runtime and artifacts }
+        '403': { description: Missing or invalid admin principal }
+        '404': { description: Run not found }
+        '503': { description: Router operations projection unavailable }
   /admin/v1/auth/login:
     post:
       operationId: adminLogin
@@ -147,10 +353,26 @@ paths:
         - name: operation
           in: path
           required: true
-          schema: { type: string, enum: [drain, recover] }
+          schema: { type: string, enum: [drain, recover, restart] }
       responses:
         '200': { description: Runtime operation state readback }
         '409': { description: Expected revision conflict }
+  /admin/v1/runtimes:
+    get:
+      operationId: listRuntimeInstances
+      description: Router-owned read-only inventory of currently registered Cloud and Local Runtime instances, including liveness and capacity snapshots.
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200': { description: Runtime inventory }
+        '403': { description: Missing runtime.operate permission }
   /delivery/v1/apply-receipts:
     post:
       operationId: recordApplyReceipt
@@ -195,6 +417,117 @@ paths:
         '403': { description: Workload identity is missing }
 components:
   schemas:
+    AdminModelSummary:
+      type: object
+      required: [key, displayName, providerKey, providerModel, protocol, releaseId, releaseState, version, defaultModel, baseUrl, apiKeyConfigured, parameters]
+      properties:
+        key: { type: string }
+        displayName: { type: string }
+        providerKey: { type: string }
+        providerModel: { type: string }
+        protocol: { type: string, enum: [chat-completions, responses] }
+        releaseId: { type: string }
+        releaseState: { type: string }
+        version: { type: integer, minimum: 1 }
+        defaultModel: { type: boolean }
+        baseUrl: { type: string, format: uri }
+        apiKeyConfigured: { type: boolean }
+        apiKeyEnv: { type: string, deprecated: true, description: Legacy Host-local environment variable reference. }
+        contextWindowTokens: { type: integer, minimum: 4096 }
+        maxOutputTokens: { type: integer, minimum: 1 }
+        parameters: { type: object, additionalProperties: true }
+    AdminProviderSummary:
+      type: object
+      required: [key, kind, baseUrl, protocol, apiKeyConfigured, defaultProvider, releaseId, releaseState, version, models]
+      properties:
+        key: { type: string }
+        kind: { type: string, const: openai-compatible }
+        baseUrl: { type: string, format: uri }
+        protocol: { type: string, enum: [chat-completions, responses] }
+        apiKeyConfigured: { type: boolean }
+        defaultProvider: { type: boolean }
+        releaseId: { type: string }
+        releaseState: { type: string }
+        version: { type: integer, minimum: 1 }
+        models: { type: array, items: { $ref: '#/components/schemas/AdminModelSummary' } }
+    AdminUser:
+      type: object
+      required: [contractVersion, userId, username, displayName, role, status, revision, createdAt, updatedAt]
+      properties:
+        contractVersion: { type: string, const: control-plane/v1 }
+        userId: { type: string }
+        username: { type: string, minLength: 1 }
+        displayName: { type: string, minLength: 1 }
+        scopeId: { type: string }
+        role: { type: string, enum: [platform_admin, operator, skill_operator, auditor, member] }
+        status: { type: string, enum: [active, suspended, removed] }
+        revision: { type: integer, minimum: 1 }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+        lastLoginAt: { type: integer }
+    ModelMutationRequest:
+      type: object
+      required: [model]
+      properties:
+        expectedRevision: { type: integer, minimum: 0 }
+        model:
+          type: object
+          required: [modelKey, displayName, providerKey, providerModel, baseUrl, protocol]
+          properties:
+            modelKey: { type: string, pattern: '^[a-z0-9]+(?:[.-][a-z0-9]+)*$' }
+            displayName: { type: string, minLength: 1 }
+            providerKey: { type: string, minLength: 1 }
+            providerModel: { type: string, minLength: 1 }
+            baseUrl: { type: string, format: uri }
+            apiKeyEnv: { type: string, pattern: '^[A-Z_][A-Z0-9_]*$' }
+            apiKey: { type: string, writeOnly: true, description: Optional legacy direct key override; new UI writes keys on the Provider instead. }
+            protocol: { type: string, enum: [chat-completions, responses] }
+            defaultModel: { type: boolean }
+            contextWindowTokens: { type: integer, minimum: 4096 }
+            maxOutputTokens: { type: integer, minimum: 1 }
+            parameters: { type: object, additionalProperties: true }
+    AgentLoopMetadata:
+      type: object
+      required: [roles, artifactKinds, sourceKinds, qaKinds]
+      additionalProperties: false
+      properties:
+        roles: { type: array, items: { type: string } }
+        artifactKinds: { type: array, items: { type: string } }
+        sourceKinds: { type: array, items: { type: string } }
+        qaKinds: { type: array, items: { type: string } }
+        executionProfiles: { type: array, items: { type: string } }
+        semanticTags: { type: array, items: { type: string } }
+        intentExamples: { type: array, items: { type: string } }
+        producesEvidenceKinds: { type: array, items: { type: string } }
+        requiredSkillNames: { type: array, items: { type: string } }
+    AdminSkillSummary:
+      type: object
+      required: [name, description, packageHash, fileCount, totalBytes]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        version: { type: string }
+        packageHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        fileCount: { type: integer, minimum: 1 }
+        totalBytes: { type: integer, minimum: 1 }
+        agentLoop: { $ref: '#/components/schemas/AgentLoopMetadata' }
+    AdminSkillDetail:
+      allOf:
+        - $ref: '#/components/schemas/AdminSkillSummary'
+        - type: object
+          required: [skillMd, files]
+          properties:
+            skillMd: { type: string }
+            files: { type: array, items: { type: string } }
+    AdminSkillPage:
+      type: object
+      required: [items, page, pageSize, total, pageCount]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminSkillSummary' } }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 50 }
+        total: { type: integer, minimum: 0 }
+        pageCount: { type: integer, minimum: 1 }
     RuntimeConfigurationSnapshot:
       description: Versioned DTO draft; the authoritative TypeScript contract is control-plane/contracts/v1.ts.
       type: object

@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeRunOperationsProjection, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
 import { LocalRuntimeSupervisor, type LocalRuntimeControl } from "../application/runtime-supervisor.ts";
 
 export interface DeviceCredential {
@@ -137,6 +137,9 @@ export class RuntimeConnectionClient {
       const run = await runtime.runs.get(ownerUserId, remoteRunId);
       if (run.status !== "running") await this.supervisor.runSettled(runtime.id, remoteRunId);
       return toStatus(run);
+    }
+    if (method === "hostRun") {
+      return await runtime.runs.hostRun(ownerUserId, remoteRunId) as unknown as RuntimeRunOperationsProjection;
     }
     if (method === "events") {
       const afterSeq = Number.isSafeInteger(payload.afterSeq) ? Number(payload.afterSeq) : 0;

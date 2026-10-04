@@ -15,6 +15,13 @@ export function createRuntimeHostHttpServer(host: AgentLoopRuntimeHost, options:
         }
         return json(response, 200, await host.getRun(decodeURIComponent(runMatch[1])));
       }
+      const operationsMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/operations$/);
+      if (request.method === "GET" && operationsMatch !== undefined && operationsMatch !== null) {
+        if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) {
+          return json(response, 401, { error: "runtime_dispatch_unauthorized" });
+        }
+        return json(response, 200, await host.hostRun(decodeURIComponent(operationsMatch[1])));
+      }
       const humanLoopCurrentMatch = request.url?.match(/^\/v1\/runtime-runs\/([^/]+)\/human-loop\/current$/);
       if (request.method === "GET" && humanLoopCurrentMatch !== undefined && humanLoopCurrentMatch !== null) {
         if (options.dispatchToken !== undefined && request.headers.authorization !== `Bearer ${options.dispatchToken}`) return json(response, 401, { error: "runtime_dispatch_unauthorized" });

@@ -12,7 +12,8 @@ const build = spawnSync(process.execPath, [resolve(root, "scripts/build.mjs")], 
 if (build.status !== 0) process.exit(build.status ?? 1);
 const port = Number(process.env.ADMIN_WEB_PORT ?? "5175");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new TypeError("ADMIN_WEB_PORT must be a TCP port");
-const apiOrigin = new URL(process.env.ADMIN_WEB_API_ORIGIN ?? "http://127.0.0.1:8792");
+// Local Runtime Hosts use 8791 onward; the standalone Admin API defaults to 8892.
+const apiOrigin = new URL(process.env.ADMIN_WEB_API_ORIGIN ?? "http://127.0.0.1:8892");
 if (apiOrigin.protocol !== "http:" && apiOrigin.protocol !== "https:") throw new TypeError("ADMIN_WEB_API_ORIGIN must use http or https");
 
 createServer(async (request, response) => {

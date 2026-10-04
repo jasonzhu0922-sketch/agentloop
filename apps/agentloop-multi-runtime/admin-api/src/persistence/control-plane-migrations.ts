@@ -33,6 +33,10 @@ const migrations: readonly ExecutableControlPlaneMigration[] = [{
   id: "control-plane/0004_scope_id_rename",
   definition: "owner_tenant_id->owner_scope_id;tenant_id->scope_id:v1",
   apply: async (database) => { await database.exec(scopeIdRenameSql(database.dialect)); },
+}, {
+  id: "control-plane/0005_admin_users",
+  definition: "cp_admin_users:v1",
+  apply: async (database) => { await database.exec(adminUsersSchemaSql(database.dialect)); },
 }];
 
 /** Standalone migration entry point. No Router, Host, or Admin API startup code calls this. */
@@ -163,6 +167,23 @@ function configurationRevisionSequenceSql(dialect: SqlConnection["dialect"]): st
     id INTEGER PRIMARY KEY, revision INTEGER NOT NULL
   );
   INSERT OR IGNORE INTO cp_configuration_revision_sequence(id, revision) VALUES (1, 0);`;
+}
+
+function adminUsersSchemaSql(dialect: SqlConnection["dialect"]): string {
+  if (dialect === "tidb") return String.raw`CREATE TABLE IF NOT EXISTS cp_admin_users (
+    id VARCHAR(191) PRIMARY KEY, username VARCHAR(191) NOT NULL, display_name VARCHAR(191) NOT NULL,
+    scope_id VARCHAR(191), role VARCHAR(32) NOT NULL, status VARCHAR(32) NOT NULL,
+    password_hash VARCHAR(512) NOT NULL, revision BIGINT NOT NULL, last_login_at BIGINT,
+    created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+    UNIQUE KEY cp_admin_users_username_uq (username)
+  );
+  CREATE INDEX cp_admin_users_status_idx ON cp_admin_users(status);`;
+  return `CREATE TABLE IF NOT EXISTS cp_admin_users (
+    id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+    scope_id TEXT, role TEXT NOT NULL, status TEXT NOT NULL,
+    password_hash TEXT NOT NULL, revision INTEGER NOT NULL, last_login_at INTEGER,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  ); CREATE INDEX IF NOT EXISTS cp_admin_users_status_idx ON cp_admin_users(status);`;
 }
 
 /** Invocation tables retain opaque capability metadata and redacted receipts only. */

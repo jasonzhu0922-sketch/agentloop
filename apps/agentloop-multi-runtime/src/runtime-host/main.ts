@@ -21,6 +21,7 @@ import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 import { createRuntimeConfigurationShadowOrchestrator } from "./application/configuration/runtime-configuration-shadow-orchestrator.ts";
 import { RuntimeConfigurationClient } from "./application/configuration/runtime-configuration-client.ts";
+import { RouterModelConfigurationClient } from "./application/configuration/router-model-configuration-client.ts";
 import { ControlPlaneAdmissionRunResolver, RunEnvironmentResolver } from "./application/configuration/run-environment-resolver.ts";
 import { SqlRuntimeConfigurationSnapshotCache } from "./persistence/runtime-configuration-snapshot-cache.ts";
 import { CloudIntegrationSecretBroker } from "./application/integrations/integration-secret-broker.ts";
@@ -37,12 +38,12 @@ const steelMarketDatabaseEnvironmentFile = resolve(
 const host = process.env.HOST ?? "127.0.0.1";
 const port = integer(process.env.PORT, 8791);
 const runtimeId = requiredEnv("RUNTIME_ID");
+const runtimeStartedAt = Date.now();
 const databasePath = resolve(appRoot, process.env.DATABASE_PATH ?? `./data/${runtimeId}/agentloop.db`);
 // The task workspace is a cluster-wide volume. RunService keeps each conversation
 // below conversations/<conversationId>, while runtime-local state stays under data/.
 const workspaceRoot = resolve(appRoot, process.env.WORKSPACE_ROOT ?? "./workspace");
 const skillPackageStoreRoot = resolve(appRoot, process.env.SKILL_PACKAGE_STORE_ROOT ?? `./data/${runtimeId}/skill-packages`);
-const providerConfigPath = resolve(appRoot, process.env.LLM_PROVIDER_CONFIG_PATH ?? "./config/llm-providers.json");
 const skillDirectoriesConfigPath = resolve(appRoot, process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json");
 const stepExecutionStrategyConfigPath = resolve(appRoot, process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? "./config/step-execution-strategy.json");
 const practiceProfileConfigPath = resolve(appRoot, process.env.PRACTICE_PROFILE_CONFIG_PATH ?? "./config/practice-profiles.json");
@@ -83,7 +84,15 @@ const database = await openStateDatabase(stateDatabaseConfigFromEnvironment({
 await migrateRuntimeState(database);
 const dispatchStore = new HostDispatchStore(database, runtimeId);
 await dispatchStore.ready();
-const providers = configurationSource === "file" ? await LlmProviderRegistry.fromConfigFile(providerConfigPath) : undefined;
+// Router is the model authority in both modes. File mode remains a local
+// development compatibility mode for Skills/Policies only; it must not create
+// a second Provider registry from a Host-local JSON file.
+const routerModelConfiguration = configurationSource === "file"
+  ? await new RouterModelConfigurationClient({ routerUrl, workloadToken: runtimeDispatchToken }).current()
+  : undefined;
+const providers = routerModelConfiguration === undefined
+  ? undefined
+  : LlmProviderRegistry.fromConfigObject(routerModelConfiguration.providerConfiguration, process.env);
 const skills = new SkillService(database, {
   // Do not make Skill package synchronization contend on the shared task volume.
   packageStoreRoot: skillPackageStoreRoot,
@@ -197,7 +206,8 @@ function createControlPlaneAdmissionRuns(): ControlPlaneAdmissionRunResolver {
   const scopeId = requiredEnv("CONTROL_PLANE_SCOPE_ID");
   const target = { plane: "cloud" as const, scopeId, runtimeId, ...(process.env.CONTROL_PLANE_RUNTIME_CLASS === undefined ? {} : { runtimeClass: process.env.CONTROL_PLANE_RUNTIME_CLASS }) };
   const client = new RuntimeConfigurationClient({ deliveryUrl, workloadToken, target });
-  const environments = new RunEnvironmentResolver({ delivery: client, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID, loadedSkillPackageHashes: () => skills.discovered().map((item) => item.packageHash), requireSignedSkillArtifacts: true });
+  const modelConfiguration = new RouterModelConfigurationClient({ routerUrl, workloadToken: runtimeDispatchToken });
+  const environments = new RunEnvironmentResolver({ delivery: client, modelConfiguration, cache: new SqlRuntimeConfigurationSnapshotCache(database), environment: process.env, createReceiptId: crypto.randomUUID, loadedSkillPackageHashes: () => skills.discovered().map((item) => item.packageHash), requireSignedSkillArtifacts: true });
   const integrationDelivery = new RuntimeIntegrationDeliveryClient({ deliveryUrl, workloadToken });
   return new ControlPlaneAdmissionRunResolver(target, environments, async (environment) => {
     const broker = new CloudIntegrationSecretBroker({
@@ -217,19 +227,48 @@ function runtimeConfigurationSource(value: string | undefined): "file" | "contro
 }
 
 async function sendHeartbeat(): Promise<void> {
+  let heartbeatBody: { readonly status: "ready"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns: number; readonly startedAt: number } | undefined;
   try {
+    heartbeatBody = {
+      status: "ready",
+      activeRunCount: await activeRunCount(),
+      queuedRunCount: 0,
+      maxConcurrentRuns,
+      startedAt: runtimeStartedAt,
+    };
     const response = await fetch(new URL(`/v1/internal/runtimes/${encodeURIComponent(runtimeId)}/heartbeat`, `${routerUrl.replace(/\/$/, "")}/`), {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${runtimeDispatchToken}` },
-      body: JSON.stringify({
-        status: "ready",
-        activeRunCount: await activeRunCount(),
-        queuedRunCount: 0,
-        maxConcurrentRuns,
-      }),
+      body: JSON.stringify(heartbeatBody),
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const responseText = await response.text();
+      let responseBody: unknown;
+      try { responseBody = responseText === "" ? undefined : JSON.parse(responseText); } catch { responseBody = undefined; }
+      const detail = responseBody !== null && typeof responseBody === "object" && !Array.isArray(responseBody)
+        ? responseBody as Record<string, unknown>
+        : undefined;
+      const errorMessage = typeof detail?.error === "string" ? detail.error : responseText.trim() || undefined;
+      const errorCode = typeof detail?.code === "string" ? detail.code : undefined;
+      throw new Error(JSON.stringify({
+        httpStatus: response.status,
+        ...(errorCode === undefined ? {} : { errorCode }),
+        ...(errorMessage === undefined ? {} : { error: errorMessage.slice(0, 1_000) }),
+      }));
+    }
   } catch (error) {
-    process.stderr.write(`Runtime Host ${runtimeId} heartbeat failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    const rawReason = error instanceof Error ? error.message : String(error);
+    let reason: unknown = rawReason;
+    try {
+      const parsed: unknown = JSON.parse(rawReason);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) reason = parsed;
+    } catch { /* Keep transport errors as plain text. */ }
+    process.stderr.write(`${runtimeLogLabel} ${JSON.stringify({
+      event: "runtime.heartbeat_failed",
+      runtimeId,
+      routerUrl,
+      request: heartbeatBody,
+      reason,
+    })}\n`);
   }
 }

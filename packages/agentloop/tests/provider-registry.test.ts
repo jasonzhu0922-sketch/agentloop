@@ -179,6 +179,36 @@ test("the provider registry routes user-visible model keys through server-owned 
   }
 });
 
+test("the provider registry accepts nested provider models with a direct provider key", () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "deepseek",
+      defaultModelKey: "deepseek-v4-flash",
+      providers: {
+        deepseek: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKey: "direct-provider-secret",
+          protocol: "chat-completions",
+          models: {
+            "deepseek-v4-flash": {
+              providerModel: "deepseek-v4-flash",
+              displayName: "DeepSeek v4 Flash",
+            },
+            "kimi-2.6": {
+              providerModel: "Kimi-K2.6",
+              displayName: "Kimi 2.6",
+            },
+          },
+        },
+      },
+    }),
+  });
+  assert.equal(registry.defaultModelKey, "deepseek-v4-flash");
+  assert.deepEqual(registry.modelKeys(), ["deepseek-v4-flash", "kimi-2.6"]);
+  assert.equal(registry.create("kimi-2.6").limits.contextWindowTokens, 128_000);
+});
+
 test("the provider registry inherits planner-only thinking for the selected chat model", async () => {
   const registry = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({
@@ -264,6 +294,45 @@ test("the provider registry forwards model chat template kwargs over provider de
   try {
     await registry.create().complete({ runId: "template-kwargs-registry", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
     assert.deepEqual(capturedBody?.chat_template_kwargs, { thinking: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the provider registry forwards additional model key-value parameters with nested JSON intact", async () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "gateway",
+      defaultModelKey: "custom-model",
+      providers: {
+        gateway: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "GATEWAY_API_KEY",
+          defaultModel: "fallback",
+        },
+      },
+      models: {
+        "custom-model": {
+          providerKey: "gateway",
+          providerModel: "custom-upstream",
+          temperature: 0.2,
+          customNested: { enabled: false, mode: "fast" },
+        },
+      },
+    }),
+    GATEWAY_API_KEY: "gateway-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "OK" } }] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await registry.create().complete({ runId: "custom-params-registry", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
+    assert.equal(capturedBody?.temperature, 0.2);
+    assert.deepEqual(capturedBody?.customNested, { enabled: false, mode: "fast" });
   } finally {
     globalThis.fetch = originalFetch;
   }

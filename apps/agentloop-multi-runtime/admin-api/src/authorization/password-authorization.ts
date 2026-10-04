@@ -28,7 +28,7 @@ export class PasswordAuthorization implements AdminAuthorizationPort {
   }
 
   public async login(username: string, password: string): Promise<{ readonly accessToken: string; readonly expiresAt: number } | undefined> {
-    if (username !== this.username || !verifyPassword(password, this.passwordHash)) return undefined;
+    if (username !== this.username || !verifyAdminPassword(password, this.passwordHash)) return undefined;
     const accessToken = `adm_${randomUUID().replaceAll("-", "")}_${randomBytes(18).toString("hex")}`;
     const expiresAt = Date.now() + this.sessionTtlMs;
     this.sessions.set(accessToken, { principal: this.principal, expiresAt });
@@ -54,7 +54,7 @@ export function hashAdminPassword(password: string): string {
   return `scrypt$16384$8$1$${salt}$${digest}`;
 }
 
-function verifyPassword(password: string, encoded: string): boolean {
+export function verifyAdminPassword(password: string, encoded: string): boolean {
   try {
     const [, n, r, p, salt, expected] = parseHash(encoded);
     const actual = scryptSync(password, salt, expected.length / 2, { N: n, r, p });

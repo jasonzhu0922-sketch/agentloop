@@ -50,6 +50,41 @@ test("HTTP Router returns a durable failed Assignment when a Runtime rejects dis
   }
 });
 
+test("HTTP Router exposes the concrete heartbeat rejection in the response and structured log", async () => {
+  const logs: string[] = [];
+  const router = {
+    heartbeat: async () => { throw new TypeError("runtime is not statically registered"); },
+  } as never;
+  const server = createRouterHttpServer(router, {
+    runtimeDispatchToken: "heartbeat-test-token",
+    logger: (line) => logs.push(line),
+  });
+  try {
+    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/internal/runtimes/general-01/heartbeat`, {
+      method: "POST",
+      headers: { authorization: "Bearer heartbeat-test-token", "content-type": "application/json" },
+      body: JSON.stringify({ status: "ready", activeRunCount: 0, queuedRunCount: 0, maxConcurrentRuns: 2 }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "runtime is not statically registered" });
+    assert.deepEqual(JSON.parse(logs[0]!), {
+      event: "router.runtime_heartbeat_rejected",
+      runtimeId: "general-01",
+      status: "ready",
+      activeRunCount: 0,
+      queuedRunCount: 0,
+      maxConcurrentRuns: 2,
+      errorType: "TypeError",
+      error: "runtime is not statically registered",
+    });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("HTTP Router + browser observer survives upstream error and socket loss, reconciles final state without redispatch", { timeout: 10_000 }, async () => {
   const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
   await store.ready();

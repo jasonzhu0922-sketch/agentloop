@@ -2,7 +2,7 @@
   "name": "@zhujun/agentloop-plan-template",
   "version": "0.1.0",
   "description": "Optional Plan Template planning extension for AgentLoop",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=26"

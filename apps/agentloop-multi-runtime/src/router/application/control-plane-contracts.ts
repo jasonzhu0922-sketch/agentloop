@@ -9,11 +9,18 @@ import type {
   RuntimeKind,
   RuntimeProfile,
   RuntimeRunStatus,
+  RuntimeRunOperationsProjection,
+  RouterRunPage,
+  RouterRunSummary,
   SubmitConversationTask,
 } from "../../shared/contracts.ts";
 
 /** Router-owned state transitions. Persistence adapters must not invent extra states. */
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
+export interface PersistedRunOperations {
+  readonly plan: RuntimeRunOperationsProjection["plan"];
+  readonly outcome?: RuntimeRunOperationsProjection["outcome"];
+}
 
 export interface RuntimeHeartbeat {
   readonly runtimeId: string;
@@ -22,6 +29,8 @@ export interface RuntimeHeartbeat {
   readonly queuedRunCount: number;
   /** The limit enforced by this Host's local admission gate. */
   readonly maxConcurrentRuns?: number;
+  /** Start time reported by the owning Runtime process, rather than Router observation time. */
+  readonly startedAt?: number;
   readonly observedAt: number;
 }
 
@@ -51,7 +60,25 @@ export interface RuntimeCatalogEntry {
   readonly profile: RuntimeProfile;
   readonly kind: RuntimeKind;
   readonly deviceId?: string;
+  /** Local runtime ownership scope; never inferred by the Admin UI. */
+  readonly scopeId?: string;
   readonly status: "ready" | "draining" | "offline";
+  readonly capabilities?: readonly string[];
+  readonly maxConcurrentRuns?: number;
+  readonly activeRunCount?: number;
+  readonly queuedRunCount?: number;
+  readonly catalogVersion?: string;
+  readonly lastHeartbeatAt?: number;
+  readonly leaseExpiresAt?: number;
+  readonly startedAt?: number;
+}
+
+export interface RuntimeCatalogPage {
+  readonly items: readonly RuntimeCatalogEntry[];
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+  readonly pageCount: number;
 }
 
 export interface StoredConversationSummary {
@@ -110,17 +137,24 @@ export interface ControlPlaneRepository {
   }): Promise<void>;
   unregisterLocalRuntime(runtimeId: string, connectionId: string, now?: number): Promise<void>;
   disconnectLocalRuntimes(connectionId: string, now?: number): Promise<void>;
+  /** Update Router-local liveness/capacity; implementations must not persist the ping. */
   heartbeat(heartbeat: RuntimeHeartbeat): Promise<void>;
   runtimeEndpoints(tenantId?: string, ownerUserId?: string): Promise<readonly StoredRuntimeEndpoint[]>;
   runtimeCatalog(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeCatalogEntry[]>;
+  /** Privileged Router read model used only by the independently authenticated Admin API. */
+  adminRuntimeCatalog(input: { readonly scopeId?: string; readonly limit: number; readonly offset: number }): Promise<RuntimeCatalogPage>;
   listConversations(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<StoredConversationPage>;
   conversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<{ readonly turns: readonly StoredConversationTurn[] } | undefined>;
+  listAdminRuns(page: { readonly limit: number; readonly offset: number }): Promise<RouterRunPage>;
+  adminRun(id: string): Promise<RouterRunSummary | undefined>;
   deleteConversation(tenantId: string, ownerUserId: string, conversationId: string): Promise<void>;
   reserve(task: SubmitConversationTask, input: { readonly heartbeatTtlMs: number; readonly reservationTtlMs: number; readonly now?: number }): Promise<StoredAssignment>;
   markAccepted(assignmentId: string, remoteRunId: string, now?: number): Promise<void>;
   markDispatchFailure(assignmentId: string, failure: DispatchFailure, now?: number): Promise<void>;
   createContinuationAssignment(parentAssignmentId: string, remoteRunId: string, now?: number): Promise<StoredAssignment>;
   observeRun(assignmentId: string, run: RuntimeRunStatus, now?: number): Promise<void>;
+  persistRunOperations(assignmentId: string, projection: RuntimeRunOperationsProjection): Promise<void>;
+  readRunOperations(assignmentId: string): Promise<PersistedRunOperations | undefined>;
   assignment(id: string): Promise<StoredAssignment | undefined>;
   unsettledAssignments(afterId: string, limit: number): Promise<readonly StoredAssignment[]>;
 }

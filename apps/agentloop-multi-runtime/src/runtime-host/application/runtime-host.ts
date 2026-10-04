@@ -1,4 +1,4 @@
-import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
+import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunOperationsProjection, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "../persistence/host-dispatch-store.ts";
 import type { RuntimeAdmissionRunResolver, RuntimeHostRunPort } from "./runtime-run-port.ts";
 
@@ -62,6 +62,14 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
         },
       }),
     };
+  }
+
+  async hostRun(remoteRunId: string): Promise<RuntimeRunOperationsProjection> {
+    const ownerUserId = this.ownersByRunId.get(remoteRunId) ?? await this.dispatchStore?.ownerForRun(remoteRunId);
+    if (ownerUserId === undefined) throw new TypeError("runtime run not found");
+    const runs = await this.runsForExistingRun(ownerUserId, remoteRunId);
+    if (runs.hostRun === undefined) throw new TypeError("runtime operations query is not configured");
+    return await runs.hostRun(ownerUserId, remoteRunId);
   }
 
   async artifacts(remoteRunId: string): Promise<readonly RuntimeArtifact[]> {

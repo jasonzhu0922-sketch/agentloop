@@ -2040,6 +2040,34 @@ test("persistent Router dispatches only heartbeating Hosts and reuses the durabl
   await database.close();
 });
 
+test("Runtime heartbeats stay in Router memory and do not write mr_runtime_nodes", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-heartbeat-memory"), endpoint: "http://runtime-heartbeat-memory" }], 100);
+  const before = await database.prepare(`
+    SELECT status, active_run_count, queued_run_count, last_heartbeat_at, updated_at
+    FROM mr_runtime_nodes WHERE id = ?
+  `).get("runtime-heartbeat-memory") as Record<string, number | string | null>;
+
+  await store.heartbeat({
+    runtimeId: "runtime-heartbeat-memory",
+    status: "ready",
+    activeRunCount: 1,
+    queuedRunCount: 2,
+    maxConcurrentRuns: 3,
+    observedAt: 200,
+  });
+
+  const after = await database.prepare(`
+    SELECT status, active_run_count, queued_run_count, last_heartbeat_at, updated_at
+    FROM mr_runtime_nodes WHERE id = ?
+  `).get("runtime-heartbeat-memory") as Record<string, number | string | null>;
+  assert.deepEqual(after, before);
+  assert.equal((await store.runtimeCatalog()).find((runtime) => runtime.id === "runtime-heartbeat-memory")?.status, "ready");
+  await database.close();
+});
+
 test("Router Runtime catalog exposes concrete statically registered Runtime IDs", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
@@ -2053,6 +2081,28 @@ test("Router Runtime catalog exposes concrete statically registered Runtime IDs"
     { id: "runtime-artifact", profile: "artifact", kind: "cloud", status: "offline" },
     { id: "runtime-general", profile: "general", kind: "cloud", status: "offline" },
   ]);
+  await database.close();
+});
+
+test("Admin Runtime inventory excludes offline Cloud and Local records before pagination", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-admin-live"), endpoint: "http://runtime-admin-live" }, { ...runtime("runtime-admin-offline"), endpoint: "http://runtime-admin-offline" }], 100);
+  await store.registerLocalRuntime({
+    runtimeId: "local-admin-live", displayName: "本机 Runtime", deviceId: "device-admin", tenantId: "tenant-admin", ownerUserId: "user-admin",
+    connectionId: "connection-admin", connectionEpoch: 1, profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1", leaseExpiresAt: 2_000, now: 200,
+  });
+  await store.registerLocalRuntime({
+    runtimeId: "local-admin-offline", displayName: "旧本机 Runtime", deviceId: "device-admin", tenantId: "tenant-admin", ownerUserId: "user-admin",
+    connectionId: "connection-old", connectionEpoch: 1, profile: "general", capabilities: [], maxConcurrentRuns: 1, status: "ready", catalogVersion: "1", leaseExpiresAt: 2_000, now: 150,
+  });
+  await store.heartbeat({ runtimeId: "runtime-admin-live", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 250 });
+  await store.disconnectLocalRuntimes("connection-old", 300);
+  await store.heartbeat({ runtimeId: "runtime-admin-offline", status: "offline", activeRunCount: 0, queuedRunCount: 0, observedAt: 300 });
+  const page = await store.adminRuntimeCatalog({ limit: 20, offset: 0 });
+  assert.deepEqual(page.items.map((item) => item.id), ["local-admin-live", "runtime-admin-live"]);
+  assert.equal(page.total, 2);
   await database.close();
 });
 

@@ -2,6 +2,7 @@
   "name": "agentloop-multi-runtime",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Reference multi-runtime control plane and AgentLoop runtime host",
   "engines": {
@@ -38,6 +39,8 @@
     "typecheck:admin-web": "tsc -p admin-web/tsconfig.json",
     "test:admin-web": "node --test --test-isolation=process admin-web/tests/*.test.ts",
     "create:admin": "node --env-file-if-exists=admin-api/.env admin-api/scripts/create-admin.mjs",
+    "create:admin-user": "node --env-file-if-exists=admin-api/.env admin-api/scripts/create-admin-user.mjs",
+    "bootstrap:admin-user": "node --env-file-if-exists=admin-api/.env admin-api/scripts/bootstrap-admin-user.mjs",
     "hash:admin-password": "node admin-api/scripts/hash-admin-password.mjs",
     "provision:admin-database": "node --env-file-if-exists=admin-api/.env admin-api/scripts/provision-admin-database.mjs",
     "typecheck:control-plane": "tsc -p control-plane/tsconfig.json",

@@ -1,10 +1,11 @@
 import { createServer, type Server } from "node:http";
 import { assertUploadedSourceContent } from "@zhujun/agentloop";
-import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import type { RouterRunDetail, RouterRunPage, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunOperationsProjection, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import { IdentityError, type IdentityService, type Principal } from "../identity/service.ts";
 import { RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../application/control-plane-contracts.ts";
 import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
 import { identityFromRequest, taskFromRequest, type RouterAttachmentBroker } from "../application/task-submission.ts";
+import type { RouterModelCatalogView, RouterModelConfiguration, UpsertRouterModelInput, UpsertRouterProviderInput } from "../model-catalog/model-catalog.ts";
 
 export { taskFromRequest } from "../application/task-submission.ts";
 
@@ -14,7 +15,37 @@ interface LocalAgentControlPlane {
 
 interface RouterTaskApi {
   submit(task: SubmitConversationTask): Promise<{ readonly id: string; readonly tenantId: string; readonly ownerUserId: string }>;
+  adminRuns?(page: { readonly limit: number; readonly offset: number }): Promise<RouterRunPage>;
+  adminRun?(id: string): Promise<RouterRunDetail | undefined>;
+  adminRuntimes?(input: { readonly scopeId?: string; readonly limit: number; readonly offset: number }): Promise<{
+    readonly items: readonly {
+    readonly id: string;
+    readonly displayName?: string;
+    readonly profile: string;
+    readonly kind: "cloud" | "local";
+    readonly deviceId?: string;
+    readonly scopeId?: string;
+    readonly status: "ready" | "draining" | "offline";
+    readonly capabilities?: readonly string[];
+    readonly maxConcurrentRuns?: number;
+    readonly activeRunCount?: number;
+    readonly queuedRunCount?: number;
+    readonly catalogVersion?: string;
+    readonly startedAt?: number;
+    readonly lastHeartbeatAt?: number;
+    readonly leaseExpiresAt?: number;
+    }[];
+    readonly page: number;
+    readonly pageSize: number;
+    readonly total: number;
+    readonly pageCount: number;
+  }>;
   models?(tenantId?: string, ownerUserId?: string): Promise<readonly RuntimeModelSummary[]>;
+  modelCatalog?(): Promise<RouterModelCatalogView>;
+  modelConfiguration?(): Promise<RouterModelConfiguration>;
+  upsertModelProvider?(input: UpsertRouterProviderInput): Promise<RouterModelCatalogView>;
+  upsertModel?(input: UpsertRouterModelInput): Promise<RouterModelCatalogView>;
+  removeModel?(modelKey: string): Promise<RouterModelCatalogView>;
   runtimes?(tenantId?: string, ownerUserId?: string): Promise<readonly { id: string; profile: string }[]>;
   conversations?(tenantId: string, ownerUserId: string, page: { readonly limit: number; readonly offset: number }): Promise<{
     readonly conversations: readonly {
@@ -51,7 +82,7 @@ interface RouterTaskApi {
   artifacts?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifacts: readonly RuntimeArtifact[] } | undefined>;
   readArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly artifact: RuntimeArtifact; readonly content: Uint8Array } | undefined>;
   previewArtifact?(id: string, artifactId: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly preview: RuntimeArtifactPreview } | undefined>;
-  heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly observedAt: number }): Promise<void>;
+  heartbeat?(input: { readonly runtimeId: string; readonly status: "ready" | "draining" | "offline"; readonly activeRunCount: number; readonly queuedRunCount: number; readonly maxConcurrentRuns?: number; readonly startedAt?: number; readonly observedAt: number }): Promise<void>;
   cancel?(id: string): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly run: RuntimeRunStatus }>;
   events?(id: string, afterSeq: number): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly events: readonly RuntimeRunEvent[] } | undefined>;
   commandOutput?(id: string, toolCallId: string, stream: "stdout" | "stderr"): Promise<{ readonly assignment: { readonly tenantId: string; readonly ownerUserId: string }; readonly output: RuntimeCommandOutput } | undefined>;
@@ -76,7 +107,7 @@ export interface LocalAgentRelease {
 }
 
 export function createRouterHttpServer(router: RouterTaskApi, options: {
-  readonly identity?: Pick<IdentityService, "register" | "login" | "authenticate" | "revoke">;
+  readonly identity?: Pick<IdentityService, "register" | "login" | "authenticate" | "revoke" | "listBusinessUsers" | "suspendBusinessUser" | "resetBusinessUserPassword">;
   readonly devices?: Pick<DeviceRepository, "issueRegistrationToken" | "registerAgent" | "heartbeat" | "list" | "revoke" | "issueLocalSession" | "authorizeLocalSession">;
   readonly attachments?: RouterAttachmentBroker;
   readonly runtimeAttachmentToken?: string;
@@ -84,7 +115,10 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
   readonly webOrigin?: string;
   readonly localAgentReleases?: readonly LocalAgentRelease[];
   readonly localAgentControl?: LocalAgentControlPlane;
+  /** Receives structured diagnostics for internal heartbeat rejection. */
+  readonly logger?: (line: string) => void;
 } = {}): Server {
+  const log = options.logger ?? ((line: string) => process.stderr.write(`${line}\n`));
   return createServer(async (request, response) => {
     try {
       setCors(response, request.headers.origin, options.webOrigin);
@@ -115,6 +149,78 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
         const body = record(await readJson(request), "request body");
         const authorization = Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : request.headers.authorization;
         return json(response, 200, { session: await options.devices.authorizeLocalSession(authorization?.replace(/^Bearer\s+/i, ""), body.sessionToken) });
+      }
+      const adminRunDetail = /^\/v1\/internal\/admin\/runs\/([^/]+)$/.exec(url.pathname);
+      const adminRunsPath = url.pathname === "/v1/internal/admin/runs";
+      if (request.method === "GET" && (adminRunsPath || adminRunDetail !== null)) {
+        if (options.runtimeDispatchToken === undefined || request.headers.authorization !== `Bearer ${options.runtimeDispatchToken}`) {
+          return json(response, 401, { error: "admin_runs_unauthorized" });
+        }
+        if (adminRunDetail !== null) {
+          if (router.adminRun === undefined) return json(response, 501, { error: "admin_runs_not_configured" });
+          const detail = await router.adminRun(decodeURIComponent(adminRunDetail[1]!));
+          return detail === undefined ? json(response, 404, { error: "run_not_found" }) : json(response, 200, detail);
+        }
+        if (router.adminRuns === undefined) return json(response, 501, { error: "admin_runs_not_configured" });
+        const page = pageInteger(url.searchParams.get("page"), "page", 1, 1, 100_000);
+        const pageSize = pageInteger(url.searchParams.get("pageSize"), "pageSize", 20, 1, 100);
+        return json(response, 200, await router.adminRuns({ limit: pageSize, offset: (page - 1) * pageSize }));
+      }
+      if (request.method === "GET" && url.pathname === "/v1/internal/admin/runtimes") {
+        if (options.runtimeDispatchToken === undefined || request.headers.authorization !== `Bearer ${options.runtimeDispatchToken}`) {
+          return json(response, 401, { error: "admin_runtimes_unauthorized" });
+        }
+        if (router.adminRuntimes === undefined) return json(response, 501, { error: "admin_runtimes_not_configured" });
+        const scopeId = url.searchParams.get("scopeId") ?? undefined;
+        const page = pageInteger(url.searchParams.get("page"), "page", 1, 1, 100_000);
+        const pageSize = pageInteger(url.searchParams.get("pageSize"), "pageSize", 20, 1, 100);
+        return json(response, 200, await router.adminRuntimes({ ...(scopeId === undefined ? {} : { scopeId }), limit: pageSize, offset: (page - 1) * pageSize }));
+      }
+      const adminUsersPath = url.pathname === "/v1/internal/admin/users";
+      const adminUserSuspend = /^\/v1\/internal\/admin\/users\/([^/]+)\/suspend$/.exec(url.pathname);
+      const adminUserPassword = /^\/v1\/internal\/admin\/users\/([^/]+)\/password$/.exec(url.pathname);
+      if (adminUsersPath || adminUserSuspend !== null || adminUserPassword !== null) {
+        if (options.runtimeDispatchToken === undefined || request.headers.authorization !== `Bearer ${options.runtimeDispatchToken}`) return json(response, 401, { error: "admin_users_unauthorized" });
+        if (options.identity === undefined) return json(response, 503, { error: "identity_not_configured" });
+        if (request.method === "GET" && adminUsersPath) {
+          const page = pageInteger(url.searchParams.get("page"), "page", 1, 1, 100_000);
+          const pageSize = pageInteger(url.searchParams.get("pageSize"), "pageSize", 20, 1, 100);
+          return json(response, 200, await options.identity.listBusinessUsers(page, pageSize));
+        }
+        if (request.method === "POST" && adminUserSuspend !== null) return json(response, 200, await options.identity.suspendBusinessUser(decodeURIComponent(adminUserSuspend[1]!)));
+        if (request.method === "POST" && adminUserPassword !== null) {
+          const body = record(await readJson(request), "request body");
+          return json(response, 200, await options.identity.resetBusinessUserPassword(decodeURIComponent(adminUserPassword[1]!), body.password));
+        }
+        return json(response, 405, { error: "method_not_allowed" });
+      }
+      const modelCatalogPath = url.pathname === "/v1/internal/model-catalog";
+      const modelConfigurationPath = url.pathname === "/v1/internal/model-configuration";
+      const modelProviderMutation = url.pathname === "/v1/internal/model-providers";
+      const modelMutation = /^\/v1\/internal\/model-models\/([^/]+)$/.exec(url.pathname);
+      if (url.pathname.startsWith("/v1/internal/model-") && request.headers.authorization !== `Bearer ${options.runtimeDispatchToken ?? ""}`) {
+        return json(response, 401, { error: "model_catalog_unauthorized" });
+      }
+      if (request.method === "GET" && modelCatalogPath) {
+        if (router.modelCatalog === undefined) return json(response, 503, { error: "model_catalog_not_configured" });
+        return json(response, 200, await router.modelCatalog());
+      }
+      if (request.method === "GET" && modelConfigurationPath) {
+        if (router.modelConfiguration === undefined) return json(response, 503, { error: "model_catalog_not_configured" });
+        return json(response, 200, await router.modelConfiguration());
+      }
+      if (request.method === "POST" && modelProviderMutation) {
+        if (router.upsertModelProvider === undefined) return json(response, 503, { error: "model_catalog_not_configured" });
+        return json(response, 201, await router.upsertModelProvider(record(await readJson(request), "request body") as unknown as UpsertRouterProviderInput));
+      }
+      if (request.method === "POST" && modelMutation !== null) {
+        if (router.upsertModel === undefined) return json(response, 503, { error: "model_catalog_not_configured" });
+        const body = record(await readJson(request), "request body");
+        return json(response, 201, await router.upsertModel({ ...body, modelKey: decodeURIComponent(modelMutation[1]!) } as unknown as UpsertRouterModelInput));
+      }
+      if (request.method === "DELETE" && modelMutation !== null) {
+        if (router.removeModel === undefined) return json(response, 503, { error: "model_catalog_not_configured" });
+        return json(response, 200, await router.removeModel(decodeURIComponent(modelMutation[1]!)));
       }
       const internalRequest = url.pathname.startsWith("/v1/internal/");
       let principal: Principal | undefined;
@@ -260,14 +366,30 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
           return json(response, 401, { error: "runtime_heartbeat_unauthorized" });
         }
         const body = record(await readJson(request), "request body");
-        await router.heartbeat({
+        const heartbeat = {
           runtimeId: decodeURIComponent(heartbeatMatch[1]),
           status: runtimeStatus(body.status),
           activeRunCount: nonNegativeInteger(body.activeRunCount, "activeRunCount"),
           queuedRunCount: nonNegativeInteger(body.queuedRunCount, "queuedRunCount"),
           ...(body.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: positiveInteger(body.maxConcurrentRuns, "maxConcurrentRuns") }),
+          ...(body.startedAt === undefined ? {} : { startedAt: nonNegativeInteger(body.startedAt, "startedAt") }),
           observedAt: Date.now(),
-        });
+        };
+        try {
+          await router.heartbeat(heartbeat);
+        } catch (error) {
+          log(JSON.stringify({
+            event: "router.runtime_heartbeat_rejected",
+            runtimeId: heartbeat.runtimeId,
+            status: heartbeat.status,
+            activeRunCount: heartbeat.activeRunCount,
+            queuedRunCount: heartbeat.queuedRunCount,
+            ...(heartbeat.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: heartbeat.maxConcurrentRuns }),
+            errorType: error instanceof Error ? error.name : typeof error,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+          throw error;
+        }
         return json(response, 204, undefined);
       }
       if (request.method === "POST" && url.pathname === "/v1/tasks") {
@@ -475,6 +597,15 @@ export class HttpRuntimeEndpoint implements RuntimeEndpoint {
     });
     const body = await response.json() as RuntimeRunStatus & { error?: string };
     if (!response.ok || typeof body.remoteRunId !== "string") throw new Error(body.error ?? `runtime status failed with HTTP ${response.status}`);
+    return body;
+  }
+
+  async hostRun(remoteRunId: string): Promise<RuntimeRunOperationsProjection> {
+    const response = await fetch(new URL(`/v1/runtime-runs/${encodeURIComponent(remoteRunId)}/operations`, `${this.endpoint.replace(/\/$/, "")}/`), {
+      headers: this.authorization === undefined ? {} : { authorization: this.authorization },
+    });
+    const body = await response.json() as RuntimeRunOperationsProjection & { error?: string };
+    if (!response.ok || body.schema !== "agentloop.hostRun/v1") throw new Error(body.error ?? `runtime operations failed with HTTP ${response.status}`);
     return body;
   }
 

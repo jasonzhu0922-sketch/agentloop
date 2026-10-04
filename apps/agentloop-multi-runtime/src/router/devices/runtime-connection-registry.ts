@@ -57,6 +57,7 @@ export class DeviceRuntimeConnectionRegistry {
       dispatch: (envelope) => rpc("dispatch", envelope),
       models: () => rpc("models", {}),
       getRun: (remoteRunId) => rpc("getRun", { remoteRunId }),
+      hostRun: (remoteRunId) => rpc("hostRun", { remoteRunId }),
       events: (remoteRunId, afterSeq) => rpc("events", { remoteRunId, afterSeq }),
       cancelRun: (remoteRunId) => rpc("cancelRun", { remoteRunId }),
       artifacts: (remoteRunId) => rpc("artifacts", { remoteRunId }),

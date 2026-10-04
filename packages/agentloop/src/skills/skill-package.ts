@@ -64,6 +64,8 @@ export interface SkillPackageInspection {
   readonly instructions: string;
   readonly name: string;
   readonly description: string;
+  /** Optional author-declared version from SKILL.md metadata.version. */
+  readonly version?: string;
   readonly packageHash: string;
   readonly fileCount: number;
   readonly totalBytes: number;
@@ -137,6 +139,7 @@ export async function inspectSkillPackage(directory: string): Promise<SkillPacka
     instructions,
     name: metadata.name,
     description: metadata.description,
+    ...(metadata.version === undefined ? {} : { version: metadata.version }),
     packageHash: hash.digest("hex"),
     fileCount: files.length,
     totalBytes,
@@ -265,7 +268,7 @@ export async function makeSkillPackageReadOnly(inspection: SkillPackageInspectio
   }
 }
 
-function parseSkillFrontmatter(source: string): { name: string; description: string; agentLoop?: SkillAgentLoopMetadata } {
+function parseSkillFrontmatter(source: string): { name: string; description: string; version?: string; agentLoop?: SkillAgentLoopMetadata } {
   const normalized = source.replaceAll("\r\n", "\n");
   const lines = normalized.split("\n");
   if (lines[0] !== "---") throw invalidPackage("SKILL.md must begin with YAML frontmatter");
@@ -300,6 +303,7 @@ function parseSkillFrontmatter(source: string): { name: string; description: str
   }
   const name = values.get("name")?.trim() ?? "";
   const description = values.get("description")?.trim() ?? "";
+  const version = parseMetadataVersion(lines, closing);
   if (!SKILL_NAME_PATTERN.test(name) || name.length > 80) {
     throw invalidPackage("SKILL.md frontmatter name must use lowercase kebab-case and be at most 80 characters");
   }
@@ -307,7 +311,26 @@ function parseSkillFrontmatter(source: string): { name: string; description: str
     throw invalidPackage("SKILL.md frontmatter description must contain between 1 and 2000 characters");
   }
   const agentLoop = parseAgentLoopFrontmatter(lines, closing);
-  return { name, description, ...(agentLoop === undefined ? {} : { agentLoop }) };
+  return { name, description, ...(version === undefined ? {} : { version }), ...(agentLoop === undefined ? {} : { agentLoop }) };
+}
+
+function parseMetadataVersion(lines: readonly string[], closing: number): string | undefined {
+  let metadataStart = -1;
+  for (let index = 1; index < closing; index += 1) {
+    if (/^metadata:\s*$/u.test(lines[index])) { metadataStart = index + 1; break; }
+  }
+  if (metadataStart < 0) return undefined;
+  for (let index = metadataStart; index < closing; index += 1) {
+    const line = lines[index];
+    if (line.trim().length === 0) continue;
+    if (!line.startsWith("  ")) break;
+    const match = line.match(/^  version:\s*(.*)$/u);
+    if (match === null) continue;
+    const version = parseScalar(match[1]).trim();
+    if (version.length === 0 || version.length > 80) throw invalidPackage("metadata.version must contain between 1 and 80 characters");
+    return version;
+  }
+  return undefined;
 }
 
 export function readSkillAgentLoopMetadata(source: string): SkillAgentLoopMetadata | undefined {

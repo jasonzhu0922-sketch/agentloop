@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS mr_tasks (
         resource_refs_json LONGTEXT NOT NULL,
         message_attachments_json LONGTEXT NOT NULL,
         local_directory_scope_ids_json LONGTEXT NOT NULL,
+        plan_json LONGTEXT,
+        outcome_json LONGTEXT,
         status LONGTEXT NOT NULL,
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL,

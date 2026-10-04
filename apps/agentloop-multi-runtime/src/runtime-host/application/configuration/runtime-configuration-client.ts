@@ -50,8 +50,8 @@ export class RuntimeConfigurationClient {
   }
 
   /** Reports a successfully constructed in-memory Run Environment; it does not imply a live Model invocation. */
-  public async reportLoaded(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string): Promise<void> {
-    await this.reportApplyStatus(snapshot, "loaded", receiptIdFor);
+  public async reportLoaded(snapshot: RuntimeConfigurationSnapshot, receiptIdFor: (releaseId: string) => string, options?: { readonly includeModelRoute?: boolean }): Promise<void> {
+    await this.reportApplyStatus(snapshot, "loaded", receiptIdFor, options);
   }
 
   public async downloadSkillArtifact(manifest: SkillArtifactManifest): Promise<Uint8Array> {
@@ -69,9 +69,9 @@ export class RuntimeConfigurationClient {
     if (!response.ok) throw new RuntimeConfigurationClientError(`Delivery skill-install-receipts returned HTTP ${response.status}`);
   }
 
-  private async reportApplyStatus(snapshot: RuntimeConfigurationSnapshot, status: ApplyReceipt["status"], receiptIdFor: (releaseId: string) => string): Promise<void> {
+  private async reportApplyStatus(snapshot: RuntimeConfigurationSnapshot, status: ApplyReceipt["status"], receiptIdFor: (releaseId: string) => string, options?: { readonly includeModelRoute?: boolean }): Promise<void> {
     const references = [
-      ...(snapshot.modelRoute === undefined ? [] : [snapshot.modelRoute]),
+      ...(snapshot.modelRoute === undefined || options?.includeModelRoute === false ? [] : [snapshot.modelRoute]),
       ...snapshot.integrations,
       ...snapshot.skills.map(({ releaseId, contentHash }) => ({ releaseId, contentHash })),
       ...snapshot.policies,

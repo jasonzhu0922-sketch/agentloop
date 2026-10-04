@@ -28,7 +28,8 @@ export interface LlmModelSummary {
 
 interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly baseUrl: string;
-  readonly apiKeyEnv: string;
+  readonly apiKey?: string;
+  readonly apiKeyEnv?: string;
   readonly contextWindowTokens: number;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;
@@ -48,7 +49,8 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
 
 interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly baseUrl: string;
-  readonly apiKeyEnv: string;
+  readonly apiKey?: string;
+  readonly apiKeyEnv?: string;
   readonly contextWindowTokens: number;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;
@@ -63,6 +65,7 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly reasoningVisibility: "visible" | "hidden";
   readonly planningThinkingMode?: "enabled" | "disabled";
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
+  readonly providerParameters?: Readonly<Record<string, unknown>>;
   readonly protocol: "chat-completions" | "responses";
 }
 
@@ -76,8 +79,7 @@ interface ParsedProviderDocument {
 /**
  * Server-owned registry for model providers.
  *
- * The JSON configuration defines provider endpoints and the environment
- * variable containing each secret. AgentLoop is a single-agent runtime: the
+ * The JSON configuration defines provider endpoints and credentials. AgentLoop is a single-agent runtime: the
  * server-default provider and model are the only ones used, and no Run input
  * can provide a base URL, key, or other connection setting.
  */
@@ -127,8 +129,8 @@ export class LlmProviderRegistry {
    * Build the registry from an in-memory configuration object with the same
    * schema as the JSON file accepted by {@link fromConfigFile}. Embedded hosts
    * typically source this object from their own configuration service;
-   * `environment` controls how each `apiKeyEnv` reference resolves to a secret,
-   * so keys can come from a KMS or vault cache instead of process.env.
+   * `environment` remains a legacy compatibility source for old apiKeyEnv
+   * documents; new provider documents should store apiKey directly.
    */
   static fromConfigObject(
     config: unknown,
@@ -178,7 +180,7 @@ export class LlmProviderRegistry {
     if (model === undefined) {
       throw new AppError("MODEL_ERROR", `Unknown server-side model key: ${modelKey}`, 400);
     }
-    const apiKey = this.environment[model.apiKeyEnv];
+    const apiKey = model.apiKey ?? (model.apiKeyEnv === undefined ? undefined : this.environment[model.apiKeyEnv]);
     if (apiKey === undefined || apiKey.trim().length === 0) {
       throw new AppError("MODEL_ERROR", `LLM model "${model.key}" is not configured`, 503);
     }
@@ -200,6 +202,7 @@ export class LlmProviderRegistry {
       reasoningVisibility: model.reasoningVisibility,
       ...(model.planningThinkingMode === undefined ? {} : { planningThinkingMode: model.planningThinkingMode }),
       ...(model.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: model.chatTemplateKwargs }),
+      ...(model.providerParameters === undefined ? {} : { providerParameters: model.providerParameters }),
       ...(onRetry === undefined ? {} : { onRetry }),
     };
     return model.protocol === "responses"
@@ -229,13 +232,35 @@ function parseProviderDocument(value: unknown, label: string): ParsedProviderDoc
   const providersRecord = requireObject(document.providers, `${label}.providers`);
   const entries = Object.entries(providersRecord);
   if (entries.length === 0) throw new Error(`${label}.providers must contain at least one provider`);
-  const providers = entries.map(([key, config]) => parseProvider(key, config, label));
+  const providers = entries.map(([key, config]) => {
+    const providerConfig = requireObject(config, `${label}.providers.${key}`);
+    const nestedModels = isObject(providerConfig.models) ? providerConfig.models : undefined;
+    const firstNestedModel = nestedModels === undefined ? undefined : Object.entries(nestedModels)[0];
+    const nestedDefaultModel = firstNestedModel === undefined
+      ? undefined
+      : isObject(firstNestedModel[1]) && typeof firstNestedModel[1].providerModel === "string"
+        ? firstNestedModel[1].providerModel
+        : firstNestedModel[0];
+    return parseProvider(key, config, label, nestedDefaultModel);
+  });
   if (!providers.some((provider) => provider.key === defaultProvider)) {
     throw new Error(`${label}.defaultProvider must name a configured provider`);
   }
-  const models = document.models === undefined
-    ? legacyModelsFromProviders(providers)
-    : parseModels(document.models, providers, label);
+  const nestedModels: Record<string, unknown> = {};
+  for (const [providerKey, providerConfig] of Object.entries(providersRecord)) {
+    if (!requireObject(providerConfig, `${label}.providers.${providerKey}`).models) continue;
+    const providerModels = requireObject(providerConfig, `${label}.providers.${providerKey}`).models;
+    if (!isObject(providerModels)) throw new Error(`${label}.providers.${providerKey}.models must be a JSON object`);
+    for (const [modelKey, modelConfig] of Object.entries(providerModels)) {
+      if (Object.hasOwn(nestedModels, modelKey)) throw new Error(`${label}.models contains duplicate model key ${modelKey}`);
+      nestedModels[modelKey] = { ...requireObject(modelConfig, `${label}.providers.${providerKey}.models.${modelKey}`), providerKey };
+    }
+  }
+  const models = document.models !== undefined
+    ? parseModels(document.models, providers, label)
+    : Object.keys(nestedModels).length > 0
+      ? parseModels(nestedModels, providers, label)
+      : legacyModelsFromProviders(providers);
   const defaultModelKey = document.defaultModelKey === undefined
     ? legacyModelKeyForProvider(providers.find((provider) => provider.key === defaultProvider)!)
     : requireModelKey(document.defaultModelKey, `${label}.defaultModelKey`);
@@ -245,7 +270,7 @@ function parseProviderDocument(value: unknown, label: string): ParsedProviderDoc
   return { defaultProvider, defaultModelKey, providers, models };
 }
 
-function parseProvider(key: string, value: unknown, documentLabel: string): OpenAICompatibleProviderConfig {
+function parseProvider(key: string, value: unknown, documentLabel: string, nestedDefaultModel?: string): OpenAICompatibleProviderConfig {
   const providerKey = requireProviderKey(key, `${documentLabel}.providers key`);
   const label = `LLM provider "${providerKey}"`;
   const config = requireObject(value, label);
@@ -254,7 +279,9 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     [
       "kind",
       "baseUrl",
+      "models",
       "apiKeyEnv",
+      "apiKey",
       "defaultModel",
       "contextWindowTokens",
       "maxOutputTokens",
@@ -278,8 +305,9 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     throw new Error(`${label} has unsupported kind`);
   }
   const baseUrl = requireHttpUrl(config.baseUrl, `${label}.baseUrl`);
-  const apiKeyEnv = requireEnvironmentKey(config.apiKeyEnv, `${label}.apiKeyEnv`);
-  const defaultModel = requireNonEmptyString(config.defaultModel, `${label}.defaultModel`, 160);
+  const apiKey = optionalSecret(config.apiKey, `${label}.apiKey`);
+  const apiKeyEnv = apiKey === undefined ? requireEnvironmentKey(config.apiKeyEnv, `${label}.apiKeyEnv`) : optionalEnvironmentKey(config.apiKeyEnv, `${label}.apiKeyEnv`);
+  const defaultModel = requireNonEmptyString(config.defaultModel ?? nestedDefaultModel, `${label}.defaultModel`, 160);
   const contextWindowTokens = optionalInteger(
     config.contextWindowTokens,
     128_000,
@@ -347,7 +375,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     key: providerKey,
     kind: "openai-compatible",
     baseUrl,
-    apiKeyEnv,
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     defaultModel,
     contextWindowTokens,
     maxOutputTokens,
@@ -388,12 +417,11 @@ function parseModel(
   const modelKey = requireModelKey(key, `${documentLabel}.models key`);
   const label = `LLM model "${modelKey}"`;
   const config = requireObject(value, label);
-  assertExactKeys(
-    config,
-    [
+  const knownModelKeys = [
       "providerKey",
       "providerModel",
       "displayName",
+      "apiKey",
       "contextWindowTokens",
       "maxOutputTokens",
       "timeoutMs",
@@ -409,9 +437,8 @@ function parseModel(
       "planningThinkingMode",
       "chatTemplateKwargs",
       "protocol",
-    ],
-    label,
-  );
+    ];
+  const providerParameters = collectProviderParameters(config, knownModelKeys, label);
   const providerKey = requireProviderKey(config.providerKey, `${label}.providerKey`);
   const provider = providersByKey.get(providerKey);
   if (provider === undefined) throw new Error(`${label}.providerKey must name a configured provider`);
@@ -472,7 +499,8 @@ function parseModel(
     providerModel,
     kind: provider.kind,
     baseUrl: provider.baseUrl,
-    apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.apiKey === undefined ? {} : { apiKey: provider.apiKey }),
+    ...(provider.apiKeyEnv === undefined ? {} : { apiKeyEnv: provider.apiKeyEnv }),
     contextWindowTokens,
     maxOutputTokens: optionalInteger(
       config.maxOutputTokens,
@@ -501,8 +529,29 @@ function parseModel(
     reasoningVisibility,
     ...(planningThinkingMode === undefined ? {} : { planningThinkingMode }),
     ...(chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs }),
+    ...(providerParameters === undefined ? {} : { providerParameters }),
     protocol,
   };
+}
+
+function collectProviderParameters(
+  config: Record<string, unknown>,
+  knownKeys: readonly string[],
+  label: string,
+): Readonly<Record<string, unknown>> | undefined {
+  const reservedRequestKeys = new Set([
+    "model", "messages", "input", "instructions", "tools", "tool_choice", "max_tokens",
+    "max_output_tokens", "stream", "thinking", "reasoning", "chat_template_kwargs",
+  ]);
+  const parameters = Object.fromEntries(Object.entries(config).filter(([key]) => !knownKeys.includes(key) && !reservedRequestKeys.has(key)));
+  if (Object.keys(parameters).length === 0) return undefined;
+  assertJsonValue(parameters, `${label} provider parameters`);
+  let serialized: string | undefined;
+  try { serialized = JSON.stringify(parameters); } catch { serialized = undefined; }
+  if (serialized === undefined || serialized.length > 16_384) {
+    throw new Error(`${label} provider parameters must be JSON serializable and at most 16384 characters`);
+  }
+  return JSON.parse(serialized) as Readonly<Record<string, unknown>>;
 }
 
 function legacyModelsFromProviders(
@@ -546,6 +595,20 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function assertJsonValue(value: unknown, label: string): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number" && Number.isFinite(value)) return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertJsonValue(item, `${label}[${index}]`));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    Object.entries(value as Record<string, unknown>).forEach(([key, item]) => assertJsonValue(item, `${label}.${key}`));
+    return;
+  }
+  throw new Error(`${label} must contain only JSON values`);
+}
+
 function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const invalid = Object.keys(value).filter((key) => !allowed.includes(key));
   if (invalid.length > 0) throw new Error(`${label} contains unsupported fields: ${invalid.join(", ")}`);
@@ -567,6 +630,21 @@ function requireEnvironmentKey(value: unknown, label: string): string {
   const key = requireNonEmptyString(value, label, 128);
   if (!ENVIRONMENT_KEY_PATTERN.test(key)) throw new Error(`${label} must be an environment-variable name`);
   return key;
+}
+
+function optionalEnvironmentKey(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  return requireEnvironmentKey(value, label);
+}
+
+function optionalSecret(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  const key = requireNonEmptyString(value, label, 16_384);
+  return key;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function requireHttpUrl(value: unknown, label: string): string {

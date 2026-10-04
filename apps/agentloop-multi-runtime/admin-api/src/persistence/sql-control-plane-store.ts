@@ -1,11 +1,12 @@
 import type { SqlConnection } from "@zhujun/agentloop";
 import type {
-  AdminMember, ApplyReceipt, AuditEvent, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand,
+  AdminMember, AdminMemberRole, AdminUser, AdminUserStatus, ApplyReceipt, AuditEvent, ControlPlaneResource, CreateTargetAssignmentCommand, PublishReleaseCommand, RecordApplyReceiptCommand, RecordSkillInstallReceiptCommand,
   ResourceRelease, TargetAssignment, TransitionReleaseCommand,
 } from "../../../control-plane/contracts/index.ts";
 import { assertAssignmentShape, assertNoAssignmentConflict, ControlPlaneError, transitionRelease } from "../../../control-plane/domain/index.ts";
 import type { ConfigurationSnapshotRepositoryPort, ControlPlaneWritePort, SkillArtifactMetadata } from "../../../control-plane/domain/ports.ts";
-import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort } from "../application/admin-ports.ts";
+import type { AdminAuditPort, AdminCatalogPort, AdminIdentityPort, AdminUserDirectoryPort } from "../application/admin-ports.ts";
+import type { AdminUserCredential, AdminUserCredentialPort } from "../authorization/ports.ts";
 
 type ResourceRow = { id: string; kind: ResourceRelease["kind"]; revision: number | string | bigint };
 type ReleaseRow = {
@@ -19,9 +20,10 @@ type AssignmentRow = {
 };
 type MemberRow = { id: string; scope_id: string; subject: string; display_name: string; role: AdminMember["role"]; status: AdminMember["status"]; revision: number | string | bigint; created_at: number | string | bigint; updated_at: number | string | bigint };
 type AuditEventRow = { id: string; actor_id: string; action: string; resource_id: string; release_id: string | null; before_ref: string | null; after_ref: string | null; created_at: number | string | bigint };
+type AdminUserRow = { id: string; username: string; display_name: string; scope_id: string | null; role: AdminMemberRole; status: AdminUserStatus; password_hash: string; revision: number | string | bigint; last_login_at: number | string | bigint | null; created_at: number | string | bigint; updated_at: number | string | bigint };
 
 /** SQL adapter for the Admin-owned cp_* tables. It never queries or writes mr_* or Runtime tables. */
-export class SqlControlPlaneStore implements ControlPlaneWritePort, ConfigurationSnapshotRepositoryPort, AdminIdentityPort, AdminAuditPort, AdminCatalogPort {
+export class SqlControlPlaneStore implements ControlPlaneWritePort, ConfigurationSnapshotRepositoryPort, AdminIdentityPort, AdminAuditPort, AdminCatalogPort, AdminUserDirectoryPort, AdminUserCredentialPort {
   private readonly database: SqlConnection;
 
   public constructor(database: SqlConnection) { this.database = database; }
@@ -184,6 +186,75 @@ export class SqlControlPlaneStore implements ControlPlaneWritePort, Configuratio
     return rows.map(memberFromRow);
   }
 
+  public async listAdminUsers(): Promise<readonly AdminUser[]> {
+    const rows = await this.database.prepare("SELECT id, username, display_name, scope_id, role, status, password_hash, revision, last_login_at, created_at, updated_at FROM cp_admin_users ORDER BY username").all<AdminUserRow>();
+    return rows.map(adminUserFromRow);
+  }
+
+  public async findAdminUserCredential(username: string): Promise<AdminUserCredential | undefined> {
+    const row = await this.database.prepare("SELECT id, username, display_name, scope_id, role, status, password_hash, revision, last_login_at, created_at, updated_at FROM cp_admin_users WHERE username = ?").get<AdminUserRow>(username);
+    if (row === undefined) return undefined;
+    return { userId: row.id, username: row.username, displayName: row.display_name, role: row.role, ...(row.scope_id === null ? {} : { scopeId: row.scope_id }), status: row.status, passwordHash: row.password_hash };
+  }
+
+  public async recordAdminUserLogin(userId: string, observedAt: number): Promise<void> {
+    await this.database.prepare("UPDATE cp_admin_users SET last_login_at = ? WHERE id = ? AND status = 'active'").run(observedAt, userId);
+  }
+
+  public async createAdminUser(input: { readonly user: AdminUser; readonly passwordHash: string; readonly expectedRevision: number; readonly actorId: string; readonly auditEventId: string }): Promise<AdminUser> {
+    if (input.expectedRevision !== 0 || input.user.revision !== 1) throw new ControlPlaneError("revision_conflict", "New Admin users require revision zero and start at revision one");
+    if (input.user.username.trim() === "" || input.passwordHash.trim() === "") throw new ControlPlaneError("invalid_contract", "Admin username and password hash are required");
+    const duplicate = await this.database.prepare("SELECT id FROM cp_admin_users WHERE id = ? OR username = ?").get<{ id: string }>(input.user.userId, input.user.username);
+    if (duplicate !== undefined) throw new ControlPlaneError("duplicate_release", `Admin user ${input.user.username} already exists`);
+    await this.database.transaction(async () => {
+      await this.database.prepare("INSERT INTO cp_admin_users(id, username, display_name, scope_id, role, status, password_hash, revision, last_login_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)")
+        .run(input.user.userId, input.user.username, input.user.displayName, input.user.scopeId ?? null, input.user.role, input.user.status, input.passwordHash, input.user.revision, input.user.createdAt, input.user.updatedAt);
+      await this.audit(input.auditEventId, input.actorId, "admin-user.created", input.user.userId, undefined, undefined, input.user.userId, input.user.createdAt);
+    });
+    return input.user;
+  }
+
+  public async updateAdminUser(input: { readonly userId: string; readonly displayName: string; readonly scopeId?: string; readonly role: AdminMemberRole; readonly expectedRevision: number; readonly actorId: string; readonly auditEventId: string }): Promise<AdminUser> {
+    const current = await this.database.prepare("SELECT id, username, display_name, scope_id, role, status, password_hash, revision, last_login_at, created_at, updated_at FROM cp_admin_users WHERE id = ?").get<AdminUserRow>(input.userId);
+    if (current === undefined) throw new ControlPlaneError("invalid_contract", `Unknown Admin user ${input.userId}`);
+    if (asNumber(current.revision) !== input.expectedRevision) throw revisionConflict(input.userId, input.expectedRevision, asNumber(current.revision));
+    const now = Date.now();
+    const next = { ...adminUserFromRow(current), displayName: input.displayName, role: input.role, ...(input.scopeId === undefined ? {} : { scopeId: input.scopeId }), revision: input.expectedRevision + 1, updatedAt: now } satisfies AdminUser;
+    await this.database.transaction(async () => {
+      await this.database.prepare("UPDATE cp_admin_users SET display_name = ?, scope_id = ?, role = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
+        .run(next.displayName, next.scopeId ?? null, next.role, next.revision, now, input.userId, input.expectedRevision);
+      await this.audit(input.auditEventId, input.actorId, "admin-user.updated", input.userId, undefined, String(input.expectedRevision), String(next.revision), now);
+    });
+    return next;
+  }
+
+  public async transitionAdminUser(input: { readonly userId: string; readonly status: AdminUserStatus; readonly expectedRevision: number; readonly actorId: string; readonly auditEventId: string }): Promise<AdminUser> {
+    const current = await this.database.prepare("SELECT id, username, display_name, scope_id, role, status, password_hash, revision, last_login_at, created_at, updated_at FROM cp_admin_users WHERE id = ?").get<AdminUserRow>(input.userId);
+    if (current === undefined) throw new ControlPlaneError("invalid_contract", `Unknown Admin user ${input.userId}`);
+    if (asNumber(current.revision) !== input.expectedRevision) throw revisionConflict(input.userId, input.expectedRevision, asNumber(current.revision));
+    if (!adminUserStatusTransition(current.status, input.status)) throw new ControlPlaneError("invalid_release_transition", `Cannot transition Admin user ${input.userId} from ${current.status} to ${input.status}`);
+    const now = Date.now();
+    const next = { ...adminUserFromRow(current), status: input.status, revision: input.expectedRevision + 1, updatedAt: now } satisfies AdminUser;
+    await this.database.transaction(async () => {
+      await this.database.prepare("UPDATE cp_admin_users SET status = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?").run(input.status, next.revision, now, input.userId, input.expectedRevision);
+      await this.audit(input.auditEventId, input.actorId, "admin-user.transitioned", input.userId, undefined, current.status, input.status, now);
+    });
+    return next;
+  }
+
+  public async setAdminUserPassword(input: { readonly userId: string; readonly passwordHash: string; readonly expectedRevision: number; readonly actorId: string; readonly auditEventId: string }): Promise<AdminUser> {
+    const current = await this.database.prepare("SELECT id, username, display_name, scope_id, role, status, password_hash, revision, last_login_at, created_at, updated_at FROM cp_admin_users WHERE id = ?").get<AdminUserRow>(input.userId);
+    if (current === undefined) throw new ControlPlaneError("invalid_contract", `Unknown Admin user ${input.userId}`);
+    if (asNumber(current.revision) !== input.expectedRevision) throw revisionConflict(input.userId, input.expectedRevision, asNumber(current.revision));
+    const now = Date.now();
+    const next = { ...adminUserFromRow(current), revision: input.expectedRevision + 1, updatedAt: now } satisfies AdminUser;
+    await this.database.transaction(async () => {
+      await this.database.prepare("UPDATE cp_admin_users SET password_hash = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?").run(input.passwordHash, next.revision, now, input.userId, input.expectedRevision);
+      await this.audit(input.auditEventId, input.actorId, "admin-user.password-reset", input.userId, undefined, undefined, String(next.revision), now);
+    });
+    return next;
+  }
+
   public async createMember(member: AdminMember, expectedRevision: number, actorId: string, auditEventId: string): Promise<AdminMember> {
     if (expectedRevision !== 0 || member.revision !== 1) throw new ControlPlaneError("revision_conflict", "New members require revision zero and start at revision one");
     await this.database.transaction(async () => {
@@ -254,6 +325,21 @@ function releaseFromRow(row: ReleaseRow): ResourceRelease {
 
 function memberFromRow(row: MemberRow): AdminMember {
   return { contractVersion: "control-plane/v1", memberId: row.id, scopeId: row.scope_id, subject: row.subject, displayName: row.display_name, role: row.role, status: row.status, revision: asNumber(row.revision), createdAt: asNumber(row.created_at), updatedAt: asNumber(row.updated_at) };
+}
+
+function adminUserFromRow(row: AdminUserRow): AdminUser {
+  return {
+    contractVersion: "control-plane/v1", userId: row.id, username: row.username, displayName: row.display_name,
+    ...(row.scope_id === null ? {} : { scopeId: row.scope_id }), role: row.role, status: row.status,
+    revision: asNumber(row.revision), createdAt: asNumber(row.created_at), updatedAt: asNumber(row.updated_at),
+    ...(row.last_login_at === null ? {} : { lastLoginAt: asNumber(row.last_login_at) }),
+  };
+}
+
+function adminUserStatusTransition(from: AdminUserStatus, to: AdminUserStatus): boolean {
+  if (from === to) return false;
+  return from === "active" ? to === "suspended" || to === "removed"
+    : from === "suspended" ? to === "active" || to === "removed" : false;
 }
 
 function memberStatusTransition(from: AdminMember["status"], to: AdminMember["status"]): boolean {

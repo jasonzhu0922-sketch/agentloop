@@ -203,6 +203,88 @@ export interface RuntimeRunEvent {
   readonly createdAt: number;
 }
 
+/** Read-only Host projection used by operations surfaces. Outcome is canonical; artifacts never imply success. */
+export interface RuntimeRunOperationsProjection {
+  readonly schema: "agentloop.hostRun/v1";
+  readonly run: {
+    readonly id: string;
+    readonly status: "running" | "completed" | "failed" | "cancelled";
+    readonly input?: string;
+    readonly modelKey?: string;
+    readonly output?: string;
+    readonly errorCode?: string;
+    readonly finishedAt?: number;
+    readonly createdAt: number;
+    readonly conversationId?: string;
+  };
+  readonly outcome?: {
+    readonly schema: "agentloop.hostOutcome/v1";
+    readonly status: string;
+    readonly reasonCode: string;
+    readonly planId?: string;
+    readonly output?: string;
+    readonly committedAt: number;
+  };
+  readonly plan: {
+    readonly state: "pending" | "available" | "unavailable";
+    readonly id: string;
+    readonly version: number;
+    readonly status: string;
+    readonly goal: string;
+    readonly selectedSkillIds: readonly string[];
+    readonly steps: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly objective: string;
+      readonly dependencies: readonly string[];
+      readonly skillIds: readonly string[];
+      readonly requiredCapabilities: readonly string[];
+      readonly output?: string;
+      readonly error?: string;
+    }[];
+    readonly assessmentCount: number;
+    readonly approvedAssessmentCount: number;
+  };
+  readonly artifacts: readonly RuntimeArtifact[];
+  readonly eventCursor: { readonly lastSeq: number };
+}
+
+/** Router-owned task summary enriched with the latest assignment and persisted turn projection. */
+export interface RouterRunSummary {
+  readonly id: string;
+  readonly input?: string;
+  readonly status: "queued" | "running" | "completed" | "failed" | "cancelled" | "unknown";
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly assignmentId?: string;
+  readonly remoteRunId?: string;
+  readonly runtimeId?: string;
+  readonly runtimeName?: string;
+  readonly modelKey?: string;
+  readonly output?: string;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+  readonly artifactCount?: number;
+  readonly planState?: RuntimeRunOperationsProjection["plan"]["state"];
+  readonly planStepCount?: number;
+}
+
+export interface RouterRunPage {
+  readonly items: readonly RouterRunSummary[];
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+  readonly pageCount: number;
+}
+
+export interface RouterRunDetail extends RouterRunSummary {
+  readonly plan?: RuntimeRunOperationsProjection["plan"];
+  readonly outcome?: RuntimeRunOperationsProjection["outcome"];
+  readonly artifacts: readonly RuntimeArtifact[];
+  readonly eventCursor?: { readonly lastSeq: number };
+  readonly missingBoundaries: readonly ("router" | "runtime")[];
+}
+
 /** Public model metadata. Provider credentials and upstream model names stay on the Host. */
 export interface RuntimeModelSummary {
   readonly key: string;
@@ -213,6 +295,7 @@ export interface RuntimeEndpoint {
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
   getRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
+  hostRun?(remoteRunId: string): Promise<RuntimeRunOperationsProjection>;
   artifacts?(remoteRunId: string): Promise<readonly RuntimeArtifact[]>;
   readArtifact?(remoteRunId: string, artifactId: string): Promise<{ readonly artifact: RuntimeArtifact; readonly content: Uint8Array }>;
   previewArtifact?(remoteRunId: string, artifactId: string): Promise<RuntimeArtifactPreview>;

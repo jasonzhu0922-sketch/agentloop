@@ -259,6 +259,7 @@ export interface DeviceCredentialEnvelope {
 
 export const CONTROL_PLANE_ERROR_CODES = [
   "configuration_unavailable",
+  "runtime_operation_not_configured",
   "invalid_contract",
   "invalid_scope",
   "scope_conflict",

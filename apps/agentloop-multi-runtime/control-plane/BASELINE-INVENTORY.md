@@ -1,6 +1,6 @@
 # WP-0 baseline inventory
 
-This is a path-and-consumer inventory, not a configuration import. No `.env` file, secret value, local deployment configuration, or Kubernetes Secret was read. The hashes below cover only tracked, credential-free JSON templates/configuration files; deployment-owned values remain deliberately uninspected.
+This is a path-and-consumer inventory. Admin bootstrap may read the deployment-owned provider document as non-secret model metadata; no `.env` file, secret value, or Kubernetes Secret is read. The hashes below cover only tracked, credential-free JSON templates/configuration files; deployment-owned values remain deliberately uninspected.
 
 | Baseline source | SHA-256 | Current consumers | Intended future target |
 | --- | --- | --- | --- |
@@ -12,7 +12,7 @@ This is a path-and-consumer inventory, not a configuration import. No `.env` fil
 
 ## Deployment-owned sources intentionally not inspected
 
-- `config/llm-providers.json` and `local-agent-runtime/config/llm-providers.json`: local/deployment-owned provider documents; this work package neither reads nor hashes them.
+- `config/llm-providers.json` and `local-agent-runtime/config/llm-providers.json`: deployment-owned provider documents. Runtime file mode reads them directly; Admin bootstrap reads only the configured cloud document to create the initial model-route Draft and never reads credential values.
 - Runtime environment file resolved by `LOCAL_AGENT_RUNTIME_ENV_FILE` (default `.env` beneath the Local Agent runtime data root): its path is passed to `ENTERPRISE_INFO_ENV_FILE` and `STEEL_MARKET_DB_ENV_FILE`; its contents were not read.
 - Cloud Host `STEEL_MARKET_DB_ENV_FILE` (defaults to `./.env`): path only, contents not read. WP-4 removed the Cloud Host `ENTERPRISE_INFO_ENV_FILE` child-process path; its historical deployment file was not read.
 - `custom-skills/mysql-steel-data/.env.example`: credential-free template. Any corresponding `.env` is deployment-owned and was not read.

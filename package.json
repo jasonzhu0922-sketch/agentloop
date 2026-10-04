@@ -2,6 +2,7 @@
   "name": "agentloop-monorepo",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "AgentLoop monorepo: @zhujun/agentloop kernel package + agentloop-app reference application",
   "engines": {
