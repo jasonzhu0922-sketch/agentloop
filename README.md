@@ -1,5 +1,10 @@
 # AgentLoop
 
+AgentLoop source code is licensed under the [Apache License 2.0](LICENSE).
+Earlier releases may remain available under their original licenses; see
+[`LICENSING.md`](LICENSING.md) for the migration boundary and third-party
+license details.
+
 AgentLoop 是一个 Plan-first 的单 Agent Runtime。它把用户任务先转成结构化 Plan，再按 Step 调度 Skill、Tool、Evidence、Assessment 和 Terminal Committer；模型文本、Tool 成功、文件存在或 UI 事件本身都不能单独判定任务完成。
 
 当前仓库是 npm workspaces monorepo：

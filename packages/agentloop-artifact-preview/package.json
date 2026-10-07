@@ -2,6 +2,7 @@
   "name": "@zhujun/agentloop-artifact-preview",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Framework-neutral, format-aware AgentLoop artifact preview",
   "exports": {
