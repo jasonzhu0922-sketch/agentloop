@@ -10,8 +10,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AppDatabase, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import type { ModelAdapter, ModelInvocation, ModelResponse, Planner } from "@zhujun/agentloop";
-import { AgentLoopRuntimeHost } from "../src/runtime/runtime-host.ts";
-import { createRuntimeHostHttpServer } from "../src/http/runtime-host-http.ts";
+import { AgentLoopRuntimeHost } from "../src/runtime-host/application/runtime-host.ts";
+import { createRuntimeHostHttpServer } from "../src/runtime-host/transport/http.ts";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const live = process.argv.includes("--live");

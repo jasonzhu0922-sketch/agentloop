@@ -135,6 +135,173 @@ test("ContextAssembler carries bounded tool-provided delivery facts with the dur
   assert.equal(deliveryFacts?.facts?.observations?.length, 24);
 });
 
+test("ContextAssembler carries existing Result selectors for file continuation without creating a second identity", async () => {
+  const readResultId = "rr_11111111-1111-4111-8111-111111111111";
+  const writeResultId = "rr_22222222-2222-4222-8222-222222222222";
+  const contentReference = {
+    schema: "agentloop.contentReferenceRead/v1",
+    resultRef: { schema: "agentloop.resultRef/v1", resultId: readResultId },
+    contentLocation: {
+      kind: "content_addressed",
+      path: "scripts/build.py",
+      sha256: "a".repeat(64),
+      bytes: 9_584,
+      characters: 9_584,
+    },
+    characterOffset: 3_600,
+    returnedCharacters: 3_800,
+    nextCharacterOffset: 7_400,
+    complete: false,
+    content: "source window",
+  };
+  const writeReceipt = {
+    schema: "agentloop.artifactReceipt/v1",
+    receiptId: "receipt-write-1",
+    sourceTool: "computer_write_file",
+    artifact: {
+      path: "scripts/build.py",
+      bytes: 9_584,
+      characters: 9_584,
+      sha256: "b".repeat(64),
+    },
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-result-selectors",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model: {
+      limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+      complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+    },
+  });
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "read", name: "computer_read_file", arguments: { path: "scripts/build.py", characterOffset: 3_600, characterLimit: 3_800 } }] },
+    { role: "tool", toolCallId: "read", name: "computer_read_file", content: JSON.stringify(contentReference), isError: false },
+    { role: "assistant", content: "", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "scripts/build.py", mode: "append" } }] },
+    { role: "tool", toolCallId: "write", name: "computer_write_file", content: JSON.stringify({
+      resultRef: { schema: "agentloop.resultRef/v1", resultId: writeResultId },
+      path: "scripts/build.py",
+      revisionId: "rev_33333333333333333333333333333333",
+      artifactReceipt: writeReceipt,
+    }), isError: false },
+  ], []);
+  const runtimeContext = assembly.runtimeContext.content;
+  const contextMatch = runtimeContext.match(/<runtime_result_context source="server">\n([\s\S]+?)\n<\/runtime_result_context>/);
+  assert.ok(contextMatch);
+  const context = JSON.parse(contextMatch[1]) as {
+    schema: string;
+    results: Array<{ result: { resultId: string }; selectors?: Array<Record<string, unknown>> }>;
+    readProtocol: string;
+  };
+  assert.equal(context.schema, "agentloop.resultContext/v1");
+  assert.match(context.readProtocol, /existing Result identity/);
+  assert.match(context.readProtocol, /nextCharacterOffset/);
+  const readEntry = context.results.find((entry) => entry.result.resultId === readResultId);
+  assert.deepEqual(readEntry?.selectors, [{
+    path: "scripts/build.py",
+    sha256: "a".repeat(64),
+    characterOffset: 3_600,
+    returnedCharacters: 3_800,
+    nextCharacterOffset: 7_400,
+    complete: false,
+  }]);
+  const writeEntry = context.results.find((entry) => entry.result.resultId === writeResultId);
+  assert.deepEqual(writeEntry?.selectors, [{
+    path: "scripts/build.py",
+    revisionId: "rev_33333333333333333333333333333333",
+    sha256: "b".repeat(64),
+    bytes: 9_584,
+    characters: 9_584,
+  }]);
+});
+
+test("ContextAssembler preserves the existing file Result navigation after compaction", async () => {
+  const resultId = "rr_33333333-3333-4333-8333-333333333333";
+  const readResult = JSON.stringify({
+    schema: "agentloop.contentReferenceRead/v1",
+    resultRef: { schema: "agentloop.resultRef/v1", resultId },
+    contentLocation: {
+      kind: "content_addressed",
+      path: "src/song.py",
+      sha256: "c".repeat(64),
+      bytes: 18_000,
+      characters: 18_000,
+    },
+    characterOffset: 6_000,
+    returnedCharacters: 6_000,
+    nextCharacterOffset: 12_000,
+    complete: false,
+    content: "window",
+  });
+  const messages: ModelMessage[] = [
+    { role: "assistant", content: "", toolCalls: [{ id: "read-source", name: "computer_read_file", arguments: { path: "src/song.py", characterOffset: 6_000, characterLimit: 6_000 } }] },
+    { role: "tool", toolCallId: "read-source", name: "computer_read_file", content: readResult, isError: false },
+  ];
+  for (let index = 0; index < 8; index += 1) {
+    messages.push(
+      { role: "assistant", content: `inspection ${index}`, toolCalls: [{ id: `inspect-${index}`, name: "inspect", arguments: { index } }] },
+      { role: "tool", toolCallId: `inspect-${index}`, name: "inspect", content: "inspection output ".repeat(500), isError: false },
+    );
+  }
+  const events: RuntimeEvent[] = [];
+  const assembler = new ContextAssembler({
+    runId: "run-result-selector-compaction",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model: {
+      limits: { contextWindowTokens: 8_000, maxOutputTokens: 2_048 },
+      complete: async (request) => {
+        assert.equal(request.phase, "compaction");
+        return {
+          content: [
+            "## Goal\nContinue the admitted step.",
+            "## Progress\n### Done\n- Source window read.",
+            "## Evidence\n- Canonical ToolResult remains persisted.",
+            "## Next Steps\n1. Continue from the next character offset.",
+            "## Critical Context\n- src/song.py has more content at offset 12000.",
+          ].join("\n"),
+          toolCalls: [],
+          finishReason: "stop",
+          usage: { inputTokens: 200, outputTokens: 80 },
+        };
+      },
+    },
+    policy: {
+      outputReserveTokens: 2_000,
+      safetyMarginTokens: 500,
+      proactiveCompactionTokens: 2_500,
+      preserveRecentTokens: 1_000,
+      pruneProtectTokens: 1_000,
+      largeToolResultProjectionCharacters: 100_000,
+      largeToolResultPreviewCharacters: 2_000,
+    },
+    emit: async (event) => { events.push(event); },
+  });
+
+  const firstAssembly = await assembler.assemble(messages, []);
+  assert.ok(events.some((event) => event.type === "context.compacted"));
+  assert.ok(firstAssembly.contextEpoch > 0);
+
+  const secondAssembly = await assembler.assemble(messages, []);
+  const match = secondAssembly.runtimeContext.content.match(/<runtime_result_context source="server">\n([\s\S]+?)\n<\/runtime_result_context>/);
+  assert.ok(match);
+  const context = JSON.parse(match[1]) as {
+    schema: string;
+    results: Array<{ result: { resultId: string }; selectors?: Array<Record<string, unknown>> }>;
+  };
+  assert.equal(context.schema, "agentloop.resultContext/v1");
+  const entries = context.results.filter((entry) => entry.result.resultId === resultId);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0]?.selectors, [{
+    path: "src/song.py",
+    sha256: "c".repeat(64),
+    characterOffset: 6_000,
+    returnedCharacters: 6_000,
+    nextCharacterOffset: 12_000,
+    complete: false,
+  }]);
+});
+
 test("ContextAssembler bounds oversized tool-provided delivery facts", async () => {
   const toolResult = JSON.stringify({
     schema: "example.computedResult/v1",
@@ -1128,6 +1295,32 @@ test("ContextAssembler retries a length-truncated summary without accepting part
   assert.doesNotMatch(assembly.runtimeContext.content, /partial content/);
 });
 
+test("ContextAssembler falls back deterministically when the summarizer returns an unstructured refusal", async () => {
+  const requests: ModelInvocation[] = [];
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 20_000, maxOutputTokens: 16_384 },
+    complete: async (request) => {
+      requests.push(request);
+      return { content: "I cannot summarize this conversation.", toolCalls: [], finishReason: "stop" };
+    },
+  };
+  const assembler = new ContextAssembler({
+    runId: "run-summary-invalid-fallback",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model,
+  });
+  const assembly = await assembler.assemble([
+    { role: "user", content: "统计绩效分布并返回前三名\n" + "source ".repeat(7_000) },
+    { role: "assistant", content: "已读取表格，等待聚合" },
+  ], []);
+
+  assert.ok(requests.length >= 2);
+  assert.match(assembly.runtimeContext.content, /## Goal/);
+  assert.match(assembly.runtimeContext.content, /统计绩效分布并返回前三名/);
+  assert.doesNotMatch(assembly.runtimeContext.content, /I cannot summarize/);
+});
+
 test("ContextAssembler skips failed proactive compaction when context still fits the model", async () => {
   const requests: ModelInvocation[] = [];
   const events: RuntimeEvent[] = [];
@@ -1313,6 +1506,43 @@ test("ContextAssembler applies step prompt projection thresholds to large ToolRe
   assert.match(projectedTool?.content ?? "", /previewCharacters=12/);
   assert.match(projectedTool?.content ?? "", /abcdef012345/);
   assert.doesNotMatch(projectedTool?.content ?? "", /abcdef0123456789/);
+});
+
+test("ContextAssembler expands the default projection when the model has input headroom", async () => {
+  const events: RuntimeEvent[] = [];
+  const context = new ContextAssembler({
+    runId: "run-adaptive-projection",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model: {
+      limits: { contextWindowTokens: 128_000, maxOutputTokens: 16_384 },
+      complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+    },
+    emit: async (event) => { events.push(event); },
+  });
+  context.setPromptProjectionPolicy({
+    schema: "agentloop.promptProjectionPolicy/v1",
+    policyId: "agentloop.defaultPromptProjectionPolicy/v1",
+    mode: "action_aware",
+    instruction: "adapt",
+    adaptive: true,
+    largeToolResultProjectionCharacters: 2_048,
+    largeToolResultPreviewCharacters: 800,
+  });
+  const largeResult = "记录：".repeat(7_000);
+  const messages: ModelMessage[] = [
+    { role: "assistant", content: "", toolCalls: [{ id: "adaptive-call", name: "large_tool", arguments: {} }] },
+    { role: "tool", toolCallId: "adaptive-call", name: "large_tool", content: largeResult, isError: false },
+  ];
+
+  const assembly = await context.assemble(messages, []);
+  const projectedTool = assembly.messages.find((message) => message.role === "tool");
+  assert.notEqual(projectedTool?.content, largeResult);
+  const projectionEvent = events.find((event) => event.type === "context.tool_outputs_projected");
+  assert.ok(projectionEvent);
+  assert.equal(projectionEvent.data.adaptive, true);
+  assert.ok((projectionEvent.data.thresholdCharacters as number) > 2_048);
+  assert.ok((projectionEvent.data.previewCharacters as number) > 800);
 });
 
 test("the Loop prunes old Tool output, compacts complete exchanges, and reloads a Skill whose body left the tail", async () => {

@@ -67,6 +67,62 @@ test("practice profiles select deterministic, bounded guidance from Runtime task
   assert.doesNotMatch(context, /Identify sheets, headers, ranges, and coverage before analysis/);
 });
 
+test("presentation practice guidance is selected by the resolved presentation artifact", () => {
+  const task = understandTask({
+    objective: "制作一份面向管理层的产品路线图 PPTX",
+    toolNames: ["computer_write_file", "verify_artifact_acceptance"],
+  });
+  assert.equal(task.deliverable.kind, "presentation");
+  assert.equal(task.deliverable.surface, "workspace_artifact");
+  assert.equal(task.operationProfiles.includes("artifact_build"), true);
+
+  const catalog: PracticeProfileCatalog = {
+    schema: "agentloop.practiceProfileCatalog/v1",
+    mode: "active",
+    profiles: [{
+      schema: "agentloop.practiceProfile/v1",
+      id: "presentation-production",
+      version: "1.0.0",
+      appliesTo: {
+        operationProfiles: ["artifact_build"],
+        artifactKinds: ["presentation"],
+      },
+      guidance: {
+        instructions: [
+          "State the audience, purpose, slide-count assumption, and source boundary before authoring.",
+          "Give every slide one speakable conclusion and choose a content-appropriate layout family.",
+          "Use editable text, shapes, charts, and images instead of a full-slide screenshot.",
+          "Inspect and accept the generated PPTX, then check every slide for overflow, overlap, contrast, and readability.",
+        ],
+        antiPatterns: [
+          "Do not substitute an HTML page for the requested PPTX.",
+          "Do not invent data or treat stdout as delivery evidence.",
+        ],
+      },
+    }],
+  };
+
+  const selected = resolvePracticeProfiles(catalog, task);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0]?.id, "presentation-production");
+  const prompt = buildDynamicSystemPrompt({
+    phase: "execution",
+    baseInstructions: ["Build the current artifact."],
+    contractLines: ["Runtime retains authority."],
+    taskProfile: buildTaskProfile({
+      phase: "execution",
+      intent: "execute",
+      artifactKind: task.deliverable.kind,
+      artifactAction: task.deliverable.action,
+      deliverySurface: task.deliverable.surface,
+      practices: selected,
+    }),
+  });
+  assert.match(prompt, /State the audience, purpose, slide-count assumption/);
+  assert.match(prompt, /Do not substitute an HTML page/);
+  assert.match(prompt, /Runtime owns authorization, evidence, assessment, Plan progression, and terminal completion/);
+});
+
 test("practice profile selection fails closed for unsupported authority-like configuration", () => {
   const task = understandTask({ objective: "分析数据", toolNames: [] });
   assert.throws(() => resolvePracticeProfiles({

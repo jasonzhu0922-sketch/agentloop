@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "../local-agent-runtime/src/runtime-configuration.ts";
+import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "../local-agent-runtime/src/config/runtime-configuration.ts";
 
 test("Local Agent uses its top-level source configuration in development and device storage when packaged", () => {
   const configuration = localAgentRuntimeConfiguration("/application", "/device-data", {});
@@ -11,6 +11,7 @@ test("Local Agent uses its top-level source configuration in development and dev
   assert.equal(configuration.environmentFile, "/application/local-agent-runtime/.env");
   assert.deepEqual(configuration.computerCommandEnvironment, {
     ENTERPRISE_INFO_ENV_FILE: "/application/local-agent-runtime/.env",
+    API_QUERY_ENV_FILE: "/application/local-agent-runtime/.env",
     STEEL_MARKET_DB_ENV_FILE: "/application/local-agent-runtime/.env",
   });
 

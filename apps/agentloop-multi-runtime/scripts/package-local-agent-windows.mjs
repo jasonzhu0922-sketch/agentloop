@@ -60,7 +60,7 @@ process.stdout.write(`Built ${msi} (${seaInjected ? "Node SEA" : "bundled Node f
 
 async function buildAgentBundles() {
   const common = {
-    entryPoints: [join(appRoot, "local-agent-runtime/src/local-agent-main.ts")],
+    entryPoints: [join(appRoot, "local-agent-runtime/src/main.ts")],
     bundle: true,
     platform: "node",
     target: "node26",

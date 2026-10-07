@@ -200,7 +200,15 @@ export interface ModelAdapter {
     contextWindowTokens: number;
     maxOutputTokens: number;
   }>;
-  /** Upper bound for one provider request, used by the Runtime Action deadline. */
+  /**
+   * Upper bound for a non-streaming `complete()` request. Runtime uses this
+   * for the corresponding Action deadline when the adapter supplies it.
+   */
+  readonly completeTimeoutMs?: number;
+  /**
+   * Upper bound for one streaming operation, including its wall-time cap.
+   * Runtime uses this for `streamComplete()` Action deadlines.
+   */
   readonly operationTimeoutMs?: number;
   /** Controls whether provider reasoning may enter Runtime events visible to clients. */
   readonly reasoningVisibility?: "visible" | "hidden";

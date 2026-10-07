@@ -7,6 +7,31 @@
   "profiles": [
     {
       "schema": "agentloop.practiceProfile/v1",
+      "id": "presentation-production",
+      "version": "1.0.0",
+      "enabled": true,
+      "name": "Presentation production",
+      "priority": 20,
+      "appliesTo": {
+        "operationProfiles": ["artifact_build"],
+        "artifactKinds": ["presentation"]
+      },
+      "guidance": {
+        "instructions": [
+          "先明确受众、目的、页数和事实来源边界；没有明确页数时说明采用的页数假设。",
+          "让每页承担一个可复述的核心结论，并根据内容选择封面、对比、流程、数据、结论等不同版式。",
+          "优先使用可编辑文本、形状、图表和图片，避免用整页截图替代可编辑内容。",
+          "生成后执行 native-pptx inspect、artifact acceptance，并按 Skill 逐页检查溢出、重叠、对比度和可读性。"
+        ],
+        "antiPatterns": [
+          "不得把 HTML 页面当作 PPTX 交付物。",
+          "不得为了视觉完整而虚构数据、客户、指标或来源。",
+          "不得把模型输出、文件名或 stdout 当作 PPTX 验收证据。"
+        ]
+      }
+    },
+    {
+      "schema": "agentloop.practiceProfile/v1",
       "id": "structured-data-analysis",
       "version": "1.0.0",
       "enabled": true,

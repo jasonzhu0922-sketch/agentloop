@@ -539,6 +539,7 @@ const IGNORED_PROGRESS_TYPES: Record<string, boolean> = {
   "action.leased": true,
   "action.dispatched": true,
   "action.result_committed": true,
+  "model.request.completed": true,
 };
 
 export function latestProgressEvent(events: readonly RunEvent[]): RunEvent | null {
@@ -573,6 +574,19 @@ const BOUNDARY_TYPES: Record<string, boolean> = {
 };
 
 export function modelWaitText(events: readonly RunEvent[]): string {
+  const pendingRequest = latestPendingModelRequest(events);
+  if (pendingRequest !== null) {
+    const seconds = Math.max(0, Math.floor((Date.now() - pendingRequest.createdAt) / 1000));
+    const purpose = pendingRequest.data?.purpose === "conversation_turn_resolver"
+      ? "正在解析本轮任务，等待模型响应"
+      : "等待模型返回";
+    const deadlineAt = pendingRequest.data?.actionDeadlineAt;
+    if (typeof deadlineAt === "number" && Number.isFinite(deadlineAt)) {
+      const remainingSeconds = Math.max(0, Math.ceil((deadlineAt - Date.now()) / 1000));
+      return `${purpose} · 已等待 ${seconds} 秒 · 截止还剩 ${remainingSeconds} 秒`;
+    }
+    return `${purpose} · 已等待 ${seconds} 秒`;
+  }
   let assembled: RunEvent | null = null;
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i].type === "context.assembled") {
@@ -588,6 +602,26 @@ export function modelWaitText(events: readonly RunEvent[]): string {
   }
   const seconds = Math.max(0, Math.floor((Date.now() - assembled.createdAt) / 1000));
   return "等待模型返回 · 已等待 " + seconds + " 秒";
+}
+
+function latestPendingModelRequest(events: readonly RunEvent[]): RunEvent | null {
+  for (let startIndex = events.length - 1; startIndex >= 0; startIndex -= 1) {
+    const started = events[startIndex];
+    if (started.type !== "model.request.started") continue;
+    const actionId = typeof started.data?.actionId === "string" ? started.data.actionId : undefined;
+    let terminal = false;
+    for (let index = startIndex + 1; index < events.length; index += 1) {
+      const event = events[index];
+      if (event.type !== "model.request.completed" && event.type !== "model.request.failed") continue;
+      const terminalActionId = typeof event.data?.actionId === "string" ? event.data.actionId : undefined;
+      if (actionId === undefined || terminalActionId === undefined || actionId === terminalActionId) {
+        terminal = true;
+        break;
+      }
+    }
+    if (!terminal) return started;
+  }
+  return null;
 }
 
 export function failureDetails(events: readonly RunEvent[]): string {
@@ -729,6 +763,7 @@ const ACTIVITY_TYPES: Record<string, boolean> = {
   "skill.activation.available": true,
   "skill.activated": true,
   "skill.compliance.assessed": true,
+  "model.request.started": true,
   "model.retry": true,
   "action.failed": true,
   "run.completed": true,

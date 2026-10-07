@@ -192,7 +192,12 @@ function activityText(item: LiveFeedItem | null): string {
 
 function LiveCard({ events, steps }: { readonly events: readonly RunEvent[]; readonly steps: readonly PlanStep[] }): React.ReactNode {
   const [planOpen, setPlanOpen] = useState(false);
+  const [, setClock] = useState(Date.now);
   const planPanelId = useId();
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const stream = latestStreaming(events);
   const streamStatus = streamingStatus(stream);
   const content = streamStatus?.content ?? "";

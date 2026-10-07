@@ -64,5 +64,8 @@ const runs = new RunService({
 
 ```sh
 npm run build   # tsc -> dist/ (the published artifact)
-npm test        # node:test suite in tests/
+npm test        # stable Unit + SQLite Kernel contracts
+npm run test:unit
+npm run test:kernel
+npm run test:full # extended suite; includes environment-dependent coverage
 ```

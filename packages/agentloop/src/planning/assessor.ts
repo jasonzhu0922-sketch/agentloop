@@ -511,9 +511,20 @@ function evidenceKindSatisfiedByGate(
     const acceptance = latestArtifactAcceptanceReceipt(receipts, candidate, expectedArtifactKind, expectedArtifactFormat);
     if (
       acceptance !== undefined
-      && (acceptance.verdict === "accepted" || acceptance.verdict === "caveated")
       && acceptance.satisfied.has(kind)
       && !acceptance.failed.has(kind)
+    ) return true;
+    // A producer receipt is the canonical observation for the neutral facts
+    // it directly establishes (path, non-empty output, and requested format).
+    // It must remain usable when the Plan has a semantic target such as
+    // `document`; requiring the separate acceptance aggregate here would
+    // incorrectly erase a successful write/convert operation.  Openability
+    // and aggregate acceptance remain acceptance-receipt-only kinds above.
+    const artifact = latestArtifactReceipt(receipts, candidate, expectedArtifactKind, expectedArtifactFormat);
+    if (
+      artifact !== undefined
+      && artifact.satisfied.has(kind)
+      && !artifact.failed.has(kind)
     ) return true;
     if (expectedArtifactKind !== undefined || expectedArtifactFormat !== undefined) return false;
   }
@@ -568,6 +579,30 @@ function latestArtifactAcceptanceReceipt(
     if (deliveredAcceptance !== undefined) return deliveredAcceptance;
   }
   return acceptances.filter((receipt) => receiptMatchesExpectedTarget(receipt, expectedArtifactKind, expectedArtifactFormat)).at(-1);
+}
+
+/** Latest producer receipt for neutral artifact facts, independent of QA acceptance. */
+function latestArtifactReceipt(
+  receipts: readonly RuntimeObservableReceipt[],
+  candidate?: RuntimeDeliveryCandidate,
+  expectedArtifactKind?: string,
+  expectedArtifactFormat?: string,
+): RuntimeObservableReceipt | undefined {
+  const artifacts = receipts.filter((receipt) =>
+    receipt.schema === "agentloop.artifactReceipt/v1"
+    || receipt.schema === "agentloop.artifactAcceptance/v1",
+  );
+  const deliveredPath = candidate?.deliveryReceipt?.artifact.path;
+  if (deliveredPath !== undefined) {
+    const delivered = artifacts.filter((receipt) =>
+      receipt.artifactPath === deliveredPath
+      && receiptMatchesExpectedTarget(receipt, expectedArtifactKind, expectedArtifactFormat),
+    ).at(-1);
+    if (delivered !== undefined) return delivered;
+  }
+  return artifacts.filter((receipt) =>
+    receiptMatchesExpectedTarget(receipt, expectedArtifactKind, expectedArtifactFormat),
+  ).at(-1);
 }
 
 function artifactPathFromRecord(record: Record<string, unknown>): string | undefined {
@@ -754,7 +789,7 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
   const verification = admitted?.verification ?? "deterministic";
   const expectedFormatUnmet = criterion.criterionId === "format_matches_request"
     && (input.expectedArtifactKind !== undefined || input.expectedArtifactFormat !== undefined)
-    && latestArtifactAcceptanceReceipt(
+    && latestArtifactReceipt(
       runtimeObservableReceipts(input.evidence.toolCalls),
       input.evidence.deliveryCandidate,
       input.expectedArtifactKind,
@@ -903,6 +938,14 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
 
 function assessmentPolicy(input: StepAssessmentInput): Record<string, unknown> | undefined {
   const policy: Record<string, unknown> = {};
+  if (input.step.role === "fact_acquisition") {
+    policy.stageSemantics = {
+      primaryResult:
+        "Assess the current step as source-evidence publication: supported facts, source references, coverage, and caveats remain its completion boundary.",
+      earlyArtifactHandling:
+        "A report, page, file, or other downstream-looking artifact may appear in the tool evidence. Treat it as a preserved candidate work product: neither approve the fact-acquisition step solely because it exists nor reject the step solely because it was produced. Assess the admitted source-evidence contract independently.",
+    };
+  }
   if (input.skills.length > 0) {
     policy.skillCaveats = {
       unavailableValidation:

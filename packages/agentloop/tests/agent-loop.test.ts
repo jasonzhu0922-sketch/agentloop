@@ -7,7 +7,7 @@ import { formatPracticePromptAugmentation } from "../src/runtime/dynamic-prompt.
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog } from "../src/runtime/practice-profiles.ts";
 import { observedSourceKindsFromToolEvidence } from "../src/runtime/source-family-observation.ts";
 import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
-import { understandTask } from "../src/runtime/task-intent.ts";
+import { classifyTaskIntent, understandTask } from "../src/runtime/task-intent.ts";
 import {
   artifactStepToolProgressPolicy,
   deriveRuntimeStepEvidenceState,
@@ -146,6 +146,34 @@ test("single leaf execution carries loop step handoff across model steps", async
   assert.equal(result.output, "route summary delivered");
   assert.equal(calls, 2);
   assert.equal(contexts.length, 2);
+});
+
+test("model-authored task intent remains authoritative over lexical task classification", () => {
+  const taskIntent = {
+    schema: "agentloop.conversationTaskIntent/v1" as const,
+    operation: "composite" as const,
+    requiresExecution: true,
+    deliverables: [
+      { action: "modify" as const, kind: "code" as const, format: "py", surface: "workspace_artifact" as const },
+      { action: "create" as const, kind: "audio" as const, format: "wav", surface: "workspace_artifact" as const },
+    ],
+  };
+  const classified = classifyTaskIntent({
+    objective: "节奏更欢快一些，音色更丰富一些",
+    resolvedTaskIntent: taskIntent,
+  });
+  assert.equal(classified.artifactKind, "audio");
+  assert.equal(classified.artifactAction, "create");
+  assert.equal(classified.deliverySurface, "workspace_artifact");
+  assert.equal(classified.wantsArtifact, true);
+  const understood = understandTask({
+    objective: "节奏更欢快一些，音色更丰富一些",
+    resolvedTaskIntent: taskIntent,
+  });
+  assert.equal(understood.operation, "composite");
+  assert.equal(understood.deliverable.kind, "audio");
+  assert.equal(understood.format, "wav");
+  assert.deepEqual(understood.deliverables?.map((item) => item.kind), ["code", "audio"]);
 });
 
 test("standard context enrichment activates tabular guidance from committed visible-file facts before the next model request", async () => {
@@ -2130,6 +2158,83 @@ test("a length-truncated execution turn with tools receives a forward-action rep
   assert.equal(calls, 3);
 });
 
+test("modify-artifact writes overwrite a same-Run read target without another model turn", async () => {
+  const writeModes: string[] = [];
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  const read: RuntimeTool<unknown> = {
+    name: "computer_read_file",
+    description: "Read a workspace file",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => ({ path: "report.html", content: "old report" }),
+  };
+  const write: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write a workspace file",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, value) => {
+      writeModes.push((value as { mode?: string }).mode ?? "create");
+      return { path: "report.html", bytes: 20, sha256: "replacement" };
+    },
+  };
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "read-existing", name: "computer_read_file", arguments: { path: "report.html" } }],
+        };
+      }
+      if (calls === 2) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{
+            id: "replace-existing",
+            name: "computer_write_file",
+            arguments: { path: "report.html", content: "new report", mode: "create" },
+          }],
+        };
+      }
+      return { content: "report replaced", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const grant = makeGrant(["computer_read_file", "computer_write_file"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Replace the report.",
+    input: "regenerate the report",
+    model,
+    tools: new ToolRegistry([read, write]),
+    grant,
+    maxSteps: 3,
+    artifactWritePolicy: "overwrite_observed_existing",
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "report replaced");
+  assert.equal(calls, 3);
+  assert.deepEqual(writeModes, ["overwrite"]);
+  assert.deepEqual(events.filter((event) => event.type === "tool.arguments.normalized").map((event) => event.data), [{
+    step: 2,
+    toolCallId: "replace-existing",
+    toolName: "computer_write_file",
+    path: "report.html",
+    originalMode: "create",
+    effectiveMode: "overwrite",
+    reason: "modify_artifact_overwrite_observed_existing",
+  }]);
+});
+
 test("prepare-stage argument rejection receives a schema repair directive", async () => {
   let calls = 0;
   let executions = 0;
@@ -3471,6 +3576,34 @@ test("command computation binding errors are actionable while derived evidence r
   assert.equal(state?.recentActionableDiagnostic, true);
   assert.deepEqual(state?.missingRequiredEvidenceKinds, ["derived_aggregation"]);
   assert.match(state?.instruction ?? "", /recent .*diagnostic/i);
+
+  const mismatchState = deriveRuntimeStepEvidenceState({
+    policy: runtimeStepToolProgressPolicy(["derived_aggregation"], { scope: "source" }),
+    evidence: [{
+      toolCallId: "mismatched-computation",
+      toolName: "computer_run_command",
+      isError: false,
+      result: JSON.stringify({
+        exitCode: 0,
+        computationEvidenceError: "Command computation facts were observed but source binding mismatched.",
+        computationObservation: {
+          schema: "agentloop.commandComputationObservation/v1",
+          inputRefs: ["source.xlsx"],
+          facts: { records: 2 },
+          caveats: [],
+          binding: {
+            status: "unverified",
+            declaredInputPaths: ["parser.py"],
+            observedInputRefs: ["source.xlsx"],
+          },
+        },
+      }),
+    }],
+  });
+
+  assert.equal(mismatchState?.recentComputationBindingMismatch, true);
+  assert.equal(mismatchState?.nextAction, "repair_computation_binding");
+  assert.match(mismatchState?.instruction ?? "", /Do not reread the source or rewrite the parser/);
 });
 
 test("artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family", () => {

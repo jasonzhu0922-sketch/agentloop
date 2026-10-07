@@ -5,7 +5,7 @@ import { createStepExecutionBinding } from "../src/planning/step-execution-bindi
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
 
-test("source semantics stay out of the global Runtime progress policy", () => {
+test("fact-acquisition progress policy keeps observable source evidence obligations", () => {
   const step = planStep({
     id: "extract-source",
     kind: "leaf",
@@ -31,7 +31,7 @@ test("source semantics stay out of the global Runtime progress policy", () => {
   });
 
   assert.notEqual(policy, undefined);
-  assert.deepEqual(policy?.requiredEvidenceKinds, ["delivery_receipt"]);
+  assert.deepEqual(policy?.requiredEvidenceKinds, ["source_summary", "record_counts", "structured_extraction_artifact", "delivery_receipt"]);
   assert.equal(policy?.maxExploratoryPrimarySteps, 8);
   assert.equal(policy?.exploratoryToolNames.includes("read_source"), true);
   assert.equal(policy?.evidenceProducingToolNames.includes("computer_write_file"), true);
@@ -90,6 +90,22 @@ test("execution context binds dependency evidence before downstream reacquisitio
     output: "Inspection found 18 staff and 90 tasks. Reuse summary_data.json and data_inspection_report.md before reading the xlsx files again.",
     evidence: {
       candidateOutput: "Inspection report delivered.",
+      publishedResult: {
+        schema: "agentloop.runtimeResult/v1",
+        ref: { schema: "agentloop.resultRef/v1", resultId: "rr_inspect_data" },
+        kind: "step",
+        producer: { runId: "run-1", planId: "plan-1", stepId: "inspect_data" },
+        inputs: [],
+        publication: { status: "published", decision: "approved" },
+        payload: {
+          content: "Inspection found 18 staff and 90 tasks.",
+          contentFormat: "text",
+          characters: 37,
+          bytes: 37,
+          sha256: "a".repeat(64),
+        },
+        createdAt: 1,
+      },
       modelSteps: 4,
       toolCalls: [{
         toolCallId: "index-visible",
@@ -202,12 +218,12 @@ test("execution context binds dependency evidence before downstream reacquisitio
     readonly schema: string;
     readonly dependencies: readonly [{
       readonly stepId: string;
+      readonly resultBinding?: { readonly result: { readonly resultId: string } };
       readonly satisfiedEvidenceKinds: readonly string[];
       readonly missingRequiredEvidenceKinds: readonly string[];
-      readonly toolEvidence: readonly Array<{
+      readonly evidenceMetadata: readonly Array<{
         readonly toolName: string;
         readonly resultSchemas: readonly string[];
-        readonly preview: string;
         readonly artifacts?: readonly Array<{ readonly path: string }>;
       }>;
     }];
@@ -215,21 +231,23 @@ test("execution context binds dependency evidence before downstream reacquisitio
 
   assert.equal(bindings.schema, "agentloop.stepDependencyContexts/v1");
   assert.equal(bindings.dependencies[0]?.stepId, "inspect_data");
+  assert.equal(bindings.dependencies[0]?.resultBinding?.result.resultId, "rr_inspect_data");
   assert.equal("output" in (bindings.dependencies[0] as object), false);
   assert.equal(bindings.dependencies[0]?.satisfiedEvidenceKinds.includes("source_summary"), true);
   assert.equal(bindings.dependencies[0]?.satisfiedEvidenceKinds.includes("artifact_path"), true);
   assert.equal(bindings.dependencies[0]?.missingRequiredEvidenceKinds.includes("source_summary"), false);
-  assert.equal(bindings.dependencies[0]?.toolEvidence.some((item) =>
+  assert.equal(bindings.dependencies[0]?.evidenceMetadata.some((item) =>
     item.toolName === "visible_index_directory"
     && item.resultSchemas.includes("agentloop.sourceSummary/v1")
   ), true);
-  assert.equal(bindings.dependencies[0]?.toolEvidence.some((item) =>
+  assert.equal(bindings.dependencies[0]?.evidenceMetadata.some((item) =>
     item.toolName === "computer_run_command"
-    && item.preview.includes("summary_data.json")
   ), true);
-  assert.equal(bindings.dependencies[0]?.toolEvidence.some((item) =>
+  assert.equal(bindings.dependencies[0]?.evidenceMetadata.some((item) =>
     item.artifacts?.some((artifact) => artifact.path === "data_inspection_report.md") === true
   ), true);
+  assert.equal("preview" in (bindings.dependencies[0]?.evidenceMetadata[0] ?? {}), false);
+  assert.equal("sourceRefs" in (bindings.dependencies[0]?.evidenceMetadata[0] ?? {}), false);
   assert.match(payload.toolSelectionPolicy.beforeAcquiringEvidence, /Reuse existing satisfied receipts/);
   const frame = payload.stepSemanticFrame as {
     readonly schema: string;
@@ -239,6 +257,11 @@ test("execution context binds dependency evidence before downstream reacquisitio
     readonly firstAction: string;
     readonly evidenceSources: readonly Array<{ readonly kind: string; readonly reusePolicy?: string }>;
     readonly completionBoundary: readonly string[];
+    readonly outcomePolicy: {
+      readonly primaryResult: string;
+      readonly earlyDownstreamArtifactPolicy: string;
+      readonly currentStepInstruction: string;
+    };
   };
   assert.equal(frame.schema, "agentloop.stepSemanticFrame/v1");
   assert.equal(frame.phaseRole, "artifact_production");
@@ -249,6 +272,24 @@ test("execution context binds dependency evidence before downstream reacquisitio
     source.kind === "dependency_step" && source.reusePolicy === "must_reuse_first"
   ), true);
   assert.equal(frame.completionBoundary.includes("artifact_acceptance"), true);
+  assert.equal(frame.outcomePolicy.primaryResult, "artifact");
+  assert.equal(frame.outcomePolicy.earlyDownstreamArtifactPolicy, "current_step_owned");
+  const dependencyContexts = payload.stepDependencyContexts as {
+    readonly earlyArtifactCandidates?: {
+      readonly instruction: string;
+      readonly artifacts: readonly Array<{
+        readonly sourceStepId: string;
+        readonly resultBinding?: { readonly result: { readonly resultId: string } };
+        readonly artifact: { readonly path: string };
+      }>;
+    };
+  };
+  assert.equal(dependencyContexts.earlyArtifactCandidates?.artifacts.some((candidate) =>
+    candidate.sourceStepId === "inspect_data"
+    && candidate.resultBinding?.result.resultId === "rr_inspect_data"
+    && candidate.artifact.path === "data_inspection_report.md"
+  ), true);
+  assert.match(dependencyContexts.earlyArtifactCandidates?.instruction ?? "", /Before recreating or overwriting/i);
   const handoff = payload.planStepHandoffFrame as {
     readonly schema: string;
     readonly mode: string;
@@ -343,6 +384,47 @@ test("execution context dynamically requires Markdown materialization for bound 
   assert.equal(directive.sourceMaterializationFormat, "markdown");
   assert.deepEqual(directive.requiredWorkflow, ["computer_write_file", "convert_artifact", "verify_artifact_acceptance"]);
   assert.match(directive.instruction, /Do not bypass this conversion boundary/);
+});
+
+test("execution context requires bounded create-then-append writes for large authored files", () => {
+  const step = planStep({
+    id: "write-deck-spec",
+    kind: "leaf",
+    position: 0,
+    objective: "Write the authored deck specification as a workspace file.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write"],
+    evidenceContract: { requiredKinds: ["artifact_path"], caveatPolicy: "none" },
+    successCriteria: [],
+    status: "pending",
+  });
+  const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
+    step,
+    plan: {
+      id: "plan-large-write",
+      runId: "run-large-write",
+      version: 1,
+      goal: "Write a large authored file",
+      selectedSkillIds: [],
+      status: "running",
+      steps: [step],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    skills: [],
+    workspaceRoot: "/workspace",
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", artifactKind: "document" }),
+    operationProfile: { id: "artifact_build" },
+    requiresFileOutput: true,
+  }).content);
+
+  assert.match(payload.largeWriteDiscipline as string, /6000/);
+  assert.match(payload.largeWriteDiscipline as string, /mode="create"/);
+  assert.match(payload.largeWriteDiscipline as string, /mode="append"/);
 });
 
 test("execution context omits bound Outcome conversion rules outside the conversion contract", () => {
@@ -470,6 +552,7 @@ test("execution context carries current-to-next handoff for non-terminal steps",
       readonly resultPublicationPolicy: string;
       readonly currentStepBoundary: string;
       readonly nextStepBoundary: string;
+      readonly earlyDownstreamArtifactPolicy: string;
       readonly forbiddenMoves: readonly string[];
     };
   };
@@ -477,7 +560,7 @@ test("execution context carries current-to-next handoff for non-terminal steps",
   assert.equal(handoff.schema, "agentloop.stepHandoffFrame/v1");
   assert.equal(handoff.mode, "current_to_next");
   assert.equal(handoff.currentStepId, "extract_data");
-  assert.match(handoff.instruction, /Do not execute the next stage/);
+  assert.match(handoff.instruction, /current step's primary result/);
   assert.equal(handoff.nextStage.kind, "direct_dependents");
   assert.equal(handoff.nextStage.steps[0]?.id, "write_report");
   assert.equal(handoff.nextStage.steps[0]?.dependsOnCurrent, true);
@@ -486,9 +569,20 @@ test("execution context carries current-to-next handoff for non-terminal steps",
   assert.equal(handoff.handoffContract.reusableEvidenceKinds.includes("record_counts"), true);
   assert.match(handoff.handoffContract.currentStepBoundary, /phaseRole=evidence_acquisition/);
   assert.match(handoff.handoffContract.nextStepBoundary, /context for semantic continuity only/);
+  assert.match(handoff.handoffContract.earlyDownstreamArtifactPolicy, /candidate work product/);
   assert.equal(handoff.handoffContract.forbiddenMoves.some((item) =>
-    item.includes("downstream artifact")
+    item.includes("downstream-looking artifact")
   ), true);
+  const acquisitionFrame = payload.stepSemanticFrame as {
+    readonly outcomePolicy: {
+      readonly primaryResult: string;
+      readonly earlyDownstreamArtifactPolicy: string;
+      readonly currentStepInstruction: string;
+    };
+  };
+  assert.equal(acquisitionFrame.outcomePolicy.primaryResult, "source_evidence");
+  assert.equal(acquisitionFrame.outcomePolicy.earlyDownstreamArtifactPolicy, "preserve_as_candidate");
+  assert.match(acquisitionFrame.outcomePolicy.currentStepInstruction, /global final deliverable/i);
 });
 
 test("execution context prefers structured JSON reads for table extraction artifacts", () => {
@@ -623,17 +717,16 @@ test("execution context prefers structured JSON reads for table extraction artif
   assert.match((payload.stepDependencyContexts as { readonly instruction: string }).instruction, /current step resolves a conflict/i);
   const bindings = payload.stepDependencyContexts as {
     readonly dependencies: readonly Array<{
-      readonly toolEvidence: readonly Array<{
+      readonly evidenceMetadata: readonly Array<{
         readonly artifacts?: readonly Array<{
           readonly path: string;
           readonly schema?: string;
-          readonly manifest?: { readonly tables: readonly Array<{ readonly recordsPointer: string }> };
         }>;
       }>;
     }>;
   };
-  assert.equal(bindings.dependencies[0]?.toolEvidence[0]?.artifacts?.[0]?.schema, "agentloop.tableExtractionArtifact/v1");
-  assert.equal(bindings.dependencies[0]?.toolEvidence[0]?.artifacts?.[0]?.manifest?.tables[0]?.recordsPointer, "/files/0/sheets/0/records");
+  assert.equal(bindings.dependencies[0]?.evidenceMetadata[0]?.artifacts?.[0]?.schema, "agentloop.tableExtractionArtifact/v1");
+  assert.equal("manifest" in (bindings.dependencies[0]?.evidenceMetadata[0]?.artifacts?.[0] ?? {}), false);
 });
 
 test("step semantic frame classifies visible directory analysis as source acquisition", () => {

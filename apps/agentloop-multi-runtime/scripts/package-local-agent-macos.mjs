@@ -40,7 +40,7 @@ await mkdir(resources, { recursive: true });
 await mkdir(swiftModuleCache, { recursive: true });
 
 await build({
-  entryPoints: [join(appRoot, "local-agent-runtime/src/local-agent-main.ts")],
+  entryPoints: [join(appRoot, "local-agent-runtime/src/main.ts")],
   bundle: true,
   format: "esm",
   platform: "node",
@@ -55,7 +55,7 @@ await build({
   },
 });
 await build({
-  entryPoints: [join(appRoot, "local-agent-runtime/src/local-agent-main.ts")],
+  entryPoints: [join(appRoot, "local-agent-runtime/src/main.ts")],
   bundle: true,
   format: "cjs",
   platform: "node",

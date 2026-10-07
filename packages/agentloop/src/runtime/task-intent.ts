@@ -5,6 +5,23 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 
 export type DeliverySurface = "conversation" | "workspace_artifact";
 
+/**
+ * Model-owned semantic task frame.  This is the bridge between the
+ * conversation resolver and Planner: downstream code must not rediscover the
+ * user's operation by scanning the latest sentence for action keywords.
+ */
+export interface ConversationTaskIntent {
+  readonly schema: "agentloop.conversationTaskIntent/v1";
+  readonly operation: StructuredTaskOperation;
+  readonly requiresExecution: boolean;
+  readonly deliverables: readonly {
+    readonly action: ArtifactAction;
+    readonly kind: ArtifactKind;
+    readonly format?: string;
+    readonly surface: DeliverySurface;
+  }[];
+}
+
 export interface TaskIntentClassification {
   readonly deliverySurface: DeliverySurface;
   readonly artifactAction: ArtifactAction;
@@ -40,6 +57,8 @@ export interface TaskIntentInput {
    * consumers must not upgrade it by re-reading model-authored objectives.
    */
   readonly evidenceDemand?: SourceNeed;
+  /** Canonical model-authored task frame, when a conversation resolver supplied one. */
+  readonly resolvedTaskIntent?: ConversationTaskIntent;
 }
 
 export type StructuredTaskOperation =
@@ -92,6 +111,8 @@ export interface StructuredTaskUnderstanding {
   readonly workflow: readonly StructuredTaskStage[];
   readonly operationProfiles: readonly StructuredTaskOperationProfile[];
   readonly constraints: readonly string[];
+  /** Full model-authored delivery set; deliverable remains the primary projection for legacy Planner consumers. */
+  readonly deliverables?: ConversationTaskIntent["deliverables"];
   readonly intent: TaskIntentClassification;
   /** Immutable deployment-profile snapshot selected at Run admission. */
   readonly practiceProfiles?: readonly PracticeProfileSelection[];
@@ -234,12 +255,32 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
   const artifactKind = detectRequestedArtifactKind(text, artifactAction);
   const sourceNeed = input.evidenceDemand ?? inferSourceNeedFromIntent(text);
   const researchPolicy = researchPolicyForIntentText(text, sourceNeed, input.toolNames ?? []);
-  const wantsArtifact = artifactAction !== "none" && artifactKind !== "none"
-    // Tool availability authorizes a possible workspace write, but it never
-    // turns a referenced input format into a requested output artifact.
-    && signals.action.length > 0
+  // `artifactAction` is the canonical action interpretation. It includes
+  // explicit native mutations (for example, "修改上一轮 PPT"), which need not
+  // also appear in the narrower creation/repair signal list. Requiring both
+  // would make the same user request simultaneously a modification and a
+  // conversation-only reply.
+  const wantsArtifact = artifactAction !== "none"
+    && artifactKind !== "none"
     && input.responseOnly !== true;
   const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0;
+  if (input.resolvedTaskIntent !== undefined) {
+    // The terminal deliverable is the legacy single-target projection. The
+    // complete ordered set is preserved on StructuredTaskUnderstanding for
+    // composite planners (for example, generator script then WAV output).
+    const deliverable = [...input.resolvedTaskIntent.deliverables].reverse().find((item) => item.kind !== "none");
+    const wantsArtifact = deliverable !== undefined && input.responseOnly !== true;
+    return {
+      deliverySurface: wantsArtifact ? "workspace_artifact" : "conversation",
+      artifactAction: deliverable?.action ?? "none",
+      artifactKind: wantsArtifact ? deliverable!.kind : "none",
+      sourceNeed,
+      ...(researchPolicy === undefined ? {} : { researchPolicy }),
+      wantsArtifact,
+      wantsConversationAnswer: !wantsArtifact,
+      signals,
+    };
+  }
   return {
     deliverySurface: wantsArtifact && !explicitConversationOnly ? "workspace_artifact" : "conversation",
     artifactAction,
@@ -303,7 +344,8 @@ export function understandTask(input: TaskIntentInput & {
       wantsConversationAnswer: false,
     };
   const collectionAggregation = isCollectionAggregationIntent(normalizedObjective);
-  const operation = structuredTaskOperation(intent, normalizedObjective, readySources, collectionAggregation);
+  const operation = input.resolvedTaskIntent?.operation
+    ?? structuredTaskOperation(intent, normalizedObjective, readySources, collectionAggregation);
   const workflow: StructuredTaskStage[] = [];
   // A request to aggregate a collection needs a source-acquisition boundary
   // even when the collection is Runtime-authorized (for example a visible
@@ -313,7 +355,10 @@ export function understandTask(input: TaskIntentInput & {
   if (operation === "transform_artifact") workflow.push("transform");
   if (intent.wantsArtifact) workflow.push("produce");
   if (workflow.length > 0 || intent.wantsConversationAnswer) workflow.push("deliver");
-  const outputFormat = structuredOutputFormat(formatInput, intent) ?? implicitNativeFormat;
+  const resolvedOutputFormat = input.resolvedTaskIntent === undefined
+    ? undefined
+    : [...input.resolvedTaskIntent.deliverables].reverse().find((item) => item.kind !== "none")?.format;
+  const outputFormat = resolvedOutputFormat ?? structuredOutputFormat(formatInput, intent) ?? implicitNativeFormat;
   const task = structuredTaskText(displayObjective, intent);
   return {
     schema: "agentloop.taskUnderstanding/v1",
@@ -347,6 +392,7 @@ export function understandTask(input: TaskIntentInput & {
     workflow: [...new Set(workflow)],
     operationProfiles: structuredOperationProfiles(intent, operation, normalizedObjective),
     constraints: [...(input.userConstraints ?? [])],
+    ...(input.resolvedTaskIntent === undefined ? {} : { deliverables: input.resolvedTaskIntent.deliverables }),
     intent,
     ...(input.practiceProfiles === undefined || input.practiceProfiles.length === 0 ? {} : { practiceProfiles: input.practiceProfiles }),
   };
@@ -624,12 +670,36 @@ function explicitDeliveryFormatKind(text: string, deliveryTarget: string): Artif
     const kind = explicitArtifactFormatKind(qualifier);
     if (kind !== "none") return kind;
   }
+  // A request may name its concrete target before a later creation verb that
+  // only describes content (for example, "make a PPTX ... then make an
+  // introduction"). Preserve every creation-clause target rather than
+  // treating the final verb as the sole authority. Each target is bounded at
+  // content/source markers, so referenced inputs still cannot become outputs.
+  for (const target of artifactCreationDeliveryTargets(text)) {
+    const kind = explicitArtifactFormatKind(target);
+    if (kind !== "none") return kind;
+  }
   return explicitArtifactFormatKind(deliveryTarget);
 }
 
 function explicitDeliveryFormatQualifiers(text: string): string[] {
-  return [...text.matchAll(/(?:以|用)\s*([^，,。；;\n]{1,48}?)\s*(?:格式|文件(?:形式)?|文档)(?:形式)?\s*(?:来|去)?\s*(?:输出|生成|创建|制作|交付|呈现|写|设计|实现|搭建|构建|导出|做|落成)/giu)]
-    .map((match) => match[1] ?? "");
+  return [
+    ...text.matchAll(/(?:以|用)\s*([^，,。；;\n]{1,48}?)\s*(?:格式|文件(?:形式)?|文档)(?:形式)?\s*(?:来|去)?\s*(?:输出|生成|创建|制作|交付|呈现|写|设计|实现|搭建|构建|导出|做|落成)/giu),
+    // The conversation resolver records compact constraints such as
+    // "Deliverable format: PPTX". These labels are output-owned and therefore
+    // safe to recognize; a bare "format:" remains intentionally ambiguous.
+    ...text.matchAll(/(?:\b(?:deliverable|output)\b|交付(?:物|格式)?|输出格式)\s*(?:format)?\s*[:：]\s*([^，,。；;\n]{1,120})/giu),
+  ].map((match) => match[1] ?? "");
+}
+
+function artifactCreationDeliveryTargets(text: string): string[] {
+  const matches = [...text.matchAll(/\b(?:make|create|build|generate|produce|deliver|write|export|design|implement|materialize|form)\b|做|制作|创建|生成|形成|产出|输出|交付|写|设计|实现|搭建|构建|导出|落成/giu)];
+  return matches.map((match, index) => {
+    const end = matches[index + 1]?.index ?? text.length;
+    const clause = text.slice(match.index, end);
+    const boundary = /[，,。；;\n]|基于|根据|来自|从|读取|解析|提取|包含|包括|字段|来源|输入|上传|参考|关于/iu.exec(clause);
+    return boundary?.index === undefined ? clause : clause.slice(0, boundary.index);
+  });
 }
 
 function artifactCreationDeliveryTarget(text: string): string {
@@ -668,7 +738,7 @@ function detectArtifactKindSignal(text: string): ArtifactKind {
 }
 
 function explicitNativeArtifactMutationRequested(value: string): boolean {
-  return /(?:\b(?:edit|modify|update|revise|repair|fix|restyle|redesign|reformat|retouch|crop|resize|replace|remove|delete|insert|append|rename|reorder|sort|filter|apply)\b|修改|更改|改动|改为|改成|调整|优化|修复|更正|美化|重设计|重新排版|改版|替换|删除|移除|新增|添加|插入|重命名|排序|筛选|套用|应用|统一.{0,8}(?:视觉|主题|风格|样式|版式|布局|配色|颜色|字体|背景))/iu.test(value);
+  return /(?:\b(?:edit|modify|update|revise|repair|fix|restyle|redesign|reformat|retouch|crop|resize|replace|remove|delete|insert|append|rename|reorder|sort|filter|apply)\b|修改|更改|改动|改为|改成|调整|优化|修复|更正|美化|重设计|重新排版|改版|替换|删除|移除|新增|添加|插入|重命名|排序|筛选|套用|应用|统一.{0,8}(?:视觉|主题|风格|样式|版式|布局|配色|颜色|字体|背景)|(?:^|[，,。；;\n])\s*(?:请|麻烦|帮(?:我)?|给我|替我|需要|要|想要|希望|继续|务必|把|将)?\s*.{0,48}(?:改一下|改一改|改改|改得?|做得?|制作得?).{0,16}(?:更好|更专业|高级|高端|高大上|清晰|美观|丰富|精简|科技感))/iu.test(value);
 }
 
 function inferSourceNeedFromIntent(text: string): SourceNeed {

@@ -13,6 +13,7 @@ import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
 import type { PatchFileInput, WriteFileMode } from "../computer/computer-executor.ts";
 import { CONTENT_REFERENCE_WINDOW_CHARACTERS } from "../runtime/content-reference.ts";
+import { LARGE_WRITE_CHUNK_CHARACTERS } from "../runtime/large-write-policy.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
 const MAX_COMMAND_ARGUMENT_CHARACTERS = 4_096;
@@ -456,7 +457,7 @@ export function createComputerTools(
         "path must be relative to the workspace root; absolute paths are rejected.",
         "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file, so create the first chunk with mode=create.",
         "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
-        "For other very large content, prefer reusable scripts or several smaller append calls over one oversized call so each content argument stays within the output budget.",
+        `For content larger than ${LARGE_WRITE_CHUNK_CHARACTERS} characters, you MUST use several smaller calls: create the first chunk with mode="create", wait for its receipt, then append ${LARGE_WRITE_CHUNK_CHARACTERS}-character-or-smaller chunks with mode="append". Never put the whole file in one tool call; split JSON, source, and markup at semantic boundaries.`,
         "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
         "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),

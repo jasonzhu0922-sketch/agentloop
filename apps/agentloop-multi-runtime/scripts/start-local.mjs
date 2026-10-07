@@ -106,7 +106,7 @@ const defaultWebOrigins = [...new Set([
   `http://localhost:${webPort}`,
   `http://127.0.0.1:${webPort}`,
 ])].join(",");
-children.push(start("router", "src/entrypoints/router-main.ts", {
+children.push(start("router", "src/router/main.ts", {
   ...common,
   HOST: routerHost,
   PORT: String(routerPort),
@@ -126,7 +126,7 @@ children.push(start("router", "src/entrypoints/router-main.ts", {
 // a shared SQLite/WAL file during local development.
 await waitForRouterHealth(publicRouterUrl);
 
-children.push(start("local-agent", "local-agent-runtime/src/local-agent-main.ts", {
+children.push(start("local-agent", "local-agent-runtime/src/main.ts", {
   ...common,
   LOCAL_AGENT_PORT: String(localAgentPort),
   ROUTER_URL: publicRouterUrl,
@@ -149,7 +149,7 @@ for (let index = 0; index < runtimeCount; index += 1) {
   const runtimeId = `general-${ordinal}`;
   await mkdir(runtimeDataRoot, { recursive: true });
   await mkdir(sharedWorkspaceRoot, { recursive: true });
-  children.push(start(`runtime-${runtimeId}`, "src/entrypoints/runtime-host-main.ts", {
+  children.push(start(`runtime-${runtimeId}`, "src/runtime-host/main.ts", {
     ...common,
     HOST: runtimeHost,
     PORT: String(runtimePort + index),

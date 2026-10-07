@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { ComputerExecutor } from "../computer/computer-executor.ts";
 import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
@@ -11,10 +10,7 @@ import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assesso
 import type {
   AssessmentProfileId,
   ConversationStepContext,
-  ConversationEvidenceLedger,
   ConversationFailedBoundary,
-  ConversationOutcomeRelation,
-  ConversationResolvedIntent,
   ConversationReusableArtifact,
   ConversationSourceFact,
   ConversationSourceReference,
@@ -41,8 +37,8 @@ import type {
   TaskSpec,
   ToolEvidence,
 } from "../planning/contracts.ts";
-import type { RuntimeResultBinding, RuntimeResultCard } from "./runtime-result.ts";
-import { createRuntimeResultCard, parseRuntimeResultRef } from "./runtime-result.ts";
+import type { RuntimeResultBinding } from "./runtime-result.ts";
+import { parseRuntimeResultRef } from "./runtime-result.ts";
 import type {
   PlanAdmissionObservation,
   PlanningExtension,
@@ -67,12 +63,13 @@ import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import { readSkillExecutionManifest } from "../skills/skill-execution-manifest.ts";
 import type { PrivateSkill, SkillService } from "../skills/skill-service.ts";
 import type { SqlConnection } from "../storage/connection.ts";
-import { RunRepository, type RunRow, type RunEventRow } from "../storage/repositories/run-repository.ts";
+import { RunRepository, type RunRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { canonicalArtifactFormatFamily, isConcreteArtifactFormat } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
+import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
@@ -80,7 +77,7 @@ import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import { observeSourceFamiliesFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
-import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type StructuredTaskUnderstanding } from "./task-intent.ts";
+import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type ConversationTaskIntent, type StructuredTaskUnderstanding } from "./task-intent.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -98,7 +95,7 @@ import type {
   VisibleDirectoryGrant,
 } from "./contracts.ts";
 import { SourceIntakeService } from "./source-intake-service.ts";
-import { ownerWorkspaceSegment } from "./owner-workspace.ts";
+import { RuntimeWorkspaceService } from "./runtime-workspace-service.ts";
 import {
   assertNoDuplicateTools,
   composeRunTools,
@@ -117,7 +114,7 @@ import { RunOutcomeRepository } from "../storage/repositories/outcome-repository
 import { CompletionFailure, partialOutputForFailure } from "./completion-failure.ts";
 import { RuntimeActionRepository, type RuntimeActionRecord } from "./runtime-action-repository.ts";
 import { RuntimeResultRepository } from "./runtime-result-repository.ts";
-import { createRuntimeResult, parseRuntimeResultJson, type RuntimeResultRef } from "./runtime-result.ts";
+import { createRuntimeResult, type RuntimeResultRef } from "./runtime-result.ts";
 import { RunCheckpointRepository, type RunCheckpointRecord } from "./run-checkpoint-repository.ts";
 import { HumanLoopRepository, type HumanLoopRequest, type HumanLoopResponse, type HumanLoopRequirement } from "./human-loop.ts";
 import {
@@ -143,11 +140,19 @@ import {
   artifactPathsFromCommandFileChanges,
   artifactPathsMentionedInCommandOutput,
   collectProcessArtifacts,
-  readProcessArtifact,
-  previewProcessArtifact,
   type ProcessArtifact,
   type ProcessArtifactPreview,
 } from "./process-artifacts.ts";
+import { conversationCandidateApproved, RuntimeArtifactQueryService } from "./runtime-artifact-query-service.ts";
+import { RuntimeCommandOutputQueryService } from "./runtime-command-output-query-service.ts";
+import { RuntimeToolArgumentsQueryService } from "./runtime-tool-arguments-query-service.ts";
+import { RuntimeConversationWorkingSetQueryService, type ConversationWorkingSetRun } from "./runtime-conversation-working-set-query-service.ts";
+import { RuntimeOutcomeQueryService, type RuntimeOutcomeProjection } from "./runtime-outcome-query-service.ts";
+import { RuntimePlanQueryService } from "./runtime-plan-query-service.ts";
+import { RuntimeEventQueryService, publicRunEvent, type StoredRunEvent } from "./runtime-event-query-service.ts";
+import { RuntimeActionQueryService } from "./runtime-action-query-service.ts";
+import { RuntimeHostRunProjectionQueryService, type RuntimeHostRunProjection } from "./runtime-host-run-projection-query-service.ts";
+import { ToolArgumentsReferenceStore, type ToolArgumentsContent } from "./tool-arguments-reference-store.ts";
 import { executionOperationProfile } from "./operation-profiles.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
@@ -167,15 +172,6 @@ export const DEFAULT_RUNNER_SYSTEM_PROMPT =
 /** Server-wide default model-turn budget per Plan step. */
 export const DEFAULT_MAX_STEPS = 32;
 
-const CONVERSATION_WORKING_SET_RUN_LIMIT = 8;
-const CONVERSATION_WORKING_SET_ARTIFACT_LIMIT = 24;
-const CONVERSATION_WORKING_SET_RESULT_LIMIT = 8;
-const CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT = 8;
-const CONVERSATION_STEP_CONTEXT_LIMIT = 12;
-const MAX_COMMAND_OUTPUT_REFERENCE_BYTES = 50 * 1024 * 1024;
-const TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES = 8 * 1024;
-const TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS = 600;
-const MAX_TOOL_ARGUMENT_REFERENCE_BYTES = 50 * 1024 * 1024;
 const MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS = 10;
 /** Covers result persistence after a Tool's own declared execution budget. */
 const TOOL_ACTION_COMMIT_GRACE_MS = 15_000;
@@ -197,44 +193,7 @@ export interface RunRecord {
   readonly sources?: readonly UploadedSourceSummary[];
 }
 
-export interface HostRunProjection {
-  readonly schema: "agentloop.hostRun/v1";
-  readonly run: RunRecord;
-  readonly outcome?: {
-    readonly schema: "agentloop.hostOutcome/v1";
-    readonly status: string;
-    readonly reasonCode: string;
-    readonly planId?: string;
-    readonly output?: string;
-    readonly deliveryReceipt?: import("./contracts.ts").RuntimeDeliveryReceipt;
-    readonly committedAt: number;
-  };
-  readonly plan: {
-    readonly state: "pending" | "available" | "unavailable";
-    readonly id: string;
-    readonly version: number;
-    readonly status: string;
-    readonly goal: string;
-    readonly selectedSkillIds: readonly string[];
-    readonly steps: readonly {
-      readonly id: string;
-      readonly status: string;
-      readonly objective: string;
-      readonly dependencies: readonly string[];
-      readonly skillIds: readonly string[];
-      readonly requiredCapabilities: readonly string[];
-      readonly executionBinding: ExecutionPlan["steps"][number]["executionBinding"];
-      readonly output?: string;
-      readonly error?: string;
-    }[];
-    readonly assessmentCount: number;
-    readonly approvedAssessmentCount: number;
-  };
-  readonly artifacts: readonly ProcessArtifact[];
-  readonly eventCursor: {
-    readonly lastSeq: number;
-  };
-}
+export interface HostRunProjection extends RuntimeHostRunProjection<RunRecord> {}
 
 export interface CommandOutputContent {
   readonly toolCallId: string;
@@ -246,15 +205,7 @@ export interface CommandOutputContent {
   readonly characters?: number;
 }
 
-export interface ToolArgumentsContent {
-  readonly toolCallId: string;
-  readonly arguments: unknown;
-  readonly content: string;
-  readonly path?: string;
-  readonly sha256?: string;
-  readonly bytes?: number;
-  readonly characters?: number;
-}
+export type { ToolArgumentsContent } from "./tool-arguments-reference-store.ts";
 
 export interface ConversationSummary {
   readonly id: string;
@@ -272,12 +223,7 @@ export interface ConversationListPage {
   readonly nextOffset?: number;
 }
 
-export interface StoredRunEvent {
-  readonly seq: number;
-  readonly type: string;
-  readonly data: Readonly<Record<string, unknown>>;
-  readonly createdAt: number;
-}
+export type { StoredRunEvent } from "./runtime-event-query-service.ts";
 
 interface ExecuteOptions {
   readonly allowDangerousTools: boolean;
@@ -318,6 +264,7 @@ export class RunService {
   private readonly workspaceRoot: string;
   private readonly sourceStorageRoot: string;
   private readonly ownerScopedWorkspace: boolean;
+  private readonly workspace: RuntimeWorkspaceService;
   private readonly coreTools: readonly RuntimeTool<unknown>[];
   private readonly plans: PlanRepository;
   private readonly sources: SourceRepository;
@@ -330,6 +277,15 @@ export class RunService {
   private readonly checkpoints: RunCheckpointRepository;
   private readonly recovery: RecoveryRepository;
   private readonly humanLoops: HumanLoopRepository;
+  private readonly artifactQueries: RuntimeArtifactQueryService;
+  private readonly commandOutputQueries: RuntimeCommandOutputQueryService;
+  private readonly toolArgumentsQueries: RuntimeToolArgumentsQueryService;
+  private readonly conversationWorkingSets: RuntimeConversationWorkingSetQueryService;
+  private readonly outcomeQueries: RuntimeOutcomeQueryService;
+  private readonly planQueries: RuntimePlanQueryService;
+  private readonly eventQueries: RuntimeEventQueryService;
+  private readonly actionQueries: RuntimeActionQueryService;
+  private readonly hostRunQueries: RuntimeHostRunProjectionQueryService<RunRecord>;
   private readonly eventHub = new RunEventHub();
   private readonly runEventLogSink?: RunEventLogSink;
   private readonly activeRunControllers = new Map<string, AbortController>();
@@ -391,15 +347,26 @@ export class RunService {
     this.workspaceRoot = computerExecutor.workspaceRoot;
     this.sourceStorageRoot = options.sourceStorageRoot ?? this.workspaceRoot;
     this.ownerScopedWorkspace = options.ownerScopedWorkspace === true;
+    this.workspace = new RuntimeWorkspaceService(this.workspaceRoot, { ownerScoped: this.ownerScopedWorkspace });
     const acceptanceService = new ArtifactAcceptanceService({
       providers: options.acceptanceProviders,
     });
     this.runs = new RunRepository(options.database);
+    this.eventQueries = new RuntimeEventQueryService({
+      runs: this.runs,
+      authorizeRun: async (actorUserId, runId) => { await this.get(actorUserId, runId); },
+    });
     this.plans = new PlanRepository(options.database);
+    this.planQueries = new RuntimePlanQueryService({ plans: this.plans, run: async (actorUserId, runId) => await this.get(actorUserId, runId) });
     this.stepResults = new StepResultCommitter(this.plans);
     this.sources = new SourceRepository(options.database);
     this.actions = new RuntimeActionRepository(options.database);
+    this.actionQueries = new RuntimeActionQueryService({
+      actions: this.actions,
+      authorizeRun: async (actorUserId, runId) => { await this.get(actorUserId, runId); },
+    });
     this.results = new RuntimeResultRepository(options.database);
+    this.outcomeQueries = new RuntimeOutcomeQueryService(options.database, this.results);
     this.coreTools = createCoreTools({
       executor: computerExecutor,
       driver: options.computerDriver,
@@ -409,6 +376,46 @@ export class RunService {
     });
     this.sourceIntake = new SourceIntakeService(this.sources, this.sourceStorageRoot, { ownerScopedStorage: this.ownerScopedWorkspace });
     this.humanLoops = new HumanLoopRepository(options.database);
+    this.artifactQueries = new RuntimeArtifactQueryService({
+      run: (actorUserId, runId) => this.get(actorUserId, runId),
+      events: (actorUserId, runId) => this.events(actorUserId, runId),
+      workspaceRoot: (run) => this.runWorkspaceRoot(run),
+    });
+    this.commandOutputQueries = new RuntimeCommandOutputQueryService({
+      run: (actorUserId, runId) => this.get(actorUserId, runId),
+      events: (actorUserId, runId) => this.events(actorUserId, runId),
+      workspaceRoot: (run) => this.runWorkspaceRoot(run),
+    });
+    this.toolArgumentsQueries = new RuntimeToolArgumentsQueryService({
+      run: (actorUserId, runId) => this.get(actorUserId, runId),
+      events: (actorUserId, runId) => this.events(actorUserId, runId),
+      // References are written by the Runtime's server-owned event projector.
+      // Authorization comes from `run`; the reference store remains under this server root.
+      store: () => new ToolArgumentsReferenceStore(this.workspaceRoot),
+    });
+    this.conversationWorkingSets = new RuntimeConversationWorkingSetQueryService({
+      runs: async (conversationId) => (await this.runs.topLevelRunsInConversation(conversationId)).map((run): ConversationWorkingSetRun => ({
+        id: run.id, status: run.status, input: run.input, ownerUserId: run.owner_user_id,
+        ...(run.conversation_id === null ? {} : { conversationId: run.conversation_id }),
+        createdAt: run.created_at, ...(run.error_code === null ? {} : { errorCode: run.error_code }),
+      })),
+      events: async (runId) => await this.runtimeEvents(runId),
+      outcome: async (runId) => await this.outcomeForRun(runId),
+      plan: async (runId) => await optionalPlanByRun(this.plans, runId),
+      reusableArtifacts: async (run, events, plan) => await this.conversationReusableArtifacts(run, events, plan),
+      turnResolution: conversationTurnResolutionFromEvents,
+      failedBoundary: failureBoundaryForRun,
+      sourceSummary: conversationSourceSummaryFromStep,
+      stepContext: conversationStepContext,
+      resumeSuggestion: buildResumeSuggestion,
+    });
+    this.hostRunQueries = new RuntimeHostRunProjectionQueryService({
+      run: async (actorUserId, runId) => await this.get(actorUserId, runId),
+      plan: async (actorUserId, runId) => await this.planQueries.hostProjection(actorUserId, runId),
+      outcome: async (runId) => await this.outcomeForRun(runId),
+      artifacts: async (actorUserId, runId) => await this.processArtifacts(actorUserId, runId),
+      events: async (actorUserId, runId) => await this.events(actorUserId, runId),
+    });
     this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
     this.checkpoints = new RunCheckpointRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
@@ -567,7 +574,28 @@ export class RunService {
     if (revision === undefined) throw new AppError("BAD_REQUEST", "expectedRevision is required", 400);
     const request = await this.humanLoops.current(runId);
     if (request?.id !== requestId) throw new AppError("CONFLICT", "Human-in-the-Loop request is no longer open", 409);
+    if (request.origin === "recovery") {
+      const recoveryState = await this.recovery.state(runId);
+      if (recoveryState?.state !== "waiting_user" || recoveryState.actionId !== request.actionId) {
+        throw new AppError("CONFLICT", "Recovery Human-in-the-Loop request is no longer actionable", 409);
+      }
+    }
     const response = await this.humanLoops.respond({ requestId, runId, actorUserId, expectedRevision: revision, value });
+    // Recovery Planner `ask_user` is a durable recovery decision, not a
+    // replay-safe Step HIL. Persist the validated answer into the recovery
+    // ledger first, then let the planner decide whether to resume, revise, or
+    // ask again. This keeps the user interaction on the canonical HIL path
+    // without silently treating a recovery question as `resume_step`.
+    if (request.origin === "recovery") {
+      await this.recovery.submitUserResponse(runId, JSON.stringify(response.value));
+      void this.advanceRecovery(actorUserId, runId).catch(async (error) => {
+        await this.appendRunEvent(runId, {
+          type: "human_loop.resume_failed",
+          data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
+        });
+      });
+      return response;
+    }
     if (request.actionId !== undefined) {
       const action = (await this.actions.list(runId)).find((item) => item.id === request.actionId);
       if (action !== undefined && action.state === "recovery_required") {
@@ -591,31 +619,7 @@ export class RunService {
   }
 
   async hostRun(actorUserId: string, runId: string): Promise<HostRunProjection> {
-    const run = await this.get(actorUserId, runId);
-    const planProjection = await this.hostPlanProjection(actorUserId, runId);
-    const outcome = await this.outcomeForRun(runId);
-    const events = await this.events(actorUserId, runId);
-    const artifacts = await this.processArtifacts(actorUserId, runId);
-    return {
-      schema: "agentloop.hostRun/v1",
-      run,
-      ...(outcome === undefined ? {} : {
-        outcome: {
-          schema: "agentloop.hostOutcome/v1",
-          status: outcome.status,
-          reasonCode: outcome.reasonCode,
-          ...(outcome.planId === undefined ? {} : { planId: outcome.planId }),
-          ...(outcome.output === undefined ? {} : { output: outcome.output }),
-          ...(outcome.deliveryReceipt === undefined ? {} : { deliveryReceipt: outcome.deliveryReceipt }),
-          committedAt: outcome.committedAt,
-        },
-      }),
-      plan: planProjection,
-      artifacts,
-      eventCursor: {
-        lastSeq: events.at(-1)?.seq ?? 0,
-      },
-    };
+    return await this.hostRunQueries.read(actorUserId, runId);
   }
 
   async cancel(actorUserId: string, runId: string): Promise<RunRecord> {
@@ -777,225 +781,46 @@ export class RunService {
     return capConversationHistory(messages);
   }
 
-  private async buildConversationWorkingSet(conversationId: string): Promise<ConversationWorkingSet | undefined> {
-    const allRuns = await this.runs.topLevelRunsInConversation(conversationId);
-    if (allRuns.length === 0) return undefined;
-    const consideredRuns = allRuns.slice(-CONVERSATION_WORKING_SET_RUN_LIMIT);
-    const planCursors: Array<ConversationWorkingSet["planCursors"][number]> = [];
-    const reusableArtifacts: ConversationReusableArtifact[] = [];
-    const resultCards: RuntimeResultCard[] = [];
-    const completedStepContexts: ConversationStepContext[] = [];
-    const failedBoundaries: ConversationFailedBoundary[] = [];
-    const requiredSkillIds = new Set<string>();
-    const recommendedCapabilityIds = new Set<string>();
-    const sourceSummaries: ConversationSourceSummary[] = [];
-    const outcomeRelations: ConversationOutcomeRelation[] = [];
-    const resolvedIntents: ConversationResolvedIntent[] = [];
-    let activeGoal: ConversationWorkingSet["activeGoal"] | undefined;
-
-    for (const run of consideredRuns) {
-      const events = this.eventsFromRows(await this.runs.eventsByRun(run.id));
-      const resolvedIntent = conversationTurnResolutionFromEvents(events);
-      if (resolvedIntent !== undefined) {
-        resolvedIntents.push({ runId: run.id, resolution: resolvedIntent });
-      }
-      for (const event of events) {
-        if (event.type !== "conversation.outcome.disputed" && event.type !== "conversation.outcome.superseded") continue;
-        const targetRunId = stringField(event.data, "targetRunId");
-        const relation = stringField(event.data, "relation");
-        if (
-          targetRunId !== undefined
-          && (relation === "correct_prior" || relation === "refine_prior" || relation === "challenge_prior")
-        ) {
-          outcomeRelations.push({
-            runId: run.id,
-            targetRunId,
-            relation,
-            state: event.type === "conversation.outcome.superseded" ? "superseded" : "disputed",
-          });
-        }
-      }
-      const outcome = await this.outcomeForRun(run.id);
-      const failure = failureBoundaryForRun(run, outcome, events);
-      if (failure !== undefined) failedBoundaries.push(failure);
-
-      let plan: ExecutionPlan | undefined;
-      try {
-        plan = await this.plans.getByRun(run.id);
-      } catch (error) {
-        if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
-      }
-      if (plan !== undefined) {
-        for (const step of plan.steps) {
-          const sourceSummary = conversationSourceSummaryFromStep(run.id, plan.id, step);
-          if (sourceSummary !== undefined) sourceSummaries.push(sourceSummary);
-          const stepContext = conversationStepContext(run.id, plan.id, step);
-          if (stepContext !== undefined) completedStepContexts.push(stepContext);
-        }
-        const cursor = {
-          runId: run.id,
-          planId: plan.id,
-          input: run.input,
-          goal: plan.goal,
-          status: plan.status,
-          selectedSkillIds: plan.selectedSkillIds,
-          steps: plan.steps
-            .filter((step) => step.retiredAt === undefined)
-            .map((step) => ({
-              id: step.id,
-              kind: step.kind,
-              position: step.position,
-              status: step.status,
-              objective: step.objective,
-              dependencies: step.dependencies,
-              skillIds: step.skillIds,
-              requiredCapabilities: step.requiredCapabilities,
-              executionBinding: step.executionBinding,
-              ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
-            })),
-        };
-        planCursors.push(cursor);
-        const unfinishedSteps = activeLeafSteps(plan).filter((step) => step.status !== "completed");
-        if (unfinishedSteps.length > 0 || run.status !== "completed") {
-          activeGoal = {
-            runId: run.id,
-            planId: plan.id,
-            goal: plan.goal,
-            status: plan.status,
-            unfinished: true,
-            ...(outcome?.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
-          };
-          for (const step of unfinishedSteps) {
-            for (const skillId of step.skillIds) requiredSkillIds.add(skillId);
-            for (const capability of step.requiredCapabilities) recommendedCapabilityIds.add(capability);
-          }
-        }
-      } else if (run.status !== "completed") {
-        activeGoal = {
-          runId: run.id,
-          goal: run.input,
-          status: run.status,
-          unfinished: true,
-          ...(outcome?.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
-        };
-      }
-
-      const sourceByPath = artifactSourceByPath(events, await this.actions.list(run.id));
-      const artifacts = await collectProcessArtifacts({
+  private async conversationReusableArtifacts(
+    run: ConversationWorkingSetRun,
+    events: readonly StoredRunEvent[],
+    plan: ExecutionPlan | undefined,
+  ): Promise<ConversationReusableArtifact[]> {
+    const sourceByPath = artifactSourceByPath(events, await this.actions.list(run.id));
+    const artifacts = await collectProcessArtifacts({
+      runId: run.id,
+      workspaceRoot: this.runWorkspaceRoot(run),
+      runCreatedAt: run.createdAt,
+      events,
+      promoteProducedArtifacts: conversationCandidateApproved(events),
+    });
+    return artifacts.map((artifact) => {
+      const source = artifactSourceForPath(sourceByPath, artifact.path);
+      const sourcePlanStep = plan?.steps.find((step) => source?.stepId !== undefined && step.id === source.stepId && step.retiredAt === undefined);
+      const sourceSkillIds = sourcePlanStep?.skillIds ?? [];
+      const sourceCapabilities = sourcePlanStep?.requiredCapabilities ?? [];
+      return {
         runId: run.id,
-        workspaceRoot: this.runWorkspaceRoot(toRunRecord(run)),
-        runCreatedAt: run.created_at,
-        events,
-        promoteProducedArtifacts: conversationCandidateApproved(events),
-      });
-      for (const artifact of artifacts) {
-        const source = artifactSourceForPath(sourceByPath, artifact.path);
-        const sourcePlanStep = plan?.steps.find((step) =>
-          source?.stepId !== undefined
-          && step.id === source.stepId
-          && step.retiredAt === undefined
-        );
-        const sourceSkillIds = sourcePlanStep?.skillIds ?? [];
-        const sourceCapabilities = sourcePlanStep?.requiredCapabilities ?? [];
-        reusableArtifacts.push({
-          runId: run.id,
-          path: artifact.path,
-          name: artifact.name,
-          bytes: artifact.bytes,
-          mimeType: artifact.mimeType,
-          sourceTool: artifact.sourceTool,
-          ...(source?.toolCallId === undefined ? {} : { sourceToolCallId: source.toolCallId }),
-          ...(source?.stepId === undefined ? {} : { sourcePlanStepId: source.stepId }),
-          ...(sourceSkillIds.length === 0 ? {} : { sourceSkillIds }),
-          ...(sourceCapabilities.length === 0 ? {} : { sourceCapabilities }),
-          reusable: true,
-        });
-      }
-      const publishedRunResult = outcome?.status === "completed" ? outcome.result : undefined;
-      if (publishedRunResult === undefined && plan !== undefined) {
-        for (const step of plan.steps) {
-          const result = step.status === "completed" ? step.evidence?.publishedResult : undefined;
-          if (result === undefined) continue;
-          const content = result.payload.content;
-          const summary = truncateWorkingSetText(content, 1_200);
-          resultCards.push(createRuntimeResultCard({
-            result,
-            goal: truncateWorkingSetText(step.objective, 600),
-            summary,
-            summaryTruncated: summary.length < content.replace(/\s+/g, " ").trim().length,
-            artifactPaths: artifacts
-              .filter((artifact) => artifactSourceForPath(sourceByPath, artifact.path)?.stepId === step.id)
-              .map((artifact) => artifact.path),
-            evidenceRefs: [
-              `run:${run.id}`,
-              `plan:${plan.id}`,
-              `step:${step.id}`,
-              ...(result.publication.assessmentRef === undefined ? [] : [`assessment:${result.publication.assessmentRef}`]),
-            ],
-          }));
-        }
-      }
-      if (publishedRunResult !== undefined) {
-        const content = publishedRunResult.payload.content;
-        const summary = truncateWorkingSetText(content, 1_200);
-        resultCards.push(createRuntimeResultCard({
-          result: publishedRunResult,
-          goal: truncateWorkingSetText(plan?.goal ?? run.input, 600),
-          summary,
-          summaryTruncated: summary.length < content.replace(/\s+/g, " ").trim().length,
-          artifactPaths: artifacts.map((artifact) => artifact.path),
-          evidenceRefs: [
-            `run:${run.id}`,
-            ...(publishedRunResult.producer.planId === undefined ? [] : [`plan:${publishedRunResult.producer.planId}`]),
-          ],
-        }));
-      }
-    }
-
-    const boundedArtifacts = reusableArtifacts.slice(-CONVERSATION_WORKING_SET_ARTIFACT_LIMIT);
-    const boundedResultCards = resultCards.slice(-CONVERSATION_WORKING_SET_RESULT_LIMIT);
-    const boundedSourceSummaries = sourceSummaries.slice(-CONVERSATION_WORKING_SET_SOURCE_SUMMARY_LIMIT);
-    const boundedStepContexts = completedStepContexts.slice(-CONVERSATION_STEP_CONTEXT_LIMIT);
-    for (const stepContext of boundedStepContexts) {
-      for (const skillId of stepContext.skillIds) requiredSkillIds.add(skillId);
-      for (const capability of stepContext.requiredCapabilities) recommendedCapabilityIds.add(capability);
-    }
-    for (const artifact of boundedArtifacts) {
-      for (const skillId of artifact.sourceSkillIds ?? []) requiredSkillIds.add(skillId);
-      for (const capability of artifact.sourceCapabilities ?? []) recommendedCapabilityIds.add(capability);
-    }
-    const resumeSuggestion = buildResumeSuggestion(activeGoal, planCursors, boundedArtifacts, failedBoundaries);
-    const evidenceLedger: ConversationEvidenceLedger | undefined = boundedSourceSummaries.length === 0
-      ? undefined
-      : {
-        schema: "conversation.evidenceLedger/v1",
-        sourceSummaries: boundedSourceSummaries,
+        path: artifact.path,
+        name: artifact.name,
+        bytes: artifact.bytes,
+        mimeType: artifact.mimeType,
+        sourceTool: artifact.sourceTool,
+        ...(source?.toolCallId === undefined ? {} : { sourceToolCallId: source.toolCallId }),
+        ...(source?.stepId === undefined ? {} : { sourcePlanStepId: source.stepId }),
+        ...(sourceSkillIds.length === 0 ? {} : { sourceSkillIds }),
+        ...(sourceCapabilities.length === 0 ? {} : { sourceCapabilities }),
+        reusable: true,
       };
-    return {
-      schema: "conversation.workset/v1",
-      conversationId,
-      runCount: allRuns.length,
-      ...(activeGoal === undefined ? {} : { activeGoal }),
-      planCursors,
-      ...(resolvedIntents.length === 0 ? {} : { resolvedIntents }),
-      resultCards: boundedResultCards,
-      reusableArtifacts: boundedArtifacts,
-      failedBoundaries,
-      ...(outcomeRelations.length === 0 ? {} : { outcomeRelations }),
-      recommendedCapabilities: {
-        skillIds: [...requiredSkillIds],
-        capabilityIds: [...recommendedCapabilityIds],
-      },
-      ...(evidenceLedger === undefined ? {} : { evidenceLedger }),
-      ...(boundedStepContexts.length === 0 ? {} : { completedStepContexts: boundedStepContexts }),
-      ...(resumeSuggestion === undefined ? {} : { resumeSuggestion }),
-    };
+    });
+  }
+
+  private async buildConversationWorkingSet(conversationId: string): Promise<ConversationWorkingSet | undefined> {
+    return await this.conversationWorkingSets.build(conversationId);
   }
 
   private runWorkspaceRoot(run: Pick<RunRecord, "ownerUserId" | "conversationId">): string {
-    return run.conversationId === undefined
-      ? this.workspaceRootForOwner(run.ownerUserId)
-      : this.conversationWorkspaceRoot(run.ownerUserId, run.conversationId);
+    return this.workspace.forRun(run);
   }
 
   private async toRunRecordWithSources(row: RunRow): Promise<RunRecord> {
@@ -1005,167 +830,27 @@ export class RunService {
     return toRunRecord(row, sources);
   }
 
-  private workspaceRootForOwner(ownerUserId: string): string {
-    if (!this.ownerScopedWorkspace) return this.workspaceRoot;
-    const target = resolve(this.workspaceRoot, "users", ownerWorkspaceSegment(ownerUserId));
-    this.assertInsideServerWorkspace(target);
-    return target;
-  }
-
-  private conversationWorkspaceRoot(ownerUserId: string, conversationId: string): string {
-    if (!isSafeWorkspaceSegment(conversationId)) {
-      throw new AppError("BAD_REQUEST", "Invalid conversation workspace id", 400);
-    }
-    const target = resolve(this.workspaceRootForOwner(ownerUserId), "conversations", conversationId);
-    this.assertInsideServerWorkspace(target);
-    return target;
-  }
-
-  private async ensureOwnerWorkspace(ownerUserId: string): Promise<string> {
-    const root = this.workspaceRootForOwner(ownerUserId);
-    if (!this.ownerScopedWorkspace) return root;
-    await this.ensureManagedWorkspaceDirectory(resolve(this.workspaceRoot, "users"));
-    await this.ensureManagedWorkspaceDirectory(root);
-    return fs.realpath(root);
-  }
-
-  private async ensureConversationWorkspace(ownerUserId: string, conversationId: string): Promise<string> {
-    const root = await this.ensureOwnerWorkspace(ownerUserId);
-    const parent = resolve(root, "conversations");
-    const target = this.conversationWorkspaceRoot(ownerUserId, conversationId);
-    await this.ensureManagedWorkspaceDirectory(parent);
-    await this.ensureManagedWorkspaceDirectory(target);
-    return fs.realpath(target);
-  }
-
-  private async ensureManagedWorkspaceDirectory(directory: string): Promise<void> {
-    this.assertInsideServerWorkspace(directory);
-    await fs.mkdir(directory, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw error;
-    });
-    const stat = await fs.lstat(directory);
-    if (stat.isSymbolicLink()) throw forbidden("Conversation workspace directories cannot be symbolic links");
-    if (!stat.isDirectory()) throw new AppError("CONFLICT", "Conversation workspace path is not a directory", 409);
-    this.assertInsideServerWorkspace(await fs.realpath(directory));
-  }
-
-  private assertInsideServerWorkspace(path: string): void {
-    const offset = relative(this.workspaceRoot, path);
-    if (offset === "" || (!offset.startsWith(`..${sep}`) && offset !== ".." && !isAbsolute(offset))) return;
-    throw forbidden("Conversation workspace escapes the configured workspace root");
-  }
-
   async plan(actorUserId: string, runId: string): Promise<{
     state: "pending" | "available" | "unavailable";
     plan: ExecutionPlan;
     assessments: SkillComplianceAssessment[];
   }> {
-    const run = await this.get(actorUserId, runId);
-    try {
-      const plan = await this.plans.getByRun(runId);
-      return { state: "available", plan, assessments: await this.plans.assessments(plan.id) };
-    } catch (error) {
-      if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
-      const now = Date.now();
-      return {
-        state: run.status === "running" ? "pending" : "unavailable",
-        plan: {
-          id: "",
-          runId,
-          version: 0,
-          goal: run.status === "running" ? "Plan is not available yet." : "No Plan was persisted for this Run.",
-          selectedSkillIds: [],
-          status: run.status === "running" ? "pending" : "failed",
-          steps: [],
-          createdAt: run.createdAt,
-          updatedAt: run.finishedAt ?? now,
-        },
-        assessments: [],
-      };
-    }
-  }
-
-  private async hostPlanProjection(
-    actorUserId: string,
-    runId: string,
-  ): Promise<HostRunProjection["plan"]> {
-    const detail = await this.plan(actorUserId, runId);
-    return {
-      state: detail.state,
-      id: detail.plan.id,
-      version: detail.plan.version,
-      status: detail.plan.status,
-      goal: detail.plan.goal,
-      selectedSkillIds: detail.plan.selectedSkillIds,
-      steps: detail.plan.steps
-        .filter((step) => step.retiredAt === undefined)
-        .map((step) => ({
-          id: step.id,
-          status: step.status,
-          objective: step.objective,
-          dependencies: step.dependencies,
-          skillIds: step.skillIds,
-          requiredCapabilities: step.requiredCapabilities,
-          executionBinding: step.executionBinding,
-          ...(step.output === undefined ? {} : { output: truncateWorkingSetText(step.output, 1_200) }),
-          ...(step.error === undefined ? {} : { error: truncateWorkingSetText(step.error, 600) }),
-        })),
-      assessmentCount: detail.assessments.length,
-      approvedAssessmentCount: detail.assessments.filter((assessment) => assessment.approved).length,
-    };
+    const projection = await this.planQueries.read(actorUserId, runId);
+    // Preserve the pre-existing public mutable-array contract without giving
+    // callers a reference to the read-model projection's collection.
+    return { ...projection, assessments: [...projection.assessments] };
   }
 
   async events(actorUserId: string, runId: string): Promise<StoredRunEvent[]> {
-    await this.get(actorUserId, runId);
-    const rows = await this.runs.eventsByRun(runId);
-    return this.eventsFromRows(rows).map(publicRunEvent);
-  }
-
-  private eventsFromRows(rows: readonly RunEventRow[]): StoredRunEvent[] {
-    return rows.map((row) => ({
-      seq: row.seq,
-      type: row.type,
-      data: JSON.parse(row.payload_json) as Record<string, unknown>,
-      createdAt: row.created_at,
-    }));
+    return await this.eventQueries.list(actorUserId, runId);
   }
 
   private async runtimeEvents(runId: string): Promise<StoredRunEvent[]> {
-    return this.eventsFromRows(await this.runs.eventsByRun(runId));
+    return await this.eventQueries.storedForRun(runId);
   }
 
-  private async outcomeForRun(runId: string): Promise<{
-    status: string;
-    reasonCode: string;
-    planId?: string;
-    output?: string;
-    result?: ReturnType<typeof parseRuntimeResultJson>;
-    deliveryReceipt?: import("./contracts.ts").RuntimeDeliveryReceipt;
-    committedAt: number;
-  } | undefined> {
-    const row = await this.database.prepare(`
-      SELECT status, reason_code, plan_id, output, result_json, committed_at FROM run_outcomes WHERE run_id = ?
-    `).get(runId) as {
-      status: string;
-      reason_code: string;
-      plan_id: string | null;
-      output: string | null;
-      result_json: string | null;
-      committed_at: number;
-    } | undefined;
-    if (row === undefined) return undefined;
-    const deliveryReceipt = row.status === "completed"
-      ? await this.results.readDeliveryReceiptForRun(runId)
-      : undefined;
-    return {
-      status: row.status,
-      reasonCode: row.reason_code,
-      ...(row.plan_id === null ? {} : { planId: row.plan_id }),
-      ...(row.output === null ? {} : { output: row.output }),
-      ...(row.result_json === null ? {} : { result: parseRuntimeResultJson(row.result_json) }),
-      ...(deliveryReceipt === undefined ? {} : { deliveryReceipt }),
-      committedAt: row.committed_at,
-    };
+  private async outcomeForRun(runId: string): Promise<RuntimeOutcomeProjection | undefined> {
+    return await this.outcomeQueries.read(runId);
   }
 
   /**
@@ -1175,41 +860,18 @@ export class RunService {
    * Run Outcome remains a separate control-plane status.
    */
   async processArtifacts(actorUserId: string, runId: string): Promise<ProcessArtifact[]> {
-    const run = await this.get(actorUserId, runId);
-    const workspaceRoot = this.runWorkspaceRoot(run);
-    const events = await this.events(actorUserId, runId);
-    return collectProcessArtifacts({
-      runId,
-      workspaceRoot,
-      runCreatedAt: run.createdAt,
-      events,
-      promoteProducedArtifacts: conversationCandidateApproved(events),
-    });
+    return await this.artifactQueries.list(actorUserId, runId);
   }
 
   async readProcessArtifact(actorUserId: string, runId: string, artifactId: string): Promise<{
     artifact: ProcessArtifact;
     content: Buffer;
   }> {
-    const artifact = (await this.processArtifacts(actorUserId, runId)).find((item) => item.id === artifactId);
-    if (artifact === undefined) throw notFound("Process artifact");
-    const run = await this.get(actorUserId, runId);
-    try {
-      return { artifact, content: await readProcessArtifact({ artifact, workspaceRoot: this.runWorkspaceRoot(run) }) };
-    } catch {
-      throw notFound("Process artifact");
-    }
+    return await this.artifactQueries.read(actorUserId, runId, artifactId);
   }
 
   async previewProcessArtifact(actorUserId: string, runId: string, artifactId: string): Promise<ProcessArtifactPreview> {
-    const artifact = (await this.processArtifacts(actorUserId, runId)).find((item) => item.id === artifactId);
-    if (artifact === undefined) throw notFound("Process artifact");
-    const run = await this.get(actorUserId, runId);
-    try {
-      return await previewProcessArtifact({ artifact, workspaceRoot: this.runWorkspaceRoot(run) });
-    } catch {
-      throw notFound("Process artifact");
-    }
+    return await this.artifactQueries.preview(actorUserId, runId, artifactId);
   }
 
   async readCommandOutput(
@@ -1218,40 +880,7 @@ export class RunService {
     toolCallId: string,
     stream: "stdout" | "stderr",
   ): Promise<CommandOutputContent> {
-    const run = await this.get(actorUserId, runId);
-    const completedEvent = (await this.events(actorUserId, runId)).find((event) => {
-      const data = event.data;
-      return event.type === "tool.completed"
-        && data.toolName === "computer_run_command"
-        && data.toolCallId === toolCallId;
-    });
-    if (completedEvent === undefined) throw notFound("Command output");
-    const result = parseCommandOutputResult(completedEvent.data.result);
-    if (result === undefined) throw notFound("Command output");
-    const ref = commandOutputReference(result[`${stream}Ref`]);
-    if (ref === undefined) {
-      const inlineContent = typeof result[stream] === "string" ? result[stream] : "";
-      return {
-        toolCallId,
-        stream,
-        content: inlineContent,
-        bytes: Buffer.byteLength(inlineContent),
-        characters: inlineContent.length,
-      };
-    }
-
-    const target = await resolveCommandOutputReference(this.runWorkspaceRoot(run), ref.path);
-    const stat = await fs.stat(target);
-    if (!stat.isFile() || stat.size > MAX_COMMAND_OUTPUT_REFERENCE_BYTES) throw notFound("Command output");
-    return {
-      toolCallId,
-      stream,
-      content: await fs.readFile(target, "utf8"),
-      path: ref.path,
-      ...(ref.sha256 === undefined ? {} : { sha256: ref.sha256 }),
-      ...(ref.bytes === undefined ? { bytes: stat.size } : { bytes: ref.bytes }),
-      ...(ref.characters === undefined ? {} : { characters: ref.characters }),
-    };
+    return await this.commandOutputQueries.read(actorUserId, runId, toolCallId, stream);
   }
 
   async readToolArguments(
@@ -1259,30 +888,7 @@ export class RunService {
     runId: string,
     toolCallId: string,
   ): Promise<ToolArgumentsContent> {
-    await this.get(actorUserId, runId);
-    const events = this.eventsFromRows(await this.runs.eventsByRun(runId));
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index];
-      const directToolCallId = typeof event.data.toolCallId === "string" ? event.data.toolCallId : undefined;
-      if (directToolCallId === toolCallId) {
-        const ref = toolArgumentsReference(event.data.argumentsRef);
-        if (ref !== undefined) return this.readToolArgumentsReference(toolCallId, ref);
-        if ("arguments" in event.data) {
-          return inlineToolArgumentsContent(toolCallId, event.data.arguments);
-        }
-      }
-      if ((event.type === "assistant.committed" || event.type === "assistant.streaming") && Array.isArray(event.data.toolCalls)) {
-        const calls = event.data.toolCalls as readonly unknown[];
-        for (let callIndex = calls.length - 1; callIndex >= 0; callIndex -= 1) {
-          const call = asRecord(calls[callIndex]);
-          if (call?.id !== toolCallId) continue;
-          const ref = toolArgumentsReference(call.argumentsRef);
-          if (ref !== undefined) return this.readToolArgumentsReference(toolCallId, ref);
-          if ("arguments" in call) return inlineToolArgumentsContent(toolCallId, call.arguments);
-        }
-      }
-    }
-    throw notFound("Tool arguments");
+    return await this.toolArgumentsQueries.read(actorUserId, runId, toolCallId);
   }
 
   /** Subscribe to live run events as they are durably appended. */
@@ -1291,8 +897,7 @@ export class RunService {
   }
 
   async actionsForRun(actorUserId: string, runId: string): Promise<RuntimeActionRecord[]> {
-    await this.get(actorUserId, runId);
-    return this.actions.list(runId);
+    return await this.actionQueries.list(actorUserId, runId);
   }
 
   async recoveryForRun(actorUserId: string, runId: string): Promise<RecoveryDetail> {
@@ -1337,6 +942,7 @@ export class RunService {
     }
     const failedBoundary = failedBoundaryFromRecoveryAction(action);
     const events = await this.events(actorUserId, runId);
+    const userResponses = await this.recovery.userResponses(runId);
     const proposedDecision = failedBoundaryRecoveryDecision(
       run,
       action,
@@ -1351,7 +957,7 @@ export class RunService {
         ...(currentPlan === undefined ? {} : { plan: currentPlan }),
         ...(failedBoundary === undefined ? {} : { failedBoundary }),
         events,
-        userResponses: (await this.recovery.userResponses(runId)).map((item) => ({
+        userResponses: userResponses.map((item) => ({
           actionId: item.actionId,
           response: item.response,
           createdAt: item.createdAt,
@@ -1362,6 +968,7 @@ export class RunService {
       action,
       plan: currentPlan,
       proposal: proposedDecision,
+      userResponses,
     });
     const decision = await this.recovery.submit(runId, proposal);
     try {
@@ -1374,6 +981,15 @@ export class RunService {
           break;
         case "ask_user":
           await this.recovery.admit(decision.id, { kind: "waiting_user", question: decision.question });
+          await this.persistRecoveryHumanLoopPause({
+            runId,
+            ...(currentPlan === undefined ? {} : { planId: currentPlan.id }),
+            ...(action.stepId === undefined ? {} : { stepId: action.stepId }),
+            actionId: action.id,
+            question: decision.question,
+            rationale: decision.rationale,
+            evidenceRefs: decision.evidenceRefs,
+          });
           break;
         case "fail":
           await this.recovery.admit(decision.id);
@@ -1392,6 +1008,7 @@ export class RunService {
             decision,
             currentPlan,
             model,
+            userResponses,
             setActionStep: (stepId) => { actionScope.stepId = stepId; },
           });
           break;
@@ -1434,8 +1051,8 @@ export class RunService {
       throw new AppError("CONFLICT", "Recovery Action does not target a running effective Plan step", 409);
     }
     const runWorkspaceRoot = run.conversationId === undefined
-      ? await this.ensureOwnerWorkspace(run.ownerUserId)
-      : await this.ensureConversationWorkspace(run.ownerUserId, run.conversationId);
+      ? await this.workspace.ensureOwnerWorkspace(run.ownerUserId)
+      : await this.workspace.ensureConversationWorkspace(run.ownerUserId, run.conversationId);
 
     const transcript = reconstructRecoveryTranscript({
       userInput: run.input,
@@ -1534,6 +1151,7 @@ export class RunService {
             requirement: error.details?.requirement,
             sourceToolCallId: error.details?.sourceToolCallId,
             emit,
+            completedRecoveryActionId: action.kind === "recovery_review" ? action.id : undefined,
           });
           return this.get(actorUserId, runId);
         }
@@ -1569,16 +1187,24 @@ export class RunService {
     readonly requirement: unknown;
     readonly sourceToolCallId: unknown;
     readonly emit: (event: RuntimeEvent) => Promise<void>;
+    /** The resumed Recovery Action that this newly requested pause supersedes. */
+    readonly completedRecoveryActionId?: string;
   }): Promise<void> {
     if (input.requirement === undefined || typeof input.requirement !== "object" || Array.isArray(input.requirement)) {
       throw new AppError("INTERNAL_ERROR", "Human-in-the-Loop request was not structured", 500);
     }
-    const action = await this.actions.requireHumanLoopResume({
+    const actionInput = {
       runId: input.runId,
       planId: input.planId,
       stepId: input.stepId,
       metadata: { sourceToolCallId: input.sourceToolCallId },
-    });
+    };
+    const action = input.completedRecoveryActionId === undefined
+      ? await this.actions.requireHumanLoopResume(actionInput)
+      : await this.actions.replaceRecoveryReviewWithHumanLoopResume({
+        ...actionInput,
+        previousActionId: input.completedRecoveryActionId,
+      });
     const request = await this.humanLoops.create({
       ...(input.requirement as HumanLoopRequirement),
       runId: input.runId,
@@ -1596,6 +1222,53 @@ export class RunService {
         runId: input.runId,
         planId: input.planId,
         stepId: input.stepId,
+        requestId: request.id,
+        kind: request.kind,
+        request,
+      },
+    });
+  }
+
+  /**
+   * Recovery Planner questions use the same durable HIL request contract as
+   * tool-originated pauses. Recovery state remains authoritative for the
+   * planner, while the request snapshot gives the browser a typed action and
+   * a revisioned response path.
+   */
+  private async persistRecoveryHumanLoopPause(input: {
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly actionId: string;
+    readonly question?: string;
+    readonly rationale: string;
+    readonly evidenceRefs: readonly string[];
+  }): Promise<void> {
+    const request = await this.humanLoops.create({
+      runId: input.runId,
+      ...(input.planId === undefined ? {} : { planId: input.planId }),
+      ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
+      actionId: input.actionId,
+      origin: "recovery",
+      kind: "approval",
+      title: "需要确认恢复操作",
+      prompt: input.question ?? "Runtime 需要你的确认才能继续恢复此 Run。",
+      rationale: input.rationale,
+      evidenceRefs: input.evidenceRefs,
+      responseSchema: {
+        type: "confirm",
+        acceptLabel: "确认并继续",
+        rejectLabel: "拒绝并停止",
+      },
+      resume: { mode: "recovery_review", ...(input.stepId === undefined ? {} : { targetStepId: input.stepId }) },
+    });
+    await this.appendRunEvent(input.runId, {
+      type: "run.waiting_user",
+      data: {
+        runId: input.runId,
+        ...(input.planId === undefined ? {} : { planId: input.planId }),
+        ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
+        actionId: input.actionId,
         requestId: request.id,
         kind: request.kind,
         request,
@@ -1754,8 +1427,8 @@ export class RunService {
       );
     }
     const runWorkspaceRoot = conversationId === undefined
-      ? await this.ensureOwnerWorkspace(actorUserId)
-      : await this.ensureConversationWorkspace(actorUserId, conversationId);
+      ? await this.workspace.ensureOwnerWorkspace(actorUserId)
+      : await this.workspace.ensureConversationWorkspace(actorUserId, conversationId);
     const conversationHistory = conversationId === undefined
       ? undefined
       : await this.conversationHistory(conversationId);
@@ -1830,22 +1503,20 @@ export class RunService {
       // actionless, abandoned Run to a Runtime Host's reconciliation pass.
       const actionScope: { planId?: string; stepId?: string } = {};
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
-      const requiresExecution = requiresDeterministicConversationExecution(input, conversationWorkingSet);
       const turnResolution = !conversationEntry
         ? undefined
-        : requiresExecution && (conversationHistory?.length ?? 0) === 0
-          ? deterministicConversationTurnResolution(input)
-          : await resolveConversationTurn(
-            model,
-            input,
-            conversationHistory,
-            {
-              visibleDirectories,
-              sources: availableSources,
-              conversationWorkingSet,
-            },
-            runController.signal,
-          );
+        : await resolveConversationTurn(
+          model,
+          emit,
+          input,
+          conversationHistory,
+          {
+            visibleDirectories,
+            sources: availableSources,
+            conversationWorkingSet,
+          },
+          runController.signal,
+        );
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
@@ -1877,9 +1548,10 @@ export class RunService {
       if (!responseOnly && this.skills.skillDirectories.length > 0) {
         await this.skills.refreshSkillDirectory();
       }
-      const privateSkills = responseOnly
-        ? []
-        : await this.skills.resolveForConversation(actorUserId);
+      // A reply-only turn does not require Skills, but it must not erase the
+      // Runtime's authorized capability catalog. The catalog stays inert in
+      // capabilityRecovery; the reply Plan still receives no Skills or Tools.
+      const privateSkills = await this.skills.resolveForConversation(actorUserId);
       const discoveredByName = new Map(this.skills.discovered().map((skill) => [skill.name, skill]));
       for (const skill of privateSkills) {
         if (skill.sourceKind !== "package" || skill.package === undefined) continue;
@@ -1926,11 +1598,10 @@ export class RunService {
         uploadedSources: availableSources,
       });
       assertNoDuplicateTools(allTools);
-      const allowedToolNames = responseOnly
-        ? []
-        : [...allTools.map((tool) => tool.name)].filter((name) =>
+      const catalogToolNames = [...allTools.map((tool) => tool.name)].filter((name) =>
           executeOptions.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)
         );
+      const allowedToolNames = responseOnly ? [] : catalogToolNames;
       const effectiveGoal = turnResolution?.effectiveGoal ?? input;
       // Visible directories are capabilities offered to the resolver, never
       // implicit task input.  Only its atomic source binding is propagated to
@@ -1952,6 +1623,7 @@ export class RunService {
         toolNames: allowedToolNames,
         skillNames: privateSkills.map((skill) => skill.name),
         evidenceDemand: turnResolution?.evidenceDemand,
+        resolvedTaskIntent: turnResolution?.taskIntent,
         responseOnly,
         uploadedSources: availableSources,
         ...(targetArtifact === undefined ? {} : {
@@ -1979,7 +1651,9 @@ export class RunService {
         ...taskIntent,
         ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
       };
-      const planningAllowedToolNames = turnResolution === undefined || planningVisibleDirectories.length > 0
+      const planningAllowedToolNames = responseOnly
+        ? []
+        : turnResolution === undefined || planningVisibleDirectories.length > 0
         ? allowedToolNames
         : allowedToolNames.filter((name) => !isVisibleDirectoryToolName(name));
       const allowedToolSummaries = toolSummaries(allTools, new Set(planningAllowedToolNames));
@@ -2059,7 +1733,7 @@ export class RunService {
         capabilityRecovery: {
           availableSkills: privateSkills,
           availableCapabilities: [
-            ...planningCapabilitiesFromTools(allowedToolSummaries, availableSources),
+            ...planningCapabilitiesFromTools(toolSummaries(allTools, new Set(catalogToolNames)), availableSources),
             ...planningCapabilitiesFromSkills(privateSkills),
           ],
         },
@@ -2665,6 +2339,9 @@ export class RunService {
         } : {}),
         systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
         stepSemanticFrame,
+        ...(stepTaskProfile.artifactAction === "modify"
+          ? { artifactWritePolicy: "overwrite_observed_existing" as const }
+          : {}),
         runtimeContext: recovery === undefined
           ? buildStepRuntimeContext(
             activeStep,
@@ -2829,6 +2506,24 @@ export class RunService {
         deferFailureReport: true,
         evaluateCandidate: async (candidate) => {
           assessmentAttempt += 1;
+          const unreadDependencyResultIds = unreadDependencyResultIdsForCandidate(activeStep, plan, candidate.toolEvidence);
+          if (unreadDependencyResultIds.length > 0) {
+            const feedback = [
+              "This Step has completed dependency Results but did not consume them.",
+              `Call read_result with only resultId (no pointer, offset, or limit) for each bound dependency before writing the completion: ${unreadDependencyResultIds.join(", ")}.`,
+              "Do not infer or restate dependency facts from metadata, a prior draft, or the original request.",
+            ].join(" ");
+            await input.emit({
+              type: "candidate.dependency_results_unread",
+              data: {
+                planId: plan.id,
+                stepId: activeStep.id,
+                attempt: assessmentAttempt,
+                resultIds: unreadDependencyResultIds,
+              },
+            });
+            return { approved: false, feedback, requiresEvidenceProgress: true };
+          }
           const activatedStepSkills = activatedSkillsForAssessment(stepSkills, candidate.activatedSkillNames);
           const evidence: StepEvidence = {
             candidateOutput: candidate.output,
@@ -3056,6 +2751,7 @@ export class RunService {
     decision: RecoveryDecisionRecord;
     currentPlan?: ExecutionPlan;
     model: ModelAdapter;
+    userResponses?: readonly RecoveryUserResponse[];
     setActionStep?: (stepId: string | undefined) => void;
   }): Promise<void> {
     if (input.currentPlan === undefined || input.decision.planRevision === undefined) {
@@ -3107,7 +2803,12 @@ export class RunService {
     const retiredStepIds = input.currentPlan.steps
       .filter((step) => step.retiredAt === undefined && !proposedIds.has(step.id))
       .map((step) => step.id);
-    await this.assertRetirementHasNoUnconfirmedUnsafeEffect(input.run.id, input.currentPlan.id, retiredStepIds);
+    await this.assertRetirementHasNoUnconfirmedUnsafeEffect(
+      input.run.id,
+      input.currentPlan.id,
+      retiredStepIds,
+      latestRecoveryResponseAuthorizesRetirement(input.userResponses, input.action.id),
+    );
     await this.plans.validateRevision({
       planId: input.currentPlan.id,
       proposal: admitted,
@@ -3179,8 +2880,8 @@ export class RunService {
     }
 
     const runWorkspaceRoot = input.run.conversationId === undefined
-      ? await this.ensureOwnerWorkspace(input.run.ownerUserId)
-      : await this.ensureConversationWorkspace(input.run.ownerUserId, input.run.conversationId);
+      ? await this.workspace.ensureOwnerWorkspace(input.run.ownerUserId)
+      : await this.workspace.ensureConversationWorkspace(input.run.ownerUserId, input.run.conversationId);
     const rootGrant = createCapabilityGrant({
       actorUserId: input.actorUserId,
       runId: input.run.id,
@@ -3357,15 +3058,14 @@ export class RunService {
       }
       if (decision.decision === "ask_user") {
         await this.recovery.admit(decision.id, { kind: "waiting_user", question: decision.question });
-        await this.appendRunEvent(input.run.id, {
-          type: "run.waiting_user",
-          data: {
-            runId: input.run.id,
-            planId: input.currentPlan.id,
-            stepId: input.stepId,
-            actionId: action.id,
-            question: decision.question,
-          },
+        await this.persistRecoveryHumanLoopPause({
+          runId: input.run.id,
+          planId: input.currentPlan.id,
+          stepId: input.stepId,
+          actionId: action.id,
+          question: decision.question,
+          rationale: decision.rationale,
+          evidenceRefs: decision.evidenceRefs,
         });
         return;
       }
@@ -3435,6 +3135,7 @@ export class RunService {
     action: RuntimeActionRecord;
     plan: ExecutionPlan | undefined;
     proposal: RecoveryDecisionProposal;
+    userResponses?: readonly RecoveryUserResponse[];
   }): Promise<RecoveryDecisionProposal> {
     if (input.proposal.decision !== "revise_plan" || input.plan === undefined || input.proposal.planRevision === undefined) {
       return input.proposal;
@@ -3454,6 +3155,15 @@ export class RunService {
       && this.unsafeActionNeedsEffectConfirmation(candidate),
     );
     if (blockers.length === 0) return input.proposal;
+    // A recovery review is the explicit authorization boundary for retiring
+    // unfinished work whose external effect is unknown. Once the user has
+    // positively confirmed this exact Recovery Action, preserve the planner's
+    // revise_plan decision instead of asking the same question again. The
+    // response remains durable in recovery_user_responses and is scoped by
+    // actionId, so it cannot authorize an unrelated action.
+    if (latestRecoveryResponseAuthorizesRetirement(input.userResponses, input.action.id)) {
+      return input.proposal;
+    }
     return {
       actionId: input.action.id,
       expectedActionRevision: input.action.revision,
@@ -3468,8 +3178,9 @@ export class RunService {
     runId: string,
     planId: string,
     retiredStepIds: readonly string[],
+    userAuthorized = false,
   ): Promise<void> {
-    if (retiredStepIds.length === 0) return;
+    if (retiredStepIds.length === 0 || userAuthorized) return;
     const retired = new Set(retiredStepIds);
     const unsafe = (await this.actions.list(runId)).find((item) =>
       item.planId === planId
@@ -3565,92 +3276,19 @@ export class RunService {
 
   private projectToolArguments(argumentsValue: unknown): {
     readonly arguments: unknown;
-    readonly argumentsRef?: ToolArgumentsReference;
+    readonly argumentsRef?: import("./tool-arguments-reference-store.ts").ToolArgumentsReference;
   } {
-    const serialized = serializeToolArguments(argumentsValue);
-    const bytes = Buffer.byteLength(serialized);
-    if (bytes <= TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES) return { arguments: argumentsValue };
-    const reference = this.writeToolArgumentsReference(serialized);
-    const projected = projectToolArgumentsValue(argumentsValue, reference, serialized);
-    return { arguments: projected, argumentsRef: reference };
-  }
-
-  private writeToolArgumentsReference(serialized: string): ToolArgumentsReference {
-    const sha256 = createHash("sha256").update(serialized).digest("hex");
-    const directory = resolve(this.workspaceRoot, ".agentloop", "tool-arguments", sha256.slice(0, 2));
-    this.assertInsideServerWorkspace(directory);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const target = resolve(directory, `${sha256}.json`);
-    this.assertInsideServerWorkspace(target);
-    try {
-      writeFileSync(target, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    return {
-      schema: "agentloop.toolArgumentsReference/v1",
-      path: relative(this.workspaceRoot, target),
-      sha256,
-      bytes: Buffer.byteLength(serialized),
-      characters: serialized.length,
-      previewCharacters: TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS,
-    };
-  }
-
-  private async readToolArgumentsReference(toolCallId: string, ref: ToolArgumentsReference): Promise<ToolArgumentsContent> {
-    const target = await resolveToolArgumentsReference(this.workspaceRoot, ref.path);
-    const stat = await fs.stat(target);
-    if (!stat.isFile() || stat.size > MAX_TOOL_ARGUMENT_REFERENCE_BYTES) throw notFound("Tool arguments");
-    const serialized = await fs.readFile(target, "utf8");
-    if (ref.sha256 !== undefined) {
-      const actual = createHash("sha256").update(serialized).digest("hex");
-      if (actual !== ref.sha256) throw notFound("Tool arguments");
-    }
-    const argumentsValue = parseStoredToolArguments(serialized);
-    return {
-      toolCallId,
-      arguments: argumentsValue,
-      content: formatToolArgumentsContent(argumentsValue),
-      path: ref.path,
-      ...(ref.sha256 === undefined ? {} : { sha256: ref.sha256 }),
-      ...(ref.bytes === undefined ? { bytes: stat.size } : { bytes: ref.bytes }),
-      ...(ref.characters === undefined ? { characters: serialized.length } : { characters: ref.characters }),
-    };
+    return new ToolArgumentsReferenceStore(this.workspaceRoot).project(argumentsValue);
   }
 
   private async resolveToolArgumentReferences(events: readonly StoredRunEvent[]): Promise<StoredRunEvent[]> {
     const resolved: StoredRunEvent[] = [];
+    const store = new ToolArgumentsReferenceStore(this.workspaceRoot);
     for (const event of events) {
-      const data = await this.resolveToolArgumentReferencesInData(event.data);
+      const data = await store.resolveEventData(event.data);
       resolved.push(data === event.data ? event : { ...event, data });
     }
     return resolved;
-  }
-
-  private async resolveToolArgumentReferencesInData(data: Readonly<Record<string, unknown>>): Promise<Readonly<Record<string, unknown>>> {
-    const directRef = toolArgumentsReference(data.argumentsRef);
-    let next: Record<string, unknown> | undefined;
-    if (directRef !== undefined) {
-      next = { ...data, arguments: (await this.readToolArgumentsReference(String(data.toolCallId ?? ""), directRef)).arguments };
-    }
-    const toolCallsValue = (next ?? data).toolCalls;
-    if (Array.isArray(toolCallsValue)) {
-      let changed = false;
-      const toolCalls: unknown[] = [];
-      for (const item of toolCallsValue) {
-        const call = asRecord(item);
-        const ref = toolArgumentsReference(call?.argumentsRef);
-        if (call === undefined || ref === undefined) {
-          toolCalls.push(item);
-          continue;
-        }
-        const resolved = await this.readToolArgumentsReference(String(call.id ?? ""), ref);
-        toolCalls.push({ ...call, arguments: resolved.arguments });
-        changed = true;
-      }
-      if (changed) next = { ...(next ?? data), toolCalls };
-    }
-    return next ?? data;
   }
 
   private logRunEvent(runId: string, seq: number, event: RuntimeEvent, createdAt: number): void {
@@ -3734,12 +3372,6 @@ function shouldLogRunEvent(type: string): boolean {
  * available to recovery-transcript.ts, which is the only consumer that needs
  * DeepSeek's opaque `reasoning_content` for the next provider turn.
  */
-function publicRunEvent(event: StoredRunEvent): StoredRunEvent {
-  if (!("privateReasoningContent" in event.data)) return event;
-  const { privateReasoningContent: _privateReasoningContent, ...data } = event.data;
-  return { ...event, data };
-}
-
 function formatRunEventLogLine(runId: string, seq: number, event: RuntimeEvent, createdAt: number): string {
   const data = event.data;
   const details = [
@@ -4217,7 +3849,7 @@ function dedupeConversationSourceReferences(
 }
 
 function failureBoundaryForRun(
-  run: RunRow,
+  run: Pick<ConversationWorkingSetRun, "id" | "status" | "errorCode">,
   outcome: { reasonCode: string; planId?: string } | undefined,
   events: readonly StoredRunEvent[],
 ): ConversationFailedBoundary | undefined {
@@ -4226,7 +3858,7 @@ function failureBoundaryForRun(
     event.type === "run.failed" || event.type === "run.cancelled"
   );
   const eventData = failedEvent?.data;
-  const code = stringField(eventData, "code") ?? run.error_code ?? outcome?.reasonCode;
+  const code = stringField(eventData, "code") ?? run.errorCode ?? outcome?.reasonCode;
   const message = stringField(eventData, "message");
   const planId = stringField(eventData, "planId") ?? outcome?.planId;
   const stepId = latestFailedStepId(events);
@@ -4309,15 +3941,6 @@ function artifactPathsFromToolResult(toolName: string | undefined, result: Reado
     ...artifactPathsFromCommandFileChanges(result),
     ...(typeof result.stdout === "string" ? artifactPathsMentionedInCommandOutput(result.stdout) : []),
   ].map(normalizeArtifactPath);
-}
-
-/**
- * A user-visible completion candidate is the conversation product boundary.
- * Once it is approved, observed non-source files are final products even when
- * the step did not invoke the optional artifact-acceptance tool separately.
- */
-function conversationCandidateApproved(events: readonly StoredRunEvent[]): boolean {
-  return events.some((event) => event.type === "candidate.approved");
 }
 
 function buildResumeSuggestion(
@@ -4422,6 +4045,35 @@ function unconfirmedEffectRecoveryQuestion(actions: readonly RuntimeActionRecord
     `需要确认的操作：${descriptions.join("、")}。`,
     "请说明这些操作的外部效果是否需要保留，或明确授权以新的执行方式继续；系统不会把缺少收据当作未执行。",
   ].join("\n");
+}
+
+/**
+ * Recovery approvals are persisted as opaque JSON strings so the Planner can
+ * retain the user's exact response. The Runtime only needs the neutral
+ * authorization bit at the retirement boundary; accept the typed confirm
+ * shape plus the primitive boolean form used by older clients.
+ */
+export function latestRecoveryResponseAuthorizesRetirement(
+  responses: readonly RecoveryUserResponse[] | undefined,
+  actionId: string,
+): boolean {
+  const latest = responses
+    ?.filter((response) => response.actionId === actionId)
+    .sort((left, right) => right.createdAt - left.createdAt)[0];
+  if (latest === undefined) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(latest.response) as unknown;
+  } catch {
+    value = latest.response.trim().toLowerCase();
+  }
+  if (value === true) return true;
+  if (typeof value === "string") {
+    return /^(?:true|yes|y|ok|confirm(?:ed)?|approve(?:d)?|continue|同意|确认|继续)$/iu.test(value.trim());
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.accepted === true || record.approved === true || record.confirmed === true;
 }
 
 function failedBoundaryRecoveryDecision(
@@ -5453,6 +5105,7 @@ function isInformativeCjkPlanningPhrase(phrase: string): boolean {
 
 class ActionTrackedModel implements ModelAdapter {
   readonly limits: ModelAdapter["limits"];
+  readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
   readonly reasoningVisibility: "visible" | "hidden" | undefined;
   private readonly model: ModelAdapter;
@@ -5471,6 +5124,7 @@ class ActionTrackedModel implements ModelAdapter {
     this.runId = runId;
     this.scope = scope;
     this.limits = model.limits;
+    this.completeTimeoutMs = model.completeTimeoutMs ?? model.operationTimeoutMs ?? 120_000;
     this.operationTimeoutMs = model.operationTimeoutMs ?? 120_000;
     this.reasoningVisibility = model.reasoningVisibility;
   }
@@ -5491,12 +5145,45 @@ class ActionTrackedModel implements ModelAdapter {
       stepId: scope.stepId,
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
-      deadlineMs: this.operationTimeoutMs + 15_000,
+      deadlineMs: this.completeTimeoutMs + 15_000,
       metadata: { phase: invocation.phase },
     }, async () => {
       const response = await this.model.complete(invocation, signal);
       throwIfAbortSignal(signal);
       return response;
+    });
+  }
+
+  completeWithRequestTelemetry(
+    invocation: ModelInvocation,
+    emit: (event: RuntimeEvent) => Promise<void>,
+    base: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+  ): Promise<ModelResponse> {
+    const scope = this.scope();
+    let action: RuntimeActionRecord | undefined;
+    return this.actions.execute({
+      runId: this.runId,
+      planId: scope.planId,
+      stepId: scope.stepId,
+      kind: actionKindForPhase(invocation.phase),
+      replayPolicy: "safe",
+      deadlineMs: this.completeTimeoutMs + 15_000,
+      metadata: { phase: invocation.phase, purpose: base.purpose },
+      onDispatched: (dispatched) => { action = dispatched; },
+    }, async () => {
+      if (action === undefined) throw new Error("Model Action was not dispatched");
+      return await completeWithRequestTelemetry({
+        model: this.model,
+        invocation,
+        emit,
+        signal,
+        base: {
+          ...base,
+          actionId: action.id,
+          ...(action.deadlineAt === undefined ? {} : { actionDeadlineAt: action.deadlineAt }),
+        },
+      });
     });
   }
 
@@ -5513,7 +5200,7 @@ class ActionTrackedModel implements ModelAdapter {
       stepId: scope.stepId,
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
-      deadlineMs: this.operationTimeoutMs + 15_000,
+      deadlineMs: (stream === undefined ? this.completeTimeoutMs : this.operationTimeoutMs) + 15_000,
       metadata: { phase: invocation.phase },
     }, async () => {
       const response = stream === undefined
@@ -6510,6 +6197,26 @@ function directDependencyToolEvidence(
   });
 }
 
+/** A dependency edge transports one unified Result identity; a downstream candidate must read that identity, not infer its content. */
+function unreadDependencyResultIdsForCandidate(
+  step: ExecutionPlan["steps"][number],
+  plan: ExecutionPlan,
+  toolCalls: readonly ToolEvidence[],
+): readonly string[] {
+  const required = new Set(step.dependencies.flatMap((dependencyId) => {
+    const result = plan.steps.find((candidate) => candidate.id === dependencyId)?.evidence?.publishedResult;
+    return result === undefined ? [] : [result.ref.resultId];
+  }));
+  if (required.size === 0) return [];
+  const consumed = new Set(toolCalls.flatMap((toolCall) => {
+    if (toolCall.isError || toolCall.toolName !== "read_result") return [];
+    const sourceResultRef = parseJsonRecord(toolCall.result)?.sourceResultRef;
+    const resultId = parseRuntimeResultRef(sourceResultRef)?.resultId;
+    return resultId === undefined ? [] : [resultId];
+  }));
+  return [...required].filter((resultId) => !consumed.has(resultId));
+}
+
 /**
  * A resolved continuation edge is the semantic authorization to reuse source
  * evidence from a prior Run.  Bind only summaries owned by that target Run;
@@ -6925,7 +6632,10 @@ function executionTaskProfileForStep(
     skillNames: skills.map((skill) => skill.name),
     allowResearchPolicy: stepAllowsResearchPolicy(step),
     practiceProfiles: taskSemantics?.practiceProfiles,
-    ...(ownsArtifactTarget ? { artifactKind: taskSemantics!.deliverable.kind } : {}),
+    ...(ownsArtifactTarget ? {
+      artifactKind: taskSemantics!.deliverable.kind,
+      artifactAction: taskSemantics!.deliverable.action,
+    } : {}),
   };
   const profile = executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
   // Planner's structured deliverable is the authority for a file-producing
@@ -6937,6 +6647,7 @@ function executionTaskProfileForStep(
     ...profile,
     deliverySurface: taskSemantics.deliverable.surface,
     artifactKind: taskSemantics.deliverable.kind,
+    artifactAction: taskSemantics.deliverable.action,
   };
 }
 
@@ -7308,7 +7019,7 @@ const CONVERSATION_TURN_TOOL = {
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["mode", "relation", "inputMode", "effectiveGoal", "evidenceStrategy", "sourceBinding", "userConstraints"],
+    required: ["mode", "relation", "inputMode", "effectiveGoal", "taskIntent", "evidenceStrategy", "sourceBinding", "userConstraints"],
     properties: {
       mode: { type: "string", enum: ["reply", "execute", "clarify"] },
       relation: {
@@ -7330,6 +7041,34 @@ const CONVERSATION_TURN_TOOL = {
       },
       resultCandidateId: { type: "string", pattern: "^result_candidate_[1-9][0-9]*$" },
       effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
+      taskIntent: {
+        type: "object",
+        additionalProperties: false,
+        required: ["schema", "operation", "requiresExecution", "deliverables"],
+        properties: {
+          schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },
+          operation: {
+            type: "string",
+            enum: ["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"],
+          },
+          requiresExecution: { type: "boolean" },
+          deliverables: {
+            type: "array",
+            maxItems: 8,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["action", "kind", "surface"],
+              properties: {
+                action: { type: "string", enum: ["none", "create", "modify", "transform"] },
+                kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
+                format: { type: "string", minLength: 1, maxLength: 32 },
+                surface: { type: "string", enum: ["conversation", "workspace_artifact"] },
+              },
+            },
+          },
+        },
+      },
       evidenceStrategy: {
         type: "string",
         enum: ["none", "lookup_lite", "source_grounded", "strict_user_source", "bound_visible_sources"],
@@ -7359,7 +7098,8 @@ const CONVERSATION_TURN_TOOL = {
 const CONVERSATION_TURN_RESOLUTION_ATTEMPTS = 2;
 
 async function resolveConversationTurn(
-  model: ModelAdapter,
+  model: ActionTrackedModel,
+  emit: (event: RuntimeEvent) => Promise<void>,
   input: string,
   conversationHistory: readonly ModelMessage[] | undefined,
   context: ConversationIntentExternalContext,
@@ -7369,7 +7109,7 @@ async function resolveConversationTurn(
   let repairFeedback: string | undefined;
   let semanticFeedback: string | undefined;
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
-    const response = await model.complete({
+    const response = await model.completeWithRequestTelemetry({
       runId: `conversation-turn:${randomUUID()}`,
       systemPrompt: conversationTurnResolverPrompt(repairFeedback),
       phase: "planning",
@@ -7384,6 +7124,10 @@ async function resolveConversationTurn(
       ],
       tools: [CONVERSATION_TURN_TOOL],
       toolChoice: { name: CONVERSATION_TURN_TOOL.name },
+    }, emit, {
+      phase: "planning",
+      purpose: "conversation_turn_resolver",
+      resolverAttempt: attempt,
     }, signal);
     const resolution = parseConversationTurnResolution(response, context);
     if (resolution !== undefined) {
@@ -7393,7 +7137,13 @@ async function resolveConversationTurn(
       const resultBound = bindUnambiguousPriorResult(artifactBound, input, context.conversationWorkingSet);
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
-        return applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet);
+        return applyConversationTurnDirectReplyFloor(
+          applyConversationTurnArtifactExecutionFloor(
+            applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet),
+            input,
+          ),
+          input,
+        );
       }
       repairFeedback = semanticFeedback;
       continue;
@@ -7677,6 +7427,91 @@ function applyConversationTurnEvidenceFloor(
   };
 }
 
+/**
+ * A resolver may summarize an explicit file request as a conversational goal,
+ * but it cannot downgrade the user-owned delivery surface. Without execution,
+ * the Runtime deliberately withholds Skills and workspace writers, making a
+ * real artifact impossible before Planner admission can enforce its receipt.
+ */
+function applyConversationTurnArtifactExecutionFloor(
+  resolution: ConversationTurnResolution,
+  input: string,
+): ConversationTurnResolution {
+  if (resolution.mode !== "reply") return resolution;
+  // A validated model-authored semantic frame is the authoritative intent
+  // decision. Do not reconstruct it from the latest sentence once present.
+  if (resolution.taskIntent !== undefined) return resolution;
+  const intent = classifyTaskIntent({
+    objective: input,
+    userConstraints: resolution.userConstraints,
+  });
+  if (!intent.wantsArtifact) return resolution;
+  return {
+    ...resolution,
+    mode: "execute",
+    evidenceStrategy: conversationEvidenceStrategyForDemand(intent.sourceNeed, resolution.sourceBinding),
+    evidenceDemand: intent.sourceNeed,
+    source: "model_guarded",
+  };
+}
+
+/**
+ * Conversation history can identify the work a user is discussing, but it
+ * cannot turn a self-contained question about that work into a capability
+ * request. This is deliberately applied after all model and deterministic
+ * bindings so an over-eager prior artifact/result selection cannot leak into
+ * Planner admission.
+ */
+function applyConversationTurnDirectReplyFloor(
+  resolution: ConversationTurnResolution,
+  input: string,
+): ConversationTurnResolution {
+  if (
+    resolution.mode === "clarify"
+    || resolution.taskIntent !== undefined
+    || resolution.evidenceDemand !== "none"
+    || resolution.sourceBinding.mode !== "none"
+    || !isDirectConversationReply(input)
+  ) return resolution;
+  const { targetArtifact: _targetArtifact, targetResult: _targetResult, ...withoutWorkProductBinding } = resolution;
+  return {
+    ...withoutWorkProductBinding,
+    mode: "reply",
+    inputMode: "none",
+    evidenceStrategy: "none",
+    sourceBinding: noConversationSourceBinding(),
+    evidenceDemand: "none",
+    source: "model_guarded",
+  };
+}
+
+function isDirectConversationReply(input: string): boolean {
+  const intent = classifyTaskIntent({ objective: input });
+  if (intent.sourceNeed !== "none" || requiresExternalState(input)) return false;
+  // An artifact action can occur inside a proposition (for example, an
+  // explanation of how a product was generated). The current utterance, not
+  // the artifact vocabulary or prior work, decides whether that action is
+  // requested from Runtime.
+  return (intent.wantsConversationAnswer && !intent.wantsArtifact)
+    || isQuestionAboutDescribedAction(input);
+}
+
+/**
+ * A self-contained question can describe any operation without asking Runtime
+ * to perform it. Keep this independent of formats, Skills, and prior results;
+ * questions that address an operation to the assistant remain executable.
+ */
+function isQuestionAboutDescribedAction(input: string): boolean {
+  const text = input.trim();
+  if (text.length === 0) return false;
+  const question = /[?？]\s*$/u.test(text)
+    || /(?:为什么|为何|怎么|如何|是否|是不是|能否|可否|多少|哪些|什么|what|why|how|whether)/iu.test(text);
+  if (!question) return false;
+  const directedExecution = /(?:^|[，,。；;]\s*)(?:请|麻烦|帮(?:我)?|给我|替我|为我|can\s+you|could\s+you|please)\s*(?:再|重新|继续)?\s*(?:生成|制作|创建|输出|交付|导出|修改|优化|转换|写|设计|实现|build|create|generate|make|modify|edit|convert|write|design)/iu.test(text)
+    || /(?:你|您|助手|agent|runtime)\s*(?:能|可以|可否|能否|能不能|是否能|can|could|will)\s*(?:帮(?:我)?|给我|替我|为我)?\s*(?:生成|制作|创建|输出|交付|导出|修改|优化|转换|写|设计|实现|build|create|generate|make|modify|edit|convert|write|design)/iu.test(text);
+  return !directedExecution;
+}
+
 function strongerConversationEvidenceDemand(
   left: ConversationTurnResolution["evidenceDemand"],
   right: ConversationTurnResolution["evidenceDemand"],
@@ -7697,6 +7532,8 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
+      "Also return taskIntent as a semantic frame: operation, requiresExecution, and every requested deliverable with action, semantic kind, optional concrete format, and delivery surface. Derive it from the full transcript and prior work context, not from isolated action words.",
+      "taskIntent.requiresExecution must agree with mode=execute. A deliverable can be a prior-artifact transformation, a new artifact, a conversation answer, or a composite of code plus a rendered artifact. Preserve all deliverables instead of choosing one because it appears first.",
       "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
@@ -7740,6 +7577,7 @@ function parseConversationTurnResolution(
   const inputMode = argumentsRecord.inputMode;
   const legacyEvidenceDemand = argumentsRecord.evidenceDemand;
   const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy, legacyEvidenceDemand);
+  const taskIntent = parseConversationTaskIntent(argumentsRecord.taskIntent);
   const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
@@ -7770,6 +7608,13 @@ function parseConversationTurnResolution(
   if (!isConversationTurnRelation(relation)) return undefined;
   if (!isConversationTurnInputMode(inputMode)) return undefined;
   if (evidenceStrategy === undefined || sourceBinding === undefined) return undefined;
+  if (taskIntent === undefined) return undefined;
+  if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
+  if (
+    taskIntent !== undefined
+    && !taskIntent.requiresExecution
+    && (inputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
+  ) return undefined;
   if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
   if (targetGoalCandidateId !== undefined && targetRunId === undefined) return undefined;
   if (resultCandidateId !== undefined && targetResult === undefined) return undefined;
@@ -7804,11 +7649,51 @@ function parseConversationTurnResolution(
     ...(targetArtifact === undefined ? {} : { targetArtifact }),
     ...(targetResult === undefined ? {} : { targetResult }),
     effectiveGoal,
+    ...(taskIntent === undefined ? {} : { taskIntent }),
     evidenceStrategy,
     sourceBinding,
     evidenceDemand,
     userConstraints,
     source: "model",
+  };
+}
+
+function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | undefined {
+  if (value === undefined) return undefined;
+  const record = optionalRecord(value);
+  if (record.schema !== "agentloop.conversationTaskIntent/v1") return undefined;
+  const operations = new Set(["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"]);
+  if (typeof record.operation !== "string" || !operations.has(record.operation)) return undefined;
+  if (typeof record.requiresExecution !== "boolean") return undefined;
+  if (!Array.isArray(record.deliverables) || record.deliverables.length > 8) return undefined;
+  const actions = new Set(["none", "create", "modify", "transform"]);
+  const kinds = new Set(["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"]);
+  const surfaces = new Set(["conversation", "workspace_artifact"]);
+  const deliverables = record.deliverables.map((item) => {
+    const deliverable = optionalRecord(item);
+    const action = deliverable.action;
+    const kind = deliverable.kind;
+    const surface = deliverable.surface;
+    const format = deliverable.format;
+    if (
+      typeof action !== "string" || !actions.has(action)
+      || typeof kind !== "string" || !kinds.has(kind)
+      || typeof surface !== "string" || !surfaces.has(surface)
+      || (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32))
+    ) return undefined;
+    return {
+      action: action as ConversationTaskIntent["deliverables"][number]["action"],
+      kind: kind as ConversationTaskIntent["deliverables"][number]["kind"],
+      ...(format === undefined ? {} : { format: format.trim() }),
+      surface: surface as ConversationTaskIntent["deliverables"][number]["surface"],
+    };
+  });
+  if (deliverables.some((item) => item === undefined)) return undefined;
+  return {
+    schema: "agentloop.conversationTaskIntent/v1",
+    operation: record.operation as ConversationTaskIntent["operation"],
+    requiresExecution: record.requiresExecution,
+    deliverables: deliverables as ConversationTaskIntent["deliverables"],
   };
 }
 
@@ -7899,6 +7784,7 @@ function conversationTurnResolutionFromEvents(
     const sourceBinding = parsePersistedConversationSourceBinding(data.sourceBinding);
     const source = data.source;
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
+    const taskIntent = parseConversationTaskIntent(data.taskIntent);
     const targetRunId = typeof data.targetRunId === "string" ? data.targetRunId.trim() : undefined;
     const targetArtifact = conversationArtifactReference(data.targetArtifact);
     const targetResult = parseResultReference(data.targetResult);
@@ -7908,6 +7794,13 @@ function conversationTurnResolutionFromEvents(
     if (!isConversationTurnInputMode(inputMode)) return undefined;
     if (!isConversationEvidenceDemand(evidenceDemand) || evidenceStrategy === undefined || sourceBinding === undefined || !isConversationTurnResolutionSource(source)) return undefined;
     if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return undefined;
+    if (data.taskIntent !== undefined && taskIntent === undefined) return undefined;
+    if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
+    if (
+      taskIntent !== undefined
+      && !taskIntent.requiresExecution
+      && (inputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
+    ) return undefined;
     if (
       !Array.isArray(data.userConstraints)
       || userConstraints.length !== data.userConstraints.length
@@ -7928,6 +7821,7 @@ function conversationTurnResolutionFromEvents(
       ...(targetArtifact === undefined ? {} : { targetArtifact }),
       ...(targetResult === undefined ? {} : { targetResult }),
       effectiveGoal,
+      ...(taskIntent === undefined ? {} : { taskIntent }),
       evidenceStrategy,
       sourceBinding,
       evidenceDemand,
@@ -8137,6 +8031,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
                 relation: intent.relation,
                 inputMode: intent.inputMode,
                 effectiveGoal: intent.effectiveGoal,
+                taskIntent: intent.taskIntent,
                 evidenceStrategy: intent.evidenceStrategy,
                 sourceBinding: intent.sourceBinding,
                 evidenceDemand: intent.evidenceDemand,
@@ -8206,233 +8101,9 @@ function requiresExternalState(input: string): boolean {
       .test(signal);
 }
 
-function requiresConversationWorksetExecution(
-  input: string,
-  conversationWorkingSet: ConversationWorkingSet | undefined,
-): boolean {
-  if (conversationWorkingSet === undefined) return false;
-  if (requestsPriorArtifactChange(input)) return true;
-  const hasReusablePriorWork = conversationWorkingSet.reusableArtifacts.length > 0
-    || (conversationWorkingSet.completedStepContexts?.length ?? 0) > 0
-    || conversationWorkingSetHasCompletedStepContext(conversationWorkingSet);
-  if (!hasReusablePriorWork) return false;
-  return classifyTaskIntent({
-    objective: input,
-  }).wantsArtifact;
-}
-
-function requiresDeterministicConversationExecution(
-  input: string,
-  conversationWorkingSet: ConversationWorkingSet | undefined,
-): boolean {
-  return requiresExternalState(input)
-    || requestsArtifactBuildFromIntent(input)
-    || requiresConversationWorksetExecution(input, conversationWorkingSet);
-}
-
-function conversationWorkingSetHasCompletedStepContext(
-  conversationWorkingSet: ConversationWorkingSet,
-): boolean {
-  return (conversationWorkingSet.completedStepContexts?.length ?? 0) > 0;
-}
-
 function hasLocalPathReference(input: string): boolean {
   return /(?:^|[\s"'`([{（【])(?:~\/|\.{1,2}\/|\/[a-z0-9._-]+\/|[a-z]:[\\/]|[a-z0-9._-]+\/[a-z0-9._/-]+)/iu
     .test(input);
-}
-
-function isSafeWorkspaceSegment(value: string): boolean {
-  return value.length > 0
-    && !value.includes("\0")
-    && !value.includes("/")
-    && !value.includes("\\")
-    && value !== "."
-    && value !== "..";
-}
-
-function parseCommandOutputResult(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return parseCommandOutputResult(parsed);
-    } catch {
-      return undefined;
-    }
-  }
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-interface ToolArgumentsReference {
-  readonly schema: "agentloop.toolArgumentsReference/v1";
-  readonly path: string;
-  readonly sha256?: string;
-  readonly bytes?: number;
-  readonly characters?: number;
-  readonly previewCharacters?: number;
-}
-
-function toolArgumentsReference(value: unknown): ToolArgumentsReference | undefined {
-  const record = parseCommandOutputResult(value);
-  if (record === undefined || typeof record.path !== "string") return undefined;
-  return {
-    schema: "agentloop.toolArgumentsReference/v1",
-    path: record.path,
-    ...(typeof record.sha256 === "string" ? { sha256: record.sha256 } : {}),
-    ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
-    ...(typeof record.characters === "number" ? { characters: record.characters } : {}),
-    ...(typeof record.previewCharacters === "number" ? { previewCharacters: record.previewCharacters } : {}),
-  };
-}
-
-function inlineToolArgumentsContent(toolCallId: string, argumentsValue: unknown): ToolArgumentsContent {
-  const content = formatToolArgumentsContent(argumentsValue);
-  return {
-    toolCallId,
-    arguments: argumentsValue,
-    content,
-    bytes: Buffer.byteLength(content),
-    characters: content.length,
-  };
-}
-
-function serializeToolArguments(value: unknown): string {
-  try {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? JSON.stringify(String(value)) : serialized;
-  } catch {
-    return JSON.stringify(String(value));
-  }
-}
-
-function parseStoredToolArguments(serialized: string): unknown {
-  try {
-    return JSON.parse(serialized) as unknown;
-  } catch {
-    throw notFound("Tool arguments");
-  }
-}
-
-function formatToolArgumentsContent(value: unknown): string {
-  if (typeof value === "string") return value;
-  const formatted = JSON.stringify(value, null, 2);
-  return formatted === undefined ? String(value) : formatted;
-}
-
-function projectToolArgumentsValue(
-  value: unknown,
-  reference: ToolArgumentsReference,
-  serialized: string,
-): unknown {
-  const summarized = summarizeToolArgumentValue(value);
-  if (Buffer.byteLength(serializeToolArguments(summarized)) <= TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES) return summarized;
-  return {
-    schema: "agentloop.toolArgumentsProjection/v1",
-    projected: true,
-    originalBytes: reference.bytes,
-    originalCharacters: reference.characters,
-    sha256: reference.sha256,
-    preview: serialized.slice(0, TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
-    omittedCharacters: Math.max(0, serialized.length - TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
-    outline: outlineToolArguments(value),
-  };
-}
-
-function summarizeToolArgumentValue(value: unknown): unknown {
-  if (typeof value === "string") {
-    if (Buffer.byteLength(value) <= TOOL_ARGUMENT_REFERENCE_THRESHOLD_BYTES) return value;
-    const sha256 = createHash("sha256").update(value).digest("hex");
-    return {
-      schema: "agentloop.toolArgumentTextProjection/v1",
-      projected: true,
-      originalBytes: Buffer.byteLength(value),
-      originalCharacters: value.length,
-      sha256,
-      preview: value.slice(0, TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
-      omittedCharacters: Math.max(0, value.length - TOOL_ARGUMENT_REFERENCE_PREVIEW_CHARACTERS),
-    };
-  }
-  if (Array.isArray(value)) return value.map((item) => summarizeToolArgumentValue(item));
-  const record = asRecord(value);
-  if (record === undefined) return value;
-  const projected: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(record)) projected[key] = summarizeToolArgumentValue(item);
-  return projected;
-}
-
-function outlineToolArguments(value: unknown): unknown {
-  if (typeof value === "string") {
-    return { type: "string", characters: value.length, bytes: Buffer.byteLength(value) };
-  }
-  if (Array.isArray(value)) {
-    return {
-      type: "array",
-      length: value.length,
-      items: value.slice(0, 8).map((item) => outlineToolArguments(item)),
-      truncated: value.length > 8,
-    };
-  }
-  const record = asRecord(value);
-  if (record === undefined) return { type: value === null ? "null" : typeof value };
-  const entries = Object.entries(record);
-  return {
-    type: "object",
-    keys: entries.slice(0, 24).map(([key, item]) => ({
-      key,
-      outline: outlineToolArguments(item),
-    })),
-    truncated: entries.length > 24,
-  };
-}
-
-async function resolveToolArgumentsReference(workspaceRoot: string, path: string): Promise<string> {
-  if (path.length === 0 || path.includes("\0") || isAbsolute(path)) throw notFound("Tool arguments");
-  const normalized = path.replaceAll("\\", "/");
-  if (normalized.split("/").some((part) => part === "" || part === "." || part === "..")) {
-    throw notFound("Tool arguments");
-  }
-  if (!normalized.startsWith(".agentloop/tool-arguments/")) throw notFound("Tool arguments");
-  const root = await fs.realpath(workspaceRoot);
-  const target = resolve(root, normalized);
-  const realTarget = await fs.realpath(target);
-  const fromRoot = relative(root, realTarget);
-  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
-    throw notFound("Tool arguments");
-  }
-  return realTarget;
-}
-
-function commandOutputReference(value: unknown): {
-  readonly path: string;
-  readonly sha256?: string;
-  readonly bytes?: number;
-  readonly characters?: number;
-} | undefined {
-  const record = parseCommandOutputResult(value);
-  if (record === undefined || typeof record.path !== "string") return undefined;
-  return {
-    path: record.path,
-    ...(typeof record.sha256 === "string" ? { sha256: record.sha256 } : {}),
-    ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
-    ...(typeof record.characters === "number" ? { characters: record.characters } : {}),
-  };
-}
-
-async function resolveCommandOutputReference(workspaceRoot: string, path: string): Promise<string> {
-  if (path.length === 0 || path.includes("\0") || isAbsolute(path)) throw notFound("Command output");
-  const normalized = path.replaceAll("\\", "/");
-  if (normalized.split("/").some((part) => part === "" || part === "." || part === "..")) {
-    throw notFound("Command output");
-  }
-  const root = await fs.realpath(workspaceRoot);
-  const target = resolve(root, normalized);
-  const realTarget = await fs.realpath(target);
-  const fromRoot = relative(root, realTarget);
-  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
-    throw notFound("Command output");
-  }
-  return realTarget;
 }
 
 const MAX_CONVERSATION_HISTORY_MESSAGES = 16;

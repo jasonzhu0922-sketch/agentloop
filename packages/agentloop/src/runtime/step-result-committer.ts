@@ -38,6 +38,7 @@ export class StepResultCommitter {
         409,
       );
     }
+    assertDependencyResultsWereRead(persistedPlan, step, input.evidence.toolCalls);
     const result = createRuntimeResult({
       kind: "step",
       producer: {
@@ -117,6 +118,43 @@ function dependencyResultRefs(plan: ExecutionPlan, step: PlanStep): RuntimeResul
     const result = plan.steps.find((candidate) => candidate.id === dependencyId)?.evidence?.publishedResult;
     return result === undefined ? [] : [result.ref];
   });
+}
+
+/** Final publication fence: a dependency Result can contribute only after the current Step read that same opaque identity. */
+function assertDependencyResultsWereRead(
+  plan: ExecutionPlan,
+  step: PlanStep,
+  toolCalls: StepEvidence["toolCalls"],
+): void {
+  const required = dependencyResultRefs(plan, step);
+  if (required.length === 0) return;
+  const consumed = new Set(toolCalls.flatMap((toolCall) => {
+    if (toolCall.isError || toolCall.toolName !== "read_result") return [];
+    const value = parseRecord(toolCall.result);
+    const sourceResultRef = parseRecord(value?.sourceResultRef);
+    const resultId = typeof sourceResultRef?.resultId === "string" ? sourceResultRef.resultId : undefined;
+    return resultId === undefined ? [] : [resultId];
+  }));
+  const unread = required.filter((ref) => !consumed.has(ref.resultId));
+  if (unread.length === 0) return;
+  throw new AppError(
+    "ASSESSMENT_ERROR",
+    `Step result publication requires read_result consumption of dependency Results: ${unread.map((ref) => ref.resultId).join(", ")}`,
+    409,
+  );
+}
+
+function parseRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      return parseRecord(JSON.parse(value) as unknown);
+    } catch {
+      return undefined;
+    }
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function uniqueResultRefs(refs: readonly RuntimeResultRef[]): RuntimeResultRef[] {

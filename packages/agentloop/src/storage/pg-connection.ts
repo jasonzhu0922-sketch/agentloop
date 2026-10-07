@@ -16,7 +16,11 @@ export interface PgPoolLike {
   end(): Promise<void>;
 }
 
-type PgPoolFactory = new (config: string | Record<string, unknown>) => PgPoolLike;
+type PgPoolFactory = new (config: Record<string, unknown>) => PgPoolLike;
+
+interface PgTypeRegistryLike {
+  setTypeParser(oid: number, parser: (value: string) => unknown): void;
+}
 
 /**
  * PostgreSQL adapter implementing {@link SqlConnection} on top of a `pg` pool.
@@ -46,7 +50,11 @@ export class PgConnection implements SqlConnection {
   static async create(config: string | Record<string, unknown>): Promise<PgConnection> {
     let load;
     try {
-      load = (await import("pg")) as unknown as { default?: { Pool?: PgPoolFactory }; Pool?: PgPoolFactory };
+      load = (await import("pg")) as unknown as {
+        default?: { Pool?: PgPoolFactory; types?: PgTypeRegistryLike };
+        Pool?: PgPoolFactory;
+        types?: PgTypeRegistryLike;
+      };
     } catch {
       throw new Error(
         "PgConnection requires the \"pg\" package. Install it next to your application: npm install pg",
@@ -56,7 +64,8 @@ export class PgConnection implements SqlConnection {
     if (typeof Pool !== "function") {
       throw new Error("The installed \"pg\" package did not expose a usable Pool export");
     }
-    return new PgConnection(new Pool(config));
+    configurePgInt8Parser(load.default?.types ?? load.types);
+    return new PgConnection(new Pool(pgPoolConfig(config)));
   }
 
   async exec(sql: string): Promise<void> {
@@ -118,6 +127,31 @@ export class PgConnection implements SqlConnection {
     if (client !== undefined) return client.query(sql, values);
     return this.pool.query(sql, values);
   }
+}
+
+/**
+ * `pg` accepts a connection string through its `connectionString` option.
+ * Passing a bare string happened to work with some driver versions, but the
+ * current Pool constructor treats it as an options object and fails before a
+ * connection can be opened.
+ */
+export function pgPoolConfig(config: string | Record<string, unknown>): Record<string, unknown> {
+  return typeof config === "string" ? { connectionString: config } : config;
+}
+
+/**
+ * PostgreSQL reports `int8` fields as strings by default. Epoch-millisecond
+ * columns must remain numeric throughout the generic storage boundary, while
+ * values outside JavaScript's safe integer range stay lossless strings.
+ */
+export function parsePgInt8(value: string): number | string {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : value;
+}
+
+/** Installs the safe `int8` result parser used by every PgConnection. */
+export function configurePgInt8Parser(types: PgTypeRegistryLike | undefined): void {
+  types?.setTypeParser(20, parsePgInt8);
 }
 
 /**

@@ -36,7 +36,7 @@
             "{{spec-path}}",
             "{{output-path}}"
           ],
-          "result": "An agentloop.pptxBuildReceipt/v1 receipt with output path, byte size, SHA-256, and slide count."
+          "result": "An agentloop.pptxBuildReceipt/v1 receipt with output path, byte size, SHA-256, slide count, and resolved canvas dimensions."
         },
         {
           "id": "inspect",

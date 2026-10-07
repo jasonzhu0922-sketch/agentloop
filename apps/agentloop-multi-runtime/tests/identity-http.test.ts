@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { IdentityService } from "../src/auth/identity-service.ts";
-import { ConversationDeleteConflictError } from "../src/control-plane/control-plane-store.ts";
-import { SqlDeviceRepository } from "../src/devices/device-service.ts";
-import type { SubmitConversationTask } from "../src/domain/contracts.ts";
-import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
-import { createRouterHttpServer } from "../src/http/router-http.ts";
+import { IdentityService } from "../src/router/identity/service.ts";
+import { ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
+import { SqlDeviceRepository } from "../src/router/devices/device-service.ts";
+import type { SubmitConversationTask } from "../src/shared/contracts.ts";
+import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
+import { createRouterHttpServer } from "../src/router/transport/http.ts";
 
 test("Router derives task identity and accepts opaque local Runtime placement", async () => {
   const database = new AppDatabase(":memory:");

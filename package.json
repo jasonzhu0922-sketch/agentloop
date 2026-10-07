@@ -33,7 +33,11 @@
     "logs:multi-runtime:docker": "docker compose --env-file apps/agentloop-multi-runtime/.env.docker -f apps/agentloop-multi-runtime/compose.yaml logs -f",
     "dev": "npm run build:kernel && npm run build:skills && npm run build:plan-template && node apps/agentloop-app/scripts/dev.mjs",
     "start": "npm run build:kernel && npm run build:skills && npm run build:plan-template && npm run start --workspace agentloop-app",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run test:unit && npm run test:kernel && npm run test:multi-runtime:contracts",
+    "test:unit": "npm run test:unit --workspace @zhujun/agentloop",
+    "test:kernel": "npm run test:kernel --workspace @zhujun/agentloop",
+    "test:multi-runtime:contracts": "npm run test:contracts --workspace agentloop-multi-runtime",
+    "test:all-workspaces": "npm run test:full --workspace @zhujun/agentloop && npm run test:full --workspace agentloop-multi-runtime && npm run test --workspace @zhujun/agentloop-artifact-preview && npm run test --workspace @zhujun/agentloop-skills && npm run test --workspace @zhujun/agentloop-plan-template && npm run test --workspace agentloop-app",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

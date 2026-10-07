@@ -103,6 +103,10 @@ interface CommandComputationArtifact {
   readonly caveats: readonly string[];
 }
 
+interface CommandComputationObservation extends CommandComputationArtifact {
+  readonly inputRefs: readonly string[];
+}
+
 /** Runtime-supplied identity for a declared package workflow action. */
 interface SkillWorkflowEvidenceBinding {
   readonly skillId: string;
@@ -1423,6 +1427,12 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
+    /**
+     * Facts parsed from a computation envelope whose source binding was not
+     * accepted. This is deliberately observational and never satisfies
+     * derived_aggregation by itself.
+     */
+    computationObservation?: Record<string, unknown>;
     executionReceipt: {
       schema: "agentloop.commandExecutionReceipt/v1";
       startState: "started";
@@ -1481,6 +1491,7 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
+    computationObservation?: Record<string, unknown>;
     executionReceipt: {
       schema: "agentloop.commandExecutionReceipt/v1";
       startState: "started";
@@ -1620,6 +1631,7 @@ export class ComputerExecutor {
               ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
               ...(computationEvidence.receipt === undefined ? {} : { computationReceipt: computationEvidence.receipt }),
               ...(computationEvidence.error === undefined ? {} : { computationEvidenceError: computationEvidence.error }),
+              ...(computationEvidence.observation === undefined ? {} : { computationObservation: computationEvidence.observation }),
               ...(workflowEvidence === undefined ? {} : { workflowEvidenceReceipt: workflowEvidence }),
             });
           } catch (error) {
@@ -1653,7 +1665,26 @@ export class ComputerExecutor {
     readonly truncated: boolean;
     readonly stdout: string;
     readonly stdoutRef?: CommandOutputReference;
-  }): Promise<{ readonly receipt?: Record<string, unknown>; readonly error?: string }> {
+  }): Promise<{
+    readonly receipt?: Record<string, unknown>;
+    readonly error?: string;
+    readonly observation?: Record<string, unknown>;
+  }> {
+    const observed = parseCommandComputationObservation(input.stdout);
+    const declaredInputPaths = input.inputs.map((item) => item.path);
+    const observation = observed === undefined
+      ? undefined
+      : {
+        schema: "agentloop.commandComputationObservation/v1",
+        inputRefs: observed.inputRefs,
+        facts: observed.facts,
+        caveats: observed.caveats,
+        binding: {
+          status: "unverified",
+          declaredInputPaths,
+          observedInputRefs: observed.inputRefs,
+        },
+      };
     if (input.inputs.length === 0) {
       // A command-computation envelope is an explicit request for Runtime to
       // authenticate derived facts.  Without captured inputs there is no
@@ -1664,6 +1695,7 @@ export class ComputerExecutor {
       if (parseJsonRecord(input.stdout)?.schema === "agentloop.commandComputation/v1") {
         return {
           error: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs. Rerun with the exact source files in computationInputs, and emit inputRefs (not inputs) with those same paths in stdout; Runtime cannot bind derived aggregation without source identity.",
+          ...(observation === undefined ? {} : { observation }),
         };
       }
       return {};
@@ -1683,8 +1715,12 @@ export class ComputerExecutor {
     }
     const artifact = parseCommandComputationArtifact(input.stdout, input.inputs);
     if (artifact === undefined) {
+      const mismatch = observed !== undefined && !samePaths(observed.inputRefs, declaredInputPaths);
       return {
-        error: "No valid agentloop.commandComputation/v1 artifact was found in stdout. Output one JSON document with matching input paths and a non-empty facts object.",
+        error: mismatch
+          ? `Command computation facts were observed but source binding mismatched. declared computationInputs=${JSON.stringify(declaredInputPaths)}; stdout inputRefs=${JSON.stringify(observed?.inputRefs ?? [])}. Rerun with computationInputs set to the exact stdout inputRefs and emit those same paths in inputRefs; Runtime cannot bind derived_aggregation until they match.`
+          : "No valid agentloop.commandComputation/v1 artifact was found in stdout. Output one JSON document with matching input paths and a non-empty facts object.",
+        ...(observation === undefined ? {} : { observation }),
       };
     }
     const output = {
@@ -2285,15 +2321,19 @@ function parseCommandComputationArtifact(
   content: string,
   inputs: readonly CapturedCommandComputationInput[],
 ): CommandComputationArtifact | undefined {
+  const observed = parseCommandComputationObservation(content);
+  if (observed === undefined || !samePaths(observed.inputRefs, inputs.map((item) => item.path))) return undefined;
+  return observed;
+}
+
+function parseCommandComputationObservation(content: string): CommandComputationObservation | undefined {
   const artifact = parseJsonRecord(content);
   if (artifact?.schema !== "agentloop.commandComputation/v1") return undefined;
-  const inputRefs = Array.isArray(artifact.inputRefs) ? artifact.inputRefs : undefined;
-  if (inputRefs === undefined || inputRefs.length !== inputs.length) return undefined;
-  for (let index = 0; index < inputs.length; index += 1) {
-    const expected = inputs[index]!;
-    const actual = inputRefs[index];
-    if (!isPlainRecord(actual) || actual.path !== expected.path) return undefined;
-  }
+  const inputRefs = Array.isArray(artifact.inputRefs)
+    && artifact.inputRefs.every((item) => isPlainRecord(item) && typeof item.path === "string" && item.path.trim().length > 0)
+    ? artifact.inputRefs.map((item) => String((item as Record<string, unknown>).path))
+    : undefined;
+  if (inputRefs === undefined) return undefined;
   const facts = isPlainRecord(artifact.facts) && Object.keys(artifact.facts).length > 0
     ? artifact.facts
     : undefined;
@@ -2303,7 +2343,11 @@ function parseCommandComputationArtifact(
     : Array.isArray(artifact.caveats) && artifact.caveats.every((item) => typeof item === "string" && item.trim().length > 0)
       ? artifact.caveats.map((item) => item.trim())
       : undefined;
-  return caveats === undefined ? undefined : { facts, caveats };
+  return caveats === undefined ? undefined : { inputRefs, facts, caveats };
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

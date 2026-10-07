@@ -219,11 +219,6 @@ export { SqliteConnection } from "./storage/sqlite-connection.ts";
 export { PgConnection, translatePlaceholders } from "./storage/pg-connection.ts";
 export { TiDbConnection, splitSqlStatements } from "./storage/tidb-connection.ts";
 export {
-  TIDB_ATTACHMENT_SCHEMA_SQL,
-  TIDB_CONTROL_PLANE_SCHEMA_SQL,
-  TIDB_DEVICE_SCHEMA_SQL,
-  TIDB_HOST_DISPATCH_SCHEMA_SQL,
-  TIDB_IDENTITY_SCHEMA_SQL,
   TIDB_KERNEL_SCHEMA_SQL,
 } from "./storage/tidb-schema-definitions.ts";
 export { insertIfAbsentSql, insertIgnoreConflictsSql, sqlForDialect, upsertSql } from "./storage/dialect-sql.ts";

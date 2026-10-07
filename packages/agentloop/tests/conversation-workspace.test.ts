@@ -8,6 +8,7 @@ import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtim
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { AppError } from "../src/shared/errors.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
@@ -250,6 +251,139 @@ test("Conversation entry classifies with Runtime-owned external context handles"
   }
 });
 
+test("a question about a prior artifact remains a direct reply despite an over-eager resolver", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const planner = new RecordingVisibleDirectoryPlanner();
+    const model = new OverEagerPriorArtifactResolverModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => planner,
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "deliver the prior presentation", {
+      allowDangerousTools: true,
+    });
+    const reply = await runs.executeConversation(owner.user.id, "我的意思是你回答我，你为什么能够这么快把 ppt 做好？", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    });
+
+    assert.equal(reply.status, "completed");
+    assert.match(reply.output ?? "", /直接解释/);
+    assert.deepEqual(planner.responseOnlyFlags, [false, true]);
+    const resolved = (await runs.events(owner.user.id, reply.id)).find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(resolved?.data.mode, "reply");
+    assert.equal(resolved?.data.inputMode, "none");
+    assert.equal(resolved?.data.targetArtifact, undefined);
+    assert.equal(resolved?.data.targetResult, undefined);
+
+    const implementationQuestion = await runs.executeConversation(owner.user.id, "那所有的 pptx 制作都是使用你这个 Python 脚本来生成吗？", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    });
+    assert.equal(implementationQuestion.status, "completed");
+    assert.match(implementationQuestion.output ?? "", /直接解释/);
+    assert.deepEqual(planner.responseOnlyFlags, [false, true, true]);
+    const implementationResolution = (await runs.events(owner.user.id, implementationQuestion.id))
+      .find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(implementationResolution?.data.mode, "reply");
+    assert.equal(implementationResolution?.data.inputMode, "none");
+    assert.equal(implementationResolution?.data.targetArtifact, undefined);
+    assert.equal(implementationResolution?.data.targetResult, undefined);
+
+    const mutation = await runs.executeConversation(owner.user.id, "请把上一轮的 PPT 改得更专业一些。", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    });
+    assert.equal(mutation.status, "completed");
+    assert.deepEqual(planner.responseOnlyFlags, [false, true, true, false]);
+    const mutationResolution = (await runs.events(owner.user.id, mutation.id)).find((event) => event.type === "conversation.turn.resolved");
+    assert.equal(mutationResolution?.data.mode, "execute");
+  } finally {
+    await database.close();
+  }
+});
+
+test("conversation resolver publishes Action-bound model lifecycle telemetry with its non-stream deadline", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new TimedConversationIntentModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => { throw new AppError("PLANNING_ERROR", "stop after resolver telemetry", 422); },
+      }),
+    });
+    let runId: string | undefined;
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "你好"),
+      (error: unknown) => {
+        if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR") return false;
+        runId = typeof error.details?.runId === "string" ? error.details.runId : undefined;
+        return true;
+      },
+    );
+    assert.ok(runId);
+    const events = await runs.events(owner.user.id, runId);
+    const started = events.find((event) => event.type === "model.request.started" && event.data.purpose === "conversation_turn_resolver");
+    const completed = events.find((event) => event.type === "model.request.completed" && event.data.purpose === "conversation_turn_resolver");
+    assert.ok(started);
+    assert.ok(completed);
+    assert.equal(started.data.request && typeof started.data.request === "object" && (started.data.request as { stream?: unknown }).stream, false);
+    assert.equal(typeof started.data.actionId, "string");
+    assert.equal(completed.data.actionId, started.data.actionId);
+    assert.equal(typeof started.data.actionDeadlineAt, "number");
+    const actionCreated = events.find((event) => event.type === "action.created" && event.data.actionId === started.data.actionId);
+    assert.ok(actionCreated);
+    assert.equal(Number(started.data.actionDeadlineAt) - actionCreated.createdAt, 25_000);
+    const committed = events.find((event) => event.type === "action.result_committed" && event.data.actionId === started.data.actionId);
+    assert.ok(committed);
+    assert.ok((started.seq ?? 0) < (completed.seq ?? 0));
+    assert.ok((completed.seq ?? 0) < (committed.seq ?? 0));
+  } finally {
+    await database.close();
+  }
+});
+
+test("conversation resolver publishes an Action-bound failed model request before its Action fails", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => new FailingConversationResolverModel(),
+    });
+    let runId: string | undefined;
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "你好"),
+      (error: unknown) => {
+        if (!(error instanceof AppError) || error.code !== "MODEL_ERROR") return false;
+        runId = typeof error.details?.runId === "string" ? error.details.runId : undefined;
+        return true;
+      },
+    );
+    assert.ok(runId);
+    const events = await runs.events(owner.user.id, runId);
+    const failed = events.find((event) => event.type === "model.request.failed" && event.data.purpose === "conversation_turn_resolver");
+    assert.ok(failed);
+    assert.equal(failed.data.code, "MODEL_ERROR");
+    const actionFailed = events.find((event) => event.type === "action.failed" && event.data.actionId === failed.data.actionId);
+    assert.ok(actionFailed);
+    assert.ok((failed.seq ?? 0) < (actionFailed.seq ?? 0));
+  } finally {
+    await database.close();
+  }
+});
+
 test("Conversation resolver atomically binds only the visible directory selected as primary data", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-workspace-"));
   const unrelated = await fs.mkdtemp(join(tmpdir(), "agentloop-atomic-visible-unrelated-"));
@@ -277,6 +411,12 @@ test("Conversation resolver atomically binds only the visible directory selected
                   relation: "new_goal",
                   inputMode: "none",
                   effectiveGoal: "读取 2026 年 8 月个人绩效评定表，汇总各等级与分值的人数及占比。",
+                  taskIntent: {
+                    schema: "agentloop.conversationTaskIntent/v1",
+                    operation: "analysis",
+                    requiresExecution: true,
+                    deliverables: [],
+                  },
                   evidenceStrategy: "bound_visible_sources",
                   sourceBinding: { mode: "primary_data", visibleDirectoryIds: ["visible_dir_2"] },
                   userConstraints: [],
@@ -778,6 +918,12 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
             relation: "new_goal",
             inputMode: "none",
             effectiveGoal: latest,
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: mode === "execute" ? "analysis" : "answer",
+              requiresExecution: mode === "execute",
+              deliverables: [],
+            },
             evidenceStrategy: usesVisibleData ? "bound_visible_sources" : "none",
             sourceBinding: usesVisibleData
               ? { mode: "primary_data", visibleDirectoryIds: ["visible_dir_1"] }
@@ -788,5 +934,67 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
       };
     }
     return { content: "conversation intent handled", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class TimedConversationIntentModel extends ContextAwareConversationIntentModel {
+  readonly completeTimeoutMs = 10_000;
+  readonly operationTimeoutMs = 90_000;
+}
+
+class FailingConversationResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  readonly completeTimeoutMs = 10_000;
+  readonly operationTimeoutMs = 90_000;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.runId.startsWith("conversation-turn:")) {
+      throw new AppError("MODEL_ERROR", "Conversation resolver provider request timed out", 502);
+    }
+    return { content: "unused", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class OverEagerPriorArtifactResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.runId.startsWith("conversation-turn:")) {
+      const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
+      const mutation = /改得更专业|修改|重新生成/u.test(latest);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "over-eager-resolution",
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: mutation ? "execute" : "reply",
+            relation: "continue_prior",
+            inputMode: "none",
+            targetGoalCandidateId: "goal_candidate_1",
+            effectiveGoal: "重新读取并验收上一轮 PPT，再解释为何生成得快。",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: mutation ? "transform_artifact" : "answer",
+              requiresExecution: mutation,
+              deliverables: mutation
+                ? [{ action: "modify", kind: "presentation", format: "pptx", surface: "workspace_artifact" }]
+                : [],
+            },
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: ["基于上一轮产物解释"],
+          },
+        }],
+      };
+    }
+    return {
+      content: request.messages.some((message) => /为什么能够这么快|所有的 pptx 制作/u.test(message.content))
+        ? "直接解释：这是对话问题，不会重新读取或修改上一轮产物。"
+        : "此前交付已经完成。",
+      finishReason: "stop",
+      toolCalls: [],
+    };
   }
 }

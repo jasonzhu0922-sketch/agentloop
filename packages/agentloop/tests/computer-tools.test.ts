@@ -34,6 +34,7 @@ test("code artifacts are classified by source extension while generic files stay
   assert.equal(artifactMatchesExpectedKind({ path: "southern_station_player.py", artifactKind: "code" }, "audio"), false);
   assert.equal(artifactMatchesExpectedTarget({ path: ".agentloop/tool-results/a1/stdout.txt", artifactKind: "generic_file" }, "document", "pdf"), false);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/merged.pdf", artifactKind: "pdf" }, "document", "pdf"), true);
+  assert.equal(artifactMatchesExpectedTarget({ path: "outputs/report.html", artifactKind: "html" }, "document", "html"), true);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/deck.pptx", artifactKind: "pptx" }, undefined, "presentation"), true);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/report.pdf", artifactKind: "pdf" }, undefined, "presentation"), false);
 });
@@ -1221,6 +1222,39 @@ test("verify_artifact_acceptance validates WAV headers and audio metadata", asyn
   }
 });
 
+test("verify_artifact_acceptance accepts a valid large WAV from a truncated profile inspection", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-large-wav-"));
+  try {
+    const path = join(root, "large.wav");
+    const declaredDataBytes = 20_000_056;
+    const header = Buffer.alloc(44);
+    header.write("RIFF", 0, "ascii");
+    header.writeUInt32LE(36 + declaredDataBytes, 4);
+    header.write("WAVEfmt ", 8, "ascii");
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20);
+    header.writeUInt16LE(2, 22);
+    header.writeUInt32LE(44_100, 24);
+    header.writeUInt32LE(176_400, 28);
+    header.writeUInt16LE(4, 32);
+    header.writeUInt16LE(16, 34);
+    header.write("data", 36, "ascii");
+    header.writeUInt32LE(declaredDataBytes, 40);
+    await fs.writeFile(path, header);
+    await fs.truncate(path, 44 + declaredDataBytes);
+
+    const result = await new ArtifactAcceptanceService().verify(new ComputerExecutor(root), { artifactPath: "large.wav" });
+
+    assert.equal(result.artifact.inspectionTruncated, true);
+    assert.equal(result.verdict, "accepted");
+    assert.equal(check(result, "format_matches_request")?.status, "passed");
+    assert.equal(check(result, "artifact_openable")?.status, "passed");
+    assert.equal(check(result, "artifact_openable")?.evidence.frameCount, declaredDataBytes / 4);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verify_artifact_acceptance recognizes MP3 as audio rather than a generic file", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "agentloop-artifact-acceptance-mp3-"));
   try {
@@ -2099,6 +2133,31 @@ test("computer_run_command binds a standard computation artifact to immutable in
       evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
     });
     assert.match(result.computationReceipt?.receiptId ?? "", /^[a-f0-9]{64}$/);
+
+    const mismatchedInputs = await executor.runCommand({
+      command: "trusted-node",
+      args: ["-e", [
+        "const fs=require('node:fs');",
+        "const rows=JSON.parse(fs.readFileSync('series.json','utf8')).rows;",
+        "process.stdout.write(JSON.stringify({schema:'agentloop.commandComputation/v1',inputRefs:[{path:'other.json'}],facts:{records:rows.length}}));",
+      ].join("")],
+      cwd: ".",
+      timeoutMs: 2_000,
+      computationInputs: [{ path: "series.json" }],
+    });
+    assert.equal(mismatchedInputs.computationReceipt, undefined);
+    assert.match(mismatchedInputs.computationEvidenceError ?? "", /source binding mismatched/);
+    assert.deepEqual(mismatchedInputs.computationObservation, {
+      schema: "agentloop.commandComputationObservation/v1",
+      inputRefs: ["other.json"],
+      facts: { records: 2 },
+      caveats: [],
+      binding: {
+        status: "unverified",
+        declaredInputPaths: ["series.json"],
+        observedInputRefs: ["other.json"],
+      },
+    });
 
     const unstructured = await executor.runCommand({
       command: "trusted-node",

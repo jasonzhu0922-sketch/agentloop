@@ -582,6 +582,7 @@ test("an assessed Step result becomes the next Step's formal readable input", as
     const skills = new SkillService(database);
     let dependencyResultId = "";
     let consumed = false;
+    let fabricatedDependencyCandidateRejected = false;
     const runs = new RunService({
       database,
       skills,
@@ -647,7 +648,12 @@ test("an assessed Step result becomes the next Step's formal readable input", as
           }
           const match = /"resultId":"(rr_[0-9a-f-]{36})"/u.exec(context);
           assert.ok(match?.[1], "the downstream context must bind the published dependency result");
+          assert.match(context, /first call read_result with only its opaque resultId/u);
           dependencyResultId = match[1];
+          if (!fabricatedDependencyCandidateRejected) {
+            fabricatedDependencyCandidateRejected = true;
+            return { content: "fabricated:first-step-value=969", finishReason: "stop" as const, toolCalls: [] };
+          }
           return {
             content: "",
             finishReason: "tool_calls" as const,
@@ -660,6 +666,10 @@ test("an assessed Step result becomes the next Step's formal readable input", as
 
     const run = await runs.execute(owner.user.id, "publish then consume one formal result");
     assert.equal(run.status, "completed");
+    assert.equal(fabricatedDependencyCandidateRejected, true);
+    assert.equal((await runs.events(owner.user.id, run.id)).some((event) =>
+      event.type === "candidate.dependency_results_unread"
+    ), true);
     assert.equal(consumed, true);
     const plan = await new PlanRepository(database).getByRun(run.id);
     const first = plan.steps.find((step) => step.id === "produce-result")!;

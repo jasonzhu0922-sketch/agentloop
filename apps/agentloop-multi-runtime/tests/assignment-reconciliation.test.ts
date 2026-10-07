@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { startAssignmentReconciler } from "../src/control-plane/assignment-reconciler.ts";
-import { streamEvents } from "../src/http/router-http.ts";
-import type { RuntimeRunStatus } from "../src/domain/contracts.ts";
+import { ControlPlaneStore, terminalTaskProjectionUpdate, terminalTurnCompletedAt } from "../src/router/persistence/control-plane-store.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { startAssignmentReconciler } from "../src/router/application/assignment-reconciler.ts";
+import { streamEvents } from "../src/router/transport/http.ts";
+import type { RuntimeRunStatus } from "../src/shared/contracts.ts";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 async function fixture(getRun: (id: string) => Promise<RuntimeRunStatus>) {
@@ -135,6 +135,15 @@ test("running observation preserves admission time and missing finish time does 
     const page = await f.store.listConversations("tenant", "user", { limit: 30, offset: 0 });
     assert.equal(page.conversations[0].updatedAt, 200);
   } finally { await f.database.close(); }
+});
+
+test("terminal projection with an unknown finish time has no untyped PostgreSQL NULL parameter", () => {
+  const projection = terminalTaskProjectionUpdate("completed", "assignment-1", null);
+  assert.doesNotMatch(projection.sql, /IS NULL/);
+  assert.ok(projection.params.every((value) => value !== null));
+  assert.deepEqual(projection.params, ["completed", "assignment-1", "assignment-1"]);
+  assert.equal(terminalTurnCompletedAt(null, 200), 200);
+  assert.equal(terminalTurnCompletedAt(150, 200), 150);
 });
 
 test("terminal event projection retains event time rather than poll time", async () => {

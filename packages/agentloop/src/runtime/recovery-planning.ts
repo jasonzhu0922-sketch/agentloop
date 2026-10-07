@@ -93,6 +93,7 @@ export class ModelRecoveryPlanner implements RecoveryPlanner {
         "You cannot execute tools, declare completion, or alter recovery facts.",
         "Choose exactly one structured recovery decision. replayPolicy=unsafe never permits resume_step.",
         "A revise_plan decision may retire only unfinished work with no unconfirmed external effect; it must include the complete revised Plan.",
+        "When userResponses contains a positive confirmation for the current Recovery Action, treat that response as the user's authorization at this boundary and do not ask the same recovery question again.",
         "If the failed boundary shows the current Plan's evidence contract is wrong for the evidence that actually exists, prefer revise_plan and repair the Plan boundary rather than resubmitting the same step.",
         "ask_user is required when an unknown external effect or user-only fact prevents a safe conclusion.",
       ].join("\n"),

@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { FileAttachmentBroker } from "../src/attachments/attachment-broker.ts";
-import { SharedFilesystemAttachmentBroker } from "../src/attachments/shared-filesystem-attachment-broker.ts";
-import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/control-plane/router.ts";
-import { AgentLoopRuntimeHost } from "../src/runtime/runtime-host.ts";
+import { FileAttachmentBroker } from "../src/router/attachments/attachment-broker.ts";
+import { SharedFilesystemAttachmentBroker } from "../src/router/attachments/shared-filesystem-attachment-broker.ts";
+import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/router/application/router.ts";
+import { AgentLoopRuntimeHost } from "../src/runtime-host/application/runtime-host.ts";
 import {
   assertRequiredRuntimeCommands,
   assertRequiredRuntimeNodeModules,
@@ -18,8 +18,8 @@ import {
   requiredRuntimeNodeModules,
   requiredRuntimePythonModules,
   runtimeCommandProbeArguments,
-} from "../src/runtime/runtime-command-preflight.ts";
-import { HttpResourceImporter } from "../src/runtime/http-resource-importer.ts";
+} from "../src/runtime-host/application/runtime-command-preflight.ts";
+import { HttpResourceImporter } from "../src/runtime-host/infrastructure/http-resource-importer.ts";
 import {
   mergeSkillDirectories,
   loadSkillDirectoriesConfig,
@@ -31,20 +31,21 @@ import {
   parseStepExecutionStrategyProfileConfig,
   resolveSkillDirectoriesConfig,
   webToolsOptionsFromEnvironment,
-} from "../src/config/config.ts";
-import { assertRuntimeDispatchEnvelope } from "../src/runtime/runtime-host.ts";
-import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, webOriginMatches } from "../src/http/router-http.ts";
+} from "../src/shared/config.ts";
+import { assertRuntimeDispatchEnvelope } from "../src/runtime-host/application/runtime-host.ts";
+import { assignmentIdFromPath, bindRouterEvents, HttpRuntimeEndpoint, streamEvents, taskFromRequest, webOriginMatches } from "../src/router/transport/http.ts";
 import { cancellationTarget, persistedCancellableAssistant } from "../web/cancellation-target.js";
 import { EventEmitter } from "node:events";
 import { AppDatabase } from "@zhujun/agentloop";
-import { ControlPlaneStore, ConversationDeleteConflictError, RuntimeCapacityError as PersistentRuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { SharedWorkspaceArtifactCatalog } from "../src/artifacts/shared-workspace-artifact-catalog.ts";
-import { HostDispatchStore } from "../src/runtime/host-dispatch-store.ts";
-import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/storage/state-database.ts";
-import { SchemaMigrationError } from "../src/storage/schema-migration-ledger.ts";
-import { migrateRouterState } from "../src/storage/router-state-migrations.ts";
-import type { RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/domain/contracts.ts";
+import { ControlPlaneStore, ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
+import { RuntimeCapacityError as PersistentRuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/application/control-plane-contracts.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
+import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
+import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/shared/persistence/state-database.ts";
+import { SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatibilitySql, migrationLedgerSql } from "../src/shared/persistence/schema-migration-ledger.ts";
+import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
+import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeInstance } from "../src/shared/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/live-update-scheduler.js";
 import { persistSessions } from "../web/session-persistence.js";
@@ -186,6 +187,19 @@ test("role migrations record an immutable checksum and fail closed on history dr
   } finally {
     await database.close();
   }
+});
+
+test("PostgreSQL migration ledger stores millisecond timestamps without integer overflow", () => {
+  assert.match(migrationLedgerSql({ dialect: "postgres" }), /applied_at BIGINT NOT NULL/);
+  assert.equal(
+    migrationLedgerCompatibilitySql({ dialect: "postgres" }),
+    "ALTER TABLE mr_schema_migrations ALTER COLUMN applied_at TYPE BIGINT",
+  );
+  assert.equal(migrationLedgerCompatibilitySql({ dialect: "sqlite" }), undefined);
+  assert.equal(isEpochMillisecondColumn("created_at"), true);
+  assert.equal(isEpochMillisecondColumn("lease_until"), true);
+  assert.equal(isEpochMillisecondColumn("connection_epoch"), true);
+  assert.equal(isEpochMillisecondColumn("next_seq"), false);
 });
 
 test("Runtime Host validates deployment-required commands before accepting Runs", () => {
@@ -471,12 +485,12 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
     readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
   assert.match(app, /const CONVERSATION_PAGE_SIZE = 30/);
-  assert.match(app, /let recoveredSessions = \[\];\s*let sessions = \[\]/);
-  assert.match(app, /recoveredSessions = sortSessions\(loadSessions\(sessionKey\(user\.id\)\)\)/);
+  assert.match(app, /const conversationState = createConversationState\(CONVERSATION_PAGE_SIZE\)/);
+  assert.match(app, /conversationState\.recovered = sortSessions\(loadSessions\(sessionKey\(user\.id\)\)\)/);
   assert.match(app, /mergeConversationSummaries\(body\.conversations, reset\)/);
-  assert.match(app, /if \(reset && sessions\.length === 0\)/);
+  assert.match(app, /if \(reset && conversationState\.sessions\.length === 0\)/);
   assert.match(app, /\/v1\/conversations\?limit=\$\{CONVERSATION_PAGE_SIZE\}&offset=\$\{offset\}/);
-  assert.match(app, /conversationVisibleLimit \+= CONVERSATION_PAGE_SIZE/);
+  assert.match(app, /conversationState\.visibleLimit \+= CONVERSATION_PAGE_SIZE/);
   assert.match(app, /加载更多对话/);
   assert.match(app, /\/v1\/conversations\/\$\{encodeURIComponent\(conversation\.id\)\}/);
   assert.match(app, /conversationMessagesFromTurns\(body\.turns\)/);
@@ -501,10 +515,73 @@ test("Runtime Host forwards deployment search endpoint and credentials to generi
 });
 
 test("Router and Runtime Host remain isolated deployment dependency closures", async () => {
-  const routerFiles = await localModuleClosure(fileURLToPath(new URL("../src/entrypoints/router-main.ts", import.meta.url)));
-  const hostFiles = await localModuleClosure(fileURLToPath(new URL("../src/entrypoints/runtime-host-main.ts", import.meta.url)));
-  assert.equal([...routerFiles].some((path) => path.includes("/src/runtime/")), false, "Router must not import Runtime Host execution");
-  assert.equal([...hostFiles].some((path) => path.includes("/src/control-plane/") || path.endsWith("/src/http/router-http.ts")), false, "Runtime Host must not import Router control-plane code");
+  const routerFiles = await localModuleClosure(fileURLToPath(new URL("../src/router/main.ts", import.meta.url)));
+  const hostFiles = await localModuleClosure(fileURLToPath(new URL("../src/runtime-host/main.ts", import.meta.url)));
+  const localAgentFiles = await localModuleClosure(fileURLToPath(new URL("../local-agent-runtime/src/main.ts", import.meta.url)));
+  assert.equal([...routerFiles].some((path) => path.includes("/src/runtime-host/")), false, "Router must not import Runtime Host execution");
+  assert.equal([...hostFiles].some((path) => path.includes("/src/router/")), false, "Runtime Host must not import Router code");
+  assert.equal([...localAgentFiles].some((path) => path.includes("/src/router/") || path.includes("/src/runtime-host/")), false, "Local Runtime Agent must use only shared contracts, never cloud role implementations");
+});
+
+test("persistent Router depends on control-plane and artifact ports, not their adapters", async () => {
+  const files = await localModuleClosure(fileURLToPath(new URL("../src/router/application/persistent-router.ts", import.meta.url)));
+  assert.equal([...files].some((path) => path.endsWith("/router/persistence/control-plane-store.ts")), false,
+    "Router application must not reach the SQL control-plane adapter");
+  assert.equal([...files].some((path) => path.endsWith("/router/artifacts/shared-workspace-artifact-catalog.ts")), false,
+    "Router application must not reach the shared-workspace artifact adapter");
+  assert.equal([...files].some((path) => path.endsWith("/router/application/control-plane-contracts.ts")), true,
+    "Router application must depend on its declared ports");
+});
+
+test("shared Router-Host contracts preserve artifact identity without importing Runtime kernel types", async () => {
+  const [contracts, persistentRouter, hostApplication, hostRunPort, hostMain, hostAdapter] = await Promise.all([
+    readFile(new URL("../src/shared/contracts.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/application/persistent-router.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/application/runtime-host.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/application/runtime-run-port.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/main.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/infrastructure/agentloop-runtime-run-port.ts", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(contracts, /@zhujun\/agentloop/,
+    "the process-boundary schema must be owned by shared contracts, not the Runtime package");
+  assert.doesNotMatch(persistentRouter, /@zhujun\/agentloop/,
+    "Router application must consume shared protocol DTOs rather than Runtime implementation types");
+  assert.doesNotMatch(hostApplication, /@zhujun\/agentloop|RunService/,
+    "Host application must depend on its runtime port rather than the kernel service class");
+  assert.match(hostApplication, /RuntimeHostRunPort/);
+  assert.match(hostRunPort, /export interface RuntimeHostRunPort/);
+  assert.match(hostAdapter, /class AgentLoopRuntimeRunPort implements RuntimeHostRunPort/,
+    "the kernel integration belongs in a Host infrastructure adapter");
+  assert.match(hostMain, /new AgentLoopRuntimeHost\(new AgentLoopRuntimeRunPort\(runs\)/,
+    "deployment composition must inject the port adapter, not RunService directly");
+
+  const artifact: RuntimeArtifact = {
+    id: "artifact-final", runId: "run-terminal", path: "deliveries/report.pdf", name: "report.pdf",
+    bytes: 128, mimeType: "application/pdf", role: "final", sourceTool: "verify_artifact_acceptance", previewable: true,
+  };
+  assert.deepEqual(artifact, {
+    id: "artifact-final", runId: "run-terminal", path: "deliveries/report.pdf", name: "report.pdf",
+    bytes: 128, mimeType: "application/pdf", role: "final", sourceTool: "verify_artifact_acceptance", previewable: true,
+  });
+});
+
+test("Multi Runtime TiDB DDL is owned by Router and Host persistence, not the AgentLoop kernel", async () => {
+  const [kernelSchema, routerControlPlaneSchema, routerAttachmentSchema, routerIdentitySchema, routerDeviceSchema, hostSchema] = await Promise.all([
+    readFile(new URL("../../../packages/agentloop/src/storage/tidb-schema-definitions.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/persistence/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/attachments/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/identity/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/devices/tidb-schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/persistence/tidb-schema.ts", import.meta.url), "utf8"),
+  ]);
+  const routerSchema = [routerControlPlaneSchema, routerAttachmentSchema, routerIdentitySchema, routerDeviceSchema].join("\n");
+  assert.doesNotMatch(kernelSchema, /mr_(?:runtime_nodes|tasks|assignments|turns|attachments|identity_|devices|device_|host_dispatches|run_executors)/,
+    "the kernel schema module must not own Multi Runtime application tables");
+  assert.match(routerSchema, /mr_runtime_nodes/);
+  assert.match(routerSchema, /mr_attachments/);
+  assert.match(routerSchema, /mr_identity_users/);
+  assert.match(routerSchema, /mr_devices/);
+  assert.match(hostSchema, /mr_host_dispatches/);
 });
 
 test("local launcher gives Router and Runtime Hosts the same shared workspace mount", async () => {
@@ -874,10 +951,10 @@ test("conversation message copy actions are delegated for every message role", a
 
 test("Multi Runtime proxies full tool arguments and command output from the owning Host Run", async () => {
   const [routerHttp, hostHttp, persistentRouter, runtimeHost, app] = await Promise.all([
-    readFile(new URL("../src/http/router-http.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/http/runtime-host-http.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/control-plane/persistent-router.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/runtime/runtime-host.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/transport/http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/transport/http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/router/application/persistent-router.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime-host/application/runtime-host.ts", import.meta.url), "utf8"),
     readFile(new URL("../web/app.js", import.meta.url), "utf8"),
   ]);
   for (const source of [routerHttp, hostHttp]) {
@@ -1254,12 +1331,12 @@ test("Web keeps Runtime directory authority above the composer and snapshots upl
 test("Web renews the Local Runtime capability before it expires and rotates it when login identity changes", async () => {
   const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
   assert.match(app, /const LOCAL_SESSION_REFRESH_AHEAD_MS = 5 \* 60 \* 1000;/);
-  assert.match(app, /let localSessionExpiresAt = 0;/);
+  assert.match(app, /const sessionState = createSessionState/);
   assert.match(app, /function clearLocalSession\(\)/);
   assert.match(app, /function scheduleLocalSessionRefresh\(deviceId, userId\)/);
-  assert.match(app, /if \(!localSessionToken \|\| localSessionExpiresAt - Date\.now\(\) <= LOCAL_SESSION_REFRESH_AHEAD_MS\) await refreshLocalSessionOnce\(\);/);
-  assert.match(app, /if \(authenticatedUser\?\.id !== user\.id\) \{[\s\S]*?clearLocalSession\(\);/);
-  assert.match(app, /if \(authenticatedUser\?\.id !== userId \|\| localDevice\?\.id !== deviceId\) throw new Error\("本机 Runtime 登录身份已更新，请重试"\);/);
+  assert.match(app, /if \(!sessionState\.localSessionToken \|\| sessionState\.localSessionExpiresAt - Date\.now\(\) <= LOCAL_SESSION_REFRESH_AHEAD_MS\) await refreshLocalSessionOnce\(\);/);
+  assert.match(app, /if \(sessionState\.user\?\.id !== user\.id\) \{[\s\S]*?clearLocalSession\(\);/);
+  assert.match(app, /if \(sessionState\.user\?\.id !== userId \|\| localDevice\?\.id !== deviceId\) throw new Error\("本机 Runtime 登录身份已更新，请重试"\);/);
 });
 
 test("Web persists question and terminal-response timing for the conversation stream", async () => {
@@ -1486,6 +1563,54 @@ test("resource importer stops unsupported Sources before they can be bound to a 
       }),
       /附件「授权委托书\.doc」：该格式暂不支持（\.doc）/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("HTTP dispatch preserves an Assignment reservation when the Host acknowledgement is lost", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("connection_reset_after_request"); };
+  try {
+    const endpoint = new HttpRuntimeEndpoint("http://runtime.test");
+    await assert.rejects(endpoint.dispatch({
+      schema: "agentloop.runtimeDispatch/v1",
+      assignmentId: "assignment-ack-lost",
+      dispatchKey: "dispatch-ack-lost",
+      subject: { tenantId: "tenant-a", userId: "user-a" },
+      conversationId: "conversation-a",
+      input: "continue safely",
+      executionTarget: { kind: "cloud_pool" },
+      dataPolicy: { mode: "cloud" },
+      allowDangerousTools: false,
+      resourceRefs: [],
+    }), RuntimeDispatchOutcomeUnknownError);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("HTTP dispatch treats an explicit Host rejection as definitive", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "runtime_input_invalid" }), {
+    status: 400, headers: { "content-type": "application/json" },
+  });
+  try {
+    const endpoint = new HttpRuntimeEndpoint("http://runtime.test");
+    await assert.rejects(endpoint.dispatch({
+      schema: "agentloop.runtimeDispatch/v1",
+      assignmentId: "assignment-rejected",
+      dispatchKey: "dispatch-rejected",
+      subject: { tenantId: "tenant-a", userId: "user-a" },
+      conversationId: "conversation-a",
+      input: "invalid by Host",
+      executionTarget: { kind: "cloud_pool" },
+      dataPolicy: { mode: "cloud" },
+      allowDangerousTools: false,
+      resourceRefs: [],
+    }), (error: unknown) => error instanceof Error
+      && !(error instanceof RuntimeDispatchOutcomeUnknownError)
+      && error.message === "runtime_input_invalid");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1910,6 +2035,34 @@ test("persistent Router dispatches only heartbeating Hosts and reuses the durabl
   await database.close();
 });
 
+test("Runtime heartbeats stay in Router memory and do not write mr_runtime_nodes", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-heartbeat-memory"), endpoint: "http://runtime-heartbeat-memory" }], 100);
+  const before = await database.prepare(`
+    SELECT status, active_run_count, queued_run_count, last_heartbeat_at, updated_at
+    FROM mr_runtime_nodes WHERE id = ?
+  `).get("runtime-heartbeat-memory") as Record<string, number | string | null>;
+
+  await store.heartbeat({
+    runtimeId: "runtime-heartbeat-memory",
+    status: "ready",
+    activeRunCount: 1,
+    queuedRunCount: 2,
+    maxConcurrentRuns: 3,
+    observedAt: 200,
+  });
+
+  const after = await database.prepare(`
+    SELECT status, active_run_count, queued_run_count, last_heartbeat_at, updated_at
+    FROM mr_runtime_nodes WHERE id = ?
+  `).get("runtime-heartbeat-memory") as Record<string, number | string | null>;
+  assert.deepEqual(after, before);
+  assert.equal((await store.runtimeCatalog()).find((runtime) => runtime.id === "runtime-heartbeat-memory")?.status, "ready");
+  await database.close();
+});
+
 test("Router Runtime catalog exposes concrete statically registered Runtime IDs", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
@@ -1950,7 +2103,7 @@ test("explicit Runtime selection uses that Host and rejects an unregistered ID",
   await database.close();
 });
 
-test("persistent Router keeps a conversation on its original Runtime Host", async () => {
+test("persistent Router keeps a conversation on its original Runtime Host without recording a migration", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -1968,6 +2121,10 @@ test("persistent Router keeps a conversation on its original Runtime Host", asyn
   const first = await router.submit(task("user-a", "message-a", "conversation-sticky"));
   const second = await router.submit(task("user-a", "message-b", "conversation-sticky"));
   assert.equal(second.runtimeId, first.runtimeId);
+  const migrations = await database.prepare(`
+    SELECT assignment_id FROM mr_conversation_runtime_migrations WHERE assignment_id = ?
+  `).all(second.id) as Array<{ assignment_id: string }>;
+  assert.deepEqual(migrations, []);
   await database.close();
 });
 
@@ -2250,7 +2407,10 @@ test("persistent Router forwards recovery advance and resume to the assigned Hos
   });
   const assignment = await router.submit(task("user-recovery", "message-recovery"));
   const advanced = await router.advanceRecovery(assignment.id);
-  assert.equal(advanced?.recovery.state?.state, "ready_to_resume");
+  assert.deepEqual(advanced?.recovery, {
+    state: { runId: "run-recovery", actionId: "action-recovery", state: "ready_to_resume", updatedAt: 200 },
+    decisions: [], planRevisionAssessments: [], userResponses: [],
+  });
   const resumed = await router.resumeRecovery(assignment.id);
   assert.equal(resumed?.run.status, "running");
   assert.deepEqual(calls, ["advance:run-recovery", "resume:run-recovery"]);

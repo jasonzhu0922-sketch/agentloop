@@ -104,6 +104,12 @@ export interface AgentLoopOptions {
   ) => boolean | Promise<boolean>;
   readonly progressPolicy?: RuntimeToolProgressPolicy;
   readonly stepExecutionStrategy?: StepExecutionStrategy;
+  /**
+   * A modify-artifact leaf may replace only a path it has already read
+   * successfully in this Run. This is Runtime-owned call canonicalization,
+   * not a relaxed default for the general file-writing Tool.
+   */
+  readonly artifactWritePolicy?: "overwrite_observed_existing";
   /** Stage 3: current-leaf visibility only; no assessment/recovery policy change. */
   readonly workProductContext?: WorkProductContextOptions;
   readonly signal?: AbortSignal;
@@ -160,6 +166,13 @@ interface ToolOutcome {
   readonly isError: boolean;
   readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
   readonly resultRef?: RuntimeResultRef;
+}
+
+interface ToolCallNormalization {
+  readonly call: ModelToolCall;
+  readonly path: string;
+  readonly originalMode: "create";
+  readonly effectiveMode: "overwrite";
 }
 
 interface AutomaticArtifactAcceptanceCall {
@@ -306,6 +319,50 @@ function toolEvidenceFromOutcome(outcome: ToolOutcome): AgentLoopToolEvidence {
     ...(outcome.failurePhase === undefined ? {} : { failurePhase: outcome.failurePhase }),
     ...(outcome.resultRef === undefined ? {} : { resultRef: outcome.resultRef }),
   };
+}
+
+function normalizeObservedArtifactWriteCall(input: {
+  readonly call: ModelToolCall;
+  readonly policy: AgentLoopOptions["artifactWritePolicy"];
+  readonly messages: readonly ModelMessage[];
+  readonly toolEvidence: readonly AgentLoopToolEvidence[];
+}): ToolCallNormalization | undefined {
+  if (input.policy !== "overwrite_observed_existing" || input.call.name !== "computer_write_file") return undefined;
+  if (input.call.arguments === null || typeof input.call.arguments !== "object" || Array.isArray(input.call.arguments)) return undefined;
+  const argumentsRecord = input.call.arguments as Record<string, unknown>;
+  const path = argumentsRecord.path;
+  // Do not change an explicit legacy mode: its mixed/invalid semantics belong
+  // to the normal Tool validator. An omitted mode is equivalent to create.
+  if (typeof path !== "string" || path.trim().length === 0 || argumentsRecord.overwrite !== undefined) return undefined;
+  if (argumentsRecord.mode !== undefined && argumentsRecord.mode !== "create") return undefined;
+  if (!wasSuccessfullyReadInCurrentRun(path, input.messages, input.toolEvidence)) return undefined;
+  return {
+    call: { ...input.call, arguments: { ...argumentsRecord, mode: "overwrite" } },
+    path,
+    originalMode: "create",
+    effectiveMode: "overwrite",
+  };
+}
+
+function wasSuccessfullyReadInCurrentRun(
+  path: string,
+  messages: readonly ModelMessage[],
+  toolEvidence: readonly AgentLoopToolEvidence[],
+): boolean {
+  const successfulReadCallIds = new Set(toolEvidence
+    .filter((item) => item.toolName === "computer_read_file" && !item.isError)
+    .map((item) => item.toolCallId));
+  if (successfulReadCallIds.size === 0) return false;
+  return messages.some((message) => message.role === "assistant" && (message.toolCalls ?? []).some((call) =>
+    call.name === "computer_read_file"
+    && successfulReadCallIds.has(call.id)
+    && isToolCallForPath(call, path)
+  ));
+}
+
+function isToolCallForPath(call: ModelToolCall, path: string): boolean {
+  if (call.arguments === null || typeof call.arguments !== "object" || Array.isArray(call.arguments)) return false;
+  return (call.arguments as Record<string, unknown>).path === path;
 }
 
 const CONVERGENCE_PROMPT = [
@@ -841,6 +898,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       assertArtifactAcceptanceCallMatchesTarget(call, options.progressPolicy);
       return grantedMaterialized.prepare(call);
     };
+    const normalizeToolCall = async (call: ModelToolCall): Promise<ModelToolCall> => {
+      const normalization = normalizeObservedArtifactWriteCall({
+        call,
+        policy: options.artifactWritePolicy,
+        messages,
+        toolEvidence,
+      });
+      if (normalization === undefined) return call;
+      await emit({
+        type: "tool.arguments.normalized",
+        data: {
+          step,
+          toolCallId: call.id,
+          toolName: call.name,
+          path: normalization.path,
+          originalMode: normalization.originalMode,
+          effectiveMode: normalization.effectiveMode,
+          reason: "modify_artifact_overwrite_observed_existing",
+        },
+      });
+      return normalization.call;
+    };
     const workProductProjection = await workProducts?.project();
     const stepExecutionDecision = stepExecutionStrategy.prepareModelStep({
       modelStep: step,
@@ -1067,6 +1146,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         signal: options.signal,
         grant: options.grant,
         prepare: prepareWithArtifactTarget,
+        normalizeToolCall,
         maxToolResultCharacters,
         maxParallelToolCalls,
         actionTracker: options.actionTracker,
@@ -1565,14 +1645,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
         admittedToolCalls.set(call.name, admittedCalls + 1);
         try {
-          const value = prepareWithArtifactTarget(call);
+          const normalizedCall = await normalizeToolCall(call);
+          const value = prepareWithArtifactTarget(normalizedCall);
           await emit({
             type: "tool.planned",
             data: {
               step,
-              toolCallId: call.id,
-              toolName: call.name,
-              arguments: call.arguments,
+              toolCallId: normalizedCall.id,
+              toolName: normalizedCall.name,
+              arguments: normalizedCall.arguments,
               replaySafe: value.tool.replaySafe,
             },
           });
@@ -2517,6 +2598,13 @@ function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string 
     if (stderr !== undefined) details.push(`stderr="${stderr}"`);
     const computationEvidenceError = shortStringField(parsed, "computationEvidenceError");
     if (computationEvidenceError !== undefined) details.push(`computationEvidenceError="${computationEvidenceError}"`);
+    const computationObservation = isPlainRecord(parsed.computationObservation) ? parsed.computationObservation : undefined;
+    const binding = computationObservation !== undefined && isPlainRecord(computationObservation.binding)
+      ? computationObservation.binding
+      : undefined;
+    if (binding !== undefined && binding.status === "unverified") {
+      details.push(`computationBinding=unverified declared=${truncateForDirective(JSON.stringify(binding.declaredInputPaths ?? []), 900)} observed=${truncateForDirective(JSON.stringify(binding.observedInputRefs ?? []), 900)}`);
+    }
     const path = shortStringField(parsed, "path");
     if (path !== undefined) details.push(`path=${path}`);
     const diagnostics = parsed.diagnostics;
@@ -2591,6 +2679,7 @@ interface StreamingDispatchContext {
   readonly signal: AbortSignal | undefined;
   readonly grant: CapabilityGrant;
   readonly prepare: (call: ModelToolCall) => PreparedToolCall;
+  readonly normalizeToolCall: (call: ModelToolCall) => Promise<ModelToolCall>;
   readonly maxToolResultCharacters: number;
   readonly maxParallelToolCalls: number;
   readonly actionTracker: AgentLoopOptions["actionTracker"];
@@ -2654,14 +2743,15 @@ async function completeWithStreamingAndDispatch(
       try {
         let entry: PreparedEntry;
         try {
-          const value = context.prepare(call);
+          const normalizedCall = await context.normalizeToolCall(call);
+          const value = context.prepare(normalizedCall);
           await context.emit({
             type: "tool.planned",
             data: {
               step: context.step,
-              toolCallId: call.id,
-              toolName: call.name,
-              arguments: call.arguments,
+              toolCallId: normalizedCall.id,
+              toolName: normalizedCall.name,
+              arguments: normalizedCall.arguments,
               replaySafe: value.tool.replaySafe,
             },
           });

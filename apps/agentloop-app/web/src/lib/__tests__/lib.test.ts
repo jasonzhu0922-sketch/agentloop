@@ -4,7 +4,7 @@ import { commandActivities, commandLine, commandSummary, fullCommandLine } from 
 import { executionCapabilities } from "../execution-capabilities";
 import { eventLabel, fmtBytes, toolAction, truncate } from "../format";
 import { plannedEventMap, translateRunEvent, translatedTimeline } from "../event-translator";
-import { executionInsights, liveEventFeed, livePlan, latestProviderReasoning, currentStepWhy, failureSummary, stepToolPurposes, streamingStatus, streamingToolProgress, toolActivityItems } from "../live";
+import { executionInsights, liveEventFeed, livePlan, latestProviderReasoning, currentStepWhy, failureSummary, modelWaitText, stepToolPurposes, streamingStatus, streamingToolProgress, toolActivityItems } from "../live";
 import { mergeRunIntoConversation, projectConversationRun } from "../../state/run-state";
 import type { ConversationDetail, RunEvent, RunRecord } from "../types";
 import type { ProcessArtifact } from "../types";
@@ -64,6 +64,46 @@ describe("format", () => {
     };
     expect(toolAction(event)).toContain("[inline script]");
     expect(toolAction(event)).not.toContain("very long generated script");
+  });
+});
+
+describe("model request wait state", () => {
+  it("shows resolver-specific elapsed and deadline information while its Action is pending", () => {
+    const now = Date.now();
+    const text = modelWaitText([{
+      seq: 4,
+      type: "model.request.started",
+      createdAt: now - 6_000,
+      data: {
+        purpose: "conversation_turn_resolver",
+        actionId: "resolver-action",
+        actionDeadlineAt: now + 54_000,
+      },
+    }]);
+
+    expect(text).toContain("正在解析本轮任务，等待模型响应");
+    expect(text).toContain("已等待");
+    expect(text).toContain("截止还剩");
+  });
+
+  it("clears the wait state when the same resolver Action publishes completion", () => {
+    const now = Date.now();
+    const text = modelWaitText([
+      {
+        seq: 4,
+        type: "model.request.started",
+        createdAt: now - 6_000,
+        data: { purpose: "conversation_turn_resolver", actionId: "resolver-action", actionDeadlineAt: now + 54_000 },
+      },
+      {
+        seq: 5,
+        type: "model.request.completed",
+        createdAt: now - 1_000,
+        data: { purpose: "conversation_turn_resolver", actionId: "resolver-action", durationMs: 5_000 },
+      },
+    ]);
+
+    expect(text).toBe("");
   });
 });
 

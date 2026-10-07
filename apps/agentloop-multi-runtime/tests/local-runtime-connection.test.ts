@@ -5,13 +5,13 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { AppDatabase } from "@zhujun/agentloop";
-import { IdentityService } from "../src/auth/identity-service.ts";
-import { ControlPlaneStore } from "../src/control-plane/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/control-plane/persistent-router.ts";
-import { RuntimeCapacityError } from "../src/control-plane/control-plane-store.ts";
-import { SqlDeviceRepository } from "../src/devices/device-service.ts";
-import { DeviceRuntimeConnectionRegistry } from "../src/devices/runtime-connection-registry.ts";
-import type { RuntimeDispatchEnvelope } from "../src/domain/contracts.ts";
+import { IdentityService } from "../src/router/identity/service.ts";
+import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
+import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
+import { RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/application/control-plane-contracts.ts";
+import { SqlDeviceRepository } from "../src/router/devices/device-service.ts";
+import { DeviceRuntimeConnectionRegistry } from "../src/router/devices/runtime-connection-registry.ts";
+import type { RuntimeDispatchEnvelope } from "../src/shared/contracts.ts";
 
 test("Router dispatches a local Assignment through the authenticated device connection exactly once", async () => {
   const database = new AppDatabase(":memory:");
@@ -188,7 +188,7 @@ test("lost Local Agent dispatch ACK retries the same Assignment and dispatch key
     endpointFactory: () => ({
       async dispatch(envelope) {
         envelopes.push(envelope);
-        if (envelopes.length === 1) throw new Error("ack_lost");
+        if (envelopes.length === 1) throw new RuntimeDispatchOutcomeUnknownError("ack_lost");
         return { remoteRunId: "already-created-run" };
       },
     }),
@@ -204,7 +204,8 @@ test("lost Local Agent dispatch ACK retries the same Assignment and dispatch key
     dataPolicy: { mode: "local" as const },
   };
   try {
-    await assert.rejects(router.submit(task), /ack_lost/);
+    await assert.rejects(router.submit(task), RuntimeDispatchOutcomeUnknownError);
+    assert.equal((await store.assignment(envelopes[0]!.assignmentId))?.status, "reserved");
     const accepted = await router.submit(task);
     assert.equal(accepted.remoteRunId, "already-created-run");
     assert.equal(envelopes.length, 2);
