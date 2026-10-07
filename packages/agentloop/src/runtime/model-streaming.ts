@@ -1,3 +1,4 @@
+import { AppError } from "../shared/errors.ts";
 import type {
   ModelAdapter,
   ModelInvocation,
@@ -34,6 +35,57 @@ export interface ModelStreamingOptions {
   readonly suppressReasoningContent?: boolean;
   /** Invoked when one tool call's arguments are confirmed complete. */
   readonly onToolCallReady?: (call: ModelToolCall) => void | Promise<void>;
+}
+
+export interface ModelRequestTelemetryOptions {
+  readonly model: ModelAdapter;
+  readonly invocation: ModelInvocation;
+  readonly emit: RuntimeEventSink;
+  readonly signal?: AbortSignal;
+  /** Extra fields carried on the request lifecycle events. */
+  readonly base: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Execute a non-streaming model request while publishing the same durable
+ * request lifecycle used by the streaming path. This is for structured
+ * pre-planning calls such as conversation-turn resolution: they have no
+ * user-visible deltas, but must never appear as a silent dispatched Action.
+ */
+export async function completeWithRequestTelemetry(options: ModelRequestTelemetryOptions): Promise<ModelResponse> {
+  const { model, invocation, emit, signal, base } = options;
+  const request = model.requestLogContext?.(invocation, false) ?? fallbackRequestLogContext(invocation, false);
+  const startedAt = Date.now();
+  await emit({ type: "model.request.started", data: { ...base, request } });
+  try {
+    const response = await model.complete(invocation, signal);
+    if (signal?.aborted === true) throw new AppError("CANCELLED", "Run was cancelled", 409);
+    await emit({
+      type: "model.request.completed",
+      data: {
+        ...base,
+        request,
+        durationMs: Date.now() - startedAt,
+        finishReason: response.finishReason,
+        contentLength: response.content.length,
+        toolCallCount: response.toolCalls.length,
+        ...(response.usage === undefined ? {} : { usage: response.usage }),
+      },
+    });
+    return response;
+  } catch (error) {
+    await emit({
+      type: "model.request.failed",
+      data: {
+        ...base,
+        request,
+        durationMs: Date.now() - startedAt,
+        ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}),
+        message: safeErrorMessage(error),
+      },
+    });
+    throw error;
+  }
 }
 
 /**

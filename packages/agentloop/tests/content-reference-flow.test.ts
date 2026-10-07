@@ -86,10 +86,10 @@ test("web snapshot -> projected ref -> exact read -> consumed summary -> restore
 
   append(messages, "computer_find_files", { pattern: "*.json" }, { matches: [] });
   for (const instance of [context, assembler()]) {
-    const consumed = projected((await instance.assemble(messages, [])).messages, "computer_read_file");
-    assert.equal(consumed.content, undefined);
-    assert.equal(consumed.contentLocation.sha256, web.contentLocation.sha256);
-    assert.ok(consumed.preview.length <= 800);
+    const retained = projected((await instance.assemble(messages, [])).messages, "computer_read_file");
+    assert.equal(retained.content, source,
+      "A complete source below the shared 12000-character window remains usable after an intervening tool call");
+    assert.equal(retained.contentLocation.sha256, web.contentLocation.sha256);
   }
   assert.equal(fetches, 1);
 
@@ -99,6 +99,47 @@ test("web snapshot -> projected ref -> exact read -> consumed summary -> restore
   const selected = projected((await context.assemble(messages, [])).messages, "computer_read_json");
   assert.equal(selected.queries[0].value[1].id, 9);
   assert.equal(selected.queries[0].totalItems, 10);
+});
+
+test("ContextAssembler retains non-overlapping windows and exposes neutral coverage for a small content reference", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reference-coverage-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = "record\n".repeat(1_500);
+  assert.ok(source.length < 12_000);
+  const executor = new ComputerExecutor(root);
+  const reference = await executor.storeContentReference(source);
+  const first = await executor.readContentReference(reference.path, 0, 4_000);
+  const second = await executor.readContentReference(reference.path, 4_000, 12_000);
+  const messages: ModelMessage[] = [];
+  append(messages, "computer_read_file", { path: reference.path, characterOffset: 0, characterLimit: 4_000 }, first);
+  append(messages, "computer_find_files", { pattern: "*.txt" }, { matches: [] });
+  append(messages, "computer_read_file", { path: reference.path, characterOffset: 4_000, characterLimit: 12_000 }, second);
+  const assembly = await assembler().assemble(messages, []);
+  const reads = assembly.messages.filter((message): message is Extract<ModelMessage, { role: "tool" }> =>
+    message.role === "tool" && message.name === "computer_read_file",
+  ).map((message) => JSON.parse(message.content) as { content?: string; characterOffset: number });
+  assert.deepEqual(reads.map((read) => read.characterOffset), [0, 4_000]);
+  assert.equal(reads.map((read) => read.content ?? "").join(""), source);
+  const coverageMatch = assembly.runtimeContext.content.match(/<runtime_result_context source="server">\n([\s\S]+?)\n<\/runtime_result_context>/);
+  assert.ok(coverageMatch);
+  const context = JSON.parse(coverageMatch[1]) as {
+    contentReferenceCoverage: Array<{
+      path: string;
+      characters: number;
+      coveredCharacterRanges: Array<{ start: number; end: number }>;
+      complete: boolean;
+    }>;
+    readProtocol: string;
+  };
+  assert.deepEqual(context.contentReferenceCoverage, [{
+    path: reference.path,
+    sha256: reference.sha256,
+    characters: source.length,
+    coveredCharacterRanges: [{ start: 0, end: source.length }],
+    complete: true,
+  }]);
+  assert.match(context.readProtocol, /not read_result/);
+  assert.match(context.readProtocol, /12000/);
 });
 
 test("command refs survive 2048/800 projection for both small and large stdout/stderr", async (t) => {

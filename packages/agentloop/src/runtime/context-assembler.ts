@@ -67,6 +67,24 @@ interface PrunedToolResult {
   readonly resultRef?: RuntimeResultRef;
 }
 
+interface ContentReferenceWindow {
+  readonly toolCallId: string;
+  readonly messageIndex: number;
+  readonly path: string;
+  readonly sha256: string;
+  readonly characters: number;
+  readonly start: number;
+  readonly end: number;
+}
+
+interface ContentReferenceCoverage {
+  readonly path: string;
+  readonly sha256: string;
+  readonly characters: number;
+  readonly coveredCharacterRanges: readonly Readonly<{ start: number; end: number }>[];
+  readonly complete: boolean;
+}
+
 const SUMMARY_SYSTEM_PROMPT = [
   "You are a context summarization component inside an agent runtime.",
   "Do not continue the task and do not answer questions from the conversation.",
@@ -194,6 +212,8 @@ export class ContextAssembler {
   private previousSnapshotId?: string;
   private summary?: string;
   private resultContextEntries: readonly RuntimeResultContextEntry[] = [];
+  private contentReferenceCoverage: readonly ContentReferenceCoverage[] = [];
+  private retainedContentReferenceWindowToolCallIds = new Set<string>();
   private lastLargeToolResultProjectionThreshold?: number;
   private lastLargeToolResultPreviewThreshold?: number;
 
@@ -560,10 +580,25 @@ export class ContextAssembler {
       });
     }
     const next = [...entries.values()].slice(-64);
-    if (JSON.stringify(next) === JSON.stringify(this.resultContextEntries)) return;
+    const referenceWorkingSet = contentReferenceWorkingSet(canonicalMessages);
+    const nextCoverage = referenceWorkingSet.coverage;
+    const nextRetainedIds = referenceWorkingSet.retainedToolCallIds;
+    if (
+      JSON.stringify(next) === JSON.stringify(this.resultContextEntries)
+      && JSON.stringify(nextCoverage) === JSON.stringify(this.contentReferenceCoverage)
+      && sameStringSet(nextRetainedIds, this.retainedContentReferenceWindowToolCallIds)
+    ) return;
     this.resultContextEntries = next;
+    this.contentReferenceCoverage = nextCoverage;
+    this.retainedContentReferenceWindowToolCallIds = nextRetainedIds;
     this.contextRevision += 1;
     this.invalidateSnapshot();
+  }
+
+  private isCurrentReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
+    const message = messages[index];
+    if (message?.role === "tool" && this.retainedContentReferenceWindowToolCallIds.has(message.toolCallId)) return true;
+    return isTrailingReferenceWindow(messages, index);
   }
 
   private buildProjectionFrom(canonicalMessages: readonly ModelMessage[], startIndex: number): ModelMessage[] {
@@ -611,7 +646,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
-        || isCurrentReferenceWindow(canonicalMessages, index)
+        || this.isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const record: PrunedToolResult = {
@@ -653,7 +688,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
-        || isCurrentReferenceWindow(canonicalMessages, index)
+        || this.isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const structuredEvidence = preserveResultRef(
@@ -744,7 +779,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
-        || isCurrentReferenceWindow(canonicalMessages, index)
+        || this.isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const structuredEvidence = preserveResultRef(
@@ -871,7 +906,7 @@ export class ContextAssembler {
       Math.min(this.policy.preserveRecentTokens, Math.floor((usable - anchorTokens) * 0.8)),
     );
     if (tailBudget <= 0) return undefined;
-    const firstCurrentRead = canonicalMessages.findIndex((_, index) => isCurrentReferenceWindow(canonicalMessages, index));
+    const firstCurrentRead = canonicalMessages.findIndex((_, index) => this.isCurrentReferenceWindow(canonicalMessages, index));
     let lastTailStart = canonicalMessages.length;
     if (firstCurrentRead >= 0) {
       lastTailStart = firstCurrentRead;
@@ -1084,12 +1119,13 @@ export class ContextAssembler {
         JSON.stringify(this.promptProjectionPolicy),
         "</prompt_projection_policy>",
       ]),
-      ...(this.resultContextEntries.length === 0 ? [] : [
+      ...(this.resultContextEntries.length === 0 && this.contentReferenceCoverage.length === 0 ? [] : [
         "<runtime_result_context source=\"server\">",
         JSON.stringify({
           schema: "agentloop.resultContext/v1",
           results: this.resultContextEntries,
-          readProtocol: "Use the existing Result identity. For exact prior output, use read_result with resultId and an optional pointer/window. For contentReference reads, use the existing selector path and nextCharacterOffset with computer_read_file when more source content is needed. For agentloop.jsonRead/v1 use query.resultPointer, not query.sourcePointer. Never create a second result identity.",
+          ...(this.contentReferenceCoverage.length === 0 ? {} : { contentReferenceCoverage: this.contentReferenceCoverage }),
+          readProtocol: "Use the existing Result identity. For exact prior Tool output, use read_result with resultId and an optional pointer/window. For raw contentReference data, use computer_read_file with its selector path, not read_result. When a reference is at most 12000 characters, read characterOffset 0 with characterLimit 12000 once; otherwise continue from nextCharacterOffset without overlap. contentReferenceCoverage records already acquired raw ranges. For agentloop.jsonRead/v1 use query.resultPointer, not query.sourcePointer. Never create a second result identity.",
         }),
         "</runtime_result_context>",
       ]),
@@ -1387,7 +1423,7 @@ function commandOutputReferences(value: Record<string, unknown>): unknown {
   });
 }
 
-function isCurrentReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
+function isTrailingReferenceWindow(messages: readonly ModelMessage[], index: number): boolean {
   // Only the last tool batch is an unconsumed working set. Older reads return
   // to a ref/summary, including after recovery reconstructs the transcript.
   if (messages.slice(index + 1).some((message) => message.role !== "tool")) return false;
@@ -1400,6 +1436,114 @@ function isCurrentReferenceWindow(messages: readonly ModelMessage[], index: numb
   return message.name === "computer_read_json" && value?.schema === "agentloop.jsonRead/v1"
     && Array.isArray(value.queries) && value.queries.length > 0
     && message.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+}
+
+function contentReferenceWorkingSet(messages: readonly ModelMessage[]): {
+  readonly coverage: readonly ContentReferenceCoverage[];
+  readonly retainedToolCallIds: Set<string>;
+} {
+  const grouped = new Map<string, ContentReferenceWindow[]>();
+  for (let index = 0; index < messages.length; index += 1) {
+    const window = contentReferenceWindow(messages[index], index);
+    if (window === undefined) continue;
+    const key = `${window.path}\u0000${window.sha256}`;
+    const windows = grouped.get(key) ?? [];
+    windows.push(window);
+    grouped.set(key, windows);
+  }
+  const groups = [...grouped.values()];
+  const coverage = groups
+    .map((items) => {
+      const latest = items.at(-1)!;
+      const coveredCharacterRanges = mergeCharacterRanges(items.map((window) => ({ start: window.start, end: window.end })));
+      return {
+        path: latest.path,
+        sha256: latest.sha256,
+        characters: latest.characters,
+        coveredCharacterRanges,
+        complete: coveredCharacterRanges.length === 1
+          && coveredCharacterRanges[0]!.start === 0
+          && coveredCharacterRanges[0]!.end >= latest.characters,
+        lastMessageIndex: latest.messageIndex,
+        windows: items,
+      };
+    })
+    .sort((left, right) => left.lastMessageIndex - right.lastMessageIndex);
+  const retainedToolCallIds = new Set<string>();
+  let remainingCharacters = CONTENT_REFERENCE_WINDOW_CHARACTERS;
+  for (const reference of [...coverage].reverse()) {
+    if (remainingCharacters === 0) break;
+    const retained = retainedReferenceWindows(reference.windows, remainingCharacters);
+    for (const toolCallId of retained) retainedToolCallIds.add(toolCallId);
+    remainingCharacters -= retainedReferenceWindowCharacters(reference.windows, retained);
+  }
+  return {
+    coverage: coverage.slice(-8).map(({ lastMessageIndex: _lastMessageIndex, windows: _windows, ...entry }) => entry),
+    retainedToolCallIds,
+  };
+}
+
+function contentReferenceWindow(message: ModelMessage | undefined, messageIndex: number): ContentReferenceWindow | undefined {
+  if (message?.role !== "tool" || message.isError || message.name !== "computer_read_file") return undefined;
+  const value = parseJsonRecord(message.content);
+  if (value?.schema !== "agentloop.contentReferenceRead/v1") return undefined;
+  const location = recordValue(value.contentLocation);
+  const path = stringValue(location?.path);
+  const sha256 = stringValue(location?.sha256);
+  const characters = numberValue(location?.characters);
+  const start = numberValue(value.characterOffset);
+  const returnedCharacters = numberValue(value.returnedCharacters);
+  if (path === undefined || sha256 === undefined || characters === undefined || start === undefined || returnedCharacters === undefined) return undefined;
+  const end = start + returnedCharacters;
+  if (!Number.isSafeInteger(end) || start < 0 || end > characters) return undefined;
+  return { toolCallId: message.toolCallId, messageIndex, path, sha256, characters, start, end };
+}
+
+function retainedReferenceWindows(windows: readonly ContentReferenceWindow[], characterBudget: number): Set<string> {
+  const retained = new Set<string>();
+  const ranges: Array<{ start: number; end: number }> = [];
+  let retainedCharacters = 0;
+  for (const window of [...windows].sort((left, right) => left.start - right.start || right.end - left.end || left.messageIndex - right.messageIndex)) {
+    const before = coveredCharacterCount(ranges);
+    const nextRanges = mergeCharacterRanges([...ranges, { start: window.start, end: window.end }]);
+    if (coveredCharacterCount(nextRanges) === before) continue;
+    const windowCharacters = window.end - window.start;
+    if (retainedCharacters + windowCharacters > characterBudget) continue;
+    retained.add(window.toolCallId);
+    retainedCharacters += windowCharacters;
+    ranges.splice(0, ranges.length, ...nextRanges);
+  }
+  return retained;
+}
+
+function retainedReferenceWindowCharacters(
+  windows: readonly ContentReferenceWindow[],
+  retainedToolCallIds: ReadonlySet<string>,
+): number {
+  return windows
+    .filter((window) => retainedToolCallIds.has(window.toolCallId))
+    .reduce((total, window) => total + window.end - window.start, 0);
+}
+
+function mergeCharacterRanges(ranges: readonly Readonly<{ start: number; end: number }>[]): Array<{ start: number; end: number }> {
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of [...ranges].filter((range) => range.end > range.start).sort((left, right) => left.start - right.start || left.end - right.end)) {
+    const previous = merged.at(-1);
+    if (previous === undefined || range.start > previous.end) {
+      merged.push({ start: range.start, end: range.end });
+      continue;
+    }
+    previous.end = Math.max(previous.end, range.end);
+  }
+  return merged;
+}
+
+function coveredCharacterCount(ranges: readonly Readonly<{ start: number; end: number }>[]): number {
+  return ranges.reduce((total, range) => total + range.end - range.start, 0);
+}
+
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
 const UPLOADED_SOURCE_CONTENT_PROJECTION_LIMIT = 12_000;

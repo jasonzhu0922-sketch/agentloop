@@ -11,7 +11,7 @@ export interface ContentReference {
 }
 
 export const CONTENT_REFERENCE_READ_INSTRUCTION =
-  "Full content is stored at contentLocation, not lost. Reuse the existing Result identity when exact prior output is needed; read_result accepts its resultId and a bounded window. If more source content is needed, use the existing contentLocation path with computer_read_file, characterOffset (0-based), and characterLimit (up to 12000), following nextCharacterOffset. The Runtime computes the content digest from the file it reads. For JSON, computer_read_json supports a profile and JSON Pointer array windows. Read only what the task requires; do not fetch or execute again solely to recover omitted content or create a second result identity. A preview is not complete source coverage.";
+  "Full content is stored at contentLocation, not lost. For raw content, use the existing contentLocation path with computer_read_file; read_result reads the prior Tool-result envelope, not the raw file. If contentLocation.characters is at most 12000, read it once from characterOffset 0 with characterLimit 12000 instead of paging or rereading previews. For larger content, use characterOffset (0-based), characterLimit up to 12000, and nextCharacterOffset without overlapping already covered ranges. The Runtime computes the content digest from the file it reads. For JSON, computer_read_json supports a profile and JSON Pointer array windows. Read only what the task requires; do not fetch or execute again solely to recover omitted content or create a second result identity. A preview is not complete source coverage.";
 
 /** Shape and counts are navigation metadata, never domain interpretation. */
 export function contentStructure(content: string): Record<string, unknown> {

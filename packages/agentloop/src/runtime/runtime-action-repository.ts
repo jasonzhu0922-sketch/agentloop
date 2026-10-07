@@ -112,9 +112,16 @@ export class RuntimeActionRepository {
     resultFailureEffectState?: (value: unknown) => RuntimeActionEffectState;
     /** Build the canonical Runtime result that is atomically committed with Action success. */
     prepareResult?: (value: T, action: RuntimeActionRecord) => Promise<RuntimeResultRecord>;
+    /**
+     * Observability hook invoked after the Action and lease are durable, but
+     * before the operation begins. It lets an operation correlate its own
+     * progress events with the Action that owns it.
+     */
+    onDispatched?: (action: RuntimeActionRecord) => Promise<void> | void;
   }, operation: () => Promise<T>): Promise<T> {
     const action = await this.dispatch(input);
     try {
+      await input.onDispatched?.(action);
       const value = await operation();
       const resultFailureCode = input.resultFailureCode?.(value);
       if (resultFailureCode === undefined) {

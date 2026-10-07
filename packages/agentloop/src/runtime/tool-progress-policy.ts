@@ -1260,6 +1260,7 @@ function artifactKindMatchesExpected(actual: string, expected: string): boolean 
     return normalizedActual === "word"
       || normalizedActual === "pdf"
       || normalizedActual === "markdown"
+      || normalizedActual === "html"
       || normalizedActual === "generic_file";
   }
   if (normalizedExpected === "code") {

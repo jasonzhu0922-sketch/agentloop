@@ -137,6 +137,7 @@ interface ModelResponseBudget {
 
 export class OpenAICompatibleModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
+  readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
   readonly reasoningVisibility: "visible" | "hidden";
   private readonly endpoint: URL;
@@ -178,6 +179,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
       maxOutputTokens: options.maxOutputTokens,
     };
     this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.completeTimeoutMs = this.timeoutMs;
     this.operationTimeoutMs = streamOperationTimeoutMs(this.timeoutMs);
     this.reasoningVisibility = options.reasoningVisibility ?? "visible";
     this.maxAttempts = options.maxAttempts ?? 3;
@@ -634,6 +636,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
  */
 export class ResponsesModel implements ModelAdapter {
   readonly limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }>;
+  readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
   readonly reasoningVisibility: "visible" | "hidden";
   private readonly endpoint: URL;
@@ -671,6 +674,7 @@ export class ResponsesModel implements ModelAdapter {
       maxOutputTokens: options.maxOutputTokens,
     };
     this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.completeTimeoutMs = this.timeoutMs;
     this.operationTimeoutMs = streamOperationTimeoutMs(this.timeoutMs);
     this.reasoningVisibility = options.reasoningVisibility ?? "visible";
     this.maxAttempts = options.maxAttempts ?? 3;

@@ -69,6 +69,7 @@ import { AppError, forbidden, notFound } from "../shared/errors.ts";
 import { canonicalArtifactFormatFamily, isConcreteArtifactFormat } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
+import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
@@ -941,6 +942,7 @@ export class RunService {
     }
     const failedBoundary = failedBoundaryFromRecoveryAction(action);
     const events = await this.events(actorUserId, runId);
+    const userResponses = await this.recovery.userResponses(runId);
     const proposedDecision = failedBoundaryRecoveryDecision(
       run,
       action,
@@ -955,7 +957,7 @@ export class RunService {
         ...(currentPlan === undefined ? {} : { plan: currentPlan }),
         ...(failedBoundary === undefined ? {} : { failedBoundary }),
         events,
-        userResponses: (await this.recovery.userResponses(runId)).map((item) => ({
+        userResponses: userResponses.map((item) => ({
           actionId: item.actionId,
           response: item.response,
           createdAt: item.createdAt,
@@ -966,6 +968,7 @@ export class RunService {
       action,
       plan: currentPlan,
       proposal: proposedDecision,
+      userResponses,
     });
     const decision = await this.recovery.submit(runId, proposal);
     try {
@@ -1005,6 +1008,7 @@ export class RunService {
             decision,
             currentPlan,
             model,
+            userResponses,
             setActionStep: (stepId) => { actionScope.stepId = stepId; },
           });
           break;
@@ -1503,6 +1507,7 @@ export class RunService {
         ? undefined
         : await resolveConversationTurn(
           model,
+          emit,
           input,
           conversationHistory,
           {
@@ -2746,6 +2751,7 @@ export class RunService {
     decision: RecoveryDecisionRecord;
     currentPlan?: ExecutionPlan;
     model: ModelAdapter;
+    userResponses?: readonly RecoveryUserResponse[];
     setActionStep?: (stepId: string | undefined) => void;
   }): Promise<void> {
     if (input.currentPlan === undefined || input.decision.planRevision === undefined) {
@@ -2797,7 +2803,12 @@ export class RunService {
     const retiredStepIds = input.currentPlan.steps
       .filter((step) => step.retiredAt === undefined && !proposedIds.has(step.id))
       .map((step) => step.id);
-    await this.assertRetirementHasNoUnconfirmedUnsafeEffect(input.run.id, input.currentPlan.id, retiredStepIds);
+    await this.assertRetirementHasNoUnconfirmedUnsafeEffect(
+      input.run.id,
+      input.currentPlan.id,
+      retiredStepIds,
+      latestRecoveryResponseAuthorizesRetirement(input.userResponses, input.action.id),
+    );
     await this.plans.validateRevision({
       planId: input.currentPlan.id,
       proposal: admitted,
@@ -3124,6 +3135,7 @@ export class RunService {
     action: RuntimeActionRecord;
     plan: ExecutionPlan | undefined;
     proposal: RecoveryDecisionProposal;
+    userResponses?: readonly RecoveryUserResponse[];
   }): Promise<RecoveryDecisionProposal> {
     if (input.proposal.decision !== "revise_plan" || input.plan === undefined || input.proposal.planRevision === undefined) {
       return input.proposal;
@@ -3143,6 +3155,15 @@ export class RunService {
       && this.unsafeActionNeedsEffectConfirmation(candidate),
     );
     if (blockers.length === 0) return input.proposal;
+    // A recovery review is the explicit authorization boundary for retiring
+    // unfinished work whose external effect is unknown. Once the user has
+    // positively confirmed this exact Recovery Action, preserve the planner's
+    // revise_plan decision instead of asking the same question again. The
+    // response remains durable in recovery_user_responses and is scoped by
+    // actionId, so it cannot authorize an unrelated action.
+    if (latestRecoveryResponseAuthorizesRetirement(input.userResponses, input.action.id)) {
+      return input.proposal;
+    }
     return {
       actionId: input.action.id,
       expectedActionRevision: input.action.revision,
@@ -3157,8 +3178,9 @@ export class RunService {
     runId: string,
     planId: string,
     retiredStepIds: readonly string[],
+    userAuthorized = false,
   ): Promise<void> {
-    if (retiredStepIds.length === 0) return;
+    if (retiredStepIds.length === 0 || userAuthorized) return;
     const retired = new Set(retiredStepIds);
     const unsafe = (await this.actions.list(runId)).find((item) =>
       item.planId === planId
@@ -4023,6 +4045,35 @@ function unconfirmedEffectRecoveryQuestion(actions: readonly RuntimeActionRecord
     `需要确认的操作：${descriptions.join("、")}。`,
     "请说明这些操作的外部效果是否需要保留，或明确授权以新的执行方式继续；系统不会把缺少收据当作未执行。",
   ].join("\n");
+}
+
+/**
+ * Recovery approvals are persisted as opaque JSON strings so the Planner can
+ * retain the user's exact response. The Runtime only needs the neutral
+ * authorization bit at the retirement boundary; accept the typed confirm
+ * shape plus the primitive boolean form used by older clients.
+ */
+export function latestRecoveryResponseAuthorizesRetirement(
+  responses: readonly RecoveryUserResponse[] | undefined,
+  actionId: string,
+): boolean {
+  const latest = responses
+    ?.filter((response) => response.actionId === actionId)
+    .sort((left, right) => right.createdAt - left.createdAt)[0];
+  if (latest === undefined) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(latest.response) as unknown;
+  } catch {
+    value = latest.response.trim().toLowerCase();
+  }
+  if (value === true) return true;
+  if (typeof value === "string") {
+    return /^(?:true|yes|y|ok|confirm(?:ed)?|approve(?:d)?|continue|同意|确认|继续)$/iu.test(value.trim());
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.accepted === true || record.approved === true || record.confirmed === true;
 }
 
 function failedBoundaryRecoveryDecision(
@@ -5054,6 +5105,7 @@ function isInformativeCjkPlanningPhrase(phrase: string): boolean {
 
 class ActionTrackedModel implements ModelAdapter {
   readonly limits: ModelAdapter["limits"];
+  readonly completeTimeoutMs: number;
   readonly operationTimeoutMs: number;
   readonly reasoningVisibility: "visible" | "hidden" | undefined;
   private readonly model: ModelAdapter;
@@ -5072,6 +5124,7 @@ class ActionTrackedModel implements ModelAdapter {
     this.runId = runId;
     this.scope = scope;
     this.limits = model.limits;
+    this.completeTimeoutMs = model.completeTimeoutMs ?? model.operationTimeoutMs ?? 120_000;
     this.operationTimeoutMs = model.operationTimeoutMs ?? 120_000;
     this.reasoningVisibility = model.reasoningVisibility;
   }
@@ -5092,12 +5145,45 @@ class ActionTrackedModel implements ModelAdapter {
       stepId: scope.stepId,
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
-      deadlineMs: this.operationTimeoutMs + 15_000,
+      deadlineMs: this.completeTimeoutMs + 15_000,
       metadata: { phase: invocation.phase },
     }, async () => {
       const response = await this.model.complete(invocation, signal);
       throwIfAbortSignal(signal);
       return response;
+    });
+  }
+
+  completeWithRequestTelemetry(
+    invocation: ModelInvocation,
+    emit: (event: RuntimeEvent) => Promise<void>,
+    base: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+  ): Promise<ModelResponse> {
+    const scope = this.scope();
+    let action: RuntimeActionRecord | undefined;
+    return this.actions.execute({
+      runId: this.runId,
+      planId: scope.planId,
+      stepId: scope.stepId,
+      kind: actionKindForPhase(invocation.phase),
+      replayPolicy: "safe",
+      deadlineMs: this.completeTimeoutMs + 15_000,
+      metadata: { phase: invocation.phase, purpose: base.purpose },
+      onDispatched: (dispatched) => { action = dispatched; },
+    }, async () => {
+      if (action === undefined) throw new Error("Model Action was not dispatched");
+      return await completeWithRequestTelemetry({
+        model: this.model,
+        invocation,
+        emit,
+        signal,
+        base: {
+          ...base,
+          actionId: action.id,
+          ...(action.deadlineAt === undefined ? {} : { actionDeadlineAt: action.deadlineAt }),
+        },
+      });
     });
   }
 
@@ -5114,7 +5200,7 @@ class ActionTrackedModel implements ModelAdapter {
       stepId: scope.stepId,
       kind: actionKindForPhase(invocation.phase),
       replayPolicy: "safe",
-      deadlineMs: this.operationTimeoutMs + 15_000,
+      deadlineMs: (stream === undefined ? this.completeTimeoutMs : this.operationTimeoutMs) + 15_000,
       metadata: { phase: invocation.phase },
     }, async () => {
       const response = stream === undefined
@@ -7012,7 +7098,8 @@ const CONVERSATION_TURN_TOOL = {
 const CONVERSATION_TURN_RESOLUTION_ATTEMPTS = 2;
 
 async function resolveConversationTurn(
-  model: ModelAdapter,
+  model: ActionTrackedModel,
+  emit: (event: RuntimeEvent) => Promise<void>,
   input: string,
   conversationHistory: readonly ModelMessage[] | undefined,
   context: ConversationIntentExternalContext,
@@ -7022,7 +7109,7 @@ async function resolveConversationTurn(
   let repairFeedback: string | undefined;
   let semanticFeedback: string | undefined;
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
-    const response = await model.complete({
+    const response = await model.completeWithRequestTelemetry({
       runId: `conversation-turn:${randomUUID()}`,
       systemPrompt: conversationTurnResolverPrompt(repairFeedback),
       phase: "planning",
@@ -7037,6 +7124,10 @@ async function resolveConversationTurn(
       ],
       tools: [CONVERSATION_TURN_TOOL],
       toolChoice: { name: CONVERSATION_TURN_TOOL.name },
+    }, emit, {
+      phase: "planning",
+      purpose: "conversation_turn_resolver",
+      resolverAttempt: attempt,
     }, signal);
     const resolution = parseConversationTurnResolution(response, context);
     if (resolution !== undefined) {

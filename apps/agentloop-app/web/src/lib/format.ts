@@ -166,6 +166,13 @@ export function eventTone(type: string): string {
 export function eventLabel(event: RunEvent): string {
   const d = event.data ?? {};
   const t = event.type;
+  if (t === "model.request.started") {
+    return d.purpose === "conversation_turn_resolver"
+      ? "正在解析本轮任务，等待模型响应"
+      : "模型请求已发出，等待响应";
+  }
+  if (t === "model.request.completed") return "模型请求完成" + (typeof d.durationMs === "number" ? ` · ${Math.round(d.durationMs / 1000)} 秒` : "");
+  if (t === "model.request.failed") return "模型请求失败" + (d.message ? " · " + clip(d.message, 100) : "");
   if (t === "assistant.streaming") {
     const c = d.content ?? "";
     return "实时草稿" + (c ? "：" + clip(c, 80) : "") + " · " + phaseLabel(d.phase);

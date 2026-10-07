@@ -10,8 +10,101 @@ import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
 import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import { createHumanLoopTool, HUMAN_LOOP_TOOL_NAME } from "../src/tools/human-loop-tool.ts";
 import { AppError } from "../src/shared/errors.ts";
-import { TEST_MODEL_LIMITS } from "./runtime-test-helpers.ts";
+import { TEST_MODEL_LIMITS, approvingTestAssessor, singleStepTestPlanner } from "./runtime-test-helpers.ts";
 import type { RuntimeEvent, RuntimeTool } from "../src/index.ts";
+import { latestRecoveryResponseAuthorizesRetirement } from "../src/runtime/run-service.ts";
+
+test("recovery confirmation is consumed as action-scoped retirement authorization", () => {
+  const now = Date.now();
+  assert.equal(latestRecoveryResponseAuthorizesRetirement([
+    { id: "old", runId: "run", actionId: "action", response: "false", createdAt: now - 1 },
+    { id: "new", runId: "run", actionId: "action", response: JSON.stringify({ accepted: true }), createdAt: now },
+  ], "action"), true);
+  assert.equal(latestRecoveryResponseAuthorizesRetirement([
+    { id: "other", runId: "run", actionId: "other-action", response: "true", createdAt: now },
+  ], "action"), false);
+});
+
+test("a positive Recovery HIL confirmation revises and executes the repair Step to a terminal Outcome", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = { user: { id: "user-recovery-confirmation" } };
+    let modelCalls = 0;
+    const unsafeProbe: RuntimeTool<Record<string, never>> = {
+      name: "unsafe_probe",
+      description: "Probe an external effect whose completion is unknown.",
+      inputSchema: { type: "object", additionalProperties: false },
+      executionMode: "exclusive",
+      replaySafe: false,
+      parse: () => ({}),
+      execute: async () => { throw new AppError("TOOL_EXECUTION_ERROR", "Probe outcome is unknown", 500); },
+    };
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      tools: [unsafeProbe],
+      plannerFactory: singleStepTestPlanner,
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async () => {
+          modelCalls += 1;
+          if (modelCalls === 1) {
+            return { content: "", finishReason: "tool_calls" as const, toolCalls: [{ id: "unsafe", name: "unsafe_probe", arguments: {} }] };
+          }
+          return { content: modelCalls === 2 ? "initial candidate" : "repair candidate", finishReason: "stop" as const, toolCalls: [] };
+        },
+      }),
+      assessorFactory: () => ({
+        assess: async (input) => input.step.role === "repair"
+          ? await approvingTestAssessor().assess(input)
+          : {
+            ...await approvingTestAssessor().assess(input),
+            approved: false,
+            criteria: input.step.successCriteria.map((criterion) => ({
+              criterionId: criterion.id,
+              satisfied: false,
+              rationale: "A repair Step must be admitted after the unsafe probe.",
+              evidenceRefs: [],
+            })),
+            feedback: "Repair the rejected boundary.",
+            failedBoundary: {
+              stepId: input.step.id,
+              missingEvidenceKinds: ["artifact_acceptance"],
+              violatedSkillRequirements: [],
+              reusableEvidenceRefs: [],
+              suggestedRepairShape: "repair_leaf" as const,
+            },
+          },
+      }),
+      planRevisionAssessorFactory: () => ({
+        assess: async () => ({ approved: true, feedback: "Approved recovery revision", evidenceRefs: [] }),
+      }),
+    });
+
+    const started = await runs.execute(owner.user.id, "produce a recoverable result");
+    const request = await waitForHumanLoop(runs, owner.user.id, started.id, "test-step");
+    assert.equal(request.origin, "recovery");
+
+    await runs.respondHumanLoop(owner.user.id, started.id, request.id, true, request.revision);
+    const completed = await waitForRunCompletion(runs, owner.user.id, started.id);
+    const events = await runs.events(owner.user.id, started.id);
+    const outcome = await database.prepare("SELECT status, output FROM run_outcomes WHERE run_id = ?")
+      .get(started.id) as { status: string; output: string | null };
+
+    assert.equal(completed.status, "completed");
+    assert.equal(outcome.status, "completed");
+    assert.match(outcome.output ?? "", /repair candidate/);
+    assert.equal(events.some((event) => event.type === "recovery.user_responded"), true);
+    assert.equal(events.some((event) => event.type === "recovery.repair_leaf_created"), true);
+    assert.equal(events.some((event) =>
+      event.type === "plan.step.completed" && typeof event.data.stepId === "string" && event.data.stepId.includes(".repair."),
+    ), true);
+    assert.equal(events.some((event) => event.type === "terminal.delivery_committed"), true);
+    assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
+    assert.equal(events.filter((event) => event.type === "tool.planned" && event.data.toolName === "unsafe_probe").length, 1);
+    assert.ok(modelCalls >= 3);
+  } finally { database.close(); }
+});
 
 test("HumanLoopRepository persists a typed request and accepts exactly one schema-valid response", async () => {
   const database = new AppDatabase(":memory:");

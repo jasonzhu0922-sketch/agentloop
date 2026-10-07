@@ -8,6 +8,7 @@ import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtim
 import { RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
+import { AppError } from "../src/shared/errors.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
@@ -303,6 +304,81 @@ test("a question about a prior artifact remains a direct reply despite an over-e
     assert.deepEqual(planner.responseOnlyFlags, [false, true, true, false]);
     const mutationResolution = (await runs.events(owner.user.id, mutation.id)).find((event) => event.type === "conversation.turn.resolved");
     assert.equal(mutationResolution?.data.mode, "execute");
+  } finally {
+    await database.close();
+  }
+});
+
+test("conversation resolver publishes Action-bound model lifecycle telemetry with its non-stream deadline", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new TimedConversationIntentModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => { throw new AppError("PLANNING_ERROR", "stop after resolver telemetry", 422); },
+      }),
+    });
+    let runId: string | undefined;
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "你好"),
+      (error: unknown) => {
+        if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR") return false;
+        runId = typeof error.details?.runId === "string" ? error.details.runId : undefined;
+        return true;
+      },
+    );
+    assert.ok(runId);
+    const events = await runs.events(owner.user.id, runId);
+    const started = events.find((event) => event.type === "model.request.started" && event.data.purpose === "conversation_turn_resolver");
+    const completed = events.find((event) => event.type === "model.request.completed" && event.data.purpose === "conversation_turn_resolver");
+    assert.ok(started);
+    assert.ok(completed);
+    assert.equal(started.data.request && typeof started.data.request === "object" && (started.data.request as { stream?: unknown }).stream, false);
+    assert.equal(typeof started.data.actionId, "string");
+    assert.equal(completed.data.actionId, started.data.actionId);
+    assert.equal(typeof started.data.actionDeadlineAt, "number");
+    const actionCreated = events.find((event) => event.type === "action.created" && event.data.actionId === started.data.actionId);
+    assert.ok(actionCreated);
+    assert.equal(Number(started.data.actionDeadlineAt) - actionCreated.createdAt, 25_000);
+    const committed = events.find((event) => event.type === "action.result_committed" && event.data.actionId === started.data.actionId);
+    assert.ok(committed);
+    assert.ok((started.seq ?? 0) < (completed.seq ?? 0));
+    assert.ok((completed.seq ?? 0) < (committed.seq ?? 0));
+  } finally {
+    await database.close();
+  }
+});
+
+test("conversation resolver publishes an Action-bound failed model request before its Action fails", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => new FailingConversationResolverModel(),
+    });
+    let runId: string | undefined;
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "你好"),
+      (error: unknown) => {
+        if (!(error instanceof AppError) || error.code !== "MODEL_ERROR") return false;
+        runId = typeof error.details?.runId === "string" ? error.details.runId : undefined;
+        return true;
+      },
+    );
+    assert.ok(runId);
+    const events = await runs.events(owner.user.id, runId);
+    const failed = events.find((event) => event.type === "model.request.failed" && event.data.purpose === "conversation_turn_resolver");
+    assert.ok(failed);
+    assert.equal(failed.data.code, "MODEL_ERROR");
+    const actionFailed = events.find((event) => event.type === "action.failed" && event.data.actionId === failed.data.actionId);
+    assert.ok(actionFailed);
+    assert.ok((failed.seq ?? 0) < (actionFailed.seq ?? 0));
   } finally {
     await database.close();
   }
@@ -858,6 +934,24 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
       };
     }
     return { content: "conversation intent handled", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class TimedConversationIntentModel extends ContextAwareConversationIntentModel {
+  readonly completeTimeoutMs = 10_000;
+  readonly operationTimeoutMs = 90_000;
+}
+
+class FailingConversationResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  readonly completeTimeoutMs = 10_000;
+  readonly operationTimeoutMs = 90_000;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.runId.startsWith("conversation-turn:")) {
+      throw new AppError("MODEL_ERROR", "Conversation resolver provider request timed out", 502);
+    }
+    return { content: "unused", finishReason: "stop", toolCalls: [] };
   }
 }
 
