@@ -2035,6 +2035,34 @@ test("persistent Router dispatches only heartbeating Hosts and reuses the durabl
   await database.close();
 });
 
+test("Runtime heartbeats stay in Router memory and do not write mr_runtime_nodes", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([{ ...runtime("runtime-heartbeat-memory"), endpoint: "http://runtime-heartbeat-memory" }], 100);
+  const before = await database.prepare(`
+    SELECT status, active_run_count, queued_run_count, last_heartbeat_at, updated_at
+    FROM mr_runtime_nodes WHERE id = ?
+  `).get("runtime-heartbeat-memory") as Record<string, number | string | null>;
+
+  await store.heartbeat({
+    runtimeId: "runtime-heartbeat-memory",
+    status: "ready",
+    activeRunCount: 1,
+    queuedRunCount: 2,
+    maxConcurrentRuns: 3,
+    observedAt: 200,
+  });
+
+  const after = await database.prepare(`
+    SELECT status, active_run_count, queued_run_count, last_heartbeat_at, updated_at
+    FROM mr_runtime_nodes WHERE id = ?
+  `).get("runtime-heartbeat-memory") as Record<string, number | string | null>;
+  assert.deepEqual(after, before);
+  assert.equal((await store.runtimeCatalog()).find((runtime) => runtime.id === "runtime-heartbeat-memory")?.status, "ready");
+  await database.close();
+});
+
 test("Router Runtime catalog exposes concrete statically registered Runtime IDs", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);

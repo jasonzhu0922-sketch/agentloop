@@ -335,6 +335,12 @@ test("Conversation resolver atomically binds only the visible directory selected
                   relation: "new_goal",
                   inputMode: "none",
                   effectiveGoal: "读取 2026 年 8 月个人绩效评定表，汇总各等级与分值的人数及占比。",
+                  taskIntent: {
+                    schema: "agentloop.conversationTaskIntent/v1",
+                    operation: "analysis",
+                    requiresExecution: true,
+                    deliverables: [],
+                  },
                   evidenceStrategy: "bound_visible_sources",
                   sourceBinding: { mode: "primary_data", visibleDirectoryIds: ["visible_dir_2"] },
                   userConstraints: [],
@@ -836,6 +842,12 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
             relation: "new_goal",
             inputMode: "none",
             effectiveGoal: latest,
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: mode === "execute" ? "analysis" : "answer",
+              requiresExecution: mode === "execute",
+              deliverables: [],
+            },
             evidenceStrategy: usesVisibleData ? "bound_visible_sources" : "none",
             sourceBinding: usesVisibleData
               ? { mode: "primary_data", visibleDirectoryIds: ["visible_dir_1"] }
@@ -854,6 +866,8 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     if (request.runId.startsWith("conversation-turn:")) {
+      const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
+      const mutation = /改得更专业|修改|重新生成/u.test(latest);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -861,11 +875,19 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
           id: "over-eager-resolution",
           name: "resolve_conversation_turn",
           arguments: {
-            mode: "execute",
+            mode: mutation ? "execute" : "reply",
             relation: "continue_prior",
             inputMode: "none",
             targetGoalCandidateId: "goal_candidate_1",
             effectiveGoal: "重新读取并验收上一轮 PPT，再解释为何生成得快。",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: mutation ? "transform_artifact" : "answer",
+              requiresExecution: mutation,
+              deliverables: mutation
+                ? [{ action: "modify", kind: "presentation", format: "pptx", surface: "workspace_artifact" }]
+                : [],
+            },
             evidenceStrategy: "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
             userConstraints: ["基于上一轮产物解释"],

@@ -164,10 +164,10 @@ SQLite 事务、PostgreSQL advisory transaction lock 或 TiDB advisory lock 串�
   "schema": "agentloop.stepExecutionStrategyConfig/v1",
   "profile": "action-aware",
   "projection": {
-    "diagnosticProjectionCharacters": 4096,
-    "diagnosticPreviewCharacters": 1200,
-    "terminalProjectionCharacters": 2048,
-    "terminalPreviewCharacters": 800
+    "diagnosticProjectionCharacters": 12000,
+    "diagnosticPreviewCharacters": 3000,
+    "terminalProjectionCharacters": 8192,
+    "terminalPreviewCharacters": 2400
   }
 }
 ```
@@ -198,6 +198,18 @@ ENTERPRISE_INFO_API_CLIENT_SECRET=replace-at-deploy
 ```
 
 Host 只会向 Skill 子进程提供 `ENTERPRISE_INFO_ENV_FILE`（部署 `.env` 文件路径，不是密钥）；脚本自行读取并校验三项配置。三项缺失或部分配置时，脚本安全地失败。可用 `ENTERPRISE_INFO_ENV_FILE` 覆盖该路径，但该变量自身不得包含凭据。
+
+### API Query 直连配置
+
+`custom-skills/api-query` 通过部署配置文件调用数智域通用 SQL API。将以下配置放在 Runtime Host 或设备 Local Agent 的 `.env` 中；不要把凭据写入 Skill、Router、命令参数或模型上下文：
+
+```dotenv
+API_QUERY_API_URL=https://eplat.baocloud.cn/service/D_A_BSTABD00_SHUTU_AGENT
+EPLAT_CLIENT_ID=replace-at-deploy
+EPLAT_CLIENT_SECRET=replace-at-deploy
+```
+
+Host 只向 Skill 子进程提供 `API_QUERY_ENV_FILE`（配置文件路径）。脚本使用 `curl` 的可用 TLS 栈发送请求，并分别报告传输、HTTP、JSON 和 SQL API `__sys__.status` 错误。默认路径是 Host 的 `.env`；受管部署可通过 `API_QUERY_ENV_FILE` 覆盖。
 
 ```bash
 # 终端 1：Router（默认读取 config/runtimes.json）

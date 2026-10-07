@@ -5,6 +5,23 @@ import { canonicalArtifactFormatFamily } from "../shared/artifact-format.ts";
 
 export type DeliverySurface = "conversation" | "workspace_artifact";
 
+/**
+ * Model-owned semantic task frame.  This is the bridge between the
+ * conversation resolver and Planner: downstream code must not rediscover the
+ * user's operation by scanning the latest sentence for action keywords.
+ */
+export interface ConversationTaskIntent {
+  readonly schema: "agentloop.conversationTaskIntent/v1";
+  readonly operation: StructuredTaskOperation;
+  readonly requiresExecution: boolean;
+  readonly deliverables: readonly {
+    readonly action: ArtifactAction;
+    readonly kind: ArtifactKind;
+    readonly format?: string;
+    readonly surface: DeliverySurface;
+  }[];
+}
+
 export interface TaskIntentClassification {
   readonly deliverySurface: DeliverySurface;
   readonly artifactAction: ArtifactAction;
@@ -40,6 +57,8 @@ export interface TaskIntentInput {
    * consumers must not upgrade it by re-reading model-authored objectives.
    */
   readonly evidenceDemand?: SourceNeed;
+  /** Canonical model-authored task frame, when a conversation resolver supplied one. */
+  readonly resolvedTaskIntent?: ConversationTaskIntent;
 }
 
 export type StructuredTaskOperation =
@@ -92,6 +111,8 @@ export interface StructuredTaskUnderstanding {
   readonly workflow: readonly StructuredTaskStage[];
   readonly operationProfiles: readonly StructuredTaskOperationProfile[];
   readonly constraints: readonly string[];
+  /** Full model-authored delivery set; deliverable remains the primary projection for legacy Planner consumers. */
+  readonly deliverables?: ConversationTaskIntent["deliverables"];
   readonly intent: TaskIntentClassification;
   /** Immutable deployment-profile snapshot selected at Run admission. */
   readonly practiceProfiles?: readonly PracticeProfileSelection[];
@@ -243,6 +264,23 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     && artifactKind !== "none"
     && input.responseOnly !== true;
   const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0;
+  if (input.resolvedTaskIntent !== undefined) {
+    // The terminal deliverable is the legacy single-target projection. The
+    // complete ordered set is preserved on StructuredTaskUnderstanding for
+    // composite planners (for example, generator script then WAV output).
+    const deliverable = [...input.resolvedTaskIntent.deliverables].reverse().find((item) => item.kind !== "none");
+    const wantsArtifact = deliverable !== undefined && input.responseOnly !== true;
+    return {
+      deliverySurface: wantsArtifact ? "workspace_artifact" : "conversation",
+      artifactAction: deliverable?.action ?? "none",
+      artifactKind: wantsArtifact ? deliverable!.kind : "none",
+      sourceNeed,
+      ...(researchPolicy === undefined ? {} : { researchPolicy }),
+      wantsArtifact,
+      wantsConversationAnswer: !wantsArtifact,
+      signals,
+    };
+  }
   return {
     deliverySurface: wantsArtifact && !explicitConversationOnly ? "workspace_artifact" : "conversation",
     artifactAction,
@@ -306,7 +344,8 @@ export function understandTask(input: TaskIntentInput & {
       wantsConversationAnswer: false,
     };
   const collectionAggregation = isCollectionAggregationIntent(normalizedObjective);
-  const operation = structuredTaskOperation(intent, normalizedObjective, readySources, collectionAggregation);
+  const operation = input.resolvedTaskIntent?.operation
+    ?? structuredTaskOperation(intent, normalizedObjective, readySources, collectionAggregation);
   const workflow: StructuredTaskStage[] = [];
   // A request to aggregate a collection needs a source-acquisition boundary
   // even when the collection is Runtime-authorized (for example a visible
@@ -316,7 +355,10 @@ export function understandTask(input: TaskIntentInput & {
   if (operation === "transform_artifact") workflow.push("transform");
   if (intent.wantsArtifact) workflow.push("produce");
   if (workflow.length > 0 || intent.wantsConversationAnswer) workflow.push("deliver");
-  const outputFormat = structuredOutputFormat(formatInput, intent) ?? implicitNativeFormat;
+  const resolvedOutputFormat = input.resolvedTaskIntent === undefined
+    ? undefined
+    : [...input.resolvedTaskIntent.deliverables].reverse().find((item) => item.kind !== "none")?.format;
+  const outputFormat = resolvedOutputFormat ?? structuredOutputFormat(formatInput, intent) ?? implicitNativeFormat;
   const task = structuredTaskText(displayObjective, intent);
   return {
     schema: "agentloop.taskUnderstanding/v1",
@@ -350,6 +392,7 @@ export function understandTask(input: TaskIntentInput & {
     workflow: [...new Set(workflow)],
     operationProfiles: structuredOperationProfiles(intent, operation, normalizedObjective),
     constraints: [...(input.userConstraints ?? [])],
+    ...(input.resolvedTaskIntent === undefined ? {} : { deliverables: input.resolvedTaskIntent.deliverables }),
     intent,
     ...(input.practiceProfiles === undefined || input.practiceProfiles.length === 0 ? {} : { practiceProfiles: input.practiceProfiles }),
   };

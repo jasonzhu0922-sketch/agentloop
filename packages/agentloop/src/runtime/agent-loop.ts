@@ -2598,6 +2598,13 @@ function summarizeToolEvidenceForDirective(item: AgentLoopToolEvidence): string 
     if (stderr !== undefined) details.push(`stderr="${stderr}"`);
     const computationEvidenceError = shortStringField(parsed, "computationEvidenceError");
     if (computationEvidenceError !== undefined) details.push(`computationEvidenceError="${computationEvidenceError}"`);
+    const computationObservation = isPlainRecord(parsed.computationObservation) ? parsed.computationObservation : undefined;
+    const binding = computationObservation !== undefined && isPlainRecord(computationObservation.binding)
+      ? computationObservation.binding
+      : undefined;
+    if (binding !== undefined && binding.status === "unverified") {
+      details.push(`computationBinding=unverified declared=${truncateForDirective(JSON.stringify(binding.declaredInputPaths ?? []), 900)} observed=${truncateForDirective(JSON.stringify(binding.observedInputRefs ?? []), 900)}`);
+    }
     const path = shortStringField(parsed, "path");
     if (path !== undefined) details.push(`path=${path}`);
     const diagnostics = parsed.diagnostics;

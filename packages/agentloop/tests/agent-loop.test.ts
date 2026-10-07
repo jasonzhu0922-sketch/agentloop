@@ -7,7 +7,7 @@ import { formatPracticePromptAugmentation } from "../src/runtime/dynamic-prompt.
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog } from "../src/runtime/practice-profiles.ts";
 import { observedSourceKindsFromToolEvidence } from "../src/runtime/source-family-observation.ts";
 import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
-import { understandTask } from "../src/runtime/task-intent.ts";
+import { classifyTaskIntent, understandTask } from "../src/runtime/task-intent.ts";
 import {
   artifactStepToolProgressPolicy,
   deriveRuntimeStepEvidenceState,
@@ -146,6 +146,34 @@ test("single leaf execution carries loop step handoff across model steps", async
   assert.equal(result.output, "route summary delivered");
   assert.equal(calls, 2);
   assert.equal(contexts.length, 2);
+});
+
+test("model-authored task intent remains authoritative over lexical task classification", () => {
+  const taskIntent = {
+    schema: "agentloop.conversationTaskIntent/v1" as const,
+    operation: "composite" as const,
+    requiresExecution: true,
+    deliverables: [
+      { action: "modify" as const, kind: "code" as const, format: "py", surface: "workspace_artifact" as const },
+      { action: "create" as const, kind: "audio" as const, format: "wav", surface: "workspace_artifact" as const },
+    ],
+  };
+  const classified = classifyTaskIntent({
+    objective: "节奏更欢快一些，音色更丰富一些",
+    resolvedTaskIntent: taskIntent,
+  });
+  assert.equal(classified.artifactKind, "audio");
+  assert.equal(classified.artifactAction, "create");
+  assert.equal(classified.deliverySurface, "workspace_artifact");
+  assert.equal(classified.wantsArtifact, true);
+  const understood = understandTask({
+    objective: "节奏更欢快一些，音色更丰富一些",
+    resolvedTaskIntent: taskIntent,
+  });
+  assert.equal(understood.operation, "composite");
+  assert.equal(understood.deliverable.kind, "audio");
+  assert.equal(understood.format, "wav");
+  assert.deepEqual(understood.deliverables?.map((item) => item.kind), ["code", "audio"]);
 });
 
 test("standard context enrichment activates tabular guidance from committed visible-file facts before the next model request", async () => {
@@ -3548,6 +3576,34 @@ test("command computation binding errors are actionable while derived evidence r
   assert.equal(state?.recentActionableDiagnostic, true);
   assert.deepEqual(state?.missingRequiredEvidenceKinds, ["derived_aggregation"]);
   assert.match(state?.instruction ?? "", /recent .*diagnostic/i);
+
+  const mismatchState = deriveRuntimeStepEvidenceState({
+    policy: runtimeStepToolProgressPolicy(["derived_aggregation"], { scope: "source" }),
+    evidence: [{
+      toolCallId: "mismatched-computation",
+      toolName: "computer_run_command",
+      isError: false,
+      result: JSON.stringify({
+        exitCode: 0,
+        computationEvidenceError: "Command computation facts were observed but source binding mismatched.",
+        computationObservation: {
+          schema: "agentloop.commandComputationObservation/v1",
+          inputRefs: ["source.xlsx"],
+          facts: { records: 2 },
+          caveats: [],
+          binding: {
+            status: "unverified",
+            declaredInputPaths: ["parser.py"],
+            observedInputRefs: ["source.xlsx"],
+          },
+        },
+      }),
+    }],
+  });
+
+  assert.equal(mismatchState?.recentComputationBindingMismatch, true);
+  assert.equal(mismatchState?.nextAction, "repair_computation_binding");
+  assert.match(mismatchState?.instruction ?? "", /Do not reread the source or rewrite the parser/);
 });
 
 test("artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family", () => {

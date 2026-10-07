@@ -20,6 +20,15 @@ const LAYOUTS = new Map([
   ["LAYOUT_WIDE", "LAYOUT_WIDE"],
   ["LAYOUT_4X3", "LAYOUT_4X3"],
 ]);
+const CANVASES = new Map([
+  ["16:9", { name: "16:9", pptxLayout: "LAYOUT_16x9", width: 10, height: 5.625 }],
+  ["wide", { name: "wide", pptxLayout: "LAYOUT_WIDE", width: 13.333333333333334, height: 7.5 }],
+  ["4:3", { name: "4:3", pptxLayout: "LAYOUT_4X3", width: 10, height: 7.5 }],
+  ["LAYOUT_16x9", { name: "16:9", pptxLayout: "LAYOUT_16x9", width: 10, height: 5.625 }],
+  ["LAYOUT_WIDE", { name: "wide", pptxLayout: "LAYOUT_WIDE", width: 13.333333333333334, height: 7.5 }],
+  ["LAYOUT_4X3", { name: "4:3", pptxLayout: "LAYOUT_4X3", width: 10, height: 7.5 }],
+]);
+const GEOMETRY_EPSILON = 1e-6;
 const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 main().catch((error) => {
@@ -83,10 +92,10 @@ async function buildDeck(specPath, outputPath) {
   if (path.extname(outputPath).toLowerCase() !== ".pptx") throw new Error("Build output must use the .pptx extension");
   preflight();
   const spec = parseJsonFile(specPath);
-  validateDeckSpec(spec);
+  const canvas = validateDeckSpec(spec);
 
   const presentation = new PptxGenJS();
-  presentation.layout = LAYOUTS.get(spec.layout ?? "16:9");
+  presentation.layout = canvas.pptxLayout;
   assignOptionalString(presentation, "author", spec.author);
   assignOptionalString(presentation, "company", spec.company);
   assignOptionalString(presentation, "subject", spec.subject);
@@ -99,7 +108,7 @@ async function buildDeck(specPath, outputPath) {
     if (slideSpec.background !== undefined) slide.background = { color: hexColor(slideSpec.background, `slides[${slideIndex}].background`) };
     if (slideSpec.hidden !== undefined) slide.hidden = Boolean(slideSpec.hidden);
     for (const [elementIndex, element] of slideSpec.elements.entries()) {
-      addElement(presentation, slide, element, `slides[${slideIndex}].elements[${elementIndex}]`);
+      addElement(presentation, slide, element, `slides[${slideIndex}].elements[${elementIndex}]`, canvas);
     }
     if (slideSpec.notes !== undefined) {
       const notes = Array.isArray(slideSpec.notes) ? slideSpec.notes : [slideSpec.notes];
@@ -121,16 +130,17 @@ async function buildDeck(specPath, outputPath) {
       sha256: sha256(content),
       kind: "pptx",
       slideCount: spec.slides.length,
+      canvas: { layout: canvas.name, width: canvas.width, height: canvas.height },
     },
   };
 }
 
-function addElement(presentation, slide, element, field) {
+function addElement(presentation, slide, element, field, canvas) {
   requiredRecord(element, field);
   rejectUnsafeKeys(element, field);
   const options = requiredRecord(element.options, `${field}.options`);
   rejectUnsafeKeys(options, `${field}.options`);
-  validateGeometry(options, `${field}.options`);
+  validateGeometry(options, `${field}.options`, canvas);
   switch (element.type) {
     case "text": {
       const text = element.text ?? element.runs;
@@ -210,7 +220,10 @@ function validateDeckSpec(spec) {
   requiredRecord(spec, "deck spec");
   rejectUnsafeKeys(spec, "deck spec");
   if (spec.schema !== SPEC_SCHEMA) throw new Error(`deck spec schema must be ${SPEC_SCHEMA}`);
-  if (!LAYOUTS.has(spec.layout ?? "16:9")) throw new Error("deck spec layout is unsupported");
+  if (typeof spec.layout !== "string" || spec.layout.trim().length === 0) {
+    throw new Error('deck spec layout is required; choose "16:9", "wide", or "4:3" explicitly');
+  }
+  if (!CANVASES.has(spec.layout) || !LAYOUTS.has(spec.layout)) throw new Error("deck spec layout is unsupported");
   if (!Array.isArray(spec.slides) || spec.slides.length === 0 || spec.slides.length > 200) {
     throw new Error("deck spec slides must contain 1-200 entries");
   }
@@ -220,13 +233,21 @@ function validateDeckSpec(spec) {
     if (!Array.isArray(slide.elements)) throw new Error(`slides[${index}].elements must be an array`);
     if (slide.elements.length > 500) throw new Error(`slides[${index}].elements exceeds 500 entries`);
   }
+  return CANVASES.get(spec.layout);
 }
 
-function validateGeometry(options, field) {
+function validateGeometry(options, field, canvas) {
   for (const key of ["x", "y", "w", "h"]) {
-    if (options[key] !== undefined && (typeof options[key] !== "number" || !Number.isFinite(options[key]))) {
+    if (typeof options[key] !== "number" || !Number.isFinite(options[key])) {
       throw new Error(`${field}.${key} must be a finite number`);
     }
+  }
+  if (options.w <= 0 || options.h <= 0) throw new Error(`${field}.w and ${field}.h must be greater than zero`);
+  if (options.x < -GEOMETRY_EPSILON || options.y < -GEOMETRY_EPSILON) {
+    throw new Error(`${field} is outside the ${canvas.name} canvas (${canvas.width} x ${canvas.height} in)`);
+  }
+  if (options.x + options.w > canvas.width + GEOMETRY_EPSILON || options.y + options.h > canvas.height + GEOMETRY_EPSILON) {
+    throw new Error(`${field} is outside the ${canvas.name} canvas (${canvas.width} x ${canvas.height} in)`);
   }
 }
 

@@ -242,7 +242,7 @@ function verifyByProfile(
     case "image":
       return verifyImageProfile(path, content);
     case "audio":
-      return verifyAudioProfile(path, content);
+      return verifyAudioProfile(path, content, truncated);
     case "json":
       return verifyJsonProfile(path, content, truncated);
     case "markdown":
@@ -622,9 +622,9 @@ const AUDIO_EXTENSIONS = new Set([".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg
  * projects as an audio artifact.  It proves a parseable local container/frame
  * header; it does not claim subjective playback quality.
  */
-function verifyAudioProfile(path: string, content: Buffer): ArtifactAcceptanceCheck[] {
+function verifyAudioProfile(path: string, content: Buffer, truncated: boolean): ArtifactAcceptanceCheck[] {
   const extension = extname(path).toLowerCase();
-  const detected = audioMetadataFor(extension, content);
+  const detected = audioMetadataFor(extension, content, truncated);
   const extensionMatches = AUDIO_EXTENSIONS.has(extension);
   const decoded = detected !== undefined;
   return [
@@ -641,9 +641,9 @@ function verifyAudioProfile(path: string, content: Buffer): ArtifactAcceptanceCh
   ];
 }
 
-function audioMetadataFor(extension: string, content: Buffer): { type: string; mode: string; metadata?: Record<string, number | string> } | undefined {
+function audioMetadataFor(extension: string, content: Buffer, truncated: boolean): { type: string; mode: string; metadata?: Record<string, number | string> } | undefined {
   if (extension === ".wav") {
-    const metadata = decodeWavMetadata(content);
+    const metadata = decodeWavMetadata(content, truncated);
     return metadata === undefined ? undefined : { type: "wav", mode: "wav_header", metadata };
   }
   if (extension === ".mp3" && hasMp3Frame(content)) return { type: "mp3", mode: "mpeg_audio_frame" };
@@ -696,7 +696,7 @@ function hasOggHeader(content: Buffer, requireOpus: boolean): boolean {
   return !requireOpus || content.subarray(0, Math.min(content.length, 128)).includes(Buffer.from("OpusHead"));
 }
 
-function decodeWavMetadata(content: Buffer): Record<string, number> | undefined {
+function decodeWavMetadata(content: Buffer, truncated = false): Record<string, number> | undefined {
   if (content.length < 12 || content.subarray(0, 4).toString("ascii") !== "RIFF" || content.subarray(8, 12).toString("ascii") !== "WAVE") {
     return undefined;
   }
@@ -708,7 +708,19 @@ function decodeWavMetadata(content: Buffer): Record<string, number> | undefined 
     const size = content.readUInt32LE(cursor + 4);
     const payloadStart = cursor + 8;
     const payloadEnd = payloadStart + size;
-    if (payloadEnd > content.length) return undefined;
+    // Profile inspection is intentionally bounded. A valid large WAV commonly
+    // has its `data` chunk beyond the inspected prefix; the header is still
+    // sufficient to establish container, format, and declared frame geometry.
+    // Only accept this case for the data chunk, and only when the caller has
+    // explicitly recorded that the inspection was truncated. A complete file
+    // with an overrun remains invalid.
+    if (payloadEnd > content.length) {
+      if (truncated && id === "data" && format !== undefined && size > 0) {
+        dataBytes = size;
+        break;
+      }
+      return undefined;
+    }
     if (id === "fmt ") {
       if (size < 16) return undefined;
       format = {

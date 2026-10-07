@@ -118,6 +118,63 @@ function summaryInstructions(maxEstimatedTokens: number): string {
   ].join("\n\n");
 }
 
+const REQUIRED_SUMMARY_HEADINGS = [
+  "## Goal",
+  "## Constraints & Preferences",
+  "## Progress",
+  "## Evidence",
+  "## Next Steps",
+  "## Critical Context",
+] as const;
+
+function isStructuredSummary(value: string): boolean {
+  const normalized = value.trim();
+  return normalized.length > 0 && REQUIRED_SUMMARY_HEADINGS.every((heading) => normalized.includes(heading));
+}
+
+function deterministicCompactionSummary(messages: readonly ModelMessage[], previousSummary?: string): string {
+  if (previousSummary !== undefined && isStructuredSummary(previousSummary)) return previousSummary;
+  const userGoal = (messages.find((message) => message.role === "user")?.content.trim() || "当前 Runtime 任务").slice(0, 1200);
+  const assistantProgress = messages
+    .filter((message): message is Extract<ModelMessage, { role: "assistant" }> => message.role === "assistant")
+    .map((message) => message.content.trim())
+    .filter((content) => content.length > 0)
+    .at(-1);
+  const toolEvidence = messages
+    .filter((message): message is Extract<ModelMessage, { role: "tool" }> => message.role === "tool")
+    .map((message) => `- ${message.name} (${message.toolCallId})`)
+    .slice(-12);
+  return [
+    "## Goal",
+    userGoal,
+    "",
+    "## Constraints & Preferences",
+    "- This deterministic fallback preserves only canonical transcript identities; reload exact tool results through their ResultRef when needed.",
+    "",
+    "## Progress",
+    "### Done",
+    toolEvidence.length === 0 ? "- No completed Tool result was available in the compacted window." : toolEvidence.join("\n"),
+    "",
+    "### In Progress",
+    assistantProgress === undefined ? "- Continue from the retained canonical transcript." : `- ${assistantProgress.slice(0, 1200)}`,
+    "",
+    "### Blocked",
+    "- No additional blocker was inferred by deterministic compaction.",
+    "",
+    "## Key Decisions",
+    "- Preserve Runtime evidence identities and do not infer omitted facts.",
+    "",
+    "## Evidence",
+    toolEvidence.length === 0 ? "- No Tool identities in the compacted window." : toolEvidence.join("\n"),
+    "",
+    "## Next Steps",
+    "1. Continue from the canonical transcript and inspect the referenced Result identities before taking another action.",
+    "",
+    "## Critical Context",
+    "- The previous model-produced compaction summary failed structural validation and was not accepted.",
+  ].join("\n");
+}
+
 export class ContextAssembler {
   private readonly runId: string;
   private readonly systemPrompt: string;
@@ -137,6 +194,8 @@ export class ContextAssembler {
   private previousSnapshotId?: string;
   private summary?: string;
   private resultContextEntries: readonly RuntimeResultContextEntry[] = [];
+  private lastLargeToolResultProjectionThreshold?: number;
+  private lastLargeToolResultPreviewThreshold?: number;
 
   constructor(options: {
     runId: string;
@@ -282,14 +341,15 @@ export class ContextAssembler {
       });
     }
 
-    const newlyProjected = this.projectLargeToolResults(canonicalMessages);
+    const newlyProjected = this.projectLargeToolResults(canonicalMessages, tools, runtimeContext, usableInputTokens);
     if (newlyProjected.length > 0) {
       await this.emitEvent({
         type: "context.tool_outputs_projected",
         data: {
           contextEpoch: this.contextEpoch,
-          thresholdCharacters: this.largeToolResultProjectionCharacters(),
-          previewCharacters: this.largeToolResultPreviewCharacters(),
+          thresholdCharacters: this.lastLargeToolResultProjectionThreshold ?? this.largeToolResultProjectionCharacters(),
+          previewCharacters: this.lastLargeToolResultPreviewThreshold ?? this.largeToolResultPreviewCharacters(),
+          adaptive: this.adaptiveProjectionEnabled(),
           toolResults: newlyProjected,
         },
       });
@@ -489,13 +549,7 @@ export class ContextAssembler {
       const ref = resultRefProjection(value?.resultRef) ?? resultRefFromMarker(message.content);
       if (ref === undefined) continue;
       const resultSchema = stringValue(value?.schema);
-      const selectors = message.name === "computer_read_json" && Array.isArray(value?.queries)
-        ? value.queries.slice(0, 24).flatMap((query) => {
-          const record = recordValue(query);
-          if (record === undefined) return [];
-          return [omitUndefinedDeep({ pointer: record.pointer, offset: record.offset, limit: record.limit }) as Record<string, unknown>];
-        })
-        : undefined;
+      const selectors = resultContextSelectors(message.name, value);
       entries.set(ref.resultId, {
         schema: "agentloop.resultContextEntry/v1",
         result: ref,
@@ -581,15 +635,24 @@ export class ContextAssembler {
     return newlyPruned;
   }
 
-  private projectLargeToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
+  private projectLargeToolResults(
+    canonicalMessages: readonly ModelMessage[],
+    tools: readonly ModelToolDefinition[],
+    runtimeContext: RuntimeContextSnapshot,
+    usableInputTokens: number,
+  ): PrunedToolResult[] {
     const newlyProjected: PrunedToolResult[] = [];
+    const baseThreshold = this.largeToolResultProjectionCharacters();
+    const basePreview = this.largeToolResultPreviewCharacters();
+    const candidates: Array<Extract<ModelMessage, { readonly role: "tool" }>> = [];
+    this.lastLargeToolResultProjectionThreshold = baseThreshold;
+    this.lastLargeToolResultPreviewThreshold = basePreview;
     for (let index = this.firstKeptMessageIndex; index < canonicalMessages.length; index += 1) {
       const message = canonicalMessages[index];
       if (
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
-        || message.content.length <= this.largeToolResultProjectionCharacters()
         || isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
@@ -611,21 +674,66 @@ export class ContextAssembler {
         newlyProjected.push(record);
         continue;
       }
-      const preview = message.content.slice(0, this.largeToolResultPreviewCharacters());
-      const record: PrunedToolResult = {
-        toolCallId: message.toolCallId,
-        toolName: message.name,
-        originalCharacters: message.content.length,
-        sha256: digest(message.content),
-        reason: "large_tool_result",
-        preview,
-        previewCharacters: preview.length,
-        resultRef: resultRefFromContent(message.content),
-      };
-      this.prunedToolResults.set(message.toolCallId, record);
-      newlyProjected.push(record);
+      if (message.content.length > baseThreshold) candidates.push(message);
+    }
+    if (candidates.length === 0) return newlyProjected;
+
+    const applyThreshold = (threshold: number): void => {
+      const previewCharacters = this.previewCharactersForThreshold(threshold, baseThreshold, basePreview);
+      for (const message of candidates) {
+        this.prunedToolResults.delete(message.toolCallId);
+        if (message.content.length <= threshold) continue;
+        const preview = message.content.slice(0, previewCharacters);
+        this.prunedToolResults.set(message.toolCallId, {
+          toolCallId: message.toolCallId,
+          toolName: message.name,
+          originalCharacters: message.content.length,
+          sha256: digest(message.content),
+          reason: "large_tool_result",
+          preview,
+          previewCharacters: preview.length,
+          resultRef: resultRefFromContent(message.content),
+        });
+      }
+    };
+
+    applyThreshold(baseThreshold);
+    let selectedThreshold = baseThreshold;
+    if (this.adaptiveProjectionEnabled()) {
+      const targetInputTokens = Math.min(usableInputTokens, this.policy.proactiveCompactionTokens);
+      const estimate = (): number => this.estimateInvocationTokens(tools, runtimeContext, this.buildProjection(canonicalMessages));
+      if (estimate() <= targetInputTokens) {
+        // Search the largest shared window that still fits the actual prompt.
+        // This keeps the semantic floor while avoiding a fixed character-to-token
+        // guess across English, CJK, JSON escaping, and tool schemas.
+        let low = baseThreshold;
+        let high = Math.max(baseThreshold, this.policy.largeToolResultProjectionCharacters);
+        while (low < high) {
+          const midpoint = Math.ceil((low + high) / 2);
+          applyThreshold(midpoint);
+          if (estimate() <= targetInputTokens) low = midpoint;
+          else high = midpoint - 1;
+        }
+        selectedThreshold = low;
+        applyThreshold(selectedThreshold);
+      }
+    }
+    this.lastLargeToolResultProjectionThreshold = selectedThreshold;
+    this.lastLargeToolResultPreviewThreshold = this.previewCharactersForThreshold(selectedThreshold, baseThreshold, basePreview);
+    for (const message of candidates) {
+      const record = this.prunedToolResults.get(message.toolCallId);
+      if (record !== undefined) newlyProjected.push(record);
     }
     return newlyProjected;
+  }
+
+  private adaptiveProjectionEnabled(): boolean {
+    return this.promptProjectionPolicy?.adaptive === true;
+  }
+
+  private previewCharactersForThreshold(threshold: number, baseThreshold: number, basePreview: number): number {
+    if (threshold <= baseThreshold) return basePreview;
+    return Math.min(threshold, Math.max(basePreview, Math.floor(basePreview * threshold / baseThreshold)));
   }
 
   private projectStructuredToolResults(canonicalMessages: readonly ModelMessage[]): PrunedToolResult[] {
@@ -813,8 +921,8 @@ export class ContextAssembler {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const prompt = [
           attempt === 0 ? "" : [
-            "The previous summarization attempt exceeded the output limit and was discarded.",
-            "Return a complete, shorter replacement summary within the stated budget.",
+            "The previous summarization attempt exceeded the output limit or did not match the required structured summary format and was discarded.",
+            "Return a complete replacement summary within the stated budget.",
             "Do not continue the task, do not mention this retry, and do not copy repetitive raw rows.",
           ].join(" "),
           summary === undefined ? "" : `<previous_summary>\n${summary}\n</previous_summary>`,
@@ -836,12 +944,19 @@ export class ContextAssembler {
         }, signal);
         inputTokens += response.usage?.inputTokens ?? 0;
         outputTokens += response.usage?.outputTokens ?? 0;
-        if (response.finishReason === "stop" && response.toolCalls.length === 0 && response.content.trim().length > 0) {
+        if (response.finishReason === "stop" && response.toolCalls.length === 0 && isStructuredSummary(response.content)) {
           summary = response.content.trim();
           accepted = true;
           break;
         }
-        if (response.finishReason !== "length" || attempt === 1) {
+        if (response.finishReason === "stop" && response.toolCalls.length === 0 && attempt === 1) {
+          summary = deterministicCompactionSummary(messages, summary);
+          accepted = true;
+          break;
+        }
+        const retryableSummaryResponse = response.finishReason === "length"
+          || (response.finishReason === "stop" && response.toolCalls.length === 0);
+        if (!retryableSummaryResponse || attempt === 1) {
           throw contextBudgetError("Context summarizer did not return a complete structured summary", {
             finishReason: response.finishReason,
             toolCallCount: response.toolCalls.length,
@@ -897,12 +1012,11 @@ export class ContextAssembler {
         tools: [],
         maxOutputTokens: this.policy.summaryMaxOutputTokens,
       }, signal);
-      if (response.finishReason !== "stop" || response.toolCalls.length > 0 || response.content.trim().length === 0) {
-        throw contextBudgetError("Context summary reduction did not return a complete structured summary", {
-          finishReason: response.finishReason,
-          toolCallCount: response.toolCalls.length,
-          attempt: attempt + 1,
-        });
+      if (response.finishReason !== "stop" || response.toolCalls.length > 0 || !isStructuredSummary(response.content)) {
+        // Never replace a structurally valid deterministic summary with an
+        // arbitrary non-empty reduction. Preserve the last accepted summary;
+        // its canonical transcript and Result identities remain available.
+        break;
       }
       summary = response.content.trim();
       inputTokens += response.usage?.inputTokens ?? 0;
@@ -975,7 +1089,7 @@ export class ContextAssembler {
         JSON.stringify({
           schema: "agentloop.resultContext/v1",
           results: this.resultContextEntries,
-          readProtocol: "Use read_result with resultId and an optional pointer rooted in the persisted result envelope plus an array window. For agentloop.jsonRead/v1 use query.resultPointer, not query.sourcePointer. Never provide a path or hash.",
+          readProtocol: "Use the existing Result identity. For exact prior output, use read_result with resultId and an optional pointer/window. For contentReference reads, use the existing selector path and nextCharacterOffset with computer_read_file when more source content is needed. For agentloop.jsonRead/v1 use query.resultPointer, not query.sourcePointer. Never create a second result identity.",
         }),
         "</runtime_result_context>",
       ]),
@@ -2210,6 +2324,67 @@ function resultRefFromMarker(content: string): ReturnType<typeof resultRefProjec
 
 function resultRefFromContent(content: string): ReturnType<typeof resultRefProjection> {
   return resultRefProjection(parseJsonRecord(content)?.resultRef) ?? resultRefFromMarker(content);
+}
+
+/**
+ * Preserve navigation fields already present in a canonical Tool result while
+ * keeping the existing Runtime Result identity. These selectors are only a
+ * bounded context view; they are not a second file/result state store.
+ */
+function resultContextSelectors(
+  toolName: string,
+  value: Record<string, unknown> | undefined,
+): readonly Readonly<Record<string, unknown>>[] | undefined {
+  if (value === undefined) return undefined;
+  if (toolName === "computer_read_json" && Array.isArray(value.queries)) {
+    return value.queries.slice(0, 24).flatMap((query) => {
+      const record = recordValue(query);
+      if (record === undefined) return [];
+      return [omitUndefinedDeep({ pointer: record.pointer, offset: record.offset, limit: record.limit }) as Record<string, unknown>];
+    });
+  }
+  if (toolName === "computer_read_file") {
+    const location = recordValue(value.contentLocation);
+    const path = stringValue(location?.path) ?? stringValue(value.resolvedPath) ?? stringValue(value.requestedPath) ?? stringValue(value.path);
+    const contentSelector = location === undefined && value.schema !== "agentloop.contentReferenceRead/v1"
+      ? undefined
+      : omitUndefinedDeep({
+        path,
+        sha256: stringValue(location?.sha256),
+        characterOffset: numberValue(value.characterOffset),
+        returnedCharacters: numberValue(value.returnedCharacters),
+        nextCharacterOffset: value.nextCharacterOffset === null
+          ? null
+          : numberValue(value.nextCharacterOffset),
+        complete: booleanValue(value.complete),
+      }) as Record<string, unknown>;
+    const lineSelector = location !== undefined || path === undefined
+      ? undefined
+      : omitUndefinedDeep({
+        path,
+        revisionId: stringValue(value.revisionId),
+        offset: numberValue(value.offset),
+        limit: numberValue(value.limit),
+        nextOffset: numberValue(value.nextOffset),
+        totalLines: numberValue(value.totalLines),
+      }) as Record<string, unknown>;
+    const selector = contentSelector ?? lineSelector;
+    return selector === undefined ? undefined : [selector];
+  }
+  if (toolName === "computer_write_file") {
+    const receipt = recordValue(value.artifactReceipt);
+    const artifact = recordValue(receipt?.artifact);
+    const path = stringValue(artifact?.path) ?? stringValue(value.path);
+    const selector = omitUndefinedDeep({
+      path,
+      revisionId: stringValue(value.revisionId),
+      sha256: stringValue(artifact?.sha256) ?? stringValue(value.sha256),
+      bytes: numberValue(artifact?.bytes) ?? numberValue(value.bytes),
+      characters: numberValue(artifact?.characters) ?? numberValue(value.characters),
+    }) as Record<string, unknown>;
+    return Object.keys(selector).length === 0 ? undefined : [selector];
+  }
+  return undefined;
 }
 
 function preserveResultRef(projection: string | undefined, canonicalContent: string): string | undefined {

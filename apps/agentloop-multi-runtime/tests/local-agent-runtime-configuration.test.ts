@@ -11,6 +11,7 @@ test("Local Agent uses its top-level source configuration in development and dev
   assert.equal(configuration.environmentFile, "/application/local-agent-runtime/.env");
   assert.deepEqual(configuration.computerCommandEnvironment, {
     ENTERPRISE_INFO_ENV_FILE: "/application/local-agent-runtime/.env",
+    API_QUERY_ENV_FILE: "/application/local-agent-runtime/.env",
     STEEL_MARKET_DB_ENV_FILE: "/application/local-agent-runtime/.env",
   });
 

@@ -572,7 +572,7 @@ test("a textual request that needs local file state is execution, not response-o
     );
 
     assert.equal(run.status, "completed");
-    assert.equal(model.classifierCalls, 0);
+    assert.equal(model.classifierCalls, 1);
     assert.equal(plannerInputs.length, 1);
     assert.equal(plannerInputs[0].responseOnly, undefined);
     assert.equal(plannerInputs[0].toolNames.includes("computer_read_file"), true);
@@ -819,6 +819,8 @@ class ConversationIntentModel implements ModelAdapter {
     if (request.tools[0]?.name === "resolve_conversation_turn") {
       this.classifierCalls += 1;
       this.classifierSawSkillCatalog = /pptx|presentation workflow/i.test(request.systemPrompt);
+      const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
+      const execute = /分析一下.*文件/u.test(latest);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -826,10 +828,18 @@ class ConversationIntentModel implements ModelAdapter {
           id: "intent",
           name: "resolve_conversation_turn",
           arguments: {
-            mode: "reply",
+            mode: execute ? "execute" : "reply",
             relation: "new_goal",
+            inputMode: "none",
             effectiveGoal: "Answer the latest conversational turn.",
-            evidenceDemand: "none",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: execute ? "analysis" : "answer",
+              requiresExecution: execute,
+              deliverables: [],
+            },
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
             userConstraints: [],
           },
         }],

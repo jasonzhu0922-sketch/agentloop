@@ -42,12 +42,18 @@ Paths are relative to this skill's directory. Everything else is plain Python, `
 
 For a new deck, write an `agentloop.pptxDeckSpec/v1` JSON file in the task workspace and call the loaded Skill's `native-pptx build` action. The package adapter owns the module format, the installed `pptxgenjs` API shape, public shape/chart enumeration lookup, output writing, and the build receipt. Its neutral element types are `text`, `shape`, `image`, `table`, and `chart`; every element has an `options` object, shapes name a public uppercase `presentation.shapes` key, and charts name a public `presentation.ChartType` key. Run `native-pptx inspect` on the result, then the required artifact acceptance and visual QA.
 
+### Canvas contract (required)
+
+`layout` is mandatory in every deck spec. Never rely on a library default: `pptxgenjs` defaults to `16:9` at **10 × 5.625 inches**, while a wide deck is **13.333 × 7.5 inches** (the usual 13.3″ × 7.5″ design canvas). Use `layout: "wide"` for coordinates designed on that canvas; use `layout: "16:9"` or `layout: "4:3"` only when the coordinates were designed for those dimensions.
+
+All elements must declare finite, positive `x`, `y`, `w`, and `h` values, and the complete rectangle must stay within the selected canvas: `0 ≤ x`, `0 ≤ y`, `x + w ≤ canvas width`, and `y + h ≤ canvas height`. The adapter rejects a missing layout, negative coordinates, zero-sized elements, and any out-of-bounds rectangle before writing the file. Do not use clipped decorative circles or cards as a substitute for choosing the correct layout. The build receipt reports the resolved canvas; treat any non-zero geometry error as a failed build that must be fixed in the spec.
+
 Minimal spec shape:
 
 ```json
 {
   "schema": "agentloop.pptxDeckSpec/v1",
-  "layout": "16:9",
+  "layout": "wide",
   "title": "Deck title",
   "slides": [
     {
@@ -74,7 +80,7 @@ Minimal spec shape:
 }
 ```
 
-For a table element use `{"type":"table","rows":[["A","B"],["1","2"]],"options":{...}}`. For a chart element use `{"type":"chart","chart":"bar","data":[{"name":"Series","labels":["A","B"],"values":[1,2]}],"options":{...}}`. Image `options.path` must be an absolute workspace path; an image data URI may be supplied as `options.data`. All colors are six uppercase hexadecimal digits without `#`. The adapter rejects underscore-prefixed/private fields, unknown shape/chart keys, unsupported layouts, relative image paths, and invalid geometry before writing the deck.
+For a table element use `{"type":"table","rows":[["A","B"],["1","2"]],"options":{...}}`. For a chart element use `{"type":"chart","chart":"bar","data":[{"name":"Series","labels":["A","B"],"values":[1,2]}],"options":{...}}`. Image `options.path` must be an absolute workspace path; an image data URI may be supplied as `options.data`. All colors are six uppercase hexadecimal digits without `#`. The adapter rejects underscore-prefixed/private fields, unknown shape/chart keys, unsupported layouts, relative image paths, missing or non-positive geometry, and out-of-bounds rectangles before writing the deck.
 
 Do not start by writing `node -e` probes, listing package internals, testing `_shapeType`/`_chartType`, or guessing whether methods live on the presentation or slide. `native-pptx preflight` is the single supported API readiness check. If the adapter lacks a required native feature, raw `pptxgenjs` is allowed as a bounded fallback, but it must follow this exact public contract:
 
@@ -82,7 +88,7 @@ Do not start by writing `node -e` probes, listing package internals, testing `_s
 // Use .cjs in this ESM Host so require() is unambiguous.
 const PptxGenJS = require("pptxgenjs");
 const pptx = new PptxGenJS();
-pptx.layout = "LAYOUT_16x9";
+pptx.layout = "LAYOUT_WIDE"; // Match a 13.333" x 7.5" spec; choose 16x9/4x3 only when designed for them.
 const slide = pptx.addSlide();
 slide.addShape(pptx.shapes.OVAL, { x: 1, y: 1, w: 2, h: 2 });
 slide.addText("Title", { x: 1, y: 0.4, w: 8, h: 0.5 });
@@ -91,7 +97,7 @@ await pptx.writeFile({ fileName: "output.pptx" });
 
 `pptxgenjs` is preinstalled; never run `npm install` during a task. Use only public `pptx.shapes.*`, `pptx.ChartType.*`, presentation methods such as `addSlide`/`writeFile`, and slide methods such as `addShape`/`addText`/`addImage`/`addTable`/`addChart`. Never use `_shapeType`, `_chartType`, `_shapes`, or other underscore-prefixed internals. The remaining footguns are:
 
-- **Set `pres.layout` before adding slides.** The default canvas is `LAYOUT_16x9` = **10" × 5.625"**, not 13.3" wide. Coordinates past the edge are written, not clamped — the shape just isn't on the slide. (`LAYOUT_WIDE` is 13.3" × 7.5".)
+- **Set `pres.layout` before adding slides and make it match the spec canvas.** The default canvas is `LAYOUT_16x9` = **10" × 5.625"**, not 13.3" wide. Coordinates past the edge are written, not clamped — the shape just isn't on the slide. (`LAYOUT_WIDE` is 13.333" × 7.5".) Run the same non-negative, in-bounds geometry check used by the native adapter before writing a raw fallback deck.
 - **Hex colors: never `#`, never 8 digits.** `color: "FF0000"`. Both `"#FF0000"` and alpha baked into the hex (`"00000020"`) **corrupt the file**. For translucency: `transparency: 0-100` on fills and images, `opacity: 0.0-1.0` on shadows — each is silently ignored on the other.
 - **pptxgenjs mutates option objects in place** (converts values to EMU on first use). Never share one `shadow`/options object across two `add*` calls — build a fresh object each time.
 - **Shadow `offset` must be ≥ 0** — a negative offset corrupts the file. To cast a shadow upward, use `angle: 270` with a positive offset.
@@ -294,6 +300,7 @@ passes them. Every failure names its fix. Fix it in the generator and rebuild.
 Convert the slides to images (see [Converting to Images](#converting-to-images)) and inspect every one. After staring at the generating code you tend to see what you expect rather than what rendered, so look at the images fresh (a subagent works well for this if you have one). User-visible defects to look for:
 
 - **Text overflow or text cut off at a box or slide boundary — check this first.** It is the most common defect and always user-visible. (For a font the previewer renders unreliably per Typography, the preview is approximate: trust the ~10% slack you left, not its apparent fit.)
+- **Canvas mismatch or clipped geometry.** Confirm the build receipt's resolved `canvas` matches the design spec (`wide` = 13.333 × 7.5 inches when applicable), and confirm every visible element stays inside that rectangle. A deck that opens but loses elements past the edge has failed visual QA.
 - Overlapping elements (text through shapes, lines through words, stacked elements)
 - Source citations or footers colliding with content above
 - Elements too close (< 0.3" gaps) or cards/sections nearly touching

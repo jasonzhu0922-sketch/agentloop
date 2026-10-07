@@ -90,6 +90,7 @@ export type RuntimeStepNextAction =
   | "produce_artifact"
   | "verify_existing_artifact"
   | "repair_artifact_source"
+  | "repair_computation_binding"
   | "submit_completion_candidate"
   | "produce_required_evidence";
 
@@ -134,6 +135,7 @@ export interface RuntimeStepEvidenceState {
   readonly knownArtifacts: readonly RuntimeStepArtifactRef[];
   readonly processArtifacts: readonly RuntimeStepArtifactRef[];
   readonly recentActionableDiagnostic: boolean;
+  readonly recentComputationBindingMismatch: boolean;
   readonly recentPatchPreconditionFailure: boolean;
   readonly nextAction: RuntimeStepNextAction;
   readonly requiredWorkflowAction?: RuntimeWorkflowEvidenceAction;
@@ -216,12 +218,14 @@ export function deriveRuntimeStepEvidenceState(input: {
     .filter((kind) => !CANDIDATE_CONTAINED_EVIDENCE_KINDS.has(kind));
   const workProduct = classifyWorkProduct(input.evidence, policy, evidenceKinds);
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(input.evidence);
+  const recentComputationBindingMismatch = hasRecentComputationBindingMismatch(input.evidence);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(input.evidence);
   const nextAction = nextActionForEvidenceGap({
     missingRequiredEvidenceKinds,
     satisfiedEvidenceKinds: [...evidenceKinds.satisfied],
     failedEvidenceKinds: [...evidenceKinds.failed],
     recentActionableDiagnostic,
+    recentComputationBindingMismatch,
     workProduct,
     policy,
   });
@@ -240,17 +244,19 @@ export function deriveRuntimeStepEvidenceState(input: {
     knownArtifacts: workProduct.deliverableArtifacts,
     processArtifacts: workProduct.processArtifacts,
     recentActionableDiagnostic,
+    recentComputationBindingMismatch,
     recentPatchPreconditionFailure,
     nextAction,
     ...(requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction }),
     evidenceProducingToolNames,
     exploratoryToolNames: recentPatchPreconditionFailure
       ? policy.exploratoryToolNames.filter((name) => PATCH_REBASE_READ_TOOL_NAMES.has(name))
-      : recentActionableDiagnostic || nextAction === "verify_existing_artifact" ? [] : policy.exploratoryToolNames,
+      : recentActionableDiagnostic || nextAction === "verify_existing_artifact" || nextAction === "repair_computation_binding" ? [] : policy.exploratoryToolNames,
     instruction: instructionForStepState({
       workProduct,
       nextAction,
       recentActionableDiagnostic,
+      recentComputationBindingMismatch,
       recentPatchPreconditionFailure,
       evidenceProducingToolNames,
       ...(requiredWorkflowAction === undefined ? {} : { requiredWorkflowAction }),
@@ -825,6 +831,7 @@ function nextActionForEvidenceGap(input: {
   readonly satisfiedEvidenceKinds: readonly string[];
   readonly failedEvidenceKinds: readonly string[];
   readonly recentActionableDiagnostic?: boolean;
+  readonly recentComputationBindingMismatch?: boolean;
   readonly workProduct: RuntimeStepWorkProductState;
   readonly policy: RuntimeToolProgressPolicy;
 }): RuntimeStepNextAction {
@@ -832,6 +839,9 @@ function nextActionForEvidenceGap(input: {
   const satisfied = new Set(input.satisfiedEvidenceKinds);
   const prerequisiteAction = pendingWorkflowEvidenceAction(input.policy, missing);
   if (prerequisiteAction !== undefined) return "produce_required_evidence";
+  if (input.recentComputationBindingMismatch === true && hasAnyTool(input.policy, ["computer_run_command"])) {
+    return "repair_computation_binding";
+  }
   if (input.recentActionableDiagnostic === true && hasAnyTool(input.policy, ["computer_patch_file", "computer_write_file"])) {
     return "repair_artifact_source";
   }
@@ -915,11 +925,14 @@ function evidenceProducingToolsForAction(
         || name === "computer_run_command"
         || name === "verify_artifact_acceptance"
       );
+    case "repair_computation_binding":
+      return tools.filter((name) => name === "computer_run_command");
     case "submit_completion_candidate":
       return [];
     case "produce_required_evidence":
       return [...tools];
   }
+  return [];
 }
 
 function pendingWorkflowEvidenceAction(
@@ -956,6 +969,7 @@ function instructionForStepState(input: {
   readonly workProduct: RuntimeStepWorkProductState;
   readonly nextAction: RuntimeStepNextAction;
   readonly recentActionableDiagnostic: boolean;
+  readonly recentComputationBindingMismatch: boolean;
   readonly recentPatchPreconditionFailure: boolean;
   readonly evidenceProducingToolNames: readonly string[];
   readonly requiredWorkflowAction?: RuntimeWorkflowEvidenceAction;
@@ -980,6 +994,11 @@ function instructionForStepState(input: {
     lines.push("Read that exact patch target once to rebase the edit, then patch, write, run, or verify; do not broaden into directory listing or reference search.");
     return lines.join(" ");
   }
+  if (input.recentComputationBindingMismatch) {
+    lines.push("A computation result was produced, but its source binding did not match the declared computationInputs.");
+    lines.push("Do not reread the source or rewrite the parser. Rerun the same command with computationInputs set to the exact paths listed in the command's inputRefs, and emit those same paths in inputRefs.");
+    return lines.join(" ");
+  }
   if (input.recentActionableDiagnostic) {
     lines.push("A recent validator, build, render, parser, or acceptance result already named a concrete artifact diagnostic.");
     lines.push("Prefer patching, running, or verifying next; read only when it is needed to resolve the diagnostic.");
@@ -989,6 +1008,9 @@ function instructionForStepState(input: {
     case "verify_existing_artifact":
       lines.push("A deliverable artifact exists, but required artifact acceptance is still missing.");
       lines.push("Prefer verifying the artifact next; avoid rereading it solely to decide whether verification is needed.");
+      break;
+    case "repair_computation_binding":
+      lines.push("Rerun the same command with computationInputs set to the exact paths listed in the command's inputRefs, and emit those same paths in inputRefs.");
       break;
     case "produce_artifact":
       if (input.workProduct.status === "process_artifact_available") {
@@ -1035,12 +1057,14 @@ export function evaluateRuntimeToolProgress(input: {
   const policyEvidenceKinds = collectPolicyEvidenceKinds(priorEvidence, policy);
   const missingRequiredEvidenceKinds = policy.requiredEvidenceKinds
     .filter((kind) => !policyEvidenceKinds.satisfied.has(kind));
+  const recentComputationBindingMismatch = hasRecentComputationBindingMismatch(priorEvidence);
   const nextAction = nextActionForEvidenceGap({
     missingRequiredEvidenceKinds,
     satisfiedEvidenceKinds: [...policyEvidenceKinds.satisfied],
     failedEvidenceKinds: [...policyEvidenceKinds.failed],
     workProduct,
     policy,
+    recentComputationBindingMismatch,
   });
   const recentActionableDiagnostic = hasRecentActionableDiagnostic(priorEvidence);
   const recentPatchPreconditionFailure = hasRecentPatchPreconditionFailure(priorEvidence);
@@ -1321,6 +1345,20 @@ function hasRecentActionableDiagnostic(evidence: readonly AgentLoopToolEvidence[
     if (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file") return false;
     if (item.toolName !== "computer_run_command" && item.toolName !== "verify_artifact_acceptance") continue;
     return isActionableDiagnostic(item);
+  }
+  return false;
+}
+
+function hasRecentComputationBindingMismatch(evidence: readonly AgentLoopToolEvidence[]): boolean {
+  for (const item of [...evidence].reverse()) {
+    if (item.toolName === "computer_write_file" || item.toolName === "computer_patch_file") return false;
+    if (item.toolName !== "computer_run_command") continue;
+    const record = parseToolEvidenceRecord(item);
+    const observation = asRecord(record?.computationObservation);
+    const binding = asRecord(observation?.binding);
+    if (stringField(binding, "status") === "unverified") return true;
+    const error = stringField(record, "computationEvidenceError");
+    return error?.includes("source binding mismatched") === true;
   }
   return false;
 }

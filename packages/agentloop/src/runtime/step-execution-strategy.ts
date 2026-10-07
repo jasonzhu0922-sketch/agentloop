@@ -152,6 +152,8 @@ export interface PromptProjectionDecision {
   readonly policyId: string;
   readonly mode: "default" | "action_aware" | "custom";
   readonly instruction: string;
+  /** Let ContextAssembler expand nominal bounds when input budget allows. */
+  readonly adaptive?: boolean;
   readonly largeToolResultProjectionCharacters?: number;
   readonly largeToolResultPreviewCharacters?: number;
 }
@@ -350,10 +352,10 @@ export class DefaultPromptProjectionPolicy implements PromptProjectionPolicy {
     readonly terminalProjectionCharacters?: number;
     readonly terminalPreviewCharacters?: number;
   } = {}) {
-    this.diagnosticProjectionCharacters = options.diagnosticProjectionCharacters ?? 4_096;
-    this.diagnosticPreviewCharacters = options.diagnosticPreviewCharacters ?? 1_200;
-    this.terminalProjectionCharacters = options.terminalProjectionCharacters ?? 2_048;
-    this.terminalPreviewCharacters = options.terminalPreviewCharacters ?? 800;
+    this.diagnosticProjectionCharacters = options.diagnosticProjectionCharacters ?? 12_000;
+    this.diagnosticPreviewCharacters = options.diagnosticPreviewCharacters ?? 3_000;
+    this.terminalProjectionCharacters = options.terminalProjectionCharacters ?? 8_192;
+    this.terminalPreviewCharacters = options.terminalPreviewCharacters ?? 2_400;
     validateProjectionThresholds(this.diagnosticProjectionCharacters, this.diagnosticPreviewCharacters, "diagnostic");
     validateProjectionThresholds(this.terminalProjectionCharacters, this.terminalPreviewCharacters, "terminal");
   }
@@ -369,6 +371,7 @@ export class DefaultPromptProjectionPolicy implements PromptProjectionPolicy {
       schema: "agentloop.promptProjectionPolicy/v1",
       policyId: this.id,
       mode: input.stepEvidenceState === undefined ? "default" : "action_aware",
+      adaptive: true,
       instruction: input.stepEvidenceState === undefined
         ? "Use the Runtime's default structured evidence and large-result projection rules."
         : `Project prior results toward nextAction=${input.stepEvidenceState.nextAction}; preserve receipts, diagnostics, artifact refs, caveats, and missing evidence before raw content.`,
@@ -438,6 +441,11 @@ function activeToolNamesForEvidenceState(
       return state.recentPatchPreconditionFailure
         ? uniqueStrings([...setupToolNames, ...state.exploratoryToolNames, ...state.evidenceProducingToolNames])
         : uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
+    case "repair_computation_binding":
+      // The progress policy has already narrowed this state to the exact
+      // command rerun needed to rebind declared computation inputs. Keep that
+      // command preferred without inventing a second, looser recovery path.
+      return uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
     case "verify_existing_artifact":
     case "produce_required_evidence":
       return uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
@@ -498,6 +506,8 @@ function unlockWhenForEvidenceState(state: RuntimeStepEvidenceState): string {
       return "a deliverable artifact exists, an actionable diagnostic requires repair, or source acquisition becomes the next action";
     case "repair_artifact_source":
       return "the artifact source has been repaired, rerun, or the evidence state names a different next action";
+    case "repair_computation_binding":
+      return "the command is rerun with declared computationInputs bound to its exact inputRefs, or the evidence state names a different next action";
     case "verify_existing_artifact":
       return "artifact acceptance is recorded or verification produces a diagnostic requiring repair";
     case "submit_completion_candidate":

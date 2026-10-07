@@ -1,7 +1,7 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
-import type { StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
+import type { ConversationTaskIntent, StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 
@@ -231,6 +231,12 @@ export interface ConversationTurnResolution {
    */
   readonly targetResult?: RuntimeResultRef;
   readonly effectiveGoal: string;
+  /**
+   * The resolver's structured interpretation of the user goal.  This is
+   * semantic input to Task Understanding, not a permission grant; Runtime
+   * still validates references and Admission still validates capabilities.
+   */
+  readonly taskIntent?: ConversationTaskIntent;
   /** Model-authored, atomic with sourceBinding; Runtime projects evidenceDemand from it. */
   readonly evidenceStrategy: ConversationEvidenceStrategy;
   /** Model-authored selection over Runtime-issued visible-directory candidates. */

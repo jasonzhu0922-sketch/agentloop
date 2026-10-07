@@ -34,6 +34,7 @@ export function localAgentRuntimeConfiguration(
     environmentFile,
     computerCommandEnvironment: {
       ENTERPRISE_INFO_ENV_FILE: environmentFile,
+      API_QUERY_ENV_FILE: environmentFile,
       STEEL_MARKET_DB_ENV_FILE: environmentFile,
     },
   };

@@ -47,3 +47,60 @@ test("preserved preflight and caveat evidence removes the artificial failure", a
   assert.equal(result.approved, true);
   assert.equal(result.feedback, "");
 });
+
+test("rejected artifact acceptance preserves independently passed path and non-empty facts", async () => {
+  const requiredKinds = ["artifact_path", "artifact_non_empty", "format_matches_request"] as const;
+  const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run-artifact", planId: "plan-artifact", attempt: 1, skills: [],
+    expectedArtifactKind: "audio",
+    step: {
+      id: "render", objective: "Render audio", role: "deliver", dependencies: [], skillIds: [], requiredCapabilities: [],
+      kind: "leaf", position: 0, status: "running", refinementState: "not_refinable", requiredFacts: [],
+      executionBinding: { schema: "agentloop.stepExecutionBinding/v1", requiredCapabilities: [], resolvedToolNames: ["verify_artifact_acceptance"], sourceKinds: ["generated_artifact"], sideEffect: "workspace_write", evidenceKinds: requiredKinds },
+      evidenceContract: { requiredKinds, caveatPolicy: "none" },
+      successCriteria: requiredKinds.map((id) => ({ id, description: id, source: "planner" })),
+    },
+    evidence: {
+      candidateOutput: "artifact exists", modelSteps: 1,
+      toolCalls: [{ toolCallId: "verify", toolName: "verify_artifact_acceptance", isError: false, result: JSON.stringify({
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "song.wav", bytes: 21_168_044, kind: "audio" },
+        verdict: "rejected",
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: ["artifact_acceptance", "format_matches_request"] },
+      }) }],
+    },
+  });
+  assert.equal(result.criteria.find((criterion) => criterion.criterionId === "artifact_path")?.satisfied, true);
+  assert.equal(result.criteria.find((criterion) => criterion.criterionId === "artifact_non_empty")?.satisfied, true);
+  assert.equal(result.criteria.find((criterion) => criterion.criterionId === "format_matches_request")?.satisfied, false);
+  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["format_matches_request"]);
+});
+
+test("producer artifact receipts remain bound to semantic document targets", async () => {
+  const requiredKinds = ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"] as const;
+  const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run-producer-receipt", planId: "plan-producer-receipt", attempt: 1,
+    expectedArtifactKind: "document",
+    skills: [],
+    step: {
+      id: "produce", objective: "Produce report", role: "deliver", dependencies: [], skillIds: [], requiredCapabilities: [],
+      kind: "leaf", position: 0, status: "running", refinementState: "not_refinable", requiredFacts: [],
+      executionBinding: { schema: "agentloop.stepExecutionBinding/v1", requiredCapabilities: [], resolvedToolNames: ["computer_write_file"], sourceKinds: ["generated_artifact"], sideEffect: "workspace_write", evidenceKinds: requiredKinds },
+      evidenceContract: { requiredKinds, caveatPolicy: "none" },
+      successCriteria: requiredKinds.map((id) => ({ id, description: id, source: "planner" })),
+    },
+    evidence: {
+      candidateOutput: "已生成报告", modelSteps: 1,
+      toolCalls: [{ toolCallId: "write", toolName: "computer_write_file", isError: false, result: JSON.stringify({
+        path: "analysis/report.md",
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path: "analysis/report.md", artifactKind: "markdown", bytes: 12 },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveated: [], failed: [] },
+        },
+      }) }],
+    },
+  });
+  assert.equal(result.approved, true);
+  assert.deepEqual(result.failedBoundary, undefined);
+});

@@ -16,6 +16,7 @@ import type {
 export type AssignmentStatus = "reserved" | "accepted" | "completed" | "failed" | "cancelled" | "unknown" | "expired";
 
 export interface RuntimeHeartbeat {
+  /** Ephemeral liveness/capacity observation; it is never part of durable Router state. */
   readonly runtimeId: string;
   readonly status: "ready" | "draining" | "offline";
   readonly activeRunCount: number;

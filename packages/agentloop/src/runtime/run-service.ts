@@ -76,7 +76,7 @@ import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import { observeSourceFamiliesFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
-import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type StructuredTaskUnderstanding } from "./task-intent.ts";
+import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type ConversationTaskIntent, type StructuredTaskUnderstanding } from "./task-intent.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -573,7 +573,28 @@ export class RunService {
     if (revision === undefined) throw new AppError("BAD_REQUEST", "expectedRevision is required", 400);
     const request = await this.humanLoops.current(runId);
     if (request?.id !== requestId) throw new AppError("CONFLICT", "Human-in-the-Loop request is no longer open", 409);
+    if (request.origin === "recovery") {
+      const recoveryState = await this.recovery.state(runId);
+      if (recoveryState?.state !== "waiting_user" || recoveryState.actionId !== request.actionId) {
+        throw new AppError("CONFLICT", "Recovery Human-in-the-Loop request is no longer actionable", 409);
+      }
+    }
     const response = await this.humanLoops.respond({ requestId, runId, actorUserId, expectedRevision: revision, value });
+    // Recovery Planner `ask_user` is a durable recovery decision, not a
+    // replay-safe Step HIL. Persist the validated answer into the recovery
+    // ledger first, then let the planner decide whether to resume, revise, or
+    // ask again. This keeps the user interaction on the canonical HIL path
+    // without silently treating a recovery question as `resume_step`.
+    if (request.origin === "recovery") {
+      await this.recovery.submitUserResponse(runId, JSON.stringify(response.value));
+      void this.advanceRecovery(actorUserId, runId).catch(async (error) => {
+        await this.appendRunEvent(runId, {
+          type: "human_loop.resume_failed",
+          data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
+        });
+      });
+      return response;
+    }
     if (request.actionId !== undefined) {
       const action = (await this.actions.list(runId)).find((item) => item.id === request.actionId);
       if (action !== undefined && action.state === "recovery_required") {
@@ -957,6 +978,15 @@ export class RunService {
           break;
         case "ask_user":
           await this.recovery.admit(decision.id, { kind: "waiting_user", question: decision.question });
+          await this.persistRecoveryHumanLoopPause({
+            runId,
+            ...(currentPlan === undefined ? {} : { planId: currentPlan.id }),
+            ...(action.stepId === undefined ? {} : { stepId: action.stepId }),
+            actionId: action.id,
+            question: decision.question,
+            rationale: decision.rationale,
+            evidenceRefs: decision.evidenceRefs,
+          });
           break;
         case "fail":
           await this.recovery.admit(decision.id);
@@ -1195,6 +1225,53 @@ export class RunService {
     });
   }
 
+  /**
+   * Recovery Planner questions use the same durable HIL request contract as
+   * tool-originated pauses. Recovery state remains authoritative for the
+   * planner, while the request snapshot gives the browser a typed action and
+   * a revisioned response path.
+   */
+  private async persistRecoveryHumanLoopPause(input: {
+    readonly runId: string;
+    readonly planId?: string;
+    readonly stepId?: string;
+    readonly actionId: string;
+    readonly question?: string;
+    readonly rationale: string;
+    readonly evidenceRefs: readonly string[];
+  }): Promise<void> {
+    const request = await this.humanLoops.create({
+      runId: input.runId,
+      ...(input.planId === undefined ? {} : { planId: input.planId }),
+      ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
+      actionId: input.actionId,
+      origin: "recovery",
+      kind: "approval",
+      title: "需要确认恢复操作",
+      prompt: input.question ?? "Runtime 需要你的确认才能继续恢复此 Run。",
+      rationale: input.rationale,
+      evidenceRefs: input.evidenceRefs,
+      responseSchema: {
+        type: "confirm",
+        acceptLabel: "确认并继续",
+        rejectLabel: "拒绝并停止",
+      },
+      resume: { mode: "recovery_review", ...(input.stepId === undefined ? {} : { targetStepId: input.stepId }) },
+    });
+    await this.appendRunEvent(input.runId, {
+      type: "run.waiting_user",
+      data: {
+        runId: input.runId,
+        ...(input.planId === undefined ? {} : { planId: input.planId }),
+        ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
+        actionId: input.actionId,
+        requestId: request.id,
+        kind: request.kind,
+        request,
+      },
+    });
+  }
+
   toolCatalog(): Array<{ name: string; dangerous: boolean; description: string }> {
     return this.coreTools.map((tool) => ({
       name: tool.name,
@@ -1422,22 +1499,19 @@ export class RunService {
       // actionless, abandoned Run to a Runtime Host's reconciliation pass.
       const actionScope: { planId?: string; stepId?: string } = {};
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
-      const requiresExecution = requiresDeterministicConversationExecution(input, conversationWorkingSet);
       const turnResolution = !conversationEntry
         ? undefined
-        : requiresExecution && (conversationHistory?.length ?? 0) === 0
-          ? deterministicConversationTurnResolution(input)
-          : await resolveConversationTurn(
-            model,
-            input,
-            conversationHistory,
-            {
-              visibleDirectories,
-              sources: availableSources,
-              conversationWorkingSet,
-            },
-            runController.signal,
-          );
+        : await resolveConversationTurn(
+          model,
+          input,
+          conversationHistory,
+          {
+            visibleDirectories,
+            sources: availableSources,
+            conversationWorkingSet,
+          },
+          runController.signal,
+        );
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
@@ -1544,6 +1618,7 @@ export class RunService {
         toolNames: allowedToolNames,
         skillNames: privateSkills.map((skill) => skill.name),
         evidenceDemand: turnResolution?.evidenceDemand,
+        resolvedTaskIntent: turnResolution?.taskIntent,
         responseOnly,
         uploadedSources: availableSources,
         ...(targetArtifact === undefined ? {} : {
@@ -2972,15 +3047,14 @@ export class RunService {
       }
       if (decision.decision === "ask_user") {
         await this.recovery.admit(decision.id, { kind: "waiting_user", question: decision.question });
-        await this.appendRunEvent(input.run.id, {
-          type: "run.waiting_user",
-          data: {
-            runId: input.run.id,
-            planId: input.currentPlan.id,
-            stepId: input.stepId,
-            actionId: action.id,
-            question: decision.question,
-          },
+        await this.persistRecoveryHumanLoopPause({
+          runId: input.run.id,
+          planId: input.currentPlan.id,
+          stepId: input.stepId,
+          actionId: action.id,
+          question: decision.question,
+          rationale: decision.rationale,
+          evidenceRefs: decision.evidenceRefs,
         });
         return;
       }
@@ -6859,7 +6933,7 @@ const CONVERSATION_TURN_TOOL = {
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["mode", "relation", "inputMode", "effectiveGoal", "evidenceStrategy", "sourceBinding", "userConstraints"],
+    required: ["mode", "relation", "inputMode", "effectiveGoal", "taskIntent", "evidenceStrategy", "sourceBinding", "userConstraints"],
     properties: {
       mode: { type: "string", enum: ["reply", "execute", "clarify"] },
       relation: {
@@ -6881,6 +6955,34 @@ const CONVERSATION_TURN_TOOL = {
       },
       resultCandidateId: { type: "string", pattern: "^result_candidate_[1-9][0-9]*$" },
       effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
+      taskIntent: {
+        type: "object",
+        additionalProperties: false,
+        required: ["schema", "operation", "requiresExecution", "deliverables"],
+        properties: {
+          schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },
+          operation: {
+            type: "string",
+            enum: ["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"],
+          },
+          requiresExecution: { type: "boolean" },
+          deliverables: {
+            type: "array",
+            maxItems: 8,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["action", "kind", "surface"],
+              properties: {
+                action: { type: "string", enum: ["none", "create", "modify", "transform"] },
+                kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
+                format: { type: "string", minLength: 1, maxLength: 32 },
+                surface: { type: "string", enum: ["conversation", "workspace_artifact"] },
+              },
+            },
+          },
+        },
+      },
       evidenceStrategy: {
         type: "string",
         enum: ["none", "lookup_lite", "source_grounded", "strict_user_source", "bound_visible_sources"],
@@ -7245,6 +7347,9 @@ function applyConversationTurnArtifactExecutionFloor(
   input: string,
 ): ConversationTurnResolution {
   if (resolution.mode !== "reply") return resolution;
+  // A validated model-authored semantic frame is the authoritative intent
+  // decision. Do not reconstruct it from the latest sentence once present.
+  if (resolution.taskIntent !== undefined) return resolution;
   const intent = classifyTaskIntent({
     objective: input,
     userConstraints: resolution.userConstraints,
@@ -7272,6 +7377,7 @@ function applyConversationTurnDirectReplyFloor(
 ): ConversationTurnResolution {
   if (
     resolution.mode === "clarify"
+    || resolution.taskIntent !== undefined
     || resolution.evidenceDemand !== "none"
     || resolution.sourceBinding.mode !== "none"
     || !isDirectConversationReply(input)
@@ -7335,6 +7441,8 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
+      "Also return taskIntent as a semantic frame: operation, requiresExecution, and every requested deliverable with action, semantic kind, optional concrete format, and delivery surface. Derive it from the full transcript and prior work context, not from isolated action words.",
+      "taskIntent.requiresExecution must agree with mode=execute. A deliverable can be a prior-artifact transformation, a new artifact, a conversation answer, or a composite of code plus a rendered artifact. Preserve all deliverables instead of choosing one because it appears first.",
       "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
@@ -7378,6 +7486,7 @@ function parseConversationTurnResolution(
   const inputMode = argumentsRecord.inputMode;
   const legacyEvidenceDemand = argumentsRecord.evidenceDemand;
   const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy, legacyEvidenceDemand);
+  const taskIntent = parseConversationTaskIntent(argumentsRecord.taskIntent);
   const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
     ? argumentsRecord.effectiveGoal.trim()
@@ -7408,6 +7517,13 @@ function parseConversationTurnResolution(
   if (!isConversationTurnRelation(relation)) return undefined;
   if (!isConversationTurnInputMode(inputMode)) return undefined;
   if (evidenceStrategy === undefined || sourceBinding === undefined) return undefined;
+  if (taskIntent === undefined) return undefined;
+  if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
+  if (
+    taskIntent !== undefined
+    && !taskIntent.requiresExecution
+    && (inputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
+  ) return undefined;
   if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
   if (targetGoalCandidateId !== undefined && targetRunId === undefined) return undefined;
   if (resultCandidateId !== undefined && targetResult === undefined) return undefined;
@@ -7442,11 +7558,51 @@ function parseConversationTurnResolution(
     ...(targetArtifact === undefined ? {} : { targetArtifact }),
     ...(targetResult === undefined ? {} : { targetResult }),
     effectiveGoal,
+    ...(taskIntent === undefined ? {} : { taskIntent }),
     evidenceStrategy,
     sourceBinding,
     evidenceDemand,
     userConstraints,
     source: "model",
+  };
+}
+
+function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | undefined {
+  if (value === undefined) return undefined;
+  const record = optionalRecord(value);
+  if (record.schema !== "agentloop.conversationTaskIntent/v1") return undefined;
+  const operations = new Set(["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"]);
+  if (typeof record.operation !== "string" || !operations.has(record.operation)) return undefined;
+  if (typeof record.requiresExecution !== "boolean") return undefined;
+  if (!Array.isArray(record.deliverables) || record.deliverables.length > 8) return undefined;
+  const actions = new Set(["none", "create", "modify", "transform"]);
+  const kinds = new Set(["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"]);
+  const surfaces = new Set(["conversation", "workspace_artifact"]);
+  const deliverables = record.deliverables.map((item) => {
+    const deliverable = optionalRecord(item);
+    const action = deliverable.action;
+    const kind = deliverable.kind;
+    const surface = deliverable.surface;
+    const format = deliverable.format;
+    if (
+      typeof action !== "string" || !actions.has(action)
+      || typeof kind !== "string" || !kinds.has(kind)
+      || typeof surface !== "string" || !surfaces.has(surface)
+      || (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32))
+    ) return undefined;
+    return {
+      action: action as ConversationTaskIntent["deliverables"][number]["action"],
+      kind: kind as ConversationTaskIntent["deliverables"][number]["kind"],
+      ...(format === undefined ? {} : { format: format.trim() }),
+      surface: surface as ConversationTaskIntent["deliverables"][number]["surface"],
+    };
+  });
+  if (deliverables.some((item) => item === undefined)) return undefined;
+  return {
+    schema: "agentloop.conversationTaskIntent/v1",
+    operation: record.operation as ConversationTaskIntent["operation"],
+    requiresExecution: record.requiresExecution,
+    deliverables: deliverables as ConversationTaskIntent["deliverables"],
   };
 }
 
@@ -7537,6 +7693,7 @@ function conversationTurnResolutionFromEvents(
     const sourceBinding = parsePersistedConversationSourceBinding(data.sourceBinding);
     const source = data.source;
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
+    const taskIntent = parseConversationTaskIntent(data.taskIntent);
     const targetRunId = typeof data.targetRunId === "string" ? data.targetRunId.trim() : undefined;
     const targetArtifact = conversationArtifactReference(data.targetArtifact);
     const targetResult = parseResultReference(data.targetResult);
@@ -7546,6 +7703,13 @@ function conversationTurnResolutionFromEvents(
     if (!isConversationTurnInputMode(inputMode)) return undefined;
     if (!isConversationEvidenceDemand(evidenceDemand) || evidenceStrategy === undefined || sourceBinding === undefined || !isConversationTurnResolutionSource(source)) return undefined;
     if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return undefined;
+    if (data.taskIntent !== undefined && taskIntent === undefined) return undefined;
+    if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
+    if (
+      taskIntent !== undefined
+      && !taskIntent.requiresExecution
+      && (inputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
+    ) return undefined;
     if (
       !Array.isArray(data.userConstraints)
       || userConstraints.length !== data.userConstraints.length
@@ -7566,6 +7730,7 @@ function conversationTurnResolutionFromEvents(
       ...(targetArtifact === undefined ? {} : { targetArtifact }),
       ...(targetResult === undefined ? {} : { targetResult }),
       effectiveGoal,
+      ...(taskIntent === undefined ? {} : { taskIntent }),
       evidenceStrategy,
       sourceBinding,
       evidenceDemand,
@@ -7775,6 +7940,7 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
                 relation: intent.relation,
                 inputMode: intent.inputMode,
                 effectiveGoal: intent.effectiveGoal,
+                taskIntent: intent.taskIntent,
                 evidenceStrategy: intent.evidenceStrategy,
                 sourceBinding: intent.sourceBinding,
                 evidenceDemand: intent.evidenceDemand,
@@ -7842,36 +8008,6 @@ function requiresExternalState(input: string): boolean {
   return hasLocalPathReference(signal)
     || /(?:\b(?:file|directory|folder|script|log|repo|repository|codebase|workspace|working\s+tree|terminal|command|shell|browser|webpage|page|database)\b|文件|目录|文件夹|脚本|日志|仓库|代码库|工作区|终端|命令|浏览器|网页|页面|数据库)/iu
       .test(signal);
-}
-
-function requiresConversationWorksetExecution(
-  input: string,
-  conversationWorkingSet: ConversationWorkingSet | undefined,
-): boolean {
-  if (conversationWorkingSet === undefined) return false;
-  if (requestsPriorArtifactChange(input)) return true;
-  const hasReusablePriorWork = conversationWorkingSet.reusableArtifacts.length > 0
-    || (conversationWorkingSet.completedStepContexts?.length ?? 0) > 0
-    || conversationWorkingSetHasCompletedStepContext(conversationWorkingSet);
-  if (!hasReusablePriorWork) return false;
-  return classifyTaskIntent({
-    objective: input,
-  }).wantsArtifact;
-}
-
-function requiresDeterministicConversationExecution(
-  input: string,
-  conversationWorkingSet: ConversationWorkingSet | undefined,
-): boolean {
-  return requiresExternalState(input)
-    || requestsArtifactBuildFromIntent(input)
-    || requiresConversationWorksetExecution(input, conversationWorkingSet);
-}
-
-function conversationWorkingSetHasCompletedStepContext(
-  conversationWorkingSet: ConversationWorkingSet,
-): boolean {
-  return (conversationWorkingSet.completedStepContexts?.length ?? 0) > 0;
 }
 
 function hasLocalPathReference(input: string): boolean {

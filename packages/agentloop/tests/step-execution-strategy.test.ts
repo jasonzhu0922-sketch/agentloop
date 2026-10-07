@@ -42,7 +42,7 @@ test("action-aware step execution strategy recommends artifact acceptance withou
   assert.equal(decision.loopStepFrame.currentStage.availableToolCount, 4);
   assert.equal(decision.loopStepFrame.toolCatalog?.preferredToolCount, 1);
   assert.equal(decision.loopStepFrame.currentEvidenceState?.nextAction, "verify_existing_artifact");
-  assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 2048);
+  assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 8192);
 });
 
 test("action-aware step execution strategy deprioritizes read-only tools during diagnostic repair", () => {
@@ -75,8 +75,35 @@ test("action-aware step execution strategy deprioritizes read-only tools during 
     decision.toolCatalog.deprioritizedToolGroups.flatMap((group) => group.toolNames).sort(),
     ["computer_read_file", "computer_search_text"],
   );
-  assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 4096);
-  assert.equal(decision.promptProjection.largeToolResultPreviewCharacters, 1200);
+  assert.equal(decision.promptProjection.largeToolResultProjectionCharacters, 12000);
+  assert.equal(decision.promptProjection.largeToolResultPreviewCharacters, 3000);
+});
+
+test("action-aware step execution strategy prefers the exact command for computation binding repair", () => {
+  const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
+  const decision = strategy.prepareModelStep({
+    modelStep: 3,
+    maxSteps: 6,
+    hardLimit: 6,
+    convergenceOnly: false,
+    availableTools: tools(["computer_read_file", "computer_run_command", "computer_write_file"]),
+    priorToolEvidence: [],
+    stepEvidenceState: state({
+      nextAction: "repair_computation_binding",
+      evidenceProducingToolNames: ["computer_run_command"],
+      exploratoryToolNames: [],
+      workProductStatus: "process_artifact_available",
+      processArtifactPaths: ["analysis/report.py"],
+      missingRequiredEvidenceKinds: ["derived_aggregation"],
+      recentComputationBindingMismatch: true,
+    }),
+  });
+
+  assert.deepEqual(decision.toolCatalog.preferredToolNames, ["computer_run_command"]);
+  assert.match(
+    decision.toolCatalog.deprioritizedToolGroups.flatMap((group) => group.preferWhen).join("\n"),
+    /computationInputs/u,
+  );
 });
 
 test("full-catalog step execution profile keeps all granted tools visible", () => {
@@ -200,6 +227,7 @@ function state(input: {
   readonly deliverableArtifactPaths?: readonly string[];
   readonly processArtifactPaths?: readonly string[];
   readonly recentActionableDiagnostic?: boolean;
+  readonly recentComputationBindingMismatch?: boolean;
 }): RuntimeStepEvidenceState {
   return {
     schema: "agentloop.runtimeStepEvidenceState/v1",
@@ -230,6 +258,7 @@ function state(input: {
     knownArtifacts: [],
     processArtifacts: [],
     recentActionableDiagnostic: input.recentActionableDiagnostic ?? false,
+    recentComputationBindingMismatch: input.recentComputationBindingMismatch ?? false,
     recentPatchPreconditionFailure: false,
     nextAction: input.nextAction,
     evidenceProducingToolNames: input.evidenceProducingToolNames,

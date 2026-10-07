@@ -386,6 +386,47 @@ test("execution context dynamically requires Markdown materialization for bound 
   assert.match(directive.instruction, /Do not bypass this conversion boundary/);
 });
 
+test("execution context requires bounded create-then-append writes for large authored files", () => {
+  const step = planStep({
+    id: "write-deck-spec",
+    kind: "leaf",
+    position: 0,
+    objective: "Write the authored deck specification as a workspace file.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write"],
+    evidenceContract: { requiredKinds: ["artifact_path"], caveatPolicy: "none" },
+    successCriteria: [],
+    status: "pending",
+  });
+  const payload = executionContextPayload(buildStepRuntimeContextSnapshot({
+    step,
+    plan: {
+      id: "plan-large-write",
+      runId: "run-large-write",
+      version: 1,
+      goal: "Write a large authored file",
+      selectedSkillIds: [],
+      status: "running",
+      steps: [step],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    skills: [],
+    workspaceRoot: "/workspace",
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", artifactKind: "document" }),
+    operationProfile: { id: "artifact_build" },
+    requiresFileOutput: true,
+  }).content);
+
+  assert.match(payload.largeWriteDiscipline as string, /6000/);
+  assert.match(payload.largeWriteDiscipline as string, /mode="create"/);
+  assert.match(payload.largeWriteDiscipline as string, /mode="append"/);
+});
+
 test("execution context omits bound Outcome conversion rules outside the conversion contract", () => {
   const directPdfStep = planStep({
     id: "generate-pdf",
