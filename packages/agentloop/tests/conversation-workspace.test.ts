@@ -503,6 +503,30 @@ test("Generic Run execution does not opt into conversation intent classification
   }
 });
 
+test("a resource-free executable conversation turn uses the canonical local intent floor", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new ContextAwareConversationIntentModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => singleStepTestPlanner(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "请生成一个 HTML 文件");
+
+    assert.equal(run.status, "completed");
+    assert.equal(model.intentCalls, 0);
+    assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+    assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "conversation.turn.resolved"), true);
+  } finally {
+    await database.close();
+  }
+});
+
 test("Uploaded sources are bound to a run and read through source tools", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-upload-source-workspace-"));
   const database = new AppDatabase(":memory:");

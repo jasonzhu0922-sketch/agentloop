@@ -57,7 +57,7 @@ interface CompatibleResponse {
       reasoning_content?: string | null;
       tool_calls?: Array<{
         id?: string;
-        function?: { name?: string; arguments?: string };
+        function?: { name?: string; arguments?: unknown };
       }>;
     };
   }>;
@@ -76,7 +76,7 @@ interface CompatibleStreamChunk {
       tool_calls?: Array<{
         index?: number;
         id?: string | null;
-        function?: { name?: string | null; arguments?: string | null };
+        function?: { name?: string | null; arguments?: unknown };
       }>;
     };
   }>;
@@ -1092,13 +1092,13 @@ interface ResponsesStreamChunk {
   delta?: string;
   item_id?: string;
   output_index?: number;
-  arguments?: string;
+  arguments?: unknown;
   item?: {
     type?: string;
     id?: string;
     call_id?: string;
     name?: string;
-    arguments?: string;
+    arguments?: unknown;
   };
   response?: Record<string, unknown>;
 }
@@ -1117,7 +1117,7 @@ function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelRe
     toolCalls.push({
       id: callId,
       name,
-      arguments: parseToolArguments(typeof item.arguments === "string" ? item.arguments : "{}"),
+      arguments: parseToolArguments(item.arguments ?? "{}"),
     });
   }
   const status = typeof record.status === "string" ? record.status : "completed";
@@ -1681,7 +1681,7 @@ async function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<
 }
 
 function parseToolCall(
-  call: { id?: string; function?: { name?: string; arguments?: string } },
+  call: { id?: string; function?: { name?: string; arguments?: unknown } },
   index: number,
 ): ModelToolCall {
   const id = call.id;
@@ -1697,12 +1697,17 @@ function parseAccumulatedToolCall(id: string, name: string, rawArguments: string
   return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments) };
 }
 
-function parseToolArguments(rawArguments: string): unknown {
-  let argumentsValue = parseToolArgumentsJson(rawArguments);
-  if (argumentsValue === undefined) return rawArguments;
-  if (typeof argumentsValue === "string") {
+function parseToolArguments(rawArguments: unknown): unknown {
+  let argumentsValue = rawArguments;
+  // Providers occasionally encode function arguments more than once (for
+  // example, a JSON string inside a JSON string). Normalize the transport
+  // representation here so every protocol reaches Runtime with the same
+  // object-or-invalid-value contract. Keep the bound to avoid chasing an
+  // arbitrary string chain supplied by a provider.
+  for (let depth = 0; depth < 4 && typeof argumentsValue === "string"; depth += 1) {
     const decodedValue = parseToolArgumentsJson(argumentsValue);
-    if (decodedValue !== undefined) argumentsValue = decodedValue;
+    if (decodedValue === undefined) break;
+    argumentsValue = decodedValue;
   }
   return argumentsValue;
 }

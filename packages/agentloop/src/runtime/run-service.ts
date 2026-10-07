@@ -1505,18 +1505,20 @@ export class RunService {
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
       const turnResolution = !conversationEntry
         ? undefined
-        : await resolveConversationTurn(
-          model,
-          emit,
-          input,
-          conversationHistory,
-          {
-            visibleDirectories,
-            sources: availableSources,
-            conversationWorkingSet,
-          },
-          runController.signal,
-        );
+        : canResolveNewConversationTurnLocally(input, conversationHistory, conversationWorkingSet, visibleDirectories, availableSources)
+          ? deterministicConversationTurnResolution(input)
+          : await resolveConversationTurn(
+            model,
+            emit,
+            input,
+            conversationHistory,
+            {
+              visibleDirectories,
+              sources: availableSources,
+              conversationWorkingSet,
+            },
+            runController.signal,
+          );
       const responseOnly = turnResolution !== undefined && turnResolution.mode !== "execute";
       await throwIfRunCancelled(this.runs, runId, runController.signal);
       if (conversationEntry) {
@@ -7751,6 +7753,26 @@ function deterministicConversationTurnResolution(input: string): ConversationTur
     userConstraints: [],
     source: "deterministic",
   };
+}
+
+function canResolveNewConversationTurnLocally(
+  input: string,
+  conversationHistory: readonly ModelMessage[] | undefined,
+  conversationWorkingSet: ConversationWorkingSet | undefined,
+  visibleDirectories: readonly VisibleDirectoryGrant[],
+  sources: readonly UploadedSourceSummary[],
+): boolean {
+  // The resolver owns cross-turn binding and opaque resource selection. On a
+  // genuinely new, resource-free conversation there is no such context to
+  // resolve; the canonical task classifier can provide the same execute
+  // floor without spending a second model round trip. Keep conversational
+  // replies on the resolver path because their reply/execute distinction is
+  // not safe to infer from artifact vocabulary alone.
+  if ((conversationHistory?.length ?? 0) > 0 || conversationWorkingSet !== undefined) return false;
+  if (visibleDirectories.length > 0 || sources.length > 0) return false;
+  const intent = classifyTaskIntent({ objective: input });
+  if (intent.wantsConversationAnswer && !intent.wantsArtifact && intent.sourceNeed === "none") return false;
+  return intent.wantsArtifact || intent.sourceNeed !== "none" || requiresExternalState(input);
 }
 
 function fallbackConversationTurnResolution(input: string): ConversationTurnResolution {

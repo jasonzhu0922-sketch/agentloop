@@ -1505,9 +1505,9 @@ test("Responses streaming adapter preserves function calls when final response o
   }
 });
 
-test("Responses streaming adapter normalizes double-encoded object tool arguments", async () => {
+test("Responses streaming adapter normalizes nested-encoded object tool arguments", async () => {
   const originalFetch = globalThis.fetch;
-  const encodedArguments = JSON.stringify(JSON.stringify({ q: "status" }));
+  const encodedArguments = JSON.stringify(JSON.stringify(JSON.stringify({ q: "status" })));
   globalThis.fetch = async () => {
     return sseResponse([
       `data: ${JSON.stringify({
