@@ -2459,7 +2459,6 @@ export class RunService {
             convergencePrompt: SOURCE_EVIDENCE_DELIVERY_CONVERGENCE_PROMPT,
           } : {}),
         ...(fileOutputStep ? {
-          shouldConvergeAfterToolStep: (context) => shouldConvergeAfterFileEvidence(activeStep, context),
           shouldUseFinalConvergence: (context) => shouldUseFinalFileConvergence(activeStep, context),
         } : lookupEvidenceStep ? {
           shouldConvergeAfterToolStep: (context) => shouldConvergeAfterLookupEvidence(activeStep, context, input.sources),
@@ -5629,26 +5628,6 @@ function shouldConvergeAfterLookupEvidence(
   return { converge: false };
 }
 
-function shouldConvergeAfterFileEvidence(
-  step: ExecutionPlan["steps"][number],
-  context: ToolStepConvergenceContext,
-): { converge: boolean; reason?: string } {
-  if (!stepAllowsFileArtifactConvergence(step)) return { converge: false };
-  if (stepRequiresArtifactAcceptance(step) && !hasSuccessfulArtifactAcceptance(context.toolEvidence)) {
-    return { converge: false };
-  }
-  const requiredExtensions = artifactExtensionsRequiredByStep(step);
-  if (requiredExtensions.size === 0) return { converge: false };
-  const producedExtensions = artifactExtensionsProducedByEvidence(context.toolEvidence);
-  for (const extension of requiredExtensions) {
-    if (!producedExtensions.has(extension)) return { converge: false };
-  }
-  return {
-    converge: true,
-    reason: `required_file_artifacts_observed:${[...requiredExtensions].sort().join(",")}`,
-  };
-}
-
 function shouldUseFinalFileConvergence(
   step: ExecutionPlan["steps"][number],
   context: ToolStepConvergenceContext,
@@ -5671,34 +5650,6 @@ function hasSuccessfulArtifactAcceptance(evidence: readonly AgentLoopToolEvidenc
       && Array.isArray(evidenceKinds.satisfied)
       && evidenceKinds.satisfied.includes("artifact_acceptance");
   });
-}
-
-function stepAllowsFileArtifactConvergence(step: ExecutionPlan["steps"][number]): boolean {
-  const text = [
-    step.id,
-    step.objective,
-    ...step.successCriteria.flatMap((criterion) => [criterion.id, criterion.description]),
-  ].join("\n").toLowerCase();
-  const productionIntent =
-    /\b(?:create|generate|write|build|rebuild|export|save|produce|output|materialize|render)\b/i.test(text)
-    || /(?:生成|创建|制作|写入|构建|重建|导出|保存|输出|产出|渲染)/u.test(text);
-  const verificationIntent =
-    /\b(?:verify|validate|check|inspect|review|qa|quality|compare|readback)\b/i.test(text)
-    || /(?:验证|校验|检查|审查|终检|验收|质量|对比|问题清单)/u.test(text);
-  if (!productionIntent && verificationIntent) return false;
-  const productionTool = stepUsesTool(step, (name) =>
-    name === "computer_write_file" || name === "computer_patch_file" || name === "convert_artifact"
-  );
-  if (productionTool) return true;
-  if (!productionIntent) return false;
-  const onlyCommandOrLookup = stepResolvedToolNames(step).every((name) =>
-    name === "computer_run_command" || isLookupToolName(name) || name === "load_skill"
-  );
-  if (verificationIntent && onlyCommandOrLookup && !/\b(?:build|rebuild|export|save|write|generate|create|produce|output)\b/i.test(text)
-    && !/(?:生成|创建|制作|写入|构建|重建|导出|保存|输出|产出)/u.test(text)) {
-    return false;
-  }
-  return true;
 }
 
 const ARTIFACT_EXTENSIONS = new Set([
@@ -7402,12 +7353,15 @@ function applyConversationTurnEvidenceFloor(
   const guardedSourceNeed = resolution.sourceBinding.mode === "primary_data"
     ? "source_grounded"
     : strongerConversationEvidenceDemand(modelSourceNeed, userAuthoredSourceNeed);
-  // A bound native work product is an input artifact, not a request to
-  // reacquire the facts that led to its earlier creation. If the latest
-  // user-authored request has no source demand, retain prior provenance in the
-  // artifact lineage but do not turn a layout/file transformation into
-  // source-grounded research merely because the target Run was grounded.
-  if (hasBoundPriorWorkProduct && userAuthoredSourceNeed === "none") {
+  // A bound native artifact transformation is an input-artifact operation, not
+  // an instruction to reacquire the facts that produced it. The Resolver's
+  // structured taskIntent and inputMode carry that semantic distinction;
+  // lexical source words in a style or dependency constraint must not override
+  // it. A fresh source pass remains explicit through refresh_sources.
+  const transformsBoundArtifact = resolution.taskIntent?.operation === "transform_artifact"
+    && resolution.targetArtifact !== undefined
+    && resolution.inputMode !== "refresh_sources";
+  if (transformsBoundArtifact || (hasBoundPriorWorkProduct && userAuthoredSourceNeed === "none")) {
     const evidenceDemand = resolution.sourceBinding.mode === "primary_data" ? "source_grounded" : "none";
     if (resolution.evidenceDemand === evidenceDemand && resolution.mode === "execute") return resolution;
     return {
@@ -7550,6 +7504,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
       "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
       "Set inputMode=prior_artifact only when changing a concrete delivered file. Set inputMode=refresh_sources only when the latest user asks to refresh, reanalyze, or verify source facts. Otherwise use inputMode=none.",
+      "A request to remove external dependencies from an existing artifact (for example links, fonts, scripts, images, CDNs, or remote resources) is a prior_artifact transformation with evidenceStrategy=none. It is not source research unless the user separately asks to refresh, reanalyze, or verify the underlying facts.",
       "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while resultCandidateId identifies the published Runtime Result supplying its content.",
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",

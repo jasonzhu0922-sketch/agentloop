@@ -176,6 +176,68 @@ test("successful Tool Actions atomically bind a unified opaque result ref and au
   }
 });
 
+test("read_result repairs an accidental pointer on a text Result without losing the canonical read", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await seedRun(database);
+    const actions = new RuntimeActionRepository(database);
+    const results = new RuntimeResultRepository(database);
+    let ref: RuntimeResultRef | undefined;
+    await actions.execute({
+      runId,
+      planId,
+      stepId,
+      kind: "tool_call",
+      replayPolicy: "safe",
+      deadlineMs: 1_000,
+      metadata: { toolCallId: "produce-text", toolName: "produce_text" },
+      prepareResult: async (value, action) => {
+        const runtimeResult = createRuntimeResult({
+          kind: "tool",
+          producer: { actionId: action.id, runId, planId, stepId, toolCallId: "produce-text", toolName: "produce_text" },
+          value,
+          publication: { status: "committed" },
+        });
+        ref = runtimeResult.ref;
+        return runtimeResult;
+      },
+    }, async () => "exact text result");
+    assert.ok(ref);
+
+    const reader = new ToolRegistry([createResultTool(results)]).materialize(createCapabilityGrant({
+      actorUserId: testOwner().user.id,
+      runId,
+      planId,
+      stepId,
+      depth: 0,
+      allowedToolNames: ["read_result"],
+      allowedSkillIds: [],
+    }));
+    const prepared = reader.prepare({
+      id: "recover-text-with-pointer",
+      name: "read_result",
+      arguments: { resultId: ref.resultId, pointer: "/content" },
+    });
+    const recovered = await prepared.tool.execute({ grant: createCapabilityGrant({
+      actorUserId: testOwner().user.id,
+      runId,
+      planId,
+      stepId,
+      depth: 0,
+      allowedToolNames: ["read_result"],
+      allowedSkillIds: [],
+    }) }, prepared.input) as Record<string, any>;
+    assert.equal(recovered.source.contentFormat, "text");
+    assert.equal(recovered.content, "exact text result");
+    assert.equal(recovered.pointer, "/content");
+    assert.equal(recovered.pointerApplied, false);
+    assert.match(recovered.repair, /omit pointer/u);
+    assert.deepEqual(recovered.sourceResultRef, ref);
+  } finally {
+    await database.close();
+  }
+});
+
 test("Runtime result parsing rejects payloads whose Runtime-owned integrity metadata was altered", () => {
   const result = createRuntimeResult({
     kind: "run",

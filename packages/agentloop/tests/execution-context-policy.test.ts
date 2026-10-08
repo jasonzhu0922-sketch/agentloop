@@ -386,7 +386,7 @@ test("execution context dynamically requires Markdown materialization for bound 
   assert.match(directive.instruction, /Do not bypass this conversion boundary/);
 });
 
-test("execution context requires bounded create-then-append writes for large authored files", () => {
+test("execution context does not impose a create-then-append protocol on authored files", () => {
   const step = planStep({
     id: "write-deck-spec",
     kind: "leaf",
@@ -422,9 +422,7 @@ test("execution context requires bounded create-then-append writes for large aut
     requiresFileOutput: true,
   }).content);
 
-  assert.match(payload.largeWriteDiscipline as string, /6000/);
-  assert.match(payload.largeWriteDiscipline as string, /mode="create"/);
-  assert.match(payload.largeWriteDiscipline as string, /mode="append"/);
+  assert.equal(payload.largeWriteDiscipline, undefined);
 });
 
 test("execution context omits bound Outcome conversion rules outside the conversion contract", () => {

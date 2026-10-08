@@ -16,7 +16,6 @@ import type {
 import type { RuntimeDecisionCommit } from "./decision-ledger.ts";
 import type { ResolvedOperationBinding } from "./decision-binding.ts";
 import type { RuntimeResultBinding } from "./runtime-result.ts";
-import { LARGE_WRITE_DISCIPLINE } from "./large-write-policy.ts";
 
 export function buildStepRuntimeContextSnapshot(input: {
   readonly step: ExecutionPlan["steps"][number];
@@ -134,9 +133,6 @@ export function buildStepRuntimeContextSnapshot(input: {
           : {}),
         ...(evidenceAcquisitionDiscipline === undefined ? {} : { evidenceAcquisitionDiscipline }),
         workspace: { root: input.workspaceRoot, filePolicy: "workspace-write" },
-        ...(input.requiresFileOutput && stepUsesTool(input.step, (name) => name === "computer_write_file")
-          ? { largeWriteDiscipline: LARGE_WRITE_DISCIPLINE }
-          : {}),
         visibleDirectories,
         visibleCommandRoots: visibleDirectories.map((root) => ({
           rootId: root.id,

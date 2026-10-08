@@ -309,6 +309,44 @@ test("a question about a prior artifact remains a direct reply despite an over-e
   }
 });
 
+test("a structured prior-artifact transform overrides an erroneous source-research strategy", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-prior-artifact-transform-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new ErroneousSourceStrategyArtifactTransformModel();
+    const initialPlanner = singleStepTestPlanner();
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          if (task.input === "write prior.html as initial") return await initialPlanner.plan(task);
+          capturedTask = task;
+          throw new Error("captured structured artifact transform");
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "write prior.html as initial", { allowDangerousTools: true });
+    assert.equal((await runs.processArtifacts(owner.user.id, prior.id)).some((artifact) => artifact.path === "prior.html"), true);
+
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "html 需要自包含，不要引用外部内容。", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    }));
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
+    assert.equal(capturedTask?.taskUnderstanding.evidence.need, "none");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("conversation resolver publishes Action-bound model lifecycle telemetry with its non-stream deadline", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -1019,6 +1057,37 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
         : "此前交付已经完成。",
       finishReason: "stop",
       toolCalls: [],
+    };
+  }
+}
+
+class ErroneousSourceStrategyArtifactTransformModel extends ConversationWriteModel {
+  override async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) return await super.complete(request);
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: "erroneous-source-strategy",
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "refine_prior",
+          inputMode: "prior_artifact",
+          targetGoalCandidateId: "goal_candidate_1",
+          targetArtifact: { path: "prior.html" },
+          effectiveGoal: "将 prior.html 修改为不依赖外部资源的自包含文件。",
+          taskIntent: {
+            schema: "agentloop.conversationTaskIntent/v1",
+            operation: "transform_artifact",
+            requiresExecution: true,
+            deliverables: [{ action: "modify", kind: "html", format: "html", surface: "workspace_artifact" }],
+          },
+          evidenceStrategy: "source_grounded",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: ["不引用外部资源"],
+        },
+      }],
     };
   }
 }

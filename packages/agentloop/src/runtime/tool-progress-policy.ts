@@ -301,7 +301,15 @@ export function runtimeStepToolProgressPolicy(
     ...(options.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: options.expectedArtifactFormat }),
     ...(options.artifactDeliveryRequired === true ? { artifactDeliveryRequired: true } : {}),
     workflowEvidenceActions: Object.freeze([...(options.workflowEvidenceActions ?? [])]),
-    autoCompleteFromEvidence: observableRequiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
+    // Receipts authenticate observable effects, but they do not establish
+    // that an artifact's semantic content is the user's finished work. An
+    // artifact-producing Step must therefore return to the model for an
+    // explicit final candidate after Runtime acceptance; this also preserves
+    // multi-write workflows without inferring continuation from prose or a
+    // tool-specific convention. Source-only and generic evidence workflows
+    // may still complete directly from their authenticated receipts.
+    autoCompleteFromEvidence: scope !== "artifact"
+      && observableRequiredEvidenceKinds.some((kind) => AUTO_COMPLETABLE_EVIDENCE_KINDS.has(kind)),
     maxExploratoryPrimarySteps: scope === "source" ? 8 : 3,
     maxExploratoryGraceSteps: scope === "source" ? 3 : 2,
     exploratoryToolNames: uniqueStrings([
@@ -466,11 +474,15 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
-  if (policy.expectedArtifactKind !== undefined || policy.expectedArtifactFormat !== undefined) {
-    // Aggregate receipt kinds are only meaningful for the artifact identity
-    // they describe.  Do not let an accepted HTML wrapper satisfy the
-    // acceptance/openability/format obligations of a code, document, or other
-    // differently typed deliverable that exists in the same Step history.
+  if (
+    policy.expectedArtifactKind !== undefined
+    || policy.expectedArtifactFormat !== undefined
+    || policy.requiredEvidenceKinds.some((kind) => ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS.has(kind))
+  ) {
+    // Aggregate receipt kinds are only meaningful for the current artifact
+    // revision they describe. Do not let an accepted earlier revision (or an
+    // accepted artifact of another type) satisfy the acceptance/openability/
+    // format obligations after a later write has changed the deliverable.
     const matchingAcceptanceKinds = collectMatchingArtifactAcceptanceKinds(
       evidence,
       policy.expectedArtifactKind,
@@ -540,7 +552,13 @@ function collectMatchingArtifactAcceptanceKinds(
   readonly failed: Set<string>;
 } {
   const output = { satisfied: new Set<string>(), caveated: new Set<string>(), failed: new Set<string>() };
-  for (const item of evidence) {
+  const latestArtifactsByPath = new Map(
+    collectKnownArtifacts(evidence)
+      .filter((artifact) => artifactMatchesExpectedTarget(artifact, expectedArtifactKind, expectedArtifactFormat))
+      .map((artifact) => [artifact.path, artifact]),
+  );
+  const evidenceIndexByCallId = new Map(evidence.map((item, index) => [item.toolCallId, index]));
+  for (const [evidenceIndex, item] of evidence.entries()) {
     if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
     for (const record of runtimeEvidenceRecordsFromToolResult(item.result)) {
       const receipt = asRecord(record.artifactReceipt);
@@ -561,6 +579,21 @@ function collectMatchingArtifactAcceptanceKinds(
           ?? stringField(artifactRecord, "kind"),
       };
       if (!artifactMatchesExpectedTarget(artifact, expectedArtifactKind, expectedArtifactFormat)) continue;
+      const current = latestArtifactsByPath.get(path);
+      if (current === undefined) continue;
+      const receiptSha256 = stringField(record, "sha256") ?? stringField(artifactRecord, "sha256");
+      // A verifier result is valid only for the latest known revision at its
+      // path. Prefer content identity; where a legacy/custom receipt lacks a
+      // hash, preserve compatibility only when it was observed after the
+      // current write. This is a neutral version boundary, not an inference
+      // about domain content.
+      if (
+        (current.sha256 !== undefined && receiptSha256 !== undefined && current.sha256 !== receiptSha256)
+        || (
+          (current.sha256 === undefined || receiptSha256 === undefined)
+          && evidenceIndex < (evidenceIndexByCallId.get(current.toolCallId) ?? -1)
+        )
+      ) continue;
       collectEvidenceKindsFromRecord(record, output);
       collectEvidenceKindsFromRecord(receipt, output);
     }
@@ -609,12 +642,16 @@ function collectKnownArtifacts(evidence: readonly AgentLoopToolEvidence[]): Runt
           ?? stringField(asRecord(parsed.output), "path");
         if (path === undefined) continue;
         const previous = byPath.get(path);
+        const observedSha256 = stringField(parsed, "sha256") ?? stringField(artifact, "sha256");
         byPath.set(path, {
           path,
           sourceTool: item.toolName,
           toolCallId: item.toolCallId,
           bytes: numberField(parsed, "bytes") ?? numberField(artifact, "bytes") ?? previous?.bytes,
-          sha256: stringField(parsed, "sha256") ?? stringField(artifact, "sha256") ?? previous?.sha256,
+          // A new materializing action without a digest starts a revision with
+          // unknown identity. Carrying the prior digest forward would make an
+          // earlier acceptance receipt appear to validate the new bytes.
+          sha256: observedSha256 ?? (item.toolName === "verify_artifact_acceptance" ? previous?.sha256 : undefined),
           artifactKind: stringField(parsed, "artifactKind")
             ?? stringField(parsed, "kind")
             ?? stringField(artifact, "artifactKind")

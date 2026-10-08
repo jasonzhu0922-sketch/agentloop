@@ -1080,10 +1080,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       if (!outcome.isError && (acceptanceState?.missingToolEvidenceKinds.length ?? 0) === 0) {
         requestedConvergenceReason = "artifact_acceptance_observed";
 
-        // A successful Runtime acceptance receipt already supplies the
-        // complete evidence boundary. Synthesize and assess the delivery
-        // candidate immediately; there is no reason to spend another model
-        // turn asking it to restate facts the Runtime just authenticated.
+        // Receipt-only workflows may synthesize a completion candidate from
+        // their authenticated evidence. Artifact-producing workflows opt out
+        // below because physical acceptance does not decide semantic delivery.
         if (options.evaluateCandidate !== undefined) {
           const candidate = deriveEvidenceCompletionCandidate({
             policy: options.progressPolicy,
@@ -1112,6 +1111,29 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             });
             if (completion !== undefined) return completion;
           }
+        }
+        if (
+          options.progressPolicy?.autoCompleteFromEvidence !== true
+          && acceptanceState?.workProduct.status === "accepted"
+        ) {
+          // Runtime acceptance establishes only that the current revision is
+          // inspectable. Artifact completion is semantic: return control to
+          // the model with its authoring tools so it can continue a multi-write
+          // draft or explicitly submit a final user-facing candidate. Do not
+          // infer either outcome from tool-call count, prose, or a format
+          // heuristic.
+          requestedConvergenceReason = undefined;
+          contextAssembler.setRuntimeDirective([
+            "<runtime_artifact_delivery_review>",
+            "The current artifact revision passed its available physical acceptance checks. This does not by itself prove that the requested content is complete.",
+            "Compare the current revision with the original task and completed source evidence. If any requested content remains absent, continue authoring or repair the artifact with an authorized Tool.",
+            "Submit a final user-facing completion candidate only after the artifact semantically fulfills the requested deliverable.",
+            "</runtime_artifact_delivery_review>",
+          ].join("\n"));
+          // The automatic verifier is Runtime work, not a model authoring
+          // turn. Keep the follow-up model decision inside this logical Step
+          // so a final write at the primary limit still gets a continuation.
+          step -= 1;
         }
       }
       continue;
@@ -2024,7 +2046,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       evidence: toolEvidence,
     });
     const missingToolEvidenceKindsAfterToolStep = evidenceStateAfterToolStep?.missingToolEvidenceKinds ?? [];
-    const convergenceQueued = convergenceDecision.converge && missingToolEvidenceKindsAfterToolStep.length === 0;
+    // An accepted artifact is physically inspectable, but a caller heuristic
+    // that merely observes the file cannot decide semantic completion. Keep
+    // authoring tools available until the model submits a completion candidate
+    // or the normal hard limit requests its final bounded turn.
+    const semanticArtifactReviewPending = options.progressPolicy?.autoCompleteFromEvidence === false
+      && evidenceStateAfterToolStep?.workProduct.status === "accepted";
+    const convergenceQueued = convergenceDecision.converge
+      && missingToolEvidenceKindsAfterToolStep.length === 0
+      && !semanticArtifactReviewPending;
     if (convergenceDecision.converge && !convergenceQueued) {
       await emit({
         type: "loop.convergence_deferred",
@@ -2032,6 +2062,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           step,
           reason: convergenceDecision.reason ?? "tool_evidence_ready",
           missingToolEvidenceKinds: missingToolEvidenceKindsAfterToolStep,
+          ...(semanticArtifactReviewPending ? { semanticArtifactReviewPending: true } : {}),
           priorToolResultCount: toolEvidence.length,
         },
       });
@@ -3154,7 +3185,7 @@ function lengthTruncationRepairDirective(input: {
     "The previous execution turn spent its output budget before producing an accepted candidate or executable Tool call.",
     "Do not continue long reasoning, restate source material, or draft large artifacts in assistant prose.",
     "Use the current Plan step and canonical evidence to take one bounded forward action.",
-    "If the requested artifact is incomplete, call a file-producing Tool with the next bounded chunk or a purpose-built materialization Tool.",
+    "If the requested artifact is incomplete, call a file-producing Tool with the complete intended content or use a purpose-built materialization Tool; do not publish a partial file as the deliverable.",
     "If the artifact appears complete but lacks acceptance evidence, call the available acceptance or verification Tool.",
     "Use read-only Tools only for one specifically missing fact that is not already available from recent evidence.",
   ].join("\n");

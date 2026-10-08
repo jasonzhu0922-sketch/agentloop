@@ -13,7 +13,6 @@ import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ComputerExecutor, type CommandRootMount } from "../computer/computer-executor.ts";
 import type { PatchFileInput, WriteFileMode } from "../computer/computer-executor.ts";
 import { CONTENT_REFERENCE_WINDOW_CHARACTERS } from "../runtime/content-reference.ts";
-import { LARGE_WRITE_CHUNK_CHARACTERS } from "../runtime/large-write-policy.ts";
 
 const MAX_COMMAND_ARGUMENTS = 200;
 const MAX_COMMAND_ARGUMENT_CHARACTERS = 4_096;
@@ -455,9 +454,9 @@ export function createComputerTools(
       description: [
         "Create, overwrite, or append to a UTF-8 file under the workspace root; requires dangerous-tool consent.",
         "path must be relative to the workspace root; absolute paths are rejected.",
-        "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file, so create the first chunk with mode=create.",
+        "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file and is intended for a later explicit extension, not a mandatory authoring protocol.",
         "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
-        `For content larger than ${LARGE_WRITE_CHUNK_CHARACTERS} characters, you MUST use several smaller calls: create the first chunk with mode="create", wait for its receipt, then append ${LARGE_WRITE_CHUNK_CHARACTERS}-character-or-smaller chunks with mode="append". Never put the whole file in one tool call; split JSON, source, and markup at semantic boundaries.`,
+        "Provide the complete intended content in one call when authoring a new file. Append remains available for intentionally extending an existing file, but the Runtime does not require a create-then-append chunk protocol.",
         "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
         "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),
@@ -519,7 +518,7 @@ export function createComputerTools(
         "Each hunk has a 1-indexed startLine, exact expectedLines copied from that read, and exact replacementLines. Use expectedLines=[] to insert before startLine, replacementLines=[] to delete, and non-empty arrays on both sides to replace.",
         "Line strings are preserved byte-for-byte, including indentation, trailing spaces, and empty strings. Do not include newline characters inside a line string.",
         "All hunks are validated against the same revision before any write; they must be ordered by strictly increasing startLine and must not overlap. Any mismatch rejects the entire patch without changing the file.",
-        "This is a surgical edit: at most 64 hunks and 50000 total expected/replacement characters are accepted. For a larger new file body, use computer_write_file in bounded chunks instead.",
+        "This is a surgical edit: at most 64 hunks and 50000 total expected/replacement characters are accepted. For a larger new file body, use computer_write_file with the complete intended replacement or a purpose-built materialization Tool.",
         "Do not pass a hash or derive a version from any tool-result hash. If the revision is stale, reread the file and use its new revisionId.",
         "The result includes schema agentloop.filePatch/v2, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
       ].join(" "),

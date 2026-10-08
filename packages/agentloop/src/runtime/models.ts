@@ -32,7 +32,7 @@ export interface OpenAICompatibleModelOptions {
   readonly toolChoiceMode?: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement?: RuntimeContextPlacement;
   /** Request a public reasoning summary from Responses-compatible models. */
-  readonly reasoningSummary?: "auto";
+  readonly reasoningSummary?: "auto" | "detailed";
   /** Control reasoning effort for Responses-compatible models. */
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   /** Control thinking for Chat Completions providers that expose DeepSeek's thinking extension. */
@@ -148,7 +148,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly retryDelayMs: number;
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
-  private readonly reasoningSummary?: "auto";
+  private readonly reasoningSummary?: "auto" | "detailed";
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly thinkingMode?: "enabled" | "disabled";
   private readonly thinkingEffort?: "low" | "medium" | "high";
@@ -209,8 +209,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
     if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
       throw new TypeError("runtime context placement must be system or user-envelope");
     }
-    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto") {
-      throw new TypeError("reasoning summary must be auto");
+    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto" && this.reasoningSummary !== "detailed") {
+      throw new TypeError("reasoning summary must be auto or detailed");
     }
     if (
       this.reasoningEffort !== undefined
@@ -647,7 +647,7 @@ export class ResponsesModel implements ModelAdapter {
   private readonly retryDelayMs: number;
   private readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
-  private readonly reasoningSummary?: "auto";
+  private readonly reasoningSummary?: "auto" | "detailed";
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   private readonly onRetry?: ModelRetryReporter;
 
@@ -700,8 +700,8 @@ export class ResponsesModel implements ModelAdapter {
     if (this.runtimeContextPlacement !== "system" && this.runtimeContextPlacement !== "user-envelope") {
       throw new TypeError("runtime context placement must be system or user-envelope");
     }
-    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto") {
-      throw new TypeError("reasoning summary must be auto");
+    if (this.reasoningSummary !== undefined && this.reasoningSummary !== "auto" && this.reasoningSummary !== "detailed") {
+      throw new TypeError("reasoning summary must be auto or detailed");
     }
     if (
       this.reasoningEffort !== undefined

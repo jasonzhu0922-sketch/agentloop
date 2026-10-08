@@ -36,7 +36,7 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly retryDelayMs: number;
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
-  readonly reasoningSummary?: "auto";
+  readonly reasoningSummary?: "auto" | "detailed";
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
   readonly thinkingEffort?: "low" | "medium" | "high";
@@ -56,7 +56,7 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly retryDelayMs: number;
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
-  readonly reasoningSummary?: "auto";
+  readonly reasoningSummary?: "auto" | "detailed";
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
   readonly thinkingEffort?: "low" | "medium" | "high";
@@ -704,9 +704,9 @@ function optionalProtocol(
 function optionalReasoningSummary(
   value: unknown,
   label: string,
-  fallback?: "auto",
-): "auto" | undefined {
+  fallback?: "auto" | "detailed",
+): "auto" | "detailed" | undefined {
   if (value === undefined) return fallback;
-  if (value === "auto") return value;
-  throw new Error(`${label} must be auto`);
+  if (value === "auto" || value === "detailed") return value;
+  throw new Error(`${label} must be auto or detailed`);
 }

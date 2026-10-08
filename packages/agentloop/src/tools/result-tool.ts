@@ -1,5 +1,6 @@
 import { badRequest, forbidden, notFound } from "../shared/errors.ts";
 import type { RuntimeResultRepository } from "../runtime/runtime-result-repository.ts";
+import type { RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 
 export const RESULT_READER_NAME = "read_result";
@@ -22,7 +23,7 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
     description: [
       "Read exact values from a committed Tool result, an assessed dependency Step result, or an explicitly bound completed Run result through one opaque Runtime result ref.",
       "Pass resultId from agentloop.resultRef/v1; never supply a filesystem path or digest.",
-      "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window.",
+      "For JSON results, use a pointer rooted in the persisted result envelope and optional array offset/limit. For agentloop.jsonRead/v1, use the returned resultPointer such as /queries/0/value; the displayed sourcePointer belongs to the original file and must not be passed to read_result. Omit pointer for a bounded serialized character window. If a pointer is accidentally sent for a text result, Runtime returns the exact text window with pointerApplied=false and a repair diagnostic; do not retry another pointer.",
     ].join(" "),
     inputSchema: {
       type: "object",
@@ -74,25 +75,21 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
         kind: record.kind,
         ...(record.producer.toolName === undefined ? {} : { toolName: record.producer.toolName }),
         ...(record.payload.resultSchema === undefined ? {} : { resultSchema: record.payload.resultSchema }),
+        contentFormat: record.payload.contentFormat,
         characters: record.payload.characters,
         bytes: record.payload.bytes,
       };
       if (input.pointer === undefined) {
-        if (input.characterOffset > record.payload.content.length) throw badRequest("characterOffset exceeds Runtime result length");
-        const content = record.payload.content.slice(input.characterOffset, input.characterOffset + input.characterLimit);
+        return readTextWindow(record.payload.content, record.ref, source, input.characterOffset, input.characterLimit);
+      }
+      if (record.payload.contentFormat !== "json") {
         return {
-          schema: "agentloop.resultRead/v1",
-          sourceResultRef: record.ref,
-          source,
-          characterOffset: input.characterOffset,
-          returnedCharacters: content.length,
-          nextCharacterOffset: input.characterOffset + content.length < record.payload.content.length
-            ? input.characterOffset + content.length
-            : null,
-          content,
+          ...readTextWindow(record.payload.content, record.ref, source, input.characterOffset, input.characterLimit),
+          pointer: input.pointer,
+          pointerApplied: false,
+          repair: "Text Runtime results do not have JSON pointer selectors. The pointer was ignored; use characterOffset/characterLimit or omit pointer on the next read.",
         };
       }
-      if (record.payload.contentFormat !== "json") throw badRequest("pointer requires a JSON Runtime result");
       const document = JSON.parse(record.payload.content) as unknown;
       let selected: unknown;
       try {
@@ -129,6 +126,28 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
         value,
       };
     },
+  };
+}
+
+function readTextWindow(
+  content: string,
+  sourceResultRef: RuntimeResultRef,
+  source: Readonly<Record<string, unknown>>,
+  characterOffset: number,
+  characterLimit: number,
+) {
+  if (characterOffset > content.length) throw badRequest("characterOffset exceeds Runtime result length");
+  const window = content.slice(characterOffset, characterOffset + characterLimit);
+  return {
+    schema: "agentloop.resultRead/v1" as const,
+    sourceResultRef,
+    source,
+    characterOffset,
+    returnedCharacters: window.length,
+    nextCharacterOffset: characterOffset + window.length < content.length
+      ? characterOffset + window.length
+      : null,
+    content: window,
   };
 }
 

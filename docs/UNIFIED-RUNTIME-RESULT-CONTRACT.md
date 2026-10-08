@@ -218,7 +218,7 @@ read_result({
 })
 ```
 
-JSON Result 支持 JSON Pointer 与数组窗口；文本或完整序列化内容支持字符窗口。单次读取有固定上限，防止大结果重新淹没上下文。
+JSON Result 支持 JSON Pointer 与数组窗口；文本或完整序列化内容支持字符窗口。单次读取有固定上限，防止大结果重新淹没上下文。若调用方误将 pointer 传给文本 Result，Runtime 返回同一 Result 的字符窗口并标记 `pointerApplied=false`，同时给出修复提示；不会把文本伪装成 JSON，也不会为读取创建新的 Result 身份。
 
 ## 6. 完整性与恢复
 

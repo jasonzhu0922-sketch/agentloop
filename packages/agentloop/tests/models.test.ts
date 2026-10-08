@@ -1837,7 +1837,7 @@ test("Responses adapter requests and streams the provider reasoning summary", as
       model: "reasoning-model",
       contextWindowTokens: 128_000,
       maxOutputTokens: 8_192,
-      reasoningSummary: "auto",
+      reasoningSummary: "detailed",
     });
     const deltas: string[] = [];
     const result = await model.streamComplete!({
@@ -1850,7 +1850,7 @@ test("Responses adapter requests and streams the provider reasoning summary", as
       if (event.type === "reasoning_delta") deltas.push(event.text);
     });
 
-    assert.deepEqual(capturedBody?.reasoning, { summary: "auto" });
+    assert.deepEqual(capturedBody?.reasoning, { summary: "detailed" });
     assert.deepEqual(deltas, ["先检查输入", "，再生成结果。"]);
     assert.equal(result.reasoningContent, "先检查输入，再生成结果。");
   } finally {
