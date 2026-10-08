@@ -316,6 +316,58 @@ test("the provider registry passes a Responses reasoning effort only to the sele
   }
 });
 
+test("the provider registry sends none reasoning effort for a Chat Completions tool model", async () => {
+  const registry = LlmProviderRegistry.fromEnvironment({
+    LLM_PROVIDERS_JSON: JSON.stringify({
+      defaultProvider: "gateway",
+      defaultModelKey: "sol-chat",
+      providers: {
+        gateway: {
+          kind: "openai-compatible",
+          baseUrl: "https://models.example.test/v1",
+          apiKeyEnv: "GATEWAY_API_KEY",
+          defaultModel: "gpt-5.6-sol",
+          protocol: "chat-completions",
+        },
+      },
+      models: {
+        "sol-chat": {
+          providerKey: "gateway",
+          providerModel: "gpt-5.6-sol",
+          reasoningEffort: "none",
+        },
+      },
+    }),
+    GATEWAY_API_KEY: "gateway-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "OK" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    await registry.create().complete({
+      runId: "chat-reasoning-registry",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Reply only: OK" }],
+      tools: [{
+        name: "load_skill",
+        description: "Load a skill",
+        inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+      }],
+    });
+    assert.equal(capturedBody?.reasoning_effort, "none");
+    assert.equal(capturedBody?.thinking, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("the provider registry routes GPT5.6 through the Responses protocol", async () => {
   const registry = LlmProviderRegistry.fromEnvironment({
     LLM_PROVIDERS_JSON: JSON.stringify({
@@ -343,6 +395,7 @@ test("the provider registry routes GPT5.6 through the Responses protocol", async
           displayName: "GPT5.6",
           toolChoiceMode: "constrained-as-auto",
           reasoningSummary: "detailed",
+          reasoningEncryptedContent: true,
           protocol: "responses",
         },
       },
@@ -396,6 +449,7 @@ test("the provider registry routes GPT5.6 through the Responses protocol", async
         }],
         tool_choice: "auto",
         reasoning: { summary: "detailed" },
+        include: ["reasoning.encrypted_content"],
         max_output_tokens: 32_768,
         stream: true,
       },

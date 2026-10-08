@@ -2,7 +2,12 @@ import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import { AppError } from "../shared/errors.ts";
 import type { ModelAdapter, ModelRetryReporter } from "./contracts.ts";
-import { OpenAICompatibleModel, ResponsesModel } from "./models.ts";
+import {
+  InMemoryResponsesReasoningContinuationStore,
+  OpenAICompatibleModel,
+  ResponsesModel,
+  type ResponsesReasoningContinuationStore,
+} from "./models.ts";
 import type { RuntimeContextPlacement } from "./prompt-protocol.ts";
 
 const PROVIDER_KEY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -37,6 +42,7 @@ interface OpenAICompatibleProviderConfig extends LlmProviderSummary {
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly reasoningSummary?: "auto" | "detailed";
+  readonly reasoningEncryptedContent: boolean;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
   readonly thinkingEffort?: "low" | "medium" | "high";
@@ -57,6 +63,7 @@ interface OpenAICompatibleModelConfig extends LlmModelSummary {
   readonly toolChoiceMode: "native" | "constrained-as-auto" | "named-as-required";
   readonly runtimeContextPlacement: RuntimeContextPlacement;
   readonly reasoningSummary?: "auto" | "detailed";
+  readonly reasoningEncryptedContent: boolean;
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   readonly thinkingMode?: "enabled" | "disabled";
   readonly thinkingEffort?: "low" | "medium" | "high";
@@ -87,6 +94,7 @@ export class LlmProviderRegistry {
   private readonly providers: ReadonlyMap<string, OpenAICompatibleProviderConfig>;
   private readonly models: ReadonlyMap<string, OpenAICompatibleModelConfig>;
   private readonly environment: Readonly<Record<string, string | undefined>>;
+  private readonly reasoningContinuationStore: ResponsesReasoningContinuationStore;
 
   private constructor(
     parsed: ParsedProviderDocument,
@@ -97,6 +105,7 @@ export class LlmProviderRegistry {
     this.providers = new Map(parsed.providers.map((provider) => [provider.key, provider]));
     this.models = new Map(parsed.models.map((model) => [model.key, model]));
     this.environment = environment;
+    this.reasoningContinuationStore = new InMemoryResponsesReasoningContinuationStore();
   }
 
   static fromEnvironment(
@@ -194,6 +203,11 @@ export class LlmProviderRegistry {
       toolChoiceMode: model.toolChoiceMode,
       runtimeContextPlacement: model.runtimeContextPlacement,
       ...(model.reasoningSummary === undefined ? {} : { reasoningSummary: model.reasoningSummary }),
+      ...(model.reasoningEncryptedContent ? {
+        reasoningEncryptedContent: true,
+        reasoningContinuationStore: this.reasoningContinuationStore,
+        reasoningContinuationScope: model.key,
+      } : {}),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
       ...(model.thinkingMode === undefined ? {} : { thinkingMode: model.thinkingMode }),
       ...(model.thinkingEffort === undefined ? {} : { thinkingEffort: model.thinkingEffort }),
@@ -264,6 +278,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
       "toolChoiceMode",
       "runtimeContextPlacement",
       "reasoningSummary",
+      "reasoningEncryptedContent",
       "reasoningEffort",
       "thinkingMode",
       "thinkingEffort",
@@ -321,6 +336,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     `${label}.runtimeContextPlacement`,
   );
   const reasoningSummary = optionalReasoningSummary(config.reasoningSummary, `${label}.reasoningSummary`);
+  const reasoningEncryptedContent = optionalBoolean(config.reasoningEncryptedContent, false, `${label}.reasoningEncryptedContent`);
   const reasoningEffort = optionalReasoningEffort(config.reasoningEffort, `${label}.reasoningEffort`);
   const thinkingMode = optionalThinkingMode(config.thinkingMode, `${label}.thinkingMode`);
   const thinkingEffort = optionalThinkingEffort(config.thinkingEffort, `${label}.thinkingEffort`);
@@ -340,8 +356,8 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
   if (planningThinkingMode !== undefined && protocol !== "chat-completions") {
     throw new Error(`${label}.planningThinkingMode is supported only with chat-completions`);
   }
-  if (reasoningEffort !== undefined && protocol !== "responses") {
-    throw new Error(`${label}.reasoningEffort is supported only with responses`);
+  if (reasoningEffort !== undefined && protocol !== "responses" && reasoningEffort !== "none") {
+    throw new Error(`${label}.reasoningEffort for chat-completions must be none; low, medium, and high require responses`);
   }
   return {
     key: providerKey,
@@ -357,6 +373,7 @@ function parseProvider(key: string, value: unknown, documentLabel: string): Open
     toolChoiceMode,
     runtimeContextPlacement,
     ...(reasoningSummary === undefined ? {} : { reasoningSummary }),
+    reasoningEncryptedContent,
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
@@ -402,6 +419,7 @@ function parseModel(
       "toolChoiceMode",
       "runtimeContextPlacement",
       "reasoningSummary",
+      "reasoningEncryptedContent",
       "reasoningEffort",
       "thinkingMode",
       "thinkingEffort",
@@ -440,6 +458,11 @@ function parseModel(
     `${label}.reasoningEffort`,
     provider.reasoningEffort,
   );
+  const reasoningEncryptedContent = optionalBoolean(
+    config.reasoningEncryptedContent,
+    provider.reasoningEncryptedContent,
+    `${label}.reasoningEncryptedContent`,
+  );
   const reasoningVisibility = optionalReasoningVisibility(
     config.reasoningVisibility,
     `${label}.reasoningVisibility`,
@@ -462,8 +485,8 @@ function parseModel(
   if (thinkingEffort !== undefined && thinkingMode === "disabled") {
     throw new Error(`${label}.thinkingEffort cannot be set when thinkingMode is disabled`);
   }
-  if (reasoningEffort !== undefined && protocol !== "responses") {
-    throw new Error(`${label}.reasoningEffort is supported only with responses`);
+  if (reasoningEffort !== undefined && protocol !== "responses" && reasoningEffort !== "none") {
+    throw new Error(`${label}.reasoningEffort for chat-completions must be none; low, medium, and high require responses`);
   }
   return {
     key: modelKey,
@@ -495,6 +518,7 @@ function parseModel(
       `${label}.reasoningSummary`,
       provider.reasoningSummary,
     ),
+    reasoningEncryptedContent,
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     ...(thinkingMode === undefined ? {} : { thinkingMode }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
@@ -524,6 +548,7 @@ function legacyModelsFromProviders(
     toolChoiceMode: provider.toolChoiceMode,
     runtimeContextPlacement: provider.runtimeContextPlacement,
     ...(provider.reasoningSummary === undefined ? {} : { reasoningSummary: provider.reasoningSummary }),
+    reasoningEncryptedContent: provider.reasoningEncryptedContent,
     ...(provider.reasoningEffort === undefined ? {} : { reasoningEffort: provider.reasoningEffort }),
     ...(provider.thinkingMode === undefined ? {} : { thinkingMode: provider.thinkingMode }),
     ...(provider.thinkingEffort === undefined ? {} : { thinkingEffort: provider.thinkingEffort }),
@@ -628,6 +653,12 @@ function optionalRuntimeContextPlacement(
   if (value === undefined) return fallback;
   if (value === "system" || value === "user-envelope") return value;
   throw new Error(`${label} must be system or user-envelope`);
+}
+
+function optionalBoolean(value: unknown, fallback: boolean, label: string): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  throw new Error(`${label} must be a boolean`);
 }
 
 function optionalThinkingMode(

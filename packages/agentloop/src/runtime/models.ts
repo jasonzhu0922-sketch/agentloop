@@ -33,7 +33,13 @@ export interface OpenAICompatibleModelOptions {
   readonly runtimeContextPlacement?: RuntimeContextPlacement;
   /** Request a public reasoning summary from Responses-compatible models. */
   readonly reasoningSummary?: "auto" | "detailed";
-  /** Control reasoning effort for Responses-compatible models. */
+  /** Keep provider-encrypted reasoning continuation in the Responses adapter only. */
+  readonly reasoningEncryptedContent?: boolean;
+  /** Internal registry-owned store; never part of the Runtime model contract. */
+  readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
+  /** Internal profile scope for the registry-owned store. */
+  readonly reasoningContinuationScope?: string;
+  /** Control Responses reasoning, or disable reasoning for tool-calling Chat Completions. */
   readonly reasoningEffort?: "none" | "low" | "medium" | "high";
   /** Control thinking for Chat Completions providers that expose DeepSeek's thinking extension. */
   readonly thinkingMode?: "enabled" | "disabled";
@@ -47,6 +53,41 @@ export interface OpenAICompatibleModelOptions {
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   /** Optional server-authored reporter invoked before each retry attempt. */
   readonly onRetry?: ModelRetryReporter;
+}
+
+export interface ResponsesReasoningContinuationStore {
+  get(scope: string, runId: string): readonly Record<string, unknown>[];
+  set(scope: string, runId: string, items: readonly Record<string, unknown>[]): void;
+}
+
+export class InMemoryResponsesReasoningContinuationStore implements ResponsesReasoningContinuationStore {
+  private readonly values = new Map<string, { readonly items: readonly Record<string, unknown>[]; readonly expiresAt: number }>();
+  private readonly maxEntries = 2_048;
+  private readonly ttlMs = 24 * 60 * 60 * 1_000;
+
+  get(scope: string, runId: string): readonly Record<string, unknown>[] {
+    this.prune();
+    return this.values.get(`${scope}\u0000${runId}`)?.items ?? [];
+  }
+
+  set(scope: string, runId: string, items: readonly Record<string, unknown>[]): void {
+    const key = `${scope}\u0000${runId}`;
+    this.prune();
+    if (items.length === 0) this.values.delete(key);
+    else {
+      if (!this.values.has(key) && this.values.size >= this.maxEntries) {
+        const oldest = this.values.keys().next().value;
+        if (oldest !== undefined) this.values.delete(oldest);
+      }
+      this.values.delete(key);
+      this.values.set(key, { items: items.map((item) => structuredClone(item)), expiresAt: Date.now() + this.ttlMs });
+    }
+  }
+
+  private prune(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.values) if (entry.expiresAt <= now) this.values.delete(key);
+  }
 }
 
 interface CompatibleResponse {
@@ -220,6 +261,9 @@ export class OpenAICompatibleModel implements ModelAdapter {
       && this.reasoningEffort !== "high"
     ) {
       throw new TypeError("reasoning effort must be none, low, medium, or high");
+    }
+    if (this.reasoningEffort !== undefined && this.reasoningEffort !== "none") {
+      throw new TypeError("Chat Completions reasoning effort must be none; low, medium, and high require Responses");
     }
     if (this.thinkingMode !== undefined && this.thinkingMode !== "enabled" && this.thinkingMode !== "disabled") {
       throw new TypeError("thinking mode must be enabled or disabled");
@@ -462,6 +506,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
             ...(thinkingMode === undefined ? {} : { thinking: { type: thinkingMode } }),
             ...(this.thinkingEffort === undefined ? {} : { reasoning_effort: this.thinkingEffort }),
           }),
+      ...(this.reasoningEffort === undefined ? {} : { reasoning_effort: this.reasoningEffort }),
       ...(this.chatTemplateKwargs === undefined ? {} : { chat_template_kwargs: this.chatTemplateKwargs }),
       max_tokens: Math.min(invocation.maxOutputTokens ?? this.limits.maxOutputTokens, this.limits.maxOutputTokens),
       ...(stream ? { stream: true } : {}),
@@ -494,7 +539,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
     let buffer = "";
     let content = "";
     let reasoningContent = "";
-    const toolCallAccumulator = new Map<number, { id?: string; name?: string; arguments: string }>();
+    const toolCallAccumulator = new Map<number, {
+      id?: string;
+      name?: string;
+      arguments: string;
+      argumentValue?: unknown;
+      hasArgumentValue: boolean;
+    }>();
     let finishReason: string | undefined;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
@@ -534,15 +585,23 @@ export class OpenAICompatibleModel implements ModelAdapter {
       }
       for (const call of choice?.delta?.tool_calls ?? []) {
         const index = typeof call.index === "number" ? call.index : toolCallAccumulator.size;
-        const accumulated = toolCallAccumulator.get(index) ?? { arguments: "" };
+        const accumulated = toolCallAccumulator.get(index) ?? { arguments: "", hasArgumentValue: false };
         if (typeof call.id === "string" && call.id.length > 0) accumulated.id = call.id;
         const nameDelta = call.function?.name;
         if (typeof nameDelta === "string" && nameDelta.length > 0) accumulated.name = nameDelta;
         const rawArgumentsDelta = call.function?.arguments;
-        const argumentsDelta = typeof rawArgumentsDelta === "string" ? rawArgumentsDelta : "";
+        const argumentsDelta = streamingToolArgumentsDelta(rawArgumentsDelta);
         if (argumentsDelta.length > 0) {
           budget.addOutputBytes(argumentsDelta, "toolCall.arguments");
-          accumulated.arguments += argumentsDelta;
+          if (typeof rawArgumentsDelta === "string") {
+            // Standard Chat Completions streams JSON arguments as fragments.
+            // Some compatible gateways instead send the complete JSON value;
+            // retain that value rather than silently turning it into `{}`.
+            if (!accumulated.hasArgumentValue) accumulated.arguments += rawArgumentsDelta;
+          } else {
+            accumulated.argumentValue = rawArgumentsDelta;
+            accumulated.hasArgumentValue = true;
+          }
         }
         toolCallAccumulator.set(index, accumulated);
         await emit({
@@ -595,7 +654,12 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const readyCalls: Array<{ index: number; call: ModelToolCall }> = [];
     for (const [index, accumulated] of ordered) {
       if (accumulated.id === undefined || accumulated.name === undefined) continue;
-      const call = parseAccumulatedToolCall(accumulated.id, accumulated.name, accumulated.arguments);
+      const call = parseAccumulatedToolCall(
+        accumulated.id,
+        accumulated.name,
+        accumulated.arguments,
+        accumulated.hasArgumentValue ? accumulated.argumentValue : undefined,
+      );
       toolCalls.push(call);
       readyCalls.push({ index, call });
     }
@@ -628,7 +692,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
 }
 
 /**
- * OpenAI Responses API adapter (stateless). DeepSeek exposes this protocol at
+ * OpenAI Responses API adapter. Provider-encrypted continuation is optional,
+ * in-memory, and scoped by the registry to one model profile and Run. DeepSeek exposes this protocol at
  * the root base URL (https://api.deepseek.com, no /v1) for Codex compatibility.
  * Its streaming events carry per-item completion signals
  * (`function_call_arguments.done`), which lets the Runtime dispatch a tool the
@@ -649,6 +714,9 @@ export class ResponsesModel implements ModelAdapter {
   private readonly runtimeContextPlacement: RuntimeContextPlacement;
   private readonly reasoningSummary?: "auto" | "detailed";
   private readonly reasoningEffort?: "none" | "low" | "medium" | "high";
+  private readonly reasoningEncryptedContent: boolean;
+  private readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
+  private readonly reasoningContinuationScope: string;
   private readonly onRetry?: ModelRetryReporter;
 
   constructor(options: OpenAICompatibleModelOptions) {
@@ -683,6 +751,12 @@ export class ResponsesModel implements ModelAdapter {
     this.runtimeContextPlacement = options.runtimeContextPlacement ?? "system";
     this.reasoningSummary = options.reasoningSummary;
     this.reasoningEffort = options.reasoningEffort;
+    this.reasoningEncryptedContent = options.reasoningEncryptedContent ?? false;
+    this.reasoningContinuationStore = options.reasoningContinuationStore;
+    this.reasoningContinuationScope = options.reasoningContinuationScope ?? this.model;
+    if (this.reasoningEncryptedContent && this.reasoningContinuationStore === undefined) {
+      throw new TypeError("Responses encrypted reasoning requires an adapter-owned continuation store");
+    }
     this.onRetry = options.onRetry;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
@@ -782,9 +856,10 @@ export class ResponsesModel implements ModelAdapter {
             assertResponsesPayload(payload);
             const result = parseResponsesResponse(payload);
             budget.assertResponse(result);
+            this.rememberReasoningContinuation(invocation.runId, payload as Record<string, unknown>);
             return result;
           }
-          return await this.consumeStream(response, sink, requestTimeout.recordActivity, budget);
+          return await this.consumeStream(response, invocation.runId, sink, requestTimeout.recordActivity, budget);
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
@@ -811,9 +886,16 @@ export class ResponsesModel implements ModelAdapter {
     const encoded = encodeOpenAICompatiblePrompt(invocation, this.runtimeContextPlacement);
     const system = encoded.messages.find((message) => message.role === "system");
     const instructions = typeof system?.content === "string" ? system.content : "";
-    const encodedInput = encoded.messages
-      .filter((message) => message.role !== "system")
-      .flatMap((message) => toResponsesInputItems(message));
+    const continuation = this.reasoningEncryptedContent
+      ? this.reasoningContinuationStore?.get(this.reasoningContinuationScope, invocation.runId) ?? []
+      : [];
+    const inputMessages = encoded.messages.filter((message) => message.role !== "system");
+    const lastUserMessageIndex = inputMessages.findLastIndex((message) => message.role === "user");
+    const encodedInput = inputMessages.flatMap((message, index) => [
+      ...(continuation.length > 0 && index === lastUserMessageIndex ? continuation : []),
+      ...toResponsesInputItems(message),
+    ]);
+    if (continuation.length > 0 && lastUserMessageIndex < 0) encodedInput.push(...continuation);
     const input = encodedInput.length === 0 ? [responsesEmptyInputSentinel()] : encodedInput;
     const providerTools = invocation.tools.map((tool) => ({
       type: "function",
@@ -839,6 +921,7 @@ export class ResponsesModel implements ModelAdapter {
               ...(this.reasoningEffort === undefined ? {} : { effort: this.reasoningEffort }),
             },
           }),
+      ...(this.reasoningEncryptedContent ? { include: ["reasoning.encrypted_content"] } : {}),
       max_output_tokens: Math.min(
         invocation.maxOutputTokens ?? this.limits.maxOutputTokens,
         this.limits.maxOutputTokens,
@@ -862,6 +945,7 @@ export class ResponsesModel implements ModelAdapter {
 
   private async consumeStream(
     response: Response,
+    runId: string,
     sink: ModelStreamSink,
     recordActivity: () => void = () => undefined,
     budget: ModelResponseBudget,
@@ -1027,6 +1111,7 @@ export class ResponsesModel implements ModelAdapter {
       ? undefined
       : parseResponsesResponse(finalResponse, content);
     if (final !== undefined) budget.assertResponse(final);
+    this.rememberReasoningContinuation(runId, finalResponse);
     const usage = finalResponse?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
     if (usage?.input_tokens !== undefined) inputTokens = usage.input_tokens;
     if (usage?.output_tokens !== undefined) outputTokens = usage.output_tokens;
@@ -1068,6 +1153,24 @@ export class ResponsesModel implements ModelAdapter {
     };
     budget.assertResponse(result);
     return result;
+  }
+
+  private rememberReasoningContinuation(runId: string, response: Record<string, unknown> | undefined): void {
+    if (!this.reasoningEncryptedContent || this.reasoningContinuationStore === undefined) return;
+    const output = Array.isArray(response?.output) ? response.output : [];
+    const items = output.filter((item): item is Record<string, unknown> =>
+      item !== null
+      && typeof item === "object"
+      && !Array.isArray(item)
+      && (item as Record<string, unknown>).type === "reasoning"
+      && typeof (item as Record<string, unknown>).encrypted_content === "string"
+      && ((item as Record<string, unknown>).encrypted_content as string).length > 0,
+    );
+    const bytes = items.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0);
+    if (bytes > 256 * 1024) {
+      throw new AppError("MODEL_ERROR", "Responses reasoning continuation exceeded the configured size limit", 502);
+    }
+    this.reasoningContinuationStore.set(this.reasoningContinuationScope, runId, items);
   }
 }
 
@@ -1693,8 +1796,22 @@ function parseToolCall(
   return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments) };
 }
 
-function parseAccumulatedToolCall(id: string, name: string, rawArguments: string): ModelToolCall {
-  return { id, name, arguments: parseToolArguments(rawArguments === "" ? "{}" : rawArguments) };
+function parseAccumulatedToolCall(id: string, name: string, rawArguments: string, rawArgumentValue?: unknown): ModelToolCall {
+  return {
+    id,
+    name,
+    arguments: rawArgumentValue === undefined ? parseToolArguments(rawArguments === "" ? "{}" : rawArguments) : parseToolArguments(rawArgumentValue),
+  };
+}
+
+function streamingToolArgumentsDelta(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 function parseToolArguments(rawArguments: unknown): unknown {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
+import { InMemoryResponsesReasoningContinuationStore, OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
 import { completeWithStreaming } from "../src/runtime/model-streaming.ts";
 
 test("OpenAI-compatible adapter maps server-configured requests and tool calls", async () => {
@@ -201,6 +201,47 @@ test("OpenAI-compatible adapter sends configured DeepSeek thinking effort", asyn
     await model.complete({ runId: "thinking-low", systemPrompt: "System", phase: "execution", messages: [], tools: [] });
     assert.deepEqual(capturedBody?.thinking, { type: "enabled" });
     assert.equal(capturedBody?.reasoning_effort, "low");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible adapter sends none reasoning effort for Chat Completions tool calls", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: {
+      content: null,
+      tool_calls: [{ id: "call-1", type: "function", function: { name: "load_skill", arguments: JSON.stringify({ name: "pdf" }) } }],
+    } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6-sol",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      reasoningEffort: "none",
+    });
+    const response = await model.complete({
+      runId: "chat-reasoning-none",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Use the tool" }],
+      tools: [{
+        name: "load_skill",
+        description: "Load a skill",
+        inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+      }],
+    });
+    assert.equal(capturedBody?.reasoning_effort, "none");
+    assert.equal(capturedBody?.thinking, undefined);
+    assert.equal(response.toolCalls[0]?.arguments && (response.toolCalls[0].arguments as { name: string }).name, "pdf");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1278,6 +1319,54 @@ test("OpenAI-compatible streaming adapter normalizes double-encoded object tool 
   }
 });
 
+test("OpenAI-compatible streaming adapter preserves non-string JSON tool arguments", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call-1",
+            function: { name: "load_skill", arguments: { name: "pdf" } },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ]);
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "gpt-5.6-sol",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    const readyCalls: Array<{ name: string; arguments: unknown }> = [];
+    const result = await model.streamComplete!({
+      runId: "run-stream-object-tool-arguments",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [{ role: "user", content: "Load the PDF skill" }],
+      tools: [{
+        name: "load_skill",
+        description: "Load a skill",
+        inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+      }],
+      toolChoice: { name: "load_skill" },
+    }, async (event) => {
+      if (event.type === "tool_call_ready") readyCalls.push({ name: event.name, arguments: event.arguments });
+    });
+
+    assert.deepEqual(result.toolCalls[0], { id: "call-1", name: "load_skill", arguments: { name: "pdf" } });
+    assert.deepEqual(readyCalls, [{ name: "load_skill", arguments: { name: "pdf" } }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("OpenAI-compatible streaming adapter exposes malformed tool arguments for runtime contract repair", async () => {
   const originalFetch = globalThis.fetch;
   const malformedArguments = [
@@ -1885,6 +1974,56 @@ test("Responses adapter can disable reasoning without requesting a summary", asy
       tools: [],
     }, async () => undefined);
     assert.deepEqual(capturedBody?.reasoning, { effort: "none" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses encrypted reasoning continuation stays private and scoped to one Run", async () => {
+  const originalFetch = globalThis.fetch;
+  const capturedBodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    capturedBodies.push(body);
+    const responseIndex = capturedBodies.length;
+    return sseResponse([
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          status: "completed",
+          output: [
+            { type: "reasoning", id: `rs_${responseIndex}`, encrypted_content: `opaque_${responseIndex}` },
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] },
+          ],
+        },
+      })}\n\n`,
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test/v1",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      reasoningEncryptedContent: true,
+      reasoningContinuationStore: new InMemoryResponsesReasoningContinuationStore(),
+      reasoningContinuationScope: "profile-a",
+    });
+    const invocation = (runId: string) => ({
+      runId,
+      systemPrompt: "System instructions",
+      phase: "execution" as const,
+      messages: [{ role: "user" as const, content: "Check" }],
+      tools: [],
+    });
+    await model.streamComplete!(invocation("run-a"), async () => undefined);
+    await model.streamComplete!(invocation("run-a"), async () => undefined);
+    await model.streamComplete!(invocation("run-b"), async () => undefined);
+
+    assert.deepEqual(capturedBodies[0]?.include, ["reasoning.encrypted_content"]);
+    assert.equal((capturedBodies[1]?.input as Array<Record<string, unknown>>).some((item) => item.encrypted_content === "opaque_1"), true);
+    assert.equal((capturedBodies[2]?.input as Array<Record<string, unknown>>).some((item) => item.encrypted_content === "opaque_1"), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
