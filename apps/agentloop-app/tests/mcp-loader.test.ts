@@ -3,13 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createCapabilityGrant } from "@zhujun/agentloop";
 import {
+  createCapabilityGrant,
+  loadMcpToolsFromConfig,
   loadMcpToolsFromConfigWithFactory,
   loadOptionalMcpToolsFromConfigFile,
   parseMcpServersConfig,
   type McpSessionFactory,
-} from "../src/mcp/mcp-loader.ts";
+} from "@zhujun/agentloop";
 
 test("MCP registration file parses server auth and materializes runtime tools", async () => {
   const config = parseMcpServersConfig({
@@ -87,6 +88,41 @@ test("MCP registration file parses server auth and materializes runtime tools", 
   );
   assert.equal((result as { readonly text?: string }).text, "ok");
   assert.equal((result as { readonly evidenceReceipt?: { readonly schema?: string } }).evidenceReceipt?.schema, "agentloop.toolEvidenceReceipt/v1");
+});
+
+test("multiple MCP servers retain separate sources and tool namespaces", async () => {
+  const config = parseMcpServersConfig({
+    servers: [
+      { key: "amap-maps", transport: "http", url: "https://mcp.amap.com/mcp" },
+      { key: "weather", transport: "http", url: "https://weather.example.test/mcp" },
+    ],
+  });
+  const integration = await loadMcpToolsFromConfigWithFactory(config, {
+    create: async (server) => ({
+      request: async (method) => method === "tools/list"
+        ? { tools: [{ name: "lookup", inputSchema: { type: "object" } }] }
+        : {},
+      close: async () => undefined,
+    }),
+  });
+  assert.deepEqual(integration.loadedServers.map((server) => server.key), ["amap-maps", "weather"]);
+  assert.deepEqual(integration.tools.map((tool) => tool.name), ["mcp_amap_maps_lookup", "mcp_weather_lookup"]);
+  assert.deepEqual(integration.tools.map((tool) => tool.source?.id), ["amap-maps", "weather"]);
+});
+
+test("MCP server keys are unique ToolSource identities", () => {
+  assert.throws(() => parseMcpServersConfig({
+    servers: [
+      { key: "duplicate", transport: "http", url: "https://first.example.test/mcp" },
+      { key: "duplicate", transport: "http", url: "https://second.example.test/mcp" },
+    ],
+  }), /duplicate key duplicate/);
+  assert.throws(() => parseMcpServersConfig({
+    servers: [
+      { key: "weather-api", transport: "http", url: "https://first.example.test/mcp" },
+      { key: "weather_api", transport: "http", url: "https://second.example.test/mcp" },
+    ],
+  }), /duplicate normalized key weather_api/);
 });
 
 test("structured MCP tool results promote source_summary evidence receipts", async () => {
@@ -213,6 +249,38 @@ test("notifications initialized can be fire-and-forget", async () => {
   const integration = await loadMcpToolsFromConfigWithFactory(config, factory);
   assert.deepEqual(seenMethods, ["tools/list"]);
   assert.equal(integration.failedServers.length, 0);
+});
+
+test("MCP credentials resolve from the explicit deployment environment", async () => {
+  let receivedKey: string | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    receivedKey = new URL(String(input)).searchParams.get("key") ?? undefined;
+    const method = new Headers(init?.headers).get("mcp-method");
+    if (method === "notifications/initialized") return new Response(null, { status: 204 });
+    if (method === "tools/list") {
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, result: { tools: [] } }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const integration = await loadMcpToolsFromConfig(parseMcpServersConfig({
+      servers: [{
+        key: "amap-maps",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "query", name: "key", secretEnv: "AMAP_MCP_KEY" },
+      }],
+    }), { environment: { AMAP_MCP_KEY: "device-owned-key" } });
+    assert.equal(integration.failedServers.length, 0);
+    assert.equal(receivedKey, "device-owned-key");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 async function withWorkingDirectory<T>(dir: string, callback: (dir: string) => Promise<T>): Promise<T> {

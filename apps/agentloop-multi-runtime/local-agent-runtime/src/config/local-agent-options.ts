@@ -15,6 +15,7 @@ export interface LocalAgentOptions {
   readonly skillDirectoriesConfigPath: string;
   readonly stepExecutionStrategyConfigPath: string;
   readonly practiceProfileConfigPath?: string;
+  readonly mcpServersConfigPath?: string;
   readonly computerCommandEnvironment?: Readonly<Record<string, string>>;
   readonly integrationEnvironment?: Readonly<Record<string, string | undefined>>;
   readonly webOrigin?: string;

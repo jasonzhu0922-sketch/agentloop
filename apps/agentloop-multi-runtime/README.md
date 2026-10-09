@@ -12,7 +12,7 @@ Browser Web → Router API / 控制面 → Runtime Host A | Runtime Host B | Run
 - `router` 承载会话入口、附件 broker 与 Assignment，选择一个 Host 并读取其 Run 状态。
 - 每个 `runtime-host` 加载 `@zhujun/agentloop`，在共享状态库中完成一个完整 Run；所有 Host 共享一个任务工作区根目录。
 
-Router 还可以作为应用集成与鉴权钩子的承载面：Host 通过受信任的 Router Tool Adapter 调用企业 API、MCP 或 Plugin，Router 据 Assignment/Run 上下文注入短期凭据并审计。工具调用的 Step 授权、Receipt、Evidence、Assessment 和 Outcome 仍留在 Host 的 AgentLoop 内核路径。
+MCP 是 Host-owned 的部署集成：每个 Runtime Host 启动时从自己的 `mcp-servers.json` 发现工具，并在本 Host 的 `RunService` 中完成 Step 授权、Receipt、Evidence、Assessment 和 Outcome。Router 只选择 Host 和转发 Run，不接收 MCP 密钥、不会成为第二个工具执行面。
 
 因此 Runtime 个数由部署副本决定：启动同一 Host 镜像多次，每个实例设置不同的 `RUNTIME_ID`，但 Router 与所有 Host 必须连接同一个状态库，并挂载同一个 `WORKSPACE_ROOT`。RunService 将任务目录固定为 `WORKSPACE_ROOT/conversations/<conversationId>`，故同一会话可复用目录、不同会话物理隔离。Router 通过 `runtimes.json` 或节点注册表知道可用实例。
 
@@ -112,6 +112,36 @@ npm run start:multi-runtime -- --runtimes 4
 ```
 
 `--runtime-count 4`、`-n 4` 和 `RUNTIME_COUNT=4` 等价。Host 使用 `general-01` 起始的独立端口，默认共用 `data/local/agentloop.db` 与 `data/local/workspace`；可通过 `AGENTLOOP_STATE_*` 和 `RUNTIME_WORKSPACE_ROOT` 分别指向共享状态库与同一个已挂载的物理工作区。启动器先等待 Router 健康后才启动 Host，避免本地共享 SQLite/WAL 的初始化竞争。可用 `RUNTIME_BASE_PORT`、`PORT`、`WEB_PORT`、`PUBLIC_HOST`、`ROUTER_URL`、`LLM_PROVIDER_CONFIG_PATH` 和 `STEP_EXECUTION_STRATEGY_CONFIG_PATH` 覆盖默认值。`PUBLIC_HOST`/`ROUTER_URL` 用于浏览器访问 Router；当 `HOST=0.0.0.0` 时启动器默认向浏览器公布 `127.0.0.1`。按 `Ctrl-C` 会同时停止所有子进程。
+
+### MCP 配置
+
+Cloud Runtime Host 默认读取 `config/mcp-servers.json`，可通过 `MCP_SERVERS_CONFIG_PATH` 指向部署专用文件。该仓库提供的默认配置启用高德 MCP：服务地址、工具别名和能力元数据可以入库，`AMAP_MCP_KEY` 只能放在 Host 的 `.env` 或 secret store。每个 Cloud Host 都必须装载同一份 MCP 配置和对应密钥；连接或发现失败会记录为该 Host 的 MCP 启动诊断，其他已装载工具仍可运行。
+
+Local Runtime Agent 则读取设备配置根目录的 `config/mcp-servers.json`，可用 `LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH` 覆盖。安装版首次启动会从包内种子创建该无密钥文件，且不会覆盖设备运维已经修改的版本；高德密钥仅从同目录 `.env` 读取，不会经过 Router、Planner 或模型上下文。
+
+在同一个 `servers` 数组中注册多个服务即可。每项的 `key` 必须唯一：它决定工具名的 `mcp_<key>_<tool>` 命名空间和 ToolSource 身份。当前支持 HTTP MCP；每个服务可独立设置认证、信任级别、允许/阻止工具、别名和能力。示例：
+
+```json
+{
+  "servers": [
+    {
+      "key": "amap-maps",
+      "transport": "http",
+      "url": "https://mcp.amap.com/mcp",
+      "auth": { "kind": "query", "name": "key", "secretEnv": "AMAP_MCP_KEY" },
+      "aliases": ["高德", "amap"]
+    },
+    {
+      "key": "weather",
+      "transport": "http",
+      "url": "https://weather.example.com/mcp",
+      "auth": { "kind": "bearer", "tokenEnv": "WEATHER_MCP_TOKEN" },
+      "aliases": ["天气"],
+      "toolAllowlist": ["forecast"]
+    }
+  ]
+}
+```
 
 ### 存储模式切换
 

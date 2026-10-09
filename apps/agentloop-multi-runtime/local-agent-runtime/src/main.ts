@@ -42,6 +42,7 @@ const maxConcurrentRuns = positiveInteger(process.env.LOCAL_RUNTIME_MAX_CONCURRE
 const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, process.env);
 await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
 const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
+const mcpServersConfigPath = resolve(process.env.LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH ?? join(runtimeConfiguration.root, "config", "mcp-servers.json"));
 const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
 const stepExecutionStrategyConfigPath = resolve(process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? join(appRoot, "config", "step-execution-strategy.json"));
@@ -55,6 +56,7 @@ const logColorOptions = {
 const server = await createLocalAgentServer({
   appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath, maxConcurrentRuns,
   providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath, practiceProfileConfigPath,
+  mcpServersConfigPath,
   computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
   integrationEnvironment,
   runEventLogSink: (runtime, line) => process.stdout.write(`${localRuntimeTerminalLogLine(runtime.id, line, logColorOptions)}\n`),

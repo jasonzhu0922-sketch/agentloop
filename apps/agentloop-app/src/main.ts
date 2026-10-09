@@ -8,13 +8,13 @@ import {
   createPlaywrightArtifactAcceptanceProvider,
   createWebTools,
   LlmProviderRegistry,
+  loadOptionalMcpToolsFromConfigFile,
   RunService,
   SkillService,
 } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { AuthService } from "./auth/auth-service.ts";
 import { createAgentLoopServer } from "./http/server.ts";
-import { loadOptionalMcpToolsFromConfigFile } from "./mcp/mcp-loader.ts";
 import { loadPlanningExtensions } from "./planning-extension-loader.ts";
 import { resolveApplicationRuntimePaths } from "./runtime-config.ts";
 import { loadStepExecutionStrategyFromConfigFile } from "./step-execution-strategy-loader.ts";

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
-import { AppError, badRequest } from "@zhujun/agentloop";
-import type { RuntimeTool, ToolExecutionContext, ToolSourceCapability } from "@zhujun/agentloop";
-import { requireRecord, requireString } from "@zhujun/agentloop";
+import { AppError, badRequest } from "../shared/errors.ts";
+import { requireRecord, requireString } from "../shared/validation.ts";
+import type { RuntimeTool, ToolSourceCapability } from "../tools/tool-registry.ts";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
-const MCP_CLIENT_NAME = "agentloop-app";
+const MCP_CLIENT_NAME = "agentloop";
 const MCP_CLIENT_VERSION = "0.1.0";
 
 export interface McpServersConfig {
@@ -63,16 +63,21 @@ export interface McpSession {
   close(): Promise<void>;
 }
 
-export async function loadMcpToolsFromConfigFile(path: string): Promise<LoadedMcpIntegration> {
-  const raw = await fs.readFile(resolve(path), "utf8");
-  return loadMcpToolsFromConfigDocument(raw, `MCP server configuration file ${resolve(path)}`);
+/** Deployment-owned values used to resolve MCP credentials. */
+export interface McpLoaderOptions {
+  readonly environment?: Readonly<Record<string, string | undefined>>;
 }
 
-export async function loadOptionalMcpToolsFromConfigFile(path: string): Promise<LoadedMcpIntegration> {
+export async function loadMcpToolsFromConfigFile(path: string, options: McpLoaderOptions = {}): Promise<LoadedMcpIntegration> {
+  const raw = await fs.readFile(resolve(path), "utf8");
+  return loadMcpToolsFromConfigDocument(raw, `MCP server configuration file ${resolve(path)}`, options);
+}
+
+export async function loadOptionalMcpToolsFromConfigFile(path: string, options: McpLoaderOptions = {}): Promise<LoadedMcpIntegration> {
   const resolved = resolve(path);
   try {
     const raw = await fs.readFile(resolved, "utf8");
-    return loadMcpToolsFromConfigDocument(raw, `MCP server configuration file ${resolved}`);
+    return loadMcpToolsFromConfigDocument(raw, `MCP server configuration file ${resolved}`, options);
   } catch (error) {
     if (isMissingFileError(error)) {
       return { tools: [], loadedServers: [], failedServers: [] };
@@ -81,19 +86,21 @@ export async function loadOptionalMcpToolsFromConfigFile(path: string): Promise<
   }
 }
 
-export async function loadMcpToolsFromConfigDocument(raw: string, label: string): Promise<LoadedMcpIntegration> {
-  return loadMcpToolsFromConfig(parseMcpServersConfig(JSON.parse(raw), label));
+export async function loadMcpToolsFromConfigDocument(raw: string, label: string, options: McpLoaderOptions = {}): Promise<LoadedMcpIntegration> {
+  return loadMcpToolsFromConfig(parseMcpServersConfig(JSON.parse(raw), label), options);
 }
 
-export async function loadMcpToolsFromConfig(config: McpServersConfig): Promise<LoadedMcpIntegration> {
+export async function loadMcpToolsFromConfig(config: McpServersConfig, options: McpLoaderOptions = {}): Promise<LoadedMcpIntegration> {
+  const environment = options.environment ?? process.env;
   return loadMcpToolsFromConfigWithFactory(config, {
-    create: async (server) => createHttpMcpSession(server),
-  });
+    create: async (server) => createHttpMcpSession(server, environment),
+  }, options);
 }
 
 export async function loadMcpToolsFromConfigWithFactory(
   config: McpServersConfig,
   factory: McpSessionFactory,
+  _options: McpLoaderOptions = {},
 ): Promise<LoadedMcpIntegration> {
   const loadedServers: LoadedMcpServer[] = [];
   const failedServers: FailedMcpServer[] = [];
@@ -123,7 +130,19 @@ export function parseMcpServersConfig(value: unknown, label = "MCP server config
   const record = requireRecord(value, label);
   const serversValue = record.servers;
   if (!Array.isArray(serversValue)) throw badRequest(`${label}.servers must be an array`);
-  const servers = serversValue.map((server, index) => parseMcpServerRegistration(server, `${label}.servers[${index}]`));
+  const serverKeys = new Set<string>();
+  const toolNamespaces = new Set<string>();
+  const servers = serversValue.map((server, index) => {
+    const parsed = parseMcpServerRegistration(server, `${label}.servers[${index}]`);
+    if (serverKeys.has(parsed.key)) throw badRequest(`${label}.servers contains duplicate key ${parsed.key}`);
+    const toolNamespace = normalizeNamePart(parsed.key);
+    if (toolNamespaces.has(toolNamespace)) {
+      throw badRequest(`${label}.servers contains duplicate normalized key ${toolNamespace}`);
+    }
+    serverKeys.add(parsed.key);
+    toolNamespaces.add(toolNamespace);
+    return parsed;
+  });
   const defaultTrust = record.defaultTrust === undefined ? undefined : parseTrust(record.defaultTrust, `${label}.defaultTrust`);
   return { ...(defaultTrust === undefined ? {} : { defaultTrust }), servers };
 }
@@ -371,9 +390,9 @@ async function listAllTools(session: McpSession): Promise<readonly McpToolDefini
   });
 }
 
-async function createHttpMcpSession(server: McpServerRegistration): Promise<McpSession> {
-  const baseUrl = resolveHttpRequestUrl(server);
-  const headers = createMcpRequestHeaders(server, "initialize", { includeProtocolVersion: false });
+async function createHttpMcpSession(server: McpServerRegistration, environment: Readonly<Record<string, string | undefined>>): Promise<McpSession> {
+  const baseUrl = resolveHttpRequestUrl(server, environment);
+  const headers = createMcpRequestHeaders(server, environment, "initialize", { includeProtocolVersion: false });
   const initResponse = await postJsonRpc(baseUrl, headers, {
     jsonrpc: "2.0",
     id: 1,
@@ -385,7 +404,7 @@ async function createHttpMcpSession(server: McpServerRegistration): Promise<McpS
     },
   });
   if (initResponse._mcpSessionId !== undefined) headers.set("mcp-session-id", initResponse._mcpSessionId);
-  await postNotification(baseUrl, createMcpRequestHeaders(server, "notifications/initialized"), {
+  await postNotification(baseUrl, createMcpRequestHeaders(server, environment, "notifications/initialized"), {
     jsonrpc: "2.0",
     method: "notifications/initialized",
   });
@@ -460,6 +479,7 @@ async function postNotification(
 
 function createMcpRequestHeaders(
   server: McpServerRegistration,
+  environment: Readonly<Record<string, string | undefined>>,
   method: string,
   options: { readonly includeProtocolVersion?: boolean } = {},
 ): Headers {
@@ -467,7 +487,7 @@ function createMcpRequestHeaders(
     accept: "application/json, text/event-stream",
     "content-type": "application/json",
     "mcp-method": method,
-    ...resolveHttpAuthHeaders(server),
+    ...resolveHttpAuthHeaders(server, environment),
     ...(server.headers ?? {}),
   });
   if (options.includeProtocolVersion !== false) {
@@ -558,11 +578,11 @@ function parseSseJsonRpcEvent(eventText: string, requestId: unknown): JsonRpcRes
   return parsed as JsonRpcResponse;
 }
 
-function resolveHttpAuthHeaders(server: McpServerRegistration): Readonly<Record<string, string>> {
+function resolveHttpAuthHeaders(server: McpServerRegistration, environment: Readonly<Record<string, string | undefined>>): Readonly<Record<string, string>> {
   const auth = server.auth;
   if (auth === undefined || auth.kind === "none") return {};
   if (auth.kind === "bearer") {
-    const token = process.env[auth.tokenEnv];
+    const token = environment[auth.tokenEnv];
     if (token === undefined || token.trim().length === 0) {
       throw new AppError("MODEL_ERROR", `Missing MCP bearer token env ${auth.tokenEnv} for server ${server.key}`, 503);
     }
@@ -572,11 +592,11 @@ function resolveHttpAuthHeaders(server: McpServerRegistration): Readonly<Record<
   return {};
 }
 
-function resolveHttpRequestUrl(server: McpServerRegistration): URL {
+function resolveHttpRequestUrl(server: McpServerRegistration, environment: Readonly<Record<string, string | undefined>>): URL {
   const url = new URL(server.url);
   const auth = server.auth;
   if (auth === undefined || auth.kind !== "query") return url;
-  const token = process.env[auth.secretEnv];
+  const token = environment[auth.secretEnv];
   if (token === undefined || token.trim().length === 0) {
     throw new AppError("MODEL_ERROR", `Missing MCP query secret env ${auth.secretEnv} for server ${server.key}`, 503);
   }

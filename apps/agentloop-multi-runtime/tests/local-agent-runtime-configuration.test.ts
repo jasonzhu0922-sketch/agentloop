@@ -25,19 +25,24 @@ test("Local Agent uses its top-level source configuration in development and dev
   assert.equal(managed.environmentFile, "/managed/agent-runtime/steel.env");
 });
 
-test("Local Agent seeds only the credential-free template and preserves deployment .env", async () => {
+test("Local Agent seeds credential-free templates and preserves deployment-owned files", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-local-agent-runtime-config-"));
   const appRoot = join(root, "application");
   const configuration = localAgentRuntimeConfiguration(appRoot, join(root, "device-data"), { AGENTLOOP_AGENT_PACKAGED: "1" });
   try {
     await mkdir(join(appRoot, "agent-loop-runtime"), { recursive: true });
     await writeFile(join(appRoot, "agent-loop-runtime", ".env.example"), "STEEL_MARKET_DB_HOST=template\n");
+    await mkdir(join(appRoot, "agent-loop-runtime", "config"), { recursive: true });
+    await writeFile(join(appRoot, "agent-loop-runtime", "config", "mcp-servers.json"), "{\"servers\":[]}\n");
     await ensureLocalAgentRuntimeConfiguration(appRoot, configuration);
     assert.equal(await readFile(join(configuration.root, ".env.example"), "utf8"), "STEEL_MARKET_DB_HOST=template\n");
+    assert.equal(await readFile(join(configuration.root, "config", "mcp-servers.json"), "utf8"), "{\"servers\":[]}\n");
 
     await writeFile(configuration.environmentFile, "STEEL_MARKET_DB_HOST=deployment\n");
+    await writeFile(join(configuration.root, "config", "mcp-servers.json"), "{\"servers\":[{\"key\":\"deployment\"}]}\n");
     await ensureLocalAgentRuntimeConfiguration(appRoot, configuration);
     assert.equal(await readFile(configuration.environmentFile, "utf8"), "STEEL_MARKET_DB_HOST=deployment\n");
+    assert.equal(await readFile(join(configuration.root, "config", "mcp-servers.json"), "utf8"), "{\"servers\":[{\"key\":\"deployment\"}]}\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

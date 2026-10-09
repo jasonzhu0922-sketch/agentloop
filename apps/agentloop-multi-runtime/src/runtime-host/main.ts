@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
+import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, loadOptionalMcpToolsFromConfigFile, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../shared/config.ts";
 import { HttpResourceImporter } from "./infrastructure/http-resource-importer.ts";
@@ -52,6 +52,7 @@ const providerConfigPath = resolve(appRoot, process.env.LLM_PROVIDER_CONFIG_PATH
 const skillDirectoriesConfigPath = resolve(appRoot, process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json");
 const stepExecutionStrategyConfigPath = resolve(appRoot, process.env.STEP_EXECUTION_STRATEGY_CONFIG_PATH ?? "./config/step-execution-strategy.json");
 const practiceProfileConfigPath = resolve(appRoot, process.env.PRACTICE_PROFILE_CONFIG_PATH ?? "./config/practice-profiles.json");
+const mcpServersConfigPath = resolve(appRoot, process.env.MCP_SERVERS_CONFIG_PATH ?? "./config/mcp-servers.json");
 const routerAttachmentToken = requiredEnv("RUNTIME_ATTACHMENT_TOKEN");
 const runtimeDispatchToken = requiredEnv("RUNTIME_DISPATCH_TOKEN");
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
@@ -95,6 +96,9 @@ const skills = new SkillService(database, {
   skillDirectories,
 });
 const skillDirectorySync = await skills.syncSkillDirectories();
+// MCP connections are Host-owned deployment integrations. The Router selects a
+// Host but never receives MCP credentials or materializes its tool catalog.
+const mcpIntegration = await loadOptionalMcpToolsFromConfigFile(mcpServersConfigPath);
 const runs = new RunService({
   database,
   skills,
@@ -104,7 +108,7 @@ const runs = new RunService({
   workspaceRoot,
   stepExecutionStrategy,
   practiceProfileCatalog,
-  tools: integrationTools,
+  tools: [...integrationTools, ...mcpIntegration.tools],
   computerCommandEnvironment: {
     ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
     API_QUERY_ENV_FILE: apiQueryEnvironmentFile,
@@ -124,6 +128,12 @@ const server = createRuntimeHostHttpServer(runtimeHost, { dispatchToken: runtime
 server.listen(port, host, () => {
   process.stdout.write(`AgentLoop Runtime Host ${runtimeId} listening on http://${host}:${port}; discovered ${skillDirectorySync.discoveredSkills.length} Skill package(s) from ${skillDirectories.join(", ")}\n`);
   void sendHeartbeat();
+  if (mcpIntegration.loadedServers.length > 0 || mcpIntegration.failedServers.length > 0) {
+    process.stdout.write(`${runtimeLogLabel} MCP sources loaded ${mcpIntegration.loadedServers.length} server(s) and skipped ${mcpIntegration.failedServers.length} failed server(s)\n`);
+    for (const failedServer of mcpIntegration.failedServers) {
+      process.stderr.write(`${runtimeLogLabel} MCP server ${failedServer.key} failed: ${failedServer.message}\n`);
+    }
+  }
 });
 const heartbeatTimer = setInterval(() => { void sendHeartbeat(); }, heartbeatIntervalMs);
 let reconciliationInFlight = false;

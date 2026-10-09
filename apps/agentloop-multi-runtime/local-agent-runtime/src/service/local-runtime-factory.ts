@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools } from "@zhujun/agentloop";
+import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools, loadOptionalMcpToolsFromConfigFile } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
@@ -42,16 +42,27 @@ export class LocalRuntimeFactory {
     await skills.syncSkillDirectories();
     const strategy = await loadStepExecutionStrategyProfileConfig(this.input.stepExecutionStrategyConfigPath);
     const practiceProfiles = await loadPracticeProfileConfig(this.input.practiceProfileConfigPath ?? join(this.input.appRoot, "config", "practice-profiles.json"));
+    const mcpIntegration = this.input.mcpServersConfigPath === undefined
+      ? { tools: [], loadedServers: [], failedServers: [] }
+      : await loadOptionalMcpToolsFromConfigFile(this.input.mcpServersConfigPath, {
+        environment: integrationEnvironment,
+      });
     const runs = new RunService({
       database, skills, modelFactory: (onRetry, modelKey) => provider.create(modelKey, onRetry),
       defaultModelKey: provider.defaultModelKey, modelKeys: provider.modelKeys(), workspaceRoot: sharedStorageRoot, sourceStorageRoot,
       ownerScopedWorkspace: true,
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
       practiceProfileCatalog: practiceProfiles,
-      tools: integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment)),
+      tools: [
+        ...(integrationEnvironment.WEB_SEARCH_DISABLED === "1" ? [] : createWebTools(webToolsOptionsFromEnvironment(integrationEnvironment))),
+        ...mcpIntegration.tools,
+      ],
       computerCommandEnvironment: this.input.computerCommandEnvironment,
       ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
     });
+    for (const failedServer of mcpIntegration.failedServers) {
+      process.stderr.write(`Local Runtime MCP server ${failedServer.key} failed: ${failedServer.message}\n`);
+    }
     const activeRunIds = new Set<string>();
     const dispatched = await database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches").all() as Array<{ owner_user_id: string; remote_run_id: string }>;
     for (const row of dispatched) {

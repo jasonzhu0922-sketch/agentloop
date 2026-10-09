@@ -51,6 +51,25 @@ export {
   SimpleCommandSafetyPlugin,
   VISIBLE_DIRECTORY_TOOL_NAMES,
 } from "./tools/index.ts";
+export {
+  loadMcpToolsFromConfig,
+  loadMcpToolsFromConfigDocument,
+  loadMcpToolsFromConfigFile,
+  loadMcpToolsFromConfigWithFactory,
+  loadOptionalMcpToolsFromConfigFile,
+  parseMcpServersConfig,
+} from "./mcp/mcp-loader.ts";
+export type {
+  FailedMcpServer,
+  LoadedMcpIntegration,
+  LoadedMcpServer,
+  McpAuthConfig,
+  McpLoaderOptions,
+  McpServerRegistration,
+  McpServersConfig,
+  McpSession,
+  McpSessionFactory,
+} from "./mcp/mcp-loader.ts";
 export type {
   ComposeRunToolsOptions,
   ConvertArtifactInput,

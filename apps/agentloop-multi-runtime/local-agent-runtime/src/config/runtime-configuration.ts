@@ -1,6 +1,6 @@
 import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -75,4 +75,10 @@ export async function ensureLocalAgentRuntimeConfiguration(appRoot: string, conf
   const bundledTemplate = join(appRoot, "agent-loop-runtime", ".env.example");
   const installedTemplate = join(configuration.root, ".env.example");
   if (existsSync(bundledTemplate) && !existsSync(installedTemplate)) await copyFile(bundledTemplate, installedTemplate);
+  const bundledMcpConfig = join(appRoot, "agent-loop-runtime", "config", "mcp-servers.json");
+  const installedMcpConfig = join(configuration.root, "config", "mcp-servers.json");
+  if (existsSync(bundledMcpConfig) && !existsSync(installedMcpConfig)) {
+    await mkdir(dirname(installedMcpConfig), { recursive: true, mode: 0o700 });
+    await copyFile(bundledMcpConfig, installedMcpConfig);
+  }
 }
