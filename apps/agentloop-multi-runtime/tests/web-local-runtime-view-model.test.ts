@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { localRuntimeListMarkup, localRuntimeOptions, localRuntimeViewModel } from "../web/local-runtime-view-model.js";
+import { localRuntimeListMarkup, localRuntimeOptions, localRuntimeViewModel } from "../web/client/local-runtime/local-runtime-view-model.js";
 
 test("local Runtime view model derives control availability without touching DOM state", () => {
   const model = localRuntimeViewModel({

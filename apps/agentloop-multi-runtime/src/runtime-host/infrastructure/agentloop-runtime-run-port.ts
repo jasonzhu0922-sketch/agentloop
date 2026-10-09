@@ -9,7 +9,7 @@ import type {
   RuntimeRunEvent,
   RuntimeToolArguments,
 } from "../../shared/contracts.ts";
-import type { RuntimeHostRun, RuntimeHostRunPort, RuntimeRunCheckpoint } from "../application/runtime-run-port.ts";
+import type { RuntimeHostRun, RuntimeHostRunPort, RuntimeRunCheckpoint } from "../ports/runtime-run-port.ts";
 
 /** Infrastructure adapter from the AgentLoop kernel to the Host application port. */
 export class AgentLoopRuntimeRunPort implements RuntimeHostRunPort {

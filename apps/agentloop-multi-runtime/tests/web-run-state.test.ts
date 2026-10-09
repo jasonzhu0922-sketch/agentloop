@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRunState } from "../web/run-state.js";
+import { createRunState } from "../web/client/state/run-state.js";
 
 test("run state isolates active execution coordination from conversation indexing", () => {
   const state = createRunState();

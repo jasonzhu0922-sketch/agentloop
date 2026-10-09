@@ -32,7 +32,7 @@ Router 的 `assignment_581b98f7-4287-4ca1-a274-604f9fcd7d68` 却停在 accepted�
 ```sh
 node --test --test-isolation=process apps/agentloop-multi-runtime/tests/assignment-stream.test.ts apps/agentloop-multi-runtime/tests/assignment-reconciliation.test.ts apps/agentloop-multi-runtime/tests/multi-runtime.test.ts
 node --test apps/agentloop-multi-runtime/tests/assignment-http.test.ts
-node --check apps/agentloop-multi-runtime/web/app.js
+node --check apps/agentloop-multi-runtime/web/client/app.js
 npm run typecheck --workspace agentloop-multi-runtime
 ```
 

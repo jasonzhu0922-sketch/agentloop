@@ -1,4 +1,4 @@
-import type { LocalRuntimeDefinition } from "./runtime-supervisor.ts";
+import type { LocalRuntimeDefinition } from "../service/runtime-supervisor.ts";
 
 /** Deployment and device configuration used to compose the Local Agent. */
 export interface LocalAgentOptions {

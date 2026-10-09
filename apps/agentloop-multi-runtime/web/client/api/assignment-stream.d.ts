@@ -1,4 +1,4 @@
-import type { RuntimeRunEvent, RuntimeRunStatus } from "../src/shared/contracts.ts";
+import type { RuntimeRunEvent, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
 export function observeAssignment(options: {
   baseUrl: string;
   headers: Record<string, string>;

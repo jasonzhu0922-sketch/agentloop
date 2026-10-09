@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSessionState } from "../web/session-state.js";
+import { createSessionState } from "../web/client/state/session-state.js";
 
 function storage() {
   const values = new Map<string, string>();

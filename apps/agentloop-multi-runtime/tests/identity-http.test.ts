@@ -11,7 +11,7 @@ import { ConversationDeleteConflictError } from "../src/router/persistence/contr
 import { SqlDeviceRepository } from "../src/router/devices/device-service.ts";
 import type { SubmitConversationTask } from "../src/shared/contracts.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
-import { createRouterHttpServer } from "../src/router/transport/http.ts";
+import { createRouterHttpServer } from "../src/router/api/router-api.ts";
 
 test("Router derives task identity and accepts opaque local Runtime placement", async () => {
   const database = new AppDatabase(":memory:");
@@ -126,7 +126,7 @@ test("identity registration hashes credentials, normalizes email, and revokes be
 });
 
 test("Web removes a left-list conversation only after its owning persistent data planes acknowledge deletion", async () => {
-  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   assert.match(app, /async function deleteConversation\(conversationId\)/);
   assert.match(app, /deletingConversationIds\.add\(conversationId\)/);
   assert.match(app, /fetch\(`\$\{api\}\/v1\/conversations\/\$\{encodeURIComponent\(conversationId\)\}`, \{ method: "DELETE"/);

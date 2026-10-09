@@ -3,15 +3,16 @@ import { resolve } from "node:path";
 import { SharedFilesystemAttachmentBroker } from "./attachments/shared-filesystem-attachment-broker.ts";
 import { loadMultiRuntimeConfig, toRuntimeInstance } from "../shared/config.ts";
 import { ControlPlaneStore } from "./persistence/control-plane-store.ts";
-import { createRouterHttpServer, HttpRuntimeEndpoint, type LocalAgentRelease } from "./transport/http.ts";
-import { PersistentMultiRuntimeRouter } from "./application/persistent-router.ts";
-import { startAssignmentReconciler } from "./application/assignment-reconciler.ts";
+import { createRouterHttpServer, type LocalAgentRelease } from "./api/router-api.ts";
+import { HttpRuntimeControl } from "./runtime-control/http-runtime-control.ts";
+import { RouterService } from "./service/router-service.ts";
+import { startAssignmentReconciler } from "./service/assignment-reconciler.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRouterState } from "./persistence/state-migrations.ts";
 import { IdentityService } from "./identity/service.ts";
 import { SharedWorkspaceArtifactCatalog } from "./artifacts/shared-workspace-artifact-catalog.ts";
 import { SqlDeviceRepository } from "./devices/device-service.ts";
-import { DeviceRuntimeConnectionRegistry } from "./devices/runtime-connection-registry.ts";
+import { LocalAgentRuntimeControl } from "./runtime-control/local-agent-runtime-control.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const host = process.env.HOST ?? "127.0.0.1";
@@ -37,17 +38,17 @@ const identity = new IdentityService(database, positiveInteger(process.env.IDENT
 await identity.ready();
 const devices = new SqlDeviceRepository(database);
 await devices.ready();
-const runtimeConnections = new DeviceRuntimeConnectionRegistry(devices, store, {
+const runtimeConnections = new LocalAgentRuntimeControl(devices, store, {
   leaseMs: positiveInteger(process.env.LOCAL_RUNTIME_LEASE_MS, 20_000),
 });
 const artifactsCatalog = new SharedWorkspaceArtifactCatalog(database, sharedWorkspaceRoot);
 await artifactsCatalog.ready();
 await store.seedRuntimes(config.runtimes.map((runtime) => ({ ...toRuntimeInstance(runtime), endpoint: runtime.endpoint })));
-const router = new PersistentMultiRuntimeRouter({
+const router = new RouterService({
   store,
   endpointFactory: (endpoint) => endpoint.startsWith("local-runtime://")
     ? runtimeConnections.endpoint(decodeURIComponent(endpoint.slice("local-runtime://".length)))
-    : new HttpRuntimeEndpoint(endpoint, `Bearer ${runtimeDispatchToken}`),
+    : new HttpRuntimeControl(endpoint, `Bearer ${runtimeDispatchToken}`),
   heartbeatTtlMs: positiveInteger(process.env.RUNTIME_HEARTBEAT_TTL_MS, 15_000),
   reservationTtlMs: positiveInteger(process.env.RUNTIME_RESERVATION_TTL_MS, 30_000),
   artifactsCatalog,

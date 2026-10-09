@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createConversationState } from "../web/conversation-state.js";
+import { createConversationState } from "../web/client/state/conversation-state.js";
 
 test("conversation state resets index and paging without touching transport state", () => {
   const state = createConversationState(30);

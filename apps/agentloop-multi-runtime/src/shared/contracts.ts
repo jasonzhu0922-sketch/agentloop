@@ -209,7 +209,8 @@ export interface RuntimeModelSummary {
   readonly displayName: string;
 }
 
-export interface RuntimeEndpoint {
+/** Router's transport-neutral control port for any Runtime execution target. */
+export interface RuntimeControlPort {
   dispatch(envelope: RuntimeDispatchEnvelope): Promise<RuntimeDispatchResult>;
   models?(): Promise<readonly RuntimeModelSummary[]>;
   getRun?(remoteRunId: string): Promise<RuntimeRunStatus>;
@@ -229,6 +230,7 @@ export interface RuntimeEndpoint {
   currentHumanLoop?(remoteRunId: string): Promise<RuntimeHumanLoopRequest | undefined>;
   respondHumanLoop?(remoteRunId: string, requestId: string, input: { readonly value: unknown; readonly expectedRevision: number }): Promise<RuntimeHumanLoopResponse>;
 }
+
 
 /**
  * Application-side integration boundary. A Runtime Host may call this gateway

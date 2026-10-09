@@ -16,7 +16,7 @@ agentloop/
 ├── packages/agentloop-plan-template/
 │                                 可选的 Plan Template / fast-path 插件
 ├── apps/agentloop-app/           单 Runtime 参考应用：HTTP API、登录鉴权、React Web
-├── apps/agentloop-multi-runtime/ 多 Runtime 参考应用：Web、Router 与 Runtime Host
+├── apps/agentloop-multi-runtime/ 多 Runtime 参考应用：Web、Router、Runtime Host 与 Local Runtime Agent
 └── docs/                         架构、集成、运维和设计文档
 ```
 
@@ -30,6 +30,10 @@ agentloop/
 | [`apps/agentloop-multi-runtime`](apps/agentloop-multi-runtime/) | **多 Runtime 参考应用** | Web 以同一会话工作台表达云端与已配对设备上的本机执行；Router 负责云端会话入口、附件与调度；多个 Runtime Host 分别加载内核并完整执行一个 Run，共享状态库和任务工作区。本机数据仍留在 Local Runtime Agent 的设备数据面。 | 需要按会话分流、扩展 Host 容量，或把控制面与执行面分离，同时保留受控本机执行的部署。 |
 
 两者各自拥有入口、配置、Web、认证/接入边界和运行数据，不能把 `agentloop-app` 的 SQLite、工作目录或 Web 直接接到 Multi Runtime 的 Router/Host 上。Multi Runtime 的一个 Run 始终由一个 Host 完整执行：不会把同一 Run 的 Plan 或 Step 拆到多个 Host，也不支持运行中的 Run 在 Host 间迁移。Web 的云端/本机一致性只统一用户交互与执行溯源，不会隐式同步附件、目录、工作区或 Local Runtime 数据；云端 `attachmentIds` 与设备 `localUploadedSourceIds` 是两条受控数据面。需要接入第三方业务系统时，应依赖 `@zhujun/agentloop` 内核包，而不是把任一参考应用当作 SDK。
+
+Multi Runtime 采用独立进程边界：`Router API` 只负责 HTTP 接入、身份、会话、附件、Assignment 和 Runtime 控制；`RouterService` 负责调度、容量、状态观察和持久化端口编排；`Runtime Host API` 只接收 Router 的受控 dispatch，并由 `RuntimeHostService` 驱动 AgentLoop 内核完整执行 Run；`Local Runtime Agent API` 只负责设备侧配对、目录授权、上传源、子 Runtime 生命周期和本机 Run。Router 与 Runtime Host 通过版本化的 `src/shared/contracts.ts` 交互，Router 不直接导入 Host 实现，Host 也不直接导入 Router 实现；Local Runtime Agent 只依赖共享契约和内核，不依赖云端角色。
+
+Web 是唯一业务工作台，但不是执行权威。其内部按职责组织为 `web/client/api`、`web/client/local-runtime`、`web/client/state`、`web/client/projections`、`web/client/presentation`、`web/client/ui`、`web/pages` 和 `web/styles`。本机 Runtime 的选择、目录授权、上传和执行展示仍由 Web 统一呈现，通过 Router 的受控设备接口或明确的 `strict_local` loopback 路径访问 Local Runtime Agent，不另建第二套业务页面或身份状态。
 
 选择单 Runtime 时按下文启动 `agentloop-app`；选择 Multi Runtime 时可先按下文用一条命令启动本地拓扑；需要分别运行 Router、Host、Web 或使用 Docker Compose 时，再查阅 [`apps/agentloop-multi-runtime/README.md`](apps/agentloop-multi-runtime/README.md)。
 
@@ -166,7 +170,7 @@ npm start
 
 ## 快速启动：agentloop-multi-runtime（多 Runtime）
 
-要求 Node.js 26 或更高版本，且根目录已执行过 `npm install`。本地启动器会启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Host，不会传给 Router 或 Web。
+要求 Node.js 26 或更高版本，且根目录已执行过 `npm install`。本地启动器会启动一个 Router、一个 Web 和两个 Runtime Host；Provider 密钥仅传给 Runtime Host，不会传给 Router 或 Web。Local Runtime Agent 是独立的设备进程，不会被云端拓扑隐式启动。
 
 1. 创建多 Runtime 自有的 Provider 配置和本地密钥文件：
 
@@ -192,6 +196,14 @@ npm run start:multi-runtime -- --runtimes 4
 ```
 
 可用 `RUNTIME_COUNT=4`、`--runtime-count 4` 或 `-n 4` 指定 Host 数量。`Ctrl-C` 会同时停止启动器创建的所有进程；端口冲突时可通过 `PORT`、`WEB_PORT` 和 `RUNTIME_BASE_PORT` 覆盖默认值。分角色启动、Docker Compose、共享 PostgreSQL/POSIX workspace 等部署方式见 [Multi Runtime 运行说明](apps/agentloop-multi-runtime/README.md)。
+
+如需启用本机 Runtime，另行启动设备侧 Agent：
+
+```bash
+npm run start:local-agent --workspace agentloop-multi-runtime
+```
+
+它默认监听 loopback `127.0.0.1:8790`，拥有独立的设备身份、Supervisor 数据库、目录授权和本机 Runtime 状态；不要向它传递 Router/云端 Host 的 PostgreSQL、TiDB 或共享状态凭据。浏览器通过配对后的 Router 控制面使用普通 `local` 路径；只有明确的严格本地入口才使用 `strict_local`。
 
 ## 本地数据与 Git 边界
 
@@ -349,6 +361,6 @@ AgentLoop 的 Runtime 设计参考并源码级核验了：
 
 ## 部署边界
 
-`agentloop-app` 适合单节点本地或内网部署：SQLite、单进程 API、同步 Run、Vite 前端独立托管。`agentloop-multi-runtime` 提供 Router 与独立 Runtime Host 的参考拓扑；生产多副本必须使用共享 PostgreSQL、共享 POSIX workspace、fenced lease、独立 Worker，以及受部署环境管理的鉴权与密钥。SQLite 仅适合其单机开发模式，不能放在 NFS/RWX 卷上供多节点共享。两种形态都应使用 HttpOnly Cookie、CSRF/OIDC/MFA 等生产认证措施，并把不可信命令置于容器或 WASM Sandbox。
+`agentloop-app` 适合单节点本地或内网部署：SQLite、单进程 API、同步 Run、Vite 前端独立托管。`agentloop-multi-runtime` 提供 Router API/Service、独立 Runtime Host 和设备侧 Local Runtime Agent 的参考拓扑；生产多副本必须使用共享 PostgreSQL、共享 POSIX workspace、fenced lease、独立 Worker，以及受部署环境管理的鉴权与密钥。Local Runtime Agent 使用设备本地 SQLite 和文件系统，不与云端状态库混用。SQLite 仅适合其单机开发模式，不能放在 NFS/RWX 卷上供多节点共享。两种形态都应使用 HttpOnly Cookie、CSRF/OIDC/MFA 等生产认证措施，并把不可信命令置于容器或 WASM Sandbox。
 
 详细架构见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。

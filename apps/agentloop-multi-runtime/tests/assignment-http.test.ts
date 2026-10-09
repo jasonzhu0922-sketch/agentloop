@@ -3,12 +3,12 @@ import { once } from "node:events";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
-import { startAssignmentReconciler } from "../src/router/application/assignment-reconciler.ts";
-import { createRouterHttpServer } from "../src/router/transport/http.ts";
+import { RouterService } from "../src/router/service/router-service.ts";
+import { startAssignmentReconciler } from "../src/router/service/assignment-reconciler.ts";
+import { createRouterHttpServer } from "../src/router/api/router-api.ts";
 import { IdentityService } from "../src/router/identity/service.ts";
-import { observeAssignment } from "../web/assignment-stream.js";
-import { projectAssistantEvent } from "../web/assistant-event-projection.js";
+import { observeAssignment } from "../web/client/api/assignment-stream.js";
+import { projectAssistantEvent } from "../web/client/projections/assistant-event-projection.js";
 
 test("HTTP Router returns a durable failed Assignment when a Runtime rejects dispatch before Run admission", async () => {
   const database = new AppDatabase(":memory:"); const store = new ControlPlaneStore(database);
@@ -17,7 +17,7 @@ test("HTTP Router returns a durable failed Assignment when a Runtime rejects dis
   const session = await identity.register("dispatch-failure@example.test", "long-test-password-123");
   await store.seedRuntimes([{ id: "host", endpoint: "http://fixture-host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }]);
   await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: Date.now() });
-  const router = new PersistentMultiRuntimeRouter({
+  const router = new RouterService({
     store,
     endpointFactory: () => ({ dispatch: async () => { throw new Error("upstream api_key=never-return-this"); } }),
   });
@@ -58,7 +58,7 @@ test("HTTP Router + browser observer survives upstream error and socket loss, re
   await store.seedRuntimes([{ id: "host", endpoint: "http://fixture-host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }]);
   await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: Date.now() });
   let finished = false; let dispatches = 0; let eventReads = 0;
-  const router = new PersistentMultiRuntimeRouter({ store, endpointFactory: () => ({
+  const router = new RouterService({ store, endpointFactory: () => ({
     dispatch: async () => { dispatches++; return { remoteRunId: "run-http" }; },
     getRun: async () => ({ remoteRunId: "run-http", status: finished ? "completed" : "running", output: "persisted final output" }),
     events: async (_id, afterSeq) => {

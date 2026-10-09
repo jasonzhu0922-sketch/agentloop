@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
-import { projectAssistantEvent, replayAssistantEvents } from "../web/assistant-event-projection.js";
+import { projectAssistantEvent, replayAssistantEvents } from "../web/client/projections/assistant-event-projection.js";
 
 const report = "任务未完成，以下仅为阶段性结果。\n\n已取得部分记录，但缺少结构预检证据。";
 test("failed terminal event keeps its persisted final report separate from the failure status", () => {
@@ -30,7 +30,7 @@ test("explicit partial output is retained without exposing backend messages", ()
 
 // Run the actual browser snapshot function without its DOM/bootstrap side effects.
 test("browser reload restores a failed Run's persisted final report", () => {
-  const source = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../web/client/app.js", import.meta.url), "utf8");
   const start = source.indexOf("function applyRecoveredRunState(");
   const end = source.indexOf("\nfunction recoveredFailureMessage", start);
   assert.ok(start >= 0 && end > start);

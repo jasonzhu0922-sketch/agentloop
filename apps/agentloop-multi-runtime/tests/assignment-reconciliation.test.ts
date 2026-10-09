@@ -3,9 +3,9 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import { ControlPlaneStore, terminalTaskProjectionUpdate, terminalTurnCompletedAt } from "../src/router/persistence/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
-import { startAssignmentReconciler } from "../src/router/application/assignment-reconciler.ts";
-import { streamEvents } from "../src/router/transport/http.ts";
+import { RouterService } from "../src/router/service/router-service.ts";
+import { startAssignmentReconciler } from "../src/router/service/assignment-reconciler.ts";
+import { streamEvents } from "../src/router/api/router-api.ts";
 import type { RuntimeRunStatus } from "../src/shared/contracts.ts";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -15,7 +15,7 @@ async function fixture(getRun: (id: string) => Promise<RuntimeRunStatus>) {
   await store.seedRuntimes([{ id: "host", endpoint: "http://host", profile: "general", capabilities: ["document"], maxConcurrentRuns: 20, activeRunCount: 0, status: "ready" }], 100);
   await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
   let dispatches = 0;
-  const router = new PersistentMultiRuntimeRouter({ store, now: () => 200, endpointFactory: () => ({
+  const router = new RouterService({ store, now: () => 200, endpointFactory: () => ({
     dispatch: async () => ({ remoteRunId: `run-${++dispatches}` }), getRun,
   }) });
   const submit = (id: string) => router.submit({ tenantId: "tenant", ownerUserId: "user", conversationId: `c-${id}`, clientMessageId: id,
@@ -29,7 +29,7 @@ test("a pre-admission dispatch failure is durable, replayable, and logged withou
   await store.seedRuntimes([{ id: "host", endpoint: "http://host", profile: "general", capabilities: [], maxConcurrentRuns: 2, activeRunCount: 0, status: "ready" }], 100);
   await store.heartbeat({ runtimeId: "host", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
   const logs: unknown[] = [];
-  const router = new PersistentMultiRuntimeRouter({
+  const router = new RouterService({
     store,
     now: () => 200,
     endpointFactory: () => ({ dispatch: async () => { throw new Error("upstream rejected Authorization: Bearer dispatch-secret-token api_key=other-secret"); } }),
@@ -150,7 +150,7 @@ test("terminal event projection retains event time rather than poll time", async
   const f = await fixture(async (remoteRunId) => ({ remoteRunId, status: "running" }));
   try {
     const a = await f.submit("one");
-    const replayRouter = new PersistentMultiRuntimeRouter({ store: f.store, now: () => 10_000, endpointFactory: () => ({
+    const replayRouter = new RouterService({ store: f.store, now: () => 10_000, endpointFactory: () => ({
       dispatch: async () => { throw new Error("must not dispatch"); },
       events: async () => [{ seq: 2, type: "run.completed", data: {}, createdAt: 250 }],
     }) });

@@ -2,10 +2,10 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { basename, resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = fileURLToPath(new URL(".", import.meta.url));
+const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const sharedPreview = fileURLToPath(new URL("../../../packages/agentloop-artifact-preview/dist/index.js", import.meta.url));
 const sharedMarkdownStyles = fileURLToPath(new URL("../../../packages/agentloop-artifact-preview/markdown.css", import.meta.url));
 const sharedMarked = fileURLToPath(new URL("../../../node_modules/marked/lib/marked.esm.js", import.meta.url));
@@ -20,6 +20,17 @@ export function runtimeConfigScript(apiUrl, agentUrl = "http://127.0.0.1:8790") 
   // processes. The configured Router URL is consumed by this server's proxy,
   // not copied into browser state where port/CORS drift can break live Runs.
   return `globalThis.AGENTLOOP_ROUTER_URL = "/api";\nglobalThis.AGENTLOOP_ROUTER_PUBLIC_URL = ${JSON.stringify(String(apiUrl).trim())};\nglobalThis.AGENTLOOP_LOCAL_AGENT_URL = ${JSON.stringify(String(agentUrl).trim())};\n`;
+}
+
+export function staticFilePath(pathname) {
+  const decodedPathname = decodeURIComponent(pathname);
+  const requested = decodedPathname === "/" || decodedPathname === "/index.html" || decodedPathname === "/app"
+    ? "pages/app.html"
+    : (decodedPathname === "/login" || decodedPathname === "/register" || decodedPathname === "/login.html"
+      ? "pages/login.html"
+      : decodedPathname.slice(1));
+  const file = resolve(root, requested);
+  return file === root || file.startsWith(`${root}${sep}`) ? file : undefined;
 }
 
 export function createWebServer() {
@@ -75,8 +86,19 @@ export function createWebServer() {
       }
       return;
     }
-    const requested = pathname === "/" ? "index.html" : (pathname === "/login" || pathname === "/register" ? "login.html" : basename(pathname));
-    const file = resolve(root, requested);
+    let file;
+    try {
+      file = staticFilePath(pathname);
+    } catch {
+      response.statusCode = 400;
+      response.end("Invalid URL encoding");
+      return;
+    }
+    if (file === undefined) {
+      response.statusCode = 404;
+      response.end("Not found");
+      return;
+    }
     try {
       await stat(file);
       response.statusCode = 200;

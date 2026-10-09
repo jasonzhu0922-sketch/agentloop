@@ -1,10 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { LocalAgentService } from "../application/local-agent-service.ts";
-import type { LocalAgentOptions } from "../application/local-agent-options.ts";
+import { LocalAgentService } from "../service/local-agent-service.ts";
+import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 
 export type LocalAgentServerOptions = LocalAgentOptions;
 
-/** Loopback HTTP adapter. Local Agent use cases and state stay in application/persistence. */
+/** Loopback HTTP adapter. Local Agent use cases and state stay in service/persistence. */
 export async function createLocalAgentServer(input: LocalAgentServerOptions): Promise<Server> {
   const service = await LocalAgentService.create(input);
   const server = createServer(async (request, response) => {

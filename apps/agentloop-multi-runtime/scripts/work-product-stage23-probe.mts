@@ -10,8 +10,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AppDatabase, LlmProviderRegistry, RunService, SkillService } from "@zhujun/agentloop";
 import type { ModelAdapter, ModelInvocation, ModelResponse, Planner } from "@zhujun/agentloop";
-import { AgentLoopRuntimeHost } from "../src/runtime-host/application/runtime-host.ts";
-import { createRuntimeHostHttpServer } from "../src/runtime-host/transport/http.ts";
+import { RuntimeHostService } from "../src/runtime-host/service/runtime-host-service.ts";
+import { createRuntimeHostHttpServer } from "../src/runtime-host/api/runtime-host-api.ts";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const live = process.argv.includes("--live");
@@ -79,7 +79,7 @@ const planner: Planner = { plan: async (task) => ({
 }) };
 const runs = new RunService({ database, skills: new SkillService(database), workspaceRoot: workspace, modelFactory,
   plannerFactory: () => planner, maxSteps: 12 });
-const host = new AgentLoopRuntimeHost(runs, { importForRun: async () => [] });
+const host = new RuntimeHostService(runs, { importForRun: async () => [] });
 const token = randomUUID();
 const server = createRuntimeHostHttpServer(host, { dispatchToken: token });
 await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });

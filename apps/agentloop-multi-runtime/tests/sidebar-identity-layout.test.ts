@@ -4,8 +4,8 @@ import test from "node:test";
 
 test("sidebar identity and account actions share one horizontal layout group", async () => {
   const [html, overrides] = await Promise.all([
-    readFile(new URL("../web/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../web/runtime-overrides.css", import.meta.url), "utf8"),
+    readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/styles/runtime-overrides.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(html, /<div id="identity-label" class="identity"><\/div>\s*<div class="foot-actions">/);

@@ -1,6 +1,6 @@
-import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeEndpoint, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
+import type { PortableResourceRef, RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeDispatchResult, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments } from "../../shared/contracts.ts";
 import { HostDispatchStore, RuntimeDispatchInFlightError } from "../persistence/host-dispatch-store.ts";
-import type { RuntimeHostRunPort } from "./runtime-run-port.ts";
+import type { RuntimeHostRunPort } from "../ports/runtime-run-port.ts";
 
 export interface ResourceImporter {
   importForRun(input: {
@@ -16,7 +16,7 @@ export interface RuntimeCapacityGate {
 }
 
 /** A Runtime Host owns local AgentLoop Runs and never accepts local directory grants. */
-export class AgentLoopRuntimeHost implements RuntimeEndpoint {
+export class RuntimeHostService implements RuntimeControlPort {
   private readonly dispatches = new Map<string, Promise<RuntimeDispatchResult>>();
   private readonly ownersByRunId = new Map<string, string>();
   private readonly runs: RuntimeHostRunPort;
@@ -236,6 +236,7 @@ export class AgentLoopRuntimeHost implements RuntimeEndpoint {
     }
   }
 }
+
 
 function projectTerminalEvent(event: { readonly seq: number; readonly type: string; readonly data: Readonly<Record<string, unknown>>; readonly createdAt: number }): RuntimeRunEvent {
   return {

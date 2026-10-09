@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import { RuntimeDispatchOutcomeUnknownError, type ControlPlaneRepository } from "../application/control-plane-contracts.ts";
-import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeEndpoint, RuntimeProfile } from "../../shared/contracts.ts";
-import type { AuthenticatedDeviceAgent, DeviceRepository } from "./device-service.ts";
+import { RuntimeDispatchOutcomeUnknownError, type ControlPlaneRepository } from "../ports/control-plane-contracts.ts";
+import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeControlPort, RuntimeProfile } from "../../shared/contracts.ts";
+import type { AuthenticatedDeviceAgent, DeviceRepository } from "../devices/device-service.ts";
 
 interface RuntimeAdvertisement {
   readonly runtimeId: string;
@@ -25,7 +25,7 @@ interface ConnectionState {
 }
 
 /** Router-side registry for outbound Local Runtime Agent connections. */
-export class DeviceRuntimeConnectionRegistry {
+export class LocalAgentRuntimeControl {
   private readonly connections = new Map<string, ConnectionState>();
   private readonly runtimeConnections = new Map<string, ConnectionState>();
   private readonly server = new WebSocketServer({ noServer: true });
@@ -51,7 +51,7 @@ export class DeviceRuntimeConnectionRegistry {
     });
   }
 
-  endpoint(runtimeId: string): RuntimeEndpoint {
+  endpoint(runtimeId: string): RuntimeControlPort {
     const rpc = <T>(method: string, payload: unknown): Promise<T> => this.rpc<T>(runtimeId, method, payload);
     return {
       dispatch: (envelope) => rpc("dispatch", envelope),
@@ -210,6 +210,7 @@ export class DeviceRuntimeConnectionRegistry {
     });
   }
 }
+
 
 function validAdvertisement(value: RuntimeAdvertisement): boolean {
   return value !== null && typeof value === "object"

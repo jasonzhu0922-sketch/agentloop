@@ -1,9 +1,9 @@
 import { createServer, type Server } from "node:http";
-import { assertRuntimeDispatchEnvelope, type AgentLoopRuntimeHost } from "../application/runtime-host.ts";
+import { assertRuntimeDispatchEnvelope, type RuntimeHostService } from "../service/runtime-host-service.ts";
 import type { RuntimeModelSummary } from "../../shared/contracts.ts";
 
 /** Private Router-to-Host transport. It is not exposed as a browser API. */
-export function createRuntimeHostHttpServer(host: AgentLoopRuntimeHost, options: { readonly dispatchToken?: string; readonly models?: readonly RuntimeModelSummary[] } = {}): Server {
+export function createRuntimeHostHttpServer(host: RuntimeHostService, options: { readonly dispatchToken?: string; readonly models?: readonly RuntimeModelSummary[] } = {}): Server {
   return createServer(async (request, response) => {
     try {
       if (request.method === "GET" && request.url === "/healthz") return json(response, 200, { status: "ok" });

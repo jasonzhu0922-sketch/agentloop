@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { AppDatabase, LlmProviderRegistry, RunService, SkillService, createStepExecutionStrategyProfile, createWebTools } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
-import type { LocalAgentOptions } from "./local-agent-options.ts";
+import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 

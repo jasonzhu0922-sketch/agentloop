@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { RunService } from "@zhujun/agentloop";
-import type { ResourceImporter } from "../application/runtime-host.ts";
+import type { ResourceImporter } from "../service/runtime-host-service.ts";
 
 const MAX_IMPORTED_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
