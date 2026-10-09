@@ -2,7 +2,7 @@ import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from "./config/bootstrap-config.ts";
-import { createLocalAgentServer } from "./transport/http-server.ts";
+import { createLocalAgentServer } from "./api/local-agent-api.ts";
 import { localRuntimeTerminalLogLine } from "./observability/runtime-terminal-log.ts";
 import { ensureLocalAgentRuntimeConfiguration, localAgentRuntimeConfiguration, readLocalAgentIntegrationEnvironment } from "./config/runtime-configuration.ts";
 

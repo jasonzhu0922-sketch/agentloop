@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createLocalRuntimeState } from "../web/local-runtime-state.js";
+import { createLocalRuntimeState } from "../web/client/local-runtime/local-runtime-state.js";
 
 test("local runtime state keeps device, Runtime, scope, and Agent lifecycle together", () => {
   const state = createLocalRuntimeState();

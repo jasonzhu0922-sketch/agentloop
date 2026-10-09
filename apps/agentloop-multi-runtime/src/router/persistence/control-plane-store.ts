@@ -22,7 +22,7 @@ import {
   type StoredConversationPage,
   type StoredConversationTurn,
   type StoredRuntimeEndpoint,
-} from "../application/control-plane-contracts.ts";
+} from "../ports/control-plane-contracts.ts";
 import { migrateRouterState } from "./state-migrations.ts";
 
 interface TaskRow {

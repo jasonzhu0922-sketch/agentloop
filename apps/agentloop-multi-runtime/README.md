@@ -44,36 +44,43 @@ Web 的“一致”是交互和可追溯性的一致，而不是把设备数据�
 
 ```text
 web/                       唯一业务 Web 界面与同源 Router 代理
-├── router-client.js       Router URL、Bearer 认证与 JSON 请求适配
-├── local-agent-client.js  Loopback Agent 会话头、续期与 401 重试
-├── session-state.js       登录身份与 Local Agent 会话凭据状态
-├── local-runtime-state.js Local Agent/设备/Runtime 的浏览器状态
-├── local-runtime-view-model.js 本机 Runtime 控件的纯视图投影
-├── run-state.js            运行中任务、上传、取消与实时刷新协调状态
-├── *-projection.js        Run/事件/产物的纯投影与展示数据转换
-└── app.js                 页面状态协调、DOM 事件绑定与渲染
+├── client/
+│   ├── api/               Router HTTP 客户端与 Assignment SSE
+│   ├── local-runtime/     Local Agent 客户端、设备/Runtime 状态与视图
+│   ├── state/             会话、运行、持久化与刷新状态
+│   ├── projections/       Run/事件/产物的纯投影
+│   ├── presentation/      回复、产物与失败提示展示
+│   ├── ui/                Composer、选择和滚动交互
+│   └── app.js             页面状态协调、DOM 事件绑定与渲染
+├── pages/                 应用页、登录页及登录样式
+├── styles/                全局样式与 Runtime 覆盖
+└── server.mjs             Web 静态资源与同源 Router 代理
 src/
 ├── shared/               Router 与 Cloud Runtime Host 共用的中立契约、配置与连接适配
 ├── router/
-│   ├── transport/        用户、Host 与设备的 Router HTTP 接入
-│   ├── application/      Assignment、任务提交构造、调度、状态观察与投影
+│   ├── api/              用户、Host 与设备的 Router HTTP API 和请求 DTO
+│   ├── service/          Assignment、任务提交构造、调度、状态观察与投影
+│   ├── ports/            Router 持久化与 Runtime 控制端口
+│   ├── runtime-control/  Cloud Runtime HTTP 与 Local Agent WebSocket 适配器
 │   ├── persistence/      Router 专属 schema、迁移与 Repository
 │   ├── identity/         云端用户身份与会话
 │   ├── devices/          Local Agent 注册和反向连接
 │   ├── attachments/      云端附件与受控资源引用
 │   └── artifacts/        云端产物目录与完整性收据
 └── runtime-host/
-    ├── transport/        仅 Router 信任的 Host HTTP 接入
-    ├── application/      dispatch 适配、容量准入与运行前检查
+    ├── api/              仅 Router 信任的 Host HTTP API
+    ├── service/          dispatch 适配、容量准入与运行前检查
+    ├── ports/            Host 到 AgentLoop kernel 的运行端口
     ├── persistence/      Runtime kernel 迁移与 Host dispatch ledger
     └── infrastructure/   Router 受控资源导入
 local-agent-runtime/
 └── src/
     ├── config/           设备启动和集成配置
-    ├── transport/        loopback HTTP 协议解码、响应与错误映射
-    ├── application/      Agent 用例、Runtime 工厂、Supervisor 与生命周期
+    ├── api/              loopback HTTP 协议解码、响应与错误映射
+    ├── service/          Agent 用例、Runtime 工厂、Supervisor 与生命周期
+    ├── connection/       Router 反向控制连接
     ├── persistence/      设备状态、目录授权等设备 SQLite/文件状态
-    ├── infrastructure/   Router 反向连接与原生目录选择器
+    ├── infrastructure/   原生目录选择器与设备适配器
     └── observability/    多 Local Runtime 的终端日志
 config/                   本应用的 Runtime/Provider 配置模板
 ```
@@ -126,7 +133,7 @@ SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应�
 
 ### Local Runtime Agent 独立部署配置
 
-Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包，也不复用 Router/云端 Host 的 `.env`。开发模式从 `local-agent-runtime/.env` 与 `local-agent-runtime/config/llm-providers.json` 读取；已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime\`。该 `.env` 是 Local Agent 唯一的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
+Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包。单独运行 `start:local-agent` 或已安装 Agent 时，从 `local-agent-runtime/.env`（打包版为设备数据目录下的 `.env`）与 `local-agent-runtime/config/llm-providers.json` 读取；本地 `start:multi-runtime` 启动器默认让 Local Agent Skill 与 Runtime Host 共用 `LLM_PROVIDER_ENV_FILE` 指定的部署文件，仍可用 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖。已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime\`。该 `.env` 是 Local Agent 的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
@@ -209,7 +216,7 @@ EPLAT_CLIENT_ID=replace-at-deploy
 EPLAT_CLIENT_SECRET=replace-at-deploy
 ```
 
-Host 只向 Skill 子进程提供 `API_QUERY_ENV_FILE`（配置文件路径）。脚本使用 `curl` 的可用 TLS 栈发送请求，并分别报告传输、HTTP、JSON 和 SQL API `__sys__.status` 错误。默认路径是 Host 的 `.env`；受管部署可通过 `API_QUERY_ENV_FILE` 覆盖。
+Host 只向 Skill 子进程提供 `API_QUERY_ENV_FILE`（配置文件路径）。脚本使用 `curl` 的可用 TLS 栈发送请求，并分别报告传输、HTTP、JSON 和 SQL API `__sys__.status` 错误。Runtime Host 默认读取自己的 `.env`；本地 `start:multi-runtime` 启动器会把同一部署文件路径传给 Local Agent，单独部署时可通过 `API_QUERY_ENV_FILE` 或 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖。
 
 ```bash
 # 终端 1：Router（默认读取 config/runtimes.json）
@@ -293,11 +300,26 @@ docker compose \
 
 四个服务默认复用同一个 `agentloop-multi-runtime:runtime-baseline-local` 镜像，Compose 只会构建一次；直接执行 Compose 与 `npm run start:multi-runtime:docker` 选择相同标签。若输出长期只重复 `Pulling fs layer` 且没有出现 `Download complete` 或 `Pull complete`，可先 `Ctrl-C` 中断（不会删除卷），再确认 `docker pull $NODE_IMAGE` 能完成后重新运行。
 
+### Docker Compose：TiDB 部署/联调
+
+主 Compose 按角色分别向 Router 和 Runtime Host 注入 `AGENTLOOP_ROUTER_STATE_*` 与 `AGENTLOOP_RUNTIME_STATE_*`。SQLite 示例继续使用原有默认值；TiDB 联调不要复用一个库，Router 和 Runtime 各用独立 database。复制单独的 TiDB 覆盖文件，填入可从 Docker 容器访问的 TiDB 地址和账号；密码中的保留字符必须进行 URL 编码。这个文件已加入 `.gitignore`，不要提交真实凭据。
+
+```bash
+cp apps/agentloop-multi-runtime/.env.docker.tidb.example \
+  apps/agentloop-multi-runtime/.env.docker.tidb
+# 编辑 .env.docker.tidb 中的 TiDB 地址、账号和密码
+npm run rebuild:multi-runtime:docker:tidb
+```
+
+Router 与 Runtime Host 启动时会各自执行其版本化 TiDB 迁移；`rebuild` 会构建并后台重建应用容器。之后用 `npm run logs:multi-runtime:docker:tidb` 查看日志，`npm run stop:multi-runtime:docker:tidb` 停止应用。部署到测试环境时，TiDB endpoint 必须能从 Docker 网络路由到；不要把 `127.0.0.1` 当作容器内的数据库地址。
+
+需要在本机启动随仓库提供的单节点 TiDB 时，可先执行 `npm run start:multi-runtime:tidb-local-db`。该集群只发布宿主机 `127.0.0.1:4000`，应用容器应通过可路由的 Docker 网络地址连接；本地集群与应用容器需加入同一个 Docker network，或改用测试环境 TiDB endpoint。停止本地数据库使用 `npm run stop:multi-runtime:tidb-local-db`；该命令不删除持久卷。不要在未备份和确认前使用 `down -v`。
+
 真实部署应通过 Secret manager 注入 Provider 配置和服务身份，而不是把这些值提交到仓库。这里的 `RUNTIME_*_TOKEN` 仅适合本地开发，生产中应替换为工作负载身份或 mTLS。
 
 本地开发界面中的租户/用户输入会被映射为 `x-tenant-id` 与 `x-user-id` 请求头，仅用于演示身份适配；它不是生产认证。Runtime 下拉框读取 Router 静态节点的具体实例 ID，例如 `general-01`、`general-02`；选择“自动”时由 Router 均衡调度，显式选择某实例时只在该实例有可预留容量时提交，不存在的实例会明确报错。Router 只选择未过期、`ready`、capability 匹配且未满的节点，并在同一事务中创建 Task、Assignment 和 30 秒可过期预留。评分是 `(activeRuns + pendingAdmissions + 0.5 × queuedRuns) / maxConcurrentRuns`；Host 仍会按自己已接受且正在运行的 Run 执行容量准入。`reserved` 不形成会话绑定；只有 Host 返回 `remoteRunId` 后才成为 affinity 候选。后续新 Run 优先健康的原 Host，原 Host 失联、draining 或满载时会迁移到下一台兼容 Host，并写入迁移审计记录。
 
-Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignmentId/events/stream` SSE 代理；事件权威仍在共享状态库的持久 Run event log，浏览器绝不直连 Host。当前已实现的是“下一新 Run”的健康 affinity 降级；执行中的 Run 的自动接管仍需要 Run lease、fence 与按 Action receipt 的安全恢复，尚未声明完成。Compose 是本地/单机骨架；生产应替换为 PostgreSQL、对象存储和 RWX workspace。设计见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
+Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignmentId/events/stream` SSE 代理；事件权威仍在共享状态库的持久 Run event log，浏览器绝不直连 Host。当前已实现的是“下一新 Run”的健康 affinity 降级；执行中的 Run 的自动接管仍需要 Run lease、fence 与按 Action receipt 的安全恢复，尚未声明完成。Compose 是本地/单机骨架；多节点生产部署还需选定共享 PostgreSQL/TiDB、对象存储和 RWX workspace。设计见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
 
 ### 打包 Local Runtime Agent（macOS Apple Silicon）
 

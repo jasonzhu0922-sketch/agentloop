@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRouterClient, routerProxyPath } from "../web/router-client.js";
-import { createLocalAgentClient } from "../web/local-agent-client.js";
+import { createRouterClient, routerProxyPath } from "../web/client/api/router-client.js";
+import { createLocalAgentClient } from "../web/client/local-runtime/local-agent-client.js";
 
 test("Router client adds the current bearer token without replacing caller headers", async () => {
   let captured: RequestInit | undefined;

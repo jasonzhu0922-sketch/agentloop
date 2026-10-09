@@ -2,10 +2,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { mkdir, rm } from "node:fs/promises";
 import { AppDatabase } from "@zhujun/agentloop";
-import type { LocalAgentOptions } from "./local-agent-options.ts";
+import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalRuntimeFactory } from "./local-runtime-factory.ts";
 import { LocalRuntimeSupervisor, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
-import { RuntimeConnectionClient } from "../infrastructure/runtime-connection-client.ts";
+import { RuntimeConnectionClient } from "../connection/router-runtime-control-client.ts";
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
 import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local-agent-state-store.ts";
 

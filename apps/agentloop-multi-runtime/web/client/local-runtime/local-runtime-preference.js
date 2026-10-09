@@ -1,4 +1,4 @@
-import { persistJson } from "./session-persistence.js";
+import { persistJson } from "../state/session-persistence.js";
 
 const LOCAL_RUNTIME_PREFERENCE_KEY = "agentloop.multi-runtime.local-execution-preference.v1";
 

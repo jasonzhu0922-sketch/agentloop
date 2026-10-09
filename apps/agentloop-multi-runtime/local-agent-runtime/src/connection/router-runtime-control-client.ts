@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import type { RuntimeArtifact, RuntimeDispatchEnvelope, RuntimeRunStatus } from "../../../src/shared/contracts.ts";
-import { LocalRuntimeSupervisor, type LocalRuntimeControl } from "../application/runtime-supervisor.ts";
+import { LocalRuntimeSupervisor, type LocalRuntimeControl } from "../service/runtime-supervisor.ts";
 
 export interface DeviceCredential {
   readonly id: string;

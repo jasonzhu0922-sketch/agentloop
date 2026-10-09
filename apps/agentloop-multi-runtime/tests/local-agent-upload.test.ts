@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createLocalAgentServer } from "../local-agent-runtime/src/transport/http-server.ts";
+import { createLocalAgentServer } from "../local-agent-runtime/src/api/local-agent-api.ts";
 
 test("Local Agent stores browser uploads as sources in the selected Runtime without using Router attachment storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentloop-local-agent-upload-"));

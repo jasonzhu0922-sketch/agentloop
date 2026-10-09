@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
-import { observeAssignment } from "../web/assignment-stream.js";
-import { projectAssistantEvent } from "../web/assistant-event-projection.js";
+import { observeAssignment } from "../web/client/api/assignment-stream.js";
+import { projectAssistantEvent } from "../web/client/projections/assistant-event-projection.js";
 
 const event = (seq: number, type: string, data = {}) => ({ seq, type, data, createdAt: seq });
 const packet = (value: ReturnType<typeof event>) => `id: ${value.seq}\nevent: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`;
@@ -103,7 +103,7 @@ test("explicit observer abort closes only its stream without declaring a Run out
 });
 
 test("actual app error handler no longer converts connection errors into terminal UI failure", async () => {
-  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   const context = vm.createContext({ setStatus() {} });
   vm.runInContext(source.slice(source.indexOf("function onEvent("), source.indexOf("async function refreshArtifacts(")), context);
   const assistant = { status: "running", text: "work remains visible", reasoning: "progress" };
@@ -112,14 +112,14 @@ test("actual app error handler no longer converts connection errors into termina
 });
 
 test("a persisted pre-admission failure completes the submitted message without opening SSE", async () => {
-  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   assert.match(source, /if \(body\.assignment\.status === "failed"\) \{[\s\S]*?completeAssistantMessage\(assistantMessage\);[\s\S]*?return;/);
   const failureBranch = source.match(/if \(body\.assignment\.status === "failed"\) \{[\s\S]*?\n\s*\}\n\s*setStatus/)?.[0] ?? "";
   assert.doesNotMatch(failureBranch, /streamAssignment\(/);
 });
 
 test("a later turn's live event repaints only its own assistant card", async () => {
-  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   const conversation = {
     id: "conversation",
     messages: [
@@ -176,7 +176,7 @@ test("a later turn's live event repaints only its own assistant card", async () 
 });
 
 test("actual app repairs legacy false failure but never regresses a confirmed terminal Run", async () => {
-  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   const context = vm.createContext({ completeAssistantMessage() {}, recoveredFailureMessage: () => "Host failure" });
   vm.runInContext(source.slice(source.indexOf("function applyRecoveredRunState("), source.indexOf("function recoveredFailureMessage(")), context);
   const old = { status: "failed", text: "network error", error: "network error", completedAt: 20, events: [] };
@@ -188,7 +188,7 @@ test("actual app repairs legacy false failure but never regresses a confirmed te
 });
 
 test("server recency correction replaces stale browser cache ordering", async () => {
-  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   const context = vm.createContext({ activeRunsByConversation: new Map() });
   vm.runInContext('const recoveredSessions = [{ id: "old", title: "old", createdAt: 1, updatedAt: 10000, messages: [] }]; let sessions = [];', context);
   vm.runInContext(source.slice(source.indexOf("function mergeConversationSummaries("), source.indexOf("async function selectConversation(")), context);
@@ -198,7 +198,7 @@ test("server recency correction replaces stale browser cache ordering", async ()
 });
 
 test("server refresh invalidates cached history so Assignment artifacts are hydrated again", async () => {
-  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
   const context = vm.createContext({ activeRunsByConversation: new Map() });
   vm.runInContext(`
     const recoveredSessions = [{

@@ -5,10 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import { LocalDirectoryScopeStore } from "../local-agent-runtime/src/persistence/directory-scope-store.ts";
-import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/application/runtime-supervisor.ts";
-import { persistSessions } from "../web/session-persistence.js";
-import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/local-runtime-preference.js";
-import { submissionFailureMessage } from "../web/submission-failure-message.js";
+import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/service/runtime-supervisor.ts";
+import { persistSessions } from "../web/client/state/session-persistence.js";
+import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/client/local-runtime/local-runtime-preference.js";
+import { submissionFailureMessage } from "../web/client/presentation/submission-failure-message.js";
 
 test("local-execution preference is explicit, user-device scoped, and best-effort", () => {
   const values = new Map<string, string>();
@@ -202,12 +202,12 @@ test("revoking a directory removes it from the local authorization catalog", asy
 
 test("web keeps strict_local recovery support while normal placement uses the Local Runtime toggle", async () => {
   const [app, index, agent, service, factory, localAgentClient] = await Promise.all([
-    readFile(new URL("../web/app.js", import.meta.url), "utf8"),
-    readFile(new URL("../web/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../local-agent-runtime/src/transport/http-server.ts", import.meta.url), "utf8"),
-    readFile(new URL("../local-agent-runtime/src/application/local-agent-service.ts", import.meta.url), "utf8"),
-    readFile(new URL("../local-agent-runtime/src/application/local-runtime-factory.ts", import.meta.url), "utf8"),
-    readFile(new URL("../web/local-agent-client.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/api/local-agent-api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/service/local-agent-service.ts", import.meta.url), "utf8"),
+    readFile(new URL("../local-agent-runtime/src/service/local-runtime-factory.ts", import.meta.url), "utf8"),
+    readFile(new URL("../web/client/local-runtime/local-agent-client.js", import.meta.url), "utf8"),
   ]);
   assert.match(app, /\/v1\/strict-local-runs/);
   assert.match(app, /async function localUploadSource\(file, conversationId, runtimeId\)/);

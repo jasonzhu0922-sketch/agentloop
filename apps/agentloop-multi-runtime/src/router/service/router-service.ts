@@ -1,4 +1,4 @@
-import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeEndpoint, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
+import type { RuntimeArtifact, RuntimeCommandOutput, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import {
   RuntimeCapacityError,
   RuntimeDispatchOutcomeUnknownError,
@@ -7,7 +7,7 @@ import {
   type RouterArtifactCatalog,
   type RuntimeCatalogEntry,
   type StoredAssignment,
-} from "./control-plane-contracts.ts";
+} from "../ports/control-plane-contracts.ts";
 
 export interface RouterDispatchFailureLog {
   readonly assignmentId: string;
@@ -19,9 +19,9 @@ export interface RouterDispatchFailureLog {
   readonly diagnostic: string;
 }
 
-export class PersistentMultiRuntimeRouter {
+export class RouterService {
   private readonly store: ControlPlaneRepository;
-  private readonly endpointFactory: (endpoint: string) => RuntimeEndpoint;
+  private readonly endpointFactory: (endpoint: string) => RuntimeControlPort;
   private readonly heartbeatTtlMs: number;
   private readonly reservationTtlMs: number;
   private readonly now: () => number;
@@ -32,7 +32,7 @@ export class PersistentMultiRuntimeRouter {
 
   constructor(input: {
     readonly store: ControlPlaneRepository;
-    readonly endpointFactory: (endpoint: string) => RuntimeEndpoint;
+    readonly endpointFactory: (endpoint: string) => RuntimeControlPort;
     readonly heartbeatTtlMs?: number;
     readonly reservationTtlMs?: number;
     readonly now?: () => number;
@@ -316,7 +316,8 @@ export class PersistentMultiRuntimeRouter {
 
 }
 
-export { RuntimeCapacityError } from "./control-plane-contracts.ts";
+
+export { RuntimeCapacityError } from "../ports/control-plane-contracts.ts";
 
 function isRuntimeCapacityFailure(error: unknown): boolean {
   return error instanceof Error && error.message === "runtime_capacity_exhausted";

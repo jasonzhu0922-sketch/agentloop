@@ -7,10 +7,10 @@ import { WebSocket } from "ws";
 import { AppDatabase } from "@zhujun/agentloop";
 import { IdentityService } from "../src/router/identity/service.ts";
 import { ControlPlaneStore } from "../src/router/persistence/control-plane-store.ts";
-import { PersistentMultiRuntimeRouter } from "../src/router/application/persistent-router.ts";
-import { RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/application/control-plane-contracts.ts";
+import { RouterService } from "../src/router/service/router-service.ts";
+import { RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/ports/control-plane-contracts.ts";
 import { SqlDeviceRepository } from "../src/router/devices/device-service.ts";
-import { DeviceRuntimeConnectionRegistry } from "../src/router/devices/runtime-connection-registry.ts";
+import { LocalAgentRuntimeControl } from "../src/router/runtime-control/local-agent-runtime-control.ts";
 import type { RuntimeDispatchEnvelope } from "../src/shared/contracts.ts";
 
 test("Router dispatches a local Assignment through the authenticated device connection exactly once", async () => {
@@ -23,7 +23,7 @@ test("Router dispatches a local Assignment through the authenticated device conn
   const registration = await devices.issueRegistrationToken(owner.principal);
   const publicKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
   const device = await devices.registerAgent({ registrationToken: registration.token, displayName: "test device", publicKey });
-  const registry = new DeviceRuntimeConnectionRegistry(devices, store);
+  const registry = new LocalAgentRuntimeControl(devices, store);
   const server = createServer();
   registry.attach(server);
   const runtimeId = "local-runtime-test";
@@ -90,7 +90,7 @@ test("Router dispatches a local Assignment through the authenticated device conn
       socket!.send(JSON.stringify({ type: "rpc.response", messageId: request.messageId, ok: true, result }));
     });
 
-    const router = new PersistentMultiRuntimeRouter({
+    const router = new RouterService({
       store,
       endpointFactory: (endpoint) => registry.endpoint(endpoint.slice("local-runtime://".length)),
     });
@@ -183,7 +183,7 @@ test("lost Local Agent dispatch ACK retries the same Assignment and dispatch key
     now,
   });
   const envelopes: RuntimeDispatchEnvelope[] = [];
-  const router = new PersistentMultiRuntimeRouter({
+    const router = new RouterService({
     store,
     endpointFactory: () => ({
       async dispatch(envelope) {

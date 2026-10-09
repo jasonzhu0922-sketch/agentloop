@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   RuntimeAssignment,
   RuntimeDispatchEnvelope,
-  RuntimeEndpoint,
+  RuntimeControlPort,
   RuntimeInstance,
   RuntimeProfile,
   RuntimeRunStatus,
@@ -12,7 +12,7 @@ import type { RuntimeArtifact } from "../../shared/contracts.ts";
 
 interface RegisteredRuntime {
   readonly instance: RuntimeInstance;
-  readonly endpoint: RuntimeEndpoint;
+  readonly endpoint: RuntimeControlPort;
   reservedRuns: number;
 }
 
@@ -27,7 +27,7 @@ export class MultiRuntimeRouter {
   private readonly assignmentsByMessage = new Map<string, Promise<RuntimeAssignment>>();
   private readonly assignmentsById = new Map<string, Promise<RuntimeAssignment>>();
 
-  register(instance: RuntimeInstance, endpoint: RuntimeEndpoint): void {
+  register(instance: RuntimeInstance, endpoint: RuntimeControlPort): void {
     if (instance.maxConcurrentRuns < 1) throw new TypeError("maxConcurrentRuns must be positive");
     this.runtimes.set(instance.id, { instance, endpoint, reservedRuns: 0 });
   }

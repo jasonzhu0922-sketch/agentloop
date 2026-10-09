@@ -2,6 +2,7 @@
 .env.before-*
 apps/agentloop-app/.env
 apps/agentloop-multi-runtime/.env.docker
+apps/agentloop-multi-runtime/.env.docker.tidb
 apps/*/.env.before-*
 apps/agentloop-app/config/llm-providers.json
 apps/agentloop-multi-runtime/config/llm-providers.json

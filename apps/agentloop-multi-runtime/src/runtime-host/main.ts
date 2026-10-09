@@ -6,8 +6,8 @@ import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutio
 import { HttpResourceImporter } from "./infrastructure/http-resource-importer.ts";
 import { AgentLoopRuntimeRunPort } from "./infrastructure/agentloop-runtime-run-port.ts";
 import { HostDispatchStore } from "./persistence/host-dispatch-store.ts";
-import { createRuntimeHostHttpServer } from "./transport/http.ts";
-import { AgentLoopRuntimeHost } from "./application/runtime-host.ts";
+import { createRuntimeHostHttpServer } from "./api/runtime-host-api.ts";
+import { RuntimeHostService } from "./service/runtime-host-service.ts";
 import {
   assertRequiredRuntimeCommands,
   assertRequiredRuntimeNodeModules,
@@ -15,7 +15,7 @@ import {
   requiredRuntimeCommands,
   requiredRuntimeNodeModules,
   requiredRuntimePythonModules,
-} from "./application/runtime-command-preflight.ts";
+} from "./service/runtime-command-preflight.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
 
@@ -116,7 +116,7 @@ const reconcileOwnedRuns = async (): Promise<void> => {
   await runs.reconcileInterruptedRuns(await dispatchStore.ownedRunIds());
 };
 await reconcileOwnedRuns();
-const runtimeHost = new AgentLoopRuntimeHost(new AgentLoopRuntimeRunPort(runs), new HttpResourceImporter(runs, routerAttachmentToken), {
+const runtimeHost = new RuntimeHostService(new AgentLoopRuntimeRunPort(runs), new HttpResourceImporter(runs, routerAttachmentToken), {
   maxConcurrentRuns,
   activeRunCount: activeRunCount,
 }, dispatchStore);
