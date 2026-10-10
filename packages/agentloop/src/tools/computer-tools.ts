@@ -646,7 +646,7 @@ export function createComputerTools(
   return tools;
 }
 
-function executorForContext(executor: ComputerExecutor, context: ToolExecutionContext): ComputerExecutor {
+export function executorForContext(executor: ComputerExecutor, context: ToolExecutionContext): ComputerExecutor {
   const commandRoots: CommandRootMount[] = [
     ...context.grant.skillExecutionRoots.map((root) => ({
       id: root.cwd,

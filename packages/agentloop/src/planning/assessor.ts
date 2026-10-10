@@ -17,6 +17,7 @@ import {
 import type {
   AssessmentMethod,
   AssessmentProfileId,
+  ArtifactTarget,
   CriterionAssessment,
   FailedBoundary,
   SkillAssessment,
@@ -294,6 +295,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const candidateOutput = input.evidence.candidateOutput.trim();
     const nonEmpty = candidateOutput.length > 0;
     const deliveryCandidate = input.evidence.deliveryCandidate;
+    const runtimeEvidenceBundles = input.runtimeEvidenceBundles;
     const successfulToolRefs = input.evidence.toolCalls
       .filter((toolCall) => !toolCall.isError)
       .map((toolCall) => toolCall.toolCallId);
@@ -305,7 +307,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const requiredKindsSatisfied = requiredKinds
       .filter((kind) => blockingKinds.has(kind))
       .every((kind) =>
-      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions, input.expectedArtifactKind, input.expectedArtifactFormat)
+      evidenceKindSatisfiedByGate(kind, receipts, successfulToolRefs, deliveryCandidate, input.workflowEvidenceActions, input.expectedArtifactKind, input.expectedArtifactFormat, input.artifactTargets, runtimeEvidenceBundles)
       );
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
       const evidenceSatisfied = criterionSatisfiedByEvidenceGate(
@@ -318,6 +320,8 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
         input.workflowEvidenceActions,
         input.expectedArtifactKind,
         input.expectedArtifactFormat,
+        input.artifactTargets,
+        runtimeEvidenceBundles,
       );
       const candidateRequired = criterion.blocking !== false
         && !isEvidenceCriterion(criterion.id);
@@ -329,7 +333,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
           ? "The completion candidate and required observable Runtime operations satisfy the principle assessment gate."
           : rejectedEvidenceGateRationale(nonEmpty, receipts,
             requiredKinds.includes(criterion.id) || criterion.id === "explicit_caveats" ? [criterion.id] : requiredKinds,
-            successfulToolRefs, deliveryCandidate, candidateRequired, input.expectedArtifactKind, input.expectedArtifactFormat),
+            successfulToolRefs, deliveryCandidate, candidateRequired, input.expectedArtifactKind, input.expectedArtifactFormat, input.artifactTargets, runtimeEvidenceBundles),
         evidenceRefs: satisfied
           ? ["candidateOutput", ...successfulToolRefs, ...receipts.map((receipt) => receipt.toolCallId), ...(deliveryCandidate?.sourceToolCallIds ?? [])]
           : successfulToolRefs,
@@ -456,10 +460,12 @@ function criterionSatisfiedByEvidenceGate(
   workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
   expectedArtifactKind?: string,
   expectedArtifactFormat?: string,
+  artifactTargets?: readonly ArtifactTarget[],
+  runtimeEvidenceBundles?: StepAssessmentInput["runtimeEvidenceBundles"],
 ): boolean {
   // Semantic caveat evidence must not inherit an unrelated source/artifact
   // failure (nor automatically pass when all other operation receipts pass).
-  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions, expectedArtifactKind, expectedArtifactFormat);
+  if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions, expectedArtifactKind, expectedArtifactFormat, artifactTargets, runtimeEvidenceBundles);
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
   return successfulToolRefs.length > 0;
 }
@@ -472,11 +478,38 @@ function evidenceKindSatisfiedByGate(
   workflowEvidenceActions?: StepAssessmentInput["workflowEvidenceActions"],
   expectedArtifactKind?: string,
   expectedArtifactFormat?: string,
+  artifactTargets?: readonly ArtifactTarget[],
+  runtimeEvidenceBundles?: StepAssessmentInput["runtimeEvidenceBundles"],
 ): boolean {
+  if (kind === "structured_extraction_artifact") {
+    return runtimeEvidenceBundles?.verified.some((bundle) => bundle.sourceResultRefs.length > 0) === true;
+  }
   if (kind === "explicit_caveats") {
     // This proves only that limitations were recorded, not that the model's
     // explanation is sufficient. A Plan requirement itself is not evidence.
     return receipts.some((receipt) => !receipt.failed.has(kind) && receipt.caveatsRecorded);
+  }
+  // An artifact evidence criterion is satisfied only when every structured
+  // target of this leaf has matching evidence. A target may be adopted from a
+  // dependency; this checks compatibility/provenance-bearing receipts, not
+  // which step originally wrote the bytes.
+  if (
+    artifactTargets !== undefined
+    && artifactTargets.length > 0
+    && (kind === "delivery_receipt" || kind === "artifact_acceptance" || isArtifactAcceptanceEvidenceKind(kind))
+  ) {
+    const eachTargetSatisfied = artifactTargets.every((target) => evidenceKindSatisfiedByGate(
+      kind,
+      receipts,
+      successfulToolRefs,
+      candidate,
+      workflowEvidenceActions,
+      target.kind,
+      target.format,
+      undefined,
+      runtimeEvidenceBundles,
+    ));
+    return eachTargetSatisfied && hasDistinctArtifactReceiptCoverage(receipts, artifactTargets);
   }
   if (kind === "delivery_receipt") {
     const candidateReceipt = candidate?.deliveryReceipt !== undefined
@@ -540,6 +573,31 @@ function evidenceKindSatisfiedByGate(
     if (receipt.failed.has(kind)) return false;
     return receipt.satisfied.has(kind);
   });
+}
+
+/** A target set is not a format count: one Markdown receipt cannot attest two requested Markdown outputs. */
+function hasDistinctArtifactReceiptCoverage(
+  receipts: readonly RuntimeObservableReceipt[],
+  targets: readonly ArtifactTarget[],
+): boolean {
+  const byPath = [...new Map(
+    receipts
+      .filter((receipt) => receipt.artifactPath !== undefined)
+      .map((receipt) => [receipt.artifactPath!, receipt]),
+  ).values()];
+  const assigned = new Set<string>();
+  const assign = (targetIndex: number): boolean => {
+    if (targetIndex === targets.length) return true;
+    const target = targets[targetIndex]!;
+    for (const receipt of byPath) {
+      if (assigned.has(receipt.artifactPath!) || !receiptMatchesExpectedTarget(receipt, target.kind, target.format)) continue;
+      assigned.add(receipt.artifactPath!);
+      if (assign(targetIndex + 1)) return true;
+      assigned.delete(receipt.artifactPath!);
+    }
+    return false;
+  };
+  return assign(0);
 }
 
 function isArtifactAcceptanceEvidenceKind(kind: string): boolean {
@@ -659,6 +717,8 @@ function rejectedEvidenceGateRationale(
   candidateRequired = true,
   expectedArtifactKind?: string,
   expectedArtifactFormat?: string,
+  artifactTargets?: readonly ArtifactTarget[],
+  runtimeEvidenceBundles?: StepAssessmentInput["runtimeEvidenceBundles"],
 ): string {
   if (!nonEmpty && candidateRequired) return "The candidate output is empty.";
   if (successfulToolRefs.length === 0) return "No successful Runtime operation is available.";
@@ -671,6 +731,8 @@ function rejectedEvidenceGateRationale(
     undefined,
     expectedArtifactKind,
     expectedArtifactFormat,
+    artifactTargets,
+    runtimeEvidenceBundles,
   ));
   if (missing.length > 0) return `No bound observable evidence confirms: ${missing.join(", ")}. This does not establish that the underlying content or operation is absent.`;
   return "The observable Runtime operations do not satisfy the principle assessment gate.";
@@ -795,16 +857,20 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
       input.expectedArtifactKind,
       input.expectedArtifactFormat,
     ) === undefined;
+  const structuredBundleUnverified = criterion.criterionId === "structured_extraction_artifact"
+    && (input.runtimeEvidenceBundles?.verified.length ?? 0) === 0;
   return {
     ...criterion,
-    ...(expectedFormatUnmet
+    ...(expectedFormatUnmet || structuredBundleUnverified
       ? {
         satisfied: false,
-        rationale: `No accepted artifact matches the required ${input.expectedArtifactFormat ?? input.expectedArtifactKind} format.`,
+        rationale: expectedFormatUnmet
+          ? `No accepted artifact matches the required ${input.expectedArtifactFormat ?? input.expectedArtifactKind} format.`
+          : "No Runtime-owned evidence bundle passed Assessment verification.",
       }
       : {}),
     blocking,
-    status: (expectedFormatUnmet ? false : criterion.satisfied)
+    status: ((expectedFormatUnmet || structuredBundleUnverified) ? false : criterion.satisfied)
       ? "satisfied"
       : verification === "model_judged" || verification === "decision_context"
         ? "unverified"
@@ -932,6 +998,19 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
     })),
     ...(policy === undefined ? {} : { assessmentPolicy: policy }),
     evidence: sanitizeStepEvidence(input.modelEvidence ?? input.evidence),
+    ...(input.runtimeEvidenceBundles === undefined ? {} : {
+      runtimeEvidenceBundles: {
+        schema: input.runtimeEvidenceBundles.schema,
+        materializationAttempted: input.runtimeEvidenceBundles.materializationAttempted,
+        verified: input.runtimeEvidenceBundles.verified.map((bundle) => ({
+          toolCallId: bundle.toolCallId,
+          materializationResultRef: bundle.materializationResultRef,
+          sourceResultRefs: bundle.sourceResultRefs,
+          artifact: bundle.artifact,
+        })),
+        rejected: input.runtimeEvidenceBundles.rejected,
+      },
+    }),
     ...(input.contextSummary === undefined ? {} : { contextSummary: input.contextSummary }),
   };
 }

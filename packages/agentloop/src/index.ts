@@ -196,6 +196,7 @@ export type {
 } from "./runtime/run-service.ts";
 export { ModelPlanRevisionAssessor, ModelRecoveryPlanner } from "./runtime/recovery-planning.ts";
 export type { RecoveryDecisionKind, RecoveryDecisionProposal, RecoveryPlanner } from "./runtime/recovery-planning.ts";
+export { DEFAULT_MAX_STEPS, MAX_SUPPORTED_STEP_TURNS } from "./runtime/run-service.ts";
 export { RecoveryRepository } from "./runtime/recovery-repository.ts";
 export type { PlanRevisionAssessmentRecord, RecoveryDecisionRecord, RecoveryUserResponse, RunRecoveryState } from "./runtime/recovery-repository.ts";
 export { reconstructRecoveryTranscript } from "./runtime/recovery-transcript.ts";
@@ -260,7 +261,8 @@ export { SkillRepository } from "./storage/repositories/skill-repository.ts";
 export { sourceSummary, SourceRepository } from "./storage/repositories/source-repository.ts";
 export type { SourceChunkRow, SourceRow } from "./storage/repositories/source-repository.ts";
 export { admitPlan } from "./planning/admission.ts";
-export { ModelPlanner } from "./planning/planner.ts";
+export { DEFAULT_MAX_PLANNING_TURNS, MAX_SUPPORTED_PLANNING_TURNS, ModelPlanner } from "./planning/planner.ts";
+export type { ModelPlannerOptions } from "./planning/planner.ts";
 export { ModelStepAssessor, ProfiledRuleStepAssessor, RuleBasedStepAssessor } from "./planning/assessor.ts";
 export { DependencyScheduler } from "./planning/scheduler.ts";
 export { PlanRepository } from "./planning/plan-repository.ts";

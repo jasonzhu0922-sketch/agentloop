@@ -440,8 +440,9 @@ export class OpenAICompatibleModel implements ModelAdapter {
 
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
+            const providerFailure = await retryableProviderFailure(response);
             await response.body?.cancel().catch(() => undefined);
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext, providerFailure);
             continue;
           }
           throw await providerHttpError(response, request.logContext);
@@ -842,8 +843,9 @@ export class ResponsesModel implements ModelAdapter {
 
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < this.maxAttempts) {
+            const providerFailure = await retryableProviderFailure(response);
             await response.body?.cancel().catch(() => undefined);
-            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext);
+            await retryAfter(this.onRetry, this.maxAttempts, this.retryDelayMs, attempt, retrySignal, response.status, request.logContext, providerFailure);
             continue;
           }
           throw await providerHttpError(response, request.logContext);
@@ -859,7 +861,7 @@ export class ResponsesModel implements ModelAdapter {
             this.rememberReasoningContinuation(invocation.runId, payload as Record<string, unknown>);
             return result;
           }
-          return await this.consumeStream(response, invocation.runId, sink, requestTimeout.recordActivity, budget);
+          return await this.consumeStream(response, invocation.runId, sink, requestTimeout.recordActivity, budget, request.logContext);
         } catch (error) {
           if (requestTimeout.aborted) {
             if (isRetryableStreamingAbort(requestTimeout.abortReason) && attempt < this.maxAttempts) {
@@ -949,6 +951,7 @@ export class ResponsesModel implements ModelAdapter {
     sink: ModelStreamSink,
     recordActivity: () => void = () => undefined,
     budget: ModelResponseBudget,
+    request: ModelRequestLogContext,
   ): Promise<ModelResponse> {
     if (response.body === null) {
       throw new AppError("MODEL_ERROR", "Model provider returned no streaming body", 502);
@@ -1107,9 +1110,11 @@ export class ResponsesModel implements ModelAdapter {
       reader.releaseLock();
     }
 
-    const final = finalResponse === undefined
-      ? undefined
-      : parseResponsesResponse(finalResponse, content);
+    if (finalResponse === undefined) {
+      throw missingResponsesTerminalEvent(request, diagnostics);
+    }
+
+    const final = parseResponsesResponse(finalResponse, content);
     if (final !== undefined) budget.assertResponse(final);
     this.rememberReasoningContinuation(runId, finalResponse);
     const usage = finalResponse?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
@@ -1756,16 +1761,40 @@ async function retryAfter(
   signal: AbortSignal,
   status?: number,
   request?: ModelRequestLogContext,
+  providerFailure?: Readonly<{ providerRequestId?: string; providerErrorBody?: string }>,
 ): Promise<void> {
   const delayMs = retryDelayMs * attempt;
   await onRetry?.({
     attempt,
     maxAttempts,
     ...(status === undefined ? {} : { status }),
+    ...(providerFailure?.providerRequestId === undefined ? {} : { providerRequestId: providerFailure.providerRequestId }),
+    ...(providerFailure?.providerErrorBody === undefined ? {} : { providerErrorBody: providerFailure.providerErrorBody }),
     delayMs,
     ...(request === undefined ? {} : { request }),
   });
   await waitForRetry(delayMs, signal);
+}
+
+async function retryableProviderFailure(response: Response): Promise<Readonly<{ providerRequestId?: string; providerErrorBody?: string }>> {
+  const providerRequestId = response.headers.get("x-request-id") ?? undefined;
+  const providerErrorBody = await safeResponseBodyPreview(response);
+  return {
+    ...(providerRequestId === undefined ? {} : { providerRequestId }),
+    ...(providerErrorBody === undefined ? {} : { providerErrorBody }),
+  };
+}
+
+function missingResponsesTerminalEvent(
+  request: ModelRequestLogContext,
+  diagnostics: StreamFailureDiagnostics,
+): AppError {
+  return new AppError("MODEL_ERROR", "Responses Provider stream ended without a terminal response event", 502, {
+    streamFailureStage: "missing_terminal_event",
+    streamEventsSeen: diagnostics.eventsSeen,
+    ...(diagnostics.lastEvent === undefined ? {} : { lastStreamEvent: diagnostics.lastEvent }),
+    request,
+  });
 }
 
 async function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<void> {

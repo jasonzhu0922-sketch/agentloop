@@ -1,4 +1,5 @@
 import type {
+  ArtifactTarget,
   CapabilitySideEffect,
   EvidenceContract,
   EvidenceKind,
@@ -48,6 +49,7 @@ export function createStepExecutionBinding(input: {
     requiredToolSourceIds,
   );
   const evidenceKinds = uniqueEvidenceKinds(input.evidenceContract?.requiredKinds ?? []);
+  const artifactTargets = normalizeArtifactTargets(input.step.artifactTargets ?? []);
   return {
     schema: "agentloop.stepExecutionBinding/v1",
     requiredCapabilities,
@@ -55,10 +57,30 @@ export function createStepExecutionBinding(input: {
     sourceKinds: inferSourceKinds(requiredCapabilities, evidenceKinds),
     sideEffect: inferSideEffect(requiredCapabilities),
     evidenceKinds,
+    ...(artifactTargets.length === 0 ? {} : { artifactTargets }),
     ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
     ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
     ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
   };
+}
+
+function normalizeArtifactTargets(targets: readonly ArtifactTarget[]): readonly ArtifactTarget[] {
+  const seen = new Set<string>();
+  return targets.map((target) => {
+    const id = target.id.trim();
+    if (id.length === 0 || seen.has(id)) throw new TypeError("artifact target IDs must be unique non-empty strings");
+    seen.add(id);
+    const kind = target.kind.trim();
+    if (kind.length === 0) throw new TypeError("artifact target kind must be non-empty");
+    const format = target.format?.trim();
+    return {
+      id,
+      ...(target.purpose === undefined ? {} : { purpose: target.purpose }),
+      kind,
+      ...(format === undefined || format.length === 0 ? {} : { format }),
+      terminalRequired: target.terminalRequired,
+    };
+  });
 }
 
 export function stepRequiredCapabilities(step: Pick<PlanStep, "requiredCapabilities" | "executionBinding">): readonly string[] {
@@ -128,8 +150,8 @@ export function planningCapabilitiesFromTools(
           ...(capability.label === undefined ? {} : { label: capability.label }),
           ...(capability.description === undefined ? {} : { description: capability.description }),
           sourceIds: [source.id],
-          produces: ["source_summary", "explicit_caveats"],
-          sourceKinds: ["web"],
+          produces: toolSourceCapabilityEvidenceKinds(capability.producesEvidenceKinds),
+          sourceKinds: toolSourceCapabilitySourceKinds(capability.sourceKinds),
           sideEffect: "external_read",
           risk: "medium",
         });
@@ -141,6 +163,26 @@ export function planningCapabilitiesFromTools(
     }
   }
   return [...staticCapabilities, ...dynamic.values()];
+}
+
+function toolSourceCapabilityEvidenceKinds(values: readonly string[] | undefined): EvidenceKind[] {
+  const supported = new Set<EvidenceKind>([
+    "source_summary", "source_urls", "schema_summary", "record_counts", "table_coverage",
+    "structured_extraction_artifact", "derived_aggregation", "artifact_path", "artifact_non_empty",
+    "artifact_acceptance", "artifact_openable", "format_matches_request", "basic_navigation",
+    "delivery_receipt", "explicit_caveats",
+  ]);
+  const declared = values ?? ["source_summary", "explicit_caveats"];
+  return uniqueEvidenceKinds(declared.filter((value): value is EvidenceKind => supported.has(value as EvidenceKind)));
+}
+
+function toolSourceCapabilitySourceKinds(values: readonly string[] | undefined): SourceKind[] {
+  const supported = new Set<SourceKind>([
+    "api", "database", "dataset", "document", "repository", "rubric", "uploaded_source",
+    "visible_directory", "workspace_file", "web", "conversation_workset", "generated_artifact",
+  ]);
+  const declared = values ?? ["web"];
+  return uniqueStrings(declared.filter((value): value is SourceKind => supported.has(value as SourceKind))) as SourceKind[];
 }
 
 const SKILL_SOURCE_PROVIDER_CAPABILITY_PREFIX = "skill_source_provider.";
@@ -293,7 +335,14 @@ export function resolveToolNamesForCapabilities(
   if (requiredToolSourceIds.length === 0) return [...resolved];
   const required = new Set(requiredToolSourceIds);
   const sourceByTool = new Map(availableTools.map((tool) => [tool.name, tool.source?.id]));
-  return [...resolved].filter((toolName) => required.has(sourceByTool.get(toolName) ?? ""));
+  // A ToolSource constraint binds the external provenance that a step must
+  // use; it is not an allow-list for Runtime-owned tools. Skill activation,
+  // workspace I/O, and artifact verification have no ToolSource identity and
+  // must remain available alongside the constrained external Tool.
+  return [...resolved].filter((toolName) => {
+    const sourceId = sourceByTool.get(toolName);
+    return sourceId === undefined || required.has(sourceId);
+  });
 }
 
 function dynamicCapabilityIds(tools: readonly PlanningToolSummary[]): ReadonlySet<string> {
@@ -319,6 +368,7 @@ function inferSourceKinds(capabilities: readonly string[], evidenceKinds: readon
   if (capabilities.includes("visible_directory_read") || capabilities.includes("visible_table_extraction")) kinds.add("visible_directory");
   if (capabilities.includes("web_research")) kinds.add("web");
   if (capabilities.includes("external_api_call")) kinds.add("web");
+  if (capabilities.includes("runtime_result_json_materialization")) kinds.add("workspace_file");
   if (capabilities.includes("workspace_file_read") || capabilities.includes("workspace_structured_artifact_read") || capabilities.includes("workspace_artifact_write")) kinds.add("workspace_file");
   if (evidenceKinds.some((kind) => SOURCE_EVIDENCE_KINDS.has(kind)) && kinds.size === 0) {
     kinds.add("conversation_workset");
@@ -340,6 +390,7 @@ function inferSideEffect(capabilities: readonly string[]): CapabilitySideEffect 
   if (capabilities.includes("external_side_effect")) return "external_write";
   if (
     capabilities.includes("workspace_artifact_write")
+    || capabilities.includes("runtime_result_json_materialization")
     || capabilities.includes("uploaded_source_materialization")
     || capabilities.includes("artifact_acceptance")
   ) return "workspace_write";
@@ -447,6 +498,7 @@ const CAPABILITY_TOOL_BINDINGS: Record<string, readonly string[]> = {
     "computer_run_command",
     "convert_artifact",
   ],
+  runtime_result_json_materialization: ["materialize_result_json"],
   external_api_call: [],
   custom_tool_call: [],
   artifact_acceptance: ["verify_artifact_acceptance"],
@@ -545,6 +597,17 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     sourceKinds: ["workspace_file", "generated_artifact"],
     sideEffect: "workspace_write",
     risk: "medium",
+  },
+  {
+    id: "runtime_result_json_materialization",
+    category: "structured_extraction",
+    label: "Materialize Runtime Result as JSON",
+    description: "Write an authorized JSON Runtime Result into a hash-bound, Runtime-owned workspace extraction artifact.",
+    produces: ["structured_extraction_artifact", "artifact_path", "artifact_non_empty"],
+    sourceKinds: ["workspace_file"],
+    sideEffect: "workspace_write",
+    risk: "low",
+    constraints: ["requires an authorized JSON Runtime Result from the current Plan step"],
   },
   {
     id: "workspace_command_computation",

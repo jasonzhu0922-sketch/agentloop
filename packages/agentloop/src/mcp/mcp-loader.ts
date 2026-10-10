@@ -18,6 +18,8 @@ export interface McpServerRegistration {
   readonly key: string;
   readonly transport: "http";
   readonly url: string;
+  /** Protocol version accepted by this server; defaults to the current client version. */
+  readonly protocolVersion?: string;
   readonly headers?: Readonly<Record<string, string>>;
   readonly auth?: McpAuthConfig;
   readonly trust?: "trusted" | "untrusted";
@@ -34,6 +36,8 @@ export type McpAuthConfig =
   | { readonly kind: "none" }
   | { readonly kind: "bearer"; readonly tokenEnv: string }
   | { readonly kind: "headers"; readonly headers: Readonly<Record<string, string>> }
+  /** Resolve each named HTTP header from a deployment-owned environment variable. */
+  | { readonly kind: "headers_env"; readonly headerEnvs: Readonly<Record<string, string>> }
   | { readonly kind: "query"; readonly name: string; readonly secretEnv: string };
 
 export interface LoadedMcpIntegration {
@@ -157,6 +161,7 @@ function parseMcpServerRegistration(value: unknown, label: string): McpServerReg
     key,
     transport: "http",
     url: requireString(record.url, `${label}.url`, { min: 1 }),
+    ...(record.protocolVersion === undefined ? {} : { protocolVersion: requireString(record.protocolVersion, `${label}.protocolVersion`, { min: 1 }) }),
     ...(record.headers === undefined ? {} : { headers: parseStringRecord(record.headers, `${label}.headers`) }),
     ...(record.auth === undefined ? {} : { auth: parseMcpAuthConfig(record.auth, `${label}.auth`) }),
     ...(record.trust === undefined ? {} : { trust: parseTrust(record.trust, `${label}.trust`) }),
@@ -174,6 +179,7 @@ function parseMcpAuthConfig(value: unknown, label: string): McpAuthConfig {
   if (kind === "none") return { kind };
   if (kind === "bearer") return { kind, tokenEnv: requireString(record.tokenEnv, `${label}.tokenEnv`, { min: 1 }) };
   if (kind === "headers") return { kind, headers: parseStringRecord(record.headers, `${label}.headers`) };
+  if (kind === "headers_env") return { kind, headerEnvs: parseStringRecord(record.headerEnvs, `${label}.headerEnvs`) };
   if (kind === "query") {
     return {
       kind,
@@ -273,25 +279,52 @@ function structuredMcpSourceSummary(
   const payload = parseStructuredMcpPayload(result);
   if (payload === undefined || !looksLikeStructuredSourcePayload(payload)) return undefined;
   const fields = summarizeStructuredMcpPayload(payload);
+  const tabularFacts = tabularMcpFacts(payload);
   const receiptId = createHash("sha256").update(`${server.key}:${tool.name}:${JSON.stringify({ payload, fields })}`).digest("hex").slice(0, 32);
   return {
     schema: "agentloop.toolEvidenceReceipt/v1",
     sourceType: "mcp",
     receiptId,
     sourceRefs: [{ serverKey: server.key, toolName: tool.name, transport: server.transport, url: server.url }],
-    facts: [{
-      kind: "source_summary",
-      toolName: tool.name,
-      textPreview: summarizeStructuredMcpTextPreview(fields),
-      fields,
-    }],
+    facts: [
+      {
+        kind: "source_summary",
+        toolName: tool.name,
+        textPreview: summarizeStructuredMcpTextPreview(fields),
+        fields,
+      },
+      ...(tabularFacts === undefined ? [] : [
+        { kind: "schema_summary", fieldCount: tabularFacts.fieldNames.length, fields: tabularFacts.fieldNames },
+        { kind: "record_counts", returnedRows: tabularFacts.returnedRows, countSemantics: "returned_rows" },
+      ]),
+    ],
     caveats: [],
     evidenceKinds: {
-      satisfied: ["mcp_tool_call", "source_summary"],
+      satisfied: [
+        "mcp_tool_call",
+        "source_summary",
+        ...(tabularFacts === undefined ? [] : ["schema_summary", "record_counts"]),
+      ],
       caveated: [],
       failed: [],
     },
   };
+}
+
+/** A fields/rows payload describes this response window, not table cardinality. */
+function tabularMcpFacts(payload: Record<string, unknown>): { fieldNames: string[]; returnedRows: number } | undefined {
+  if (!Array.isArray(payload.fields) || !Array.isArray(payload.rows)) return undefined;
+  const fieldNames = payload.fields.map((field, index) => {
+    if (typeof field === "string" && field.trim().length > 0) return field;
+    if (isRecord(field)) {
+      for (const key of ["name", "field", "column", "label"]) {
+        const value = field[key];
+        if (typeof value === "string" && value.trim().length > 0) return value;
+      }
+    }
+    return `column_${index + 1}`;
+  });
+  return { fieldNames, returnedRows: payload.rows.length };
 }
 
 function parseStructuredMcpPayload(result: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -392,25 +425,26 @@ async function listAllTools(session: McpSession): Promise<readonly McpToolDefini
 
 async function createHttpMcpSession(server: McpServerRegistration, environment: Readonly<Record<string, string | undefined>>): Promise<McpSession> {
   const baseUrl = resolveHttpRequestUrl(server, environment);
-  const headers = createMcpRequestHeaders(server, environment, "initialize", { includeProtocolVersion: false });
+  const protocolVersion = server.protocolVersion ?? MCP_PROTOCOL_VERSION;
+  const headers = createMcpRequestHeaders(server, environment, "initialize", protocolVersion, { includeProtocolVersion: false });
   const initResponse = await postJsonRpc(baseUrl, headers, {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
     params: {
-      protocolVersion: MCP_PROTOCOL_VERSION,
+      protocolVersion,
       capabilities: { tools: {} },
       clientInfo: { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION },
     },
   });
   if (initResponse._mcpSessionId !== undefined) headers.set("mcp-session-id", initResponse._mcpSessionId);
-  await postNotification(baseUrl, createMcpRequestHeaders(server, environment, "notifications/initialized"), {
+  await postNotification(baseUrl, createMcpRequestHeadersFrom(headers, protocolVersion, "notifications/initialized"), {
     jsonrpc: "2.0",
     method: "notifications/initialized",
   });
   let requestId = 2;
   return {
-    request: (method, params, signal) => requestHttpJsonRpc(baseUrl, headers, method, params, signal, requestId++),
+    request: (method, params, signal) => requestHttpJsonRpc(baseUrl, headers, protocolVersion, method, params, signal, requestId++),
     close: async () => undefined,
   };
 }
@@ -418,12 +452,13 @@ async function createHttpMcpSession(server: McpServerRegistration, environment: 
 async function requestHttpJsonRpc(
   url: URL,
   headers: Headers,
+  protocolVersion: string,
   method: string,
   params: Record<string, unknown> | undefined,
   signal?: AbortSignal,
   requestId = 99,
 ): Promise<Record<string, unknown>> {
-  headers = createMcpRequestHeadersFrom(headers, method, params);
+  headers = createMcpRequestHeadersFrom(headers, protocolVersion, method, params);
   const response = await postJsonRpc(url, headers, {
     jsonrpc: "2.0",
     id: requestId,
@@ -481,6 +516,7 @@ function createMcpRequestHeaders(
   server: McpServerRegistration,
   environment: Readonly<Record<string, string | undefined>>,
   method: string,
+  protocolVersion: string,
   options: { readonly includeProtocolVersion?: boolean } = {},
 ): Headers {
   const headers = new Headers({
@@ -491,13 +527,14 @@ function createMcpRequestHeaders(
     ...(server.headers ?? {}),
   });
   if (options.includeProtocolVersion !== false) {
-    headers.set("mcp-protocol-version", MCP_PROTOCOL_VERSION);
+    headers.set("mcp-protocol-version", protocolVersion);
   }
   return headers;
 }
 
 function createMcpRequestHeadersFrom(
   headers: Headers,
+  protocolVersion: string,
   method: string,
   params?: Record<string, unknown>,
 ): Headers {
@@ -505,7 +542,7 @@ function createMcpRequestHeadersFrom(
   cloned.set("accept", "application/json, text/event-stream");
   cloned.set("content-type", "application/json");
   cloned.set("mcp-method", method);
-  cloned.set("mcp-protocol-version", MCP_PROTOCOL_VERSION);
+  cloned.set("mcp-protocol-version", protocolVersion);
   if (method === "tools/call" && typeof params?.name === "string" && params.name.length > 0) {
     cloned.set("mcp-name", params.name);
   } else if (method === "resources/read" && typeof params?.uri === "string" && params.uri.length > 0) {
@@ -541,10 +578,10 @@ async function readSseJsonRpcResponse(response: Response, requestId: unknown): P
       const { value, done } = await reader.read();
       if (value !== undefined) buffer += decoder.decode(value, { stream: !done });
       while (true) {
-        const separatorIndex = buffer.indexOf("\n\n");
-        if (separatorIndex < 0) break;
-        const eventText = buffer.slice(0, separatorIndex).replace(/\r\n/g, "\n");
-        buffer = buffer.slice(separatorIndex + 2);
+        const separator = /\r?\n\r?\n/.exec(buffer);
+        if (separator?.index === undefined) break;
+        const eventText = buffer.slice(0, separator.index).replace(/\r\n/g, "\n");
+        buffer = buffer.slice(separator.index + separator[0].length);
         const json = parseSseJsonRpcEvent(eventText, requestId);
         if (json !== undefined) {
           await reader.cancel().catch(() => undefined);
@@ -589,6 +626,17 @@ function resolveHttpAuthHeaders(server: McpServerRegistration, environment: Read
     return { authorization: `Bearer ${token}` };
   }
   if (auth.kind === "headers") return auth.headers;
+  if (auth.kind === "headers_env") {
+    const headers: Record<string, string> = {};
+    for (const [header, envName] of Object.entries(auth.headerEnvs)) {
+      const value = environment[envName];
+      if (value === undefined || value.trim().length === 0) {
+        throw new AppError("MODEL_ERROR", `Missing MCP header env ${envName} for header ${header} on server ${server.key}`, 503);
+      }
+      headers[header] = value;
+    }
+    return headers;
+  }
   return {};
 }
 
@@ -638,11 +686,19 @@ function parseToolSourceCapabilities(value: unknown, label: string): readonly To
     const category = requireString(record.category, `${itemLabel}.category`, { min: 1, max: 80 });
     const labelValue = record.label === undefined ? undefined : requireString(record.label, `${itemLabel}.label`, { min: 1, max: 160 });
     const description = record.description === undefined ? undefined : requireString(record.description, `${itemLabel}.description`, { min: 1, max: 1_000 });
+    const producesEvidenceKinds = record.producesEvidenceKinds === undefined
+      ? undefined
+      : parseStringArray(record.producesEvidenceKinds, `${itemLabel}.producesEvidenceKinds`);
+    const sourceKinds = record.sourceKinds === undefined
+      ? undefined
+      : parseStringArray(record.sourceKinds, `${itemLabel}.sourceKinds`);
     return {
       id,
       category,
       ...(labelValue === undefined ? {} : { label: labelValue }),
       ...(description === undefined ? {} : { description }),
+      ...(producesEvidenceKinds === undefined ? {} : { producesEvidenceKinds }),
+      ...(sourceKinds === undefined ? {} : { sourceKinds }),
     };
   });
 }

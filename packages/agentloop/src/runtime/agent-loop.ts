@@ -283,7 +283,8 @@ function assertArtifactAcceptanceCallMatchesTarget(
   if (call.name !== "verify_artifact_acceptance") return;
   const expectedArtifactKind = policy?.expectedArtifactKind;
   const expectedArtifactFormat = policy?.expectedArtifactFormat;
-  if (expectedArtifactKind === undefined && expectedArtifactFormat === undefined) return;
+  const artifactTargets = policy?.artifactTargets ?? [];
+  if (expectedArtifactKind === undefined && expectedArtifactFormat === undefined && artifactTargets.length === 0) return;
   if (!isPlainRecord(call.arguments)) return;
   const artifactPath = call.arguments.artifactPath;
   if (typeof artifactPath !== "string" || artifactPath.trim().length === 0) return;
@@ -292,18 +293,20 @@ function assertArtifactAcceptanceCallMatchesTarget(
     : typeof call.arguments.artifactKind === "string"
       ? call.arguments.artifactKind
       : undefined;
-  if (artifactMatchesExpectedTarget(
-    { path: artifactPath, ...(profileId === undefined ? {} : { artifactKind: profileId }) },
-    expectedArtifactKind,
-    expectedArtifactFormat,
-  )) return;
-  const target = expectedArtifactFormat ?? expectedArtifactKind ?? "admitted artifact target";
+  const artifact = { path: artifactPath, ...(profileId === undefined ? {} : { artifactKind: profileId }) };
+  const matches = artifactTargets.length > 0
+    ? artifactTargets.some((target) => artifactMatchesExpectedTarget(artifact, target.kind, target.format))
+    : artifactMatchesExpectedTarget(artifact, expectedArtifactKind, expectedArtifactFormat);
+  if (matches) return;
+  const target = artifactTargets.length > 0
+    ? artifactTargets.map((item) => item.format ?? item.kind).join(", ")
+    : expectedArtifactFormat ?? expectedArtifactKind ?? "admitted artifact target";
   const declared = profileId === undefined ? artifactPath : `${artifactPath} (${profileId})`;
   throw new AppError(
     "TOOL_POLICY_DENIED",
     `verify_artifact_acceptance target mismatch: ${declared} cannot verify the admitted ${target} deliverable`,
     422,
-    { artifactPath, profileId, expectedArtifactKind, expectedArtifactFormat },
+    { artifactPath, profileId, expectedArtifactKind, expectedArtifactFormat, artifactTargets },
   );
 }
 

@@ -4,6 +4,7 @@ import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
 import type { ConversationTaskIntent, StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
 import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
+import type { AssessmentEvidenceBundles } from "./runtime-evidence-bundle.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -75,6 +76,20 @@ export interface EvidenceContract {
   readonly caveatPolicy: CaveatPolicy;
 }
 
+/**
+ * A concrete artifact obligation for one Plan leaf.  It deliberately names a
+ * target, not a producer: a leaf may adopt a compatible, provenance-bearing
+ * artifact from an earlier step instead of recreating it.
+ */
+export interface ArtifactTarget {
+  readonly id: string;
+  /** Server-frozen user-visible purpose; a Planner binding cannot rewrite it. */
+  readonly purpose?: string;
+  readonly kind: string;
+  readonly format?: string;
+  readonly terminalRequired: boolean;
+}
+
 export interface PlanningCapability {
   readonly id: string;
   readonly category?: string;
@@ -95,6 +110,8 @@ export interface StepExecutionBinding {
   readonly sourceKinds: readonly SourceKind[];
   readonly sideEffect: CapabilitySideEffect;
   readonly evidenceKinds: readonly EvidenceKind[];
+  /** Structured work-product targets assessed by this leaf. */
+  readonly artifactTargets?: readonly ArtifactTarget[];
   /** Registered ToolSource identifiers, such as an MCP provider key. */
   readonly requiredToolSourceIds?: readonly string[];
   /** Concrete uploaded source identifiers authorized for this step. */
@@ -468,6 +485,10 @@ export interface PlanStepProposal {
   readonly skillIds: readonly string[];
   readonly requiredCapabilities: readonly string[];
   readonly sourceConstraint?: SourceConstraint;
+  /** Targets this leaf may produce, transform, or adopt with provenance. */
+  readonly artifactTargets?: readonly ArtifactTarget[];
+  /** Bindings to server-owned requested targets. Model output may only name these IDs. */
+  readonly artifactTargetIds?: readonly string[];
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
 }
@@ -634,11 +655,15 @@ export interface StepAssessmentInput {
   readonly expectedArtifactKind?: string;
   /** Exact format resolved from the admitted task semantics. */
   readonly expectedArtifactFormat?: string;
+  /** Current leaf's structured artifact obligations, including adopted artifacts. */
+  readonly artifactTargets?: readonly ArtifactTarget[];
   readonly skills: readonly PrivateSkill[];
   readonly evidence: StepEvidence;
   readonly modelEvidence?: StepEvidence;
   readonly contextSummary?: string;
   readonly assessmentProfile?: AssessmentProfileId;
+  /** Server-verified Runtime Result evidence bundles. Tool labels remain advisory. */
+  readonly runtimeEvidenceBundles?: AssessmentEvidenceBundles;
   /** The admission-pinned professional guidance snapshot for this Plan. */
   readonly practiceProfiles?: readonly import("../runtime/practice-profiles.ts").PracticeProfileSelection[];
   /** This candidate has an artifact/source-receipt shape mismatch for holistic assessment. */

@@ -7,6 +7,17 @@ function fixture(schema: boolean, caveats: boolean): StepAssessmentInput {
   const requiredKinds = ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "explicit_caveats"] as const;
   return {
     runId: "run", planId: "plan", attempt: 1, skills: [],
+    runtimeEvidenceBundles: {
+      schema: "agentloop.assessmentEvidenceBundles/v1",
+      materializationAttempted: true,
+      verified: [{
+        toolCallId: "materialize",
+        materializationResultRef: { schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-4000-8000-000000000001" },
+        sourceResultRefs: [{ schema: "agentloop.resultRef/v1", resultId: "rr_00000000-0000-4000-8000-000000000002" }],
+        artifact: { path: "evidence/source.json", bytes: 128, sha256: "a".repeat(64) },
+      }],
+      rejected: [],
+    },
     step: {
       id: "analysis", objective: "Analyze acquired source data", role: "deliver", dependencies: [], skillIds: [], requiredCapabilities: [],
       kind: "leaf", position: 0, status: "running", refinementState: "not_refinable", requiredFacts: [],
@@ -46,6 +57,21 @@ test("preserved preflight and caveat evidence removes the artificial failure", a
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess(fixture(true, true));
   assert.equal(result.approved, true);
   assert.equal(result.feedback, "");
+});
+
+test("a tool-returned structured-extraction label cannot replace an Assessment-verified Runtime Result bundle", async () => {
+  const input = fixture(true, true);
+  const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    ...input,
+    runtimeEvidenceBundles: {
+      schema: "agentloop.assessmentEvidenceBundles/v1",
+      materializationAttempted: false,
+      verified: [],
+      rejected: [],
+    },
+  });
+  assert.equal(result.approved, false);
+  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["structured_extraction_artifact"]);
 });
 
 test("rejected artifact acceptance preserves independently passed path and non-empty facts", async () => {

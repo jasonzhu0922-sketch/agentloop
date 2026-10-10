@@ -4,6 +4,7 @@ import type { ConversationWorkingSet, ExecutionPlan, PlanStep } from "../src/pla
 import { createStepExecutionBinding } from "../src/planning/step-execution-binding.ts";
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
+import { deriveRuntimeStepEvidenceState } from "../src/runtime/tool-progress-policy.ts";
 
 test("fact-acquisition progress policy keeps observable source evidence obligations", () => {
   const step = planStep({
@@ -38,6 +39,49 @@ test("fact-acquisition progress policy keeps observable source evidence obligati
   assert.match(policy?.repairDirective ?? "", /source-evidence step/);
 });
 
+test("fact-acquisition policy directs an admitted Runtime evidence materializer after source facts exist", () => {
+  const step = planStep({
+    id: "materialize-source-evidence",
+    kind: "leaf",
+    position: 0,
+    objective: "Preserve extracted source facts as a Runtime-owned evidence bundle.",
+    dependencies: [],
+    role: "fact_acquisition",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["visible_directory_read", "runtime_result_json_materialization"],
+    evidenceContract: {
+      requiredKinds: ["source_summary", "schema_summary", "structured_extraction_artifact", "explicit_caveats"],
+      caveatPolicy: "mark_unverified_facts",
+    },
+    successCriteria: [],
+    status: "pending",
+  });
+  const policy = buildStepToolProgressPolicy({ step, requiresFileOutput: false });
+
+  const state = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [{
+      toolCallId: "inspect-source",
+      toolName: "visible_extract_tables",
+      isError: false,
+      result: JSON.stringify({
+        schema: "agentloop.sourceSummary/v1",
+        evidenceKinds: {
+          satisfied: ["source_summary", "schema_summary"],
+          caveated: [],
+          failed: [],
+        },
+      }),
+    }],
+  });
+
+  assert.equal(state?.nextAction, "materialize_runtime_result_evidence");
+  assert.deepEqual(state?.evidenceProducingToolNames, ["materialize_result_json"]);
+  assert.match(state?.instruction ?? "", /Do not recreate or aggregate/);
+});
+
 test("artifact progress policy retains the admitted concrete format beside its semantic kind", () => {
   const step = planStep({
     id: "merge-pdfs",
@@ -67,6 +111,106 @@ test("artifact progress policy retains the admitted concrete format beside its s
 
   assert.equal(policy?.expectedArtifactKind, "document");
   assert.equal(policy?.expectedArtifactFormat, "pdf");
+});
+
+test("step-local artifact targets override a task-wide legacy format and require coverage for every target", () => {
+  const step = planStep({
+    id: "ods-report-qc",
+    kind: "leaf",
+    position: 0,
+    objective: "Verify the Markdown QC report and the workbook delivery.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+    artifactTargets: [
+      { id: "qc-report", kind: "document", format: "markdown", terminalRequired: true },
+      { id: "ods-workbook", kind: "spreadsheet", format: "xlsx", terminalRequired: true },
+    ],
+    evidenceContract: {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      caveatPolicy: "none",
+    },
+    successCriteria: [],
+    status: "pending",
+  });
+  const policy = buildStepToolProgressPolicy({
+    step,
+    requiresFileOutput: true,
+    // This is the same stale single-value projection that affected Run 41ef8e7b.
+    taskProfile: buildTaskProfile({ phase: "execution", intent: "execute", artifactKind: "spreadsheet" }),
+    expectedArtifactFormat: "xlsx",
+    artifactTargets: step.executionBinding.artifactTargets,
+  });
+
+  assert.deepEqual(policy?.artifactTargets?.map((target) => target.format), ["markdown", "xlsx"]);
+  const xlsxOnly = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [artifactEvidence("write-xlsx", "ods_delivery.xlsx", "spreadsheet", 128), acceptanceEvidence("verify-xlsx", "ods_delivery.xlsx", "spreadsheet")],
+  });
+  assert.equal(xlsxOnly?.missingRequiredEvidenceKinds.includes("artifact_path"), true);
+  assert.equal(xlsxOnly?.missingRequiredEvidenceKinds.includes("artifact_acceptance"), true);
+
+  const complete = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [
+      artifactEvidence("write-qc", "ods_report_qc.md", "document", 64),
+      acceptanceEvidence("verify-qc", "ods_report_qc.md", "document"),
+      artifactEvidence("write-xlsx", "ods_delivery.xlsx", "spreadsheet", 128),
+      acceptanceEvidence("verify-xlsx", "ods_delivery.xlsx", "spreadsheet"),
+    ],
+  });
+  assert.deepEqual(complete?.missingRequiredEvidenceKinds, []);
+});
+
+test("two same-format targets need two distinct artifact paths", () => {
+  const step = planStep({
+    id: "two-markdown-deliverables",
+    kind: "leaf",
+    position: 0,
+    objective: "Deliver the analysis and quality-control reports.",
+    dependencies: [],
+    role: "produce",
+    refinementState: "not_refinable",
+    requiredFacts: [],
+    skillIds: [],
+    requiredCapabilities: ["workspace_artifact_write", "artifact_acceptance"],
+    artifactTargets: [
+      { id: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown", terminalRequired: true },
+      { id: "quality-report", purpose: "Quality-control report", kind: "document", format: "markdown", terminalRequired: true },
+    ],
+    evidenceContract: {
+      requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+      caveatPolicy: "none",
+    },
+    successCriteria: [],
+    status: "pending",
+  });
+  const policy = buildStepToolProgressPolicy({
+    step,
+    requiresFileOutput: true,
+    artifactTargets: step.executionBinding.artifactTargets,
+  });
+  const reusedOnePath = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [
+      artifactEvidence("write-one", "analysis.md", "document", 64),
+      acceptanceEvidence("verify-one", "analysis.md", "document"),
+    ],
+  });
+  assert.equal(reusedOnePath?.missingRequiredEvidenceKinds.includes("artifact_path"), true);
+  const distinctPaths = deriveRuntimeStepEvidenceState({
+    policy,
+    evidence: [
+      artifactEvidence("write-analysis", "analysis.md", "document", 64),
+      acceptanceEvidence("verify-analysis", "analysis.md", "document"),
+      artifactEvidence("write-qc", "quality.md", "document", 64),
+      acceptanceEvidence("verify-qc", "quality.md", "document"),
+    ],
+  });
+  assert.deepEqual(distinctPaths?.missingRequiredEvidenceKinds, []);
 });
 
 test("execution context binds dependency evidence before downstream reacquisition", () => {
@@ -1034,6 +1178,7 @@ function planStep(step: Omit<PlanStep, "executionBinding">): PlanStep {
         "computer_read_file",
         "computer_read_json",
         "computer_summarize_table_artifact",
+        "materialize_result_json",
         "computer_write_file",
         "computer_patch_file",
         "computer_run_command",
@@ -1051,4 +1196,32 @@ function executionContextPayload(content: string): Record<string, unknown> {
   const match = content.match(/<execution_context source="server">\n(.*?)\n<\/execution_context>/s);
   assert.ok(match?.[1]);
   return JSON.parse(match[1]) as Record<string, unknown>;
+}
+
+function artifactEvidence(toolCallId: string, path: string, artifactKind: string, bytes: number) {
+  return {
+    toolCallId,
+    toolName: "computer_write_file",
+    isError: false,
+    result: JSON.stringify({
+      schema: "agentloop.artifactReceipt/v1",
+      artifact: { path, kind: artifactKind, bytes, sha256: `${toolCallId}-digest` },
+      evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveated: [], failed: [] },
+    }),
+  };
+}
+
+function acceptanceEvidence(toolCallId: string, artifactPath: string, artifactKind: string) {
+  return {
+    toolCallId,
+    toolName: "verify_artifact_acceptance",
+    isError: false,
+    result: JSON.stringify({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifactPath,
+      artifactKind,
+      verdict: "accepted",
+      evidenceKinds: { satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"], caveated: [], failed: [] },
+    }),
+  };
 }

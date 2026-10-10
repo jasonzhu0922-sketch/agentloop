@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
-import { DEFAULT_RUNNER_SYSTEM_PROMPT, RunService } from "../src/runtime/run-service.ts";
+import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, recoveryArtifactTargetBinding, RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import {
@@ -10,6 +10,19 @@ import {
   TEST_MODEL_LIMITS,
   testOwner,
 } from "./runtime-test-helpers.ts";
+
+test("recovery plan projection retains Runtime-owned artifact target bindings by ID", () => {
+  const binding = {
+    artifactTargets: [{ id: "receipt-standard-excel", purpose: "Workbook", kind: "spreadsheet", format: "excel", terminalRequired: true }],
+  } as never;
+  const taskSemantics = {
+    artifactTargets: [{ id: "receipt-standard-excel", purpose: "Workbook", action: "create", kind: "spreadsheet", format: "excel", surface: "workspace_artifact", terminalRequired: true }],
+  } as never;
+
+  assert.deepEqual(recoveryArtifactTargetBinding(binding, taskSemantics), {
+    artifactTargetIds: ["receipt-standard-excel"],
+  });
+});
 
 test("RunService makes Simplified Chinese the default user-facing execution language", async () => {
   const database = new AppDatabase(":memory:");
@@ -49,6 +62,81 @@ test("RunService makes Simplified Chinese the default user-facing execution lang
       executionSystemPrompt,
       /Preserve code, commands, paths, API fields, and proper nouns in their original form\./,
     );
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService enforces the configured model-turn budget for each Plan step", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    let executionTurns = 0;
+    const model: ModelAdapter = {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
+          return { content: "本步骤达到执行回合上限，尚未形成可验证结果。", finishReason: "stop", toolCalls: [] };
+        }
+        executionTurns += 1;
+        return { content: "", finishReason: "length", toolCalls: [] };
+      },
+    };
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => ({
+          goal: task.input,
+          schema: "agentloop.outcomePlan/v2" as const,
+          shape: "single_leaf" as const,
+          selectedSkillIds: [],
+          steps: [{
+            id: "conversation-only",
+            objective: task.input,
+            dependencies: [],
+            role: "deliver" as const,
+            skillIds: [],
+            requiredCapabilities: ["conversation_delivery"],
+            evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" as const },
+            successCriteria: [{ id: "answered", description: "Return a direct answer.", source: "task" as const }],
+          }],
+        }),
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+      maxSteps: 1,
+    });
+
+    const owner = testOwner();
+    await assert.rejects(runs.execute(owner.user.id, "完成当前步骤"), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "RUN_LIMIT_EXCEEDED");
+      return true;
+    });
+    assert.ok(executionTurns >= 1);
+    const run = (await runs.list(owner.user.id))[0];
+    assert.ok(run);
+    const limitEvent = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "loop.limit_exceeded");
+    assert.equal(limitEvent?.data.maxSteps, 1);
+    assert.equal(limitEvent?.data.candidateRepairGraceSteps, 4);
+  } finally {
+    database.close();
+  }
+});
+
+test("RunService rejects unsafe configured per-Step turn budgets", () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const options = {
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async () => ({ content: "", finishReason: "stop" as const, toolCalls: [] }),
+      }),
+    };
+    assert.throws(() => new RunService({ ...options, maxSteps: 0 }), /maxSteps must be a positive safe integer/);
+    assert.throws(() => new RunService({ ...options, maxSteps: MAX_SUPPORTED_STEP_TURNS + 1 }), /maxSteps must be a positive safe integer/);
+    assert.equal(DEFAULT_MAX_STEPS, 32);
   } finally {
     database.close();
   }

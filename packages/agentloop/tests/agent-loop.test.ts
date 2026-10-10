@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ModelPlanner } from "../src/planning/planner.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { buildRuntimeDeliveryCandidate } from "../src/runtime/delivery-candidate.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
@@ -54,6 +55,59 @@ test("parallel tools settle into model source order while completion events stay
     .filter((event) => event.type === "tool.completed")
     .map((event) => event.data.toolName);
   assert.deepEqual(completionNames, ["fast_square", "slow_double"]);
+});
+
+test("ModelPlanner emits a strict Responses schema with every leaf property required", async () => {
+  let capturedSchema: Record<string, unknown> | undefined;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    async complete(request: ModelInvocation): Promise<ModelResponse> {
+      capturedSchema = request.tools[0]?.inputSchema as Record<string, unknown>;
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "strict-schema-plan",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Answer the question.",
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "answer",
+              objective: "Answer the question.",
+              dependsOn: [],
+              role: "deliver",
+              skillIds: [],
+              requiredCapabilities: [],
+              sourceConstraint: null,
+              evidenceContract: null,
+              artifactTargetIds: [],
+            }],
+          },
+        }],
+      };
+    },
+  };
+  const taskUnderstanding = understandTask({ objective: "回答这个问题。", toolNames: [] });
+  await new ModelPlanner(model).plan({
+    runId: "run-strict-schema-plan",
+    input: "回答这个问题。",
+    taskUnderstanding,
+    availableSkills: [],
+    availableToolNames: [],
+    availableTools: [],
+  });
+
+  const leafSchema = ((capturedSchema?.properties as Record<string, unknown>).leaves as Record<string, unknown>)
+    .items as Record<string, unknown>;
+  assert.equal(leafSchema.additionalProperties, false);
+  assert.deepEqual(leafSchema.required, Object.keys(leafSchema.properties as Record<string, unknown>));
+  const leafProperties = leafSchema.properties as Record<string, unknown>;
+  assert.deepEqual(leafProperties.artifactTargetIds, {
+    type: "array", maxItems: 0, items: { type: "string" },
+  });
 });
 
 test("execution turns use the model-declared output budget", async () => {
@@ -4086,6 +4140,59 @@ test("agent loop rejects an HTML acceptance profile before it can self-validate 
   assert.equal(verificationExecutions, 0);
   const rejected = events.find((event) => event.type === "tool.rejected");
   assert.match(rejected?.data.reason ?? "", /target mismatch.*html_ppt.*pptx/);
+});
+
+test("agent loop permits Markdown verification for a structured Markdown target despite a legacy XLSX projection", async () => {
+  let verificationExecutions = 0;
+  let turns = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      turns += 1;
+      return turns === 1
+        ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "verify-qc", name: "verify_artifact_acceptance", arguments: { artifactPath: "ods_report_qc.md", profileId: "markdown" } }] }
+        : { content: "QC verification attempted.", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify artifact acceptance",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      verificationExecutions += 1;
+      return { schema: "agentloop.artifactAcceptance/v1" };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["verify_artifact_acceptance"]);
+  await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Verify the QC report.",
+    input: "验收 QC Markdown",
+    model,
+    tools: new ToolRegistry([verifyTool]),
+    grant,
+    maxSteps: 3,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_acceptance"],
+      {
+        expectedArtifactKind: "spreadsheet",
+        expectedArtifactFormat: "xlsx",
+        artifactTargets: [
+          { id: "qc-report", kind: "document", format: "markdown", terminalRequired: true },
+          { id: "ods-workbook", kind: "spreadsheet", format: "xlsx", terminalRequired: true },
+        ],
+      },
+    ),
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(verificationExecutions, 1);
+  assert.equal(events.some((event) => event.type === "tool.rejected"), false);
 });
 
 test("artifact progress policy allows diagnostic-driven intermediate source repair before rerender", async () => {

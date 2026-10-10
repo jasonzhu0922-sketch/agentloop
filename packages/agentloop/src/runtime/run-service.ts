@@ -7,6 +7,7 @@ import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts"
 import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptance-provider.ts";
 import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "../planning/admission.ts";
 import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
+import { AssessmentEvidenceBundleVerifier } from "../planning/runtime-evidence-bundle.ts";
 import type {
   AssessmentProfileId,
   ConversationStepContext,
@@ -66,12 +67,12 @@ import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
-import { canonicalArtifactFormatFamily, isConcreteArtifactFormat } from "../shared/artifact-format.ts";
+import { canonicalArtifactFormatFamily, isConcreteArtifactFormat, semanticArtifactFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { completeWithRequestTelemetry } from "./model-streaming.ts";
 import { createCapabilityGrant } from "./capability-grant.ts";
-import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
+import { buildDynamicSystemPrompt, buildTaskProfile, formatPracticePromptAugmentation, type ArtifactKind, type DynamicPromptProfile, type TaskProfile } from "./dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog, type PracticeProfileResolution } from "./practice-profiles.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./execution-context-policy.ts";
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
@@ -171,6 +172,8 @@ export const DEFAULT_RUNNER_SYSTEM_PROMPT =
 
 /** Server-wide default model-turn budget per Plan step. */
 export const DEFAULT_MAX_STEPS = 32;
+/** Hard ceiling for a deployment-configured model-turn budget per Plan step. */
+export const MAX_SUPPORTED_STEP_TURNS = 256;
 
 const MAX_UPLOADED_SOURCE_FULL_COVERAGE_CONVERGENCE_CHUNKS = 10;
 /** Covers result persistence after a Tool's own declared execution budget. */
@@ -274,6 +277,7 @@ export class RunService {
   private readonly stepResults: StepResultCommitter;
   private readonly actions: RuntimeActionRepository;
   private readonly results: RuntimeResultRepository;
+  private readonly assessmentEvidenceBundles: AssessmentEvidenceBundleVerifier;
   private readonly checkpoints: RunCheckpointRepository;
   private readonly recovery: RecoveryRepository;
   private readonly humanLoops: HumanLoopRepository;
@@ -298,6 +302,8 @@ export class RunService {
     database: SqlConnection;
     skills: SkillService;
     modelFactory: ModelFactory;
+    /** Bounded Planner contract-repair turns for the default ModelPlanner. */
+    maxPlanningTurns?: number;
     plannerFactory?: PlannerFactory;
     assessorFactory?: AssessorFactory;
     recoveryPlannerFactory?: RecoveryPlannerFactory;
@@ -313,6 +319,7 @@ export class RunService {
     computerCommandEnvironment?: Readonly<Record<string, string>>;
     tools?: readonly RuntimeTool<unknown>[];
     systemPrompt?: string;
+    /** Bounded model-turn budget per executable Plan step. */
     maxSteps?: number;
     defaultModelKey?: string;
     modelKeys?: readonly string[];
@@ -326,13 +333,15 @@ export class RunService {
     this.database = options.database;
     this.skills = options.skills;
     this.modelFactory = options.modelFactory;
-    this.plannerFactory = options.plannerFactory ?? ((model) => new ModelPlanner(model));
+    this.plannerFactory = options.plannerFactory ?? ((model) => new ModelPlanner(model, {
+      ...(options.maxPlanningTurns === undefined ? {} : { maxPlanningTurns: options.maxPlanningTurns }),
+    }));
     this.defaultAssessmentPolicyEnabled = options.assessorFactory === undefined;
     this.assessorFactory = options.assessorFactory ?? ((model) => new ModelStepAssessor(model));
     this.recoveryPlannerFactory = options.recoveryPlannerFactory ?? ((model) => new ModelRecoveryPlanner(model));
     this.planRevisionAssessorFactory = options.planRevisionAssessorFactory ?? ((model) => new ModelPlanRevisionAssessor(model));
     this.systemPrompt = options.systemPrompt ?? DEFAULT_RUNNER_SYSTEM_PROMPT;
-    this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.maxSteps = stepTurnLimit(options.maxSteps);
     this.defaultModelKey = options.defaultModelKey;
     this.allowedModelKeys = options.modelKeys === undefined ? undefined : new Set(options.modelKeys);
     const skillReadOnlyRoots = [
@@ -366,6 +375,7 @@ export class RunService {
       authorizeRun: async (actorUserId, runId) => { await this.get(actorUserId, runId); },
     });
     this.results = new RuntimeResultRepository(options.database);
+    this.assessmentEvidenceBundles = new AssessmentEvidenceBundleVerifier(this.results);
     this.outcomeQueries = new RuntimeOutcomeQueryService(options.database, this.results);
     this.coreTools = createCoreTools({
       executor: computerExecutor,
@@ -588,6 +598,13 @@ export class RunService {
     // without silently treating a recovery question as `resume_step`.
     if (request.origin === "recovery") {
       await this.recovery.submitUserResponse(runId, JSON.stringify(response.value));
+      // A recovery-review confirmation has two terminal user choices. The
+      // negative choice is not missing authorization to retry later: it is an
+      // explicit instruction to stop this Run.
+      if (request.responseSchema.type === "confirm" && isRejectedRecoveryConfirmation(response.value)) {
+        await this.cancel(actorUserId, runId);
+        return response;
+      }
       void this.advanceRecovery(actorUserId, runId).catch(async (error) => {
         await this.appendRunEvent(runId, {
           type: "human_loop.resume_failed",
@@ -1254,7 +1271,11 @@ export class RunService {
       title: "需要确认恢复操作",
       prompt: input.question ?? "Runtime 需要你的确认才能继续恢复此 Run。",
       rationale: input.rationale,
-      evidenceRefs: input.evidenceRefs,
+      // The recovery decision remains the complete audit record. A HIL
+      // request is an interactive projection with a stricter reference
+      // contract, so it must never turn an otherwise valid recovery into a
+      // malformed control signal merely because the evidence set is large.
+      evidenceRefs: boundedHumanLoopEvidenceRefs(input.evidenceRefs),
       responseSchema: {
         type: "confirm",
         acceptLabel: "确认并继续",
@@ -1659,7 +1680,12 @@ export class RunService {
         ? allowedToolNames
         : allowedToolNames.filter((name) => !isVisibleDirectoryToolName(name));
       const allowedToolSummaries = toolSummaries(allTools, new Set(planningAllowedToolNames));
-      const requiredToolSourceIds = requiredToolSourceIdsFromInput(`${input}\n${effectiveGoal}`, allowedToolSummaries);
+      const requiredToolSourceIds = requiredToolSourceIdsForTurn({
+        input,
+        effectiveGoal,
+        allowedTools: allowedToolSummaries,
+        turnResolution,
+      });
       const rootGrant = createCapabilityGrant({
         actorUserId,
         runId,
@@ -2290,6 +2316,7 @@ export class RunService {
         requiresFileOutput: fileOutputStep,
         taskProfile: stepTaskProfile,
         ...(expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat }),
+        ...(activeStep.executionBinding.artifactTargets === undefined ? {} : { artifactTargets: activeStep.executionBinding.artifactTargets }),
         workflowEvidenceActions,
       });
       // A delivery leaf may be deliberately tool-free: its direct dependency
@@ -2339,7 +2366,11 @@ export class RunService {
             storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
           },
         } : {}),
-        systemPrompt: buildStepSystemPrompt(this.systemPrompt, stepTaskProfile),
+        systemPrompt: buildStepSystemPrompt(
+          this.systemPrompt,
+          stepTaskProfile,
+          input.turnResolution?.mode === "clarify",
+        ),
         stepSemanticFrame,
         ...(stepTaskProfile.artifactAction === "modify"
           ? { artifactWritePolicy: "overwrite_observed_existing" as const }
@@ -2635,15 +2666,24 @@ export class RunService {
                 assessmentReused: true,
               };
           }
-          const assess = () => assessor.assess({
+          const assess = async () => assessor.assess({
             runId: input.runId,
             planId: plan.id,
             step: activeStep,
             ...(stepTaskProfile.artifactKind === "none" ? {} : { expectedArtifactKind: stepTaskProfile.artifactKind }),
             ...(expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat }),
+            ...(activeStep.executionBinding.artifactTargets === undefined ? {} : { artifactTargets: activeStep.executionBinding.artifactTargets }),
             skills: activatedStepSkills,
             evidence,
             modelEvidence,
+            runtimeEvidenceBundles: await this.assessmentEvidenceBundles.verify({
+              runId: input.runId,
+              planId: plan.id,
+              stepId: activeStep.id,
+              actorUserId: input.rootGrant.actorUserId,
+              ...(input.rootGrant.conversationId === undefined ? {} : { conversationId: input.rootGrant.conversationId }),
+              toolCalls: evidence.toolCalls,
+            }),
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
             ...(plan.taskSemantics?.practiceProfiles === undefined ? {} : { practiceProfiles: plan.taskSemantics.practiceProfiles }),
@@ -2779,6 +2819,9 @@ export class RunService {
       toolNames: [...availableToolNames],
       skillNames: privateSkills.map((skill) => skill.name),
     });
+    const requiredToolSourceIds = [...new Set(input.currentPlan.steps.flatMap((step) =>
+      step.executionBinding.requiredToolSourceIds ?? []
+    ))];
     const admitted = admitPlan({
       runId: input.run.id,
       proposal: input.decision.planRevision,
@@ -2795,6 +2838,7 @@ export class RunService {
         availableToolSummaries,
         sources,
       ),
+      ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
       availableUploadedSourceIds: sources.map((source) => source.id),
       availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
       taskIntent,
@@ -3222,6 +3266,8 @@ export class RunService {
           attempt: info.attempt,
           maxAttempts: info.maxAttempts,
           ...(info.status === undefined ? {} : { status: info.status }),
+          ...(info.providerRequestId === undefined ? {} : { providerRequestId: info.providerRequestId }),
+          ...(info.providerErrorBody === undefined ? {} : { providerErrorBody: info.providerErrorBody }),
           delayMs: info.delayMs,
           ...(info.request === undefined ? {} : { request: info.request }),
         },
@@ -3300,6 +3346,14 @@ export class RunService {
       if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
     }
   }
+}
+
+function stepTurnLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_STEPS;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_SUPPORTED_STEP_TURNS) {
+    throw new TypeError(`maxSteps must be a positive safe integer no greater than ${MAX_SUPPORTED_STEP_TURNS}`);
+  }
+  return value;
 }
 
 const TERMINAL_EVENT_TYPES = new Set([
@@ -4077,6 +4131,14 @@ export function latestRecoveryResponseAuthorizesRetirement(
   return record.accepted === true || record.approved === true || record.confirmed === true;
 }
 
+function isRejectedRecoveryConfirmation(value: unknown): boolean {
+  return value !== true
+    && typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && (value as Record<string, unknown>).accepted === false;
+}
+
 function failedBoundaryRecoveryDecision(
   run: RunRecord,
   action: RuntimeActionRecord,
@@ -4123,7 +4185,7 @@ function failedBoundaryRecoveryDecision(
   if (planContractMismatchRequiresRevision(target, failedBoundary, observedShapes)) {
     return undefined;
   }
-  const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version);
+  const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version, plan.taskSemantics);
   const planRevision: PlanProposal = {
     goal: plan.goal,
     schema: "agentloop.outcomePlan/v2",
@@ -4146,6 +4208,7 @@ function failedBoundaryRecoveryDecision(
           skillIds: step.skillIds,
           requiredCapabilities: step.requiredCapabilities,
           ...recoverySourceConstraint(step.executionBinding),
+          ...recoveryArtifactTargetBinding(step.executionBinding, plan.taskSemantics),
           ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
           successCriteria: step.successCriteria,
         }]),
@@ -4180,6 +4243,24 @@ export function recoverySourceConstraint(binding: ExecutionPlan["steps"][number]
       ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
     },
   };
+}
+
+/**
+ * A persisted execution binding stores materialized targets, while a new
+ * proposal must reference Runtime-owned targets by ID. Preserve the material
+ * form only for legacy Plans that have no immutable target inventory.
+ */
+export function recoveryArtifactTargetBinding(
+  binding: ExecutionPlan["steps"][number]["executionBinding"],
+  taskSemantics: Pick<StructuredTaskUnderstanding, "artifactTargets"> | undefined,
+): Pick<PlanStepProposal, "artifactTargetIds" | "artifactTargets"> {
+  const targets = binding.artifactTargets;
+  if (targets === undefined || targets.length === 0) return {};
+  const requestedIds = new Set((taskSemantics?.artifactTargets ?? []).map((target) => target.id));
+  if (requestedIds.size > 0 && targets.every((target) => requestedIds.has(target.id))) {
+    return { artifactTargetIds: targets.map((target) => target.id) };
+  }
+  return { artifactTargets: targets };
 }
 
 function planContractMismatchRequiresRevision(
@@ -4378,6 +4459,7 @@ function repairLeafForFailedBoundary(
   target: ExecutionPlan["steps"][number],
   failedBoundary: FailedBoundary,
   planVersion: number,
+  taskSemantics?: Pick<StructuredTaskUnderstanding, "artifactTargets">,
 ): PlanStepProposal {
   const repairId = repairLeafId(target.id, planVersion);
   const missing = failedBoundary.missingEvidenceKinds.length === 0
@@ -4393,6 +4475,7 @@ function repairLeafForFailedBoundary(
     requiredFacts: target.requiredFacts,
     skillIds: target.skillIds,
     requiredCapabilities: target.requiredCapabilities,
+    ...recoveryArtifactTargetBinding(target.executionBinding, taskSemantics),
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
     successCriteria: target.successCriteria,
   };
@@ -4403,6 +4486,23 @@ function repairLeafId(stepId: string, planVersion: number): string {
   const maximumBase = 128 - suffix.length;
   const base = stepId.slice(0, Math.max(1, maximumBase)).replace(/[^A-Za-z0-9._-]/g, "_");
   return `${base}${suffix}`;
+}
+
+/**
+ * A Human-in-the-Loop request is intentionally bounded for the interactive
+ * control plane. Keep the recovery/assessment evidence unabridged in their
+ * own durable records, while projecting the most recent distinct references
+ * into the request in chronological order.
+ */
+function boundedHumanLoopEvidenceRefs(evidenceRefs: readonly string[]): string[] {
+  const distinct = Array.from(new Set(
+    evidenceRefs
+      .filter((reference): reference is string => typeof reference === "string")
+      .map((reference) => reference.trim())
+      .filter((reference) => reference.length > 0),
+  ));
+  const maximum = 50;
+  return distinct.length <= maximum ? distinct : distinct.slice(-maximum);
 }
 
 function failedBoundaryQuestion(failedBoundary: FailedBoundary): string {
@@ -5226,6 +5326,27 @@ function actionKindForPhase(phase: RuntimeContextSnapshot["phase"]): Exclude<Run
   if (phase === "assessment") return "assessment";
   if (phase === "compaction") return "compaction";
   return "model_turn";
+}
+
+/**
+ * A prior Runtime Result is a formal input, not an instruction to repeat the
+ * acquisition that originally produced it.  In that continuation state,
+ * effectiveGoal may retain the historical provider name for provenance, but
+ * it cannot create a current-Run ToolSource obligation.  Fresh-source modes
+ * continue to derive the explicit source binding from the user goal.
+ */
+function requiredToolSourceIdsForTurn(input: {
+  readonly input: string;
+  readonly effectiveGoal: string;
+  readonly allowedTools: readonly PlanningToolSummary[];
+  readonly turnResolution: ConversationTurnResolution | undefined;
+}): string[] {
+  const resolution = input.turnResolution;
+  const reusesBoundPriorResult = resolution?.targetResult !== undefined
+    && resolution.inputMode === "prior_result"
+    && resolution.evidenceDemand === "none";
+  if (reusesBoundPriorResult) return [];
+  return requiredToolSourceIdsFromInput(`${input.input}\n${input.effectiveGoal}`, input.allowedTools);
 }
 
 function toolSummaries(
@@ -6575,9 +6696,18 @@ function executionTaskProfileForStep(
   skills: readonly PrivateSkill[],
   taskSemantics?: StructuredTaskUnderstanding,
 ): TaskProfile {
-  const ownsArtifactTarget = taskSemantics?.deliverable.surface === "workspace_artifact"
+  const artifactTargets = step.executionBinding.artifactTargets ?? [];
+  // A composite leaf has no single TaskProfile artifactKind. Its concrete
+  // targets are carried by the Runtime policy and must not be replaced with
+  // the task-wide legacy deliverable projection.
+  const ownsArtifactTarget = artifactTargets.length === 1
+    || (artifactTargets.length === 0 && taskSemantics?.deliverable.surface === "workspace_artifact"
     && taskSemantics.deliverable.kind !== "none"
-    && (stepRequiresFileOutput(step) || stepAllowsSkillFileOutput(step));
+    && (stepRequiresFileOutput(step) || stepAllowsSkillFileOutput(step)));
+  const artifactTarget = artifactTargets[0];
+  const artifactKind = artifactTarget === undefined
+    ? taskSemantics?.deliverable.kind
+    : taskProfileArtifactKind(artifactTarget.kind);
   const input = {
     objective: step.objective,
     successCriteria: step.successCriteria,
@@ -6585,10 +6715,8 @@ function executionTaskProfileForStep(
     skillNames: skills.map((skill) => skill.name),
     allowResearchPolicy: stepAllowsResearchPolicy(step),
     practiceProfiles: taskSemantics?.practiceProfiles,
-    ...(ownsArtifactTarget ? {
-      artifactKind: taskSemantics!.deliverable.kind,
-      artifactAction: taskSemantics!.deliverable.action,
-    } : {}),
+    ...(ownsArtifactTarget && artifactKind !== undefined ? { artifactKind } : {}),
+    ...(ownsArtifactTarget && taskSemantics !== undefined ? { artifactAction: taskSemantics.deliverable.action } : {}),
   };
   const profile = executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
   // Planner's structured deliverable is the authority for a file-producing
@@ -6598,10 +6726,24 @@ function executionTaskProfileForStep(
   if (!ownsArtifactTarget) return profile;
   return {
     ...profile,
-    deliverySurface: taskSemantics.deliverable.surface,
-    artifactKind: taskSemantics.deliverable.kind,
-    artifactAction: taskSemantics.deliverable.action,
+    ...(taskSemantics === undefined ? {} : { deliverySurface: taskSemantics.deliverable.surface }),
+    ...(artifactKind === undefined ? {} : { artifactKind }),
+    ...(taskSemantics === undefined ? {} : { artifactAction: taskSemantics.deliverable.action }),
   };
+}
+
+function taskProfileArtifactKind(value: string): ArtifactKind | undefined {
+  const semanticKind = semanticArtifactFamily(value);
+  return semanticKind === "html"
+    || semanticKind === "document"
+    || semanticKind === "presentation"
+    || semanticKind === "spreadsheet"
+    || semanticKind === "image"
+    || semanticKind === "audio"
+    || semanticKind === "code"
+    || semanticKind === "none"
+    ? semanticKind
+    : undefined;
 }
 
 /**
@@ -6613,6 +6755,13 @@ function executionArtifactFormatForStep(
   step: ExecutionPlan["steps"][number],
   taskSemantics?: StructuredTaskUnderstanding,
 ): string | undefined {
+  const artifactTargets = step.executionBinding.artifactTargets ?? [];
+  if (artifactTargets.length > 1) return undefined;
+  if (artifactTargets.length === 1) {
+    return artifactTargets[0]!.format !== undefined && isConcreteArtifactFormat(artifactTargets[0]!.format)
+      ? artifactTargets[0]!.format
+      : undefined;
+  }
   if (
     taskSemantics?.deliverable.surface !== "workspace_artifact"
     || taskSemantics.deliverable.kind === "none"
@@ -6641,6 +6790,7 @@ function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean
 function buildStepSystemPrompt(
   systemPrompt: string,
   taskProfile: TaskProfile,
+  clarificationOnly = false,
 ): string {
   return buildDynamicSystemPrompt({
     phase: "execution",
@@ -6656,6 +6806,10 @@ function buildStepSystemPrompt(
       "Your response without tool calls is only a completion candidate and may be rejected with repair feedback.",
       "A completion candidate must be non-empty: summarize the completed work in 2-4 short sentences and cite the concrete evidence or tool results used.",
       "Use only currently exposed tools. Tool success alone does not prove the step is complete.",
+      ...(clarificationOnly ? [
+        "This is an intentionally tool-free clarification step because required user input is unresolved. Do not claim that MCP servers, Skills, or Tools are unavailable, disconnected, or misconfigured merely because this step exposes none.",
+        "State the unresolved input precisely and ask the user for its value. Do not claim to have performed the requested substantive work or generated its deliverables.",
+      ] : []),
     ],
     taskProfile,
   });
@@ -7011,8 +7165,10 @@ const CONVERSATION_TURN_TOOL = {
             items: {
               type: "object",
               additionalProperties: false,
-              required: ["action", "kind", "surface"],
+              required: ["targetId", "purpose", "action", "kind", "surface"],
               properties: {
+                targetId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+                purpose: { type: "string", minLength: 1, maxLength: 500 },
                 action: { type: "string", enum: ["none", "create", "modify", "transform"] },
                 kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
                 format: { type: "string", minLength: 1, maxLength: 32 },
@@ -7488,7 +7644,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
-      "Also return taskIntent as a semantic frame: operation, requiresExecution, and every requested deliverable with action, semantic kind, optional concrete format, and delivery surface. Derive it from the full transcript and prior work context, not from isolated action words.",
+      "Also return taskIntent as a semantic frame: operation, requiresExecution, and every requested deliverable with stable targetId, user-visible purpose, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output, never a filename. Derive them from the full transcript and prior work context, not from isolated action words.",
       "taskIntent.requiresExecution must agree with mode=execute. A deliverable can be a prior-artifact transformation, a new artifact, a conversation answer, or a composite of code plus a rendered artifact. Preserve all deliverables instead of choosing one because it appears first.",
       "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
@@ -7626,19 +7782,27 @@ function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | u
   const actions = new Set(["none", "create", "modify", "transform"]);
   const kinds = new Set(["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"]);
   const surfaces = new Set(["conversation", "workspace_artifact"]);
+  const targetIds = new Set<string>();
   const deliverables = record.deliverables.map((item) => {
     const deliverable = optionalRecord(item);
     const action = deliverable.action;
     const kind = deliverable.kind;
     const surface = deliverable.surface;
     const format = deliverable.format;
+    const targetId = deliverable.targetId;
+    const purpose = deliverable.purpose;
     if (
       typeof action !== "string" || !actions.has(action)
       || typeof kind !== "string" || !kinds.has(kind)
       || typeof surface !== "string" || !surfaces.has(surface)
+      || (targetId !== undefined && (typeof targetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(targetId) || targetId.length > 128 || targetIds.has(targetId)))
+      || (purpose !== undefined && (typeof purpose !== "string" || purpose.trim().length === 0 || purpose.length > 500))
       || (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32))
     ) return undefined;
+    if (targetId !== undefined) targetIds.add(targetId);
     return {
+      ...(targetId === undefined ? {} : { targetId: targetId.trim() }),
+      ...(purpose === undefined ? {} : { purpose: purpose.trim() }),
       action: action as ConversationTaskIntent["deliverables"][number]["action"],
       kind: kind as ConversationTaskIntent["deliverables"][number]["kind"],
       ...(format === undefined ? {} : { format: format.trim() }),

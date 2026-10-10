@@ -10,6 +10,7 @@ import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { SourceRepository } from "../src/storage/repositories/source-repository.ts";
+import type { RuntimeTool } from "../src/tools/tool-registry.ts";
 import { approvingTestAssessor, singleStepTestPlanner, TEST_MODEL_LIMITS, testOwner } from "./runtime-test-helpers.ts";
 
 test("Computer Tool writes are isolated by conversation and reused by follow-up runs", async () => {
@@ -347,6 +348,80 @@ test("a structured prior-artifact transform overrides an erroneous source-resear
   }
 });
 
+test("a prior Result continuation does not turn historical ToolSource provenance into a new acquisition requirement", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-prior-result-tool-source-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    let capturedTask: TaskSpec | undefined;
+    const sourceTool = ontoflowToolSourceFixture();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      tools: [sourceTool],
+      modelFactory: () => priorResultContinuationResolver("prior_result"),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          if (task.input === "seed reusable ODS result") return await singleStepTestPlanner().plan(task);
+          capturedTask = task;
+          throw new Error("captured prior Result continuation task");
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "seed reusable ODS result");
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "Use the prior Result to produce the DDM report without refreshing data.", {
+      conversationId: prior.conversationId,
+    }), /Run failed/);
+
+    assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
+    assert.ok(capturedTask?.turnResolution?.targetResult);
+    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
+    assert.equal(capturedTask?.requiredToolSourceIds, undefined);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a refresh-sources continuation retains an explicitly named ToolSource requirement", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-refresh-source-tool-source-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    let capturedTask: TaskSpec | undefined;
+    const sourceTool = ontoflowToolSourceFixture();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      tools: [sourceTool],
+      modelFactory: () => priorResultContinuationResolver("refresh_sources"),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          if (task.input === "seed reusable ODS result") return await singleStepTestPlanner().plan(task);
+          capturedTask = task;
+          throw new Error("captured refresh-sources continuation task");
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "seed reusable ODS result");
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "Refresh source data with ontoflow-jtbc, then produce the DDM report.", {
+      conversationId: prior.conversationId,
+    }), /Run failed/);
+
+    assert.equal(capturedTask?.turnResolution?.inputMode, "refresh_sources");
+    assert.deepEqual(capturedTask?.requiredToolSourceIds, ["ontoflow-jtbc"]);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("conversation resolver publishes Action-bound model lifecycle telemetry with its non-stream deadline", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -506,6 +581,64 @@ test("Conversation resolver atomically binds only the visible directory selected
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(unrelated, { recursive: true, force: true });
     await fs.rm(performance, { recursive: true, force: true });
+  }
+});
+
+test("clarification turns do not misrepresent their intentionally tool-free step as an unavailable integration", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => ({
+        limits: TEST_MODEL_LIMITS,
+        complete: async (request: ModelInvocation): Promise<ModelResponse> => {
+          if (request.runId.startsWith("conversation-turn:")) {
+            return {
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [{
+                id: "clarify-target",
+                name: "resolve_conversation_turn",
+                arguments: {
+                  mode: "clarify",
+                  relation: "new_goal",
+                  inputMode: "none",
+                  effectiveGoal: "A database analysis was requested, but the target table name is still missing.",
+                  taskIntent: {
+                    schema: "agentloop.conversationTaskIntent/v1",
+                    operation: "analysis",
+                    requiresExecution: false,
+                    deliverables: [],
+                  },
+                  evidenceStrategy: "none",
+                  sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+                  userConstraints: ["Ask for the concrete database schema and table name before analysis."],
+                },
+              }],
+            };
+          }
+          assert.match(request.systemPrompt, /intentionally tool-free clarification step/);
+          assert.match(request.systemPrompt, /Do not claim that MCP servers, Skills, or Tools are unavailable/);
+          return {
+            content: "请提供实际的数据域和表名（schema.table_name），收到后才能开始查询和建模。",
+            finishReason: "stop",
+            toolCalls: [],
+          };
+        },
+      }),
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "请分析数据库中的目标表");
+
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /请提供实际的数据域和表名/);
+    assert.doesNotMatch(run.output ?? "", /MCP.*不可用|工具.*不可用/);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.find((event) => event.type === "conversation.intent.classified")?.data.resolutionMode, "clarify");
+  } finally {
+    await database.close();
   }
 });
 
@@ -740,6 +873,68 @@ function utf16BeHex(value: string): string {
   return swapped.toString("hex").toUpperCase();
 }
 
+function ontoflowToolSourceFixture(): RuntimeTool<unknown> {
+  return {
+    name: "mcp_ontoflow_jtbc_call_rdb_sql_api_query",
+    description: "Read approved ODS metadata.",
+    source: {
+      id: "ontoflow-jtbc",
+      aliases: ["ontoflow-jtbc"],
+      transport: "mcp",
+      capabilities: [{
+        id: "data_asset.ods_read",
+        category: "data_asset",
+        producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts"],
+        sourceKinds: ["database"],
+      }],
+    },
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (input) => input,
+    execute: async () => ({ source_summary: "fixture ODS metadata" }),
+  };
+}
+
+function priorResultContinuationResolver(inputMode: "prior_result" | "refresh_sources"): ModelAdapter {
+  return {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      if (!request.runId.startsWith("conversation-turn:")) {
+        return { content: "seed result completed", finishReason: "stop", toolCalls: [] };
+      }
+      const refreshSources = inputMode === "refresh_sources";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: `resolve-${inputMode}`,
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "execute",
+            relation: "continue_prior",
+            inputMode,
+            targetGoalCandidateId: "goal_candidate_1",
+            ...(refreshSources ? {} : { resultCandidateId: "result_candidate_1" }),
+            effectiveGoal: refreshSources
+              ? "Refresh the ODS source through ontoflow-jtbc and produce the DDM report."
+              : "Use the previously acquired ODS Result from ontoflow-jtbc to produce the DDM report.",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "create_artifact",
+              requiresExecution: true,
+              deliverables: [{ action: "create", kind: "document", format: "md", surface: "workspace_artifact" }],
+            },
+            evidenceStrategy: refreshSources ? "source_grounded" : "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: refreshSources ? ["Refresh the source data before delivery."] : ["Do not refresh source data."],
+          },
+        }],
+      };
+    },
+  };
+}
+
 class ConversationWriteModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
   private calls = 0;
@@ -812,6 +1007,9 @@ class RecordingVisibleDirectoryPlanner implements Planner {
         skillIds: [],
         role: sourceGrounded ? "fact_acquisition" : "deliver",
         requiredCapabilities: hasVisibleTools ? ["visible_directory_read"] : [],
+        ...(task.taskUnderstanding.artifactTargets === undefined || task.taskUnderstanding.artifactTargets.length === 0
+          ? {}
+          : { artifactTargetIds: task.taskUnderstanding.artifactTargets.map((target) => target.id) }),
         ...(sourceGrounded && task.visibleDirectories![0] !== undefined ? {
           sourceConstraint: { requiredVisibleDirectoryIds: [task.visibleDirectories![0].id] },
           evidenceContract: { requiredKinds: ["source_summary" as const], caveatPolicy: "mark_unverified_facts" as const },
@@ -1041,7 +1239,7 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
               operation: mutation ? "transform_artifact" : "answer",
               requiresExecution: mutation,
               deliverables: mutation
-                ? [{ action: "modify", kind: "presentation", format: "pptx", surface: "workspace_artifact" }]
+                ? [{ targetId: "prior-presentation", purpose: "Deliver the professionally revised prior presentation.", action: "modify", kind: "presentation", format: "pptx", surface: "workspace_artifact" }]
                 : [],
             },
             evidenceStrategy: "none",

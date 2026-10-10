@@ -480,6 +480,8 @@ export function buildStepToolProgressPolicy(input: {
   readonly taskProfile?: TaskProfile;
   /** Exact format admitted for this artifact-producing Step. */
   readonly expectedArtifactFormat?: string;
+  /** Structured targets owned or adopted by this Step. */
+  readonly artifactTargets?: readonly import("../planning/contracts.ts").ArtifactTarget[];
   readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
 }): RuntimeToolProgressPolicy | undefined {
   const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
@@ -487,6 +489,7 @@ export function buildStepToolProgressPolicy(input: {
   return runtimeStepToolProgressPolicy(requiredKinds, {
     expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
     ...(input.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: input.expectedArtifactFormat }),
+    ...(input.artifactTargets === undefined || input.artifactTargets.length === 0 ? {} : { artifactTargets: input.artifactTargets }),
     artifactDeliveryRequired: input.requiresFileOutput,
     workflowEvidenceActions: input.workflowEvidenceActions,
     scope: stepRequiresArtifactEvidence(input.step)

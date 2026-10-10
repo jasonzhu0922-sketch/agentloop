@@ -13,6 +13,7 @@ const SOURCE_EXTENSIONS = new Set([
 export function canonicalArtifactFormatFamily(value: string): string {
   const normalized = value.trim().toLowerCase().replace(/^\./u, "");
   if (normalized === "doc" || normalized === "docx" || normalized === "word") return "word";
+  if (normalized === "excel") return "xlsx";
   if (normalized === "md") return "markdown";
   if (normalized === "htm") return "html";
   if (normalized === "jpeg") return "jpg";

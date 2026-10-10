@@ -15,11 +15,26 @@ export interface ConversationTaskIntent {
   readonly operation: StructuredTaskOperation;
   readonly requiresExecution: boolean;
   readonly deliverables: readonly {
+    /** Stable user-deliverable identity. Required from the resolver for new turns. */
+    readonly targetId?: string;
+    /** User-visible use/acceptance intent; never infer this later from a filename. */
+    readonly purpose?: string;
     readonly action: ArtifactAction;
     readonly kind: ArtifactKind;
     readonly format?: string;
     readonly surface: DeliverySurface;
   }[];
+}
+
+/** A server-owned artifact contract frozen before Planning begins. */
+export interface RequestedArtifactTarget {
+  readonly id: string;
+  readonly purpose: string;
+  readonly action: ArtifactAction;
+  readonly kind: Exclude<ArtifactKind, "none">;
+  readonly format?: string;
+  readonly surface: "workspace_artifact";
+  readonly terminalRequired: true;
 }
 
 export interface TaskIntentClassification {
@@ -113,6 +128,8 @@ export interface StructuredTaskUnderstanding {
   readonly constraints: readonly string[];
   /** Full model-authored delivery set; deliverable remains the primary projection for legacy Planner consumers. */
   readonly deliverables?: ConversationTaskIntent["deliverables"];
+  /** Immutable requested workspace outputs, keyed by identity rather than format count. */
+  readonly artifactTargets?: readonly RequestedArtifactTarget[];
   readonly intent: TaskIntentClassification;
   /** Immutable deployment-profile snapshot selected at Run admission. */
   readonly practiceProfiles?: readonly PracticeProfileSelection[];
@@ -392,10 +409,46 @@ export function understandTask(input: TaskIntentInput & {
     workflow: [...new Set(workflow)],
     operationProfiles: structuredOperationProfiles(intent, operation, normalizedObjective),
     constraints: [...(input.userConstraints ?? [])],
-    ...(input.resolvedTaskIntent === undefined ? {} : { deliverables: input.resolvedTaskIntent.deliverables }),
+    ...(input.resolvedTaskIntent === undefined ? {} : {
+      deliverables: input.resolvedTaskIntent.deliverables,
+      artifactTargets: requestedArtifactTargets(input.resolvedTaskIntent.deliverables),
+    }),
     intent,
     ...(input.practiceProfiles === undefined || input.practiceProfiles.length === 0 ? {} : { practiceProfiles: input.practiceProfiles }),
   };
+}
+
+/**
+ * Converts resolver output into the immutable inventory consumed by Planner,
+ * Admission, and execution. Legacy persisted v1 turns have no semantic
+ * identity, so retain a deterministic compatibility projection; newly issued
+ * resolver schema requires targetId and purpose.
+ */
+export function requestedArtifactTargets(
+  deliverables: readonly ConversationTaskIntent["deliverables"][number][],
+): readonly RequestedArtifactTarget[] {
+  const ids = new Set<string>();
+  const targets: RequestedArtifactTarget[] = [];
+  for (const [index, deliverable] of deliverables.entries()) {
+    if (deliverable.surface !== "workspace_artifact" || deliverable.kind === "none") continue;
+    const id = deliverable.targetId?.trim() || `legacy-artifact-${index + 1}`;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id) || ids.has(id)) {
+      throw new TypeError(`artifact target IDs must be unique stable identifiers: ${id}`);
+    }
+    ids.add(id);
+    const purpose = deliverable.purpose?.trim()
+      || `Deliver the requested ${deliverable.format ?? deliverable.kind} artifact.`;
+    targets.push({
+      id,
+      purpose,
+      action: deliverable.action,
+      kind: deliverable.kind,
+      ...(deliverable.format === undefined ? {} : { format: deliverable.format }),
+      surface: "workspace_artifact",
+      terminalRequired: true,
+    });
+  }
+  return targets;
 }
 
 function structuredTaskText(value: string, intent: TaskIntentClassification): string {

@@ -18,6 +18,8 @@ export function runtimeEvidenceRecordsFromToolResult(result: string): readonly R
   const parsed = parseJsonRecord(result);
   if (parsed === undefined) return [];
   const records: Record<string, unknown>[] = [parsed];
+  const evidenceReceipt = recordValue(parsed.evidenceReceipt);
+  if (evidenceReceipt !== undefined && hasRuntimeEvidenceSchema(evidenceReceipt)) records.push(evidenceReceipt);
   const artifactReceipt = recordValue(parsed.artifactReceipt);
   if (artifactReceipt !== undefined && hasRuntimeEvidenceSchema(artifactReceipt)) records.push(artifactReceipt);
   const computationReceipt = recordValue(parsed.computationReceipt);

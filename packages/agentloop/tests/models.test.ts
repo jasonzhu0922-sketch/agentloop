@@ -1802,6 +1802,49 @@ test("Responses adapter preserves provider HTTP error details for semantic compl
   }
 });
 
+test("Responses adapter includes bounded provider error evidence on HTTP retries", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  const retries: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return new Response(JSON.stringify({ error: { message: "strict schema rejected", type: "invalid_request_error" } }), {
+        status: 400,
+        headers: { "content-type": "application/json", "x-request-id": "req-retry-400" },
+      });
+    }
+    return sseResponse([
+      'data: {"type":"response.completed","response":{"status":"completed","output_text":"ok"}}\n\n',
+    ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      onRetry: (info) => retries.push({ ...info }),
+    });
+    const response = await model.complete({
+      runId: "run-responses-http-retry-evidence",
+      systemPrompt: "Return text.",
+      phase: "planning",
+      messages: [{ role: "user", content: "Plan this task." }],
+      tools: [],
+    });
+    assert.equal(response.content, "ok");
+    assert.equal(attempts, 2);
+    assert.equal(retries[0]?.providerRequestId, "req-retry-400");
+    assert.equal(retries[0]?.providerErrorBody, "{\"error\":{\"message\":\"strict schema rejected\",\"type\":\"invalid_request_error\"}}");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Responses adapter rejects a Chat Completions payload instead of treating it as an empty stop", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
@@ -1903,6 +1946,41 @@ test("Responses adapter preserves final message text when completed response omi
     assert.equal(result.content, "Loaded skill");
     assert.equal(result.finishReason, "stop");
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 2 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter fails closed when a stream ends without response.completed", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+  ]);
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "run-responses-missing-terminal",
+        systemPrompt: "Return text.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [],
+      }, async () => undefined),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "MODEL_ERROR");
+        assert.equal((error as { message?: string }).message, "Responses Provider stream ended without a terminal response event");
+        assert.equal((error as { details?: Record<string, unknown> }).details?.streamFailureStage, "missing_terminal_event");
+        assert.equal((error as { details?: Record<string, unknown> }).details?.streamEventsSeen, 1);
+        return true;
+      },
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

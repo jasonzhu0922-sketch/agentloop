@@ -433,6 +433,8 @@ function activeToolNamesForEvidenceState(
   switch (state.nextAction) {
     case "acquire_source_evidence":
       return uniqueStrings([...setupToolNames, ...state.exploratoryToolNames]);
+    case "materialize_runtime_result_evidence":
+      return uniqueStrings([...setupToolNames, ...state.evidenceProducingToolNames]);
     case "produce_artifact":
       return state.recentPatchPreconditionFailure
         ? uniqueStrings([...setupToolNames, ...state.exploratoryToolNames, ...state.evidenceProducingToolNames])
@@ -502,6 +504,8 @@ function unlockWhenForEvidenceState(state: RuntimeStepEvidenceState): string {
   switch (state.nextAction) {
     case "acquire_source_evidence":
       return "source evidence is acquired or the evidence state changes to artifact production, repair, verification, or completion";
+    case "materialize_runtime_result_evidence":
+      return "the authorized Runtime Result set is materialized and Assessment can verify its provenance, or the evidence state names a different next action";
     case "produce_artifact":
       return "a deliverable artifact exists, an actionable diagnostic requires repair, or source acquisition becomes the next action";
     case "repair_artifact_source":

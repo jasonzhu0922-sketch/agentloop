@@ -35,6 +35,7 @@ test("code artifacts are classified by source extension while generic files stay
   assert.equal(artifactMatchesExpectedTarget({ path: ".agentloop/tool-results/a1/stdout.txt", artifactKind: "generic_file" }, "document", "pdf"), false);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/merged.pdf", artifactKind: "pdf" }, "document", "pdf"), true);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/report.html", artifactKind: "html" }, "document", "html"), true);
+  assert.equal(artifactMatchesExpectedTarget({ path: "outputs/receipt-standard.xlsx", artifactKind: "xlsx" }, "spreadsheet", "excel"), true);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/deck.pptx", artifactKind: "pptx" }, undefined, "presentation"), true);
   assert.equal(artifactMatchesExpectedTarget({ path: "outputs/report.pdf", artifactKind: "pdf" }, undefined, "presentation"), false);
 });

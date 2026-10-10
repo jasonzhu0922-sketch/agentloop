@@ -82,11 +82,11 @@ const CAVEAT_POLICY_VALUES = [
 ] as const satisfies readonly CaveatPolicy[];
 
 // A plan can expose independent evidence gaps (for example, source grounding
-// followed by a structured schema receipt). Keep recovery bounded while
-// allowing the authorized catalog to add each missing producer.
-const MAX_PLANNING_TURNS = 4;
-const MAX_CAPABILITY_RECOVERIES = 2;
-
+// followed by a structured schema receipt). The deployment may raise this
+// bounded repair budget for complex workflows, but the Planner remains the
+// authority that validates it before a model is invoked.
+export const DEFAULT_MAX_PLANNING_TURNS = 4;
+export const MAX_SUPPORTED_PLANNING_TURNS = 64;
 const OUTCOME_LEAF_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -99,6 +99,7 @@ const OUTCOME_LEAF_SCHEMA = {
     "requiredCapabilities",
     "sourceConstraint",
     "evidenceContract",
+    "artifactTargetIds",
   ],
   properties: {
     id: { type: "string" },
@@ -120,7 +121,7 @@ const OUTCOME_LEAF_SCHEMA = {
             additionalProperties: false,
             required: ["kind", "ids"],
             properties: {
-              kind: { type: "string", enum: ["tool_source", "uploaded_source", "visible_directory"] },
+              kind: { type: "string", enum: ["uploaded_source", "visible_directory"] },
               ids: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1 } },
             },
           },
@@ -140,6 +141,11 @@ const OUTCOME_LEAF_SCHEMA = {
         },
         caveatPolicy: { type: "string", enum: CAVEAT_POLICY_VALUES },
       },
+    },
+    artifactTargetIds: {
+      type: "array",
+      maxItems: 8,
+      items: { type: "string", minLength: 1, maxLength: 128 },
     },
   },
 } as const;
@@ -180,12 +186,17 @@ const SUBMIT_OUTCOME_PLAN_TOOL = {
   },
 } as const;
 
-type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "source_constraint_arguments" | "native_skill_binding" | "source_namespace" | "source_provider_contract" | "plan_topology" | "admission";
+type PlannerContractRetryKind = "empty" | "plain_text" | "execution_tool" | "arguments" | "source_constraint_arguments" | "native_skill_binding" | "prior_result_materialization" | "source_namespace" | "source_provider_contract" | "plan_topology" | "admission";
 
 interface PlannerContractRetry {
   readonly kind: PlannerContractRetryKind;
   readonly directive: string;
   readonly candidateSkillIds?: readonly string[];
+}
+
+export interface ModelPlannerOptions {
+  /** Bounded number of OutcomePlan contract-repair attempts for one Run. */
+  readonly maxPlanningTurns?: number;
 }
 
 const PLANNING_MAX_OUTPUT_TOKENS = 8_192;
@@ -226,9 +237,11 @@ const STEP_GRANULARITY_GUIDANCE = {
 
 export class ModelPlanner implements Planner {
   private readonly model: ModelAdapter;
+  private readonly maxPlanningTurns: number;
 
-  constructor(model: ModelAdapter) {
+  constructor(model: ModelAdapter, options: ModelPlannerOptions = {}) {
     this.model = model;
+    this.maxPlanningTurns = planningTurnLimit(options.maxPlanningTurns);
   }
 
   async plan(task: TaskSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanProposal> {
@@ -238,6 +251,7 @@ export class ModelPlanner implements Planner {
       data: {
         availableSkillCount: task.availableSkills.length,
         availableToolCount: task.availableToolNames.length,
+        maxPlanningTurns: this.maxPlanningTurns,
       },
     });
     if (task.responseOnly && taskProfile.planShape === "single_leaf") {
@@ -304,6 +318,8 @@ export class ModelPlanner implements Planner {
         "selectedSkillRoles is an execution-selection list, not a candidate list: every listed Skill, regardless of role, must also appear in at least one concrete leaf.skillIds; otherwise omit it.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
+        "requestedArtifactTargets is Runtime-owned and immutable. For an artifact-producing/adopting leaf, submit only artifactTargetIds from that inventory; do not invent IDs or rewrite purpose, kind, format, or terminalRequired. A leaf may adopt a compatible artifact from an earlier step, but its target binding remains explicit; never use one output format as the target for unrelated artifacts.",
+        "Every leaf must include artifactTargetIds. Use [] when the leaf does not produce or adopt a requested artifact.",
         "HIL pauses an outcome; preserve its requested deliverable and continue production after the response.",
         "For browser/document artifacts, require format/openability; Skill-owned QA covers navigation and polish unless required.",
         "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
@@ -314,7 +330,7 @@ export class ModelPlanner implements Planner {
       taskProfile,
     });
     let runtimeDirective: string | undefined;
-    for (let turn = 1; turn <= MAX_PLANNING_TURNS; turn += 1) {
+    for (let turn = 1; turn <= this.maxPlanningTurns; turn += 1) {
       await emit?.({
         type: "planning.turn.started",
         data: {
@@ -429,7 +445,11 @@ export class ModelPlanner implements Planner {
           },
         });
         const sourceProviderViolations = boundSourceProviderContractViolations(planningTask, outcomePlanCalls);
-        const resolution = capabilityRecoveryCount < MAX_CAPABILITY_RECOVERIES
+        // Capability recovery is already bounded by the Planner's configured
+        // turn budget. A second gap can depend on the producer added for the
+        // first one, so a separate fixed retry ceiling can terminate a valid
+        // repair sequence before the Planner has a chance to combine them.
+        const resolution = capabilityRecoveryCount < this.maxPlanningTurns - 1
           && isCapabilityRecoveryFailure(planningError)
           && sourceProviderViolations.length === 0
           ? resolveCapabilityRecovery(planningTask, outcomePlanCalls, isSourceGroundingFailure(planningError))
@@ -471,6 +491,14 @@ export class ModelPlanner implements Planner {
     }
     throw lastPlanningError ?? new AppError("PLANNING_ERROR", "Planner did not produce an OutcomePlan", 422);
   }
+}
+
+function planningTurnLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_PLANNING_TURNS;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_SUPPORTED_PLANNING_TURNS) {
+    throw new TypeError(`maxPlanningTurns must be a positive safe integer no greater than ${MAX_SUPPORTED_PLANNING_TURNS}`);
+  }
+  return value;
 }
 
 /** Planner reasoning is an internal provider continuation, never user-facing output. */
@@ -552,6 +580,8 @@ function plannerContractRetryDirective(
   }
   const nativeSkillBinding = nativeTransformationSkillBindingRepair(planningError, task);
   if (nativeSkillBinding !== undefined) return nativeSkillBinding;
+  const priorResultMaterialization = priorResultMaterializationRepair(planningError, task);
+  if (priorResultMaterialization !== undefined) return priorResultMaterialization;
   const planTopology = planTopologyRepair(planningError, planningTaskProfile(task).planTopology);
   if (planTopology !== undefined) return planTopology;
   if (isSourceConstraintNamespaceFailure(planningError)) {
@@ -570,6 +600,29 @@ function plannerContractRetryDirective(
     };
   }
   return undefined;
+}
+
+function priorResultMaterializationRepair(
+  planningError: AppError,
+  task: TaskSpec,
+): PlannerContractRetry | undefined {
+  const result = conversationResultInput(task);
+  if (
+    result === undefined
+    || !/bound prior Runtime Result must materialize that formal input/i.test(planningError.message)
+  ) return undefined;
+  return {
+    kind: "prior_result_materialization",
+    directive: [
+      "Your previous OutcomePlan attempted to reacquire facts even though Runtime has bound a prior Runtime Result as the formal input for this artifact continuation.",
+      `Validation error: ${summarizePlanningError(planningError.message)}.`,
+      `Bound Result ID: ${result.result.resultId}.`,
+      "Submit exactly one corrected OutcomePlan for the same goal.",
+      "Use no fact_acquisition leaf and do not bind a ToolSource for this continuation. Put reading/using the bound Result, any needed workspace artifact read, required Skill work, artifact generation, and acceptance in a producer leaf.",
+      "The execution Runtime exposes read_result for the bound Result. Do not claim that source facts were freshly acquired in this Run; preserve caveats from the formal input.",
+      "Create a new fact-acquisition leaf only when the latest user message explicitly requests source refresh, reanalysis, or verification.",
+    ].join("\n"),
+  };
 }
 
 function planTopologyRepair(
@@ -778,20 +831,41 @@ function resolveCapabilityRecovery(
   return {
     task: { ...task, availableSkills, availableCapabilities },
     selectedSkillRoles,
-    directive: capabilityRecoveryDirective(gaps),
+    directive: capabilityRecoveryDirective(gaps, proposal, currentCapabilities),
     gapCount: gaps.length,
     candidateCapabilityIds,
     candidateSkillIds,
   };
 }
 
-function capabilityRecoveryDirective(gaps: ReturnType<typeof resolveCapabilityGaps>): string {
+function capabilityRecoveryDirective(
+  gaps: ReturnType<typeof resolveCapabilityGaps>,
+  proposal: PlanProposal,
+  capabilities: readonly PlanningCapability[],
+): string {
+  const capabilityById = new Map(capabilities.map((capability) => [capability.id, capability]));
+  const repairSteps = gaps.map((gap) => {
+    const step = proposal.steps.find((candidate) => candidate.id === gap.stepId);
+    const requiredKinds = step?.evidenceContract?.requiredKinds ?? [];
+    const preserveCapabilityIds = (step?.requiredCapabilities ?? []).filter((capabilityId) => {
+      const produced = capabilityById.get(capabilityId)?.produces ?? [];
+      return produced.some((kind) => requiredKinds.includes(kind));
+    });
+    return {
+      stepId: gap.stepId,
+      missingEvidenceKinds: gap.missingEvidenceKinds,
+      // These are additions for the named missing kinds. They are not a
+      // replacement for a producer that already satisfies another hard kind.
+      preserveCapabilityIds,
+      candidateAdditions: gap.candidates,
+    };
+  });
   return [
     "Runtime Admission found that the previous plan required evidence its bound capabilities could not produce.",
     "The authorized capability catalog has now been expanded only with the eligible evidence-producer candidates below.",
-    "Revise the OutcomePlan for the same goal. Bind a selected candidate Skill to the concrete acquisition leaf when required, and make downstream HIL/production leaves depend on that fact leaf instead of claiming that they themselves produced upstream evidence.",
-    "Do not invent capabilities, add permissions, install tools, or keep an evidence requirement on a leaf that does not produce it.",
-    `Capability gaps: ${JSON.stringify(gaps)}.`,
+    "Revise the OutcomePlan for the same goal. For every repair step, retain every preserveCapabilityId and add an eligible candidateAddition that produces each missing evidence kind. Candidate additions are additive, never substitutes for an already-bound producer of a different required kind.",
+    "If the candidate consumes a durable workspace result while the current leaf acquires an external source, split those evidence boundaries and make the consuming leaf depend on the source leaf. Do not invent capabilities, add permissions, install tools, or keep an evidence requirement on a leaf that does not produce it.",
+    `Capability repair steps: ${JSON.stringify(repairSteps)}.`,
   ].join("\n");
 }
 
@@ -1221,7 +1295,9 @@ function planningRuntimeContext(
           callablePlanningTool: SUBMIT_OUTCOME_PLAN_TOOL.name,
           capabilityCatalogSemantics: "requiredCapabilities accepts only IDs from capabilityCatalog.allowedIds. Runtime Admission resolves those authorized execution capabilities to tools after the Plan is submitted; identifiers from other planning namespaces are not capabilities.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
-          sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete resource binding. When present, submit sourceConstraint.bindings only: every item has one kind and non-empty ids. kind=tool_source is only for host-registered ToolSource IDs; kind=uploaded_source is only for concrete IDs listed in sources; kind=visible_directory is only for IDs listed in visibleDirectories. Do not submit empty placeholder IDs, Skill IDs, or one ID under more than one kind.",
+          sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete uploaded or visible-directory input binding. When present, submit sourceConstraint.bindings only for uploaded_source IDs listed in sources or visible_directory IDs listed in visibleDirectories. Runtime derives ToolSource bindings from requiredCapabilities and user-required source policy; do not submit tool_source, Tool names, MCP names, or Skill IDs.",
+          requestedArtifactTargets: task.taskUnderstanding.artifactTargets ?? [],
+          artifactTargetBindingPolicy: "requestedArtifactTargets is the complete immutable delivery inventory. Bind every requested target exactly once with artifactTargetIds on its producing or adopting leaf. Do not submit artifactTargets objects: Runtime materializes the server-owned purpose/kind/format/terminalRequired contract.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1250,6 +1326,7 @@ function planningRuntimeContext(
 
 function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][number] {
   const allowedCapabilityIds = planningCapabilitiesForTask(task).map((capability) => capability.id).sort();
+  const allowedArtifactTargetIds = (task.taskUnderstanding.artifactTargets ?? []).map((target) => target.id).sort();
   return {
     ...SUBMIT_OUTCOME_PLAN_TOOL,
     inputSchema: {
@@ -1264,7 +1341,20 @@ function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][
               ...OUTCOME_LEAF_SCHEMA.properties,
               requiredCapabilities: {
                 type: "array",
-                items: { type: "string", enum: allowedCapabilityIds },
+                items: allowedCapabilityIds.length === 0
+                  ? { type: "string", minLength: 1 }
+                  : { type: "string", enum: allowedCapabilityIds },
+              },
+              artifactTargetIds: {
+                type: "array",
+                ...(allowedArtifactTargetIds.length === 0
+                  ? { maxItems: 0, items: { type: "string" } }
+                  : {
+                      minItems: 1,
+                      maxItems: allowedArtifactTargetIds.length,
+                      uniqueItems: true,
+                      items: { type: "string", enum: allowedArtifactTargetIds },
+                    }),
               },
             },
           },
@@ -1727,8 +1817,113 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
     ...proposal,
     steps: normalizedSteps
       .map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task))
-      .map((step) => normalizeSkillIdentityResourceBindings(step, task)),
+      .map((step) => normalizeSkillIdentityResourceBindings(step, task))
+      .map((step) => normalizeInheritedToolSourceConstraints(step, normalizedSteps, task))
+      .map((step) => normalizeBoundResultToolSourceConstraints(step, task)),
   };
+}
+
+/**
+ * Source constraints belong to the leaf that acquires evidence. Low-reasoning
+ * planners often copy an upstream source constraint onto a dependent delivery
+ * leaf even though it has no source capability or source evidence obligation.
+ * Remove only that inherited duplicate; an independent source use remains
+ * explicit and must still resolve to a Tool.
+ */
+function normalizeInheritedToolSourceConstraints(
+  step: PlanStepProposal,
+  allSteps: readonly PlanStepProposal[],
+  task: TaskSpec,
+): PlanStepProposal {
+  const constrained = step.sourceConstraint?.requiredToolSourceIds ?? [];
+  if (constrained.length === 0 || step.dependencies.length === 0 || step.role === "fact_acquisition") return step;
+  if (stepRequiresSourceEvidence(step)) return step;
+  if (constrained.some((sourceId) => stepRequiresToolSourceCapability(step, sourceId, task))) return step;
+  const byId = new Map(allSteps.map((candidate) => [candidate.id, candidate]));
+  const inherited = inheritedToolSourceIds(step.dependencies, byId);
+  const remaining = constrained.filter((sourceId) => !inherited.has(sourceId));
+  if (remaining.length === constrained.length) return step;
+  const sourceConstraint = {
+    ...(remaining.length === 0 ? {} : { requiredToolSourceIds: remaining }),
+    ...(step.sourceConstraint?.requiredUploadedSourceIds === undefined ? {} : { requiredUploadedSourceIds: step.sourceConstraint.requiredUploadedSourceIds }),
+    ...(step.sourceConstraint?.requiredVisibleDirectoryIds === undefined ? {} : { requiredVisibleDirectoryIds: step.sourceConstraint.requiredVisibleDirectoryIds }),
+  };
+  return {
+    ...step,
+    ...(Object.keys(sourceConstraint).length === 0 ? { sourceConstraint: undefined } : { sourceConstraint }),
+  };
+}
+
+function inheritedToolSourceIds(
+  dependencyIds: readonly string[],
+  byId: ReadonlyMap<string, PlanStepProposal>,
+): ReadonlySet<string> {
+  const sources = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (stepId: string): void => {
+    if (visited.has(stepId)) return;
+    visited.add(stepId);
+    const step = byId.get(stepId);
+    if (step === undefined) return;
+    for (const sourceId of step.sourceConstraint?.requiredToolSourceIds ?? []) sources.add(sourceId);
+    for (const dependency of step.dependencies) visit(dependency);
+  };
+  for (const dependency of dependencyIds) visit(dependency);
+  return sources;
+}
+
+/**
+ * A bound prior Result is a formal input, not a request to re-run the Source
+ * that originally produced it. A Planner can nevertheless copy a historical
+ * ToolSource name into a standalone producer leaf. Remove only ToolSources
+ * that have no current semantic use; explicit source evidence, a capability
+ * owned by that source, and a user-required source remain binding.
+ */
+function normalizeBoundResultToolSourceConstraints(
+  step: PlanStepProposal,
+  task: TaskSpec,
+): PlanStepProposal {
+  const constrained = step.sourceConstraint?.requiredToolSourceIds ?? [];
+  if (constrained.length === 0 || step.role !== "produce" || conversationResultInput(task) === undefined) return step;
+  if (stepRequiresSourceEvidence(step)) return step;
+  const explicitlyRequired = new Set(task.requiredToolSourceIds ?? []);
+  const remaining = constrained.filter((sourceId) =>
+    explicitlyRequired.has(sourceId) || stepRequiresToolSourceCapability(step, sourceId, task),
+  );
+  if (remaining.length === constrained.length) return step;
+  const sourceConstraint = {
+    ...(remaining.length === 0 ? {} : { requiredToolSourceIds: remaining }),
+    ...(step.sourceConstraint?.requiredUploadedSourceIds === undefined ? {} : { requiredUploadedSourceIds: step.sourceConstraint.requiredUploadedSourceIds }),
+    ...(step.sourceConstraint?.requiredVisibleDirectoryIds === undefined ? {} : { requiredVisibleDirectoryIds: step.sourceConstraint.requiredVisibleDirectoryIds }),
+  };
+  return {
+    ...step,
+    ...(Object.keys(sourceConstraint).length === 0 ? { sourceConstraint: undefined } : { sourceConstraint }),
+  };
+}
+
+function stepRequiresSourceEvidence(step: PlanStepProposal): boolean {
+  const sourceEvidenceKinds = new Set<EvidenceKind>([
+    "source_summary", "source_urls", "schema_summary", "record_counts", "table_coverage",
+    "structured_extraction_artifact",
+  ]);
+  return step.evidenceContract?.requiredKinds.some((kind) => sourceEvidenceKinds.has(kind)) === true;
+}
+
+function stepRequiresToolSourceCapability(
+  step: PlanStepProposal,
+  sourceId: string,
+  task: TaskSpec,
+): boolean {
+  const declaredCapabilityIds = new Set([
+    ...(task.availableTools ?? [])
+      .filter((tool) => tool.source?.id === sourceId)
+      .flatMap((tool) => tool.source?.capabilities.map((capability) => capability.id) ?? []),
+    ...(task.availableCapabilities ?? [])
+      .filter((capability) => capability.sourceIds?.includes(sourceId) === true)
+      .map((capability) => capability.id),
+  ]);
+  return step.requiredCapabilities.some((capability) => declaredCapabilityIds.has(capability));
 }
 
 /**
@@ -1806,13 +2001,14 @@ function sourceBindingIdentityPolicy(task: TaskSpec): Record<string, unknown> {
   const skillNames = task.availableSkills.map((skill) => skill.name);
   return {
     schema: "agentloop.sourceBindingIdentityPolicy/v1",
-    toolSourceRule: "Only registered ToolSource IDs or aliases may appear under kind=tool_source.",
-    skillRule: "Skill IDs/names and Skill-owned API domains are not ToolSources; bind them through skillIds plus skill_source_provider capabilities.",
+    toolSourceRule: "ToolSource selection is Runtime-owned. Declare a capability such as data_asset.ods_read; Runtime resolves it to a current Host ToolSource and applies any user-required source policy.",
+    skillRule: "Skill IDs/names and Skill-owned API domains are not ToolSources; bind Skills through skillIds plus their declared capabilities.",
     registeredToolSources: registered,
     skillNames,
     examples: {
-      validSkillProvider: "skillIds=[discovered:aihot], requiredCapabilities=[skill_source_provider.api.discovered:aihot], sourceConstraint omitted",
-      invalidSkillBinding: "sourceConstraint.bindings=[{kind:tool_source,ids:[aihot]}]",
+      validCapabilityBinding: "requiredCapabilities=[data_asset.ods_read], sourceConstraint omitted",
+      validConcreteInputBinding: "sourceConstraint.bindings=[{kind:uploaded_source,ids:[src_example]}]",
+      invalidToolBinding: "sourceConstraint.bindings=[{kind:tool_source,ids:[ontoflow-jtbc]}]",
     },
   };
 }
@@ -2365,6 +2561,8 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   const sourceConstraint = record.sourceConstraint === undefined || record.sourceConstraint === null
     ? undefined
     : parseSourceConstraint(record.sourceConstraint, index);
+  const artifactTargetIds = parseArtifactTargetIds(record.artifactTargetIds, index);
+  const artifactTargets = parseArtifactTargets(record.artifactTargets, index);
   return {
     id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
     kind: "leaf",
@@ -2374,6 +2572,8 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
     requiredCapabilities: canonicalStringSet(record.requiredCapabilities, `leaves[${index}].requiredCapabilities`, 100),
     ...(sourceConstraint === undefined ? {} : { sourceConstraint }),
+    ...(artifactTargetIds.length === 0 ? {} : { artifactTargetIds }),
+    ...(artifactTargets.length === 0 ? {} : { artifactTargets }),
     ...(evidenceContract === undefined ? {
       successCriteria: [{
         id: "delivered",
@@ -2391,18 +2591,51 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   };
 }
 
+function parseArtifactTargetIds(value: unknown, index: number): readonly string[] {
+  if (value === undefined || value === null) return [];
+  return canonicalStringSet(value, `leaves[${index}].artifactTargetIds`, 8);
+}
+
+function parseArtifactTargets(value: unknown, index: number): NonNullable<PlanStepProposal["artifactTargets"]> {
+  // Plans emitted before structured artifact targets remain admissible. The
+  // Admission boundary synthesizes the one-target legacy projection only
+  // where it is unambiguous and rejects an uncovered composite delivery.
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 8) {
+    throw badRequest(`leaves[${index}].artifactTargets must be an array with at most 8 entries`);
+  }
+  const ids = new Set<string>();
+  return value.map((item, targetIndex) => {
+    const record = requireRecord(item, `leaves[${index}].artifactTargets[${targetIndex}]`);
+    const id = requireString(record.id, `leaves[${index}].artifactTargets[${targetIndex}].id`, {
+      max: 128,
+      pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    });
+    if (ids.has(id)) throw badRequest(`leaves[${index}].artifactTargets must have unique IDs`);
+    ids.add(id);
+    const kind = requireString(record.kind, `leaves[${index}].artifactTargets[${targetIndex}].kind`, { max: 64 });
+    const format = record.format === null || record.format === undefined
+      ? undefined
+      : requireString(record.format, `leaves[${index}].artifactTargets[${targetIndex}].format`, { max: 32 });
+    if (typeof record.terminalRequired !== "boolean") {
+      throw badRequest(`leaves[${index}].artifactTargets[${targetIndex}].terminalRequired must be boolean`);
+    }
+    return { id, kind, ...(format === undefined ? {} : { format }), terminalRequired: record.terminalRequired };
+  });
+}
+
 function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
   const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
   if (Object.keys(record).length === 0) return undefined;
   const bindings = record.bindings === undefined
     ? parseLegacySourceConstraintBindings(record, index)
     : parseSourceConstraintBindings(record.bindings, index);
-  const requiredToolSourceIds = bindings.toolSourceIds;
   const requiredUploadedSourceIds = bindings.uploadedSourceIds;
   const requiredVisibleDirectoryIds = bindings.visibleDirectoryIds;
-  if (requiredToolSourceIds.length === 0 && requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) return undefined;
+  if (requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) return undefined;
   return {
-    ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+    // tool_source was accepted by older Planner contracts. Tool resolution is
+    // now Runtime-owned, so retain only concrete Runtime-issued inputs here.
     ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
     ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
   };

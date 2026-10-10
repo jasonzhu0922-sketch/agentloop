@@ -187,6 +187,10 @@ export interface ModelRetryInfo {
   readonly maxAttempts: number;
   /** HTTP status that triggered the retry, when the failure was an HTTP response. */
   readonly status?: number;
+  /** Provider request identifier for a retryable HTTP response, when supplied. */
+  readonly providerRequestId?: string;
+  /** Bounded upstream error body retained for diagnosing retryable HTTP responses. */
+  readonly providerErrorBody?: string;
   /** Backoff delay in milliseconds before the next attempt. */
   readonly delayMs: number;
   /** Sanitized provider-bound request shape, without prompt, tool results, or secrets. */

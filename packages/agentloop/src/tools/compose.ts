@@ -11,6 +11,7 @@ import { createSkillLoader } from "./skill-loader.ts";
 import { createSourceTools } from "./source-tools.ts";
 import { createHumanLoopTool } from "./human-loop-tool.ts";
 import { createResultTool } from "./result-tool.ts";
+import { createResultJsonMaterializer } from "./result-materializer.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 import { createVisibleDirectoryTools } from "./visible-directory-tools.ts";
 
@@ -25,7 +26,7 @@ export interface CoreToolsOptions {
 export function createCoreTools(options: CoreToolsOptions): readonly RuntimeTool<unknown>[] {
   return [
     createHumanLoopTool(),
-    ...(options.results === undefined ? [] : [createResultTool(options.results)]),
+    ...(options.results === undefined ? [] : [createResultTool(options.results), createResultJsonMaterializer(options.results, options.executor)]),
     ...createComputerTools(options.executor, options.driver, options.acceptanceService),
     ...createArtifactConverterTools(options.executor),
     ...(options.pluginTools ?? []),

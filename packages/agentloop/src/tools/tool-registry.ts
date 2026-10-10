@@ -24,6 +24,10 @@ export interface ToolSourceCapability {
   readonly category: string;
   readonly label?: string;
   readonly description?: string;
+  /** Host-declared evidence facts this source capability can attest. */
+  readonly producesEvidenceKinds?: readonly string[];
+  /** Host-declared source classes used by planning and evidence contracts. */
+  readonly sourceKinds?: readonly string[];
 }
 
 /**

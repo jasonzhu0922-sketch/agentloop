@@ -1,4 +1,5 @@
 import { artifactFormatFamilyForPath, canonicalArtifactFormatFamily, isSourceArtifactPath, semanticArtifactFamily } from "../shared/artifact-format.ts";
+import type { ArtifactTarget } from "../planning/contracts.ts";
 import type { AgentLoopToolEvidence, ModelToolCall } from "./contracts.ts";
 import {
   parseJsonRecord,
@@ -14,6 +15,8 @@ export interface RuntimeToolProgressPolicy {
   readonly expectedArtifactKind?: string;
   /** Exact output format resolved from the admitted task, such as pdf or html. */
   readonly expectedArtifactFormat?: string;
+  /** Step-local artifact obligations. These supersede the legacy single target projection. */
+  readonly artifactTargets?: readonly ArtifactTarget[];
   /** A requested file must be authored after any declared Skill workflow fact it consumes. */
   readonly artifactDeliveryRequired?: boolean;
   /** Package-owned action declarations whose outputs are prerequisite evidence for this leaf. */
@@ -87,6 +90,7 @@ export function candidateRejectionProgressHint(input: {
 
 export type RuntimeStepNextAction =
   | "acquire_source_evidence"
+  | "materialize_runtime_result_evidence"
   | "produce_artifact"
   | "verify_existing_artifact"
   | "repair_artifact_source"
@@ -116,6 +120,7 @@ export interface RuntimeStepWorkProductState {
   readonly acceptanceRequired: boolean;
   readonly expectedArtifactKind?: string;
   readonly expectedArtifactFormat?: string;
+  readonly artifactTargets?: readonly ArtifactTarget[];
   readonly deliverableArtifacts: readonly RuntimeStepArtifactRef[];
   readonly processArtifacts: readonly RuntimeStepArtifactRef[];
 }
@@ -266,7 +271,7 @@ export function deriveRuntimeStepEvidenceState(input: {
 
 export function artifactStepToolProgressPolicy(
   requiredEvidenceKinds: readonly string[],
-  options: { readonly expectedArtifactKind?: string; readonly expectedArtifactFormat?: string } = {},
+  options: { readonly expectedArtifactKind?: string; readonly expectedArtifactFormat?: string; readonly artifactTargets?: readonly ArtifactTarget[] } = {},
 ): RuntimeToolProgressPolicy {
   return runtimeStepToolProgressPolicy(requiredEvidenceKinds, {
     ...options,
@@ -279,6 +284,7 @@ export function runtimeStepToolProgressPolicy(
   options: {
     readonly expectedArtifactKind?: string;
     readonly expectedArtifactFormat?: string;
+    readonly artifactTargets?: readonly ArtifactTarget[];
     readonly artifactDeliveryRequired?: boolean;
     readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
     readonly scope?: "artifact" | "source" | "generic";
@@ -299,6 +305,7 @@ export function runtimeStepToolProgressPolicy(
     requiredEvidenceKinds: observableRequiredEvidenceKinds,
     ...(options.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: options.expectedArtifactKind }),
     ...(options.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: options.expectedArtifactFormat }),
+    ...(options.artifactTargets === undefined || options.artifactTargets.length === 0 ? {} : { artifactTargets: options.artifactTargets }),
     ...(options.artifactDeliveryRequired === true ? { artifactDeliveryRequired: true } : {}),
     workflowEvidenceActions: Object.freeze([...(options.workflowEvidenceActions ?? [])]),
     // Receipts authenticate observable effects, but they do not establish
@@ -333,6 +340,7 @@ export function runtimeStepToolProgressPolicy(
     ]),
     setupToolNames: ["load_skill"],
     evidenceProducingToolNames: uniqueStrings([
+      "materialize_result_json",
       "computer_patch_file",
       "computer_write_file",
       "computer_run_command",
@@ -474,9 +482,21 @@ function collectPolicyEvidenceKinds(
   readonly failed: Set<string>;
 } {
   const evidenceKinds = collectEvidenceKinds(evidence);
+  if (policy.artifactTargets !== undefined && policy.artifactTargets.length > 0) {
+    // Raw receipt aggregation says only that *some* artifact exists. For a
+    // structured target set it cannot establish the leaf-wide path/non-empty
+    // obligations until classifyWorkProduct has checked every target below.
+    evidenceKinds.satisfied.delete("artifact_path");
+    evidenceKinds.satisfied.delete("artifact_non_empty");
+    evidenceKinds.caveated.delete("artifact_path");
+    evidenceKinds.caveated.delete("artifact_non_empty");
+    evidenceKinds.failed.delete("artifact_path");
+    evidenceKinds.failed.delete("artifact_non_empty");
+  }
   if (
     policy.expectedArtifactKind !== undefined
     || policy.expectedArtifactFormat !== undefined
+    || policy.artifactTargets !== undefined
     || policy.requiredEvidenceKinds.some((kind) => ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS.has(kind))
   ) {
     // Aggregate receipt kinds are only meaningful for the current artifact
@@ -485,8 +505,7 @@ function collectPolicyEvidenceKinds(
     // format obligations after a later write has changed the deliverable.
     const matchingAcceptanceKinds = collectMatchingArtifactAcceptanceKinds(
       evidence,
-      policy.expectedArtifactKind,
-      policy.expectedArtifactFormat,
+      policy,
     );
     for (const kind of ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS) {
       evidenceKinds.satisfied.delete(kind);
@@ -544,59 +563,65 @@ function collectPolicyEvidenceKinds(
 
 function collectMatchingArtifactAcceptanceKinds(
   evidence: readonly AgentLoopToolEvidence[],
-  expectedArtifactKind: string | undefined,
-  expectedArtifactFormat: string | undefined,
+  policy: RuntimeToolProgressPolicy,
 ): {
   readonly satisfied: Set<string>;
   readonly caveated: Set<string>;
   readonly failed: Set<string>;
 } {
+  const targets = artifactTargetsForPolicy(policy);
   const output = { satisfied: new Set<string>(), caveated: new Set<string>(), failed: new Set<string>() };
-  const latestArtifactsByPath = new Map(
-    collectKnownArtifacts(evidence)
-      .filter((artifact) => artifactMatchesExpectedTarget(artifact, expectedArtifactKind, expectedArtifactFormat))
-      .map((artifact) => [artifact.path, artifact]),
-  );
-  const evidenceIndexByCallId = new Map(evidence.map((item, index) => [item.toolCallId, index]));
-  for (const [evidenceIndex, item] of evidence.entries()) {
-    if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
-    for (const record of runtimeEvidenceRecordsFromToolResult(item.result)) {
-      const receipt = asRecord(record.artifactReceipt);
-      const artifactRecord = artifactRecordsFromResult(record)[0]
-        ?? artifactRecordsFromResult(receipt ?? {})[0];
-      const path = stringField(record, "artifactPath")
-        ?? stringField(record, "path")
-        ?? stringField(artifactRecord, "path")
-        ?? stringField(asRecord(record.output), "path");
-      if (path === undefined) continue;
-      const artifact: RuntimeStepArtifactRef = {
-        path,
-        sourceTool: item.toolName,
-        toolCallId: item.toolCallId,
-        artifactKind: stringField(record, "artifactKind")
-          ?? stringField(record, "kind")
-          ?? stringField(artifactRecord, "artifactKind")
-          ?? stringField(artifactRecord, "kind"),
-      };
-      if (!artifactMatchesExpectedTarget(artifact, expectedArtifactKind, expectedArtifactFormat)) continue;
-      const current = latestArtifactsByPath.get(path);
-      if (current === undefined) continue;
-      const receiptSha256 = stringField(record, "sha256") ?? stringField(artifactRecord, "sha256");
-      // A verifier result is valid only for the latest known revision at its
-      // path. Prefer content identity; where a legacy/custom receipt lacks a
-      // hash, preserve compatibility only when it was observed after the
-      // current write. This is a neutral version boundary, not an inference
-      // about domain content.
-      if (
-        (current.sha256 !== undefined && receiptSha256 !== undefined && current.sha256 !== receiptSha256)
-        || (
-          (current.sha256 === undefined || receiptSha256 === undefined)
-          && evidenceIndex < (evidenceIndexByCallId.get(current.toolCallId) ?? -1)
-        )
-      ) continue;
-      collectEvidenceKindsFromRecord(record, output);
-      collectEvidenceKindsFromRecord(receipt, output);
+  const acceptanceForTarget = (target: Pick<ArtifactTarget, "kind" | "format"> | undefined) => {
+    const targetOutput = { satisfied: new Set<string>(), caveated: new Set<string>(), failed: new Set<string>() };
+    const latestArtifactsByPath = new Map(
+      collectKnownArtifacts(evidence)
+        .filter((artifact) => artifactMatchesTarget(artifact, target, policy))
+        .map((artifact) => [artifact.path, artifact]),
+    );
+    const evidenceIndexByCallId = new Map(evidence.map((item, index) => [item.toolCallId, index]));
+    for (const [evidenceIndex, item] of evidence.entries()) {
+      if (item.isError || item.toolName !== "verify_artifact_acceptance") continue;
+      for (const record of runtimeEvidenceRecordsFromToolResult(item.result)) {
+        const receipt = asRecord(record.artifactReceipt);
+        const artifactRecord = artifactRecordsFromResult(record)[0]
+          ?? artifactRecordsFromResult(receipt ?? {})[0];
+        const path = stringField(record, "artifactPath")
+          ?? stringField(record, "path")
+          ?? stringField(artifactRecord, "path")
+          ?? stringField(asRecord(record.output), "path");
+        if (path === undefined) continue;
+        const artifact: RuntimeStepArtifactRef = {
+          path,
+          sourceTool: item.toolName,
+          toolCallId: item.toolCallId,
+          artifactKind: stringField(record, "artifactKind")
+            ?? stringField(record, "kind")
+            ?? stringField(artifactRecord, "artifactKind")
+            ?? stringField(artifactRecord, "kind"),
+        };
+        if (!artifactMatchesTarget(artifact, target, policy)) continue;
+        const current = latestArtifactsByPath.get(path);
+        if (current === undefined) continue;
+        const receiptSha256 = stringField(record, "sha256") ?? stringField(artifactRecord, "sha256");
+        if (
+          (current.sha256 !== undefined && receiptSha256 !== undefined && current.sha256 !== receiptSha256)
+          || (
+            (current.sha256 === undefined || receiptSha256 === undefined)
+            && evidenceIndex < (evidenceIndexByCallId.get(current.toolCallId) ?? -1)
+          )
+        ) continue;
+        collectEvidenceKindsFromRecord(record, targetOutput);
+        collectEvidenceKindsFromRecord(receipt, targetOutput);
+      }
     }
+    return targetOutput;
+  };
+  const targetOutputs = targets.map((target) => acceptanceForTarget(target));
+  if (targetOutputs.length === 0) return output;
+  for (const kind of ARTIFACT_ACCEPTANCE_EVIDENCE_KINDS) {
+    if (targetOutputs.every((item) => item.satisfied.has(kind))) output.satisfied.add(kind);
+    if (targetOutputs.every((item) => item.caveated.has(kind))) output.caveated.add(kind);
+    if (targetOutputs.some((item) => item.failed.has(kind))) output.failed.add(kind);
   }
   return output;
 }
@@ -682,6 +707,7 @@ function classifyWorkProduct(
   // merely because it was written by a work-product-capable tool.
   const tracksArtifactDelivery = policy.expectedArtifactKind !== undefined
     || policy.expectedArtifactFormat !== undefined
+    || policy.artifactTargets !== undefined
     || policy.requiredEvidenceKinds.some((kind) => ARTIFACT_WORK_PRODUCT_EVIDENCE_KINDS.has(kind));
   const artifacts = tracksArtifactDelivery
     ? collectKnownArtifacts(evidence)
@@ -696,7 +722,16 @@ function classifyWorkProduct(
   // artifact.  File-format validation can still inspect it, but cannot turn
   // it into delivery proof after the fact: author a new report from the
   // completed workflow result and validate that revision instead.
-  const deliverableArtifacts = prerequisiteArtifactOrderSatisfied
+  // Only explicit structured targets require all-target coverage. Legacy
+  // single-target policies retain their established receipt semantics; many
+  // historical producer receipts do not carry a byte count here.
+  const targetCoverageSatisfied = policy.artifactTargets === undefined || policy.artifactTargets.length === 0
+    || hasDistinctArtifactCoverage(
+      policy.artifactTargets,
+      acceptanceEligibleArtifacts.filter((artifact) => (artifact.bytes ?? 0) > 0),
+      (artifact, target) => artifactMatchesTarget(artifact, target, policy),
+    );
+  const deliverableArtifacts = prerequisiteArtifactOrderSatisfied && targetCoverageSatisfied
     ? acceptanceEligibleArtifacts
     : [];
   const processArtifacts = prerequisiteArtifactOrderSatisfied
@@ -721,9 +756,35 @@ function classifyWorkProduct(
     acceptanceRequired,
     ...(policy.expectedArtifactKind === undefined ? {} : { expectedArtifactKind: policy.expectedArtifactKind }),
     ...(policy.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: policy.expectedArtifactFormat }),
+    ...(policy.artifactTargets === undefined ? {} : { artifactTargets: policy.artifactTargets }),
     deliverableArtifacts,
     processArtifacts,
   };
+}
+
+/**
+ * Format is not artifact identity: four Markdown targets need four distinct
+ * paths. A small bipartite match keeps legal cross-step adoption while
+ * preventing one receipt/output from satisfying multiple obligations.
+ */
+function hasDistinctArtifactCoverage(
+  targets: readonly ArtifactTarget[],
+  artifacts: readonly RuntimeStepArtifactRef[],
+  matches: (artifact: RuntimeStepArtifactRef, target: ArtifactTarget) => boolean,
+): boolean {
+  const byPath = [...new Map(artifacts.map((artifact) => [artifact.path, artifact])).values()];
+  const assigned = new Set<string>();
+  const assign = (targetIndex: number): boolean => {
+    if (targetIndex === targets.length) return true;
+    for (const artifact of byPath) {
+      if (assigned.has(artifact.path) || !matches(artifact, targets[targetIndex]!)) continue;
+      assigned.add(artifact.path);
+      if (assign(targetIndex + 1)) return true;
+      assigned.delete(artifact.path);
+    }
+    return false;
+  };
+  return assign(0);
 }
 
 function artifactPrerequisiteOrderSatisfied(
@@ -775,8 +836,8 @@ function isAcceptanceDeliverableArtifact(
   // inspectability, not that this is the artifact the current Step promised
   // to deliver. Check the Step-owned target before either shortcut can make
   // an intermediate format eligible for automatic acceptance.
-  if (policy.expectedArtifactKind !== undefined || policy.expectedArtifactFormat !== undefined) {
-    if (!artifactMatchesExpectedTarget(artifact, policy.expectedArtifactKind, policy.expectedArtifactFormat)) return false;
+  if (policy.expectedArtifactKind !== undefined || policy.expectedArtifactFormat !== undefined || policy.artifactTargets !== undefined) {
+    if (!artifactTargetsForPolicy(policy).some((target) => artifactMatchesTarget(artifact, target, policy))) return false;
     // Once the Step explicitly owns the requested artifact kind, a matching
     // source file is no longer merely a build input.  In particular, code
     // delivery must make a matching .py/.js/etc. eligible for Runtime-owned
@@ -789,6 +850,24 @@ function isAcceptanceDeliverableArtifact(
   if (artifact.artifactKind !== undefined && artifact.artifactKind !== "code" && artifact.artifactKind !== "source") return true;
   return !isSourceArtifactPath(artifact.path)
     && !/(?:^|[\\/])(?:makefile|dockerfile)$/i.test(artifact.path);
+}
+
+function artifactTargetsForPolicy(policy: Pick<RuntimeToolProgressPolicy, "artifactTargets" | "expectedArtifactKind" | "expectedArtifactFormat">): readonly Pick<ArtifactTarget, "kind" | "format">[] {
+  if (policy.artifactTargets !== undefined && policy.artifactTargets.length > 0) return policy.artifactTargets;
+  if (policy.expectedArtifactKind === undefined && policy.expectedArtifactFormat === undefined) return [];
+  return [{ kind: policy.expectedArtifactKind ?? "generic_file", ...(policy.expectedArtifactFormat === undefined ? {} : { format: policy.expectedArtifactFormat }) }];
+}
+
+function artifactMatchesTarget(
+  artifact: Pick<RuntimeStepArtifactRef, "path" | "artifactKind">,
+  target: Pick<ArtifactTarget, "kind" | "format"> | undefined,
+  policy: Pick<RuntimeToolProgressPolicy, "expectedArtifactKind" | "expectedArtifactFormat">,
+): boolean {
+  return artifactMatchesExpectedTarget(
+    artifact,
+    target?.kind ?? policy.expectedArtifactKind,
+    target?.format ?? policy.expectedArtifactFormat,
+  );
 }
 
 function formatEvidenceCompletionDelivery(input: {
@@ -894,6 +973,15 @@ function nextActionForEvidenceGap(input: {
     return "produce_artifact";
   }
   if (
+    missing.has("structured_extraction_artifact")
+    && satisfied.has("source_summary")
+    && !missing.has("source_urls")
+    && !missing.has("schema_summary")
+    && hasAnyTool(input.policy, ["materialize_result_json"])
+  ) {
+    return "materialize_runtime_result_evidence";
+  }
+  if (
     missing.has("source_summary")
     || missing.has("source_urls")
     || missing.has("schema_summary")
@@ -946,6 +1034,8 @@ function evidenceProducingToolsForAction(
   switch (action) {
     case "acquire_source_evidence":
       return [];
+    case "materialize_runtime_result_evidence":
+      return tools.filter((name) => name === "materialize_result_json");
     case "produce_artifact":
       return tools.filter((name) =>
         name === "computer_patch_file"
@@ -1056,6 +1146,9 @@ function instructionForStepState(input: {
       } else {
         lines.push("Produce the requested artifact with an evidence-producing tool.");
       }
+      break;
+    case "materialize_runtime_result_evidence":
+      lines.push("Materialize the authorized JSON Runtime Result set with materialize_result_json. Do not recreate or aggregate those Results with computer_write_file.");
       break;
     case "acquire_source_evidence":
       lines.push("Acquire only the missing source evidence required by the current evidence contract.");
