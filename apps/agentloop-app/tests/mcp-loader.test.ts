@@ -90,6 +90,51 @@ test("MCP registration file parses server auth and materializes runtime tools", 
   assert.equal((result as { readonly evidenceReceipt?: { readonly schema?: string } }).evidenceReceipt?.schema, "agentloop.toolEvidenceReceipt/v1");
 });
 
+test("tabular MCP responses project schema and returned-row facts without inferring source cardinality", async () => {
+  const config = parseMcpServersConfig({
+    servers: [{ key: "structured-db", transport: "http", url: "https://mcp.example.test" }],
+  });
+  const integration = await loadMcpToolsFromConfigWithFactory(config, {
+    create: async () => ({
+      request: async (method) => method === "tools/list"
+        ? { tools: [{ name: "query", inputSchema: { type: "object" } }] }
+        : {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              fields: [{ name: "TABLE_NAME" }, { name: "ROW_COUNT" }],
+              rows: [["T_ODS_CUSTOMER", 4117], ["T_ODS_ORDER", 200]],
+              totalRows: 4117,
+            }),
+          }],
+          isError: false,
+        },
+      close: async () => undefined,
+    }),
+  });
+  const result = await integration.tools[0]!.execute({
+    grant: createCapabilityGrant({
+      actorUserId: "user-structured-db",
+      runId: "run-structured-db",
+      depth: 0,
+      allowedToolNames: ["mcp_structured_db_query"],
+      allowedSkillIds: [],
+    }),
+  }, {});
+  const receipt = (result as { evidenceReceipt: { facts: Array<Record<string, unknown>>; evidenceKinds: { satisfied: string[] } } }).evidenceReceipt;
+  assert.deepEqual(receipt.evidenceKinds.satisfied, ["mcp_tool_call", "source_summary", "schema_summary", "record_counts"]);
+  assert.deepEqual(receipt.facts.find((fact) => fact.kind === "schema_summary"), {
+    kind: "schema_summary",
+    fieldCount: 2,
+    fields: ["TABLE_NAME", "ROW_COUNT"],
+  });
+  assert.deepEqual(receipt.facts.find((fact) => fact.kind === "record_counts"), {
+    kind: "record_counts",
+    returnedRows: 2,
+    countSemantics: "returned_rows",
+  });
+});
+
 test("multiple MCP servers retain separate sources and tool namespaces", async () => {
   const config = parseMcpServersConfig({
     servers: [
@@ -278,6 +323,92 @@ test("MCP credentials resolve from the explicit deployment environment", async (
     }), { environment: { AMAP_MCP_KEY: "device-owned-key" } });
     assert.equal(integration.failedServers.length, 0);
     assert.equal(receivedKey, "device-owned-key");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("MCP arbitrary headers resolve from the explicit deployment environment", async () => {
+  let receivedApiKey: string | null = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const headers = new Headers(init?.headers);
+    receivedApiKey = headers.get("x-api-key");
+    const method = headers.get("mcp-method");
+    if (method === "notifications/initialized") return new Response(null, { status: 204 });
+    if (method === "tools/list") {
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, result: { tools: [] } }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const config = parseMcpServersConfig({
+      servers: [{
+        key: "ontoflow-jtbc",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "headers_env", headerEnvs: { "X-API-Key": "ONTOFLOW_JTBC_API_KEY" } },
+      }],
+    });
+    const integration = await loadMcpToolsFromConfig(config, { environment: { ONTOFLOW_JTBC_API_KEY: "device-owned-key" } });
+    assert.equal(integration.failedServers.length, 0);
+    assert.equal(receivedApiKey, "device-owned-key");
+    const missingSecret = await loadMcpToolsFromConfig(parseMcpServersConfig({
+      servers: [{
+        key: "missing-secret",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "headers_env", headerEnvs: { "X-API-Key": "MISSING_KEY" } },
+      }],
+    }), { environment: {} });
+    assert.equal(missingSecret.failedServers.length, 1);
+    assert.match(missingSecret.failedServers[0]?.message ?? "", /Missing MCP header env MISSING_KEY/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("MCP server uses its configured protocol version and session ID for the whole HTTP session", async () => {
+  const requests: Array<{ readonly method: string; readonly protocolVersion: string | null; readonly sessionId: string | null; readonly payload: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const headers = new Headers(init?.headers);
+    const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const method = String(payload.method);
+    requests.push({ method, protocolVersion: headers.get("mcp-protocol-version"), sessionId: headers.get("mcp-session-id"), payload });
+    if (method === "notifications/initialized") return new Response(null, { status: 204 });
+    if (method === "tools/list") {
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { tools: [] } }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(`event: message\r\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: {} })}\r\n\r\n`, {
+      headers: { "content-type": "text/event-stream", "mcp-session-id": "test-session" },
+    });
+  };
+  try {
+    const integration = await loadMcpToolsFromConfig(parseMcpServersConfig({
+      servers: [{
+        key: "legacy-fastmcp",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        protocolVersion: "2024-11-05",
+      }],
+    }));
+    assert.equal(integration.failedServers.length, 0);
+    assert.equal((requests[0]?.payload.params as { protocolVersion?: string }).protocolVersion, "2024-11-05");
+    assert.deepEqual(
+      requests.map(({ method, protocolVersion, sessionId }) => ({ method, protocolVersion, sessionId })),
+      [
+        { method: "initialize", protocolVersion: null, sessionId: null },
+        { method: "notifications/initialized", protocolVersion: "2024-11-05", sessionId: "test-session" },
+        { method: "tools/list", protocolVersion: "2024-11-05", sessionId: "test-session" },
+      ],
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

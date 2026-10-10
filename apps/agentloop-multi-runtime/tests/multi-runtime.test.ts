@@ -9,6 +9,7 @@ import { FileAttachmentBroker } from "../src/router/attachments/attachment-broke
 import { SharedFilesystemAttachmentBroker } from "../src/router/attachments/shared-filesystem-attachment-broker.ts";
 import { MultiRuntimeRouter, RuntimeCapacityError } from "../src/router/service/in-memory-router.ts";
 import { RuntimeHostService } from "../src/runtime-host/service/runtime-host-service.ts";
+import { loadOptionalPlanTemplateObserver, planTemplateEnabled } from "../src/runtime-host/plan-template-observer.ts";
 import {
   assertRequiredRuntimeCommands,
   assertRequiredRuntimeNodeModules,
@@ -147,6 +148,49 @@ test("shared state configuration switches between SQLite, PostgreSQL, and role-s
   );
 });
 
+test("cloud Runtime Host enables PlanTemplate only through its deployment switch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-plan-template-observe-"));
+  const configPath = join(root, "plan-template.json");
+  await writeFile(configPath, JSON.stringify({
+    storage: { type: "sqlite", databasePath: ":memory:", migrateOnStart: true },
+    config: { enabled: true, observeEnabled: false, mode: "direct_use", allowDirectUse: true },
+  }), "utf8");
+  assert.equal(planTemplateEnabled(undefined), false);
+  assert.equal(planTemplateEnabled("false"), false);
+  assert.equal(planTemplateEnabled("true"), true);
+  assert.throws(() => planTemplateEnabled("yes"), /PLAN_TEMPLATE_ENABLED/);
+  assert.equal(await loadOptionalPlanTemplateObserver({
+    appRoot: root,
+    configPath: join(root, "missing-config.json"),
+    enabled: "false",
+  }), undefined);
+
+  const plugin = await loadOptionalPlanTemplateObserver({ appRoot: root, configPath, enabled: "true" });
+  assert.notEqual(plugin, undefined);
+  if (plugin === undefined) return;
+  try {
+    const decision = await plugin.extension().beforePlanning({
+      runId: "observe-only-run",
+      actorUserId: "owner",
+      input: "Summarize the supplied evidence",
+      responseOnly: false,
+      availableSkills: [],
+      selectedSkillRoles: [],
+      availableToolNames: [],
+      availableTools: [],
+      visibleDirectories: [],
+      sources: [],
+    });
+    assert.deepEqual(decision, { kind: "none" });
+    const matches = await (await plugin.store()).matchesByRun("observe-only-run");
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0]?.decision, "observed");
+  } finally {
+    await plugin.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Docker Compose passes independent TiDB settings to Router and Runtime Hosts", async () => {
   const [compose, tidbExample, packageJson] = await Promise.all([
     readFile(new URL("../compose.yaml", import.meta.url), "utf8"),
@@ -157,6 +201,8 @@ test("Docker Compose passes independent TiDB settings to Router and Runtime Host
   assert.match(compose, /AGENTLOOP_ROUTER_STATE_DATABASE_URL: \$\{AGENTLOOP_ROUTER_STATE_DATABASE_URL:-\$\{AGENTLOOP_STATE_DATABASE_URL:-\}\}/);
   assert.equal((compose.match(/^\s+AGENTLOOP_RUNTIME_STATE_DRIVER:/gm) ?? []).length, 2);
   assert.equal((compose.match(/^\s+AGENTLOOP_RUNTIME_STATE_DATABASE_URL:/gm) ?? []).length, 2);
+  assert.match(compose, /PLANNING_MAX_TURNS: \$\{PLANNING_MAX_TURNS:-4\}/);
+  assert.match(compose, /STEP_MAX_TURNS: \$\{STEP_MAX_TURNS:-32\}/);
   assert.match(tidbExample, /AGENTLOOP_ROUTER_STATE_DRIVER=tidb/);
   assert.match(tidbExample, /\/agentloop_router/);
   assert.match(tidbExample, /AGENTLOOP_RUNTIME_STATE_DRIVER=tidb/);
@@ -630,8 +676,8 @@ test("local launcher gives Router and Runtime Hosts the same shared workspace mo
   );
   assert.match(
     localAgentEnvironment,
-    /LOCAL_AGENT_RUNTIME_ENV_FILE:\s*process\.env\.LOCAL_AGENT_RUNTIME_ENV_FILE \?\? providerEnvFile/,
-    "the local launcher must give Local Agent Skills the deployment env file by default",
+    /LOCAL_AGENT_RUNTIME_ENV_FILE:\s*process\.env\.LOCAL_AGENT_RUNTIME_ENV_FILE \?\? "\.env"/,
+    "the local launcher must preserve the Local Agent environment boundary by default",
   );
 });
 
@@ -1144,6 +1190,9 @@ test("Web keeps an open Human-in-the-Loop request reachable outside the bounded 
   assert.match(app, /function renderHumanLoopCard\(message\)/);
   assert.match(app, /function currentHumanLoopMessage\(messages\)/);
   assert.match(app, /panel\.hidden = false;/);
+  assert.match(app, /confirmationRejected/);
+  assert.match(app, /AgentLoop 会停止本次任务/);
+  assert.match(app, /humanLoopConfirmationDrafts[\s\S]*saveSessions\(\);\s*render\(\);/);
   assert.doesNotMatch(app, /data-human-loop-open/);
   assert.match(overrides, /\.human-loop-panel\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*width:\s*min\(780px, calc\(100% - 48px\)\);[^}]*height:\s*min\(760px, calc\(100% - 48px\)\);[^}]*overflow:\s*hidden/s);
   assert.match(overrides, /\.human-loop-panel-body\s*\{[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);

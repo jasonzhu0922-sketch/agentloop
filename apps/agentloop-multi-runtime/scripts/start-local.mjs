@@ -142,6 +142,10 @@ children.push(start("local-agent", "local-agent-runtime/src/main.ts", {
   PRACTICE_PROFILE_CONFIG_PATH: practiceProfileConfigPath,
   SKILL_DIRECTORIES_CONFIG_PATH: process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? "./config/skill-directories.json",
   LLM_PROVIDER_ENV_FILE: providerEnvFile,
+  // Local Agent integrations remain device-owned. The root deployment file is
+  // for Router and Runtime Hosts; an operator can still provide an explicit
+  // Local Agent environment-file override.
+  LOCAL_AGENT_RUNTIME_ENV_FILE: process.env.LOCAL_AGENT_RUNTIME_ENV_FILE ?? ".env",
 }, providerEnvFiles));
 
 for (let index = 0; index < runtimeCount; index += 1) {

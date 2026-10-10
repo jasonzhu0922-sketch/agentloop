@@ -7,6 +7,24 @@ import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 
+interface McpStartupIntegration {
+  readonly loadedServers: readonly { readonly key: string; readonly toolCount: number }[];
+  readonly failedServers: readonly { readonly key: string; readonly message: string }[];
+}
+
+export function localRuntimeMcpStartupLogLines(integration: McpStartupIntegration): readonly { readonly stream: "stdout" | "stderr"; readonly text: string }[] {
+  return [
+    ...integration.loadedServers.map((server) => ({
+      stream: "stdout" as const,
+      text: `Local Runtime MCP server ${server.key} loaded ${server.toolCount} tool(s)`,
+    })),
+    ...integration.failedServers.map((server) => ({
+      stream: "stderr" as const,
+      text: `Local Runtime MCP server ${server.key} failed: ${server.message}`,
+    })),
+  ];
+}
+
 /** Creates the isolated kernel, storage and skill catalog for one device Runtime. */
 export class LocalRuntimeFactory {
   private readonly input: LocalAgentOptions;
@@ -49,6 +67,8 @@ export class LocalRuntimeFactory {
       });
     const runs = new RunService({
       database, skills, modelFactory: (onRetry, modelKey) => provider.create(modelKey, onRetry),
+      ...(this.input.planningMaxTurns === undefined ? {} : { maxPlanningTurns: this.input.planningMaxTurns }),
+      ...(this.input.stepMaxTurns === undefined ? {} : { maxSteps: this.input.stepMaxTurns }),
       defaultModelKey: provider.defaultModelKey, modelKeys: provider.modelKeys(), workspaceRoot: sharedStorageRoot, sourceStorageRoot,
       ownerScopedWorkspace: true,
       stepExecutionStrategy: createStepExecutionStrategyProfile(strategy.profile, strategy.projection),
@@ -60,8 +80,8 @@ export class LocalRuntimeFactory {
       computerCommandEnvironment: this.input.computerCommandEnvironment,
       ...(this.input.runEventLogSink === undefined ? {} : { runEventLogSink: (line) => this.input.runEventLogSink!(definition, line) }),
     });
-    for (const failedServer of mcpIntegration.failedServers) {
-      process.stderr.write(`Local Runtime MCP server ${failedServer.key} failed: ${failedServer.message}\n`);
+    for (const line of localRuntimeMcpStartupLogLines(mcpIntegration)) {
+      (line.stream === "stdout" ? process.stdout : process.stderr).write(`${line.text}\n`);
     }
     const activeRunIds = new Set<string>();
     const dispatched = await database.prepare("SELECT owner_user_id, remote_run_id FROM local_runtime_dispatches").all() as Array<{ owner_user_id: string; remote_run_id: string }>;

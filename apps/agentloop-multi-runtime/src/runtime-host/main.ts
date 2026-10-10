@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, LlmProviderRegistry, loadOptionalMcpToolsFromConfigFile, RunService, SkillService } from "@zhujun/agentloop";
+import { colorizeTerminalLogLabel, colorizeTerminalLogLine, createStepExecutionStrategyProfile, createWebTools, DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, LlmProviderRegistry, loadOptionalMcpToolsFromConfigFile, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS, RunService, SkillService } from "@zhujun/agentloop";
 import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../shared/config.ts";
 import { HttpResourceImporter } from "./infrastructure/http-resource-importer.ts";
@@ -18,6 +18,7 @@ import {
 } from "./service/runtime-command-preflight.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../shared/persistence/state-database.ts";
 import { migrateRuntimeState } from "./persistence/state-migrations.ts";
+import { loadOptionalPlanTemplateObserver } from "./plan-template-observer.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 // This non-sensitive path is the only Enterprise Info setting passed to
@@ -57,6 +58,18 @@ const routerAttachmentToken = requiredEnv("RUNTIME_ATTACHMENT_TOKEN");
 const runtimeDispatchToken = requiredEnv("RUNTIME_DISPATCH_TOKEN");
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
 const maxConcurrentRuns = positiveInteger(process.env.MAX_CONCURRENT_RUNS, 2);
+const planningMaxTurns = boundedPositiveInteger(
+  process.env.PLANNING_MAX_TURNS,
+  DEFAULT_MAX_PLANNING_TURNS,
+  MAX_SUPPORTED_PLANNING_TURNS,
+  "PLANNING_MAX_TURNS",
+);
+const stepMaxTurns = boundedPositiveInteger(
+  process.env.STEP_MAX_TURNS,
+  DEFAULT_MAX_STEPS,
+  MAX_SUPPORTED_STEP_TURNS,
+  "STEP_MAX_TURNS",
+);
 const heartbeatIntervalMs = positiveInteger(process.env.HEARTBEAT_INTERVAL_MS, 5_000);
 const logColorOptions = terminalLogColorOptions();
 const runtimeLogLabel = colorizeTerminalLogLabel(`[${runtimeId}]`, runtimeId, logColorOptions);
@@ -99,10 +112,19 @@ const skillDirectorySync = await skills.syncSkillDirectories();
 // MCP connections are Host-owned deployment integrations. The Router selects a
 // Host but never receives MCP credentials or materializes its tool catalog.
 const mcpIntegration = await loadOptionalMcpToolsFromConfigFile(mcpServersConfigPath);
+const planTemplateObserver = await loadOptionalPlanTemplateObserver({
+  appRoot,
+  enabled: process.env.PLAN_TEMPLATE_ENABLED,
+  ...(process.env.PLAN_TEMPLATE_CONFIG_PATH === undefined
+    ? {}
+    : { configPath: process.env.PLAN_TEMPLATE_CONFIG_PATH }),
+});
 const runs = new RunService({
   database,
   skills,
   modelFactory: (onRetry, modelKey) => providers.create(modelKey, onRetry),
+  maxPlanningTurns: planningMaxTurns,
+  maxSteps: stepMaxTurns,
   defaultModelKey: providers.defaultModelKey,
   modelKeys: providers.modelKeys(),
   workspaceRoot,
@@ -114,6 +136,7 @@ const runs = new RunService({
     API_QUERY_ENV_FILE: apiQueryEnvironmentFile,
     STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
   },
+  ...(planTemplateObserver === undefined ? {} : { planningExtensions: [planTemplateObserver.extension()] }),
   runEventLogSink: (line) => process.stdout.write(`${runtimeLogLabel} ${colorizeTerminalLogLine(line, logColorOptions)}\n`),
 });
 const reconcileOwnedRuns = async (): Promise<void> => {
@@ -152,8 +175,17 @@ function shutdown(): void {
   clearInterval(heartbeatTimer);
   clearInterval(reconciliationTimer);
   server.close(() => {
-    database.close();
-    process.exitCode = 0;
+    if (planTemplateObserver === undefined) {
+      database.close();
+      process.exitCode = 0;
+      return;
+    }
+    void planTemplateObserver.close()
+      .catch((error) => process.stderr.write(`PlanTemplate observer shutdown failed: ${String(error)}\n`))
+      .finally(() => {
+        database.close();
+        process.exitCode = 0;
+      });
   });
 }
 process.on("SIGINT", shutdown);
@@ -176,6 +208,14 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 3_600_000) throw new Error("value must be a positive integer");
+  return parsed;
+}
+
+function boundedPositiveInteger(value: string | undefined, fallback: number, maximum: number, name: string): number {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
   return parsed;
 }
 

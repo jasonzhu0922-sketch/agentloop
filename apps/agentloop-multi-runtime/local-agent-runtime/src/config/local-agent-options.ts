@@ -9,6 +9,10 @@ export interface LocalAgentOptions {
   readonly workspaceRoot: string;
   readonly skillPackageStoreRoot: string;
   readonly maxConcurrentRuns?: number;
+  /** Bounded Planner contract-repair turns for each device-local Runtime. */
+  readonly planningMaxTurns?: number;
+  /** Bounded model turns for each executable Plan step on this device. */
+  readonly stepMaxTurns?: number;
   readonly runtimeDataRoot?: string;
   readonly supervisorDatabasePath?: string;
   readonly providerConfigPath: string;

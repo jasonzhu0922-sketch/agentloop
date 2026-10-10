@@ -46,10 +46,7 @@
       "displayName": "DeepSeek v4 Flash 2",
       "maxOutputTokens": 16384,
       "toolChoiceMode": "named-as-required",
-      "chatTemplateKwargs": {
-        "thinking": false,
-        "effort": "none"
-      },
+      "chatTemplateKwargs": { "thinking": false, "effort": "none" },
       "reasoningVisibility": "hidden"
     },
     "kimi-2.6": {
@@ -63,6 +60,18 @@
       "providerModel": "gpt-5.6-terra",
       "displayName": "GPT-5.6 Terra",
       "reasoningEffort": "none",
+      "reasoningSummary": "detailed",
+      "reasoningEncryptedContent": true,
+      "reasoningVisibility": "hidden",
+      "protocol": "responses"
+    },
+    "gpt-5.6-luna": {
+      "providerKey": "openai",
+      "providerModel": "gpt-5.6-luna",
+      "displayName": "GPT-5.6 luna",
+      "reasoningEffort": "none",
+      "reasoningSummary": "detailed",
+      "reasoningEncryptedContent": true,
       "reasoningVisibility": "hidden",
       "protocol": "responses"
     }

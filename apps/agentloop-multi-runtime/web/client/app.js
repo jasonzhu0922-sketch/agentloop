@@ -2236,8 +2236,16 @@ function renderHumanLoopSurfaces(messages) {
     return;
   }
   const request = message.humanLoop;
+  const confirmationRejected = request.responseSchema?.type === "confirm"
+    && humanLoopConfirmation(message, request.id) === "reject";
+  const submitLabel = confirmationRejected
+    ? (request.responseSchema.rejectLabel || "拒绝并停止")
+    : (request.responseSchema?.acceptLabel || "确认并继续");
+  const submitHint = confirmationRejected
+    ? "提交后，AgentLoop 会停止本次任务"
+    : "提交后，AgentLoop 会继续执行";
   panel.hidden = false;
-  panel.innerHTML = `<header class="human-loop-panel-head"><div><span class="human-loop-panel-kicker">需要你的决策</span><strong>${escapeHtml(request.title)}</strong></div><span class="human-loop-panel-badge">等待你的输入</span></header><div class="human-loop-panel-body">${renderHumanLoopCard(message)}</div><footer class="human-loop-panel-actions"><span>提交后，AgentLoop 会继续执行</span><button type="button" class="human-loop-submit" data-human-loop-submit="${escapeHtml(message.id)}">确认并继续</button></footer>`;
+  panel.innerHTML = `<header class="human-loop-panel-head"><div><span class="human-loop-panel-kicker">需要你的决策</span><strong>${escapeHtml(request.title)}</strong></div><span class="human-loop-panel-badge">等待你的输入</span></header><div class="human-loop-panel-body">${renderHumanLoopCard(message)}</div><footer class="human-loop-panel-actions"><span>${escapeHtml(submitHint)}</span><button type="button" class="human-loop-submit" data-human-loop-submit="${escapeHtml(message.id)}">${escapeHtml(submitLabel)}</button></footer>`;
 }
 
 /** Preserve an unfinished HIL answer across unrelated live-state renders. */
@@ -2280,6 +2288,7 @@ function rememberHumanLoopConfirmation(messageId, requestId, value) {
   if (!assistant || assistant.humanLoop?.id !== requestId || (value !== "accept" && value !== "reject")) return;
   assistant.humanLoopConfirmationDrafts = { ...(assistant.humanLoopConfirmationDrafts || {}), [requestId]: value };
   saveSessions();
+  render();
 }
 
 function renderRecovery(message) {

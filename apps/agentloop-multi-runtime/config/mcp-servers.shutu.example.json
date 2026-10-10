@@ -2,27 +2,6 @@
   "defaultTrust": "untrusted",
   "servers": [
     {
-      "key": "amap-maps",
-      "transport": "http",
-      "url": "https://mcp.amap.com/mcp",
-      "auth": {
-        "kind": "query",
-        "name": "key",
-        "secretEnv": "AMAP_MCP_KEY"
-      },
-      "trust": "trusted",
-      "timeoutMs": 15000,
-      "aliases": ["高德", "amap"],
-      "capabilities": [
-        {
-          "id": "spatial_planning.route",
-          "category": "spatial_planning",
-          "label": "Route planning",
-          "description": "Plan routes and travel options using this map source."
-        }
-      ]
-    },
-    {
       "key": "ontoflow-jtbc",
       "transport": "http",
       "url": "http://10.82.75.22:8082/mcp",

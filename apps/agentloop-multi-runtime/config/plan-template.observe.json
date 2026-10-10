@@ -1,14 +1,10 @@
 {
   "storage": {
     "type": "sqlite",
-    "databasePath": "../data/agentloop-plan-template.db",
+    "databasePath": "../data/local/agentloop-plan-template.db",
     "migrateOnStart": true
   },
   "config": {
-    "enabled": false,
-    "observeEnabled": false,
-    "mode": "off",
-    "allowDirectUse": false,
     "minDirectUseScore": 0.9,
     "minPlannerContextScore": 0.7,
     "allowedRiskCeiling": "low"

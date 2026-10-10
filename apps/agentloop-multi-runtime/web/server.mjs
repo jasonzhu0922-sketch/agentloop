@@ -12,6 +12,10 @@ const sharedMarked = fileURLToPath(new URL("../../../node_modules/marked/lib/mar
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.WEB_PORT ?? 5174);
 const routerUrl = process.env.ROUTER_URL ?? "http://127.0.0.1:8788";
+// Browser configuration has a different authority boundary from the proxy
+// upstream: a container reaches `router` over its Compose network, whereas a
+// paired Local Runtime Agent must receive the externally routable URL.
+const routerPublicUrl = process.env.ROUTER_PUBLIC_URL ?? routerUrl;
 const localAgentUrl = process.env.LOCAL_AGENT_URL ?? "http://127.0.0.1:8790";
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 
@@ -47,7 +51,7 @@ export function createWebServer() {
     if (pathname === "/runtime-config.js") {
       response.statusCode = 200;
       response.setHeader("content-type", types[".js"]);
-      response.end(runtimeConfigScript(routerUrl, localAgentUrl));
+      response.end(runtimeConfigScript(routerPublicUrl, localAgentUrl));
       return;
     }
     if (pathname === "/artifact-preview.js") {

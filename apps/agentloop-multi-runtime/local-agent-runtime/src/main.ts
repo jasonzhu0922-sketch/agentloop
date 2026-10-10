@@ -1,6 +1,7 @@
 import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_MAX_PLANNING_TURNS, DEFAULT_MAX_STEPS, MAX_SUPPORTED_PLANNING_TURNS, MAX_SUPPORTED_STEP_TURNS } from "@zhujun/agentloop";
 import { readLocalAgentBootstrapConfig, writeLocalAgentBootstrapConfig } from "./config/bootstrap-config.ts";
 import { createLocalAgentServer } from "./api/local-agent-api.ts";
 import { localRuntimeTerminalLogLine } from "./observability/runtime-terminal-log.ts";
@@ -42,6 +43,18 @@ const maxConcurrentRuns = positiveInteger(process.env.LOCAL_RUNTIME_MAX_CONCURRE
 const runtimeConfiguration = localAgentRuntimeConfiguration(appRoot, dataRoot, process.env);
 await ensureLocalAgentRuntimeConfiguration(appRoot, runtimeConfiguration);
 const integrationEnvironment = await readLocalAgentIntegrationEnvironment(runtimeConfiguration);
+const planningMaxTurns = boundedPositiveInteger(
+  process.env.PLANNING_MAX_TURNS ?? integrationEnvironment.PLANNING_MAX_TURNS,
+  DEFAULT_MAX_PLANNING_TURNS,
+  MAX_SUPPORTED_PLANNING_TURNS,
+  "PLANNING_MAX_TURNS",
+);
+const stepMaxTurns = boundedPositiveInteger(
+  process.env.STEP_MAX_TURNS ?? integrationEnvironment.STEP_MAX_TURNS,
+  DEFAULT_MAX_STEPS,
+  MAX_SUPPORTED_STEP_TURNS,
+  "STEP_MAX_TURNS",
+);
 const mcpServersConfigPath = resolve(process.env.LOCAL_AGENT_MCP_SERVERS_CONFIG_PATH ?? join(runtimeConfiguration.root, "config", "mcp-servers.json"));
 const providerConfigPath = resolve(process.env.LOCAL_AGENT_PROVIDER_CONFIG_PATH ?? join(appRoot, "local-agent-runtime", "config", "llm-providers.json"));
 const skillDirectoriesConfigPath = resolve(process.env.SKILL_DIRECTORIES_CONFIG_PATH ?? join(appRoot, "config", "skill-directories.json"));
@@ -54,7 +67,7 @@ const logColorOptions = {
   noColor: process.env.NO_COLOR,
 };
 const server = await createLocalAgentServer({
-  appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath, maxConcurrentRuns,
+  appRoot, routerUrl, statePath, databasePath, workspaceRoot, skillPackageStoreRoot, runtimeDataRoot, supervisorDatabasePath, maxConcurrentRuns, planningMaxTurns, stepMaxTurns,
   providerConfigPath, skillDirectoriesConfigPath, stepExecutionStrategyConfigPath, practiceProfileConfigPath,
   mcpServersConfigPath,
   computerCommandEnvironment: runtimeConfiguration.computerCommandEnvironment,
@@ -68,6 +81,14 @@ server.listen(port, host, () => process.stdout.write(`AgentLoop Local Runtime Ag
 function positiveInteger(value: string | undefined, fallback: number, name = "LOCAL_AGENT_PORT"): number {
   const result = Number(value ?? fallback);
   if (!Number.isSafeInteger(result) || result < 1 || result > 65_535) throw new Error(`${name} must be a positive integer no greater than 65535`);
+  return result;
+}
+
+function boundedPositiveInteger(value: string | undefined, fallback: number, maximum: number, name: string): number {
+  const result = Number(value ?? fallback);
+  if (!Number.isSafeInteger(result) || result < 1 || result > maximum) {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
   return result;
 }
 function requiredArgument(value: string | undefined, flag: string): string { if (value === undefined || value.trim() === "") throw new Error(`${flag} requires a value`); return value; }

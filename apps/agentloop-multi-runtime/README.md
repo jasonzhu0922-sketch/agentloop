@@ -163,7 +163,7 @@ SQLite 不是多节点数据库：不要把它放到 NFS/RWX 卷。生产还应�
 
 ### Local Runtime Agent 独立部署配置
 
-Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包。单独运行 `start:local-agent` 或已安装 Agent 时，从 `local-agent-runtime/.env`（打包版为设备数据目录下的 `.env`）与 `local-agent-runtime/config/llm-providers.json` 读取；本地 `start:multi-runtime` 启动器默认让 Local Agent Skill 与 Runtime Host 共用 `LLM_PROVIDER_ENV_FILE` 指定的部署文件，仍可用 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖。已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime\`。该 `.env` 是 Local Agent 的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
+Local Runtime Agent 的模型、联网搜索和 Skill 集成配置属于设备部署边界，不属于同步的 Skill 包。单独运行 `start:local-agent`、已安装 Agent 与本地 `start:multi-runtime` 都默认从 `local-agent-runtime/.env`（打包版为设备数据目录下的 `.env`）及 `local-agent-runtime/config/llm-providers.json` 读取；根 `.env` 只提供 Router 和 Runtime Host 的部署配置。受管部署仍可用 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖 Local Agent 的环境文件路径。已安装 Agent 首次启动会在设备数据目录创建 `agent-loop-runtime/.env.example`，运维应复制为同目录 `.env` 并以最小权限保存真实凭据。macOS 默认目录为 `~/Library/Application Support/AgentLoop Local Runtime/agent-loop-runtime/`，Windows 为 `%LOCALAPPDATA%\AgentLoop Local Runtime\agent-loop-runtime/`。该 `.env` 是 Local Agent 的模型/联网搜索配置来源：例如 `OPENAI_API_KEY`、`MY_LLM_API_KEY`、`WEB_SEARCH_*` 均仅被 Agent 进程内集成读取；`mysql-steel-data` 与 `enterprise-info` 只收到同一文件路径并自行读取各自字段。凭据绝不写入 Skill 包、Planner、模型上下文或命令环境。受管部署可用 `LOCAL_AGENT_RUNTIME_CONFIG_ROOT`、`LOCAL_AGENT_RUNTIME_ENV_FILE` 或 `LOCAL_AGENT_PROVIDER_CONFIG_PATH` 覆盖路径。
 
 Local Agent 的源码也作为独立部署单元位于 `local-agent-runtime/src/`；它只依赖共享内核包及 Multi Runtime 的中立配置/契约，Router 和云端 Runtime Host 入口仍保留在 `src/`。`start:local-agent`、本地启动器和 macOS/Windows 打包器都以此目录的 `main.ts` 为唯一入口。
 
@@ -195,6 +195,24 @@ SQLite 事务、PostgreSQL advisory transaction lock 或 TiDB advisory lock 串�
 ### Step execution policy
 
 每个 Runtime Host 在启动时从 `config/step-execution-strategy.json` 读取内置执行策略；默认已设为 `action-aware`。它根据当前证据和下一动作收缩可见工具，并保留必要的回执、诊断和产物引用。若需要为一组 Host 使用另一份策略文件，设置 `STEP_EXECUTION_STRATEGY_CONFIG_PATH` 并重启这些 Host；不会影响正在执行或已完成的 Run。
+
+### PlanTemplate Observe
+
+云端 Runtime Host 仅在 `.env` 中显式设置 `PLAN_TEMPLATE_ENABLED=true` 时，才在 Planner 前加载 `@zhujun/agentloop-plan-template`。未设置或设为 `false` 时，Host 不加载插件、不创建模板库，也不记录 Observe 数据。启用后当前仍强制处于 Observe 模式：每次 Run 只记录 task fingerprint、PlanAdmission 和 Outcome，不向 Planner 注入 context，也不会生成模板 Plan。Router 不加载或匹配模板；它仍只依据 Host profile、能力和容量分配 Run。Local Runtime Agent 也不加载该插件。
+
+默认配置为 `config/plan-template.observe.json`，本地单机开发写入 `data/local/agentloop-plan-template.db`。多 Host 的生产部署必须让所有 Cloud Host 使用同一份、只允许 Observe 的 PostgreSQL/TiDB 配置文件，并通过 `PLAN_TEMPLATE_CONFIG_PATH` 指向它；不要在 RWX/NFS 上共享 SQLite。例如 TiDB 配置可使用 Runtime database 中由插件拥有的独立表：
+
+```json
+{
+  "storage": {
+    "type": "tidb",
+    "connectionString": "mysql://user:password@tidb:4000/agentloop_runtime",
+    "migrateOnStart": true
+  }
+}
+```
+
+Host 会强制覆盖 `enabled=true`、`observeEnabled=true`、`mode=observe` 和 `allowDirectUse=false`。因此 `PLAN_TEMPLATE_ENABLED=true` 只能开启 Observe，配置文件不能提前开启 `planner_context` 或 `direct_use`；后续放量必须改变 Host 装配策略并经过独立验证。
 
 ```json
 {
@@ -246,7 +264,7 @@ EPLAT_CLIENT_ID=replace-at-deploy
 EPLAT_CLIENT_SECRET=replace-at-deploy
 ```
 
-Host 只向 Skill 子进程提供 `API_QUERY_ENV_FILE`（配置文件路径）。脚本使用 `curl` 的可用 TLS 栈发送请求，并分别报告传输、HTTP、JSON 和 SQL API `__sys__.status` 错误。Runtime Host 默认读取自己的 `.env`；本地 `start:multi-runtime` 启动器会把同一部署文件路径传给 Local Agent，单独部署时可通过 `API_QUERY_ENV_FILE` 或 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖。
+Host 只向 Skill 子进程提供 `API_QUERY_ENV_FILE`（配置文件路径）。脚本使用 `curl` 的可用 TLS 栈发送请求，并分别报告传输、HTTP、JSON 和 SQL API `__sys__.status` 错误。Runtime Host 默认读取根 `.env`；Local Agent 默认读取 `local-agent-runtime/.env`，单独部署时可通过 `API_QUERY_ENV_FILE` 或 `LOCAL_AGENT_RUNTIME_ENV_FILE` 覆盖。
 
 ```bash
 # 终端 1：Router（默认读取 config/runtimes.json）
