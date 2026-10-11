@@ -27,12 +27,12 @@ const enterpriseInfoEnvironmentFile = resolve(
   appRoot,
   process.env.ENTERPRISE_INFO_ENV_FILE ?? "./.env",
 );
-// api-query receives only the deployment-file path; its script reads the
-// endpoint and credentials without exposing them to Planner, model context, or
-// command-line arguments.
-const apiQueryEnvironmentFile = resolve(
+// data-platform-query receives only its deployment-file path; its wrapper
+// reads the DAM_TEST_* values without exposing them to Planner, model context,
+// or command-line arguments.
+const damTestEnvironmentFile = resolve(
   appRoot,
-  process.env.API_QUERY_ENV_FILE ?? "./.env",
+  process.env.DAM_TEST_ENV_FILE ?? "./.env",
 );
 // Like other Skill-owned integrations, pass only the deployment configuration
 // path. The mysql Skill reads credentials itself; neither Planner nor model
@@ -133,7 +133,7 @@ const runs = new RunService({
   tools: [...integrationTools, ...mcpIntegration.tools],
   computerCommandEnvironment: {
     ENTERPRISE_INFO_ENV_FILE: enterpriseInfoEnvironmentFile,
-    API_QUERY_ENV_FILE: apiQueryEnvironmentFile,
+    DAM_TEST_ENV_FILE: damTestEnvironmentFile,
     STEEL_MARKET_DB_ENV_FILE: steelMarketDatabaseEnvironmentFile,
   },
   ...(planTemplateObserver === undefined ? {} : { planningExtensions: [planTemplateObserver.extension()] }),

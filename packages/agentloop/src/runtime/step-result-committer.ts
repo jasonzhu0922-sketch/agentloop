@@ -100,6 +100,11 @@ export function isCaveatedStepResult(
   ) === true;
   const blockingSkill = assessment.skills.some((skill) =>
     skill.followed !== true
+    // The Runtime evidence assessor deliberately records selected Skills as
+    // not_assessed: it verifies observable effects, not domain-method QA.
+    // That neutral observation cannot overturn an approved assessment or a
+    // separately classified non-blocking caveat at terminal commit.
+    && skill.status !== "not_assessed"
     && skill.status !== "skipped_unavailable"
     && skill.status !== "process_caveat"
   );

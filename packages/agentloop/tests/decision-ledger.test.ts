@@ -9,6 +9,7 @@ import {
 } from "../src/runtime/decision-ledger.ts";
 import { ModelStepAssessor } from "../src/planning/assessor.ts";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
+import { completionCaveatReasonCode } from "../src/runtime/run-service.ts";
 import { isCaveatedStepResult } from "../src/runtime/step-result-committer.ts";
 import type { StepAssessmentInput } from "../src/planning/contracts.ts";
 
@@ -110,6 +111,28 @@ test("a decision conflict remains terminally caveatable when Skill observation i
     skills: [{ skillId: "optional-skill", skillName: "optional-skill", followed: false, status: "not_assessed", rationale: "No Skill-specific observation." }],
     evidenceDigest: "digest", feedback: "The result carries a decision conflict warning.", createdAt: 1,
   }, {}), true);
+});
+
+test("a non-blocking Runtime evidence caveat remains terminally caveatable when Skill QA is not assessed", () => {
+  const assessment = {
+    id: "assessment-1", planId: "plan-1", stepId: "step-1", attempt: 1, approved: true,
+    criteria: [{
+      criterionId: "source_summary", satisfied: false, status: "conflict" as const, blocking: false,
+      rationale: "The receipt was not preserved.", evidenceRefs: [],
+    }],
+    skills: [{
+      skillId: "source-skill", skillName: "source-skill", followed: false, status: "not_assessed" as const,
+      rationale: "Runtime does not reperform domain QA.", evidenceRefs: [],
+    }],
+    evidenceDigest: "digest", feedback: "Deliver the non-blocking caveat.", createdAt: 1,
+  };
+  const plan = {
+    runId: "run-1",
+    steps: [{ id: "step-1", kind: "leaf", status: "completed", dependencies: [], evidence: {} }],
+  } as any;
+
+  assert.equal(isCaveatedStepResult(assessment, {}), true);
+  assert.equal(completionCaveatReasonCode(plan, [assessment]), "completed_with_unverified_quality");
 });
 
 test("a non-blocking model-judged criterion is retained as unverified without rejecting delivery", async () => {
