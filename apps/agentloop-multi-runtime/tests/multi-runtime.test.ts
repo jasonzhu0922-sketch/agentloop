@@ -57,6 +57,7 @@ import { isNearBottom, nextScrollTop } from "../web/client/ui/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/client/projections/conversation-history.js";
 import { executionLocationLabel, executionProvenanceParts } from "../web/client/projections/execution-provenance.js";
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "../web/client/presentation/assistant-message-presentation.js";
+import { humanLoopResponseText } from "../web/client/presentation/human-loop-response.js";
 import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "../web/client/presentation/artifact-display.js";
 import { commandToolCallIds, executionActivities } from "../web/client/projections/execution-detail-projection.js";
 import { hasSelectedTextWithin } from "../web/client/ui/message-selection.js";
@@ -1262,6 +1263,30 @@ test("Web keeps an open Human-in-the-Loop request reachable outside the bounded 
   assert.match(overrides, /\.human-loop-panel\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*width:\s*min\(780px, calc\(100% - 48px\)\);[^}]*height:\s*min\(760px, calc\(100% - 48px\)\);[^}]*overflow:\s*hidden/s);
   assert.match(overrides, /\.human-loop-panel-body\s*\{[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain/s);
   assert.doesNotMatch(overrides, /\.human-loop-card\s*\{[^}]*max-height:/s);
+});
+
+test("Web renders resolved Human-in-the-Loop values with the labels the user selected", async () => {
+  const selection = {
+    responseSchema: {
+      type: "select",
+      options: [{ id: "schema-fallback", label: "同意按 Schema 降级建模" }],
+    },
+  };
+  const confirmation = {
+    responseSchema: {
+      type: "confirm",
+      acceptLabel: "同意降级完成",
+      rejectLabel: "不同意降级",
+    },
+  };
+  assert.equal(humanLoopResponseText(selection, ["schema-fallback"]), "同意按 Schema 降级建模");
+  assert.equal(humanLoopResponseText(confirmation, true), "同意降级完成");
+  assert.equal(humanLoopResponseText(confirmation, { accepted: false }), "不同意降级");
+
+  const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  assert.match(app, /const responseLabel = entry\.request\?\.responseSchema\?\.type === "form" \? "已填写" : "已选择";/);
+  assert.match(app, /<summary><span>\$\{responseLabel\}<\/span><strong>\$\{escapeHtml\(responseText\)\}<\/strong><\/summary>/);
+  assert.doesNotMatch(app, /<summary>已回答：\$\{escapeHtml\(entry\.request\?\.title/);
 });
 
 test("Web renders a cancelled Run as a stable terminal state instead of live progress", () => {

@@ -5,6 +5,7 @@ import { executionProvenanceParts } from "./projections/execution-provenance.js"
 import { artifactPreviewMode, openArtifactPreview, renderBlobPreview, renderMarkdown, renderStructuredPreview, updateArtifactPreviewMarkup } from "/artifact-preview.js";
 import { isExecutionLogArtifact, isFinalDeliveryArtifact } from "./presentation/artifact-display.js";
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "./presentation/assistant-message-presentation.js";
+import { humanLoopResponseText } from "./presentation/human-loop-response.js";
 import { submissionFailureMessage } from "./presentation/submission-failure-message.js";
 import { cancellationTarget } from "./state/cancellation-target.js";
 import { createConversationState } from "./state/conversation-state.js";
@@ -2191,14 +2192,11 @@ function renderHumanLoop(message) {
 function renderResolvedHumanLoops(message) {
   const history = Array.isArray(message.humanLoopHistory) ? message.humanLoopHistory : [];
   if (!history.length) return "";
-  return `<section class="human-loop-history" aria-label="已回答的人工决策">${history.map((entry) => `<details><summary>已回答：${escapeHtml(entry.request?.title || "人工决策")}</summary><p>${escapeHtml(entry.request?.prompt || "")}</p><div><b>你的回答</b><span>${escapeHtml(humanLoopResponseText(entry.value))}</span></div></details>`).join("")}</section>`;
-}
-
-function humanLoopResponseText(value) {
-  if (value === true) return "已确认";
-  if (Array.isArray(value)) return value.length ? value.join("、") : "未选择";
-  if (value && typeof value === "object") return Object.entries(value).map(([key, entry]) => `${key}: ${String(entry)}`).join("；");
-  return String(value ?? "");
+  return `<section class="human-loop-history" aria-label="已回答的人工决策">${history.map((entry) => {
+    const responseText = humanLoopResponseText(entry.request, entry.value);
+    const responseLabel = entry.request?.responseSchema?.type === "form" ? "已填写" : "已选择";
+    return `<details><summary><span>${responseLabel}</span><strong>${escapeHtml(responseText)}</strong></summary><p>${escapeHtml(entry.request?.title || "人工决策")}</p><div><b>决策问题</b><span>${escapeHtml(entry.request?.prompt || "")}</span></div></details>`;
+  }).join("")}</section>`;
 }
 
 function renderHumanLoopCard(message) {

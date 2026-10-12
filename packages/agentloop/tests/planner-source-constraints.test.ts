@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_MAX_PLANNING_TURNS, MAX_SUPPORTED_PLANNING_TURNS, ModelPlanner } from "../src/planning/planner.ts";
+import { admitPlan } from "../src/planning/admission.ts";
 import type { TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
@@ -144,6 +145,57 @@ function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls:
     calls: () => count,
   };
 }
+
+test("deterministic response plan owns every canonical conversation delivery target", async () => {
+  const runId = "run-deterministic-response-target";
+  const targetId = "vertical-privilege-escalation-explanation";
+  const canonicalState = createCanonicalRunState({
+    runId,
+    userInput: "IT 软件安全里面有一个名词叫垂直越权，这个是什么风险？",
+    understanding: understandTask({
+      objective: "Explain vertical privilege escalation as a software security risk.",
+      resolvedTaskIntent: {
+        schema: "agentloop.conversationTaskIntent/v1",
+        operation: "answer",
+        requiresExecution: false,
+        deliverables: [{
+          targetId,
+          purpose: "Explain vertical privilege escalation as a software security risk.",
+          expectedArtifactCount: 1,
+          action: "none",
+          kind: "none",
+          surface: "conversation",
+        }],
+      },
+    }),
+    now: 1,
+  });
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    complete: async () => { throw new Error("response-only planning must remain deterministic"); },
+  };
+  const task: TaskSpec = {
+    runId,
+    canonicalState,
+    responseOnly: true,
+    availableSkills: [],
+    availableToolNames: [],
+    availableTools: [],
+  };
+
+  const proposal = await new ModelPlanner(model).plan(task);
+  assert.deepEqual(proposal.steps[0]?.targetIds, [targetId]);
+
+  const admitted = admitPlan({
+    runId,
+    proposal,
+    availableSkills: [],
+    availableToolNames: new Set(),
+    availableTools: [],
+    canonicalState,
+  });
+  assert.deepEqual(admitted.steps[0]?.executionBinding.targetIds, [targetId]);
+});
 
 test("ModelPlanner honors the configured contract-repair turn limit while preserving the default", async () => {
   const defaultBudget = retryingPlannerModel();

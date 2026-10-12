@@ -787,6 +787,8 @@
 .human-loop-history { display: grid; gap: 7px; }
 .human-loop-history details { border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text-2); }
 .human-loop-history summary { padding: 9px 11px; cursor: pointer; color: var(--text-2); font-size: 12px; font-weight: 650; }
+.human-loop-history summary span { margin-right: 7px; color: var(--text-3); font-weight: 550; }
+.human-loop-history summary strong { overflow-wrap: anywhere; color: var(--text); font-weight: 700; }
 .human-loop-history p,.human-loop-history details > div { margin: 0; padding: 0 11px 10px; font-size: 12px; }
 .human-loop-history details > div { display: grid; gap: 3px; }
 .human-loop-history details > div b { color: var(--text-3); font-size: 11px; }

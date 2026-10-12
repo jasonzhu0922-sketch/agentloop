@@ -279,7 +279,7 @@ export class ModelPlanner implements Planner {
           deterministic: true,
         },
       });
-      return responseOnlyPlan(planningIntentObjective(task));
+      return responseOnlyPlan(task);
     }
     const messages: ModelInvocation["messages"] = [
       ...(task.conversationHistory ?? []),
@@ -500,7 +500,9 @@ function withoutReasoningContent(response: import("../runtime/contracts.ts").Mod
   return withoutReasoning;
 }
 
-function responseOnlyPlan(input: string): PlanProposal {
+function responseOnlyPlan(task: TaskSpec): PlanProposal {
+  const input = planningIntentObjective(task);
+  const targetIds = (canonicalTaskUnderstanding(task).deliverables ?? []).map((target) => target.targetId);
   return {
     goal: input.trim().slice(0, 20_000) || "Answer the latest user message",
     schema: "agentloop.outcomePlan/v2",
@@ -514,6 +516,7 @@ function responseOnlyPlan(input: string): PlanProposal {
       role: "deliver",
       skillIds: [],
       requiredCapabilities: ["conversation_delivery"],
+      targetIds,
       successCriteria: [{ id: "answered", description: "A non-empty direct answer is returned.", source: "planner" }],
     }],
   };
