@@ -3,7 +3,8 @@ import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import { taskEvidencePolicyForTaskUnderstanding, type StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
-import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, SuccessCriterion } from "./contracts.ts";
+import { canonicalRunStateRef, type CanonicalRunState } from "../runtime/canonical-run-state.ts";
+import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, StepExecutionBinding, SuccessCriterion } from "./contracts.ts";
 import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import {
   createStepExecutionBinding,
@@ -37,7 +38,6 @@ const TOOL_PRODUCED_EVIDENCE_KINDS = new Set([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -51,7 +51,6 @@ const REUSABLE_SOURCE_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "explicit_caveats",
 ]);
 const SOURCE_GROUNDING_EVIDENCE_KINDS = new Set<EvidenceKind>([
@@ -69,7 +68,6 @@ const SOURCE_PROVIDER_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "explicit_caveats",
 ]);
 
@@ -80,23 +78,20 @@ export function admitPlan(input: {
   availableToolNames: ReadonlySet<string>;
   availableTools?: readonly PlanningToolSummary[];
   availableCapabilities?: readonly PlanningCapability[];
-  requiredToolSourceIds?: readonly string[];
   availableUploadedSourceIds?: readonly string[];
   availableVisibleDirectoryIds?: readonly string[];
   /** Accepted evidence canonically bound to the resolved prior Run. */
   reusableEvidenceKinds?: readonly EvidenceKind[];
   /** Server-validated Runtime Result inputs for this new Plan. */
   resultBindings?: readonly RuntimeResultBinding[];
-  taskIntent?: {
-    readonly deliverySurface?: "conversation" | "workspace_artifact";
-    readonly artifactKind?: string;
-    readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
-    readonly evidenceDemand?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
-  };
-  /** Canonical structured task interpretation produced before Planner admission. */
-  taskSemantics?: StructuredTaskUnderstanding;
+  /** The Run-owned state is the only task-semantics authority at Admission. */
+  canonicalState: CanonicalRunState;
   now?: number;
 }): ExecutionPlan {
+  if (input.canonicalState.runId !== input.runId) reject("Canonical Run State belongs to another Run");
+  const taskSemantics = input.canonicalState.intent.understanding;
+  const taskIntent = taskSemantics.intent;
+  const canonicalRequiredToolSourceIds = input.canonicalState.intent.requiredToolSourceIds;
   const proposal = bindRequiredSkillCompanions(input.proposal, input.availableSkills);
   assertRuntimeResultBindings(input.resultBindings ?? []);
   if (proposal.steps.length === 0 || proposal.steps.length > 100) {
@@ -147,6 +142,17 @@ export function admitPlan(input: {
     const constrainedVisibleDirectoryIds = step.sourceConstraint?.requiredVisibleDirectoryIds ?? [];
     assertUnique(constrainedUploadedSourceIds, `required uploaded sources for step ${step.id}`);
     assertUnique(constrainedVisibleDirectoryIds, `required visible directories for step ${step.id}`);
+    assertSourceConstraintNamespaces({
+      stepId: step.id,
+      requiredToolSourceIds: canonicalRequiredToolSourceIds,
+      requiredUploadedSourceIds: constrainedUploadedSourceIds,
+      requiredVisibleDirectoryIds: constrainedVisibleDirectoryIds,
+      availableToolSourceIds: new Set((input.availableTools ?? []).flatMap((tool) => tool.source === undefined ? [] : [tool.source.id])),
+      availableUploadedSourceIds: new Set(input.availableUploadedSourceIds ?? []),
+      availableVisibleDirectoryIds: new Set(input.availableVisibleDirectoryIds ?? []),
+      availableSkillIds: new Set(input.availableSkills.map((skill) => skill.id)),
+      availableSkillNames: new Set(input.availableSkills.map((skill) => skill.name)),
+    });
     const unknownUploadedSources = unknownUploadedSourceIds(constrainedUploadedSourceIds, input.availableUploadedSourceIds ?? []);
     if (unknownUploadedSources.length > 0) {
       reject(`Step ${step.id} requires unavailable uploaded source(s): ${unknownUploadedSources.join(", ")}`);
@@ -185,12 +191,12 @@ export function admitPlan(input: {
         `Step ${step.id} is only a Skill activation step; bind the Skill to a concrete user-deliverable step instead`,
       );
     }
-    const fileProducingStep = kind === "leaf" && requiresFileProduction(step, input.taskIntent);
+    const fileProducingStep = kind === "leaf" && requiresFileProduction(step, taskIntent);
     const artifactTargets = normalizeArtifactTargetsForStep({
       step,
-      fileProducingStep,
-      taskSemantics: input.taskSemantics,
+      taskSemantics,
     });
+    const targetIds = normalizeTargetIdsForStep(step, taskSemantics);
     if (!canProduceFiles && fileProducingStep) {
       reject(
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
@@ -201,7 +207,7 @@ export function admitPlan(input: {
       contract: evidenceContract,
       terminalLeaf: kind === "leaf" && !dependedOnStepIds.has(step.id),
       fileProducingStep,
-      taskIntent: input.taskIntent,
+      taskIntent,
       artifactAcceptanceAvailable,
     });
     const requiredCapabilities = new Set(step.requiredCapabilities);
@@ -221,17 +227,18 @@ export function admitPlan(input: {
     const completionEvidenceContract = normalizeCompletionEvidenceContract(
       step.role,
       evidenceContract,
-      input.taskIntent,
+      taskIntent,
       fileProducingStep && artifactAcceptanceAvailable,
     );
     const completionCriteria = ensureArtifactDeliverySuccessCriteria(
-      normalizeCompletionSuccessCriteria(step.role, step.successCriteria, input.taskIntent),
+      normalizeCompletionSuccessCriteria(step.role, step.successCriteria, taskIntent),
       completionEvidenceContract,
     );
-    normalizeCompletionCapabilities(step.role, requiredCapabilities, input.taskIntent);
-    const criteria: SuccessCriterion[] = completionCriteria.map((criterion) => ({
+    const targetCriteria = deliveryTargetSuccessCriteria(targetIds, taskSemantics);
+    normalizeCompletionCapabilities(step.role, requiredCapabilities, taskIntent);
+    const criteria: SuccessCriterion[] = [...completionCriteria, ...targetCriteria].map((criterion) => ({
       ...criterion,
-      blocking: criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, input.taskIntent),
+      blocking: criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, taskIntent),
     }));
     for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
@@ -245,7 +252,7 @@ export function admitPlan(input: {
     const sourceConstraint = deriveRuntimeSourceConstraint({
       proposalConstraint: step.sourceConstraint,
       requiredCapabilities: [...requiredCapabilities],
-      requiredToolSourceIds: input.requiredToolSourceIds ?? [],
+      requiredToolSourceIds: canonicalRequiredToolSourceIds,
       availableCapabilities,
     });
     const constrainedToolSourceIds = sourceConstraint?.requiredToolSourceIds ?? [];
@@ -265,9 +272,11 @@ export function admitPlan(input: {
       reject(`Step ${step.id} requires unavailable ToolSource(s): ${unknownToolSources.join(", ")}`);
     }
     const executionBinding = createStepExecutionBinding({
-      step: { ...step, artifactTargets, sourceConstraint, requiredCapabilities: [...requiredCapabilities] },
+      step: { ...step, targetIds, sourceConstraint, requiredCapabilities: [...requiredCapabilities] },
+      artifactTargets,
       availableToolNames: input.availableToolNames,
       ...(input.availableTools === undefined ? {} : { availableTools: input.availableTools }),
+      availableCapabilities,
       evidenceContract: completionEvidenceContract,
     });
     const unknownCapabilities = unknownPlanningCapabilities(
@@ -298,14 +307,13 @@ export function admitPlan(input: {
     const {
       evidenceContract: _proposalEvidenceContract,
       sourceConstraint: _proposalSourceConstraint,
-      artifactTargets: _proposalArtifactTargets,
-      artifactTargetIds: _proposalArtifactTargetIds,
+      targetIds: _proposalTargetIds,
       ...stepWithoutEvidenceContract
     } = step;
     return {
       ...stepWithoutEvidenceContract,
       ...(sourceConstraint === undefined ? {} : { sourceConstraint }),
-      ...(artifactTargets.length === 0 ? {} : { artifactTargets }),
+      targetIds,
       kind,
       position,
       skillIds: stepSkillIds,
@@ -319,13 +327,14 @@ export function admitPlan(input: {
     };
   });
 
-  const admittedSteps = normalizeConversationTerminalEvidenceReuse(steps, input.taskIntent);
-  assertArtifactTargetCoverage(admittedSteps, input.taskSemantics);
-  assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, input.taskSemantics);
-  assertTerminalArtifactDelivery(admittedSteps, input.taskIntent);
+  const admittedSteps = normalizeConversationTerminalEvidenceReuse(steps, taskIntent);
+  assertDeliveryTargetCoverage(admittedSteps, taskSemantics);
+  assertArtifactTargetCoverage(admittedSteps, taskSemantics);
+  assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
+  assertTerminalArtifactDelivery(admittedSteps, taskIntent);
   assertRequiredSourceGrounding(
     admittedSteps,
-    input.taskIntent,
+    { evidenceDemand: taskIntent.sourceNeed },
     availableCapabilities,
     input.reusableEvidenceKinds ?? [],
   );
@@ -336,6 +345,7 @@ export function admitPlan(input: {
       evidenceContract: step.evidenceContract,
       successCriteria: step.successCriteria,
       requiredCapabilities: step.executionBinding.requiredCapabilities,
+      evidenceProducers: step.executionBinding.evidenceProducers,
       availableCapabilities,
     });
   }
@@ -350,7 +360,7 @@ export function admitPlan(input: {
   if (admittedSteps.every((step) => step.kind !== "leaf")) {
     reject("Plan must contain at least one executable leaf step");
   }
-  const requiredToolSourceIds = new Set(input.requiredToolSourceIds ?? []);
+  const requiredToolSourceIds = new Set(canonicalRequiredToolSourceIds);
   if (requiredToolSourceIds.size > 0) {
     const boundToolSourceIds = new Set(admittedSteps.flatMap((step) => step.executionBinding.requiredToolSourceIds ?? []));
     const missingToolSourceIds = [...requiredToolSourceIds].filter((sourceId) => !boundToolSourceIds.has(sourceId));
@@ -367,7 +377,7 @@ export function admitPlan(input: {
     version: 1,
     goal: proposal.goal,
     selectedSkillIds,
-    ...(input.taskSemantics === undefined ? {} : { taskSemantics: input.taskSemantics }),
+    canonicalStateRef: canonicalRunStateRef(input.canonicalState),
     ...(input.resultBindings === undefined || input.resultBindings.length === 0 ? {} : { resultBindings: input.resultBindings }),
     status: "admitted",
     steps: admittedSteps,
@@ -658,6 +668,7 @@ function normalizeConversationTerminalEvidenceReuse(
       executionBinding: {
         ...step.executionBinding,
         evidenceKinds: requiredKinds,
+        evidenceProducers: step.executionBinding.evidenceProducers.filter((producer) => requiredKinds.includes(producer.evidenceKind)),
       },
     };
   });
@@ -727,6 +738,7 @@ function assertEvidenceContractIsProducible(input: {
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
   readonly requiredCapabilities: readonly string[];
+  readonly evidenceProducers: StepExecutionBinding["evidenceProducers"];
   readonly availableCapabilities: readonly PlanningCapability[];
 }): void {
   if (input.evidenceContract === undefined) return;
@@ -735,6 +747,9 @@ function assertEvidenceContractIsProducible(input: {
     .map((id) => capabilityById.get(id))
     .filter((capability): capability is PlanningCapability => capability !== undefined);
   const produced = new Set(boundCapabilities.flatMap((capability) => capability.produces));
+  const boundProducerKinds = new Set(input.evidenceProducers
+    .filter((producer) => producer.resolvedToolNames.length > 0)
+    .map((producer) => producer.evidenceKind));
   const sourceProviderCapabilities = boundCapabilities.filter((capability) => capability.category === "skill_source_provider");
   const blockingKinds = new Set(input.successCriteria
     .filter((criterion) => criterion.blocking !== false)
@@ -742,7 +757,7 @@ function assertEvidenceContractIsProducible(input: {
   const unavailable = new Set(input.evidenceContract.requiredKinds.filter((kind) =>
     TOOL_PRODUCED_EVIDENCE_KINDS.has(kind)
     && blockingKinds.has(kind)
-    && !produced.has(kind),
+    && (!produced.has(kind) || !boundProducerKinds.has(kind)),
   ));
   // A fact-acquisition leaf may combine providers only for evidence that each
   // bound provider can actually publish.  Treating their capabilities as a
@@ -915,9 +930,6 @@ function criterionBlocksCompletion(
   } | undefined,
 ): boolean {
   if (criterionId === "explicit_caveats") return false;
-  if (criterionId === "derived_aggregation") {
-    return /(?:group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|合计|占比)/iu.test(step.objective);
-  }
   if (criterionId === "artifact_acceptance" || criterionId === "artifact_openable") return false;
   if (criterionId === "source_summary" || criterionId === "source_urls") {
     return step.role === "fact_acquisition" || taskIntent?.sourceNeed === "strict_user_source";
@@ -1031,64 +1043,73 @@ function requiresFileProduction(
 
 function normalizeArtifactTargetsForStep(input: {
   readonly step: PlanProposal["steps"][number];
-  readonly fileProducingStep: boolean;
   readonly taskSemantics?: StructuredTaskUnderstanding;
 }): readonly ArtifactTarget[] {
   const requested = input.taskSemantics?.artifactTargets ?? [];
-  const requestedById = new Map(requested.map((target) => [target.id, target]));
-  const requestedHasExplicitIdentity = requested.length > 0
-    && input.taskSemantics?.deliverables?.filter((item) => item.surface === "workspace_artifact" && item.kind !== "none")
-      .every((item) => item.targetId !== undefined && item.purpose !== undefined) === true;
-  const boundIds = input.step.artifactTargetIds ?? [];
-  if (requestedHasExplicitIdentity) {
-    if (input.step.artifactTargets !== undefined && input.step.artifactTargets.length > 0) {
-      reject(`Step ${input.step.id} must bind Runtime-owned artifactTargetIds, not redefine artifactTargets`);
-    }
-    const unknown = boundIds.filter((id) => !requestedById.has(id));
-    if (unknown.length > 0) reject(`Step ${input.step.id} binds unknown artifact target(s): ${unknown.join(", ")}`);
-    if (new Set(boundIds).size !== boundIds.length) reject(`Step ${input.step.id} repeats artifact target binding`);
-    return boundIds.map((id) => {
-      const target = requestedById.get(id)!;
-      return {
-        id: target.id,
-        purpose: target.purpose,
-        kind: target.kind,
-        ...(target.format === undefined ? {} : { format: target.format }),
-        terminalRequired: true,
-      };
-    });
-  }
-  const supplied = input.step.artifactTargets ?? [];
-  const ids = new Set<string>();
-  for (const target of supplied) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(target.id)) {
-      reject(`Step ${input.step.id} has an invalid artifact target ID: ${target.id}`);
-    }
-    if (ids.has(target.id)) reject(`Step ${input.step.id} repeats artifact target ${target.id}`);
-    ids.add(target.id);
-    if (target.kind.trim().length === 0) reject(`Step ${input.step.id} has an artifact target without a kind`);
-    if (target.format !== undefined && target.format.trim().length === 0) {
-      reject(`Step ${input.step.id} has an artifact target with an empty format`);
-    }
-  }
-  if (supplied.length > 0) return supplied;
+  const ownedDeliveryTargetIds = new Set(input.step.targetIds ?? []);
+  return requested.filter((target) => ownedDeliveryTargetIds.has(target.deliveryTargetId)).map((target) => {
+    return {
+      id: target.id,
+      purpose: target.purpose,
+      kind: target.kind,
+      ...(target.format === undefined ? {} : { format: target.format }),
+      terminalRequired: true,
+    };
+  });
+}
 
-  const deliverables = input.taskSemantics?.deliverables?.filter((item) =>
-    item.surface === "workspace_artifact" && item.kind !== "none"
-  ) ?? [];
-  if (input.fileProducingStep && input.step.role !== "fact_acquisition" && deliverables.length > 1) {
-    reject(`Step ${input.step.id} produces or adopts artifacts for a multi-deliverable task but declares no artifactTargets`);
+function normalizeTargetIdsForStep(
+  step: PlanProposal["steps"][number],
+  taskSemantics?: StructuredTaskUnderstanding,
+): readonly string[] {
+  const requested = taskSemantics?.deliverables ?? [];
+  const requestedIds = new Set(requested.map((target) => target.targetId));
+  const targetIds = [...new Set(step.targetIds ?? [])];
+  const unknown = targetIds.filter((targetId) => !requestedIds.has(targetId));
+  if (unknown.length > 0) reject(`Step ${step.id} binds unknown delivery target(s): ${unknown.join(", ")}`);
+  return targetIds;
+}
+
+function deliveryTargetSuccessCriteria(
+  targetIds: readonly string[],
+  taskSemantics?: StructuredTaskUnderstanding,
+): readonly SuccessCriterion[] {
+  const byId = new Map((taskSemantics?.deliverables ?? []).map((target) => [target.targetId, target]));
+  return targetIds.map((targetId) => {
+    const target = byId.get(targetId);
+    if (target === undefined) reject(`Unknown delivery target ${targetId}`);
+    return {
+      id: `delivery_target:${targetId}`,
+      targetId,
+      description: `The delivered result fulfills canonical target ${targetId}: ${target.purpose}`,
+      source: "task" as const,
+      verification: "model_judged" as const,
+      blocking: true,
+    };
+  });
+}
+
+function assertDeliveryTargetCoverage(
+  steps: readonly PlanStep[],
+  taskSemantics?: StructuredTaskUnderstanding,
+): void {
+  const requested = taskSemantics?.deliverables ?? [];
+  if (requested.length === 0) return;
+  const owners = new Map<string, string[]>();
+  for (const step of steps) {
+    for (const targetId of step.executionBinding.targetIds) {
+      owners.set(targetId, [...(owners.get(targetId) ?? []), step.id]);
+    }
   }
-  // Preserve one-target plans while preventing their legacy projection from
-  // silently representing a composite delivery set.
-  if (!input.fileProducingStep || deliverables.length !== 1) return [];
-  const target = deliverables[0]!;
-  return [{
-    id: `${input.step.id}.primary`,
-    kind: target.kind,
-    ...(target.format === undefined ? {} : { format: target.format }),
-    terminalRequired: true,
-  }];
+  const missing = requested.filter((target) => (owners.get(target.targetId)?.length ?? 0) === 0);
+  const duplicate = [...owners].filter(([, stepIds]) => stepIds.length > 1);
+  if (missing.length > 0 || duplicate.length > 0) {
+    const details = [
+      ...(missing.length === 0 ? [] : [`missing ${missing.map((target) => target.targetId).join(", ")}`]),
+      ...(duplicate.length === 0 ? [] : [`multiply owned ${duplicate.map(([targetId]) => targetId).join(", ")}`]),
+    ];
+    reject(`Plan targetIds must cover canonical delivery targets exactly once: ${details.join("; ")}`);
+  }
 }
 
 function assertArtifactTargetCoverage(
@@ -1116,7 +1137,7 @@ function assertArtifactTargetCoverage(
         ...(missing.length === 0 ? [] : [`missing ${missing.map((target) => target.id).join(", ")}`]),
         ...(unexpected.length === 0 ? [] : [`unexpected ${unexpected.map((target) => target.id).join(", ")}`]),
       ];
-      reject(`Plan artifactTargetIds must cover the requested targets exactly: ${details.join("; ")}`);
+      reject(`Plan targetIds must cover the requested targets exactly: ${details.join("; ")}`);
     }
     return;
   }

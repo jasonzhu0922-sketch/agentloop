@@ -4,12 +4,15 @@ import { DEFAULT_MAX_PLANNING_TURNS, MAX_SUPPORTED_PLANNING_TURNS, ModelPlanner 
 import type { TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 
 class RedundantSourceConstraintPlannerModel implements ModelAdapter {
   readonly limits = { contextWindowTokens: 40_000, maxOutputTokens: 2_048 } as const;
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     assert.equal(request.phase, "planning");
+    assert.match(JSON.stringify(request.tools[0]?.inputSchema), /"sourceConstraint":\{"type":"null"\}/);
+    assert.match(request.runtimeContext?.content ?? "", /"requiredToolSourceIds":\["ontoflow-jtbc"\]/);
     return {
       content: "",
       finishReason: "tool_calls",
@@ -29,9 +32,7 @@ class RedundantSourceConstraintPlannerModel implements ModelAdapter {
               role: "fact_acquisition",
               skillIds: [],
               requiredCapabilities: ["data_asset.ods_read"],
-              sourceConstraint: {
-                bindings: [{ kind: "tool_source", ids: ["ontoflow-jtbc"] }],
-              },
+              sourceConstraint: null,
               evidenceContract: {
                 requiredKinds: ["source_summary", "schema_summary", "record_counts"],
                 caveatPolicy: "strict_fail_on_missing_source",
@@ -44,11 +45,7 @@ class RedundantSourceConstraintPlannerModel implements ModelAdapter {
               role: "produce",
               skillIds: [],
               requiredCapabilities: ["workspace_artifact_write"],
-              // This is the model error from Run 2082138e: a dependent leaf
-              // mechanically repeats provenance that it neither reads nor attests.
-              sourceConstraint: {
-                bindings: [{ kind: "tool_source", ids: ["ontoflow-jtbc"] }],
-              },
+              sourceConstraint: null,
               evidenceContract: {
                 requiredKinds: ["artifact_path", "artifact_non_empty", "explicit_caveats"],
                 caveatPolicy: "mark_unverified_facts",
@@ -63,19 +60,19 @@ class RedundantSourceConstraintPlannerModel implements ModelAdapter {
 
 function planningRetryTask(): TaskSpec {
   const tools = [{ name: "computer_write_file", description: "Write a workspace artifact." }];
+  const runId = "run-planning-turn-limit";
   return {
-    runId: "run-planning-turn-limit",
-    input: "Create a Markdown report from the approved inputs.",
-    taskUnderstanding: understandTask({
+    runId,
+    canonicalState: createCanonicalRunState({ runId, userInput: "Create a Markdown report from the approved inputs.", understanding: understandTask({
       objective: "Create a Markdown report from the approved inputs.",
       toolNames: tools.map((tool) => tool.name),
       resolvedTaskIntent: {
         schema: "agentloop.conversationTaskIntent/v1",
         operation: "create_artifact",
         requiresExecution: true,
-        deliverables: [{ action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
+        deliverables: [{ targetId: "markdown-report", purpose: "Deliver the requested Markdown report.", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
       },
-    }),
+    }), now: 1 }),
     availableSkills: [],
     availableToolNames: tools.map((tool) => tool.name),
     availableTools: tools,
@@ -103,6 +100,7 @@ function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls:
           role: "produce",
           skillIds: [],
           requiredCapabilities: ["workspace_artifact_write"],
+          targetIds: ["markdown-report"],
           evidenceContract: {
             requiredKinds: ["artifact_path", "artifact_non_empty"],
             caveatPolicy: "mark_unverified_facts",
@@ -173,7 +171,7 @@ test("ModelPlanner rejects an unsafe configured planning turn limit", () => {
   assert.throws(() => new ModelPlanner(model, { maxPlanningTurns: MAX_SUPPORTED_PLANNING_TURNS + 1 }), /maxPlanningTurns must be a positive safe integer/);
 });
 
-test("Planner drops model-authored ToolSource bindings and leaves source resolution to Admission", async () => {
+test("Planner schema exposes no sourceConstraint namespace when canonical inputs contain only a ToolSource", async () => {
   const tools = [
     {
       name: "mcp_ontoflow_jtbc_call_rdb_sql_api_query",
@@ -193,10 +191,15 @@ test("Planner drops model-authored ToolSource bindings and leaves source resolut
   ];
   const task: TaskSpec = {
     runId: "run-source-constraint-regression",
-    input: "Read approved ODS metadata and deliver a DDM-ready summary.",
-    taskUnderstanding: understandTask({
-      objective: "Read approved ODS metadata and deliver a DDM-ready summary.",
-      toolNames: tools.map((tool) => tool.name),
+    canonicalState: createCanonicalRunState({
+      runId: "run-source-constraint-regression",
+      userInput: "Read approved ODS metadata and deliver a DDM-ready summary.",
+      understanding: understandTask({
+        objective: "Read approved ODS metadata and deliver a DDM-ready summary.",
+        toolNames: tools.map((tool) => tool.name),
+      }),
+      requiredToolSourceIds: ["ontoflow-jtbc"],
+      now: 1,
     }),
     availableSkills: [],
     availableToolNames: tools.map((tool) => tool.name),
@@ -209,6 +212,88 @@ test("Planner drops model-authored ToolSource bindings and leaves source resolut
 
   assert.equal(acquisition?.sourceConstraint, undefined);
   assert.equal(delivery?.sourceConstraint, undefined);
+});
+
+test("externally grounded data analysis cannot collapse acquisition and delivery into one leaf", async () => {
+  const objective = "使用已接入的数据资产 MCP 查询 ODS 表结构并分析数据分布。";
+  const deliverables = [
+    { targetId: "table-schema", purpose: "ODS 表字段与类型说明", expectedArtifactCount: 1, action: "create" as const, kind: "document" as const, surface: "conversation" as const },
+    { targetId: "data-distribution", purpose: "ODS 表数据分布分析", expectedArtifactCount: 1, action: "create" as const, kind: "document" as const, surface: "conversation" as const },
+  ];
+  const tools = [{
+    name: "mcp_database_query",
+    description: "Query approved database metadata and data evidence.",
+    source: {
+      id: "database-connector",
+      transport: "mcp" as const,
+      capabilities: [{
+        id: "data_asset.read",
+        category: "data_asset",
+        producesEvidenceKinds: ["source_summary", "schema_summary", "record_counts"],
+        sourceKinds: ["database"],
+      }],
+    },
+  }];
+  const understanding = understandTask({
+    objective,
+    toolNames: tools.map((tool) => tool.name),
+    evidenceDemand: "lookup_lite",
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "composite",
+      requiresExecution: true,
+      deliverables,
+    },
+  });
+  const runId = "run-external-data-analysis-topology";
+  const task: TaskSpec = {
+    runId,
+    canonicalState: createCanonicalRunState({ runId, userInput: objective, understanding, now: 1 }),
+    availableSkills: [],
+    availableToolNames: tools.map((tool) => tool.name),
+    availableTools: tools,
+  };
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    complete: async (request) => {
+      const submitTool = request.tools.find((tool) => tool.name === "submit_outcome_plan");
+      const leaves = submitTool?.inputSchema.properties?.leaves as Record<string, unknown> | undefined;
+      const leafItems = leaves?.items as Record<string, unknown> | undefined;
+      const leafProperties = leafItems?.properties as Record<string, unknown> | undefined;
+      const targetIdsSchema = leafProperties?.targetIds as Record<string, unknown> | undefined;
+      assert.equal(targetIdsSchema?.minItems, 0);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "collapsed-analysis-plan",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: objective,
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "acquire-and-analyze",
+              objective,
+              dependsOn: [],
+              role: "fact_acquisition",
+              skillIds: [],
+              requiredCapabilities: ["data_asset.read"],
+              sourceConstraint: null,
+              evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+              targetIds: deliverables.map((target) => target.targetId),
+            }],
+          },
+        }],
+      };
+    },
+  };
+
+  await assert.rejects(
+    new ModelPlanner(model, { maxPlanningTurns: 1 }).plan(task),
+    /violates required plan topology.*fact_then_produce.*deliver/,
+  );
 });
 
 test("Planner repair uses a bound prior Result instead of recreating its fact-acquisition leaf", async () => {
@@ -232,7 +317,7 @@ test("Planner repair uses a bound prior Result instead of recreating its fact-ac
           arguments: {
             schema: "agentloop.outcomePlan/v2",
             goal: "Complete the requested artifact from the bound prior Result.",
-            shape: "single_leaf",
+            shape: reacquisition ? "pipeline" : "single_leaf",
             selectedSkillRoles: [],
             leaves: reacquisition ? [{
               id: "repeated-acquisition",
@@ -245,6 +330,18 @@ test("Planner repair uses a bound prior Result instead of recreating its fact-ac
                 requiredKinds: ["source_summary"],
                 caveatPolicy: "mark_unverified_facts",
               },
+            }, {
+              id: "produce-after-reacquisition",
+              objective: "Produce the requested report from the reacquired facts.",
+              dependsOn: ["repeated-acquisition"],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              targetIds: ["markdown-report"],
+              evidenceContract: {
+                requiredKinds: ["artifact_path", "artifact_non_empty"],
+                caveatPolicy: "mark_unverified_facts",
+              },
             }] : [{
               id: "produce-from-prior-result",
               objective: "Read the bound prior Result and produce the requested report.",
@@ -252,6 +349,7 @@ test("Planner repair uses a bound prior Result instead of recreating its fact-ac
               role: "produce",
               skillIds: [],
               requiredCapabilities: ["workspace_artifact_write"],
+              targetIds: ["markdown-report"],
               evidenceContract: {
                 requiredKinds: ["artifact_path", "artifact_non_empty"],
                 caveatPolicy: "mark_unverified_facts",
@@ -265,40 +363,44 @@ test("Planner repair uses a bound prior Result instead of recreating its fact-ac
   const tools = [{ name: "computer_write_file", description: "Write a workspace artifact." }];
   const task: TaskSpec = {
     runId: "run-prior-result-materialization-regression",
-    input: "Continue the prior report.",
-    taskUnderstanding: understandTask({
+    canonicalState: createCanonicalRunState({
+      runId: "run-prior-result-materialization-regression",
+      userInput: "Continue the prior report.",
+      turnResolution: {
+        schema: "agentloop.conversationTurnResolution/v1",
+        mode: "execute",
+        relation: "continue_prior",
+        inputMode: "prior_result",
+        targetRunId: "prior-run",
+        targetResult: priorResult,
+        effectiveGoal: "Create the requested Markdown report from the prior result.",
+        taskIntent: {
+          schema: "agentloop.conversationTaskIntent/v1",
+          operation: "create_artifact",
+          requiresExecution: true,
+          deliverables: [{ targetId: "markdown-report", purpose: "Deliver the requested Markdown report.", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
+        },
+        evidenceStrategy: "none",
+        sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+        evidenceDemand: "none",
+        userConstraints: [],
+        source: "model",
+      },
+      understanding: understandTask({
       objective: "Create the requested Markdown report from the prior result.",
       toolNames: tools.map((tool) => tool.name),
       resolvedTaskIntent: {
         schema: "agentloop.conversationTaskIntent/v1",
         operation: "create_artifact",
         requiresExecution: true,
-        deliverables: [{ action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
+        deliverables: [{ targetId: "markdown-report", purpose: "Deliver the requested Markdown report.", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
       },
+      }),
+      now: 1,
     }),
     availableSkills: [],
     availableToolNames: tools.map((tool) => tool.name),
     availableTools: tools,
-    turnResolution: {
-      schema: "agentloop.conversationTurnResolution/v1",
-      mode: "execute",
-      relation: "continue_prior",
-      inputMode: "prior_result",
-      targetRunId: "prior-run",
-      targetResult: priorResult,
-      effectiveGoal: "Create the requested Markdown report from the prior result.",
-      taskIntent: {
-        schema: "agentloop.conversationTaskIntent/v1",
-        operation: "create_artifact",
-        requiresExecution: true,
-        deliverables: [{ action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
-      },
-      evidenceStrategy: "none",
-      sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-      evidenceDemand: "none",
-      userConstraints: [],
-      source: "model",
-    },
     conversationWorkingSet: {
       schema: "conversation.workset/v1",
       conversationId: "conversation-prior-result",
@@ -337,40 +439,44 @@ function boundPriorResultTask(input: {
   const tools = input.tools ?? [];
   return {
     runId: input.runId,
-    input: "Produce the requested DDM model from the previously acquired result without refreshing source data.",
-    taskUnderstanding: understandTask({
+    canonicalState: createCanonicalRunState({
+      runId: input.runId,
+      userInput: "Produce the requested DDM model from the previously acquired result without refreshing source data.",
+      turnResolution: {
+        schema: "agentloop.conversationTurnResolution/v1",
+        mode: "execute",
+        relation: "continue_prior",
+        inputMode: "prior_result",
+        targetRunId: "prior-run",
+        targetResult: priorResult,
+        effectiveGoal: "Produce the requested DDM model from the prior Runtime Result.",
+        taskIntent: {
+          schema: "agentloop.conversationTaskIntent/v1",
+          operation: "create_artifact",
+          requiresExecution: true,
+          deliverables: [{ targetId: "ddm-model", purpose: "Deliver the requested DDM model.", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
+        },
+        evidenceStrategy: "none",
+        sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+        evidenceDemand: "none",
+        userConstraints: ["Do not refresh source data."],
+        source: "model",
+      },
+      understanding: understandTask({
       objective: "Produce the requested DDM model from the prior Runtime Result.",
       toolNames: tools.map((tool) => tool.name),
       resolvedTaskIntent: {
         schema: "agentloop.conversationTaskIntent/v1",
         operation: "create_artifact",
         requiresExecution: true,
-        deliverables: [{ action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
+        deliverables: [{ targetId: "ddm-model", purpose: "Deliver the requested DDM model.", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
       },
+      }),
+      now: 1,
     }),
     availableSkills: [],
     availableToolNames: tools.map((tool) => tool.name),
     availableTools: tools,
-    turnResolution: {
-      schema: "agentloop.conversationTurnResolution/v1",
-      mode: "execute",
-      relation: "continue_prior",
-      inputMode: "prior_result",
-      targetRunId: "prior-run",
-      targetResult: priorResult,
-      effectiveGoal: "Produce the requested DDM model from the prior Runtime Result.",
-      taskIntent: {
-        schema: "agentloop.conversationTaskIntent/v1",
-        operation: "create_artifact",
-        requiresExecution: true,
-        deliverables: [{ action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" }],
-      },
-      evidenceStrategy: "none",
-      sourceBinding: { mode: "none", visibleDirectoryIds: [] },
-      evidenceDemand: "none",
-      userConstraints: ["Do not refresh source data."],
-      source: "model",
-    },
     conversationWorkingSet: {
       schema: "conversation.workset/v1",
       conversationId: "conversation-bound-result-source-constraint",
@@ -395,7 +501,7 @@ function boundPriorResultTask(input: {
   };
 }
 
-function priorResultProducerWithToolSourceModel(requiredCapabilities: readonly string[], evidenceKinds?: readonly "source_summary"[]): ModelAdapter {
+function priorResultProducerModel(requiredCapabilities: readonly string[], evidenceKinds?: readonly "source_summary"[]): ModelAdapter {
   return {
     limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
     async complete(): Promise<ModelResponse> {
@@ -403,7 +509,7 @@ function priorResultProducerWithToolSourceModel(requiredCapabilities: readonly s
         content: "",
         finishReason: "tool_calls",
         toolCalls: [{
-          id: "produce-from-prior-result-with-stale-source",
+          id: "produce-from-prior-result",
           name: "submit_outcome_plan",
           arguments: {
             schema: "agentloop.outcomePlan/v2",
@@ -417,9 +523,8 @@ function priorResultProducerWithToolSourceModel(requiredCapabilities: readonly s
               role: "produce",
               skillIds: [],
               requiredCapabilities,
-              sourceConstraint: {
-                bindings: [{ kind: "tool_source", ids: ["ontoflow-jtbc"] }],
-              },
+              targetIds: ["ddm-model"],
+              sourceConstraint: null,
               evidenceContract: {
                 requiredKinds: ["artifact_path", "artifact_non_empty", ...(evidenceKinds ?? [])],
                 caveatPolicy: "mark_unverified_facts",
@@ -432,7 +537,7 @@ function priorResultProducerWithToolSourceModel(requiredCapabilities: readonly s
   };
 }
 
-test("Planner removes an unneeded ToolSource copied onto a bound-Result producer", async () => {
+test("a bound-Result producer leaves ToolSource selection to canonical Runtime intent", async () => {
   const tools = [
     {
       name: "mcp_ontoflow_jtbc_call_rdb_sql_api_query",
@@ -446,7 +551,7 @@ test("Planner removes an unneeded ToolSource copied onto a bound-Result producer
     { name: "computer_write_file", description: "Write a workspace artifact." },
   ];
   const proposal = await new ModelPlanner(
-    priorResultProducerWithToolSourceModel(["workspace_artifact_write"]),
+    priorResultProducerModel(["workspace_artifact_write"]),
   ).plan(boundPriorResultTask({
     runId: "run-bound-result-stale-tool-source",
     tools,
@@ -455,7 +560,7 @@ test("Planner removes an unneeded ToolSource copied onto a bound-Result producer
   assert.equal(proposal.steps[0]?.sourceConstraint, undefined);
 });
 
-test("Planner retains a current source capability without retaining the model ToolSource hint", async () => {
+test("Planner retains a current source capability without a model-owned ToolSource binding", async () => {
   const tools = [
     {
       name: "mcp_ontoflow_jtbc_call_rdb_sql_api_query",
@@ -474,7 +579,7 @@ test("Planner retains a current source capability without retaining the model To
     { name: "computer_write_file", description: "Write a workspace artifact." },
   ];
   const proposal = await new ModelPlanner(
-    priorResultProducerWithToolSourceModel(["workspace_artifact_write", "data_asset.ods_read"], ["source_summary"]),
+    priorResultProducerModel(["workspace_artifact_write", "data_asset.ods_read"], ["source_summary"]),
   ).plan(boundPriorResultTask({
     runId: "run-bound-result-current-tool-source",
     tools,
@@ -482,4 +587,71 @@ test("Planner retains a current source capability without retaining the model To
 
   assert.equal(proposal.steps[0]?.sourceConstraint, undefined);
   assert.deepEqual(proposal.steps[0]?.requiredCapabilities, ["workspace_artifact_write", "data_asset.ods_read"]);
+});
+
+test("Planner rejects a ToolSource ID masquerading as a visible directory", async () => {
+  const tools = [{
+    name: "mcp_ontoflow_jtbc_call_rdb_sql_api_query",
+    description: "Read approved ODS metadata.",
+    source: {
+      id: "ontoflow-jtbc",
+      transport: "mcp" as const,
+      capabilities: [{ id: "data_asset.ods_read", category: "data_asset" }],
+    },
+  }];
+  const task: TaskSpec = {
+    runId: "run-tool-source-as-visible-directory",
+    canonicalState: createCanonicalRunState({
+      runId: "run-tool-source-as-visible-directory",
+      userInput: "Read approved ODS metadata.",
+      understanding: understandTask({
+        objective: "Read approved ODS metadata.",
+        toolNames: tools.map((tool) => tool.name),
+      }),
+      requiredToolSourceIds: ["ontoflow-jtbc"],
+      now: 1,
+    }),
+    availableSkills: [],
+    availableToolNames: tools.map((tool) => tool.name),
+    availableTools: tools,
+  };
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    async complete(): Promise<ModelResponse> {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "misclassified-tool-source",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Read approved ODS metadata.",
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "ods-facts",
+              objective: "Read approved ODS metadata.",
+              dependsOn: [],
+              role: "fact_acquisition",
+              skillIds: [],
+              requiredCapabilities: ["data_asset.ods_read"],
+              sourceConstraint: {
+                bindings: [{ kind: "visible_directory", ids: ["ontoflow-jtbc"] }],
+              },
+              evidenceContract: {
+                requiredKinds: ["source_summary"],
+                caveatPolicy: "strict_fail_on_missing_source",
+              },
+            }],
+          },
+        }],
+      };
+    },
+  };
+
+  await assert.rejects(
+    new ModelPlanner(model, { maxPlanningTurns: 1 }).plan(task),
+    /sourceConstraint namespaces do not match canonical Runtime inputs; invalid visible_directory IDs: ontoflow-jtbc/,
+  );
 });

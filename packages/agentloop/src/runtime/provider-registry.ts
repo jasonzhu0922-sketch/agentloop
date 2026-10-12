@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import { AppError } from "../shared/errors.ts";
-import type { ModelAdapter, ModelRetryReporter } from "./contracts.ts";
+import type { ModelAdapter, ModelRetryReporter, ModelStreamRawCaptureWriter } from "./contracts.ts";
 import {
   InMemoryResponsesReasoningContinuationStore,
   OpenAICompatibleModel,
@@ -80,6 +80,11 @@ interface ParsedProviderDocument {
   readonly models: readonly OpenAICompatibleModelConfig[];
 }
 
+export interface LlmProviderRegistryOptions {
+  /** Deployment-owned persistence for anomalous raw provider streams. */
+  readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
+}
+
 /**
  * Server-owned registry for model providers.
  *
@@ -95,10 +100,12 @@ export class LlmProviderRegistry {
   private readonly models: ReadonlyMap<string, OpenAICompatibleModelConfig>;
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private readonly reasoningContinuationStore: ResponsesReasoningContinuationStore;
+  private readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
 
   private constructor(
     parsed: ParsedProviderDocument,
     environment: Readonly<Record<string, string | undefined>>,
+    options: LlmProviderRegistryOptions = {},
   ) {
     this.defaultProviderKey = parsed.defaultProvider;
     this.defaultModelKey = parsed.defaultModelKey;
@@ -106,21 +113,24 @@ export class LlmProviderRegistry {
     this.models = new Map(parsed.models.map((model) => [model.key, model]));
     this.environment = environment;
     this.reasoningContinuationStore = new InMemoryResponsesReasoningContinuationStore();
+    this.streamRawCaptureWriter = options.streamRawCaptureWriter;
   }
 
   static fromEnvironment(
     environment: Readonly<Record<string, string | undefined>> = process.env,
+    options: LlmProviderRegistryOptions = {},
   ): LlmProviderRegistry {
     const raw = environment.LLM_PROVIDERS_JSON;
     if (raw === undefined || raw.trim().length === 0) {
       throw new Error("LLM_PROVIDERS_JSON must configure at least one server-side LLM provider");
     }
-    return LlmProviderRegistry.fromJson(raw, "LLM_PROVIDERS_JSON", environment);
+    return LlmProviderRegistry.fromJson(raw, "LLM_PROVIDERS_JSON", environment, options);
   }
 
   static async fromConfigFile(
     path: string,
     environment: Readonly<Record<string, string | undefined>> = process.env,
+    options: LlmProviderRegistryOptions = {},
   ): Promise<LlmProviderRegistry> {
     const resolved = resolve(path);
     const raw = await fs.readFile(resolved, "utf8").catch((error: NodeJS.ErrnoException) => {
@@ -129,7 +139,7 @@ export class LlmProviderRegistry {
       }
       throw error;
     });
-    return LlmProviderRegistry.fromJson(raw, `LLM provider configuration file ${resolved}`, environment);
+    return LlmProviderRegistry.fromJson(raw, `LLM provider configuration file ${resolved}`, environment, options);
   }
 
   /**
@@ -142,10 +152,12 @@ export class LlmProviderRegistry {
   static fromConfigObject(
     config: unknown,
     environment: Readonly<Record<string, string | undefined>> = process.env,
+    options: LlmProviderRegistryOptions = {},
   ): LlmProviderRegistry {
     return new LlmProviderRegistry(
       parseProviderDocument(config, "LLM provider configuration object"),
       environment,
+      options,
     );
   }
 
@@ -215,6 +227,7 @@ export class LlmProviderRegistry {
       ...(model.planningThinkingMode === undefined ? {} : { planningThinkingMode: model.planningThinkingMode }),
       ...(model.chatTemplateKwargs === undefined ? {} : { chatTemplateKwargs: model.chatTemplateKwargs }),
       ...(onRetry === undefined ? {} : { onRetry }),
+      ...(this.streamRawCaptureWriter === undefined ? {} : { streamRawCaptureWriter: this.streamRawCaptureWriter }),
     };
     return model.protocol === "responses"
       ? new ResponsesModel(modelOptions)
@@ -225,6 +238,7 @@ export class LlmProviderRegistry {
     raw: string,
     label: string,
     environment: Readonly<Record<string, string | undefined>>,
+    options: LlmProviderRegistryOptions = {},
   ): LlmProviderRegistry {
     let value: unknown;
     try {
@@ -232,7 +246,7 @@ export class LlmProviderRegistry {
     } catch {
       throw new Error(`${label} must be valid JSON`);
     }
-    return new LlmProviderRegistry(parseProviderDocument(value, label), environment);
+    return new LlmProviderRegistry(parseProviderDocument(value, label), environment, options);
   }
 }
 

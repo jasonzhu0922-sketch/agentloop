@@ -9,6 +9,7 @@ import { RuntimeActionRepository } from "../src/runtime/runtime-action-repositor
 import { PlanRepository } from "../src/planning/plan-repository.ts";
 import { reconstructRecoveryTranscript } from "../src/runtime/recovery-transcript.ts";
 import { RunService } from "../src/runtime/run-service.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { RuntimeResultRepository } from "../src/runtime/runtime-result-repository.ts";
 import {
   createRuntimeResult,
@@ -18,6 +19,7 @@ import {
   type RuntimeResultRef,
 } from "../src/runtime/runtime-result.ts";
 import { StepResultCommitter } from "../src/runtime/step-result-committer.ts";
+import { understandTask } from "../src/runtime/task-intent.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
@@ -59,6 +61,20 @@ test("Result bindings and context cards preserve one global Result identity", ()
     evidenceRefs: ["assessment:approved"],
   };
   assert.deepEqual(parseRuntimeResultCard(card), card);
+});
+
+test("read_result schema and parser reject abbreviated Runtime result ids", () => {
+  const tool = createResultTool({} as RuntimeResultRepository);
+  const resultIdSchema = tool.inputSchema.properties?.resultId as Record<string, unknown>;
+  assert.equal(resultIdSchema.minLength, 39);
+  assert.equal(resultIdSchema.maxLength, 39);
+  assert.equal(resultIdSchema.pattern, "^rr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+  assert.throws(
+    () => tool.parse({ resultId: "rr_e94026ad" }),
+    (error: unknown) => error instanceof AppError
+      && error.message.includes("complete opaque Runtime result id")
+      && error.message.includes("abbreviated prefixes are invalid"),
+  );
 });
 
 async function seedRun(database: AppDatabase): Promise<void> {
@@ -652,7 +668,7 @@ test("an assessed Step result becomes the next Step's formal readable input", as
         plan: async (task) => ({
           schema: "agentloop.outcomePlan/v2",
           shape: "fact_then_produce",
-          goal: task.input,
+          goal: task.canonicalState.intent.userInput,
           selectedSkillIds: [],
           selectedSkillRoles: [],
           steps: [{
@@ -754,6 +770,11 @@ test("Step result publication accepts only Assessment-owned non-blocking caveats
     const plans = new PlanRepository(database);
     let plan = await plans.create(admitPlan({
       runId: "step-result-publication-run",
+      canonicalState: createCanonicalRunState({
+        runId: "step-result-publication-run",
+        userInput: "publish assessed results",
+        understanding: understandTask({ objective: "publish assessed results" }),
+      }),
       proposal: {
         goal: "publish assessed results",
         selectedSkillIds: [],
@@ -878,6 +899,11 @@ test("Step result publication is fenced once its Run is terminal", async () => {
     const plans = new PlanRepository(database);
     let plan = await plans.create(admitPlan({
       runId,
+      canonicalState: createCanonicalRunState({
+        runId,
+        userInput: "publish one result",
+        understanding: understandTask({ objective: "publish one result" }),
+      }),
       proposal: {
         goal: "publish one result",
         selectedSkillIds: [],

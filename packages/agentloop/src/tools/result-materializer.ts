@@ -7,6 +7,7 @@ import {
   serializeRuntimeResultEvidenceBundle,
 } from "../runtime/result-evidence-bundle.ts";
 import type { RuntimeResultRepository } from "../runtime/runtime-result-repository.ts";
+import { isRuntimeResultId } from "../runtime/runtime-result.ts";
 import { executorForContext } from "./computer-tools.ts";
 import type { RuntimeTool, ToolExecutionContext } from "./tool-registry.ts";
 
@@ -51,7 +52,7 @@ export function createResultJsonMaterializer(
       }
       const resultIds = record.resultIds.map((value, index) => {
         const resultId = requireString(value, `resultIds[${index}]`, { min: 4, max: 120 });
-        if (!/^rr_[0-9a-f-]{36}$/u.test(resultId)) throw badRequest("resultIds must contain opaque Runtime result ids");
+        if (!isRuntimeResultId(resultId)) throw badRequest("resultIds must contain complete opaque Runtime result ids");
         return resultId;
       });
       if (new Set(resultIds).size !== resultIds.length) throw badRequest("resultIds must not contain duplicates");

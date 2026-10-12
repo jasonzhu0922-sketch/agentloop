@@ -49,6 +49,12 @@ export interface RuntimeTool<TInput = unknown> {
   readonly executionMode: "parallel" | "exclusive";
   readonly replaySafe: boolean;
   /**
+   * A completion-preparation observer may consume already committed Runtime
+   * evidence after production Tools have been fenced off. It must be replay
+   * safe and must not publish a second Runtime Result identity.
+   */
+  readonly availableDuringCompletionPreparation?: boolean;
+  /**
    * Whether a successful call creates a new immutable Runtime Result. Tools
    * that only observe a previously identified Result keep their audit Action
    * but must not mint a second Result identity for that observation.
@@ -88,6 +94,7 @@ export interface PreparedToolCall {
 
 export interface MaterializedTools {
   readonly definitions: readonly ModelToolDefinition[];
+  readonly completionPreparationDefinitions: readonly ModelToolDefinition[];
   readonly prepare: (call: ModelToolCall) => PreparedToolCall;
 }
 
@@ -107,6 +114,14 @@ export class ToolRegistry {
     }
     for (const tool of tools) {
       if (this.tools.has(tool.name)) throw new TypeError(`Duplicate tool name: ${tool.name}`);
+      if (
+        tool.availableDuringCompletionPreparation === true
+        && (!tool.replaySafe || tool.publishesRuntimeResult !== false)
+      ) {
+        throw new TypeError(
+          `Completion-preparation Tool ${tool.name} must be replay safe and set publishesRuntimeResult=false`,
+        );
+      }
       this.tools.set(tool.name, tool);
     }
   }
@@ -123,6 +138,13 @@ export class ToolRegistry {
         description: tool.description,
         inputSchema: tool.inputSchema,
       })),
+      completionPreparationDefinitions: visible
+        .filter((tool) => tool.availableDuringCompletionPreparation === true)
+        .map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        })),
       prepare: (call) => {
         const tool = byName.get(call.name);
         if (tool === undefined) throw forbidden(`Tool "${call.name}" is not available in this run`);

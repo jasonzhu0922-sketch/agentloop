@@ -15,7 +15,7 @@ import type {
   RuntimePromptAugmentation,
 } from "./contracts.ts";
 import type { PromptProjectionDecision } from "./step-execution-strategy.ts";
-import type { RuntimeResultContextEntry, RuntimeResultRef } from "./runtime-result.ts";
+import { isRuntimeResultId, type RuntimeResultContextEntry, type RuntimeResultRef } from "./runtime-result.ts";
 
 export interface ContextPolicy {
   readonly outputReserveTokens?: number;
@@ -646,7 +646,6 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
-        || this.isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const record: PrunedToolResult = {
@@ -810,6 +809,7 @@ export class ContextAssembler {
         message.role !== "tool"
         || message.name === "load_skill"
         || message.isError
+        || this.isCurrentReferenceWindow(canonicalMessages, index)
         || this.prunedToolResults.has(message.toolCallId)
       ) continue;
       const structuredEvidence = preserveResultRef(
@@ -1432,6 +1432,11 @@ function isTrailingReferenceWindow(messages: readonly ModelMessage[], index: num
   const value = parseJsonRecord(message.content);
   if (message.name === "computer_read_file" && value?.schema === "agentloop.contentReferenceRead/v1") {
     return typeof value.content === "string" && value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+  }
+  if (message.name === "read_result" && value?.schema === "agentloop.resultRead/v1") {
+    if (typeof value.content === "string") return value.content.length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
+    if (!("value" in value)) return false;
+    return JSON.stringify(value.value).length <= CONTENT_REFERENCE_WINDOW_CHARACTERS;
   }
   return message.name === "computer_read_json" && value?.schema === "agentloop.jsonRead/v1"
     && Array.isArray(value.queries) && value.queries.length > 0
@@ -2452,12 +2457,12 @@ function resultRefProjection(value: unknown): Readonly<{
   const record = recordValue(value);
   if (record === undefined || record.schema !== "agentloop.resultRef/v1") return undefined;
   const resultId = stringValue(record.resultId);
-  if (resultId === undefined || !/^rr_[0-9a-f-]{36}$/u.test(resultId)) return undefined;
+  if (!isRuntimeResultId(resultId)) return undefined;
   return { schema: "agentloop.resultRef/v1", resultId };
 }
 
 function resultRefFromMarker(content: string): ReturnType<typeof resultRefProjection> {
-  const match = /\[Runtime ResultRef (\{"schema":"agentloop\.resultRef\/v1","resultId":"rr_[0-9a-f-]{36}"\})\]/u.exec(content);
+  const match = /\[Runtime ResultRef (\{"schema":"agentloop\.resultRef\/v1","resultId":"[^"]+"\})\]/u.exec(content);
   if (match?.[1] === undefined) return undefined;
   try {
     return resultRefProjection(JSON.parse(match[1]));

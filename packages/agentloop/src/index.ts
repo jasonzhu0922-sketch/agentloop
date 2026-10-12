@@ -115,7 +115,7 @@ export type {
 } from "./runtime/step-execution-strategy.ts";
 export { OpenAICompatibleModel } from "./runtime/models.ts";
 export { LlmProviderRegistry } from "./runtime/provider-registry.ts";
-export type { LlmModelSummary, LlmProviderSummary } from "./runtime/provider-registry.ts";
+export type { LlmModelSummary, LlmProviderRegistryOptions, LlmProviderSummary } from "./runtime/provider-registry.ts";
 export { RunEventHub } from "./runtime/run-event-hub.ts";
 export type { LiveRunEvent } from "./runtime/run-event-hub.ts";
 export { colorizeTerminalLogLabel, colorizeTerminalLogLine, shouldUseTerminalLogColor } from "./runtime/terminal-log.ts";
@@ -135,7 +135,33 @@ export type {
 } from "./runtime/process-artifacts.ts";
 export { RuntimeActionRepository } from "./runtime/runtime-action-repository.ts";
 export { RuntimeResultRepository } from "./runtime/runtime-result-repository.ts";
-export { createRuntimeResult, createRuntimeResultCard, parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultCard, parseRuntimeResultJson, parseRuntimeResultRef } from "./runtime/runtime-result.ts";
+export { requestedArtifactTargets, understandTask } from "./runtime/task-intent.ts";
+export type {
+  ConversationTaskIntent,
+  RequestedArtifactTarget,
+  StructuredTaskUnderstanding,
+} from "./runtime/task-intent.ts";
+export { CanonicalRunStateRepository } from "./runtime/canonical-run-state-repository.ts";
+export {
+  bindCanonicalPlan,
+  canonicalRunStateRef,
+  commitCanonicalTerminal,
+  createCanonicalRunState,
+  markCanonicalReadyForTerminal,
+  recordCanonicalAssessment,
+  recordCanonicalStepResult,
+  reviseCanonicalPlan,
+  startCanonicalStep,
+} from "./runtime/canonical-run-state.ts";
+export type {
+  CanonicalGoalGap,
+  CanonicalRunPhase,
+  CanonicalRunState,
+  CanonicalRunStateRef,
+  CanonicalStepProgress,
+  CanonicalStepStatus,
+} from "./runtime/canonical-run-state.ts";
+export { createRuntimeResult, createRuntimeResultCard, isRuntimeResultId, parseRuntimeResult, parseRuntimeResultBinding, parseRuntimeResultCard, parseRuntimeResultJson, parseRuntimeResultRef, RUNTIME_RESULT_ID_PATTERN } from "./runtime/runtime-result.ts";
 export type {
   RuntimeResultBinding,
   RuntimeResultBindingRelation,

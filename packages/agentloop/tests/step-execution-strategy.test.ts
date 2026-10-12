@@ -79,33 +79,6 @@ test("action-aware step execution strategy deprioritizes read-only tools during 
   assert.equal(decision.promptProjection.largeToolResultPreviewCharacters, 3000);
 });
 
-test("action-aware step execution strategy prefers the exact command for computation binding repair", () => {
-  const strategy = new DefaultStepExecutionStrategy({ toolExposurePolicy: new DefaultToolExposurePolicy() });
-  const decision = strategy.prepareModelStep({
-    modelStep: 3,
-    maxSteps: 6,
-    hardLimit: 6,
-    convergenceOnly: false,
-    availableTools: tools(["computer_read_file", "computer_run_command", "computer_write_file"]),
-    priorToolEvidence: [],
-    stepEvidenceState: state({
-      nextAction: "repair_computation_binding",
-      evidenceProducingToolNames: ["computer_run_command"],
-      exploratoryToolNames: [],
-      workProductStatus: "process_artifact_available",
-      processArtifactPaths: ["analysis/report.py"],
-      missingRequiredEvidenceKinds: ["derived_aggregation"],
-      recentComputationBindingMismatch: true,
-    }),
-  });
-
-  assert.deepEqual(decision.toolCatalog.preferredToolNames, ["computer_run_command"]);
-  assert.match(
-    decision.toolCatalog.deprioritizedToolGroups.flatMap((group) => group.preferWhen).join("\n"),
-    /computationInputs/u,
-  );
-});
-
 test("full-catalog step execution profile keeps all granted tools visible", () => {
   const strategy = createStepExecutionStrategyProfile("full-catalog");
   const decision = strategy.prepareModelStep({

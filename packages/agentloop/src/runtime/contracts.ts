@@ -58,7 +58,14 @@ export interface RuntimeDeliveryCandidate {
   readonly caveats: readonly string[];
   readonly evidenceKinds: RuntimeDeliveryCandidateEvidenceKinds;
   readonly sourceToolCallIds: readonly string[];
+  /** Claims are target-scoped; evidence and Assessment decide whether they are accepted. */
+  readonly deliveryClaims: readonly RuntimeDeliveryClaim[];
   readonly deliveryReceipt?: RuntimeDeliveryReceipt;
+}
+
+export interface RuntimeDeliveryClaim {
+  readonly targetId: string;
+  readonly evidenceRefs: readonly string[];
 }
 
 export interface ModelToolCall {
@@ -127,6 +134,8 @@ export interface ModelResponse {
     inputTokens?: number;
     outputTokens?: number;
   }>;
+  /** Sanitized wire-level evidence for a streaming provider response. */
+  readonly streamReceipt?: ModelStreamReceipt;
 }
 
 export interface ModelRequestLogContext {
@@ -142,6 +151,59 @@ export interface ModelRequestLogContext {
   readonly toolChoice: string;
   readonly runtimeContextPlacement: string;
 }
+
+export interface ModelStreamRawCaptureRef {
+  readonly schema: "agentloop.modelStreamRawCaptureRef/v1";
+  /** Deployment-owned opaque reference. Raw bytes never enter the Run event. */
+  readonly ref: string;
+  readonly capturedBytes: number;
+  readonly rawBytes: number;
+  readonly rawSha256: string;
+  readonly truncated: boolean;
+}
+
+export interface ModelStreamReceipt {
+  readonly schema: "agentloop.modelStreamReceipt/v1";
+  readonly transport: "sse";
+  readonly httpStatus: number;
+  readonly contentType?: string;
+  readonly providerRequestId?: string;
+  readonly rawBytes: number;
+  readonly rawSha256: string;
+  readonly readChunkCount: number;
+  readonly sseEventCount: number;
+  readonly jsonEventCount: number;
+  readonly nonJsonEventCount: number;
+  readonly doneEventCount: number;
+  readonly unrecognizedJsonEventCount: number;
+  readonly unterminatedFinalEventBytes: number;
+  readonly finishReasonObserved: boolean;
+  readonly sinkEmissionObserved: boolean;
+  readonly observedDeltaFields: readonly string[];
+  readonly anomalyReasons: readonly string[];
+  readonly rawCapture?: ModelStreamRawCaptureRef;
+  readonly rawCaptureError?: string;
+}
+
+export interface ModelStreamRawCaptureInput {
+  readonly schema: "agentloop.modelStreamRawCapture/v1";
+  readonly runId: string;
+  readonly request: ModelRequestLogContext;
+  readonly response: Readonly<{
+    status: number;
+    contentType?: string;
+    providerRequestId?: string;
+  }>;
+  readonly anomalyReasons: readonly string[];
+  readonly rawSse: Uint8Array;
+  readonly rawBytes: number;
+  readonly rawSha256: string;
+  readonly truncated: boolean;
+}
+
+export type ModelStreamRawCaptureWriter = (
+  input: ModelStreamRawCaptureInput,
+) => Promise<ModelStreamRawCaptureRef>;
 
 /**
  * Incremental, provider-neutral deltas emitted while one model turn streams.

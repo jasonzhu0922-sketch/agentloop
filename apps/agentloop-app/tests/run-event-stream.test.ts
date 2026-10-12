@@ -490,7 +490,7 @@ test("an informational follow-up does not inherit Skills or execution Tools from
             toolNames: [...task.availableToolNames],
           });
           return {
-            goal: task.input,
+            goal: task.canonicalState.intent.userInput,
             selectedSkillIds: [],
             steps: [{
               id: "answer",
@@ -498,6 +498,7 @@ test("an informational follow-up does not inherit Skills or execution Tools from
               dependencies: [],
               skillIds: [],
               requiredCapabilities: ["conversation_delivery"],
+              targetIds: (task.canonicalState.intent.understanding.deliverables ?? []).map((target) => target.targetId),
               recommendedToolNames: [],
               successCriteria: [{ id: "answered", description: "Return a direct answer", source: "task" }],
             }],
@@ -548,7 +549,7 @@ test("a textual request that needs local file state is execution, not response-o
             toolNames: [...task.availableToolNames],
           });
           return {
-            goal: task.input,
+            goal: task.canonicalState.intent.userInput,
             selectedSkillIds: [],
             steps: [{
               id: "inspect-file",
@@ -556,6 +557,7 @@ test("a textual request that needs local file state is execution, not response-o
               dependencies: [],
               skillIds: [],
               requiredCapabilities: ["workspace_file_read", "conversation_delivery"],
+              targetIds: (task.canonicalState.intent.understanding.deliverables ?? []).map((target) => target.targetId),
               recommendedToolNames: [],
               successCriteria: [{ id: "classified-for-execution", description: "The planner received the execution tool catalog", source: "task" }],
             }],
@@ -778,7 +780,33 @@ test("Host protocol exposes a stable sidecar Run projection over HTTP", async ()
 
 class StaticCompletionModel implements ModelAdapter {
   readonly limits = TEST_MODEL_LIMITS;
-  async complete(): Promise<ModelResponse> {
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.tools[0]?.name === "resolve_conversation_turn") {
+      const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "resolve-static-conversation",
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "reply",
+            relation: "new_goal",
+            inputMode: "none",
+            effectiveGoal: latest,
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "answer",
+              requiresExecution: false,
+              deliverables: [],
+            },
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: [],
+          },
+        }],
+      };
+    }
     return { content: "done", finishReason: "stop", toolCalls: [] };
   }
 }
@@ -880,8 +908,9 @@ async function postJson(base: string, path: string, token: string, body: unknown
     },
     body: JSON.stringify(body),
   });
-  assert.equal(response.status < 300, true, `POST ${path} failed with ${response.status}`);
-  return response.json();
+  const responseText = await response.text();
+  assert.equal(response.status < 300, true, `POST ${path} failed with ${response.status}: ${responseText}`);
+  return JSON.parse(responseText) as unknown;
 }
 
 async function getJson(base: string, path: string, token: string): Promise<unknown> {

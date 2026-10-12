@@ -208,7 +208,17 @@ export class RuntimeActionRepository {
         SELECT id FROM runs
         WHERE status = 'running'
           AND created_at <= ?
-          AND NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
+          AND (
+            NOT EXISTS (SELECT 1 FROM runtime_actions WHERE runtime_actions.run_id = runs.id)
+            OR (
+              NOT EXISTS (SELECT 1 FROM canonical_run_states WHERE canonical_run_states.run_id = runs.id)
+              AND NOT EXISTS (
+                SELECT 1 FROM runtime_actions
+                WHERE runtime_actions.run_id = runs.id
+                  AND runtime_actions.state IN ('dispatched', 'recovery_required')
+              )
+            )
+          )
           ${runScope}
       `).all(now - LEGACY_ACTIONLESS_RUN_GRACE_MS, ...(scopedRunIds ?? [])) as unknown as Array<{ id: string }>;
       for (const run of legacyRuns) {

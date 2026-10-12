@@ -77,6 +77,25 @@ export function resolveSkillWorkflowEvidenceBindings(input: {
 }
 
 /**
+ * A manifest declaration is capability inventory, not a requirement to use
+ * that action for every matching evidence kind. Only an operation selected by
+ * the step-scoped decision ledger makes its matching workflow receipt
+ * mandatory for the current leaf.
+ */
+export function requiredSkillWorkflowEvidenceBindings(input: {
+  readonly available: readonly SkillWorkflowEvidenceBinding[];
+  readonly resolvedOperations: readonly ResolvedOperationBinding[];
+}): readonly SkillWorkflowEvidenceBinding[] {
+  const required = input.available.filter((binding) => input.resolvedOperations.some((operation) =>
+    operation.skillId === binding.skillId
+    && operation.skillName === binding.skillName
+    && operation.executorId === binding.executorId
+    && operation.actionId === binding.actionId
+  ));
+  return Object.freeze(required);
+}
+
+/**
  * Compile package-owned operation metadata and a Runtime-authoritative choice
  * into immutable command constraints. This is deliberately generic: Skills
  * declare which operation inputs carry the selected label/identity/option;

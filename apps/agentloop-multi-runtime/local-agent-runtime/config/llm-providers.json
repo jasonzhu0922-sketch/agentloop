@@ -46,6 +46,7 @@
       "displayName": "DeepSeek v4 Flash 2",
       "maxOutputTokens": 16384,
       "toolChoiceMode": "named-as-required",
+      "thinkingMode": "disabled",
       "chatTemplateKwargs": { "thinking": false, "effort": "none" },
       "reasoningVisibility": "hidden"
     },

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ConversationWorkingSet, ExecutionPlan, PlanStep } from "../src/planning/contracts.ts";
-import { createStepExecutionBinding } from "../src/planning/step-execution-binding.ts";
+import type { ArtifactTarget, ConversationWorkingSet, ExecutionPlan, PlanStep } from "../src/planning/contracts.ts";
+import { createStepExecutionBinding, planningCapabilitiesFromToolNames } from "../src/planning/step-execution-binding.ts";
 import { buildTaskProfile } from "../src/runtime/dynamic-prompt.ts";
 import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "../src/runtime/execution-context-policy.ts";
 import { deriveRuntimeStepEvidenceState } from "../src/runtime/tool-progress-policy.ts";
@@ -50,7 +50,7 @@ test("fact-acquisition policy directs an admitted Runtime evidence materializer 
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    requiredCapabilities: ["visible_directory_read", "runtime_result_json_materialization"],
+    requiredCapabilities: ["visible_table_extraction", "runtime_result_json_materialization"],
     evidenceContract: {
       requiredKinds: ["source_summary", "schema_summary", "structured_extraction_artifact", "explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
@@ -113,7 +113,7 @@ test("artifact progress policy retains the admitted concrete format beside its s
   assert.equal(policy?.expectedArtifactFormat, "pdf");
 });
 
-test("step-local artifact targets override a task-wide legacy format and require coverage for every target", () => {
+test("step-local artifact targets require coverage for every canonical target", () => {
   const step = planStep({
     id: "ods-report-qc",
     kind: "leaf",
@@ -819,9 +819,9 @@ test("execution context prefers structured JSON reads for table extraction artif
     refinementState: "not_refinable",
     requiredFacts: [],
     skillIds: [],
-    requiredCapabilities: ["workspace_file_read"],
+    requiredCapabilities: ["workspace_structured_artifact_read"],
     evidenceContract: {
-      requiredKinds: ["derived_aggregation", "explicit_caveats"],
+      requiredKinds: ["explicit_caveats"],
       caveatPolicy: "mark_unverified_facts",
     },
     successCriteria: [],
@@ -851,8 +851,7 @@ test("execution context prefers structured JSON reads for table extraction artif
   assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_summarize_table_artifact/);
   assert.match(payload.structuredArtifactConsumptionDiscipline, /computer_read_json/);
   assert.match(payload.structuredArtifactConsumptionDiscipline, /Use computer_search_text only/);
-  assert.match(payload.derivedAggregationDiscipline, /computer_aggregate_table_artifact/);
-  assert.match(payload.derivedAggregationDiscipline, /caveat is not a substitute/i);
+  assert.equal("derivedAggregationDiscipline" in payload, false);
   assert.match(payload.toolSelectionPolicy.beforeAcquiringEvidence, /current-stage evidence for this stage/i);
   assert.match(payload.stageEvidencePrecedence, /dependency evidence is input, not a veto/i);
   assert.match(payload.stageEvidencePrecedence, /do not re-fetch or revalidate solely to reconcile/i);
@@ -1159,34 +1158,41 @@ test("execution context exposes prior conversation artifacts as reusable context
   assert.equal(reuseContext.sourceSummaries[0]?.facts[0]?.claim.includes("18 staff"), true);
 });
 
-function planStep(step: Omit<PlanStep, "executionBinding">): PlanStep {
+function planStep(
+  input: Omit<PlanStep, "executionBinding"> & { readonly artifactTargets?: readonly ArtifactTarget[] },
+): PlanStep {
+  const availableToolNames = new Set([
+    "read_source",
+    "visible_index_directory",
+    "visible_find_files",
+    "visible_read_file",
+    "visible_read_files",
+    "visible_search_text",
+    "visible_extract_tables",
+    "computer_list_directory",
+    "computer_find_files",
+    "computer_search_text",
+    "computer_read_file",
+    "computer_read_json",
+    "computer_summarize_table_artifact",
+    "computer_aggregate_table_artifact",
+    "materialize_result_json",
+    "computer_write_file",
+    "computer_patch_file",
+    "computer_run_command",
+    "convert_artifact",
+    "verify_artifact_acceptance",
+    "load_skill",
+    "mcp_route_query",
+  ]);
+  const { artifactTargets, ...step } = input;
   return {
     ...step,
     executionBinding: createStepExecutionBinding({
       step,
-      availableToolNames: new Set([
-        "read_source",
-        "visible_index_directory",
-        "visible_find_files",
-        "visible_read_file",
-        "visible_read_files",
-        "visible_search_text",
-        "visible_extract_tables",
-        "computer_list_directory",
-        "computer_find_files",
-        "computer_search_text",
-        "computer_read_file",
-        "computer_read_json",
-        "computer_summarize_table_artifact",
-        "materialize_result_json",
-        "computer_write_file",
-        "computer_patch_file",
-        "computer_run_command",
-        "convert_artifact",
-        "verify_artifact_acceptance",
-        "load_skill",
-        "mcp_route_query",
-      ]),
+      artifactTargets,
+      availableToolNames,
+      availableCapabilities: planningCapabilitiesFromToolNames([...availableToolNames]),
       evidenceContract: step.evidenceContract,
     }),
   };

@@ -160,13 +160,32 @@ export class AppDatabase implements SqlConnection {
       CREATE INDEX IF NOT EXISTS runs_owner_idx ON runs(owner_user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS runs_parent_idx ON runs(parent_run_id);
 
+      CREATE TABLE IF NOT EXISTS canonical_run_states (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        state_id TEXT NOT NULL UNIQUE,
+        intent_id TEXT NOT NULL UNIQUE,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS canonical_run_state_revisions (
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(run_id, revision)
+      );
+
       CREATE TABLE IF NOT EXISTS plans (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
         version INTEGER NOT NULL,
         goal TEXT NOT NULL,
         selected_skill_ids_json TEXT NOT NULL,
-        task_semantics_json TEXT,
+        canonical_state_ref_json TEXT,
         input_bindings_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL CHECK(status IN ('admitted', 'running', 'completed', 'failed')),
         created_at INTEGER NOT NULL,
@@ -533,7 +552,7 @@ export class AppDatabase implements SqlConnection {
       await this.ensureColumn("runs", "conversation_id", "TEXT REFERENCES conversations(id) ON DELETE SET NULL");
       await this.ensureColumn("runs", "model_key", "TEXT");
       await this.ensureColumn("plans", "input_bindings_json", "TEXT NOT NULL DEFAULT '[]'");
-      await this.ensureColumn("plans", "task_semantics_json", "TEXT");
+      await this.ensureColumn("plans", "canonical_state_ref_json", "TEXT");
       await this.ensureColumn("plan_steps", "kind", "TEXT NOT NULL DEFAULT 'leaf'");
       await this.ensureColumn("plan_steps", "parent_step_id", "TEXT");
       await this.ensureColumn("plan_steps", "role", "TEXT");

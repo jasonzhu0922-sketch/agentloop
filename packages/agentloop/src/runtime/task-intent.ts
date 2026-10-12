@@ -16,9 +16,11 @@ export interface ConversationTaskIntent {
   readonly requiresExecution: boolean;
   readonly deliverables: readonly {
     /** Stable user-deliverable identity. Required from the resolver for new turns. */
-    readonly targetId?: string;
+    readonly targetId: string;
     /** User-visible use/acceptance intent; never infer this later from a filename. */
-    readonly purpose?: string;
+    readonly purpose: string;
+    /** Exact number of independently delivered outputs in this semantic family. */
+    readonly expectedArtifactCount: number;
     readonly action: ArtifactAction;
     readonly kind: ArtifactKind;
     readonly format?: string;
@@ -29,6 +31,8 @@ export interface ConversationTaskIntent {
 /** A server-owned artifact contract frozen before Planning begins. */
 export interface RequestedArtifactTarget {
   readonly id: string;
+  /** Canonical delivery target that owns this concrete artifact instance. */
+  readonly deliveryTargetId: string;
   readonly purpose: string;
   readonly action: ArtifactAction;
   readonly kind: Exclude<ArtifactKind, "none">;
@@ -126,7 +130,7 @@ export interface StructuredTaskUnderstanding {
   readonly workflow: readonly StructuredTaskStage[];
   readonly operationProfiles: readonly StructuredTaskOperationProfile[];
   readonly constraints: readonly string[];
-  /** Full model-authored delivery set; deliverable remains the primary projection for legacy Planner consumers. */
+  /** Full model-authored delivery set; deliverable is its primary summary projection. */
   readonly deliverables?: ConversationTaskIntent["deliverables"];
   /** Immutable requested workspace outputs, keyed by identity rather than format count. */
   readonly artifactTargets?: readonly RequestedArtifactTarget[];
@@ -149,7 +153,6 @@ export interface TaskEvidencePolicy {
     readonly schemaSummary: boolean;
     readonly recordCounts: boolean;
     readonly structuredExtractionArtifact: boolean;
-    readonly derivedAggregation: boolean;
     readonly tableCoverage: boolean;
   };
 }
@@ -187,7 +190,6 @@ export function taskEvidencePolicyForTaskUnderstanding(
       schemaSummary: structuredData && schemaOrField,
       recordCounts: structuredData && aggregation,
       structuredExtractionArtifact: needsStructuredArtifact,
-      derivedAggregation: structuredData && aggregation,
       tableCoverage: structuredData && tableCoverage,
     },
   };
@@ -282,14 +284,16 @@ export function classifyTaskIntent(input: TaskIntentInput): TaskIntentClassifica
     && input.responseOnly !== true;
   const explicitConversationOnly = signals.answer.length > 0 && signals.action.length === 0;
   if (input.resolvedTaskIntent !== undefined) {
-    // The terminal deliverable is the legacy single-target projection. The
-    // complete ordered set is preserved on StructuredTaskUnderstanding for
-    // composite planners (for example, generator script then WAV output).
-    const deliverable = [...input.resolvedTaskIntent.deliverables].reverse().find((item) => item.kind !== "none");
+    // The resolver owns the delivery surface. A semantic kind such as
+    // `document` may describe a conversational report; it does not imply a
+    // workspace file. The complete ordered set remains authoritative below.
+    const deliverable = [...input.resolvedTaskIntent.deliverables].reverse().find((item) =>
+      item.surface === "workspace_artifact" && item.kind !== "none"
+    );
     const wantsArtifact = deliverable !== undefined && input.responseOnly !== true;
     return {
       deliverySurface: wantsArtifact ? "workspace_artifact" : "conversation",
-      artifactAction: deliverable?.action ?? "none",
+      artifactAction: wantsArtifact ? deliverable.action : "none",
       artifactKind: wantsArtifact ? deliverable!.kind : "none",
       sourceNeed,
       ...(researchPolicy === undefined ? {} : { researchPolicy }),
@@ -420,34 +424,43 @@ export function understandTask(input: TaskIntentInput & {
 
 /**
  * Converts resolver output into the immutable inventory consumed by Planner,
- * Admission, and execution. Legacy persisted v1 turns have no semantic
- * identity, so retain a deterministic compatibility projection; newly issued
- * resolver schema requires targetId and purpose.
+ * Admission, execution, Assessment, and terminal commitment. A deliverable
+ * family expands into one stable target identity per required output.
  */
 export function requestedArtifactTargets(
   deliverables: readonly ConversationTaskIntent["deliverables"][number][],
 ): readonly RequestedArtifactTarget[] {
   const ids = new Set<string>();
   const targets: RequestedArtifactTarget[] = [];
-  for (const [index, deliverable] of deliverables.entries()) {
-    if (deliverable.surface !== "workspace_artifact" || deliverable.kind === "none") continue;
-    const id = deliverable.targetId?.trim() || `legacy-artifact-${index + 1}`;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id) || ids.has(id)) {
-      throw new TypeError(`artifact target IDs must be unique stable identifiers: ${id}`);
+  for (const deliverable of deliverables) {
+    if (!Number.isInteger(deliverable.expectedArtifactCount) || deliverable.expectedArtifactCount < 1 || deliverable.expectedArtifactCount > 8) {
+      throw new TypeError("expectedArtifactCount must be an integer from 1 through 8");
     }
-    ids.add(id);
-    const purpose = deliverable.purpose?.trim()
-      || `Deliver the requested ${deliverable.format ?? deliverable.kind} artifact.`;
-    targets.push({
-      id,
-      purpose,
-      action: deliverable.action,
-      kind: deliverable.kind,
-      ...(deliverable.format === undefined ? {} : { format: deliverable.format }),
-      surface: "workspace_artifact",
-      terminalRequired: true,
-    });
+    if (deliverable.targetId.trim() !== deliverable.targetId || deliverable.purpose.trim() !== deliverable.purpose || deliverable.purpose.length === 0) {
+      throw new TypeError("artifact target identity and purpose must be non-empty canonical strings");
+    }
+    if (deliverable.surface !== "workspace_artifact" || deliverable.kind === "none") continue;
+    for (let ordinal = 1; ordinal <= deliverable.expectedArtifactCount; ordinal += 1) {
+      const id = deliverable.expectedArtifactCount === 1
+        ? deliverable.targetId
+        : `${deliverable.targetId}.${ordinal}`;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id) || id.length > 128 || ids.has(id)) {
+        throw new TypeError(`artifact target IDs must be unique stable identifiers of at most 128 characters: ${id}`);
+      }
+      ids.add(id);
+      targets.push({
+        id,
+        deliveryTargetId: deliverable.targetId,
+        purpose: deliverable.purpose,
+        action: deliverable.action,
+        kind: deliverable.kind,
+        ...(deliverable.format === undefined ? {} : { format: deliverable.format }),
+        surface: "workspace_artifact",
+        terminalRequired: true,
+      });
+    }
   }
+  if (targets.length > 8) throw new TypeError("task intent may require at most 8 workspace artifacts");
   return targets;
 }
 
@@ -658,6 +671,24 @@ export function researchPolicyForIntent(input: TaskIntentInput): ResearchPolicy 
 export function requestedArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
   const kind = classifyTaskIntent({ objective: input }).artifactKind;
   return kind === "none" ? new Set() : new Set([kind]);
+}
+
+/**
+ * Artifact families explicitly named by user-authored text. Unlike the
+ * primary summary projection above, this preserves every named family so
+ * the conversation boundary can reject model-invented secondary deliverables.
+ */
+export function explicitArtifactKindsFromIntent(input: string): Set<Exclude<ArtifactKind, "none">> {
+  const text = normalize(input);
+  const kinds = new Set<Exclude<ArtifactKind, "none">>();
+  if (/(?:\b(?:html|web\s?page|webpage|landing\s?page|site|website|frontend|ui)\b|网页|页面|首页|登录页|落地页|站点|网站|前端|界面)/iu.test(text)) kinds.add("html");
+  if (/(?:\bpptx?\b|\bslides?\b|\bdeck\b|\bpresentation\b|演示文稿|幻灯片|课件)/iu.test(text)) kinds.add("presentation");
+  if (/(?:\bpdf\b|\bdocx?\b|\bword\b|\bmarkdown\b|\bmd\b|\btxt\b|\bdocument\b|文档|报告书|材料文件)/iu.test(text)) kinds.add("document");
+  if (/(?:\bxlsx?\b|\bexcel\b|\bspreadsheet\b|\bsheet\b|\bcsv\b|表格|工作簿)/iu.test(text)) kinds.add("spreadsheet");
+  if (/(?:\bpng\b|\bjpe?g\b|\bwebp\b|\bgif\b|\bsvg\b|\bimage\b|\bposter\b|海报|图片|图像)/iu.test(text)) kinds.add("image");
+  if (/(?:\b(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|weba)\b|audio|音频)/iu.test(text)) kinds.add("audio");
+  if (/(?:\b(?:bash|cjs|code|javascript|js|json|mjs|python|py|script|typescript|ts)\b|代码|脚本|程序)/iu.test(text)) kinds.add("code");
+  return kinds;
 }
 
 export function requestsArtifactBuildFromIntent(input: string): boolean {

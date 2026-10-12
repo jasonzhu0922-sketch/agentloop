@@ -70,10 +70,12 @@ export async function completeWithRequestTelemetry(options: ModelRequestTelemetr
         contentLength: response.content.length,
         toolCallCount: response.toolCalls.length,
         ...(response.usage === undefined ? {} : { usage: response.usage }),
+        ...(response.streamReceipt === undefined ? {} : { streamReceipt: response.streamReceipt }),
       },
     });
     return response;
   } catch (error) {
+    const streamReceipt = streamReceiptFromError(error);
     await emit({
       type: "model.request.failed",
       data: {
@@ -82,6 +84,7 @@ export async function completeWithRequestTelemetry(options: ModelRequestTelemetr
         durationMs: Date.now() - startedAt,
         ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}),
         message: safeErrorMessage(error),
+        ...(streamReceipt === undefined ? {} : { streamReceipt }),
       },
     });
     throw error;
@@ -118,11 +121,13 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
         contentLength: response.content.length,
         toolCallCount: response.toolCalls.length,
         ...(response.usage === undefined ? {} : { usage: response.usage }),
+        ...(response.streamReceipt === undefined ? {} : { streamReceipt: response.streamReceipt }),
       },
     });
     return response;
   };
   const failed = async (error: unknown): Promise<never> => {
+    const streamReceipt = streamReceiptFromError(error);
     await emit({
       type: "model.request.failed",
       data: {
@@ -132,6 +137,7 @@ export async function completeWithStreaming(options: ModelStreamingOptions): Pro
         ...(firstEventAt === undefined ? {} : { timeToFirstEventMs: firstEventAt - startedAt }),
         ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}),
         message: safeErrorMessage(error),
+        ...(streamReceipt === undefined ? {} : { streamReceipt }),
       },
     });
     throw error;
@@ -255,4 +261,11 @@ function safeErrorMessage(error: unknown): string {
   const compact = message.replace(/\s+/g, " ").trim();
   if (compact.length === 0) return "Model request failed";
   return compact.length <= 200 ? compact : `${compact.slice(0, 197)}...`;
+}
+
+function streamReceiptFromError(error: unknown): unknown | undefined {
+  if (typeof error !== "object" || error === null || !("details" in error)) return undefined;
+  const details = error.details;
+  if (typeof details !== "object" || details === null || !("streamReceipt" in details)) return undefined;
+  return details.streamReceipt;
 }

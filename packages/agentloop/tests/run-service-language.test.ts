@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
-import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, recoveryArtifactTargetBinding, RunService } from "../src/runtime/run-service.ts";
+import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, recoveryTargetBinding, RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import {
@@ -11,16 +11,14 @@ import {
   testOwner,
 } from "./runtime-test-helpers.ts";
 
-test("recovery plan projection retains Runtime-owned artifact target bindings by ID", () => {
+test("recovery plan projection retains canonical delivery target ownership", () => {
   const binding = {
+    targetIds: ["receipt-standard-excel"],
     artifactTargets: [{ id: "receipt-standard-excel", purpose: "Workbook", kind: "spreadsheet", format: "excel", terminalRequired: true }],
   } as never;
-  const taskSemantics = {
-    artifactTargets: [{ id: "receipt-standard-excel", purpose: "Workbook", action: "create", kind: "spreadsheet", format: "excel", surface: "workspace_artifact", terminalRequired: true }],
-  } as never;
 
-  assert.deepEqual(recoveryArtifactTargetBinding(binding, taskSemantics), {
-    artifactTargetIds: ["receipt-standard-excel"],
+  assert.deepEqual(recoveryTargetBinding(binding), {
+    targetIds: ["receipt-standard-excel"],
   });
 });
 
@@ -87,13 +85,13 @@ test("RunService enforces the configured model-turn budget for each Plan step", 
       modelFactory: () => model,
       plannerFactory: () => ({
         plan: async (task) => ({
-          goal: task.input,
+          goal: task.canonicalState.intent.userInput,
           schema: "agentloop.outcomePlan/v2" as const,
           shape: "single_leaf" as const,
           selectedSkillIds: [],
           steps: [{
             id: "conversation-only",
-            objective: task.input,
+            objective: task.canonicalState.intent.userInput,
             dependencies: [],
             role: "deliver" as const,
             skillIds: [],
@@ -108,7 +106,7 @@ test("RunService enforces the configured model-turn budget for each Plan step", 
     });
 
     const owner = testOwner();
-    await assert.rejects(runs.execute(owner.user.id, "完成当前步骤"), (error: unknown) => {
+    await assert.rejects(runs.execute(owner.user.id, "Return a direct answer."), (error: unknown) => {
       assert.equal((error as { code?: string }).code, "RUN_LIMIT_EXCEEDED");
       return true;
     });

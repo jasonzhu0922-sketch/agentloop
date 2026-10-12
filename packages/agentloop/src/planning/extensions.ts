@@ -1,5 +1,6 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { UploadedSourceSummary, VisibleDirectoryGrant } from "../runtime/contracts.ts";
+import type { CanonicalRunState } from "../runtime/canonical-run-state.ts";
 import type {
   ConversationWorkingSet,
   PlanProposal,
@@ -10,9 +11,9 @@ import type {
 } from "./contracts.ts";
 
 export interface PlanningExtensionInput {
-  readonly runId: string;
   readonly actorUserId: string;
-  readonly input: string;
+  /** The same Run-owned intent and progress authority used by the core Planner. */
+  readonly canonicalState: CanonicalRunState;
   readonly responseOnly: boolean;
   readonly modelKey?: string;
   readonly conversationId?: string;

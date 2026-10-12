@@ -348,7 +348,7 @@ export function createComputerTools(
       name: "computer_aggregate_table_artifact",
       description: [
         "Derive deterministic count, group-count, sum, average, minimum, or maximum statistics from a durable agentloop.visibleTableExtraction/v1 JSON artifact.",
-        "Use this for a downstream count, grouping, distribution, ranking, or numeric aggregate question after structured extraction; it reads every selected record and returns coverage, source ranges, filters, values/groups, and a reusable derived_aggregation evidence receipt.",
+        "Use this for a downstream count, grouping, distribution, ranking, or numeric aggregate question after structured extraction; it reads every selected record and returns coverage, source ranges, filters, values/groups, and computation provenance.",
         "This Tool preserves data semantics only. It does not decide business labels or write the user-facing conclusion.",
       ].join(" "),
       inputSchema: objectSchema(["path", "queries"], {
@@ -1336,9 +1336,9 @@ function aggregateTableExtractionArtifact(input: {
       facts,
       caveats: deduplicatedCaveats,
       evidenceKinds: {
-        satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", ...(complete ? ["derived_aggregation", "table_coverage"] : [])],
+        satisfied: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", ...(complete ? ["table_coverage"] : [])],
         caveated: deduplicatedCaveats.length === 0 ? [] : ["explicit_caveats"],
-        failed: complete ? [] : ["derived_aggregation"],
+        failed: complete ? [] : ["table_coverage"],
       },
     },
   };

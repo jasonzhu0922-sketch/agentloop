@@ -53,7 +53,6 @@ export function buildStepRuntimeContextSnapshot(input: {
   const stepDependencyContexts = buildStepDependencyContexts(input.step, input.plan, stepSemanticFrame);
   const resultBindings = collectResultBindings(input.plan.resultBindings ?? [], stepDependencyContexts);
   const hasStructuredJsonArtifactDependencies = hasStructuredJsonArtifacts(stepDependencyContexts);
-  const requiresDerivedAggregation = input.step.evidenceContract?.requiredKinds.includes("derived_aggregation") === true;
   const conversationReuseContext = buildConversationReuseContext(input.conversationWorkingSet);
   const boundOutcomeConversion = boundOutcomeConversionDirective(input);
   const planStepHandoffFrame = buildPlanStepHandoffFrame(input.step, input.plan, stepSemanticFrame);
@@ -86,6 +85,10 @@ export function buildStepRuntimeContextSnapshot(input: {
           resolvedToolNames,
           ...(input.step.evidenceContract === undefined ? {} : { evidenceContract: input.step.evidenceContract }),
           successCriteria: input.step.successCriteria,
+        },
+        evidenceProductionPolicy: {
+          instruction: "For each required evidence kind, use only its admitted evidenceProducers. A Tool that creates similar content but is not bound as a producer cannot satisfy the receipt contract. Repair must preserve these bindings instead of guessing another Tool from the evidence-kind name.",
+          producers: input.step.executionBinding.evidenceProducers,
         },
         ...(boundOutcomeConversion === undefined ? {} : { boundOutcomeConversion }),
         decisionAuthority: {
@@ -123,12 +126,6 @@ export function buildStepRuntimeContextSnapshot(input: {
           ? {
             structuredArtifactConsumptionDiscipline:
               "A dependency result includes durable structured JSON artifacts. Use its resultBinding with read_result first to inspect the canonical artifact manifest; do not infer omitted tables, rows, or groups from step handoff metadata. For agentloop.tableExtractionArtifact/v1, use the returned manifest table entries and their recordsPointer/rowsPointer/columnsPointer with computer_read_json JSON Pointer queries and array windows. Use computer_summarize_table_artifact first to cover all manifest tables with compact field/count/stat summaries; then use computer_read_json only for missing details or narrow windows. Use computer_search_text only for unknown keyword locations in unstructured text, or when the manifest/profile is insufficient after structured reads.",
-          }
-          : {}),
-        ...(requiresDerivedAggregation
-          ? {
-            derivedAggregationDiscipline:
-              "This step answers an aggregation question from structured dependency evidence. Use computer_aggregate_table_artifact against the referenced durable extraction artifact for count, group, rank, distribution, or numeric statistics; preserve its coverage and caveats in the answer. A caveat is not a substitute for the requested result when that Tool reports complete coverage. Do not claim the aggregate cannot be determined without first reporting why the structured aggregation receipt is incomplete or unavailable.",
           }
           : {}),
         ...(evidenceAcquisitionDiscipline === undefined ? {} : { evidenceAcquisitionDiscipline }),
@@ -485,13 +482,15 @@ export function buildStepToolProgressPolicy(input: {
   readonly workflowEvidenceActions?: readonly RuntimeWorkflowEvidenceAction[];
 }): RuntimeToolProgressPolicy | undefined {
   const requiredKinds = input.step.evidenceContract?.requiredKinds ?? [];
-  if (!input.requiresFileOutput && !stepRequiresRuntimeEvidenceProgress(requiredKinds)) return undefined;
+  if (!input.requiresFileOutput && !stepRequiresRuntimeEvidenceProgress(requiredKinds) && input.step.executionBinding.targetIds.length === 0) return undefined;
   return runtimeStepToolProgressPolicy(requiredKinds, {
+    targetIds: input.step.executionBinding.targetIds,
     expectedArtifactKind: input.taskProfile?.artifactKind === "none" ? undefined : input.taskProfile?.artifactKind,
     ...(input.expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat: input.expectedArtifactFormat }),
     ...(input.artifactTargets === undefined || input.artifactTargets.length === 0 ? {} : { artifactTargets: input.artifactTargets }),
     artifactDeliveryRequired: input.requiresFileOutput,
     workflowEvidenceActions: input.workflowEvidenceActions,
+    evidenceProducers: input.step.executionBinding.evidenceProducers,
     scope: stepRequiresArtifactEvidence(input.step)
       ? "artifact"
       : stepRequiresSourceEvidence(requiredKinds) ? "source" : "generic",

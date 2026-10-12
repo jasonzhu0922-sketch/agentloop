@@ -7,14 +7,22 @@ export function instantiatePlanTemplate(input: {
   readonly fingerprint: TaskFingerprint;
 }): PlanProposal {
   const selectedSkillRoles = selectSkillRoles(input.task.selectedSkillRoles, input.template);
+  const userInput = input.task.canonicalState.intent.userInput;
+  const dependedOnStepIds = new Set(input.template.planSkeleton.flatMap((step) => step.dependsOn));
+  const terminalStepIds = input.template.planSkeleton
+    .filter((step) => !dependedOnStepIds.has(step.id))
+    .map((step) => step.id);
+  const canonicalTargetIds = (input.task.canonicalState.intent.understanding.deliverables ?? [])
+    .map((target) => target.targetId);
   const steps = input.template.planSkeleton.map((step) => ({
     id: step.id,
     kind: "leaf" as const,
-    objective: instantiateObjective(step, input.task.input),
+    objective: instantiateObjective(step, userInput),
     dependencies: step.dependsOn,
     role: step.role,
     skillIds: skillIdsForStep(step, selectedSkillRoles),
     requiredCapabilities: step.requiredCapabilities,
+    targetIds: terminalStepIds.length === 1 && terminalStepIds[0] === step.id ? canonicalTargetIds : [],
     evidenceContract: {
       requiredKinds: step.requiredEvidenceKinds,
       caveatPolicy: "none" as const,
@@ -31,7 +39,7 @@ export function instantiatePlanTemplate(input: {
   return {
     schema: "agentloop.outcomePlan/v2",
     shape: inferShape(input.template),
-    goal: input.task.input,
+    goal: userInput,
     selectedSkillIds,
     ...(selectedSkillRoles.length === 0 ? {} : { selectedSkillRoles }),
     steps,

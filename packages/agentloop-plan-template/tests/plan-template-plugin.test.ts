@@ -3,9 +3,18 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { PlanProposal } from "@zhujun/agentloop";
+import { createCanonicalRunState, understandTask, type PlanProposal } from "@zhujun/agentloop";
 import { createPlanTemplatePlugin } from "../src/index.ts";
 import { profileTask, routePlanTemplate } from "../src/index.ts";
+
+function canonicalState(runId: string, userInput: string) {
+  return createCanonicalRunState({
+    runId,
+    userInput,
+    understanding: understandTask({ objective: userInput }),
+    now: 1,
+  });
+}
 
 test("observeEnabled records a match in the plugin-owned sqlite database", async () => {
   const directory = await fs.mkdtemp(join(tmpdir(), "agentloop-plan-template-"));
@@ -25,9 +34,8 @@ test("observeEnabled records a match in the plugin-owned sqlite database", async
   });
   try {
     const decision = await plugin.extension().beforePlanning({
-      runId: "run-observe",
       actorUserId: "owner",
-      input: "请基于上传的 Excel 生成 HTML 分析报告",
+      canonicalState: canonicalState("run-observe", "请基于上传的 Excel 生成 HTML 分析报告"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -64,9 +72,8 @@ test("observeEnabled records a match in the plugin-owned sqlite database", async
 
 test("mcp route queries are not profiled as web research templates", async () => {
   const fingerprint = profileTask({
-    runId: "run-amap-mcp",
     actorUserId: "owner",
-    input: "请调用高德 MCP，查询天安门到外滩的驾车路线和距离。",
+    canonicalState: canonicalState("run-amap-mcp", "请调用高德 MCP，查询天安门到外滩的驾车路线和距离。"),
     responseOnly: false,
     availableSkills: [],
     selectedSkillRoles: [],
@@ -82,9 +89,8 @@ test("mcp route queries are not profiled as web research templates", async () =>
 
   const decision = routePlanTemplate({
     task: {
-      runId: "run-amap-mcp",
       actorUserId: "owner",
-      input: "请调用高德 MCP，查询天安门到外滩的驾车路线和距离。",
+      canonicalState: canonicalState("run-amap-mcp", "请调用高德 MCP，查询天安门到外滩的驾车路线和距离。"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -142,9 +148,8 @@ test("mcp route queries are not profiled as web research templates", async () =>
 test("direct-use rejects templates with disjoint specific instruction fingerprints", async () => {
   const input = "查询天安门到乌鲁木齐的自驾游行车路线，要有关键节点信息。";
   const task = {
-    runId: "run-disjoint-instruction",
     actorUserId: "owner",
-    input,
+    canonicalState: canonicalState("run-disjoint-instruction", input),
     responseOnly: false,
     availableSkills: [],
     selectedSkillRoles: [],
@@ -224,9 +229,8 @@ test("direct-use rejects templates with disjoint specific instruction fingerprin
 
 test("instruction tokens raise similarity for matching template instruction text", async () => {
   const fingerprint = profileTask({
-    runId: "run-instruction-sim",
     actorUserId: "owner",
-    input: "查询并返回最新研究结果",
+    canonicalState: canonicalState("run-instruction-sim", "查询并返回最新研究结果"),
     responseOnly: false,
     availableSkills: [],
     selectedSkillRoles: [],
@@ -238,9 +242,8 @@ test("instruction tokens raise similarity for matching template instruction text
 
   const decision = routePlanTemplate({
     task: {
-      runId: "run-instruction-sim",
       actorUserId: "owner",
-      input: "查询并返回最新研究结果",
+      canonicalState: canonicalState("run-instruction-sim", "查询并返回最新研究结果"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -307,9 +310,8 @@ test("instruction tokens raise similarity for matching template instruction text
 });
 test("research tasks without instruction affinity stay below direct-use threshold", async () => {
   const fingerprint = profileTask({
-    runId: "run-research",
     actorUserId: "owner",
-    input: "请联网查询最近的 AI 热点新闻，并给出简洁中文简报。",
+    canonicalState: canonicalState("run-research", "请联网查询最近的 AI 热点新闻，并给出简洁中文简报。"),
     responseOnly: false,
     availableSkills: [],
     selectedSkillRoles: [],
@@ -324,9 +326,8 @@ test("research tasks without instruction affinity stay below direct-use threshol
 
   const decision = routePlanTemplate({
     task: {
-      runId: "run-research",
       actorUserId: "owner",
-      input: "请联网查询最近的 AI 热点新闻，并给出简洁中文简报。",
+      canonicalState: canonicalState("run-research", "请联网查询最近的 AI 热点新闻，并给出简洁中文简报。"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -448,9 +449,8 @@ test("observe mode can run alongside direct use routing", async () => {
     });
 
     const decision = await plugin.extension().beforePlanning({
-      runId: "run-observe-direct-use",
       actorUserId: "owner",
-      input: "研究 web search result and deliver a summary",
+      canonicalState: canonicalState("run-observe-direct-use", "研究 web search result and deliver a summary"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -524,9 +524,8 @@ test("observeEnabled can run alongside direct use routing", async () => {
     });
 
     const decision = await plugin.extension().beforePlanning({
-      runId: "run-observe-direct-use",
       actorUserId: "owner",
-      input: "研究 web search result and deliver a summary",
+      canonicalState: canonicalState("run-observe-direct-use", "研究 web search result and deliver a summary"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -611,9 +610,8 @@ test("direct-use templates rebind leaf objectives to the current task input", as
     });
 
     const decision = await plugin.extension().beforePlanning({
-      runId: "run-api-query-rebind",
       actorUserId: "owner",
-      input: "查询宝武集团数据中台客商画像API 的参数信息",
+      canonicalState: canonicalState("run-api-query-rebind", "查询宝武集团数据中台客商画像API 的参数信息"),
       responseOnly: false,
       availableSkills: [{ id: "discovered:api-query", ownerUserId: "owner", name: "api-query", description: "API query", sourceKind: "package" }],
       selectedSkillRoles: [{ skillId: "discovered:api-query", role: "source_provider", reason: "metadata" }],
@@ -688,9 +686,8 @@ test("observed and routed matches are both marked completed on outcome", async (
     });
 
     await plugin.extension().beforePlanning({
-      runId: "run-outcome-rewrite",
       actorUserId: "owner",
-      input: "研究 web search result and deliver a summary",
+      canonicalState: canonicalState("run-outcome-rewrite", "研究 web search result and deliver a summary"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -745,9 +742,8 @@ test("disabled mode does not create the plugin database", async () => {
   });
   try {
     const decision = await plugin.extension().beforePlanning({
-      runId: "run-off",
       actorUserId: "owner",
-      input: "hello",
+      canonicalState: canonicalState("run-off", "hello"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -784,9 +780,8 @@ test("plugin resolves relative sqlite storage paths from plugin config context",
   });
   try {
     const decision = await plugin.extension().beforePlanning({
-      runId: "run-relative-storage",
       actorUserId: "owner",
-      input: "hello",
+      canonicalState: canonicalState("run-relative-storage", "hello"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -826,9 +821,8 @@ test("miner promotes repeated completed observations to candidate templates only
   try {
     for (const [index, runId] of ["run-mine-1", "run-mine-2"].entries()) {
       await plugin.extension().beforePlanning({
-        runId,
         actorUserId: "owner",
-        input: "查询宝武集团数据中台中合同备案 API 的参数信息",
+        canonicalState: canonicalState(runId, "查询宝武集团数据中台中合同备案 API 的参数信息"),
         responseOnly: false,
         availableSkills: [{ id: "discovered:api-query", ownerUserId: "owner", name: "api-query", description: "API query", sourceKind: "package" }],
         selectedSkillRoles: [{ skillId: "discovered:api-query", role: "source_provider", reason: "metadata" }],
@@ -858,9 +852,8 @@ test("miner promotes repeated completed observations to candidate templates only
     }
 
     await plugin.extension().beforePlanning({
-      runId: "run-missing-proposal",
       actorUserId: "owner",
-      input: "查询宝武集团数据中台中合同备案 API 的参数信息",
+      canonicalState: canonicalState("run-missing-proposal", "查询宝武集团数据中台中合同备案 API 的参数信息"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -918,9 +911,8 @@ test("manual management can approve and retire mined templates", async () => {
   });
   try {
     await plugin.extension().beforePlanning({
-      runId: "run-manage",
       actorUserId: "owner",
-      input: "查询宝武集团数据中台中合同备案 API 的参数信息",
+      canonicalState: canonicalState("run-manage", "查询宝武集团数据中台中合同备案 API 的参数信息"),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],

@@ -28,14 +28,16 @@ const SOURCE_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "explicit_caveats",
 ]);
 
 export function createStepExecutionBinding(input: {
   readonly step: PlanStepProposal;
+  /** Runtime materialization of the immutable artifact instances owned by targetIds. */
+  readonly artifactTargets?: readonly ArtifactTarget[];
   readonly availableToolNames: ReadonlySet<string>;
   readonly availableTools?: readonly PlanningToolSummary[];
+  readonly availableCapabilities: readonly PlanningCapability[];
   readonly evidenceContract?: EvidenceContract;
 }): StepExecutionBinding {
   const requiredCapabilities = uniqueStrings(input.step.requiredCapabilities);
@@ -49,14 +51,32 @@ export function createStepExecutionBinding(input: {
     requiredToolSourceIds,
   );
   const evidenceKinds = uniqueEvidenceKinds(input.evidenceContract?.requiredKinds ?? []);
-  const artifactTargets = normalizeArtifactTargets(input.step.artifactTargets ?? []);
+  const capabilityById = new Map(input.availableCapabilities.map((capability) => [capability.id, capability]));
+  const evidenceProducers = evidenceKinds.flatMap((evidenceKind) => requiredCapabilities.flatMap((capabilityId) => {
+    const capability = capabilityById.get(capabilityId);
+    if (capability?.produces.includes(evidenceKind) !== true) return [];
+    return [{
+      evidenceKind,
+      capabilityId,
+      resolvedToolNames: resolveToolNamesForCapabilities(
+        [capabilityId],
+        input.availableToolNames,
+        input.availableTools,
+        requiredToolSourceIds,
+      ),
+    }];
+  }));
+  const artifactTargets = normalizeArtifactTargets(input.artifactTargets ?? []);
+  const targetIds = uniqueStrings(input.step.targetIds ?? []);
   return {
     schema: "agentloop.stepExecutionBinding/v1",
     requiredCapabilities,
     resolvedToolNames,
+    evidenceProducers,
     sourceKinds: inferSourceKinds(requiredCapabilities, evidenceKinds),
     sideEffect: inferSideEffect(requiredCapabilities),
     evidenceKinds,
+    targetIds,
     ...(artifactTargets.length === 0 ? {} : { artifactTargets }),
     ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
     ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
@@ -168,7 +188,7 @@ export function planningCapabilitiesFromTools(
 function toolSourceCapabilityEvidenceKinds(values: readonly string[] | undefined): EvidenceKind[] {
   const supported = new Set<EvidenceKind>([
     "source_summary", "source_urls", "schema_summary", "record_counts", "table_coverage",
-    "structured_extraction_artifact", "derived_aggregation", "artifact_path", "artifact_non_empty",
+    "structured_extraction_artifact", "artifact_path", "artifact_non_empty",
     "artifact_acceptance", "artifact_openable", "format_matches_request", "basic_navigation",
     "delivery_receipt", "explicit_caveats",
   ]);
@@ -583,7 +603,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     // This capability can inspect an extraction that was already produced by
     // another operation.  It cannot itself attest that an extraction happened:
     // a generic JSON read is not a source-bound extraction receipt.
-    produces: ["source_summary", "schema_summary", "record_counts", "derived_aggregation", "explicit_caveats"],
+    produces: ["source_summary", "schema_summary", "record_counts", "table_coverage", "explicit_caveats"],
     sourceKinds: ["workspace_file"],
     sideEffect: "workspace_read",
     risk: "low",
@@ -614,7 +634,7 @@ const CAPABILITY_DEFINITIONS: readonly PlanningCapability[] = [
     category: "structured_data",
     label: "Compute over hash-bound workspace inputs",
     description: "Run a generic workspace command that emits a standard computation artifact bound to immutable input references.",
-    produces: ["derived_aggregation", "explicit_caveats"],
+    produces: ["explicit_caveats"],
     sourceKinds: ["workspace_file"],
     sideEffect: "workspace_write",
     risk: "medium",

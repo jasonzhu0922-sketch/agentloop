@@ -4,7 +4,6 @@ import { requireRecord, requireString, requireStringArray } from "../shared/vali
 import type { ModelAdapter, ModelInvocation, RuntimeContextSnapshot, RuntimeDeliveryCandidate, RuntimeEventSink } from "../runtime/contracts.ts";
 import { buildDynamicSystemPrompt, buildTaskProfile, formatDynamicPromptContext, type TaskProfile } from "../runtime/dynamic-prompt.ts";
 import { completeWithStreaming } from "../runtime/model-streaming.ts";
-import { classifyTaskIntent } from "../runtime/task-intent.ts";
 import { isTextToolInvocation } from "../runtime/text-tool-invocation.ts";
 import { deliveryCandidateCaveats } from "../runtime/delivery-candidate.ts";
 import { artifactMatchesExpectedTarget } from "../runtime/tool-progress-policy.ts";
@@ -27,7 +26,7 @@ import type {
   StepEvidence,
   SuggestedRepairShape,
 } from "./contracts.ts";
-import { stepHasSourceKind, stepResolvedToolNames } from "./step-execution-binding.ts";
+import { stepHasSourceKind } from "./step-execution-binding.ts";
 
 const SUBMIT_ASSESSMENT_TOOL = {
   name: "submit_assessment",
@@ -299,8 +298,12 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const successfulToolRefs = input.evidence.toolCalls
       .filter((toolCall) => !toolCall.isError)
       .map((toolCall) => toolCall.toolCallId);
-    const receipts = runtimeObservableReceipts(input.evidence.toolCalls);
     const requiredKinds = runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []);
+    const receipts = runtimeObservableReceipts(
+      input.evidence.toolCalls,
+      requiredKinds,
+      input.step.executionBinding.evidenceProducers,
+    );
     const blockingKinds = new Set(input.step.successCriteria
       .filter((criterion) => criterion.blocking !== false)
       .map((criterion) => criterion.id));
@@ -359,6 +362,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
 
 interface RuntimeObservableReceipt {
   readonly toolCallId: string;
+  readonly toolName: string;
   readonly schema: string;
   readonly verdict?: string;
   readonly artifactPath?: string;
@@ -384,7 +388,6 @@ const RUNTIME_OBSERVABLE_GATE_KINDS = new Set([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -397,8 +400,19 @@ function runtimeGateRequiredKinds(requiredKinds: readonly string[]): string[] {
   return requiredKinds.filter((kind) => RUNTIME_OBSERVABLE_GATE_KINDS.has(kind));
 }
 
-function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string }[]): RuntimeObservableReceipt[] {
+function runtimeObservableReceipts(
+  toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string }[],
+  requiredKinds: readonly string[],
+  evidenceProducers: StepAssessmentInput["step"]["executionBinding"]["evidenceProducers"],
+): RuntimeObservableReceipt[] {
   const receipts: RuntimeObservableReceipt[] = [];
+  const requiredKindSet = new Set(requiredKinds);
+  const producerToolsByKind = new Map<string, Set<string>>();
+  for (const producer of evidenceProducers) {
+    const tools = producerToolsByKind.get(producer.evidenceKind) ?? new Set<string>();
+    for (const toolName of producer.resolvedToolNames) tools.add(toolName);
+    producerToolsByKind.set(producer.evidenceKind, tools);
+  }
   for (const toolCall of toolCalls) {
     if (toolCall.isError) continue;
     for (const parsed of runtimeEvidenceRecordsFromToolResult(toolCall.result)) {
@@ -417,21 +431,32 @@ function runtimeObservableReceipts(toolCalls: readonly { toolCallId: string; too
         schema === undefined
       ) continue;
       const evidenceKinds = runtimeEvidenceKindArrays(nestedReceipt ?? parsed);
+      const authenticatedArtifactAcceptance = schema === "agentloop.artifactAcceptance/v1"
+        && producerToolsByKind.get("artifact_acceptance")?.has(toolCall.toolName) === true;
+      const producerAllows = (kind: string): boolean =>
+        !requiredKindSet.has(kind)
+        || producerToolsByKind.get(kind)?.has(toolCall.toolName) === true
+        || (authenticatedArtifactAcceptance && isArtifactAcceptanceAttestationKind(kind));
       receipts.push({
         toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
         schema,
-        verdict: canonicalArtifactAcceptanceVerdict(parsed),
+        verdict: schema === "agentloop.artifactAcceptance/v1" && !authenticatedArtifactAcceptance
+          ? undefined
+          : canonicalArtifactAcceptanceVerdict(parsed),
         ...(schema === "agentloop.artifactAcceptance/v1" || schema === "agentloop.artifactReceipt/v1"
           ? {
             artifactPath: artifactPathFromRecord(nestedReceipt ?? parsed),
             artifactKind: artifactKindFromRecord(nestedReceipt ?? parsed),
           }
           : {}),
-        satisfied: new Set(evidenceKinds.satisfied),
-        failed: new Set(evidenceKinds.failed),
-        caveatsRecorded: Array.isArray((nestedReceipt ?? parsed).caveats)
+        satisfied: new Set(evidenceKinds.satisfied.filter(producerAllows)),
+        failed: new Set(evidenceKinds.failed.filter(producerAllows)),
+        caveatsRecorded: producerAllows("explicit_caveats") && (
+          Array.isArray((nestedReceipt ?? parsed).caveats)
           || evidenceKinds.satisfied.includes("explicit_caveats")
-          || evidenceKinds.caveated.includes("explicit_caveats"),
+          || evidenceKinds.caveated.includes("explicit_caveats")
+        ),
         ...(schema === "agentloop.skillWorkflowEvidenceReceipt/v1" && workflowActionFromRecord(parsed) !== undefined
           ? { workflowAction: workflowActionFromRecord(parsed) }
           : {}),
@@ -509,7 +534,7 @@ function evidenceKindSatisfiedByGate(
       undefined,
       runtimeEvidenceBundles,
     ));
-    return eachTargetSatisfied && hasDistinctArtifactReceiptCoverage(receipts, artifactTargets);
+    return eachTargetSatisfied && hasDistinctArtifactReceiptCoverage(receipts, artifactTargets, kind);
   }
   if (kind === "delivery_receipt") {
     const candidateReceipt = candidate?.deliveryReceipt !== undefined
@@ -561,13 +586,13 @@ function evidenceKindSatisfiedByGate(
     ) return true;
     if (expectedArtifactKind !== undefined || expectedArtifactFormat !== undefined) return false;
   }
-  const declaredActions = (workflowEvidenceActions ?? []).filter((action) => action.producesEvidenceKinds.includes(kind));
-  if (declaredActions.length > 0) {
+  const boundActions = (workflowEvidenceActions ?? []).filter((action) => action.producesEvidenceKinds.includes(kind));
+  if (boundActions.length > 0) {
     return receipts.some((receipt) => !receipt.failed.has(kind)
       && receipt.schema === "agentloop.skillWorkflowEvidenceReceipt/v1"
       && receipt.satisfied.has(kind)
       && receipt.workflowAction !== undefined
-      && declaredActions.some((action) => action.skillName === receipt.workflowAction!.skillName && action.executorId === receipt.workflowAction!.executorId && action.actionId === receipt.workflowAction!.actionId));
+      && boundActions.some((action) => action.skillName === receipt.workflowAction!.skillName && action.executorId === receipt.workflowAction!.executorId && action.actionId === receipt.workflowAction!.actionId));
   }
   return receipts.some((receipt) => {
     if (receipt.failed.has(kind)) return false;
@@ -579,10 +604,11 @@ function evidenceKindSatisfiedByGate(
 function hasDistinctArtifactReceiptCoverage(
   receipts: readonly RuntimeObservableReceipt[],
   targets: readonly ArtifactTarget[],
+  kind: string,
 ): boolean {
   const byPath = [...new Map(
     receipts
-      .filter((receipt) => receipt.artifactPath !== undefined)
+      .filter((receipt) => receipt.artifactPath !== undefined && receiptSatisfiesArtifactEvidenceKind(receipt, kind))
       .map((receipt) => [receipt.artifactPath!, receipt]),
   ).values()];
   const assigned = new Set<string>();
@@ -600,11 +626,29 @@ function hasDistinctArtifactReceiptCoverage(
   return assign(0);
 }
 
+function receiptSatisfiesArtifactEvidenceKind(receipt: RuntimeObservableReceipt, kind: string): boolean {
+  if (kind === "delivery_receipt") {
+    return (receipt.schema === "agentloop.artifactReceipt/v1" || receipt.schema === "agentloop.artifactAcceptance/v1")
+      && !receipt.failed.has("artifact_path")
+      && !receipt.failed.has("artifact_non_empty");
+  }
+  if (kind === "artifact_acceptance") {
+    return receipt.schema === "agentloop.artifactAcceptance/v1"
+      && (receipt.verdict === "accepted" || receipt.verdict === "caveated" || receipt.satisfied.has(kind))
+      && receipt.failed.size === 0;
+  }
+  return receipt.satisfied.has(kind) && !receipt.failed.has(kind);
+}
+
 function isArtifactAcceptanceEvidenceKind(kind: string): boolean {
   return kind === "artifact_path"
     || kind === "artifact_non_empty"
     || kind === "artifact_openable"
     || kind === "format_matches_request";
+}
+
+function isArtifactAcceptanceAttestationKind(kind: string): boolean {
+  return kind === "artifact_acceptance" || isArtifactAcceptanceEvidenceKind(kind);
 }
 
 function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
@@ -835,10 +879,52 @@ function buildAssessment(
   };
 }
 
+/**
+ * Rebind every assessor implementation to the admitted Step contract before
+ * its decision can update CanonicalRunState. Injected assessors are not a
+ * second authority for criterion identity, target ownership, or blocking.
+ */
+export function enforceAdmittedAssessment(
+  input: StepAssessmentInput,
+  assessment: SkillComplianceAssessment,
+): SkillComplianceAssessment {
+  if (assessment.planId !== input.planId || assessment.stepId !== input.step.id) {
+    throw new AppError("ASSESSMENT_ERROR", "Assessment belongs to another Plan or Step", 422);
+  }
+  assertExactIds(
+    assessment.criteria.map((criterion) => criterion.criterionId),
+    input.step.successCriteria.map((criterion) => criterion.id),
+    "criterion",
+  );
+  const criteria = assessment.criteria.map((criterion) => classifyCriterion(input, criterion));
+  const hasUserVisibleDelivery = input.evidence.candidateOutput.trim().length > 0
+    || hasArtifactDeliveryEvidence(input);
+  const approved = assessment.approved
+    && hasUserVisibleDelivery
+    && criteria.every((criterion) => criterion.satisfied || criterion.blocking !== true);
+  const failedBoundary = approved
+    ? undefined
+    : assessment.failedBoundary ?? deriveFailedBoundary(input, criteria, assessment.skills);
+  const { failedBoundary: _untrustedBoundary, ...base } = assessment;
+  return {
+    ...base,
+    approved,
+    criteria,
+    feedback: approved
+      ? assessment.feedback
+      : assessment.feedback || defaultFeedback(criteria, assessment.skills),
+    ...(failedBoundary === undefined ? {} : { failedBoundary }),
+  };
+}
+
 function hasArtifactDeliveryEvidence(input: StepAssessmentInput): boolean {
   return input.evidence.toolCalls.some((toolCall) => {
     if (toolCall.isError) return false;
-    return runtimeObservableReceipts([toolCall]).some((receipt) =>
+    return runtimeObservableReceipts(
+      [toolCall],
+      runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []),
+      input.step.executionBinding.evidenceProducers,
+    ).some((receipt) =>
       receipt.schema === "agentloop.artifactReceipt/v1"
       || receipt.schema === "agentloop.artifactAcceptance/v1",
     );
@@ -852,25 +938,34 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
   const expectedFormatUnmet = criterion.criterionId === "format_matches_request"
     && (input.expectedArtifactKind !== undefined || input.expectedArtifactFormat !== undefined)
     && latestArtifactReceipt(
-      runtimeObservableReceipts(input.evidence.toolCalls),
+      runtimeObservableReceipts(
+        input.evidence.toolCalls,
+        runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []),
+        input.step.executionBinding.evidenceProducers,
+      ),
       input.evidence.deliveryCandidate,
       input.expectedArtifactKind,
       input.expectedArtifactFormat,
     ) === undefined;
   const structuredBundleUnverified = criterion.criterionId === "structured_extraction_artifact"
     && (input.runtimeEvidenceBundles?.verified.length ?? 0) === 0;
+  const targetClaimMissing = admitted?.targetId !== undefined
+    && input.evidence.deliveryCandidate?.deliveryClaims.some((claim) => claim.targetId === admitted.targetId) !== true;
   return {
     ...criterion,
-    ...(expectedFormatUnmet || structuredBundleUnverified
+    ...(admitted?.targetId === undefined ? {} : { targetId: admitted.targetId }),
+    ...(expectedFormatUnmet || structuredBundleUnverified || targetClaimMissing
       ? {
         satisfied: false,
-        rationale: expectedFormatUnmet
+        rationale: targetClaimMissing
+          ? `The completion candidate has no delivery claim for canonical target ${admitted?.targetId}.`
+          : expectedFormatUnmet
           ? `No accepted artifact matches the required ${input.expectedArtifactFormat ?? input.expectedArtifactKind} format.`
           : "No Runtime-owned evidence bundle passed Assessment verification.",
       }
       : {}),
     blocking,
-    status: ((expectedFormatUnmet || structuredBundleUnverified) ? false : criterion.satisfied)
+    status: ((expectedFormatUnmet || structuredBundleUnverified || targetClaimMissing) ? false : criterion.satisfied)
       ? "satisfied"
       : verification === "model_judged" || verification === "decision_context"
         ? "unverified"
@@ -935,6 +1030,7 @@ function deriveFailedBoundary(
   const failedCriteria = criteria.filter((item) => !item.satisfied && item.blocking === true);
   const evidenceKinds = new Set<string>(input.step.evidenceContract?.requiredKinds ?? []);
   const missingEvidenceKinds = failedCriteria.flatMap((criterion) => {
+    if (criterion.targetId !== undefined) return [criterion.criterionId];
     if (evidenceKinds.has(criterion.criterionId)) return [criterion.criterionId];
     return input.step.evidenceContract === undefined ? [criterion.criterionId] : [];
   });
@@ -974,9 +1070,11 @@ function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
     step: {
       id: input.step.id,
       objective: input.step.objective,
+      targetIds: input.step.executionBinding.targetIds,
       ...(input.step.evidenceContract === undefined ? {} : { evidenceContract: input.step.evidenceContract }),
       successCriteria: input.step.successCriteria,
     },
+    targets: input.step.executionBinding.targetIds.map((targetId) => input.canonicalState.targets[targetId]),
     skills: input.skills.map((skill) => ({
       id: skill.id,
       name: skill.name,
@@ -1112,12 +1210,7 @@ function assessmentRuntimeContext(
 
 function assessmentTaskProfile(input: StepAssessmentInput): TaskProfile {
   const allowsResearchPolicy = stepAllowsResearchPolicy(input.step);
-  const intent = classifyTaskIntent({
-    objective: input.step.objective,
-    successCriteria: input.step.successCriteria,
-    toolNames: stepResolvedToolNames(input.step),
-    skillNames: input.skills.map((skill) => skill.name),
-  });
+  const intent = input.canonicalState.intent.understanding.intent;
   return buildTaskProfile({
     phase: "assessment",
     intent: "execute",

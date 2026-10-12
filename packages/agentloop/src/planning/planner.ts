@@ -10,6 +10,7 @@ import { formatAvailableSkills } from "../skills/skill-context.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type {
   CaveatPolicy,
+  ConversationTurnResolution,
   ConversationReusableArtifact,
   EvidenceContract,
   EvidenceKind,
@@ -34,7 +35,6 @@ const EVIDENCE_KIND_VALUES = [
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -51,7 +51,6 @@ const SOURCE_PROVIDER_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "explicit_caveats",
 ]);
 const SOURCE_GROUNDING_EVIDENCE_KINDS = new Set<EvidenceKind>([
@@ -99,7 +98,7 @@ const OUTCOME_LEAF_SCHEMA = {
     "requiredCapabilities",
     "sourceConstraint",
     "evidenceContract",
-    "artifactTargetIds",
+    "targetIds",
   ],
   properties: {
     id: { type: "string" },
@@ -142,7 +141,7 @@ const OUTCOME_LEAF_SCHEMA = {
         caveatPolicy: { type: "string", enum: CAVEAT_POLICY_VALUES },
       },
     },
-    artifactTargetIds: {
+    targetIds: {
       type: "array",
       maxItems: 8,
       items: { type: "string", minLength: 1, maxLength: 128 },
@@ -284,7 +283,7 @@ export class ModelPlanner implements Planner {
     }
     const messages: ModelInvocation["messages"] = [
       ...(task.conversationHistory ?? []),
-      { role: "user", content: task.input },
+      { role: "user", content: canonicalUserInput(task) },
     ];
     let planningTask = task;
     let selectedSkillRoles = task.selectedSkillRoles ?? selectInitialSkillRoles(task.availableSkills, taskProfile);
@@ -308,7 +307,7 @@ export class ModelPlanner implements Planner {
         "You are the Planner for a Plan-first Runtime.",
         "Return exactly one submit_outcome_plan tool call; do not execute work, call other tools, or declare completion.",
         "Use only supplied context facts, capability catalog entries, and Skill catalog entries.",
-        "Treat taskUnderstanding as the canonical structured interpretation for operation, subject, evidence, deliverable, and workflow; do not re-infer those boundaries from attachment filenames or generic report wording.",
+        "Treat canonicalRunState.intent.understanding as the authoritative interpretation for operation, subject, evidence, deliverable, and workflow; do not re-infer those boundaries from attachment filenames, Step prose, or generic report wording.",
       ],
       contractLines: [
         "Fill the smallest Outcome Plan using agentloop.outcomePlan/v2 so Runtime can start useful work.",
@@ -318,8 +317,8 @@ export class ModelPlanner implements Planner {
         "selectedSkillRoles is an execution-selection list, not a candidate list: every listed Skill, regardless of role, must also appear in at least one concrete leaf.skillIds; otherwise omit it.",
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
-        "requestedArtifactTargets is Runtime-owned and immutable. For an artifact-producing/adopting leaf, submit only artifactTargetIds from that inventory; do not invent IDs or rewrite purpose, kind, format, or terminalRequired. A leaf may adopt a compatible artifact from an earlier step, but its target binding remains explicit; never use one output format as the target for unrelated artifacts.",
-        "Every leaf must include artifactTargetIds. Use [] when the leaf does not produce or adopt a requested artifact.",
+        "requestedTargets is Runtime-owned and immutable. Every outcome leaf must bind the user-visible deliverable targetIds it owns; do not invent IDs or rewrite purpose, surface, kind, or format.",
+        "Every leaf must include targetIds. Use [] only for a prerequisite leaf that delivers no user-visible target.",
         "HIL pauses an outcome; preserve its requested deliverable and continue production after the response.",
         "For browser/document artifacts, require format/openability; Skill-owned QA covers navigation and polish unless required.",
         "Do not create Skill-loading-only, polish-only, QA, or repair/verification tail leaves. Skill-required QA is handled inside the Skill-bound leaf after load_skill, not as a Planner template.",
@@ -388,7 +387,7 @@ export class ModelPlanner implements Planner {
           throw planningResponseError("Planner must submit exactly one structured submit_outcome_plan call", turn, response);
         }
         const proposal = normalizeOutcomePlanProposal(
-          bindRequiredSkillCompanions(parseOutcomePlanProposal(outcomePlanCalls[0]), planningTask.availableSkills),
+          bindRequiredSkillCompanions(parseOutcomePlanProposal(outcomePlanCalls[0], planningTask), planningTask.availableSkills),
           planningTask,
         );
         assertInitialOutcomePlanShape(proposal, planningTask);
@@ -408,21 +407,14 @@ export class ModelPlanner implements Planner {
           availableToolNames: new Set(planningTask.availableToolNames),
           ...(planningTask.availableTools === undefined ? {} : { availableTools: planningTask.availableTools }),
           availableCapabilities: planningCapabilitiesForTask(planningTask),
-          ...(planningTask.requiredToolSourceIds === undefined ? {} : { requiredToolSourceIds: planningTask.requiredToolSourceIds }),
           ...(planningTask.sources === undefined ? {} : { availableUploadedSourceIds: planningTask.sources.map((source) => source.id) }),
           ...(planningTask.visibleDirectories === undefined ? {} : { availableVisibleDirectoryIds: planningTask.visibleDirectories.map((directory) => directory.id) }),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(
             planningTask.conversationWorkingSet,
-            planningTask.turnResolution,
+            canonicalTurnResolution(planningTask),
           ),
           resultBindings: runtimeResultBindingsForPlanningTask(planningTask),
-          taskIntent: {
-            deliverySurface: taskProfile.deliverySurface,
-            artifactKind: taskProfile.artifactKind,
-            sourceNeed: taskProfile.sourceNeed,
-            evidenceDemand: planningTask.turnResolution?.evidenceDemand,
-          },
-          taskSemantics: planningTask.taskUnderstanding,
+          canonicalState: planningTask.canonicalState,
         });
         await emit?.({
           type: "planning.outcome_plan.admitted",
@@ -729,7 +721,7 @@ function boundSourceProviderContractViolations(
   if (outcomePlanCalls.length !== 1) return [];
   let proposal: PlanProposal;
   try {
-    proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
+    proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0], task), task);
   } catch {
     return [];
   }
@@ -790,7 +782,7 @@ function resolveCapabilityRecovery(
   if (task.capabilityRecovery === undefined || outcomePlanCalls.length !== 1) return undefined;
   let proposal: PlanProposal;
   try {
-    proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0]), task);
+    proposal = normalizeOutcomePlanProposal(parseOutcomePlanProposal(outcomePlanCalls[0], task), task);
   } catch {
     return undefined;
   }
@@ -801,11 +793,12 @@ function resolveCapabilityRecovery(
     currentCapabilities,
     catalog: task.capabilityRecovery,
   });
-  const sourceGroundingGap = sourceGroundingRequired && task.turnResolution?.evidenceDemand !== undefined
-    && task.turnResolution.evidenceDemand !== "none"
+  const turnResolution = canonicalTurnResolution(task);
+  const sourceGroundingGap = sourceGroundingRequired && turnResolution?.evidenceDemand !== undefined
+    && turnResolution.evidenceDemand !== "none"
     ? resolveSourceGroundingGap({
       catalog: task.capabilityRecovery,
-      evidenceDemand: task.turnResolution.evidenceDemand,
+      evidenceDemand: turnResolution.evidenceDemand,
     })
     : undefined;
   const gaps = [...evidenceGaps, ...(sourceGroundingGap === undefined ? [] : [sourceGroundingGap])];
@@ -985,7 +978,23 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 }
 
 function planningTaskIntent(task: TaskSpec) {
-  return task.taskUnderstanding.intent;
+  return canonicalTaskUnderstanding(task).intent;
+}
+
+function canonicalTaskUnderstanding(task: TaskSpec) {
+  return task.canonicalState.intent.understanding;
+}
+
+function canonicalUserInput(task: TaskSpec): string {
+  return task.canonicalState.intent.userInput;
+}
+
+function canonicalTurnResolution(task: TaskSpec): ConversationTurnResolution | undefined {
+  return task.canonicalState.intent.turnResolution;
+}
+
+function canonicalRequiredToolSourceIds(task: TaskSpec): readonly string[] {
+  return task.canonicalState.intent.requiredToolSourceIds;
 }
 
 function planningTaskProfile(task: TaskSpec): TaskProfile {
@@ -1006,7 +1015,11 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
     || task.conversationWorkingSet?.activeGoal?.unfinished === true;
   const dataAnalysisSourceTask = !priorArtifactTransformation
     && operationProfileIds.has("data_analysis")
-    && (taskHasVisibleDataSource(task) || taskHasUploadedDataSource(task));
+    && (
+      taskHasVisibleDataSource(task)
+      || taskHasUploadedDataSource(task)
+      || sourceNeed !== "none"
+    );
   const planShape = recovery
     ? "recovery_patch"
     : uploadedArtifactTransformation || priorArtifactTransformation
@@ -1016,12 +1029,16 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
         : artifactKind !== "none" && (sourceNeed === "source_grounded" || sourceNeed === "strict_user_source")
           ? "fact_then_produce"
           : "single_leaf";
-  const planTopology = requiredPlanTopologyForTask(task, planShape, taskIntent.deliverySurface);
+  const planTopology = requiredPlanTopologyForTask(
+    planShape,
+    taskIntent.deliverySurface,
+    dataAnalysisSourceTask,
+  );
   return buildTaskProfile({
     phase: "planning",
     intent: recovery ? "recover" : "execute",
     operations: operationProfiles,
-    practices: task.taskUnderstanding.practiceProfiles,
+    practices: canonicalTaskUnderstanding(task).practiceProfiles,
     evidenceProfile: sourceNeed === "none"
       ? "deterministic"
       : sourceNeed === "strict_user_source"
@@ -1042,15 +1059,14 @@ function planningTaskProfile(task: TaskSpec): TaskProfile {
 
 /** Derives typed structural obligations from resolved task semantics. */
 function requiredPlanTopologyForTask(
-  task: TaskSpec,
   planShape: TaskProfile["planShape"],
   deliverySurface: TaskProfile["deliverySurface"],
+  dataAnalysisSourceTask: boolean,
 ): PlanTopologyRequirement | undefined {
   if (
-    task.taskUnderstanding.analysisScope !== "collection_aggregation"
+    !dataAnalysisSourceTask
     || planShape !== "fact_then_produce"
     || deliverySurface !== "conversation"
-    || (!taskHasVisibleDataSource(task) && !taskHasUploadedDataSource(task))
   ) return undefined;
   return {
     schema: "agentloop.planTopology/v1",
@@ -1115,8 +1131,9 @@ function isUploadedArtifactTransformationTask(
  * be resolved by Runtime before Planner treats the request as a native edit.
  */
 function conversationArtifactTransformationTarget(task: TaskSpec): ConversationReusableArtifact | undefined {
-  const target = task.turnResolution?.targetArtifact;
-  if (target === undefined || task.turnResolution?.evidenceDemand !== "none") return undefined;
+  const turnResolution = canonicalTurnResolution(task);
+  const target = turnResolution?.targetArtifact;
+  if (target === undefined || turnResolution?.evidenceDemand !== "none") return undefined;
   return task.conversationWorkingSet?.reusableArtifacts.find((artifact) =>
     artifact.reusable && artifact.runId === target.runId && artifact.path === target.path,
   );
@@ -1169,15 +1186,17 @@ function inferRiskProfile(toolNames: readonly string[]): NonNullable<TaskProfile
 }
 
 function planningIntentObjective(task: TaskSpec): string {
-  const effectiveGoal = task.turnResolution?.effectiveGoal ?? task.input;
+  const turnResolution = canonicalTurnResolution(task);
+  const userInput = canonicalUserInput(task);
+  const effectiveGoal = turnResolution?.effectiveGoal ?? userInput;
   // Every resolved effectiveGoal is self-contained. Appending the prior active
   // goal to a resolved new_goal would reintroduce exactly the cross-turn
   // semantic contamination the Resolver boundary is meant to remove.
-  const inheritsActiveGoal = task.turnResolution === undefined;
+  const inheritsActiveGoal = turnResolution === undefined;
   return [...new Set([
     effectiveGoal,
-    ...(task.turnResolution?.userConstraints ?? []),
-    task.input,
+    ...(turnResolution?.userConstraints ?? []),
+    userInput,
     inheritsActiveGoal ? task.conversationWorkingSet?.activeGoal?.goal ?? "" : "",
     inheritsActiveGoal ? task.conversationWorkingSet?.resumeSuggestion ?? "" : "",
   ].map((value) => value.trim()).filter((value) => value.length > 0))].join("\n");
@@ -1232,26 +1251,17 @@ function planningRuntimeContext(
           classificationOnly: true,
           ids: taskProfile.operations.map((profile) => profile.id),
         },
-        ...(task.requiredToolSourceIds === undefined || task.requiredToolSourceIds.length === 0
+        ...(canonicalRequiredToolSourceIds(task).length === 0
           ? {}
-          : { requiredToolSourceIds: task.requiredToolSourceIds }),
+          : { requiredToolSourceIds: canonicalRequiredToolSourceIds(task) }),
         ...(task.workspaceFacts === undefined ? {} : { workspaceFacts: task.workspaceFacts }),
-        taskUnderstanding: task.taskUnderstanding,
-        planningTask: {
-          schema: "agentloop.planningTask/v1",
-          task: task.taskUnderstanding.task,
-          ...(task.taskUnderstanding.format === undefined ? {} : { format: task.taskUnderstanding.format }),
-          evidence: task.taskUnderstanding.evidence,
-          deliverable: task.taskUnderstanding.deliverable,
-          constraints: task.taskUnderstanding.constraints,
-          instruction: "Use task for business work and format only for final delivery. Never let output format select or redefine the source/domain Skill.",
-        },
+        canonicalRunState: task.canonicalState,
+        canonicalIntentPolicy: "Read task, format, evidence, deliverables, constraints, and turn binding only from canonicalRunState.intent. Do not reinterpret them from Plan text or conversation summaries.",
         visibleDirectories: task.visibleDirectories ?? [],
         sources: task.sources ?? [],
         sourceBindingIdentityPolicy: sourceBindingIdentityPolicy(task),
         uploadedSourceContext: uploadedSourcePlanningContext(task.sources ?? []),
         ...(task.conversationWorkingSet === undefined ? {} : { conversationWorkingSet: task.conversationWorkingSet }),
-        ...(task.turnResolution === undefined ? {} : { turnResolution: task.turnResolution }),
         ...((task.planningExtensionContexts?.length ?? 0) === 0 ? {} : {
           planningExtensionContexts: task.planningExtensionContexts,
         }),
@@ -1296,8 +1306,8 @@ function planningRuntimeContext(
           capabilityCatalogSemantics: "requiredCapabilities accepts only IDs from capabilityCatalog.allowedIds. Runtime Admission resolves those authorized execution capabilities to tools after the Plan is submitted; identifiers from other planning namespaces are not capabilities.",
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
           sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete uploaded or visible-directory input binding. When present, submit sourceConstraint.bindings only for uploaded_source IDs listed in sources or visible_directory IDs listed in visibleDirectories. Runtime derives ToolSource bindings from requiredCapabilities and user-required source policy; do not submit tool_source, Tool names, MCP names, or Skill IDs.",
-          requestedArtifactTargets: task.taskUnderstanding.artifactTargets ?? [],
-          artifactTargetBindingPolicy: "requestedArtifactTargets is the complete immutable delivery inventory. Bind every requested target exactly once with artifactTargetIds on its producing or adopting leaf. Do not submit artifactTargets objects: Runtime materializes the server-owned purpose/kind/format/terminalRequired contract.",
+          requestedTargets: canonicalTaskUnderstanding(task).deliverables ?? [],
+          targetBindingPolicy: "requestedTargets is the complete immutable delivery inventory. Bind every requested target exactly once with targetIds on its producing or adopting leaf. Runtime materializes workspace artifact targets from the same canonical target inventory.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1326,7 +1336,7 @@ function planningRuntimeContext(
 
 function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][number] {
   const allowedCapabilityIds = planningCapabilitiesForTask(task).map((capability) => capability.id).sort();
-  const allowedArtifactTargetIds = (task.taskUnderstanding.artifactTargets ?? []).map((target) => target.id).sort();
+  const allowedArtifactTargetIds = (canonicalTaskUnderstanding(task).deliverables ?? []).map((target) => target.targetId).sort();
   return {
     ...SUBMIT_OUTCOME_PLAN_TOOL,
     inputSchema: {
@@ -1345,12 +1355,15 @@ function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][
                   ? { type: "string", minLength: 1 }
                   : { type: "string", enum: allowedCapabilityIds },
               },
-              artifactTargetIds: {
+              sourceConstraint: sourceConstraintSchemaForTask(task),
+              targetIds: {
                 type: "array",
                 ...(allowedArtifactTargetIds.length === 0
                   ? { maxItems: 0, items: { type: "string" } }
                   : {
-                      minItems: 1,
+                      // Prerequisite/acquisition leaves do not own a user-visible
+                      // delivery target; only producing or adopting leaves bind one.
+                      minItems: 0,
                       maxItems: allowedArtifactTargetIds.length,
                       uniqueItems: true,
                       items: { type: "string", enum: allowedArtifactTargetIds },
@@ -1359,6 +1372,48 @@ function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][
             },
           },
         },
+      },
+    },
+  };
+}
+
+function sourceConstraintSchemaForTask(task: TaskSpec): Record<string, unknown> {
+  const uploadedSourceIds = [...new Set((task.sources ?? []).map((source) => source.id))].sort();
+  const visibleDirectoryIds = [...new Set((task.visibleDirectories ?? []).map((directory) => directory.id))].sort();
+  const variants: Record<string, unknown>[] = [];
+  if (uploadedSourceIds.length > 0) {
+    variants.push({
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "ids"],
+      properties: {
+        kind: { type: "string", enum: ["uploaded_source"] },
+        ids: { type: "array", minItems: 1, maxItems: uploadedSourceIds.length, uniqueItems: true, items: { type: "string", enum: uploadedSourceIds } },
+      },
+    });
+  }
+  if (visibleDirectoryIds.length > 0) {
+    variants.push({
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "ids"],
+      properties: {
+        kind: { type: "string", enum: ["visible_directory"] },
+        ids: { type: "array", minItems: 1, maxItems: visibleDirectoryIds.length, uniqueItems: true, items: { type: "string", enum: visibleDirectoryIds } },
+      },
+    });
+  }
+  if (variants.length === 0) return { type: "null" };
+  return {
+    type: ["object", "null"],
+    additionalProperties: false,
+    required: ["bindings"],
+    properties: {
+      bindings: {
+        type: "array",
+        minItems: 1,
+        maxItems: variants.length,
+        items: variants.length === 1 ? variants[0] : { oneOf: variants },
       },
     },
   };
@@ -1376,7 +1431,7 @@ function evidenceContractPolicyForTask(
   taskProfile: TaskProfile,
   selectedSkillRoles: readonly SelectedSkillRole[],
 ): Record<string, unknown> {
-  const taskEvidencePolicy = taskEvidencePolicyForTaskUnderstanding(task.taskUnderstanding, task.sources);
+  const taskEvidencePolicy = taskEvidencePolicyForTaskUnderstanding(canonicalTaskUnderstanding(task), task.sources);
   const capabilities = planningCapabilitiesForTask(task);
   const sourceBoundCapabilities = capabilitiesForSelectedSourceProviders(task, capabilities, selectedSkillRoles);
   const producibleSourceKinds = new Set(sourceBoundCapabilities.flatMap((capability) => capability.produces));
@@ -1474,7 +1529,7 @@ function capabilitiesForSelectedSourceProviders(
 }
 
 function relevantOperationProfiles(task: TaskSpec): ReturnType<typeof operationProfileCatalogForPlanning> {
-  return operationProfilesForTaskUnderstanding(task.taskUnderstanding);
+  return operationProfilesForTaskUnderstanding(canonicalTaskUnderstanding(task));
 }
 
 function artifactFollowupContextField(task: TaskSpec): { readonly artifactFollowup?: ReturnType<typeof buildArtifactFollowupContext> } {
@@ -1557,15 +1612,16 @@ function buildArtifactFollowupContext(task: TaskSpec): {
 }
 
 function conversationResultInput(task: TaskSpec): NonNullable<NonNullable<TaskSpec["conversationWorkingSet"]>["resultCards"]>[number] | undefined {
-  const target = task.turnResolution?.targetResult;
-  if (target === undefined || task.turnResolution?.evidenceDemand !== "none") return undefined;
+  const turnResolution = canonicalTurnResolution(task);
+  const target = turnResolution?.targetResult;
+  if (target === undefined || turnResolution?.evidenceDemand !== "none") return undefined;
   return task.conversationWorkingSet?.resultCards?.find((item) =>
     item.result.resultId === target.resultId,
   );
 }
 
 function runtimeResultBindingsForPlanningTask(task: TaskSpec): readonly RuntimeResultBinding[] {
-  const resolution = task.turnResolution;
+  const resolution = canonicalTurnResolution(task);
   if (resolution?.targetResult === undefined || resolution.relation === "new_goal") return [];
   return [{
     schema: "agentloop.resultBinding/v1",
@@ -1689,7 +1745,7 @@ function assertInitialOutcomePlanShape(proposal: PlanProposal, task: TaskSpec): 
       );
     }
   }
-  if (isEmptyConversationWorkspace(task) && !explicitWorkspaceInspectionRequested(task.input)) {
+  if (isEmptyConversationWorkspace(task) && !explicitWorkspaceInspectionRequested(canonicalUserInput(task))) {
     const inspectionStep = proposal.steps.find((step) => isWorkspaceInspectionStep(step));
     if (inspectionStep !== undefined) {
       throw new AppError(
@@ -1801,7 +1857,7 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
       };
     }
     const coreCriteria = artifactNormalized.successCriteria.filter((criterion) =>
-      !isUnrequestedOptionalEnhancementCriterion(criterion.description, task.input)
+      !isUnrequestedOptionalEnhancementCriterion(criterion.description, canonicalUserInput(task))
     );
     if (coreCriteria.length > 0) return { ...artifactNormalized, successCriteria: coreCriteria };
     return {
@@ -1816,7 +1872,6 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
   return {
     ...proposal,
     steps: normalizedSteps
-      .map((step) => normalizeStructuredAggregationLeaf(step, normalizedSteps, task))
       .map((step) => normalizeSkillIdentityResourceBindings(step, task))
       .map((step) => normalizeInheritedToolSourceConstraints(step, normalizedSteps, task))
       .map((step) => normalizeBoundResultToolSourceConstraints(step, task)),
@@ -1886,7 +1941,7 @@ function normalizeBoundResultToolSourceConstraints(
   const constrained = step.sourceConstraint?.requiredToolSourceIds ?? [];
   if (constrained.length === 0 || step.role !== "produce" || conversationResultInput(task) === undefined) return step;
   if (stepRequiresSourceEvidence(step)) return step;
-  const explicitlyRequired = new Set(task.requiredToolSourceIds ?? []);
+  const explicitlyRequired = new Set(canonicalRequiredToolSourceIds(task));
   const remaining = constrained.filter((sourceId) =>
     explicitlyRequired.has(sourceId) || stepRequiresToolSourceCapability(step, sourceId, task),
   );
@@ -1938,15 +1993,8 @@ function criterionBlockingByGoal(
   taskProfile: TaskProfile,
 ): boolean {
   if (kind === "explicit_caveats") return false;
-  if (kind === "derived_aggregation") {
-    // Structured aggregation normalization below upgrades this to a blocking
-    // criterion only when the admitted Plan actually has that dependency.
-    return /(?:group(?:ed|ing)?|distribution|rank(?:ing)?|top|bottom|max(?:imum)?|min(?:imum)?|average|mean|sum|total|分组|分布|排行|排名|最高|最低|最大|最小|均值|平均|合计|占比)/iu.test(
-      `${task.input}\n${step.objective}`,
-    );
-  }
   if (kind === "artifact_acceptance" || kind === "artifact_openable") {
-    return explicitStrictQualityRequested(task.input);
+    return explicitStrictQualityRequested(canonicalUserInput(task));
   }
   if (kind === "source_summary" || kind === "source_urls") {
     return step.role === "fact_acquisition" || taskProfile.sourceNeed === "strict_user_source";
@@ -2183,7 +2231,7 @@ function normalizeModelEvidenceGates(
   step: PlanStepProposal,
   task: TaskSpec,
 ): PlanStepProposal {
-  const policy = taskEvidencePolicyForTaskUnderstanding(task.taskUnderstanding, task.sources);
+  const policy = taskEvidencePolicyForTaskUnderstanding(canonicalTaskUnderstanding(task), task.sources);
   const capabilityNormalized = normalizeIncompatibleStructuredSourceCapabilities(step, task, policy);
   const contract = capabilityNormalized.evidenceContract;
   if (contract === undefined) return capabilityNormalized;
@@ -2204,7 +2252,6 @@ function modelMayRequireEvidenceKind(kind: EvidenceKind, policy: TaskEvidencePol
   if (kind === "schema_summary") return policy.requiredKinds.schemaSummary;
   if (kind === "record_counts") return policy.requiredKinds.recordCounts;
   if (kind === "structured_extraction_artifact") return policy.requiredKinds.structuredExtractionArtifact;
-  if (kind === "derived_aggregation") return policy.requiredKinds.derivedAggregation;
   if (kind === "table_coverage") return policy.requiredKinds.tableCoverage;
   return true;
 }
@@ -2239,70 +2286,6 @@ function normalizeIncompatibleStructuredSourceCapabilities(
     }
   }
   return { ...step, requiredCapabilities };
-}
-
-/**
- * A complete structured artifact is an input to a count/group/rank question,
- * not an optional hint. Keep this at the Plan boundary: tools expose neutral
- * records and receipts, while this rule only recognizes aggregation semantics.
- */
-function normalizeStructuredAggregationLeaf(
-  step: PlanStepProposal,
-  allSteps: readonly PlanStepProposal[],
-  task: TaskSpec,
-): PlanStepProposal {
-  const evidencePolicy = taskEvidencePolicyForTaskUnderstanding(task.taskUnderstanding, task.sources);
-  if (
-    step.role === "fact_acquisition"
-    || !evidencePolicy.requiredKinds.derivedAggregation
-    || !dependsOnStructuredExtraction(step, allSteps)
-    || !task.availableToolNames.includes("computer_aggregate_table_artifact")
-  ) return step;
-  const requiredKinds = uniqueEvidenceKinds([
-    ...(step.evidenceContract?.requiredKinds ?? []),
-    "derived_aggregation",
-    "explicit_caveats",
-  ]);
-  const caveatPolicy = step.evidenceContract?.caveatPolicy ?? "mark_unverified_facts";
-  return {
-    ...step,
-    role: step.role === undefined ? "deliver" : step.role,
-    requiredCapabilities: [...new Set([...step.requiredCapabilities, "workspace_structured_artifact_read"])],
-    evidenceContract: { requiredKinds, caveatPolicy },
-    successCriteria: requiredKinds.map((kind) => ({
-      id: kind,
-      description: evidenceCriterionDescription(kind, caveatPolicy),
-      source: "planner" as const,
-      blocking: kind === "derived_aggregation" ? true : kind === "explicit_caveats" ? false : undefined,
-    })),
-  };
-}
-
-function dependsOnStructuredExtraction(
-  step: PlanStepProposal,
-  allSteps: readonly PlanStepProposal[],
-): boolean {
-  const byId = new Map(allSteps.map((item) => [item.id, item]));
-  const seen = new Set<string>();
-  const visit = (stepId: string): boolean => {
-    if (seen.has(stepId)) return false;
-    seen.add(stepId);
-    const candidate = byId.get(stepId);
-    if (candidate === undefined) return false;
-    if (
-      candidate.evidenceContract?.requiredKinds.includes("structured_extraction_artifact")
-      || (
-        (
-          candidate.requiredCapabilities.includes("uploaded_table_extraction")
-          || candidate.requiredCapabilities.includes("visible_table_extraction")
-          || candidate.requiredCapabilities.includes("workspace_structured_artifact_read")
-        )
-        && /(?:extract|table|spreadsheet|workbook|csv|xlsx|xlsm|表格|工作簿|工作表|抽取)/iu.test(candidate.objective)
-      )
-    ) return true;
-    return candidate.dependencies.some(visit);
-  };
-  return step.dependencies.some(visit);
 }
 
 function uniqueEvidenceKinds(values: readonly EvidenceKind[]): EvidenceKind[] {
@@ -2474,7 +2457,7 @@ function normalizePlannerText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function parseOutcomePlanProposal(call: ModelToolCall): PlanProposal {
+function parseOutcomePlanProposal(call: ModelToolCall, task: TaskSpec): PlanProposal {
   try {
     const value = requireRecord(call.arguments, "submit_outcome_plan arguments");
     parseOutcomePlanSchema(value.schema);
@@ -2489,7 +2472,7 @@ function parseOutcomePlanProposal(call: ModelToolCall): PlanProposal {
       shape,
       selectedSkillRoles,
       selectedSkillIds: [...new Set(selectedSkillRoles.map((selection) => selection.skillId))],
-      steps: value.leaves.map((item, index) => parseOutcomeLeaf(item, index)),
+      steps: value.leaves.map((item, index) => parseOutcomeLeaf(item, index, task)),
     };
   } catch (error) {
     if (error instanceof AppError && error.code === "BAD_REQUEST") {
@@ -2549,7 +2532,7 @@ function parseSkillRole(value: unknown, index: number): SelectedSkillRole["role"
   throw badRequest(`selectedSkillRoles[${index}].role is invalid`);
 }
 
-function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
+function parseOutcomeLeaf(value: unknown, index: number, task: TaskSpec): PlanStepProposal {
   const record = requireRecord(value, `leaves[${index}]`);
   const evidenceContract = record.evidenceContract === undefined || record.evidenceContract === null
     ? undefined
@@ -2560,9 +2543,8 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   // absence before Admission rather than rejecting an otherwise valid Plan.
   const sourceConstraint = record.sourceConstraint === undefined || record.sourceConstraint === null
     ? undefined
-    : parseSourceConstraint(record.sourceConstraint, index);
-  const artifactTargetIds = parseArtifactTargetIds(record.artifactTargetIds, index);
-  const artifactTargets = parseArtifactTargets(record.artifactTargets, index);
+    : parseSourceConstraint(record.sourceConstraint, index, task);
+  const targetIds = parseTargetIds(record.targetIds, index);
   return {
     id: requireString(record.id, `leaves[${index}].id`, { max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }),
     kind: "leaf",
@@ -2572,8 +2554,7 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
     skillIds: requireStringArray(record.skillIds, `leaves[${index}].skillIds`, 100),
     requiredCapabilities: canonicalStringSet(record.requiredCapabilities, `leaves[${index}].requiredCapabilities`, 100),
     ...(sourceConstraint === undefined ? {} : { sourceConstraint }),
-    ...(artifactTargetIds.length === 0 ? {} : { artifactTargetIds }),
-    ...(artifactTargets.length === 0 ? {} : { artifactTargets }),
+    ...(targetIds.length === 0 ? {} : { targetIds }),
     ...(evidenceContract === undefined ? {
       successCriteria: [{
         id: "delivered",
@@ -2591,58 +2572,28 @@ function parseOutcomeLeaf(value: unknown, index: number): PlanStepProposal {
   };
 }
 
-function parseArtifactTargetIds(value: unknown, index: number): readonly string[] {
+function parseTargetIds(value: unknown, index: number): readonly string[] {
   if (value === undefined || value === null) return [];
-  return canonicalStringSet(value, `leaves[${index}].artifactTargetIds`, 8);
+  return canonicalStringSet(value, `leaves[${index}].targetIds`, 8);
 }
 
-function parseArtifactTargets(value: unknown, index: number): NonNullable<PlanStepProposal["artifactTargets"]> {
-  // Plans emitted before structured artifact targets remain admissible. The
-  // Admission boundary synthesizes the one-target legacy projection only
-  // where it is unambiguous and rejects an uncovered composite delivery.
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > 8) {
-    throw badRequest(`leaves[${index}].artifactTargets must be an array with at most 8 entries`);
-  }
-  const ids = new Set<string>();
-  return value.map((item, targetIndex) => {
-    const record = requireRecord(item, `leaves[${index}].artifactTargets[${targetIndex}]`);
-    const id = requireString(record.id, `leaves[${index}].artifactTargets[${targetIndex}].id`, {
-      max: 128,
-      pattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
-    });
-    if (ids.has(id)) throw badRequest(`leaves[${index}].artifactTargets must have unique IDs`);
-    ids.add(id);
-    const kind = requireString(record.kind, `leaves[${index}].artifactTargets[${targetIndex}].kind`, { max: 64 });
-    const format = record.format === null || record.format === undefined
-      ? undefined
-      : requireString(record.format, `leaves[${index}].artifactTargets[${targetIndex}].format`, { max: 32 });
-    if (typeof record.terminalRequired !== "boolean") {
-      throw badRequest(`leaves[${index}].artifactTargets[${targetIndex}].terminalRequired must be boolean`);
-    }
-    return { id, kind, ...(format === undefined ? {} : { format }), terminalRequired: record.terminalRequired };
-  });
-}
-
-function parseSourceConstraint(value: unknown, index: number): PlanStepProposal["sourceConstraint"] {
+function parseSourceConstraint(value: unknown, index: number, task: TaskSpec): PlanStepProposal["sourceConstraint"] {
   const record = requireRecord(value, `leaves[${index}].sourceConstraint`);
   if (Object.keys(record).length === 0) return undefined;
-  const bindings = record.bindings === undefined
-    ? parseLegacySourceConstraintBindings(record, index)
-    : parseSourceConstraintBindings(record.bindings, index);
+  if (record.bindings === undefined) {
+    throw badRequest(`leaves[${index}].sourceConstraint.bindings is required`);
+  }
+  const bindings = parseSourceConstraintBindings(record.bindings, index, task);
   const requiredUploadedSourceIds = bindings.uploadedSourceIds;
   const requiredVisibleDirectoryIds = bindings.visibleDirectoryIds;
   if (requiredUploadedSourceIds.length === 0 && requiredVisibleDirectoryIds.length === 0) return undefined;
   return {
-    // tool_source was accepted by older Planner contracts. Tool resolution is
-    // now Runtime-owned, so retain only concrete Runtime-issued inputs here.
     ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
     ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
   };
 }
 
-function parseSourceConstraintBindings(value: unknown, index: number): {
-  readonly toolSourceIds: readonly string[];
+function parseSourceConstraintBindings(value: unknown, index: number, task: TaskSpec): {
   readonly uploadedSourceIds: readonly string[];
   readonly visibleDirectoryIds: readonly string[];
 } {
@@ -2657,28 +2608,28 @@ function parseSourceConstraintBindings(value: unknown, index: number): {
   for (const [bindingIndex, item] of value.entries()) {
     const binding = requireRecord(item, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}]`);
     const kind = requireString(binding.kind, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}].kind`, { max: 64 });
-    if (kind !== "tool_source" && kind !== "uploaded_source" && kind !== "visible_directory") {
+    if (kind !== "uploaded_source" && kind !== "visible_directory") {
       throw badRequest(`leaves[${index}].sourceConstraint.bindings[${bindingIndex}].kind is invalid`);
     }
     const ids = semanticSourceIds(binding.ids, `leaves[${index}].sourceConstraint.bindings[${bindingIndex}].ids`, 20);
     byKind.set(kind, [...new Set([...(byKind.get(kind) ?? []), ...ids])]);
   }
+  const uploadedSourceIds = byKind.get("uploaded_source") ?? [];
+  const visibleDirectoryIds = byKind.get("visible_directory") ?? [];
+  const allowedUploadedSourceIds = new Set((task.sources ?? []).map((source) => source.id));
+  const allowedVisibleDirectoryIds = new Set((task.visibleDirectories ?? []).map((directory) => directory.id));
+  const invalidUploadedSourceIds = uploadedSourceIds.filter((id) => !allowedUploadedSourceIds.has(id));
+  const invalidVisibleDirectoryIds = visibleDirectoryIds.filter((id) => !allowedVisibleDirectoryIds.has(id));
+  if (invalidUploadedSourceIds.length > 0 || invalidVisibleDirectoryIds.length > 0) {
+    throw badRequest([
+      `leaves[${index}].sourceConstraint namespaces do not match canonical Runtime inputs`,
+      ...(invalidUploadedSourceIds.length === 0 ? [] : [`invalid uploaded_source IDs: ${invalidUploadedSourceIds.join(", ")}`]),
+      ...(invalidVisibleDirectoryIds.length === 0 ? [] : [`invalid visible_directory IDs: ${invalidVisibleDirectoryIds.join(", ")}`]),
+    ].join("; "));
+  }
   return {
-    toolSourceIds: byKind.get("tool_source") ?? [],
-    uploadedSourceIds: byKind.get("uploaded_source") ?? [],
-    visibleDirectoryIds: byKind.get("visible_directory") ?? [],
-  };
-}
-
-function parseLegacySourceConstraintBindings(record: Record<string, unknown>, index: number): {
-  readonly toolSourceIds: readonly string[];
-  readonly uploadedSourceIds: readonly string[];
-  readonly visibleDirectoryIds: readonly string[];
-} {
-  return {
-    toolSourceIds: semanticSourceIds(record.requiredToolSourceIds, `leaves[${index}].sourceConstraint.requiredToolSourceIds`, 20),
-    uploadedSourceIds: semanticSourceIds(record.requiredUploadedSourceIds, `leaves[${index}].sourceConstraint.requiredUploadedSourceIds`, 20),
-    visibleDirectoryIds: semanticSourceIds(record.requiredVisibleDirectoryIds, `leaves[${index}].sourceConstraint.requiredVisibleDirectoryIds`, 20),
+    uploadedSourceIds,
+    visibleDirectoryIds,
   };
 }
 
@@ -2738,8 +2689,6 @@ function evidenceCriterionDescription(kind: EvidenceKind, caveatPolicy: CaveatPo
       return `All extracted tables are covered by the summary.${suffix}`;
     case "structured_extraction_artifact":
       return `A durable structured extraction artifact or content-addressed reference is available.${suffix}`;
-    case "derived_aggregation":
-      return `A complete, coverage-backed aggregation derived from the structured records is available.${suffix}`;
     case "artifact_path":
       return "The delivered artifact path is recorded.";
     case "artifact_non_empty":

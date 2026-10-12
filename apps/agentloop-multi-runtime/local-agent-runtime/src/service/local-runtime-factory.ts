@@ -5,6 +5,7 @@ import { bundledSkillDirectories } from "@zhujun/agentloop-skills";
 import { loadPracticeProfileConfig, loadSkillDirectoriesConfig, loadStepExecutionStrategyProfileConfig, mergeSkillDirectories, webToolsOptionsFromEnvironment } from "../../../src/shared/config.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
 import { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
+import { LocalModelStreamCaptureStore } from "../persistence/model-stream-capture-store.ts";
 import { LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 
 interface McpStartupIntegration {
@@ -50,7 +51,10 @@ export class LocalRuntimeFactory {
     `);
     const scopes = new LocalDirectoryScopeStore(database);
     await scopes.ready();
-    const provider = await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment);
+    const streamCaptures = new LocalModelStreamCaptureStore(join(runtimeRoot, "diagnostics", "model-streams"));
+    const provider = await LlmProviderRegistry.fromConfigFile(this.input.providerConfigPath, integrationEnvironment, {
+      streamRawCaptureWriter: streamCaptures.capture,
+    });
     const custom = await loadSkillDirectoriesConfig({ appRoot: this.input.appRoot, configPath: this.input.skillDirectoriesConfigPath });
     const packaged = environment.AGENTLOOP_BUNDLED_SKILL_DIRECTORIES?.split(",").map((path) => path.trim()).filter(Boolean);
     const skills = new SkillService(database, {

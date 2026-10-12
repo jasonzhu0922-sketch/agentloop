@@ -38,7 +38,7 @@ import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, 
 import { HttpRuntimeControl } from "../src/router/runtime-control/http-runtime-control.ts";
 import { cancellationTarget, persistedCancellableAssistant } from "../web/client/state/cancellation-target.js";
 import { EventEmitter } from "node:events";
-import { AppDatabase } from "@zhujun/agentloop";
+import { AppDatabase, CanonicalRunStateRepository, createCanonicalRunState, understandTask } from "@zhujun/agentloop";
 import { ControlPlaneStore, ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
 import { RuntimeCapacityError as PersistentRuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/ports/control-plane-contracts.ts";
 import { RouterService } from "../src/router/service/router-service.ts";
@@ -47,6 +47,7 @@ import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/shared/persistence/state-database.ts";
 import { SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatibilitySql, migrationLedgerSql } from "../src/shared/persistence/schema-migration-ledger.ts";
 import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
+import { migrateRuntimeState } from "../src/runtime-host/persistence/state-migrations.ts";
 import type { RuntimeArtifact, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeInstance } from "../src/shared/contracts.ts";
 import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/client/projections/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/client/state/live-update-scheduler.js";
@@ -170,9 +171,13 @@ test("cloud Runtime Host enables PlanTemplate only through its deployment switch
   if (plugin === undefined) return;
   try {
     const decision = await plugin.extension().beforePlanning({
-      runId: "observe-only-run",
       actorUserId: "owner",
-      input: "Summarize the supplied evidence",
+      canonicalState: createCanonicalRunState({
+        runId: "observe-only-run",
+        userInput: "Summarize the supplied evidence",
+        understanding: understandTask({ objective: "Summarize the supplied evidence" }),
+        now: 1,
+      }),
       responseOnly: false,
       availableSkills: [],
       selectedSkillRoles: [],
@@ -230,6 +235,66 @@ test("Router state never initializes Runtime kernel tables, while Runtime state 
     }
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Runtime migration upgrades an existing kernel database for canonical Run state", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    await migrateRuntimeState(database);
+    await database.exec(`
+      DELETE FROM mr_schema_migrations WHERE id = 'runtime/0008_canonical_run_state';
+      DROP TABLE canonical_run_state_revisions;
+      DROP TABLE canonical_run_states;
+      ALTER TABLE plans DROP COLUMN canonical_state_ref_json;
+      ALTER TABLE plans ADD COLUMN task_semantics_json TEXT
+    `);
+    await database.prepare(`
+      INSERT INTO runs(id, owner_user_id, depth, status, input, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run("legacy-run", "owner", 0, "running", "legacy request", 1);
+    await database.prepare(`
+      INSERT INTO plans(
+        id, run_id, version, goal, selected_skill_ids_json, task_semantics_json,
+        input_bindings_json, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("legacy-plan", "legacy-run", 1, "legacy goal", "[]", "{\"legacy\":true}", "[]", "running", 1, 1);
+
+    await migrateRuntimeState(database);
+
+    const tables = await database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'canonical_run_state%'
+      ORDER BY name
+    `).all<{ name: string }>();
+    assert.deepEqual(tables.map((table) => table.name), [
+      "canonical_run_state_revisions",
+      "canonical_run_states",
+    ]);
+    const planColumns = await database.prepare("PRAGMA table_info(plans)").all<{ name: string }>();
+    assert.equal(planColumns.some((column) => column.name === "canonical_state_ref_json"), true);
+    assert.equal(planColumns.some((column) => column.name === "task_semantics_json"), true);
+    const legacyPlan = await database.prepare(`
+      SELECT task_semantics_json, canonical_state_ref_json FROM plans WHERE id = ?
+    `).get<{ task_semantics_json: string; canonical_state_ref_json: string | null }>("legacy-plan");
+    assert.equal(legacyPlan?.task_semantics_json, "{\"legacy\":true}");
+    assert.equal(legacyPlan?.canonical_state_ref_json, null);
+
+    const state = createCanonicalRunState({
+      runId: "legacy-run",
+      userInput: "legacy request",
+      understanding: understandTask({ objective: "legacy request" }),
+      now: 2,
+    });
+    const states = new CanonicalRunStateRepository(database);
+    await states.create(state);
+    assert.deepEqual(await states.get("legacy-run"), state);
+    const migration = await database.prepare(`
+      SELECT checksum FROM mr_schema_migrations WHERE id = 'runtime/0008_canonical_run_state'
+    `).get<{ checksum: string }>();
+    assert.match(migration?.checksum ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    await database.close();
   }
 });
 

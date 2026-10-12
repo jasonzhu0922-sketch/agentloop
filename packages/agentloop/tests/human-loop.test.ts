@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { HumanLoopRepository } from "../src/runtime/human-loop.ts";
-import { RunService } from "../src/runtime/run-service.ts";
+import { recoveryProposalSuccessCriteria, RunService } from "../src/runtime/run-service.ts";
+import { admitPlan } from "../src/planning/admission.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { understandTask } from "../src/runtime/task-intent.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { RunRepository } from "../src/storage/repositories/run-repository.ts";
 import { PlanRepository } from "../src/planning/plan-repository.ts";
@@ -24,6 +27,72 @@ test("recovery confirmation is consumed as action-scoped retirement authorizatio
   assert.equal(latestRecoveryResponseAuthorizesRetirement([
     { id: "other", runId: "run", actionId: "other-action", response: "true", createdAt: now },
   ], "action"), false);
+});
+
+test("recovery proposals let Admission derive delivery-target criteria exactly once", () => {
+  const targetId = "data-distribution-analysis";
+  const understanding = understandTask({
+    objective: "Analyze the complete data distribution.",
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "analysis",
+      requiresExecution: true,
+      deliverables: [{
+        targetId,
+        purpose: "Deliver the complete data distribution analysis.",
+        expectedArtifactCount: 1,
+        action: "create",
+        kind: "none",
+        surface: "conversation",
+      }],
+    },
+  });
+  const admitted = admitPlan({
+    runId: "run-recovery-target-criteria",
+    canonicalState: createCanonicalRunState({
+      runId: "run-recovery-target-criteria",
+      userInput: "Analyze the complete data distribution.",
+      understanding,
+      now: 1,
+    }),
+    proposal: {
+      schema: "agentloop.outcomePlan/v2",
+      goal: "Analyze the complete data distribution.",
+      shape: "recovery_patch",
+      selectedSkillIds: [],
+      selectedSkillRoles: [],
+      steps: [{
+        id: "analysis.repair.2",
+        kind: "leaf",
+        objective: "Repair the missing distribution analysis.",
+        dependencies: [],
+        role: "repair",
+        refinementState: "not_refinable",
+        requiredFacts: [],
+        skillIds: [],
+        requiredCapabilities: [],
+        targetIds: [targetId],
+        successCriteria: recoveryProposalSuccessCriteria([
+          { id: "analysis_complete", description: "The analysis is complete.", source: "planner" },
+          {
+            id: `delivery_target:${targetId}`,
+            targetId,
+            description: "Admission-derived target criterion from the prior Plan.",
+            source: "task",
+            verification: "model_judged",
+            blocking: true,
+          },
+        ]),
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(),
+  });
+
+  assert.equal(admitted.steps[0]?.successCriteria.filter((criterion) =>
+    criterion.id === `delivery_target:${targetId}`
+  ).length, 1);
+  assert.equal(admitted.steps[0]?.successCriteria.some((criterion) => criterion.id === "analysis_complete"), true);
 });
 
 test("recovery HIL projects oversized evidence while retaining the complete decision provenance", async () => {
@@ -94,23 +163,7 @@ test("a positive Recovery HIL confirmation revises and executes the repair Step 
       database,
       skills: new SkillService(database),
       tools: [unsafeProbe],
-      plannerFactory: () => ({
-        plan: async (task) => {
-          const proposal = await basePlanner.plan(task);
-          return {
-            ...proposal,
-            steps: proposal.steps.map((step) => ({
-              ...step,
-              artifactTargets: [{
-                id: "structured-report",
-                kind: "document",
-                format: "markdown",
-                terminalRequired: true,
-              }],
-            })),
-          };
-        },
-      }),
+      plannerFactory: () => basePlanner,
       modelFactory: () => ({
         limits: TEST_MODEL_LIMITS,
         complete: async () => {
@@ -151,6 +204,11 @@ test("a positive Recovery HIL confirmation revises and executes the repair Step 
     const started = await runs.execute(owner.user.id, "produce a recoverable result");
     const request = await waitForHumanLoop(runs, owner.user.id, started.id, "test-step");
     assert.equal(request.origin, "recovery");
+    const repairAction = (await runs.actionsForRun(owner.user.id, started.id)).find((action) =>
+      action.metadata.reason === "assessment_failed_boundary"
+    );
+    assert.equal(typeof repairAction?.metadata.canonicalGapId, "string");
+    assert.equal(repairAction?.metadata.failedBoundary, undefined);
 
     await runs.respondHumanLoop(owner.user.id, started.id, request.id, true, request.revision);
     const completed = await waitForRunCompletion(runs, owner.user.id, started.id);
@@ -171,8 +229,8 @@ test("a positive Recovery HIL confirmation revises and executes the repair Step 
     assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
     assert.equal(events.filter((event) => event.type === "tool.planned" && event.data.toolName === "unsafe_probe").length, 1);
     assert.deepEqual(
-      repairedPlan.steps.find((step) => step.id.includes(".repair."))?.executionBinding.artifactTargets,
-      [{ id: "structured-report", kind: "document", format: "markdown", terminalRequired: true }],
+      repairedPlan.steps.find((step) => step.id.includes(".repair."))?.executionBinding.targetIds,
+      [],
     );
     assert.ok(modelCalls >= 3);
   } finally { database.close(); }

@@ -6,7 +6,7 @@ import type { ComputerDriver } from "../computer/computer-driver.ts";
 import { ArtifactAcceptanceService } from "../acceptance/artifact-acceptance.ts";
 import type { ArtifactAcceptanceProvider } from "../acceptance/artifact-acceptance-provider.ts";
 import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForTurn } from "../planning/admission.ts";
-import { ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
+import { enforceAdmittedAssessment, ModelStepAssessor, ProfiledRuleStepAssessor } from "../planning/assessor.ts";
 import { AssessmentEvidenceBundleVerifier } from "../planning/runtime-evidence-bundle.ts";
 import type {
   AssessmentProfileId,
@@ -67,7 +67,7 @@ import type { SqlConnection } from "../storage/connection.ts";
 import { RunRepository, type RunRow } from "../storage/repositories/run-repository.ts";
 import { SourceRepository, sourceSummary } from "../storage/repositories/source-repository.ts";
 import { AppError, forbidden, notFound } from "../shared/errors.ts";
-import { canonicalArtifactFormatFamily, isConcreteArtifactFormat, semanticArtifactFamily } from "../shared/artifact-format.ts";
+import { artifactFormatFamilyForPath, canonicalArtifactFormatFamily, isConcreteArtifactFormat, semanticArtifactFamily } from "../shared/artifact-format.ts";
 import { optionalPositiveInteger, requireRecord, requireString } from "../shared/validation.ts";
 import { runAgentLoop, type ToolStepConvergenceContext } from "./agent-loop.ts";
 import { completeWithRequestTelemetry } from "./model-streaming.ts";
@@ -78,7 +78,7 @@ import { buildStepRuntimeContextSnapshot, buildStepToolProgressPolicy } from "./
 import { deriveStepSemanticFrame } from "./step-semantic-frame.ts";
 import { observeSourceFamiliesFromToolEvidence } from "./source-family-observation.ts";
 import type { StepExecutionStrategy } from "./step-execution-strategy.ts";
-import { artifactKindForReference, classifyTaskIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type ConversationTaskIntent, type StructuredTaskUnderstanding } from "./task-intent.ts";
+import { artifactKindForReference, classifyTaskIntent, explicitArtifactKindsFromIntent, requestedArtifactKindsFromIntent, requestsArtifactBuildFromIntent, requestsPriorArtifactChange, understandTask, type ConversationTaskIntent, type StructuredTaskUnderstanding } from "./task-intent.ts";
 import type {
   CapabilityGrant,
   AgentLoopToolEvidence,
@@ -134,7 +134,11 @@ import {
 } from "./recovery-repository.ts";
 import { reconstructRecoveryTranscript } from "./recovery-transcript.ts";
 import { assessDecisionBindings, decisionCommitsFromEvents, type RuntimeDecisionCommit } from "./decision-ledger.ts";
-import { resolveOperationBindings, resolveSkillWorkflowEvidenceBindings } from "./decision-binding.ts";
+import {
+  requiredSkillWorkflowEvidenceBindings,
+  resolveOperationBindings,
+  resolveSkillWorkflowEvidenceBindings,
+} from "./decision-binding.ts";
 import { toolOperationFailureCode } from "./tool-operation-outcome.ts";
 import { RunEventHub, type LiveRunEvent } from "./run-event-hub.ts";
 import {
@@ -155,6 +159,17 @@ import { RuntimeActionQueryService } from "./runtime-action-query-service.ts";
 import { RuntimeHostRunProjectionQueryService, type RuntimeHostRunProjection } from "./runtime-host-run-projection-query-service.ts";
 import { ToolArgumentsReferenceStore, type ToolArgumentsContent } from "./tool-arguments-reference-store.ts";
 import { executionOperationProfile } from "./operation-profiles.ts";
+import {
+  bindCanonicalPlan,
+  createCanonicalRunState,
+  recordCanonicalAssessment,
+  recordCanonicalStepResult,
+  reviseCanonicalPlan,
+  startCanonicalStep,
+  type CanonicalGoalGap,
+  type CanonicalRunState,
+} from "./canonical-run-state.ts";
+import { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts";
 
 export type ModelFactory = (onRetry?: ModelRetryReporter, modelKey?: string) => ModelAdapter;
 export type PlannerFactory = (model: ModelAdapter) => Planner;
@@ -270,6 +285,7 @@ export class RunService {
   private readonly workspace: RuntimeWorkspaceService;
   private readonly coreTools: readonly RuntimeTool<unknown>[];
   private readonly plans: PlanRepository;
+  private readonly canonicalStates: CanonicalRunStateRepository;
   private readonly sources: SourceRepository;
   private readonly sourceIntake: SourceIntakeService;
   private readonly scheduler = new DependencyScheduler();
@@ -366,6 +382,7 @@ export class RunService {
       authorizeRun: async (actorUserId, runId) => { await this.get(actorUserId, runId); },
     });
     this.plans = new PlanRepository(options.database);
+    this.canonicalStates = new CanonicalRunStateRepository(options.database);
     this.planQueries = new RuntimePlanQueryService({ plans: this.plans, run: async (actorUserId, runId) => await this.get(actorUserId, runId) });
     this.stepResults = new StepResultCommitter(this.plans);
     this.sources = new SourceRepository(options.database);
@@ -426,7 +443,13 @@ export class RunService {
       artifacts: async (actorUserId, runId) => await this.processArtifacts(actorUserId, runId),
       events: async (actorUserId, runId) => await this.events(actorUserId, runId),
     });
-    this.terminal = new TerminalCommitter(this.plans, new RunOutcomeRepository(options.database), this.humanLoops);
+    this.terminal = new TerminalCommitter(
+      this.plans,
+      new RunOutcomeRepository(options.database),
+      this.humanLoops,
+      this.canonicalStates,
+      options.database,
+    );
     this.checkpoints = new RunCheckpointRepository(options.database);
     this.runEventLogSink = options.runEventLogSink;
     const recoveryEventLogSink: RecoveryEventLogSink = (event) => {
@@ -606,6 +629,7 @@ export class RunService {
         return response;
       }
       void this.advanceRecovery(actorUserId, runId).catch(async (error) => {
+        if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
         await this.appendRunEvent(runId, {
           type: "human_loop.resume_failed",
           data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
@@ -625,6 +649,7 @@ export class RunService {
         });
         await this.recovery.admit(decision.id, { kind: "ready_to_resume" });
         void this.resumeRecovery(actorUserId, runId).catch(async (error) => {
+          if (process.env.AGENTLOOP_DEBUG_ERRORS === "1") console.error(error);
           await this.appendRunEvent(runId, {
             type: "human_loop.resume_failed",
             data: { requestId, code: error instanceof AppError ? error.code : "INTERNAL_ERROR" },
@@ -957,11 +982,11 @@ export class RunService {
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
     }
-    const failedBoundary = failedBoundaryFromRecoveryAction(action);
     const events = await this.events(actorUserId, runId);
     const userResponses = await this.recovery.userResponses(runId);
+    const canonicalState = await this.canonicalStates.get(runId);
+    const failedBoundary = failedBoundaryFromRecoveryAction(action, canonicalState);
     const proposedDecision = failedBoundaryRecoveryDecision(
-      run,
       action,
       currentPlan,
       failedBoundary,
@@ -1109,6 +1134,7 @@ export class RunService {
       () => actionScope,
     );
     const assessor = this.assessorFactory(model);
+    const canonicalState = await this.canonicalStates.get(runId);
     const emit = async (event: RuntimeEvent): Promise<void> => this.appendRunEvent(runId, event);
     let resumeStarted = false;
     try {
@@ -1117,10 +1143,10 @@ export class RunService {
       const resumedPlan = await this.executePlanSteps({
         actorUserId,
         runId,
-        input: run.input,
         privateSkills,
         rootGrant,
         plan,
+        canonicalState,
         model,
         assessor,
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
@@ -1526,9 +1552,7 @@ export class RunService {
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
       const turnResolution = !conversationEntry
         ? undefined
-        : canResolveNewConversationTurnLocally(input, conversationHistory, conversationWorkingSet, visibleDirectories, availableSources)
-          ? deterministicConversationTurnResolution(input)
-          : await resolveConversationTurn(
+        : await resolveConversationTurn(
             model,
             emit,
             input,
@@ -1669,11 +1693,6 @@ export class RunService {
           data: practiceProfileResolutionEventData(initialPracticeResolution),
         });
       }
-      const taskIntent = taskUnderstanding.intent;
-      const admissionTaskIntent = {
-        ...taskIntent,
-        ...(turnResolution === undefined ? {} : { evidenceDemand: turnResolution.evidenceDemand }),
-      };
       const planningAllowedToolNames = responseOnly
         ? []
         : turnResolution === undefined || planningVisibleDirectories.length > 0
@@ -1685,6 +1704,21 @@ export class RunService {
         effectiveGoal,
         allowedTools: allowedToolSummaries,
         turnResolution,
+      });
+      let canonicalState = await this.canonicalStates.create(createCanonicalRunState({
+        runId,
+        userInput: input,
+        ...(turnResolution === undefined ? {} : { turnResolution }),
+        understanding: taskUnderstanding,
+        requiredToolSourceIds,
+      }));
+      await emit({
+        type: "canonical_run_state.initialized",
+        data: {
+          stateId: canonicalState.stateId,
+          intentId: canonicalState.intent.id,
+          revision: canonicalState.revision,
+        },
       });
       const rootGrant = createCapabilityGrant({
         actorUserId,
@@ -1746,9 +1780,7 @@ export class RunService {
       const planningWorkspace = await planningWorkspaceFacts(runWorkspaceRoot, planningVisibleDirectories, conversationId, availableSources);
       const planningTask: TaskSpec = {
         runId,
-        input,
-        ...(turnResolution === undefined ? {} : { turnResolution }),
-        taskUnderstanding,
+        canonicalState,
         availableSkills: planningSkills,
         selectedSkillRoles: planningSkillRoles.map((item) => item.selection),
         ...(continuationSkillIds.length === 0 ? {} : { continuationSkillIds }),
@@ -1765,7 +1797,6 @@ export class RunService {
             ...planningCapabilitiesFromSkills(privateSkills),
           ],
         },
-        ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
         workspaceFacts: planningWorkspace,
         visibleDirectories: planningVisibleDirectories,
         sources: availableSources,
@@ -1818,13 +1849,11 @@ export class RunService {
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
           availableCapabilities: planningCapabilitiesForAdmittedProposal(proposal, privateSkills, allowedToolSummaries, availableSources),
-          ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: planningVisibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           ...(resultBindings.length === 0 ? {} : { resultBindings }),
-          taskIntent: admissionTaskIntent,
-          taskSemantics: taskUnderstanding,
+          canonicalState,
         });
       } catch (error) {
         await this.notifyPlanningExtensionsAfterAdmission({
@@ -1859,16 +1888,20 @@ export class RunService {
           availableToolNames: rootGrant.allowedToolNames,
           availableTools: allowedToolSummaries,
           availableCapabilities: planningCapabilitiesForAdmittedProposal(proposal, privateSkills, allowedToolSummaries, availableSources),
-          ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
           availableUploadedSourceIds: availableSources.map((source) => source.id),
           availableVisibleDirectoryIds: planningVisibleDirectories.map((directory) => directory.id),
           reusableEvidenceKinds: reusableSourceEvidenceKindsForTurn(conversationWorkingSet, turnResolution),
           ...(resultBindings.length === 0 ? {} : { resultBindings }),
-          taskIntent: admissionTaskIntent,
-          taskSemantics: taskUnderstanding,
+          canonicalState,
         });
       }
       plan = await this.plans.create(plan);
+      const planBoundState = bindCanonicalPlan(canonicalState, plan);
+      canonicalState = await this.canonicalStates.commit({
+        expectedRevision: canonicalState.revision,
+        state: planBoundState,
+        reason: "plan_admitted",
+      });
       planId = plan.id;
       actionScope.planId = plan.id;
       admittedPlanSource = proposalSource;
@@ -1891,10 +1924,10 @@ export class RunService {
       plan = await this.executePlanSteps({
         actorUserId,
         runId,
-        input,
         privateSkills,
         rootGrant,
         plan,
+        canonicalState,
         model,
         assessor,
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
@@ -1904,7 +1937,6 @@ export class RunService {
         sources: availableSources,
         ...(conversationHistory === undefined ? {} : { conversationHistory }),
         ...(conversationWorkingSet === undefined ? {} : { conversationWorkingSet }),
-        ...(turnResolution === undefined ? {} : { turnResolution }),
         signal: runController.signal,
         onStepChanged: (stepId) => {
           runningStepId = stepId;
@@ -2069,9 +2101,8 @@ export class RunService {
     for (const extension of this.planningExtensions) {
       try {
         const extensionInput: PlanningExtensionInput = {
-          runId: input.task.runId,
           actorUserId: input.actorUserId,
-          input: input.task.input,
+          canonicalState: input.task.canonicalState,
           responseOnly: input.responseOnly,
           ...(input.modelKey === undefined ? {} : { modelKey: input.modelKey }),
           ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
@@ -2167,10 +2198,10 @@ export class RunService {
   private async executePlanSteps(input: {
     actorUserId: string;
     runId: string;
-    input: string;
     privateSkills: readonly PrivateSkill[];
     rootGrant: CapabilityGrant;
     plan: ExecutionPlan;
+    canonicalState: CanonicalRunState;
     model: ModelAdapter;
     assessor: StepAssessor;
     defaultAssessmentPolicyEnabled: boolean;
@@ -2180,7 +2211,6 @@ export class RunService {
     sources: readonly UploadedSourceSummary[];
     conversationHistory?: readonly ModelMessage[];
     conversationWorkingSet?: ConversationWorkingSet;
-    turnResolution?: ConversationTurnResolution;
     initialRecovery?: Readonly<{
       stepId: string;
       messages: readonly ModelMessage[];
@@ -2192,6 +2222,15 @@ export class RunService {
     signal?: AbortSignal;
   }): Promise<ExecutionPlan> {
     let plan = input.plan;
+    let canonicalState = input.canonicalState;
+    const turnResolution = canonicalState.intent.turnResolution;
+    if (
+      plan.canonicalStateRef.stateId !== canonicalState.stateId
+      || plan.canonicalStateRef.intentId !== canonicalState.intent.id
+      || plan.canonicalStateRef.runId !== canonicalState.runId
+    ) {
+      throw new AppError("CONFLICT", "Plan and Canonical Run State identities do not match", 409);
+    }
     let forcedStepId = input.initialRecovery?.stepId;
     while (!isPlanLeafComplete(plan)) {
       if (forcedStepId === undefined) this.scheduler.assertProgressPossible(plan);
@@ -2204,7 +2243,15 @@ export class RunService {
         throw new AppError("CONFLICT", `Plan step ${step.id} cannot be resumed from ${step.status}`, 409);
       }
       input.onStepChanged(step.id);
-      if (step.status === "pending") plan = await this.plans.startStep(plan.id, step.id);
+      if (step.status === "pending") {
+        plan = await this.plans.startStep(plan.id, step.id);
+        const startedState = startCanonicalStep(canonicalState, step.id);
+        canonicalState = await this.canonicalStates.commit({
+          expectedRevision: canonicalState.revision,
+          state: startedState,
+          reason: "step_started",
+        });
+      }
       const activeStep = plan.steps.find((item) => item.id === step.id)!;
       const skillsByReference = buildSkillReferenceMap(input.privateSkills);
       const stepSkills = activeStep.skillIds.map((skillId) => {
@@ -2231,14 +2278,16 @@ export class RunService {
         planId: plan.id,
         stepId: activeStep.id,
       });
-      const workflowEvidenceActions = skillWorkflowEvidenceActions({
-        skills: stepSkills,
-        manifests: skillManifests,
-        requiredEvidenceKinds: activeStep.evidenceContract?.requiredKinds ?? [],
-      });
       const workflowEvidenceBindings = resolveSkillWorkflowEvidenceBindings({
         skills: stepSkills,
         manifests: skillManifests,
+      });
+      const workflowEvidenceActions = skillWorkflowEvidenceActions({
+        bindings: requiredSkillWorkflowEvidenceBindings({
+          available: workflowEvidenceBindings,
+          resolvedOperations: resolvedOperationBindings,
+        }),
+        requiredEvidenceKinds: activeStep.evidenceContract?.requiredKinds ?? [],
       });
       // The Run grant is the execution authorization boundary. A Plan leaf
       // describes the current objective and its evidence contract, but must
@@ -2298,8 +2347,8 @@ export class RunService {
         stepCanConvergeFromLookupEvidence(activeStep)
         || stepAllowsSourceSummaryCandidateConvergence(activeStep)
       );
-      const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills, plan.taskSemantics);
-      const expectedArtifactFormat = executionArtifactFormatForStep(activeStep, plan.taskSemantics);
+      const stepTaskProfile = executionTaskProfileForStep(activeStep, stepSkills, canonicalState.intent.understanding);
+      const expectedArtifactFormat = executionArtifactFormatForStep(activeStep);
       const stepSemanticFrame = deriveStepSemanticFrame({
         step: activeStep,
         plan,
@@ -2327,7 +2376,7 @@ export class RunService {
       const dependencyToolEvidence = directDependencyToolEvidence(activeStep, plan);
       const conversationToolEvidence = conversationEvidenceToolEvidence(
         input.conversationWorkingSet,
-        input.turnResolution,
+        turnResolution,
         activeStep,
       );
       const inheritedAssessmentToolEvidence = mergeAssessmentToolEvidence(
@@ -2340,7 +2389,7 @@ export class RunService {
           data: {
             planId: plan.id,
             stepId: activeStep.id,
-            targetRunId: input.turnResolution?.targetRunId,
+            targetRunId: turnResolution?.targetRunId,
             evidenceRefs: conversationToolEvidence.map((item) => item.toolCallId),
           },
         });
@@ -2352,7 +2401,7 @@ export class RunService {
       // A visible directory is intentionally not preclassified from its path.
       // Only a committed structured source summary/extraction can refine the
       // task's observed input families for the next model turn.
-      const discoveredSourceKinds = new Set<string>(plan.taskSemantics?.evidence.sourceKinds ?? []);
+      const discoveredSourceKinds = new Set<string>(canonicalState.intent.understanding.evidence.sourceKinds);
       const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
       const result = await runAgentLoop({
         runId: input.runId,
@@ -2369,7 +2418,7 @@ export class RunService {
         systemPrompt: buildStepSystemPrompt(
           this.systemPrompt,
           stepTaskProfile,
-          input.turnResolution?.mode === "clarify",
+          turnResolution?.mode === "clarify",
         ),
         stepSemanticFrame,
         ...(stepTaskProfile.artifactAction === "modify"
@@ -2403,7 +2452,7 @@ export class RunService {
             decisionLedger,
             resolvedOperationBindings,
           ),
-        input: input.input,
+        input: canonicalState.intent.userInput,
         ...(input.conversationHistory === undefined ? {} : { conversationHistory: input.conversationHistory }),
         ...(recovery === undefined ? {} : {
           initialMessages: recovery.messages,
@@ -2427,7 +2476,7 @@ export class RunService {
                 sourceToolCallIds: observation.sourceToolCallIds,
               },
             });
-            const refinedTaskUnderstanding = taskUnderstandingWithObservedSourceKinds(plan.taskSemantics, discoveredSourceKinds);
+            const refinedTaskUnderstanding = taskUnderstandingWithObservedSourceKinds(canonicalState.intent.understanding, discoveredSourceKinds);
             if (refinedTaskUnderstanding === undefined) return undefined;
             const resolution = resolvePracticeProfileResolution(this.practiceProfileCatalog, refinedTaskUnderstanding, {
               selectionPoint: "source_discovery",
@@ -2563,7 +2612,7 @@ export class RunService {
             toolCalls: mergeAssessmentToolEvidence(inheritedAssessmentToolEvidence, candidate.toolEvidence),
             modelSteps: candidate.modelSteps,
           };
-          const temporalScopeGap = temporalScopeGapForCandidate(input.input, evidence.toolCalls);
+          const temporalScopeGap = temporalScopeGapForCandidate(canonicalState.intent.userInput, evidence.toolCalls);
           if (temporalScopeGap !== undefined) {
             const failedBoundary: FailedBoundary = {
               stepId: activeStep.id,
@@ -2606,7 +2655,7 @@ export class RunService {
           const assessmentSignature = stepAssessmentSignature({
             stepId: activeStep.id,
             assessmentProfile,
-            ...(plan.taskSemantics?.practiceProfiles === undefined ? {} : { practiceProfiles: plan.taskSemantics.practiceProfiles }),
+            ...(canonicalState.intent.understanding.practiceProfiles === undefined ? {} : { practiceProfiles: canonicalState.intent.understanding.practiceProfiles }),
             activatedSkills: activatedStepSkills,
             evidence,
             modelEvidence,
@@ -2666,32 +2715,35 @@ export class RunService {
                 assessmentReused: true,
               };
           }
-          const assess = async () => assessor.assess({
+          const runtimeEvidenceBundles = await this.assessmentEvidenceBundles.verify({
+            runId: input.runId,
+            planId: plan.id,
+            stepId: activeStep.id,
+            actorUserId: input.rootGrant.actorUserId,
+            ...(input.rootGrant.conversationId === undefined ? {} : { conversationId: input.rootGrant.conversationId }),
+            toolCalls: evidence.toolCalls,
+          });
+          const assessmentInput = {
             runId: input.runId,
             planId: plan.id,
             step: activeStep,
+            canonicalState,
             ...(stepTaskProfile.artifactKind === "none" ? {} : { expectedArtifactKind: stepTaskProfile.artifactKind }),
             ...(expectedArtifactFormat === undefined ? {} : { expectedArtifactFormat }),
             ...(activeStep.executionBinding.artifactTargets === undefined ? {} : { artifactTargets: activeStep.executionBinding.artifactTargets }),
             skills: activatedStepSkills,
             evidence,
             modelEvidence,
-            runtimeEvidenceBundles: await this.assessmentEvidenceBundles.verify({
-              runId: input.runId,
-              planId: plan.id,
-              stepId: activeStep.id,
-              actorUserId: input.rootGrant.actorUserId,
-              ...(input.rootGrant.conversationId === undefined ? {} : { conversationId: input.rootGrant.conversationId }),
-              toolCalls: evidence.toolCalls,
-            }),
+            runtimeEvidenceBundles,
             ...(candidate.contextSummary === undefined ? {} : { contextSummary: candidate.contextSummary }),
             assessmentProfile,
-            ...(plan.taskSemantics?.practiceProfiles === undefined ? {} : { practiceProfiles: plan.taskSemantics.practiceProfiles }),
+            ...(canonicalState.intent.understanding.practiceProfiles === undefined ? {} : { practiceProfiles: canonicalState.intent.understanding.practiceProfiles }),
             ...(holisticSourceContractMismatch ? { holisticSourceContractMismatch: true } : {}),
             attempt: assessmentAttempt,
             decisionLedger,
             workflowEvidenceActions,
-          }, input.signal, input.emit);
+          };
+          const assess = async () => assessor.assess(assessmentInput, input.signal, input.emit);
           const assessed = useProfiledRuleAssessor
             ? await this.actions.execute({
               runId: input.runId,
@@ -2703,9 +2755,16 @@ export class RunService {
               metadata: { phase: "assessment", assessmentProfile, assessmentMethod: "rule" },
             }, assess)
             : await assess();
-          const assessment = assessDecisionBindings({ assessment: assessed, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
+          const admittedAssessment = enforceAdmittedAssessment(assessmentInput, assessed);
+          const assessment = assessDecisionBindings({ assessment: admittedAssessment, planId: plan.id, stepId: activeStep.id, ledger: decisionLedger, evidence: evidence.toolCalls });
           assessedCandidates.set(assessmentSignature, assessment);
           await this.plans.saveAssessment(assessment);
+          const assessedState = recordCanonicalAssessment(canonicalState, assessment, evidence);
+          canonicalState = await this.canonicalStates.commit({
+            expectedRevision: canonicalState.revision,
+            state: assessedState,
+            reason: assessment.approved ? "step_assessment_approved" : "step_assessment_rejected",
+          });
           await input.emit({
             type: "skill.compliance.assessed",
             data: {
@@ -2771,6 +2830,15 @@ export class RunService {
         evidence,
       });
       plan = publication.plan;
+      const publishedState = recordCanonicalStepResult(canonicalState, activeStep.id, {
+        ...evidence,
+        publishedResult: publication.result,
+      });
+      canonicalState = await this.canonicalStates.commit({
+        expectedRevision: canonicalState.revision,
+        state: publishedState,
+        reason: "step_result_published",
+      });
       input.onStepChanged(undefined);
       await input.emit({
         type: "plan.step.completed",
@@ -2813,15 +2881,7 @@ export class RunService {
       .map((tool) => tool.name)
       .filter((name) => input.run.allowDangerousTools || !DANGEROUS_COMPUTER_TOOL_NAMES.has(name)));
     const availableToolSummaries = toolSummaries(allTools, availableToolNames);
-    const taskSemantics = input.currentPlan.taskSemantics;
-    const taskIntent = taskSemantics?.intent ?? classifyTaskIntent({
-      objective: input.run.input,
-      toolNames: [...availableToolNames],
-      skillNames: privateSkills.map((skill) => skill.name),
-    });
-    const requiredToolSourceIds = [...new Set(input.currentPlan.steps.flatMap((step) =>
-      step.executionBinding.requiredToolSourceIds ?? []
-    ))];
+    const canonicalState = await this.canonicalStates.get(input.run.id);
     const admitted = admitPlan({
       runId: input.run.id,
       proposal: input.decision.planRevision,
@@ -2838,11 +2898,9 @@ export class RunService {
         availableToolSummaries,
         sources,
       ),
-      ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
       availableUploadedSourceIds: sources.map((source) => source.id),
       availableVisibleDirectoryIds: visibleDirectories.map((directory) => directory.id),
-      taskIntent,
-      ...(taskSemantics === undefined ? {} : { taskSemantics }),
+      canonicalState,
     });
     const proposedIds = new Set(admitted.steps.map((step) => step.id));
     const retiredStepIds = input.currentPlan.steps
@@ -2888,6 +2946,11 @@ export class RunService {
       retiredStepIds,
       reason: input.decision.rationale,
       actionId: input.action.id,
+    });
+    const revisedCanonicalState = await this.canonicalStates.commit({
+      expectedRevision: canonicalState.revision,
+      state: reviseCanonicalPlan(canonicalState, revised),
+      reason: "plan_revised",
     });
     const repairLeaves = revised.steps.filter((step) =>
       step.retiredAt === undefined
@@ -2944,10 +3007,10 @@ export class RunService {
       const completed = await this.executePlanSteps({
         actorUserId: input.actorUserId,
         runId: input.run.id,
-        input: input.run.input,
         privateSkills,
         rootGrant,
         plan: revised,
+        canonicalState: revisedCanonicalState,
         model: input.model,
         assessor,
         defaultAssessmentPolicyEnabled: this.defaultAssessmentPolicyEnabled,
@@ -3039,12 +3102,15 @@ export class RunService {
     feedback?: string;
     failureReport?: () => Promise<string>;
   }): Promise<void> {
+    const canonicalState = await this.canonicalStates.get(input.run.id);
+    const canonicalGap = canonicalGapForRepair(canonicalState, input.stepId, input.failedBoundary);
+    const failedBoundary = failedBoundaryFromCanonicalGap(canonicalGap);
     const action = await this.actions.requireAutomaticRepair({
       runId: input.run.id,
       planId: input.currentPlan.id,
       stepId: input.stepId,
       metadata: {
-        failedBoundary: input.failedBoundary,
+        canonicalGapId: canonicalGap.id,
         ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
       },
     });
@@ -3055,7 +3121,7 @@ export class RunService {
         planId: input.currentPlan.id,
         stepId: input.stepId,
         actionId: action.id,
-        failedBoundary: input.failedBoundary,
+        failedBoundary,
       },
     });
     const actionScope = { planId: action.planId, stepId: action.stepId };
@@ -3067,17 +3133,16 @@ export class RunService {
     );
     const events = await this.events(input.actorUserId, input.run.id);
     const proposedDecision = failedBoundaryRecoveryDecision(
-      input.run,
       action,
       input.currentPlan,
-      input.failedBoundary,
-      observedReceiptShapes(events, input.failedBoundary.reusableEvidenceRefs),
+      failedBoundary,
+      observedReceiptShapes(events, failedBoundary.reusableEvidenceRefs),
     ) ?? await this.recoveryPlannerFactory(model).decide({
       runId: input.run.id,
       userInput: input.run.input,
       action,
       plan: input.currentPlan,
-      failedBoundary: input.failedBoundary,
+      failedBoundary,
       events,
       userResponses: [],
     });
@@ -3578,6 +3643,17 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
     if (usage !== undefined) {
       addNumber(details, "inputTokens", usage.inputTokens);
       addNumber(details, "outputTokens", usage.outputTokens);
+    }
+    const streamReceipt = asRecord(data.streamReceipt);
+    if (streamReceipt !== undefined) {
+      addNumber(details, "streamEvents", streamReceipt.sseEventCount);
+      addNumber(details, "streamRawBytes", streamReceipt.rawBytes);
+      if (Array.isArray(streamReceipt.anomalyReasons) && streamReceipt.anomalyReasons.length > 0) {
+        details.push(`streamAnomalies=${JSON.stringify(streamReceipt.anomalyReasons)}`);
+      }
+      const rawCapture = asRecord(streamReceipt.rawCapture);
+      if (rawCapture !== undefined) addString(details, "streamCapture", rawCapture.ref);
+      addString(details, "streamCaptureError", streamReceipt.rawCaptureError);
     }
     const message = asString(data.message);
     if (message !== undefined && message.trim().length > 0) details.push(`message="${truncateForTerminal(message, 160)}"`);
@@ -4140,7 +4216,6 @@ function isRejectedRecoveryConfirmation(value: unknown): boolean {
 }
 
 function failedBoundaryRecoveryDecision(
-  run: RunRecord,
   action: RuntimeActionRecord,
   plan: ExecutionPlan | undefined,
   failedBoundary: FailedBoundary | undefined,
@@ -4185,7 +4260,7 @@ function failedBoundaryRecoveryDecision(
   if (planContractMismatchRequiresRevision(target, failedBoundary, observedShapes)) {
     return undefined;
   }
-  const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version, plan.taskSemantics);
+  const repairStep = repairLeafForFailedBoundary(target, failedBoundary, plan.version);
   const planRevision: PlanProposal = {
     goal: plan.goal,
     schema: "agentloop.outcomePlan/v2",
@@ -4208,9 +4283,9 @@ function failedBoundaryRecoveryDecision(
           skillIds: step.skillIds,
           requiredCapabilities: step.requiredCapabilities,
           ...recoverySourceConstraint(step.executionBinding),
-          ...recoveryArtifactTargetBinding(step.executionBinding, plan.taskSemantics),
+          ...recoveryTargetBinding(step.executionBinding),
           ...(step.evidenceContract === undefined ? {} : { evidenceContract: step.evidenceContract }),
-          successCriteria: step.successCriteria,
+          successCriteria: recoveryProposalSuccessCriteria(step.successCriteria),
         }]),
   };
   return {
@@ -4245,22 +4320,11 @@ export function recoverySourceConstraint(binding: ExecutionPlan["steps"][number]
   };
 }
 
-/**
- * A persisted execution binding stores materialized targets, while a new
- * proposal must reference Runtime-owned targets by ID. Preserve the material
- * form only for legacy Plans that have no immutable target inventory.
- */
-export function recoveryArtifactTargetBinding(
+/** Recovery carries the same canonical delivery ownership into the replacement leaf. */
+export function recoveryTargetBinding(
   binding: ExecutionPlan["steps"][number]["executionBinding"],
-  taskSemantics: Pick<StructuredTaskUnderstanding, "artifactTargets"> | undefined,
-): Pick<PlanStepProposal, "artifactTargetIds" | "artifactTargets"> {
-  const targets = binding.artifactTargets;
-  if (targets === undefined || targets.length === 0) return {};
-  const requestedIds = new Set((taskSemantics?.artifactTargets ?? []).map((target) => target.id));
-  if (requestedIds.size > 0 && targets.every((target) => requestedIds.has(target.id))) {
-    return { artifactTargetIds: targets.map((target) => target.id) };
-  }
-  return { artifactTargets: targets };
+): Pick<PlanStepProposal, "targetIds"> {
+  return binding.targetIds.length === 0 ? {} : { targetIds: binding.targetIds };
 }
 
 function planContractMismatchRequiresRevision(
@@ -4301,8 +4365,7 @@ function failedBoundaryHasNoAcquisitionPath(
     || kind === "schema_summary"
     || kind === "record_counts"
     || kind === "table_coverage"
-    || kind === "structured_extraction_artifact"
-    || kind === "derived_aggregation",
+    || kind === "structured_extraction_artifact",
   );
   if (
     !requiresSourceEvidence
@@ -4336,8 +4399,7 @@ function failedBoundaryHasMissingSourceEvidence(failedBoundary: FailedBoundary):
     || kind === "schema_summary"
     || kind === "record_counts"
     || kind === "table_coverage"
-    || kind === "structured_extraction_artifact"
-    || kind === "derived_aggregation",
+    || kind === "structured_extraction_artifact",
   );
 }
 
@@ -4449,17 +4511,65 @@ function observedReceiptShapes(
   return shapes;
 }
 
-function failedBoundaryFromRecoveryAction(action: RuntimeActionRecord): FailedBoundary | undefined {
+function failedBoundaryFromRecoveryAction(
+  action: RuntimeActionRecord,
+  canonicalState: CanonicalRunState,
+): FailedBoundary | undefined {
   const reason = typeof action.metadata.reason === "string" ? action.metadata.reason : undefined;
   if (reason !== "assessment_failed_boundary") return undefined;
-  return failedBoundaryFromErrorDetails({ failedBoundary: action.metadata.failedBoundary });
+  const gapId = typeof action.metadata.canonicalGapId === "string" ? action.metadata.canonicalGapId : undefined;
+  const gap = gapId === undefined
+    ? undefined
+    : canonicalState.gaps.find((candidate) => candidate.id === gapId && candidate.status === "open");
+  if (gap === undefined) {
+    throw new AppError("CONFLICT", "Recovery Action has no matching open canonical GoalGap", 409);
+  }
+  return failedBoundaryFromCanonicalGap(gap);
+}
+
+function canonicalGapForRepair(
+  state: CanonicalRunState,
+  stepId: string,
+  observed: FailedBoundary,
+): CanonicalGoalGap {
+  const gap = [...state.gaps].reverse().find((candidate) =>
+    candidate.stepId === stepId && candidate.status === "open"
+  );
+  if (gap === undefined) {
+    throw new AppError("CONFLICT", `Step ${stepId} has no open canonical GoalGap`, 409);
+  }
+  if (
+    observed.stepId !== gap.stepId
+    || observed.suggestedRepairShape !== gap.suggestedAction
+    || !sameStringSet(observed.missingEvidenceKinds, gap.missingEvidenceKinds)
+    || !sameStringSet(observed.violatedSkillRequirements, gap.violatedSkillRequirements)
+  ) {
+    throw new AppError("CONFLICT", `Step ${stepId} repair boundary does not match its canonical GoalGap`, 409);
+  }
+  return gap;
+}
+
+function failedBoundaryFromCanonicalGap(gap: CanonicalGoalGap): FailedBoundary {
+  if (gap.stepId === undefined) {
+    throw new AppError("CONFLICT", `Delivery target ${gap.targetId ?? "unknown"} is not a Step repair boundary`, 409);
+  }
+  return {
+    stepId: gap.stepId,
+    missingEvidenceKinds: gap.missingEvidenceKinds,
+    violatedSkillRequirements: gap.violatedSkillRequirements,
+    reusableEvidenceRefs: gap.evidenceRefs,
+    suggestedRepairShape: gap.suggestedAction,
+  };
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
 }
 
 function repairLeafForFailedBoundary(
   target: ExecutionPlan["steps"][number],
   failedBoundary: FailedBoundary,
   planVersion: number,
-  taskSemantics?: Pick<StructuredTaskUnderstanding, "artifactTargets">,
 ): PlanStepProposal {
   const repairId = repairLeafId(target.id, planVersion);
   const missing = failedBoundary.missingEvidenceKinds.length === 0
@@ -4475,10 +4585,19 @@ function repairLeafForFailedBoundary(
     requiredFacts: target.requiredFacts,
     skillIds: target.skillIds,
     requiredCapabilities: target.requiredCapabilities,
-    ...recoveryArtifactTargetBinding(target.executionBinding, taskSemantics),
+    ...recoveryTargetBinding(target.executionBinding),
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
-    successCriteria: target.successCriteria,
+    successCriteria: recoveryProposalSuccessCriteria(target.successCriteria),
   };
+}
+
+/** Admission alone derives canonical delivery-target criteria from targetIds. */
+export function recoveryProposalSuccessCriteria(
+  criteria: readonly ExecutionPlan["steps"][number]["successCriteria"][number][],
+): readonly ExecutionPlan["steps"][number]["successCriteria"][number][] {
+  return criteria.filter((criterion) =>
+    criterion.targetId === undefined || criterion.id !== `delivery_target:${criterion.targetId}`
+  );
 }
 
 function repairLeafId(stepId: string, planVersion: number): string {
@@ -5537,7 +5656,6 @@ function stepNeedsReusableSourceEvidence(step: ExecutionPlan["steps"][number]): 
     || kind === "record_counts"
     || kind === "table_coverage"
     || kind === "structured_extraction_artifact"
-    || kind === "derived_aggregation"
     || kind === "explicit_caveats"
   );
 }
@@ -6373,6 +6491,7 @@ function selectAssessmentProfile(
   const artifactDeliveryEvidenceGate = stepUsesArtifactDeliveryEvidenceGate(step);
   if (artifactDeliveryEvidenceGate) return "evidence_gate";
   if (holisticSourceContractMismatch) return "source_grounded";
+  if (step.successCriteria.some((criterion) => criterion.verification === "model_judged")) return "source_grounded";
   // Runtime-owned observable evidence is a prerequisite, not a semantic
   // opinion. Check it before keyword-selected model profiles so wording such
   // as "do not fabricate" cannot approve a candidate that never acquired the
@@ -6400,7 +6519,6 @@ const RUNTIME_RECEIPT_ASSESSMENT_KINDS = new Set([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -6510,32 +6628,27 @@ function hasTableArtifactCoverageEvidence(toolCalls: readonly ToolEvidence[]): b
 }
 
 /**
- * Package manifests own their domain result contract.  Runtime projects only
- * the neutral fact that a declared action can satisfy a currently-required
- * evidence kind, so a delivery leaf can schedule that action before it writes
- * a report without knowing any domain workflow names or result schemas.
+ * Runtime projects only actions explicitly selected by the step-scoped
+ * decision ledger. Package manifests remain capability inventory and cannot
+ * shadow a neutral receipt from another authorized producer merely because an
+ * action advertises the same evidence kind.
  */
 function skillWorkflowEvidenceActions(input: {
-  readonly skills: readonly PrivateSkill[];
-  readonly manifests: ReadonlyMap<string, Awaited<ReturnType<typeof readSkillExecutionManifest>>>;
+  readonly bindings: readonly import("./decision-binding.ts").SkillWorkflowEvidenceBinding[];
   readonly requiredEvidenceKinds: readonly string[];
 }): readonly import("./tool-progress-policy.ts").RuntimeWorkflowEvidenceAction[] {
   const required = new Set(input.requiredEvidenceKinds);
-  return input.skills.flatMap((skill) =>
-    (input.manifests.get(skill.id) ?? []).flatMap((entrypoint) =>
-      entrypoint.actions
-        .filter((action) => action.producesEvidenceKinds.some((kind) => required.has(kind)))
-        .map((action) => ({
-          skillName: skill.name,
-          executorId: entrypoint.id,
-          actionId: action.id,
-          command: entrypoint.command,
-          script: entrypoint.script,
-          args: action.args,
-          producesEvidenceKinds: action.producesEvidenceKinds,
-        })),
-    ),
-  );
+  return input.bindings
+    .filter((binding) => binding.producesEvidenceKinds.some((kind) => required.has(kind)))
+    .map((binding) => ({
+      skillName: binding.skillName,
+      executorId: binding.executorId,
+      actionId: binding.actionId,
+      command: binding.command,
+      script: binding.script,
+      args: binding.argumentTemplates.slice(1),
+      producesEvidenceKinds: binding.producesEvidenceKinds,
+    }));
 }
 
 function receiptKinds(receipt: Record<string, unknown>): ReadonlySet<string> {
@@ -6601,8 +6714,7 @@ function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): bool
     || requiredKinds.includes("source_summary")
     || requiredKinds.includes("schema_summary")
     || requiredKinds.includes("record_counts")
-    || requiredKinds.includes("structured_extraction_artifact")
-    || requiredKinds.includes("derived_aggregation");
+    || requiredKinds.includes("structured_extraction_artifact");
 }
 
 function stepUsesOnlyDirectDelivery(step: ExecutionPlan["steps"][number]): boolean {
@@ -6698,16 +6810,13 @@ function executionTaskProfileForStep(
 ): TaskProfile {
   const artifactTargets = step.executionBinding.artifactTargets ?? [];
   // A composite leaf has no single TaskProfile artifactKind. Its concrete
-  // targets are carried by the Runtime policy and must not be replaced with
-  // the task-wide legacy deliverable projection.
-  const ownsArtifactTarget = artifactTargets.length === 1
-    || (artifactTargets.length === 0 && taskSemantics?.deliverable.surface === "workspace_artifact"
-    && taskSemantics.deliverable.kind !== "none"
-    && (stepRequiresFileOutput(step) || stepAllowsSkillFileOutput(step)));
+  // targets remain in the Runtime policy rather than being collapsed here.
+  const ownsArtifactTarget = artifactTargets.length === 1;
   const artifactTarget = artifactTargets[0];
-  const artifactKind = artifactTarget === undefined
-    ? taskSemantics?.deliverable.kind
-    : taskProfileArtifactKind(artifactTarget.kind);
+  const artifactKind = artifactTarget === undefined ? undefined : taskProfileArtifactKind(artifactTarget.kind);
+  const deliveryTarget = step.executionBinding.targetIds.length === 1
+    ? taskSemantics?.deliverables?.find((target) => target.targetId === step.executionBinding.targetIds[0])
+    : undefined;
   const input = {
     objective: step.objective,
     successCriteria: step.successCriteria,
@@ -6716,7 +6825,7 @@ function executionTaskProfileForStep(
     allowResearchPolicy: stepAllowsResearchPolicy(step),
     practiceProfiles: taskSemantics?.practiceProfiles,
     ...(ownsArtifactTarget && artifactKind !== undefined ? { artifactKind } : {}),
-    ...(ownsArtifactTarget && taskSemantics !== undefined ? { artifactAction: taskSemantics.deliverable.action } : {}),
+    ...(ownsArtifactTarget && deliveryTarget !== undefined ? { artifactAction: deliveryTarget.action } : {}),
   };
   const profile = executionTaskProfile(executionOperationProfile(input), skills.length > 0, input);
   // Planner's structured deliverable is the authority for a file-producing
@@ -6726,9 +6835,9 @@ function executionTaskProfileForStep(
   if (!ownsArtifactTarget) return profile;
   return {
     ...profile,
-    ...(taskSemantics === undefined ? {} : { deliverySurface: taskSemantics.deliverable.surface }),
+    ...(deliveryTarget === undefined ? {} : { deliverySurface: deliveryTarget.surface }),
     ...(artifactKind === undefined ? {} : { artifactKind }),
-    ...(taskSemantics === undefined ? {} : { artifactAction: taskSemantics.deliverable.action }),
+    ...(deliveryTarget === undefined ? {} : { artifactAction: deliveryTarget.action }),
   };
 }
 
@@ -6753,7 +6862,6 @@ function taskProfileArtifactKind(value: string): ArtifactKind | undefined {
  */
 function executionArtifactFormatForStep(
   step: ExecutionPlan["steps"][number],
-  taskSemantics?: StructuredTaskUnderstanding,
 ): string | undefined {
   const artifactTargets = step.executionBinding.artifactTargets ?? [];
   if (artifactTargets.length > 1) return undefined;
@@ -6762,18 +6870,7 @@ function executionArtifactFormatForStep(
       ? artifactTargets[0]!.format
       : undefined;
   }
-  if (
-    taskSemantics?.deliverable.surface !== "workspace_artifact"
-    || taskSemantics.deliverable.kind === "none"
-    || (!stepRequiresFileOutput(step) && !stepAllowsSkillFileOutput(step))
-  ) return undefined;
-  // Plans persisted before concrete format ownership used family labels such
-  // as `presentation` here. Preserve their semantic `deliverable.kind`, but
-  // never reinterpret a family label as a filename format at the acceptance
-  // boundary.
-  return taskSemantics.format !== undefined && isConcreteArtifactFormat(taskSemantics.format)
-    ? taskSemantics.format
-    : undefined;
+  return undefined;
 }
 
 function stepAllowsResearchPolicy(step: ExecutionPlan["steps"][number]): boolean {
@@ -7161,14 +7258,16 @@ const CONVERSATION_TURN_TOOL = {
           requiresExecution: { type: "boolean" },
           deliverables: {
             type: "array",
+            description: "Terminal user-requested outputs only. Never include scripts, temporary files, manifests, specs, or other implementation artifacts unless the user explicitly requested that item as a delivered output.",
             maxItems: 8,
             items: {
               type: "object",
               additionalProperties: false,
-              required: ["targetId", "purpose", "action", "kind", "surface"],
+              required: ["targetId", "purpose", "expectedArtifactCount", "action", "kind", "surface"],
               properties: {
                 targetId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
                 purpose: { type: "string", minLength: 1, maxLength: 500 },
+                expectedArtifactCount: { type: "integer", minimum: 1, maximum: 8 },
                 action: { type: "string", enum: ["none", "create", "modify", "transform"] },
                 kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
                 format: { type: "string", minLength: 1, maxLength: 32 },
@@ -7204,7 +7303,7 @@ const CONVERSATION_TURN_TOOL = {
   },
 } as const;
 
-const CONVERSATION_TURN_RESOLUTION_ATTEMPTS = 2;
+const CONVERSATION_TURN_RESOLUTION_ATTEMPTS = 3;
 
 async function resolveConversationTurn(
   model: ActionTrackedModel,
@@ -7238,12 +7337,13 @@ async function resolveConversationTurn(
       purpose: "conversation_turn_resolver",
       resolverAttempt: attempt,
     }, signal);
-    const resolution = parseConversationTurnResolution(response, context);
+    const resolution = parseConversationTurnResolution(response, context, input);
     if (resolution !== undefined) {
-      const inherited = inheritContinuedConversationIntent(resolution, context.conversationWorkingSet);
+      const artifactBound = bindUnambiguousPriorArtifact(resolution, input, context.conversationWorkingSet);
+      const relationBound = bindPriorArtifactMutationRelation(artifactBound, input);
+      const inherited = inheritContinuedConversationIntent(relationBound, context.conversationWorkingSet);
       const inheritedBinding = inheritPriorWorkProductBinding(inherited, context.conversationWorkingSet);
-      const artifactBound = bindUnambiguousPriorArtifact(inheritedBinding, input, context.conversationWorkingSet);
-      const resultBound = bindUnambiguousPriorResult(artifactBound, input, context.conversationWorkingSet);
+      const resultBound = bindUnambiguousPriorResult(inheritedBinding, input, context.conversationWorkingSet);
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
         return applyConversationTurnDirectReplyFloor(
@@ -7255,9 +7355,27 @@ async function resolveConversationTurn(
         );
       }
       repairFeedback = semanticFeedback;
+      await emit({
+        type: "conversation.turn.resolution_rejected",
+        data: {
+          resolverAttempt: attempt,
+          category: "semantic_contract",
+          feedback: semanticFeedback,
+          ...conversationTurnResolutionAttemptSummary(response),
+        },
+      });
       continue;
     }
     repairFeedback = conversationTurnRepairFeedback(response);
+    await emit({
+      type: "conversation.turn.resolution_rejected",
+      data: {
+        resolverAttempt: attempt,
+        category: "shape_contract",
+        feedback: repairFeedback,
+        ...conversationTurnResolutionAttemptSummary(response),
+      },
+    });
   }
   if (semanticFeedback !== undefined) {
     return {
@@ -7270,10 +7388,28 @@ async function resolveConversationTurn(
       sourceBinding: noConversationSourceBinding(),
       evidenceDemand: "none",
       userConstraints: [semanticFeedback],
-      source: "deterministic",
+      taskIntent: {
+        schema: "agentloop.conversationTaskIntent/v1",
+        operation: "answer",
+        requiresExecution: false,
+        deliverables: [{
+          targetId: "clarification",
+          purpose: "Clarify the unresolved prior-work binding",
+          expectedArtifactCount: 1,
+          action: "none",
+          kind: "none",
+          surface: "conversation",
+        }],
+      },
+      source: "model_guarded",
     };
   }
-  return fallbackConversationTurnResolution(input);
+  throw new AppError(
+    "PLANNING_ERROR",
+    `Conversation turn resolver failed its canonical contract after ${CONVERSATION_TURN_RESOLUTION_ATTEMPTS} attempts`,
+    422,
+    { repairFeedback },
+  );
 }
 
 /**
@@ -7349,6 +7485,7 @@ function inheritPriorWorkProductBinding(
     resolution.mode !== "execute"
     || resolution.relation === "new_goal"
     || resolution.targetRunId === undefined
+    || resolution.targetArtifact !== undefined
     || resolution.targetResult !== undefined
     || resolution.inputMode === "refresh_sources"
   ) return resolution;
@@ -7411,13 +7548,40 @@ function bindUnambiguousPriorArtifact(
   };
 }
 
+/**
+ * A new transformation of an accepted prior artifact is a refinement edge,
+ * not a resumption of the prior operation. Keeping it as continue_prior would
+ * replace the new effective goal with the old goal before canonical intent is
+ * frozen.
+ */
+function bindPriorArtifactMutationRelation(
+  resolution: ConversationTurnResolution,
+  input: string,
+): ConversationTurnResolution {
+  if (
+    resolution.mode !== "execute"
+    || resolution.relation !== "continue_prior"
+    || resolution.targetArtifact === undefined
+    || !requestsPriorArtifactChange(input)
+  ) return resolution;
+  return {
+    ...resolution,
+    relation: "refine_prior",
+    source: "model_guarded",
+  };
+}
+
 /** A published Runtime Result remains reusable independently of its producer kind. */
 function bindUnambiguousPriorResult(
   resolution: ConversationTurnResolution,
   input: string,
   workset: ConversationWorkingSet | undefined,
 ): ConversationTurnResolution {
-  if (resolution.mode !== "execute" || resolution.inputMode === "refresh_sources") return resolution;
+  if (
+    resolution.mode !== "execute"
+    || resolution.inputMode === "refresh_sources"
+    || resolution.targetArtifact !== undefined
+  ) return resolution;
   if (resolution.targetResult !== undefined) {
     if (resolution.relation !== "new_goal") return resolution;
     const selectedCard = workset?.resultCards?.find((item) => item.result.resultId === resolution.targetResult?.resultId);
@@ -7455,14 +7619,43 @@ function conversationTurnSemanticFeedback(
   input: string,
   workset: ConversationWorkingSet | undefined,
 ): string | undefined {
-  if (!referencesPriorConversationResult(input) || resolution.targetResult !== undefined) return undefined;
-  const candidates = workset?.resultCards ?? [];
-  if (candidates.length === 0) {
-    return "The user refers to a prior result, but no completed reusable Outcome is available. Ask the user to clarify or provide the content; do not silently reacquire sources.";
+  if (referencesPriorConversationResult(input) && resolution.targetResult === undefined) {
+    const candidates = workset?.resultCards ?? [];
+    if (candidates.length === 0) {
+      return "The user refers to a prior result, but no completed reusable Outcome is available. Ask the user to clarify or provide the content; do not silently reacquire sources.";
+    }
+    return candidates.length === 1
+      ? "The user refers to the available prior result. Set inputMode=prior_result and select result_candidate_1."
+      : "The user refers to a prior result, but multiple reusable results are available. Select the matching opaque resultCandidateId from reusableResultCandidates; if the transcript does not distinguish them, return clarify.";
   }
-  return candidates.length === 1
-    ? "The user refers to the available prior result. Set inputMode=prior_result and select result_candidate_1."
-    : "The user refers to a prior result, but multiple reusable results are available. Select the matching opaque resultCandidateId from reusableResultCandidates; if the transcript does not distinguish them, return clarify.";
+  return unsupportedPriorArtifactDeliverableFeedback(resolution, input, workset);
+}
+
+function unsupportedPriorArtifactDeliverableFeedback(
+  resolution: ConversationTurnResolution,
+  input: string,
+  workset: ConversationWorkingSet | undefined,
+): string | undefined {
+  if (
+    resolution.mode !== "execute"
+    || resolution.taskIntent?.operation !== "transform_artifact"
+    || resolution.targetArtifact === undefined
+  ) return undefined;
+  const target = workset?.reusableArtifacts.find((artifact) =>
+    artifact.runId === resolution.targetArtifact?.runId
+    && artifact.path === resolution.targetArtifact.path
+  );
+  if (target === undefined) return undefined;
+  const allowedKinds = explicitArtifactKindsFromIntent(input);
+  allowedKinds.add(artifactKindForReference(target));
+  const unsupported = resolution.taskIntent.deliverables.filter((deliverable) =>
+    deliverable.surface === "workspace_artifact"
+    && deliverable.kind !== "none"
+    && !allowedKinds.has(deliverable.kind)
+  );
+  if (unsupported.length === 0) return undefined;
+  const ids = unsupported.map((deliverable) => deliverable.targetId ?? deliverable.purpose ?? deliverable.kind).join(", ");
+  return `Remove unrequested terminal deliverable(s): ${ids}. A prior-artifact transformation may preserve the target artifact family, but any additional terminal artifact family must be explicitly requested in the latest user turn. Keep helper and intermediate artifacts out of taskIntent.deliverables.`;
 }
 
 function referencesPriorConversationResult(input: string): boolean {
@@ -7644,8 +7837,9 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "An acknowledgement, thanks, or statement that the user will handle the next action is reply-only: naming prior work does not by itself authorize Runtime to execute that work again.",
       "effectiveGoal must be a self-contained description of the outcome Runtime should now deliver; preserve the latest user constraints without requiring imperative wording.",
       "Resolve effectiveGoal, evidenceStrategy, and sourceBinding as one decision. Do not make evidence strategy independent from the task input you selected.",
-      "Also return taskIntent as a semantic frame: operation, requiresExecution, and every requested deliverable with stable targetId, user-visible purpose, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output, never a filename. Derive them from the full transcript and prior work context, not from isolated action words.",
-      "taskIntent.requiresExecution must agree with mode=execute. A deliverable can be a prior-artifact transformation, a new artifact, a conversation answer, or a composite of code plus a rendered artifact. Preserve all deliverables instead of choosing one because it appears first.",
+      "Also return taskIntent as a semantic frame: operation, requiresExecution, and every terminal output family the user requested with stable targetId, user-visible purpose, exact expectedArtifactCount, action, semantic kind, optional concrete format, and delivery surface. targetId/purpose are the immutable identity and acceptance intent of each output family, never a filename. expectedArtifactCount is required, must be a positive integer, and must preserve an explicit requested cardinality; use 1 only when exactly one output is requested. Derive these fields from the full transcript and prior work context, not from isolated action words.",
+      "taskIntent.deliverables is an acceptance contract, not an implementation plan. Never promote a helper script, temporary file, manifest, intermediate representation, source summary, or verification output into deliverables merely because execution may create or use it. Include code plus a rendered artifact only when the user explicitly requests both as terminal outputs.",
+      "taskIntent.requiresExecution must agree with mode=execute. Preserve every explicitly requested terminal output instead of choosing one because it appears first.",
       "visibleDirectories are merely Runtime-authorized candidates, not automatic input. Use sourceBinding.mode=none and visibleDirectoryIds=[] unless the user explicitly refers to a candidate or the requested object, period, and subject have a high-confidence match to one unique candidate.",
       "When a visible directory is the primary data input, set sourceBinding.mode=primary_data, select only its opaque IDs from visibleDirectories, and set evidenceStrategy=bound_visible_sources. A primary-data binding can never use evidenceStrategy=none.",
       "When multiple visible directories could plausibly satisfy the goal and the transcript does not distinguish one, return clarify rather than guessing. Do not bind a directory merely because it is available.",
@@ -7678,6 +7872,7 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
 function parseConversationTurnResolution(
   response: ModelResponse,
   context: ConversationIntentExternalContext,
+  input: string,
 ): ConversationTurnResolution | undefined {
   const workset = context.conversationWorkingSet;
   const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL.name);
@@ -7688,8 +7883,7 @@ function parseConversationTurnResolution(
   const mode = argumentsRecord.mode;
   const relation = argumentsRecord.relation;
   const inputMode = argumentsRecord.inputMode;
-  const legacyEvidenceDemand = argumentsRecord.evidenceDemand;
-  const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy, legacyEvidenceDemand);
+  const evidenceStrategy = parseConversationEvidenceStrategy(argumentsRecord.evidenceStrategy);
   const taskIntent = parseConversationTaskIntent(argumentsRecord.taskIntent);
   const sourceBinding = parseConversationSourceBinding(argumentsRecord.sourceBinding, context.visibleDirectories);
   const effectiveGoal = typeof argumentsRecord.effectiveGoal === "string"
@@ -7698,14 +7892,23 @@ function parseConversationTurnResolution(
   const targetGoalCandidateId = typeof argumentsRecord.targetGoalCandidateId === "string"
     ? argumentsRecord.targetGoalCandidateId.trim()
     : undefined;
-  const targetRunId = targetGoalCandidateId === undefined
+  const candidateTargetRunId = targetGoalCandidateId === undefined
     ? undefined
     : conversationRunIdForGoalCandidate(workset, targetGoalCandidateId);
   const artifactRecord = optionalRecord(argumentsRecord.targetArtifact);
   const artifactPath = typeof artifactRecord.path === "string" ? artifactRecord.path.trim() : undefined;
-  const targetArtifact = artifactPath !== undefined && targetRunId !== undefined
-    ? { runId: targetRunId, path: artifactPath }
-    : undefined;
+  const matchingArtifacts = artifactPath === undefined
+    ? []
+    : workset?.reusableArtifacts.filter((artifact) => artifact.reusable && artifact.path === artifactPath) ?? [];
+  const candidateArtifact = matchingArtifacts.find((artifact) => artifact.runId === candidateTargetRunId)
+    ?? (matchingArtifacts.length === 1 ? matchingArtifacts[0] : undefined);
+  const targetArtifact = candidateArtifact === undefined
+    ? undefined
+    : { runId: candidateArtifact.runId, path: candidateArtifact.path };
+  const guardedPriorArtifact = targetArtifact !== undefined && requestsPriorArtifactChange(input);
+  const targetRunId = guardedPriorArtifact ? targetArtifact.runId : candidateTargetRunId;
+  const normalizedInputMode = guardedPriorArtifact ? "prior_artifact" : inputMode;
+  const normalizedRelation = guardedPriorArtifact && relation === "new_goal" ? "refine_prior" : relation;
   const resultCandidateId = typeof argumentsRecord.resultCandidateId === "string"
     ? argumentsRecord.resultCandidateId.trim()
     : undefined;
@@ -7718,36 +7921,36 @@ function parseConversationTurnResolution(
     ? argumentsRecord.userConstraints.map((item) => (item as string).trim())
     : undefined;
   if (mode !== "reply" && mode !== "execute" && mode !== "clarify") return undefined;
-  if (!isConversationTurnRelation(relation)) return undefined;
-  if (!isConversationTurnInputMode(inputMode)) return undefined;
+  if (!isConversationTurnRelation(normalizedRelation)) return undefined;
+  if (!isConversationTurnInputMode(normalizedInputMode)) return undefined;
   if (evidenceStrategy === undefined || sourceBinding === undefined) return undefined;
   if (taskIntent === undefined) return undefined;
   if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
   if (
     taskIntent !== undefined
     && !taskIntent.requiresExecution
-    && (inputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
+    && (normalizedInputMode !== "none" || targetArtifact !== undefined || targetResult !== undefined)
   ) return undefined;
   if (argumentsRecord.targetArtifact !== undefined && targetArtifact === undefined) return undefined;
-  if (targetGoalCandidateId !== undefined && targetRunId === undefined) return undefined;
+  if (targetGoalCandidateId !== undefined && candidateTargetRunId === undefined && targetArtifact === undefined) return undefined;
   if (resultCandidateId !== undefined && targetResult === undefined) return undefined;
-  if (inputMode === "prior_result" && targetResult === undefined) return undefined;
-  if (inputMode !== "prior_result" && resultCandidateId !== undefined) return undefined;
-  if (inputMode === "prior_artifact" && targetArtifact === undefined) return undefined;
-  if (inputMode !== "prior_artifact" && targetArtifact !== undefined) return undefined;
+  if (normalizedInputMode === "prior_result" && targetResult === undefined) return undefined;
+  if (normalizedInputMode !== "prior_result" && resultCandidateId !== undefined) return undefined;
+  if (normalizedInputMode === "prior_artifact" && targetArtifact === undefined) return undefined;
+  if (normalizedInputMode !== "prior_artifact" && targetArtifact !== undefined) return undefined;
   if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000 || userConstraints === undefined) return undefined;
   const evidenceDemand = conversationEvidenceDemandForStrategy(evidenceStrategy);
   if (!isConversationSourceBindingConsistent(evidenceStrategy, sourceBinding)) return undefined;
   if (mode !== "execute" && (evidenceDemand !== "none" || sourceBinding.mode !== "none")) return undefined;
 
   const priorRunIds = conversationTurnTargetRunIds(workset);
-  if (relation === "new_goal") {
+  if (normalizedRelation === "new_goal") {
     if (targetRunId !== undefined && !priorRunIds.has(targetRunId)) return undefined;
   } else if (targetRunId === undefined || !priorRunIds.has(targetRunId)) {
     return undefined;
   }
   if (targetArtifact !== undefined) {
-    if (relation === "new_goal" || targetRunId !== targetArtifact.runId) return undefined;
+    if (normalizedRelation === "new_goal" || targetRunId !== targetArtifact.runId) return undefined;
     const isReusable = workset?.reusableArtifacts.some((artifact) =>
       artifact.runId === targetArtifact.runId && artifact.path === targetArtifact.path && artifact.reusable,
     ) === true;
@@ -7756,18 +7959,40 @@ function parseConversationTurnResolution(
   return {
     schema: "agentloop.conversationTurnResolution/v1",
     mode,
-    relation,
-    inputMode,
+    relation: normalizedRelation,
+    inputMode: normalizedInputMode,
     ...(targetRunId === undefined ? {} : { targetRunId }),
     ...(targetArtifact === undefined ? {} : { targetArtifact }),
     ...(targetResult === undefined ? {} : { targetResult }),
     effectiveGoal,
-    ...(taskIntent === undefined ? {} : { taskIntent }),
+    taskIntent,
     evidenceStrategy,
     sourceBinding,
     evidenceDemand,
     userConstraints,
-    source: "model",
+    source: guardedPriorArtifact ? "model_guarded" : "model",
+  };
+}
+
+function conversationTurnResolutionAttemptSummary(response: ModelResponse): Readonly<Record<string, unknown>> {
+  const call = response.toolCalls.find((item) => item.name === CONVERSATION_TURN_TOOL.name);
+  const value = optionalRecord(call?.arguments);
+  const artifact = optionalRecord(value.targetArtifact);
+  const intent = optionalRecord(value.taskIntent);
+  const deliverables = Array.isArray(intent.deliverables) ? intent.deliverables : [];
+  return {
+    toolCallCount: response.toolCalls.length,
+    toolCallNames: response.toolCalls.map((item) => item.name),
+    ...(typeof value.mode === "string" ? { mode: value.mode } : {}),
+    ...(typeof value.relation === "string" ? { relation: value.relation } : {}),
+    ...(typeof value.inputMode === "string" ? { inputMode: value.inputMode } : {}),
+    ...(typeof value.targetGoalCandidateId === "string" ? { targetGoalCandidateId: value.targetGoalCandidateId } : {}),
+    ...(typeof artifact.path === "string" ? { targetArtifactPath: artifact.path } : {}),
+    deliverableKinds: deliverables.map((item) => optionalRecord(item).kind).filter((item) => typeof item === "string"),
+    deliverableExpectedArtifactCounts: deliverables.map((item) => {
+      const count = optionalRecord(item).expectedArtifactCount;
+      return Number.isInteger(count) ? count : null;
+    }),
   };
 }
 
@@ -7791,18 +8016,22 @@ function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | u
     const format = deliverable.format;
     const targetId = deliverable.targetId;
     const purpose = deliverable.purpose;
+    const expectedArtifactCount = deliverable.expectedArtifactCount;
     if (
       typeof action !== "string" || !actions.has(action)
       || typeof kind !== "string" || !kinds.has(kind)
       || typeof surface !== "string" || !surfaces.has(surface)
-      || (targetId !== undefined && (typeof targetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(targetId) || targetId.length > 128 || targetIds.has(targetId)))
-      || (purpose !== undefined && (typeof purpose !== "string" || purpose.trim().length === 0 || purpose.length > 500))
+      || typeof targetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(targetId) || targetId.length > 128 || targetIds.has(targetId)
+      || typeof purpose !== "string" || purpose.trim().length === 0 || purpose.length > 500
+      || !Number.isInteger(expectedArtifactCount) || (expectedArtifactCount as number) < 1 || (expectedArtifactCount as number) > 8
+      || ((expectedArtifactCount as number) > 1 && typeof targetId === "string" && targetId.length > 126)
       || (format !== undefined && (typeof format !== "string" || format.trim().length === 0 || format.length > 32))
     ) return undefined;
-    if (targetId !== undefined) targetIds.add(targetId);
+    targetIds.add(targetId);
     return {
-      ...(targetId === undefined ? {} : { targetId: targetId.trim() }),
-      ...(purpose === undefined ? {} : { purpose: purpose.trim() }),
+      targetId: targetId.trim(),
+      purpose: purpose.trim(),
+      expectedArtifactCount: expectedArtifactCount as number,
       action: action as ConversationTaskIntent["deliverables"][number]["action"],
       kind: kind as ConversationTaskIntent["deliverables"][number]["kind"],
       ...(format === undefined ? {} : { format: format.trim() }),
@@ -7810,6 +8039,7 @@ function parseConversationTaskIntent(value: unknown): ConversationTaskIntent | u
     };
   });
   if (deliverables.some((item) => item === undefined)) return undefined;
+  if (deliverables.reduce((count, item) => count + (item?.surface === "workspace_artifact" ? item.expectedArtifactCount : 0), 0) > 8) return undefined;
   return {
     schema: "agentloop.conversationTaskIntent/v1",
     operation: record.operation as ConversationTaskIntent["operation"],
@@ -7855,50 +8085,18 @@ function conversationTurnRepairFeedback(response: ModelResponse): string {
   if (response.toolCalls[0]?.name !== CONVERSATION_TURN_TOOL.name) {
     return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_TURN_TOOL.name}.`;
   }
+  const value = optionalRecord(response.toolCalls[0].arguments);
+  const intent = optionalRecord(value.taskIntent);
+  if (Array.isArray(intent.deliverables)) {
+    const invalidCountIndex = intent.deliverables.findIndex((item) => {
+      const count = optionalRecord(item).expectedArtifactCount;
+      return !Number.isInteger(count) || (count as number) < 1 || (count as number) > 8;
+    });
+    if (invalidCountIndex >= 0) {
+      return `taskIntent.deliverables[${invalidCountIndex}].expectedArtifactCount must be an integer from 1 to 8. Preserve the number of terminal artifacts explicitly requested by the user; use 1 only when exactly one artifact is requested.`;
+    }
+  }
   return "The previous response did not provide a valid mode, relation, input mode, opaque candidate selection, effective goal, evidence demand, and constraint list.";
-}
-
-function deterministicConversationTurnResolution(input: string): ConversationTurnResolution {
-  const evidenceDemand = classifyTaskIntent({ objective: input }).sourceNeed;
-  return {
-    schema: "agentloop.conversationTurnResolution/v1",
-    mode: "execute",
-    relation: "new_goal",
-    inputMode: "none",
-    effectiveGoal: input.trim() || "Complete the latest user request",
-    evidenceStrategy: evidenceDemand,
-    sourceBinding: noConversationSourceBinding(),
-    evidenceDemand,
-    userConstraints: [],
-    source: "deterministic",
-  };
-}
-
-function canResolveNewConversationTurnLocally(
-  input: string,
-  conversationHistory: readonly ModelMessage[] | undefined,
-  conversationWorkingSet: ConversationWorkingSet | undefined,
-  visibleDirectories: readonly VisibleDirectoryGrant[],
-  sources: readonly UploadedSourceSummary[],
-): boolean {
-  // The resolver owns cross-turn binding and opaque resource selection. On a
-  // genuinely new, resource-free conversation there is no such context to
-  // resolve; the canonical task classifier can provide the same execute
-  // floor without spending a second model round trip. Keep conversational
-  // replies on the resolver path because their reply/execute distinction is
-  // not safe to infer from artifact vocabulary alone.
-  if ((conversationHistory?.length ?? 0) > 0 || conversationWorkingSet !== undefined) return false;
-  if (visibleDirectories.length > 0 || sources.length > 0) return false;
-  const intent = classifyTaskIntent({ objective: input });
-  if (intent.wantsConversationAnswer && !intent.wantsArtifact && intent.sourceNeed === "none") return false;
-  return intent.wantsArtifact || intent.sourceNeed !== "none" || requiresExternalState(input);
-}
-
-function fallbackConversationTurnResolution(input: string): ConversationTurnResolution {
-  return {
-    ...deterministicConversationTurnResolution(input),
-    source: "fallback",
-  };
 }
 
 function conversationTurnResolutionFromEvents(
@@ -7910,18 +8108,9 @@ function conversationTurnResolutionFromEvents(
     const data = optionalRecord(event.data);
     const mode = data.mode;
     const relation = data.relation;
-    const inputMode = data.inputMode === undefined
-      ? data.targetResult !== undefined
-        ? "prior_result"
-        : data.targetArtifact !== undefined
-          ? "prior_artifact"
-          : "none"
-      : data.inputMode;
+    const inputMode = data.inputMode;
     const evidenceDemand = data.evidenceDemand;
-    const evidenceStrategy = parseConversationEvidenceStrategy(data.evidenceStrategy, evidenceDemand);
-    // Historical resolution events did not record a source binding. They are
-    // interpreted as unbound; only new model resolutions can bind a visible
-    // directory candidate.
+    const evidenceStrategy = parseConversationEvidenceStrategy(data.evidenceStrategy);
     const sourceBinding = parsePersistedConversationSourceBinding(data.sourceBinding);
     const source = data.source;
     const effectiveGoal = typeof data.effectiveGoal === "string" ? data.effectiveGoal.trim() : "";
@@ -7935,8 +8124,7 @@ function conversationTurnResolutionFromEvents(
     if (!isConversationTurnInputMode(inputMode)) return undefined;
     if (!isConversationEvidenceDemand(evidenceDemand) || evidenceStrategy === undefined || sourceBinding === undefined || !isConversationTurnResolutionSource(source)) return undefined;
     if (effectiveGoal.length === 0 || effectiveGoal.length > 2_000) return undefined;
-    if (data.taskIntent !== undefined && taskIntent === undefined) return undefined;
-    if (taskIntent !== undefined && taskIntent.requiresExecution !== (mode === "execute")) return undefined;
+    if (taskIntent === undefined || taskIntent.requiresExecution !== (mode === "execute")) return undefined;
     if (
       taskIntent !== undefined
       && !taskIntent.requiresExecution
@@ -7962,7 +8150,7 @@ function conversationTurnResolutionFromEvents(
       ...(targetArtifact === undefined ? {} : { targetArtifact }),
       ...(targetResult === undefined ? {} : { targetResult }),
       effectiveGoal,
-      ...(taskIntent === undefined ? {} : { taskIntent }),
+      taskIntent,
       evidenceStrategy,
       sourceBinding,
       evidenceDemand,
@@ -7974,7 +8162,6 @@ function conversationTurnResolutionFromEvents(
 }
 
 function parsePersistedConversationSourceBinding(value: unknown): ConversationSourceBinding | undefined {
-  if (value === undefined) return noConversationSourceBinding();
   const record = optionalRecord(value);
   const mode = record.mode;
   const ids = record.visibleDirectoryIds;
@@ -8002,7 +8189,7 @@ function isConversationTurnMode(value: unknown): value is ConversationTurnResolu
 }
 
 function isConversationTurnResolutionSource(value: unknown): value is ConversationTurnResolution["source"] {
-  return value === "model" || value === "model_guarded" || value === "deterministic" || value === "fallback";
+  return value === "model" || value === "model_guarded";
 }
 
 function isConversationTurnRelation(value: unknown): value is ConversationTurnRelation {
@@ -8028,7 +8215,6 @@ function noConversationSourceBinding(): ConversationSourceBinding {
 
 function parseConversationEvidenceStrategy(
   value: unknown,
-  legacyEvidenceDemand: unknown,
 ): ConversationEvidenceStrategy | undefined {
   if (
     value === "none"
@@ -8037,10 +8223,7 @@ function parseConversationEvidenceStrategy(
     || value === "strict_user_source"
     || value === "bound_visible_sources"
   ) return value;
-  // Persisted v1 events and test doubles emitted the former independent
-  // evidenceDemand. They have no visible source choice, so retain only the
-  // unbound interpretation while rolling out the atomic contract.
-  return isConversationEvidenceDemand(legacyEvidenceDemand) ? legacyEvidenceDemand : undefined;
+  return undefined;
 }
 
 function conversationEvidenceDemandForStrategy(

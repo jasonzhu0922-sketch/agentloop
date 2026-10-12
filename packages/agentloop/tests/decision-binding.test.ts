@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
-import { resolveOperationBindings } from "../src/runtime/decision-binding.ts";
+import {
+  requiredSkillWorkflowEvidenceBindings,
+  resolveOperationBindings,
+  resolveSkillWorkflowEvidenceBindings,
+} from "../src/runtime/decision-binding.ts";
 import { createDecisionCommit } from "../src/runtime/decision-ledger.ts";
 import { ToolRegistry, type RuntimeTool } from "../src/tools/tool-registry.ts";
 
@@ -97,4 +101,25 @@ test("computer_run_command rejects a manifest operation with a substituted decis
       args: ["scripts/query.py", "--action", "detail", "--identity-ref", "9131011579144036XB"],
     },
   }), (error: unknown) => (error as { details?: { policyCode?: string } }).details?.policyCode === "resolved_operation_binding_conflict");
+});
+
+test("workflow evidence becomes mandatory only for an explicitly resolved operation", () => {
+  const skill = { id: "skill-1", name: "skill-1", package: { packageHash: "hash", root: "/skills/skill-1", entrypointPath: "SKILL.md", fileCount: 1, totalBytes: 1 } } as never;
+  const manifests = new Map([["skill-1", [{
+    id: "executor-1", description: "query", command: "python3", script: "scripts/query.py",
+    actions: [{
+      id: "detail", description: "detail", inputs: [{ name: "identity-ref", description: "identity", required: true }],
+      decisionBinding: { identityRefInputs: ["identity-ref"] },
+      args: ["--identity-ref", "{{identity-ref}}"], result: "result", producesEvidenceKinds: ["source_summary"],
+    }],
+  }]]]);
+  const available = resolveSkillWorkflowEvidenceBindings({ skills: [skill], manifests });
+
+  assert.equal(requiredSkillWorkflowEvidenceBindings({ available, resolvedOperations: [] }).length, 0);
+
+  const resolvedOperations = resolveOperationBindings({
+    skills: [skill], manifests, decisionLedger: [decision], planId: "plan-1", stepId: "step-1",
+  });
+  const required = requiredSkillWorkflowEvidenceBindings({ available, resolvedOperations });
+  assert.deepEqual(required.map((binding) => binding.actionId), ["detail"]);
 });

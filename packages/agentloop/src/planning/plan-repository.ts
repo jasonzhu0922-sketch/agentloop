@@ -13,7 +13,7 @@ import type {
 } from "./contracts.ts";
 import { parseRuntimeResult, parseRuntimeResultBinding } from "../runtime/runtime-result.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
-import type { StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
+import type { CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
 
 interface PlanRow {
   id: string;
@@ -21,7 +21,7 @@ interface PlanRow {
   version: number;
   goal: string;
   selected_skill_ids_json: string;
-  task_semantics_json?: string | null;
+  canonical_state_ref_json?: string | null;
   input_bindings_json?: string;
   status: PlanStatus;
   created_at: number;
@@ -73,7 +73,7 @@ export class PlanRepository {
   async create(plan: ExecutionPlan): Promise<ExecutionPlan> {
     await this.database.transaction(async () => {
       await this.database.prepare(`
-        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, task_semantics_json, input_bindings_json, status, created_at, updated_at)
+        INSERT INTO plans(id, run_id, version, goal, selected_skill_ids_json, canonical_state_ref_json, input_bindings_json, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         plan.id,
@@ -81,7 +81,7 @@ export class PlanRepository {
         plan.version,
         plan.goal,
         JSON.stringify(plan.selectedSkillIds),
-        plan.taskSemantics === undefined ? null : JSON.stringify(plan.taskSemantics),
+        JSON.stringify(plan.canonicalStateRef),
         JSON.stringify(plan.resultBindings ?? []),
         plan.status,
         plan.createdAt,
@@ -356,9 +356,7 @@ export class PlanRepository {
       version: row.version,
       goal: row.goal,
       selectedSkillIds: JSON.parse(row.selected_skill_ids_json),
-      ...(row.task_semantics_json === undefined || row.task_semantics_json === null
-        ? {}
-        : { taskSemantics: parseTaskSemantics(row.task_semantics_json) }),
+      canonicalStateRef: parseCanonicalStateRef(row.canonical_state_ref_json, row.run_id),
       resultBindings: parseResultBindings(row.input_bindings_json),
       status: row.status,
       steps: steps.map(toStep),
@@ -371,7 +369,7 @@ export class PlanRepository {
     const proposal = {
       goal: plan.goal,
       selectedSkillIds: plan.selectedSkillIds,
-      ...(plan.taskSemantics === undefined ? {} : { taskSemantics: plan.taskSemantics }),
+      canonicalStateRef: plan.canonicalStateRef,
       resultBindings: plan.resultBindings ?? [],
       steps: plan.steps.map((step) => ({
         id: step.id,
@@ -399,24 +397,20 @@ export class PlanRepository {
   }
 }
 
-function parseTaskSemantics(value: string): StructuredTaskUnderstanding {
-  const parsed = JSON.parse(value) as unknown;
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Plan has invalid task semantics; replan required");
+function parseCanonicalStateRef(value: string | null | undefined, runId: string): CanonicalRunStateRef {
+  if (value === undefined || value === null) {
+    throw new Error(`Plan for Run ${runId} has no canonical state reference; replan required`);
   }
-  const record = parsed as Record<string, unknown>;
-  const deliverable = record.deliverable;
+  const parsed = JSON.parse(value) as Partial<CanonicalRunStateRef>;
   if (
-    record.schema !== "agentloop.taskUnderstanding/v1"
-    || deliverable === null
-    || typeof deliverable !== "object"
-    || Array.isArray(deliverable)
-    || typeof (deliverable as Record<string, unknown>).kind !== "string"
-    || typeof (deliverable as Record<string, unknown>).surface !== "string"
+    typeof parsed.stateId !== "string"
+    || parsed.runId !== runId
+    || typeof parsed.intentId !== "string"
+    || typeof parsed.revision !== "number"
   ) {
-    throw new Error("Plan has invalid task semantics; replan required");
+    throw new Error(`Plan for Run ${runId} has an invalid canonical state reference; replan required`);
   }
-  return parsed as StructuredTaskUnderstanding;
+  return parsed as CanonicalRunStateRef;
 }
 
 function parseAssessmentProfile(value: string | undefined): AssessmentProfileId {
@@ -458,7 +452,13 @@ function toStep(row: StepRow): PlanStep {
     throw new Error(`Plan step ${row.step_id} lacks execution binding; replan required`);
   }
   const executionBinding = JSON.parse(row.execution_binding_json);
-  if (executionBinding.schema !== "agentloop.stepExecutionBinding/v1" || !Array.isArray(executionBinding.requiredCapabilities)) {
+  if (
+    executionBinding.schema !== "agentloop.stepExecutionBinding/v1"
+    || !Array.isArray(executionBinding.requiredCapabilities)
+    || !Array.isArray(executionBinding.targetIds)
+    || !Array.isArray(executionBinding.evidenceProducers)
+    || !executionBinding.evidenceProducers.every(isValidEvidenceProducerBinding)
+  ) {
     throw new Error(`Plan step ${row.step_id} has invalid execution binding; replan required`);
   }
   return {
@@ -485,6 +485,17 @@ function toStep(row: StepRow): PlanStep {
     ...(row.retired_at === null ? {} : { retiredAt: row.retired_at }),
     ...(row.retirement_reason === null ? {} : { retirementReason: row.retirement_reason }),
   };
+}
+
+function isValidEvidenceProducerBinding(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const producer = value as Record<string, unknown>;
+  return typeof producer.evidenceKind === "string"
+    && producer.evidenceKind.trim().length > 0
+    && typeof producer.capabilityId === "string"
+    && producer.capabilityId.trim().length > 0
+    && Array.isArray(producer.resolvedToolNames)
+    && producer.resolvedToolNames.every((toolName) => typeof toolName === "string" && toolName.trim().length > 0);
 }
 
 function parseStepEvidence(value: string, planId: string, stepId: string): StepEvidence {

@@ -325,7 +325,7 @@ test("a structured prior-artifact transform overrides an erroneous source-resear
       modelFactory: () => model,
       plannerFactory: () => ({
         plan: async (task) => {
-          if (task.input === "write prior.html as initial") return await initialPlanner.plan(task);
+          if (task.canonicalState.intent.userInput === "write prior.html as initial") return await initialPlanner.plan(task);
           capturedTask = task;
           throw new Error("captured structured artifact transform");
         },
@@ -340,11 +340,187 @@ test("a structured prior-artifact transform overrides an erroneous source-resear
       allowDangerousTools: true,
       conversationId: prior.conversationId,
     }));
-    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
-    assert.equal(capturedTask?.taskUnderstanding.evidence.need, "none");
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.evidenceDemand, "none");
+    assert.equal(capturedTask?.canonicalState.intent.understanding.evidence.need, "none");
   } finally {
     await database.close();
     await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a prior-artifact transform keeps implementation artifacts out of canonical terminal deliverables", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-terminal-deliverable-boundary-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new ProcessArtifactPollutingResolverModel();
+    const initialPlanner = singleStepTestPlanner();
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          if (task.canonicalState.intent.userInput === "write merged_output.pdf as initial") return await initialPlanner.plan(task);
+          capturedTask = task;
+          throw new Error("captured repaired terminal deliverable intent");
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "write merged_output.pdf as initial", { allowDangerousTools: true });
+    assert.equal((await runs.processArtifacts(owner.user.id, prior.id)).some((artifact) => artifact.path === "merged_output.pdf"), true);
+
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "现在把合并文件拆分为平均的 4 份", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    }), /Run failed/);
+
+    assert.equal(model.resolverAttempts, 2);
+    assert.match(model.repairPrompts[0] ?? "", /Remove unrequested terminal deliverable\(s\): split_pdfs_script/);
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.relation, "refine_prior");
+    assert.match(capturedTask?.canonicalState.intent.turnResolution?.effectiveGoal ?? "", /平均拆分为 4 份/);
+    assert.doesNotMatch(capturedTask?.canonicalState.intent.turnResolution?.effectiveGoal ?? "", /合并为一个/);
+    const understanding = capturedTask?.canonicalState.intent.understanding;
+    assert.equal(understanding?.format, "pdf");
+    assert.deepEqual(understanding?.deliverables?.map((deliverable) => deliverable.targetId), ["prior_artifact_transformation"]);
+    assert.deepEqual(understanding?.artifactTargets?.map((target) => target.id), [
+      "prior_artifact_transformation.1",
+      "prior_artifact_transformation.2",
+      "prior_artifact_transformation.3",
+      "prior_artifact_transformation.4",
+    ]);
+    assert.equal(understanding?.artifactTargets?.some((target) => target.kind === "code"), false);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a uniquely named reusable artifact repairs resolver lineage instead of falling back to a new goal", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-prior-artifact-lineage-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new PriorArtifactLineageDriftModel();
+    const initialPlanner = singleStepTestPlanner();
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          if (task.canonicalState.intent.userInput === "write merged_output.pdf as initial") return await initialPlanner.plan(task);
+          capturedTask = task;
+          throw new Error("captured repaired prior artifact lineage");
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "write merged_output.pdf as initial", { allowDangerousTools: true });
+    await assert.rejects(() => runs.executeConversation(owner.user.id, "现在把合并文件拆分为平均的 4 份", {
+      allowDangerousTools: true,
+      conversationId: prior.conversationId,
+    }), /Run failed/);
+
+    const resolution = capturedTask?.canonicalState.intent.turnResolution;
+    assert.equal(resolution?.relation, "refine_prior");
+    assert.equal(resolution?.inputMode, "prior_artifact");
+    assert.equal(resolution?.targetRunId, prior.id);
+    assert.equal(resolution?.targetArtifact?.path, "merged_output.pdf");
+    assert.equal(resolution?.source, "model_guarded");
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a malformed canonical turn resolution exhausts bounded repair and never falls back", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-turn-resolution-fail-closed-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new AlwaysMalformedPriorArtifactResolverModel();
+    let plannerCalls = 0;
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async (task) => {
+          plannerCalls += 1;
+          return await singleStepTestPlanner().plan(task);
+        },
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const prior = await runs.execute(owner.user.id, "write merged_output.pdf as initial", { allowDangerousTools: true });
+    const plannerCallsBeforeFollowUp = plannerCalls;
+    let failedRunId: string | undefined;
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "现在把合并文件拆分为平均的 4 份", {
+        allowDangerousTools: true,
+        conversationId: prior.conversationId,
+      }),
+      (error: unknown) => {
+        failedRunId = error instanceof AppError && typeof error.details?.runId === "string" ? error.details.runId : undefined;
+        return error instanceof AppError && error.code === "PLANNING_ERROR" && /canonical contract after 3 attempts/.test(error.message);
+      },
+    );
+
+    assert.ok(failedRunId);
+    assert.equal(model.resolverAttempts, 3);
+    assert.equal(plannerCalls, plannerCallsBeforeFollowUp);
+    const events = await runs.events(owner.user.id, failedRunId);
+    assert.equal(events.filter((event) => event.type === "conversation.turn.resolution_rejected").length, 3);
+    assert.equal(events.some((event) => event.type === "conversation.turn.resolved"), false);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("conversation resolver gives field-specific repair feedback for a missing artifact count", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new MissingExpectedArtifactCountResolverModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => { throw new AppError("PLANNING_ERROR", "stop after repaired resolver", 422); },
+      }),
+    });
+
+    let runId: string | undefined;
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "生成一个 PDF 文件"),
+      (error: unknown) => {
+        if (!(error instanceof AppError) || error.code !== "PLANNING_ERROR") return false;
+        runId = typeof error.details?.runId === "string" ? error.details.runId : undefined;
+        return /stop after repaired resolver/.test(error.message);
+      },
+    );
+
+    assert.equal(model.resolverAttempts, 2);
+    assert.equal(model.repairPrompts.length, 1);
+    assert.match(model.repairPrompts[0] ?? "", /taskIntent\.deliverables\[0\]\.expectedArtifactCount must be an integer from 1 to 8/);
+    assert.ok(runId);
+    const events = await runs.events(owner.user.id, runId);
+    const rejected = events.find((event) => event.type === "conversation.turn.resolution_rejected");
+    assert.deepEqual(rejected?.data.deliverableExpectedArtifactCounts, [null]);
+  } finally {
+    await database.close();
   }
 });
 
@@ -363,7 +539,7 @@ test("a prior Result continuation does not turn historical ToolSource provenance
       modelFactory: () => priorResultContinuationResolver("prior_result"),
       plannerFactory: () => ({
         plan: async (task) => {
-          if (task.input === "seed reusable ODS result") return await singleStepTestPlanner().plan(task);
+          if (task.canonicalState.intent.userInput === "seed reusable ODS result") return await singleStepTestPlanner().plan(task);
           capturedTask = task;
           throw new Error("captured prior Result continuation task");
         },
@@ -376,10 +552,10 @@ test("a prior Result continuation does not turn historical ToolSource provenance
       conversationId: prior.conversationId,
     }), /Run failed/);
 
-    assert.equal(capturedTask?.turnResolution?.inputMode, "prior_result");
-    assert.ok(capturedTask?.turnResolution?.targetResult);
-    assert.equal(capturedTask?.turnResolution?.evidenceDemand, "none");
-    assert.equal(capturedTask?.requiredToolSourceIds, undefined);
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.inputMode, "prior_result");
+    assert.ok(capturedTask?.canonicalState.intent.turnResolution?.targetResult);
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.evidenceDemand, "none");
+    assert.deepEqual(capturedTask?.canonicalState.intent.requiredToolSourceIds, []);
   } finally {
     await database.close();
     await fs.rm(workspace, { recursive: true, force: true });
@@ -401,7 +577,7 @@ test("a refresh-sources continuation retains an explicitly named ToolSource requ
       modelFactory: () => priorResultContinuationResolver("refresh_sources"),
       plannerFactory: () => ({
         plan: async (task) => {
-          if (task.input === "seed reusable ODS result") return await singleStepTestPlanner().plan(task);
+          if (task.canonicalState.intent.userInput === "seed reusable ODS result") return await singleStepTestPlanner().plan(task);
           capturedTask = task;
           throw new Error("captured refresh-sources continuation task");
         },
@@ -414,8 +590,8 @@ test("a refresh-sources continuation retains an explicitly named ToolSource requ
       conversationId: prior.conversationId,
     }), /Run failed/);
 
-    assert.equal(capturedTask?.turnResolution?.inputMode, "refresh_sources");
-    assert.deepEqual(capturedTask?.requiredToolSourceIds, ["ontoflow-jtbc"]);
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.inputMode, "refresh_sources");
+    assert.deepEqual(capturedTask?.canonicalState.intent.requiredToolSourceIds, ["ontoflow-jtbc"]);
   } finally {
     await database.close();
     await fs.rm(workspace, { recursive: true, force: true });
@@ -569,9 +745,9 @@ test("Conversation resolver atomically binds only the visible directory selected
 
     assert.equal(run.status, "completed");
     assert.deepEqual(capturedTask?.visibleDirectories?.map((directory) => directory.id), ["visible_dir_2"]);
-    assert.equal(capturedTask?.taskUnderstanding.operation, "analysis");
-    assert.equal(capturedTask?.taskUnderstanding.evidence.need, "source_grounded");
-    assert.equal(capturedTask?.taskUnderstanding.operationProfiles.includes("data_analysis"), true);
+    assert.equal(capturedTask?.canonicalState.intent.understanding.operation, "analysis");
+    assert.equal(capturedTask?.canonicalState.intent.understanding.evidence.need, "source_grounded");
+    assert.equal(capturedTask?.canonicalState.intent.understanding.operationProfiles.includes("data_analysis"), true);
     assert.equal(capturedTask?.availableToolNames.includes("visible_extract_tables"), true);
     const resolved = (await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.turn.resolved");
     assert.deepEqual(resolved?.data.sourceBinding, { mode: "primary_data", visibleDirectoryIds: ["visible_dir_2"] });
@@ -674,7 +850,7 @@ test("Generic Run execution does not opt into conversation intent classification
   }
 });
 
-test("a resource-free executable conversation turn uses the canonical local intent floor", async () => {
+test("a resource-free executable conversation turn still uses the canonical Resolver contract", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const owner = testOwner();
@@ -688,11 +864,11 @@ test("a resource-free executable conversation turn uses the canonical local inte
     });
 
     const run = await runs.executeConversation(owner.user.id, "请生成一个 HTML 文件");
-
     assert.equal(run.status, "completed");
-    assert.equal(model.intentCalls, 0);
-    assert.deepEqual((await runs.events(owner.user.id, run.id)).find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
-    assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "conversation.turn.resolved"), true);
+    assert.equal(model.intentCalls, 1);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.deepEqual(events.find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
+    assert.equal(events.some((event) => event.type === "conversation.turn.resolved"), true);
   } finally {
     await database.close();
   }
@@ -923,7 +1099,15 @@ function priorResultContinuationResolver(inputMode: "prior_result" | "refresh_so
               schema: "agentloop.conversationTaskIntent/v1",
               operation: "create_artifact",
               requiresExecution: true,
-              deliverables: [{ action: "create", kind: "document", format: "md", surface: "workspace_artifact" }],
+              deliverables: [{
+                targetId: "ddm-report",
+                purpose: "Produce the requested DDM report.",
+                expectedArtifactCount: 1,
+                action: "create",
+                kind: "document",
+                format: "md",
+                surface: "workspace_artifact",
+              }],
             },
             evidenceStrategy: refreshSources ? "source_grounded" : "none",
             sourceBinding: { mode: "none", visibleDirectoryIds: [] },
@@ -992,7 +1176,8 @@ class RecordingVisibleDirectoryPlanner implements Planner {
   async plan(task: TaskSpec): Promise<PlanProposal> {
     const hasVisibleTools = task.availableToolNames.includes("visible_find_files")
       && task.availableToolNames.includes("visible_read_file");
-    const sourceGrounded = task.taskUnderstanding.evidence.need !== "none";
+    const taskUnderstanding = task.canonicalState.intent.understanding;
+    const sourceGrounded = taskUnderstanding.evidence.need !== "none";
     this.visibleDirectoryCounts.push(task.visibleDirectories?.length ?? 0);
     this.availableToolNameSnapshots.push([...task.availableToolNames]);
     this.responseOnlyFlags.push(task.responseOnly === true);
@@ -1007,9 +1192,9 @@ class RecordingVisibleDirectoryPlanner implements Planner {
         skillIds: [],
         role: sourceGrounded ? "fact_acquisition" : "deliver",
         requiredCapabilities: hasVisibleTools ? ["visible_directory_read"] : [],
-        ...(task.taskUnderstanding.artifactTargets === undefined || task.taskUnderstanding.artifactTargets.length === 0
+        ...(taskUnderstanding.deliverables === undefined || taskUnderstanding.deliverables.length === 0
           ? {}
-          : { artifactTargetIds: task.taskUnderstanding.artifactTargets.map((target) => target.id) }),
+          : { targetIds: taskUnderstanding.deliverables.map((target) => target.targetId) }),
         ...(sourceGrounded && task.visibleDirectories![0] !== undefined ? {
           sourceConstraint: { requiredVisibleDirectoryIds: [task.visibleDirectories![0].id] },
           evidenceContract: { requiredKinds: ["source_summary" as const], caveatPolicy: "mark_unverified_facts" as const },
@@ -1165,8 +1350,8 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
       this.intentContexts.push(context);
       assert.match(context, /agentloop\.conversationTurnContext\/v1/);
       const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
-      const mode = latest.includes("分析") ? "execute" : "reply";
-      const usesVisibleData = mode === "execute";
+      const mode = latest.includes("分析") || latest.includes("生成") ? "execute" : "reply";
+      const usesVisibleData = latest.includes("分析");
       return {
         content: "",
         finishReason: "tool_calls",
@@ -1180,9 +1365,19 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
             effectiveGoal: latest,
             taskIntent: {
               schema: "agentloop.conversationTaskIntent/v1",
-              operation: mode === "execute" ? "analysis" : "answer",
+              operation: latest.includes("生成") ? "create_artifact" : mode === "execute" ? "analysis" : "answer",
               requiresExecution: mode === "execute",
-              deliverables: [],
+              deliverables: latest.includes("生成")
+                ? [{
+                  targetId: "requested-html",
+                  purpose: "Generate the requested HTML file.",
+                  expectedArtifactCount: 1,
+                  action: "create",
+                  kind: "html",
+                  format: "html",
+                  surface: "workspace_artifact",
+                }]
+                : [],
             },
             evidenceStrategy: usesVisibleData ? "bound_visible_sources" : "none",
             sourceBinding: usesVisibleData
@@ -1239,7 +1434,7 @@ class OverEagerPriorArtifactResolverModel implements ModelAdapter {
               operation: mutation ? "transform_artifact" : "answer",
               requiresExecution: mutation,
               deliverables: mutation
-                ? [{ targetId: "prior-presentation", purpose: "Deliver the professionally revised prior presentation.", action: "modify", kind: "presentation", format: "pptx", surface: "workspace_artifact" }]
+                ? [{ targetId: "prior-presentation", purpose: "Deliver the professionally revised prior presentation.", expectedArtifactCount: 1, action: "modify", kind: "presentation", format: "pptx", surface: "workspace_artifact" }]
                 : [],
             },
             evidenceStrategy: "none",
@@ -1279,11 +1474,211 @@ class ErroneousSourceStrategyArtifactTransformModel extends ConversationWriteMod
             schema: "agentloop.conversationTaskIntent/v1",
             operation: "transform_artifact",
             requiresExecution: true,
-            deliverables: [{ action: "modify", kind: "html", format: "html", surface: "workspace_artifact" }],
+            deliverables: [{
+              targetId: "self-contained-html",
+              purpose: "Make the prior HTML self-contained.",
+              expectedArtifactCount: 1,
+              action: "modify",
+              kind: "html",
+              format: "html",
+              surface: "workspace_artifact",
+            }],
           },
           evidenceStrategy: "source_grounded",
           sourceBinding: { mode: "none", visibleDirectoryIds: [] },
           userConstraints: ["不引用外部资源"],
+        },
+      }],
+    };
+  }
+}
+
+class ProcessArtifactPollutingResolverModel extends ConversationWriteModel {
+  resolverAttempts = 0;
+  readonly repairPrompts: string[] = [];
+
+  override async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) return await super.complete(request);
+    this.resolverAttempts += 1;
+    if (this.resolverAttempts > 1) this.repairPrompts.push(request.systemPrompt);
+    const polluted = this.resolverAttempts === 1;
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: `terminal-deliverable-resolution-${this.resolverAttempts}`,
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "continue_prior",
+          inputMode: "prior_artifact",
+          targetGoalCandidateId: "goal_candidate_1",
+          targetArtifact: { path: "merged_output.pdf" },
+          effectiveGoal: "将 merged_output.pdf 平均拆分为 4 份 PDF 子文件并交付。",
+          taskIntent: polluted
+            ? {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "transform_artifact",
+              requiresExecution: true,
+              deliverables: [{
+                targetId: "split_pdf_parts",
+                purpose: "将合并 PDF 平均拆分为四份 PDF 子文件并交付。",
+                expectedArtifactCount: 4,
+                action: "transform",
+                kind: "document",
+                format: "pdf",
+                surface: "workspace_artifact",
+              }, {
+                targetId: "split_pdfs_script",
+                purpose: "生成用于执行拆分的 Python 脚本。",
+                expectedArtifactCount: 1,
+                action: "create" as const,
+                kind: "code" as const,
+                format: "py",
+                surface: "workspace_artifact" as const,
+              }],
+            }
+            : {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "transform_artifact",
+              requiresExecution: true,
+              deliverables: [{
+                targetId: "prior_artifact_transformation",
+                purpose: "将合并 PDF 平均拆分为四份 PDF 子文件并交付。",
+                expectedArtifactCount: 4,
+                action: "transform",
+                kind: "document",
+                format: "pdf",
+                surface: "workspace_artifact",
+              }],
+            },
+          evidenceStrategy: "none",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: ["现在把合并文件拆分为平均的 4 份"],
+        },
+      }],
+    };
+  }
+}
+
+class MissingExpectedArtifactCountResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  resolverAttempts = 0;
+  readonly repairPrompts: string[] = [];
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) {
+      return { content: "unused", finishReason: "stop", toolCalls: [] };
+    }
+    this.resolverAttempts += 1;
+    if (this.resolverAttempts > 1) this.repairPrompts.push(request.systemPrompt);
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: `missing-artifact-count-${this.resolverAttempts}`,
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "new_goal",
+          inputMode: "none",
+          effectiveGoal: "生成一个 PDF 文件。",
+          taskIntent: {
+            schema: "agentloop.conversationTaskIntent/v1",
+            operation: "create_artifact",
+            requiresExecution: true,
+            deliverables: [{
+              targetId: "requested-pdf",
+              purpose: "生成用户请求的 PDF 文件。",
+              ...(this.resolverAttempts === 1 ? {} : { expectedArtifactCount: 1 }),
+              action: "create",
+              kind: "document",
+              format: "pdf",
+              surface: "workspace_artifact",
+            }],
+          },
+          evidenceStrategy: "none",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: [],
+        },
+      }],
+    };
+  }
+}
+
+class PriorArtifactLineageDriftModel extends ConversationWriteModel {
+  override async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) return await super.complete(request);
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: "prior-artifact-lineage-drift",
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "new_goal",
+          inputMode: "none",
+          targetArtifact: { path: "merged_output.pdf" },
+          effectiveGoal: "将 merged_output.pdf 平均拆分为 4 份 PDF 子文件并交付。",
+          taskIntent: {
+            schema: "agentloop.conversationTaskIntent/v1",
+            operation: "transform_artifact",
+            requiresExecution: true,
+            deliverables: [{
+              targetId: "split_pdf_parts",
+              purpose: "将合并 PDF 平均拆分为四份 PDF 子文件并交付。",
+              expectedArtifactCount: 4,
+              action: "transform",
+              kind: "document",
+              format: "pdf",
+              surface: "workspace_artifact",
+            }],
+          },
+          evidenceStrategy: "none",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: [],
+        },
+      }],
+    };
+  }
+}
+
+class AlwaysMalformedPriorArtifactResolverModel extends ConversationWriteModel {
+  resolverAttempts = 0;
+
+  override async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) return await super.complete(request);
+    this.resolverAttempts += 1;
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: `malformed-prior-artifact-${this.resolverAttempts}`,
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "refine_prior",
+          inputMode: "prior_artifact",
+          targetGoalCandidateId: "goal_candidate_1",
+          targetArtifact: { path: "merged_output.pdf" },
+          effectiveGoal: "将 merged_output.pdf 平均拆分为 4 份 PDF 子文件并交付。",
+          taskIntent: {
+            schema: "agentloop.conversationTaskIntent/v1",
+            operation: "transform_artifact",
+            requiresExecution: true,
+            deliverables: [{
+              targetId: "split_pdf_parts",
+              purpose: "将合并 PDF 平均拆分为四份 PDF 子文件并交付。",
+              action: "transform",
+              kind: "document",
+              format: "pdf",
+              surface: "workspace_artifact",
+            }],
+          },
+          evidenceStrategy: "none",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: [],
         },
       }],
     };

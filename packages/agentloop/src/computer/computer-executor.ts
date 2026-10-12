@@ -1427,11 +1427,7 @@ export class ComputerExecutor {
     computationReceipt?: Record<string, unknown>;
     workflowEvidenceReceipt?: Record<string, unknown>;
     computationEvidenceError?: string;
-    /**
-     * Facts parsed from a computation envelope whose source binding was not
-     * accepted. This is deliberately observational and never satisfies
-     * derived_aggregation by itself.
-     */
+    /** Facts parsed from a computation envelope whose source binding was not accepted. */
     computationObservation?: Record<string, unknown>;
     executionReceipt: {
       schema: "agentloop.commandExecutionReceipt/v1";
@@ -1687,21 +1683,21 @@ export class ComputerExecutor {
       };
     if (input.inputs.length === 0) {
       // A command-computation envelope is an explicit request for Runtime to
-      // authenticate derived facts.  Without captured inputs there is no
+      // authenticate computation provenance. Without captured inputs there is no
       // source identity to bind, so silently returning nothing leaves the
       // current step unable to converge and gives the caller no repair path.
       // Do not infer inputs from stdout: only the tool-call arguments are an
       // authorized, hashable source declaration.
       if (parseJsonRecord(input.stdout)?.schema === "agentloop.commandComputation/v1") {
         return {
-          error: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs. Rerun with the exact source files in computationInputs, and emit inputRefs (not inputs) with those same paths in stdout; Runtime cannot bind derived aggregation without source identity.",
+          error: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs. Rerun with the exact source files in computationInputs, and emit inputRefs (not inputs) with those same paths in stdout; Runtime cannot verify computation input/output provenance without source identity.",
           ...(observation === undefined ? {} : { observation }),
         };
       }
       return {};
     }
     if (input.exitCode !== 0 || input.signal !== null) {
-      return { error: "Command did not succeed, so a derived aggregation cannot be bound." };
+      return { error: "Command did not succeed, so computation provenance cannot be verified." };
     }
     if (input.truncated) {
       return { error: "Command stdout was truncated, so its computation artifact cannot be bound." };
@@ -1718,7 +1714,7 @@ export class ComputerExecutor {
       const mismatch = observed !== undefined && !samePaths(observed.inputRefs, declaredInputPaths);
       return {
         error: mismatch
-          ? `Command computation facts were observed but source binding mismatched. declared computationInputs=${JSON.stringify(declaredInputPaths)}; stdout inputRefs=${JSON.stringify(observed?.inputRefs ?? [])}. Rerun with computationInputs set to the exact stdout inputRefs and emit those same paths in inputRefs; Runtime cannot bind derived_aggregation until they match.`
+          ? `Command computation facts were observed but source binding mismatched. declared computationInputs=${JSON.stringify(declaredInputPaths)}; stdout inputRefs=${JSON.stringify(observed?.inputRefs ?? [])}. Rerun with computationInputs set to the exact stdout inputRefs and emit those same paths in inputRefs; Runtime cannot verify computation input/output provenance until they match.`
           : "No valid agentloop.commandComputation/v1 artifact was found in stdout. Output one JSON document with matching input paths and a non-empty facts object.",
         ...(observation === undefined ? {} : { observation }),
       };
@@ -1747,7 +1743,7 @@ export class ComputerExecutor {
         facts: artifact.facts,
         caveats: artifact.caveats,
         evidenceKinds: {
-          satisfied: ["derived_aggregation"],
+          satisfied: [],
           caveated: artifact.caveats.length > 0 ? ["explicit_caveats"] : [],
           failed: [],
         },

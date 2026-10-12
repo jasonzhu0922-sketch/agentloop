@@ -61,13 +61,30 @@ CREATE TABLE IF NOT EXISTS runs (
       );
 CREATE INDEX IF NOT EXISTS runs_owner_idx ON runs(owner_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS runs_parent_idx ON runs(parent_run_id);
+CREATE TABLE IF NOT EXISTS canonical_run_states (
+        run_id VARCHAR(191) PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        state_id VARCHAR(191) NOT NULL UNIQUE,
+        intent_id VARCHAR(191) NOT NULL UNIQUE,
+        revision BIGINT NOT NULL,
+        state_json LONGTEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+CREATE TABLE IF NOT EXISTS canonical_run_state_revisions (
+        run_id VARCHAR(191) NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        revision BIGINT NOT NULL,
+        state_json LONGTEXT NOT NULL,
+        reason LONGTEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY(run_id, revision)
+      );
 CREATE TABLE IF NOT EXISTS plans (
         id VARCHAR(191) PRIMARY KEY,
         run_id VARCHAR(191) NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
         version BIGINT NOT NULL,
         goal LONGTEXT NOT NULL,
         selected_skill_ids_json LONGTEXT NOT NULL,
-        task_semantics_json LONGTEXT,
+        canonical_state_ref_json LONGTEXT,
         input_bindings_json LONGTEXT NOT NULL,
         status VARCHAR(64) NOT NULL CHECK(status IN ('admitted', 'running', 'completed', 'failed')),
         created_at BIGINT NOT NULL,

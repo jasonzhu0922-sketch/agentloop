@@ -7,7 +7,6 @@ const TOOL_PRODUCED_EVIDENCE_KINDS = new Set<EvidenceKind>([
   "record_counts",
   "table_coverage",
   "structured_extraction_artifact",
-  "derived_aggregation",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",

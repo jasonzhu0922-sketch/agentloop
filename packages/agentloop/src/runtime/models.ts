@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import type {
   ModelAdapter,
@@ -6,6 +7,8 @@ import type {
   ModelRequestLogContext,
   ModelResponse,
   ModelRetryReporter,
+  ModelStreamRawCaptureWriter,
+  ModelStreamReceipt,
   ModelStreamSink,
   ModelToolCall,
 } from "./contracts.ts";
@@ -53,6 +56,8 @@ export interface OpenAICompatibleModelOptions {
   readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   /** Optional server-authored reporter invoked before each retry attempt. */
   readonly onRetry?: ModelRetryReporter;
+  /** Deployment-owned persistence for anomalous raw upstream SSE bytes. */
+  readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
 }
 
 export interface ResponsesReasoningContinuationStore {
@@ -112,6 +117,7 @@ interface CompatibleStreamChunk {
   choices?: Array<{
     finish_reason?: string | null;
     delta?: {
+      role?: string | null;
       content?: string | null;
       reasoning_content?: string | null;
       tool_calls?: Array<{
@@ -136,6 +142,16 @@ interface StreamFailureDiagnostics {
   eventsSeen: number;
   hadSinkEmission: boolean;
   lastEvent?: StreamEventSummary;
+  readChunkCount: number;
+  sseEventCount: number;
+  jsonEventCount: number;
+  nonJsonEventCount: number;
+  doneEventCount: number;
+  unrecognizedJsonEventCount: number;
+  unterminatedFinalEventBytes: number;
+  finishReasonObserved: boolean;
+  observedDeltaFields: Set<string>;
+  streamReceipt?: ModelStreamReceipt;
 }
 
 interface StreamEventSummary {
@@ -164,6 +180,7 @@ const MODEL_OUTPUT_BYTES_PER_TOKEN = 32;
 const MIN_MODEL_OUTPUT_BYTES = 64 * 1024;
 const MODEL_RESPONSE_ENVELOPE_MULTIPLIER = 4;
 const MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024;
+const MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES = 2 * 1024 * 1024;
 const NEVER_ABORT_SIGNAL = new AbortController().signal;
 
 interface ModelResponseBudget {
@@ -196,6 +213,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private readonly planningThinkingMode?: "enabled" | "disabled";
   private readonly chatTemplateKwargs?: Readonly<Record<string, unknown>>;
   private readonly onRetry?: ModelRetryReporter;
+  private readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
 
   constructor(options: OpenAICompatibleModelOptions) {
     const base = new URL(options.baseUrl.endsWith("/") ? options.baseUrl : `${options.baseUrl}/`);
@@ -234,6 +252,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     this.planningThinkingMode = options.planningThinkingMode;
     this.chatTemplateKwargs = options.chatTemplateKwargs;
     this.onRetry = options.onRetry;
+    this.streamRawCaptureWriter = options.streamRawCaptureWriter;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
     }
@@ -452,6 +471,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
           return await this.consumeStream(
             response,
             sink,
+            invocation,
+            request.logContext,
             requestTimeout.recordActivity,
             createModelResponseBudget(invocation, this.limits),
           );
@@ -529,6 +550,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
   private async consumeStream(
     response: Response,
     sink: ModelStreamSink,
+    invocation: ModelInvocation,
+    request: ModelRequestLogContext,
     recordActivity: () => void = () => undefined,
     budget: ModelResponseBudget,
   ): Promise<ModelResponse> {
@@ -553,6 +576,72 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const diagnostics: StreamFailureDiagnostics = {
       eventsSeen: 0,
       hadSinkEmission: false,
+      readChunkCount: 0,
+      sseEventCount: 0,
+      jsonEventCount: 0,
+      nonJsonEventCount: 0,
+      doneEventCount: 0,
+      unrecognizedJsonEventCount: 0,
+      unterminatedFinalEventBytes: 0,
+      finishReasonObserved: false,
+      observedDeltaFields: new Set<string>(),
+    };
+    const rawHash = createHash("sha256");
+    const rawCaptureChunks: Buffer[] = [];
+    let rawBytes = 0;
+    let capturedBytes = 0;
+    const buildStreamReceipt = async (
+      anomalyReasons: readonly string[],
+      rawSha256: string,
+      forceTruncated = false,
+    ): Promise<ModelStreamReceipt> => {
+      const contentType = response.headers.get("content-type") ?? undefined;
+      const providerRequestId = response.headers.get("x-request-id") ?? undefined;
+      let rawCapture: ModelStreamReceipt["rawCapture"];
+      let rawCaptureError: string | undefined;
+      if (anomalyReasons.length > 0 && this.streamRawCaptureWriter !== undefined) {
+        try {
+          rawCapture = await this.streamRawCaptureWriter({
+            schema: "agentloop.modelStreamRawCapture/v1",
+            runId: invocation.runId,
+            request,
+            response: {
+              status: response.status,
+              ...(contentType === undefined ? {} : { contentType }),
+              ...(providerRequestId === undefined ? {} : { providerRequestId }),
+            },
+            anomalyReasons,
+            rawSse: Buffer.concat(rawCaptureChunks),
+            rawBytes,
+            rawSha256,
+            truncated: forceTruncated || capturedBytes < rawBytes,
+          });
+        } catch (error) {
+          rawCaptureError = safeErrorMessage(error) ?? "raw stream capture failed";
+        }
+      }
+      return {
+        schema: "agentloop.modelStreamReceipt/v1",
+        transport: "sse",
+        httpStatus: response.status,
+        ...(contentType === undefined ? {} : { contentType }),
+        ...(providerRequestId === undefined ? {} : { providerRequestId }),
+        rawBytes,
+        rawSha256,
+        readChunkCount: diagnostics.readChunkCount,
+        sseEventCount: diagnostics.sseEventCount,
+        jsonEventCount: diagnostics.jsonEventCount,
+        nonJsonEventCount: diagnostics.nonJsonEventCount,
+        doneEventCount: diagnostics.doneEventCount,
+        unrecognizedJsonEventCount: diagnostics.unrecognizedJsonEventCount,
+        unterminatedFinalEventBytes: diagnostics.unterminatedFinalEventBytes,
+        finishReasonObserved: diagnostics.finishReasonObserved,
+        sinkEmissionObserved: diagnostics.hadSinkEmission,
+        observedDeltaFields: [...diagnostics.observedDeltaFields].sort(),
+        anomalyReasons,
+        ...(rawCapture === undefined ? {} : { rawCapture }),
+        ...(rawCaptureError === undefined ? {} : { rawCaptureError }),
+      };
     };
     const emit = async (event: Parameters<ModelStreamSink>[0]): Promise<void> => {
       diagnostics.hadSinkEmission = true;
@@ -562,29 +651,40 @@ export class OpenAICompatibleModel implements ModelAdapter {
     const handleData = async (data: string): Promise<void> => {
       diagnostics.eventsSeen += 1;
       diagnostics.lastEvent = summarizeStreamEvent(data);
-      if (data.trim() === "[DONE]") return;
+      if (data.trim() === "[DONE]") {
+        diagnostics.doneEventCount += 1;
+        return;
+      }
       budget.assertEventBytes(data);
       let payload: CompatibleStreamChunk;
       try {
         payload = JSON.parse(data) as CompatibleStreamChunk;
       } catch {
-        return; // Ignore malformed or keep-alive data lines.
+        diagnostics.nonJsonEventCount += 1;
+        return;
       }
+      diagnostics.jsonEventCount += 1;
       assertChatCompletionsPayload(payload);
       const choice = payload.choices?.[0];
+      let recognized = false;
+      for (const field of Object.keys(choice?.delta ?? {})) diagnostics.observedDeltaFields.add(field);
+      if (typeof choice?.delta?.role === "string" && choice.delta.role.length > 0) recognized = true;
       const deltaContent = choice?.delta?.content;
       if (typeof deltaContent === "string" && deltaContent.length > 0) {
+        recognized = true;
         budget.addOutputBytes(deltaContent, "content");
         content += deltaContent;
         await emit({ type: "text_delta", text: deltaContent });
       }
       const reasoningDelta = choice?.delta?.reasoning_content;
       if (typeof reasoningDelta === "string" && reasoningDelta.length > 0) {
+        recognized = true;
         budget.addOutputBytes(reasoningDelta, "reasoningContent");
         reasoningContent += reasoningDelta;
         await emit({ type: "reasoning_delta", text: reasoningDelta });
       }
       for (const call of choice?.delta?.tool_calls ?? []) {
+        recognized = true;
         const index = typeof call.index === "number" ? call.index : toolCallAccumulator.size;
         const accumulated = toolCallAccumulator.get(index) ?? { arguments: "", hasArgumentValue: false };
         if (typeof call.id === "string" && call.id.length > 0) accumulated.id = call.id;
@@ -613,11 +713,34 @@ export class OpenAICompatibleModel implements ModelAdapter {
           argumentsDelta,
         });
       }
-      if (choice?.finish_reason != null) finishReason = choice.finish_reason;
-      if (payload.usage?.prompt_tokens !== undefined) inputTokens = payload.usage.prompt_tokens;
-      if (payload.usage?.completion_tokens !== undefined) outputTokens = payload.usage.completion_tokens;
+      if (choice?.finish_reason != null) {
+        recognized = true;
+        diagnostics.finishReasonObserved = true;
+        finishReason = choice.finish_reason;
+      }
+      if (payload.usage?.prompt_tokens !== undefined) {
+        recognized = true;
+        inputTokens = payload.usage.prompt_tokens;
+      }
+      if (payload.usage?.completion_tokens !== undefined) {
+        recognized = true;
+        outputTokens = payload.usage.completion_tokens;
+      }
+      if (!recognized) diagnostics.unrecognizedJsonEventCount += 1;
     };
 
+    const handleEventBlock = async (event: string): Promise<void> => {
+      if (event.trim().length === 0) return;
+      diagnostics.sseEventCount += 1;
+      const dataLines: string[] = [];
+      for (const line of event.split("\n")) {
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      if (dataLines.length > 0) await handleData(dataLines.join("\n"));
+    };
+
+    let consumptionFailed = false;
+    let consumptionError: unknown;
     try {
       for (;;) {
         let result: ReadableStreamReadResult<Uint8Array>;
@@ -628,26 +751,56 @@ export class OpenAICompatibleModel implements ModelAdapter {
         }
         const { done, value } = result;
         if (done) break;
+        diagnostics.readChunkCount += 1;
+        const rawChunk = Buffer.from(value);
+        rawHash.update(rawChunk);
+        rawBytes += rawChunk.length;
+        if (capturedBytes < MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES) {
+          const retained = rawChunk.subarray(0, MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES - capturedBytes);
+          rawCaptureChunks.push(Buffer.from(retained));
+          capturedBytes += retained.length;
+        }
         recordActivity();
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.replaceAll("\r\n", "\n").split("\n\n");
         buffer = events.pop() ?? "";
         for (const event of events) {
-          const dataLines: string[] = [];
-          for (const line of event.split("\n")) {
-            if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-          }
-          if (dataLines.length === 0) continue;
           try {
-            await handleData(dataLines.join("\n"));
+            await handleEventBlock(event);
           } catch (error) {
             if (error instanceof AppError) throw error;
             throw new StreamConsumptionError("consume_event", error, diagnostics);
           }
         }
       }
+      buffer += decoder.decode();
+      if (buffer.trim().length > 0) {
+        diagnostics.unterminatedFinalEventBytes = Buffer.byteLength(buffer, "utf8");
+        try {
+          await handleEventBlock(buffer.replaceAll("\r\n", "\n"));
+        } catch (error) {
+          if (error instanceof AppError) throw error;
+          throw new StreamConsumptionError("consume_event", error, diagnostics);
+        }
+      }
+    } catch (error) {
+      consumptionFailed = true;
+      consumptionError = error;
+      await reader.cancel().catch(() => undefined);
     } finally {
       reader.releaseLock();
+    }
+    if (consumptionFailed) {
+      const anomalyReasons = streamFailureAnomalyReasons(consumptionError, diagnostics);
+      const streamReceipt = await buildStreamReceipt(anomalyReasons, rawHash.digest("hex"), true);
+      diagnostics.streamReceipt = streamReceipt;
+      if (consumptionError instanceof AppError) {
+        throw new AppError(consumptionError.code, consumptionError.message, consumptionError.status, {
+          ...consumptionError.details,
+          streamReceipt,
+        });
+      }
+      throw consumptionError;
     }
 
     const ordered = [...toolCallAccumulator.entries()].sort(([left], [right]) => left - right);
@@ -673,7 +826,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         await sink({ type: "tool_call_ready", index, id: call.id, name: call.name, arguments: call.arguments });
       }
     }
-    const result: ModelResponse = {
+    const resultWithoutReceipt: ModelResponse = {
       content,
       toolCalls,
       finishReason: finalFinishReason,
@@ -687,6 +840,10 @@ export class OpenAICompatibleModel implements ModelAdapter {
             },
           }),
     };
+    const rawSha256 = rawHash.digest("hex");
+    const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
+    const streamReceipt = await buildStreamReceipt(anomalyReasons, rawSha256);
+    const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
     budget.assertResponse(result);
     return result;
   }
@@ -971,6 +1128,15 @@ export class ResponsesModel implements ModelAdapter {
     const diagnostics: StreamFailureDiagnostics = {
       eventsSeen: 0,
       hadSinkEmission: false,
+      readChunkCount: 0,
+      sseEventCount: 0,
+      jsonEventCount: 0,
+      nonJsonEventCount: 0,
+      doneEventCount: 0,
+      unrecognizedJsonEventCount: 0,
+      unterminatedFinalEventBytes: 0,
+      finishReasonObserved: false,
+      observedDeltaFields: new Set<string>(),
     };
 
     const handleData = async (data: string): Promise<void> => {
@@ -1601,6 +1767,9 @@ function unreadableStreamingResponse(error: unknown, attempts: number, request: 
       : {
           streamFailureStage: streamError.stage,
           streamEventsSeen: streamError.diagnostics.eventsSeen,
+          ...(streamError.diagnostics.streamReceipt === undefined
+            ? {}
+            : { streamReceipt: streamError.diagnostics.streamReceipt }),
           ...(streamError.diagnostics.lastEvent === undefined
             ? {}
             : { lastStreamEvent: streamError.diagnostics.lastEvent }),
@@ -1618,6 +1787,42 @@ async function safeResponseBodyPreview(response: Response): Promise<string | und
   } catch {
     return undefined;
   }
+}
+
+function streamFailureAnomalyReasons(
+  error: unknown,
+  diagnostics: StreamFailureDiagnostics,
+): string[] {
+  const reasons = [
+    error instanceof AppError && /protocol|payload/u.test(error.message.toLowerCase())
+      ? "provider_protocol_mismatch"
+      : "stream_consumption_failed",
+  ];
+  if (diagnostics.nonJsonEventCount > 0) reasons.push("non_json_sse_data");
+  if (diagnostics.unrecognizedJsonEventCount > 0) reasons.push("unrecognized_json_event");
+  if (diagnostics.unterminatedFinalEventBytes > 0) reasons.push("unterminated_final_sse_event");
+  return reasons;
+}
+
+function streamAnomalyReasons(
+  response: ModelResponse,
+  diagnostics: StreamFailureDiagnostics,
+): string[] {
+  const reasons: string[] = [];
+  const hasProviderOutput = response.content.length > 0
+    || (response.reasoningContent?.length ?? 0) > 0
+    || response.toolCalls.length > 0;
+  if (response.finishReason === "stop" && response.content.trim().length === 0 && response.toolCalls.length === 0) {
+    reasons.push("empty_stop_completion");
+  }
+  if (!diagnostics.hadSinkEmission) reasons.push("no_stream_delta");
+  if (!diagnostics.finishReasonObserved) reasons.push("missing_finish_reason");
+  if (diagnostics.nonJsonEventCount > 0) reasons.push("non_json_sse_data");
+  if (diagnostics.unrecognizedJsonEventCount > 0) reasons.push("unrecognized_json_event");
+  if (diagnostics.unterminatedFinalEventBytes > 0) reasons.push("unterminated_final_sse_event");
+  if ((response.usage?.outputTokens ?? 0) > 0 && !hasProviderOutput) reasons.push("usage_output_without_payload");
+  if (response.usage?.outputTokens === 0 && hasProviderOutput) reasons.push("zero_output_usage_with_payload");
+  return reasons;
 }
 
 function summarizeStreamEvent(data: string): StreamEventSummary {

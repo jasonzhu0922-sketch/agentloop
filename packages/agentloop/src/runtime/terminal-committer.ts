@@ -5,16 +5,29 @@ import { RunOutcomeRepository } from "../storage/repositories/outcome-repository
 import type { HumanLoopRepository } from "./human-loop.ts";
 import { createRuntimeResult, type RuntimeResultRecord } from "./runtime-result.ts";
 import { isCaveatedStepResult } from "./step-result-committer.ts";
+import { commitCanonicalTerminal, markCanonicalReadyForTerminal } from "./canonical-run-state.ts";
+import type { CanonicalRunStateRepository } from "./canonical-run-state-repository.ts";
+import type { SqlConnection } from "../storage/connection.ts";
 
 export class TerminalCommitter {
   private readonly plans: PlanRepository;
   private readonly outcomes: RunOutcomeRepository;
   private readonly humanLoops?: HumanLoopRepository;
+  private readonly canonicalStates: CanonicalRunStateRepository;
+  private readonly connection: SqlConnection;
 
-  constructor(plans: PlanRepository, outcomes: RunOutcomeRepository, humanLoops?: HumanLoopRepository) {
+  constructor(
+    plans: PlanRepository,
+    outcomes: RunOutcomeRepository,
+    humanLoops: HumanLoopRepository | undefined,
+    canonicalStates: CanonicalRunStateRepository,
+    connection: SqlConnection,
+  ) {
     this.plans = plans;
     this.outcomes = outcomes;
     this.humanLoops = humanLoops;
+    this.canonicalStates = canonicalStates;
+    this.connection = connection;
   }
 
   async commitCompleted(runId: string, planId: string, output: string): Promise<void> {
@@ -35,7 +48,11 @@ export class TerminalCommitter {
         );
       }
     }
-    await this.outcomes.commitCompleted({ runId, planId, result: runResult(plan, output) });
+    const result = runResult(plan, output);
+    await this.connection.transaction(async () => {
+      await this.commitCanonicalCompletion(runId, "plan_assessed_and_completed");
+      await this.outcomes.commitCompleted({ runId, planId, result });
+    });
   }
 
   async commitCompletedWithDeferredValidation(runId: string, planId: string, output: string): Promise<void> {
@@ -76,7 +93,11 @@ export class TerminalCommitter {
     if (!hasCaveat) {
       throw new AppError("ASSESSMENT_ERROR", "Caveated completion commit requires at least one caveated assessment", 409);
     }
-    await this.outcomes.commitCompletedWithCaveats({ runId, planId, result: runResult(plan, output), reasonCode });
+    const result = runResult(plan, output);
+    await this.connection.transaction(async () => {
+      await this.commitCanonicalCompletion(runId, reasonCode);
+      await this.outcomes.commitCompletedWithCaveats({ runId, planId, result, reasonCode });
+    });
   }
 
   async commitStopped(input: {
@@ -87,7 +108,34 @@ export class TerminalCommitter {
     /** User-facing partial report; never an accepted completion or receipt. */
     output?: string;
   }): Promise<void> {
-    await this.outcomes.commitStopped(input);
+    await this.connection.transaction(async () => {
+      const state = await this.canonicalStates.getOptional(input.runId);
+      if (state !== undefined && state.terminal === undefined) {
+        const terminal = commitCanonicalTerminal(state, { status: input.status, reasonCode: input.reasonCode });
+        await this.canonicalStates.commit({
+          expectedRevision: state.revision,
+          state: terminal,
+          reason: `terminal_${input.status}`,
+        });
+      }
+      await this.outcomes.commitStopped(input);
+    });
+  }
+
+  private async commitCanonicalCompletion(runId: string, reasonCode: string): Promise<void> {
+    const state = await this.canonicalStates.get(runId);
+    const ready = markCanonicalReadyForTerminal(state);
+    const persistedReady = await this.canonicalStates.commit({
+      expectedRevision: state.revision,
+      state: ready,
+      reason: "terminal_ready",
+    });
+    const completed = commitCanonicalTerminal(persistedReady, { status: "completed", reasonCode });
+    await this.canonicalStates.commit({
+      expectedRevision: persistedReady.revision,
+      state: completed,
+      reason: "terminal_completed",
+    });
   }
 
   private async assertNoOpenHumanLoop(runId: string): Promise<void> {

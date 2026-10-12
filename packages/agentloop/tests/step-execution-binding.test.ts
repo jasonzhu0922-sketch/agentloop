@@ -8,6 +8,7 @@ import {
 } from "../src/planning/step-execution-binding.ts";
 import type { PlanningToolSummary } from "../src/planning/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 
 const tools: readonly PlanningToolSummary[] = [
   {
@@ -49,7 +50,50 @@ test("ToolSource capability declarations carry their host-owned evidence semanti
   assert.deepEqual(capability?.sourceKinds, ["database"]);
 });
 
+test("Admission rejects an evidence capability that resolves to no producer Tool", () => {
+  const runId = "run-empty-evidence-producer";
+  assert.throws(() => admitPlan({
+    runId,
+    proposal: {
+      goal: "Compute the required total.",
+      selectedSkillIds: [],
+      steps: [{
+        id: "acquire",
+        objective: "Compute the required total.",
+        dependencies: [],
+        role: "fact_acquisition",
+        skillIds: [],
+        requiredCapabilities: ["declared_without_tool"],
+        evidenceContract: { requiredKinds: ["table_coverage"], caveatPolicy: "none" },
+        successCriteria: [{ id: "table_coverage", description: "Complete table coverage is observed.", source: "planner" }],
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(),
+    availableCapabilities: [{
+      id: "declared_without_tool",
+      produces: ["table_coverage"],
+      sourceKinds: ["database"],
+      sideEffect: "external_read",
+      risk: "low",
+    }],
+    canonicalState: createCanonicalRunState({
+      runId,
+      userInput: "Compute the required total.",
+      understanding: understandTask({ objective: "Compute the required total." }),
+      now: 1,
+    }),
+  }), /bound capabilities cannot produce: table_coverage/);
+});
+
 test("Admission derives a user-required ToolSource only for leaves that demand its capability", () => {
+  const canonicalState = createCanonicalRunState({
+    runId: "run-dynamic-tool-source-binding",
+    userInput: "Acquire ODS facts and produce a report.",
+    understanding: understandTask({ objective: "Acquire ODS facts and produce a report." }),
+    requiredToolSourceIds: ["ontoflow-jtbc"],
+    now: 1,
+  });
   const plan = admitPlan({
     runId: "run-dynamic-tool-source-binding",
     proposal: {
@@ -63,9 +107,6 @@ test("Admission derives a user-required ToolSource only for leaves that demand i
           role: "fact_acquisition",
           skillIds: [],
           requiredCapabilities: ["data_asset.ods_read"],
-          // Legacy/model output may still carry this value. Admission derives
-          // the same binding from the declared capability and user policy.
-          sourceConstraint: { requiredToolSourceIds: ["ontoflow-jtbc"] },
           evidenceContract: {
             requiredKinds: ["source_summary"],
             caveatPolicy: "mark_unverified_facts",
@@ -79,8 +120,6 @@ test("Admission derives a user-required ToolSource only for leaves that demand i
           role: "produce",
           skillIds: [],
           requiredCapabilities: ["workspace_artifact_write"],
-          // This stale model hint must not grant or constrain an MCP Tool.
-          sourceConstraint: { requiredToolSourceIds: ["ontoflow-jtbc"] },
           successCriteria: [{ id: "delivered", description: "The report is produced.", source: "planner" }],
         },
       ],
@@ -89,7 +128,7 @@ test("Admission derives a user-required ToolSource only for leaves that demand i
     availableToolNames: new Set(tools.map((tool) => tool.name)),
     availableTools: tools,
     availableCapabilities: planningCapabilitiesFromTools(tools),
-    requiredToolSourceIds: ["ontoflow-jtbc"],
+    canonicalState,
   });
 
   const acquisition = plan.steps.find((step) => step.id === "ods-facts");
@@ -110,8 +149,8 @@ test("Admission rejects an incomplete structured artifact binding before executi
       operation: "composite",
       requiresExecution: true,
       deliverables: [
-        { targetId: "ods-analysis", purpose: "ODS analysis report", action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" },
-        { targetId: "ods-quality", purpose: "ODS quality-control report", action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" },
+        { targetId: "ods-analysis", purpose: "ODS analysis report", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" },
+        { targetId: "ods-quality", purpose: "ODS quality-control report", expectedArtifactCount: 1, action: "create", kind: "document", format: "markdown", surface: "workspace_artifact" },
       ],
     },
   });
@@ -125,7 +164,7 @@ test("Admission rejects an incomplete structured artifact binding before executi
       role: "produce" as const,
       skillIds: [],
       requiredCapabilities: ["workspace_artifact_write"],
-      artifactTargetIds: ["ods-analysis"],
+      targetIds: ["ods-analysis"],
       successCriteria: [{ id: "delivered", description: "Reports are produced.", source: "planner" as const }],
     }],
   };
@@ -134,22 +173,97 @@ test("Admission rejects an incomplete structured artifact binding before executi
     proposal,
     availableSkills: [],
     availableToolNames: new Set(tools.map((tool) => tool.name)),
-    taskSemantics,
+    canonicalState: createCanonicalRunState({ runId: "run-structured-artifact-binding", userInput: "Produce the requested ODS reports.", understanding: taskSemantics, now: 1 }),
   });
-  assert.throws(admission, /must cover the requested targets exactly: missing ods-quality/);
+  assert.throws(admission, /must cover canonical delivery targets exactly once: missing ods-quality/);
 
   const plan = admitPlan({
     runId: "run-structured-artifact-binding-complete",
     proposal: {
       ...proposal,
-      steps: [{ ...proposal.steps[0]!, artifactTargetIds: ["ods-analysis", "ods-quality"] }],
+      steps: [{ ...proposal.steps[0]!, targetIds: ["ods-analysis", "ods-quality"] }],
     },
     availableSkills: [],
     availableToolNames: new Set(tools.map((tool) => tool.name)),
-    taskSemantics,
+    canonicalState: createCanonicalRunState({ runId: "run-structured-artifact-binding-complete", userInput: "Produce the requested ODS reports.", understanding: taskSemantics, now: 1 }),
   });
   assert.deepEqual(plan.steps[0]?.executionBinding.artifactTargets, [
     { id: "ods-analysis", purpose: "ODS analysis report", kind: "document", format: "markdown", terminalRequired: true },
     { id: "ods-quality", purpose: "ODS quality-control report", kind: "document", format: "markdown", terminalRequired: true },
+  ]);
+
+  assert.throws(() => admitPlan({
+    runId: "run-duplicate-delivery-owner",
+    proposal: {
+      ...proposal,
+      steps: [
+        { ...proposal.steps[0]!, id: "primary-owner", targetIds: ["ods-analysis", "ods-quality"] },
+        { ...proposal.steps[0]!, id: "duplicate-owner", targetIds: ["ods-analysis"] },
+      ],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(tools.map((tool) => tool.name)),
+    canonicalState: createCanonicalRunState({ runId: "run-duplicate-delivery-owner", userInput: "Produce the requested ODS reports.", understanding: taskSemantics, now: 1 }),
+  }), /multiply owned ods-analysis/);
+});
+
+test("one semantic deliverable family expands into the exact canonical artifact cardinality", () => {
+  const understanding = understandTask({
+    objective: "Split the source document into four PDF files.",
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "transform_artifact",
+      requiresExecution: true,
+      deliverables: [{
+        targetId: "split-pdf-parts",
+        purpose: "Deliver four independently accepted PDF parts.",
+        expectedArtifactCount: 4,
+        action: "transform",
+        kind: "document",
+        format: "pdf",
+        surface: "workspace_artifact",
+      }],
+    },
+  });
+
+  assert.deepEqual(understanding.artifactTargets?.map((target) => target.id), [
+    "split-pdf-parts.1",
+    "split-pdf-parts.2",
+    "split-pdf-parts.3",
+    "split-pdf-parts.4",
+  ]);
+  assert.equal(understanding.artifactTargets?.every((target) => target.format === "pdf"), true);
+
+  const plan = admitPlan({
+    runId: "run-four-artifacts-one-target",
+    proposal: {
+      goal: "Split the source document into four PDF files.",
+      selectedSkillIds: [],
+      steps: [{
+        id: "split-pdfs",
+        objective: "Split and deliver four PDF files.",
+        dependencies: [],
+        role: "produce",
+        skillIds: [],
+        requiredCapabilities: ["workspace_artifact_write"],
+        targetIds: ["split-pdf-parts"],
+        successCriteria: [{ id: "delivered", description: "Four PDFs are delivered.", source: "planner" }],
+      }],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(tools.map((tool) => tool.name)),
+    canonicalState: createCanonicalRunState({
+      runId: "run-four-artifacts-one-target",
+      userInput: "Split the source document into four PDF files.",
+      understanding,
+      now: 1,
+    }),
+  });
+  assert.deepEqual(plan.steps[0]?.executionBinding.targetIds, ["split-pdf-parts"]);
+  assert.deepEqual(plan.steps[0]?.executionBinding.artifactTargets?.map((target) => target.id), [
+    "split-pdf-parts.1",
+    "split-pdf-parts.2",
+    "split-pdf-parts.3",
+    "split-pdf-parts.4",
   ]);
 });

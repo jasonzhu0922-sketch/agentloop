@@ -12,6 +12,8 @@ import type { ModelAdapter } from "../src/runtime/contracts.ts";
 import { completionCaveatReasonCode } from "../src/runtime/run-service.ts";
 import { isCaveatedStepResult } from "../src/runtime/step-result-committer.ts";
 import type { StepAssessmentInput } from "../src/planning/contracts.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
+import { understandTask } from "../src/runtime/task-intent.ts";
 
 const commit = createDecisionCommit({
   requestId: "request-1",
@@ -155,13 +157,19 @@ test("a non-blocking model-judged criterion is retained as unverified without re
   } as unknown as ModelAdapter;
   const input = {
     runId: "run-1", planId: "plan-1", attempt: 1,
+    canonicalState: createCanonicalRunState({
+      runId: "run-1",
+      userInput: "Deliver a visual artifact.",
+      understanding: understandTask({ objective: "Deliver a visual artifact." }),
+      now: 1,
+    }),
     step: {
       id: "step-1",
       objective: "Deliver a visual artifact.",
       role: "deliver",
       executionBinding: {
         schema: "agentloop.stepExecutionBinding/v1",
-        requiredCapabilities: [], resolvedToolNames: [], sourceKinds: [], sideEffect: "none", evidenceKinds: [],
+        requiredCapabilities: [], resolvedToolNames: [], evidenceProducers: [], sourceKinds: [], sideEffect: "none", evidenceKinds: [], targetIds: [],
       },
       successCriteria: [{
         id: "visual-quality", description: "The visual direction is appropriate.", source: "task",

@@ -76,18 +76,19 @@ export function createPlanTemplatePlugin(
     name: "agentloop-plan-template",
     beforePlanning: async (input: PlanningExtensionInput): Promise<PlanningExtensionDecision> => {
       if (!config.enabled) return { kind: "none" };
+      const runId = input.canonicalState.runId;
       await ensureMigratedIfConfigured();
       const store = await ensureStore();
       const fingerprint = profileTask(input);
       if (config.observeEnabled) {
         const match = newMatchRecord({
-          runId: input.runId,
+          runId,
           fingerprint,
           decision: "observed",
           now,
           rejectionReasons: [],
         });
-        appendPendingMatch(pendingMatches, input.runId, match);
+        appendPendingMatch(pendingMatches, runId, match);
         await store.recordMatch(match);
       }
 
@@ -102,14 +103,14 @@ export function createPlanTemplatePlugin(
         config,
       });
       const match = newMatchRecord({
-        runId: input.runId,
+        runId,
         fingerprint,
         decision: decision.kind,
         now,
         ...(decision.kind === "rejected" ? { rejectionReasons: decision.rejectionReasons } : { rejectionReasons: [] }),
         ...(decision.kind === "rejected" ? {} : { templateId: decision.template.id, score: decision.score }),
       });
-      appendPendingMatch(pendingMatches, input.runId, match);
+      appendPendingMatch(pendingMatches, runId, match);
       await store.recordMatch(match);
       if (decision.kind === "planner_context") {
         return {

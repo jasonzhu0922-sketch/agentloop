@@ -14,6 +14,13 @@ export interface RuntimeResultRef {
   readonly resultId: string;
 }
 
+export const RUNTIME_RESULT_ID_PATTERN = "^rr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+const RUNTIME_RESULT_ID_REGEX = new RegExp(RUNTIME_RESULT_ID_PATTERN, "u");
+
+export function isRuntimeResultId(value: unknown): value is string {
+  return typeof value === "string" && RUNTIME_RESULT_ID_REGEX.test(value);
+}
+
 /** A global declaration that a Plan/Step consumes a Runtime Result. */
 export interface RuntimeResultBinding {
   readonly schema: "agentloop.resultBinding/v1";
@@ -255,8 +262,7 @@ export function parseRuntimeResultRef(value: unknown): RuntimeResultRef | undefi
   const record = value as Record<string, unknown>;
   if (
     record.schema !== "agentloop.resultRef/v1"
-    || typeof record.resultId !== "string"
-    || !/^rr_[0-9a-f-]{36}$/u.test(record.resultId)
+    || !isRuntimeResultId(record.resultId)
   ) return undefined;
   return { schema: "agentloop.resultRef/v1", resultId: record.resultId };
 }

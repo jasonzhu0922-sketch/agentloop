@@ -2131,7 +2131,7 @@ test("computer_run_command binds a standard computation artifact to immutable in
       },
       facts: { records: 2, change: 70 },
       caveats: [],
-      evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+      evidenceKinds: { satisfied: [], caveated: [], failed: [] },
     });
     assert.match(result.computationReceipt?.receiptId ?? "", /^[a-f0-9]{64}$/);
 
@@ -3911,8 +3911,8 @@ test("computer_aggregate_table_artifact derives complete group counts from struc
     ) as { queries: Array<{ value?: Array<{ value: string; count: number }>; returned?: number; totalItems?: number }> };
     assert.equal(groupWindow.queries[0]?.totalItems, 3);
     assert.deepEqual(groupWindow.queries[0]?.value, [{ value: "B", count: 1 }]);
-    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("derived_aggregation"));
-    assert.equal(result.evidenceReceipt.evidenceKinds.failed.includes("derived_aggregation"), false);
+    assert.ok(result.evidenceReceipt.evidenceKinds.satisfied.includes("table_coverage"));
+    assert.equal(result.evidenceReceipt.evidenceKinds.failed.includes("table_coverage"), false);
 
     const limited = allowed.prepare({
       id: "aggregate-table-artifact-window",
@@ -3928,12 +3928,15 @@ test("computer_aggregate_table_artifact derives complete group counts from struc
     ) as {
       results: Array<{ groups?: Array<{ value: string; count: number }>; complete: boolean; groupCount?: number; returnedGroupCount?: number; nextGroupOffset?: number }>;
       resultRef: { path: string };
+      evidenceReceipt: { evidenceKinds: { satisfied: string[]; failed: string[] } };
     };
     assert.equal(limitedResult.results[0]?.groups?.length, 2);
     assert.equal(limitedResult.results[0]?.groupCount, 3);
     assert.equal(limitedResult.results[0]?.returnedGroupCount, 2);
     assert.equal(limitedResult.results[0]?.nextGroupOffset, 2);
     assert.equal(limitedResult.results[0]?.complete, false);
+    assert.equal(limitedResult.evidenceReceipt.evidenceKinds.satisfied.includes("table_coverage"), false);
+    assert.ok(limitedResult.evidenceReceipt.evidenceKinds.failed.includes("table_coverage"));
     const completeWindowSource = JSON.parse(await fs.readFile(join(root, limitedResult.resultRef.path), "utf8")) as {
       results: Array<{ groups?: Array<{ value: string; count: number }> }>;
     };

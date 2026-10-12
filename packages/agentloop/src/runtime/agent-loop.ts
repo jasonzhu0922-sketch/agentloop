@@ -46,6 +46,7 @@ import {
   initialRuntimeToolProgressState,
   candidateRejectionProgressHint,
   artifactMatchesExpectedTarget,
+  type RuntimeStepEvidenceState,
   type RuntimeToolProgressPolicy,
 } from "./tool-progress-policy.ts";
 import {
@@ -237,14 +238,16 @@ function automaticArtifactAcceptanceCall(input: {
     || state.workProduct.status !== "deliverable_available"
     || !input.availableToolNames.includes("verify_artifact_acceptance")
   ) return undefined;
-  const artifact = state.workProduct.deliverableArtifacts.findLast((candidate) => artifactMatchesExpectedTarget(
-    candidate,
-    state.workProduct.expectedArtifactKind,
-    state.workProduct.expectedArtifactFormat,
-  ));
+  const artifact = state.workProduct.deliverableArtifacts.findLast((candidate) => {
+    if (!artifactMatchesExpectedTarget(
+      candidate,
+      state.workProduct.expectedArtifactKind,
+      state.workProduct.expectedArtifactFormat,
+    )) return false;
+    return !input.attemptedArtifactKeys.has([candidate.path, candidate.sha256 ?? candidate.toolCallId].join("#"));
+  });
   if (artifact === undefined) return undefined;
   const artifactKey = [artifact.path, artifact.sha256 ?? artifact.toolCallId].join("#");
-  if (input.attemptedArtifactKeys.has(artifactKey)) return undefined;
   // `artifactKind` is a Runtime/Planner semantic label (for example
   // `document`), whereas verifier profiles are concrete inspection kinds
   // (`word`, `docx`, `pdf`, ...). Never pass that semantic label across the
@@ -380,6 +383,18 @@ const CONVERGENCE_PROMPT = [
   "</runtime_convergence>",
 ].join("\n");
 
+function completionPreparationPrompt(toolNames: readonly string[]): string {
+  return [
+    "<runtime_completion_preparation>",
+    "The current Plan step has enough receipt-backed evidence to prepare a completion candidate.",
+    "Effectful execution and new source-acquisition tools are fenced off on this turn.",
+    `Only these bounded, read-only evidence observers remain available: ${toolNames.join(", ")}.`,
+    "Use them only when exact values omitted from the current prompt projection are required to form the candidate.",
+    "Otherwise submit one concise user-visible completion candidate now. The independent assessor and Terminal Committer remain authoritative.",
+    "</runtime_completion_preparation>",
+  ].join("\n");
+}
+
 function emptyCandidateRepairDirective(input: {
   readonly convergenceOnly: boolean;
   readonly toolAvailable: boolean;
@@ -454,10 +469,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const toolCallLimits = normalizeToolCallLimits(options.toolCallLimits);
   let grantedCandidateRepairGraceSteps = 0;
   let grantedFinalConvergenceGraceSteps = 0;
+  let completionObservationContinuationGranted = false;
   let rejectedCandidateAssessments = 0;
   let rejectedUnassessableCandidates = 0;
   let evidenceProgressBaseline: number | undefined;
   let evidenceProgressBoundary: CandidateCompletionEvaluation["failedBoundary"];
+  let completionFencePending = false;
   let pendingCandidateRepairDirective: string | undefined;
   let pendingStructuredObservationSynthesisDirective: string | undefined;
   const messages: ModelMessage[] = [
@@ -471,6 +488,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     input: Omit<Parameters<typeof buildRuntimeDeliveryCandidate>[0], "expectedArtifactKind" | "expectedArtifactFormat">,
   ): RuntimeDeliveryCandidate => buildRuntimeDeliveryCandidate({
     ...input,
+    ...(options.progressPolicy?.targetIds === undefined ? {} : { targetIds: options.progressPolicy.targetIds }),
     ...(options.progressPolicy?.expectedArtifactKind === undefined
       ? {}
       : { expectedArtifactKind: options.progressPolicy.expectedArtifactKind }),
@@ -571,6 +589,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     } else if (evaluation.approved || context.toolEvidence.length > (evidenceProgressBaseline ?? -1)) {
       evidenceProgressBaseline = undefined;
       evidenceProgressBoundary = undefined;
+    }
+    if (!evaluation.approved) {
+      // Assessment owns semantic acceptance. A rejection opens exactly the
+      // next repair turn with the complete Run-authorized catalog; once that
+      // turn produces evidence, the current-step completion fence applies
+      // again instead of allowing an unbounded chain of later-step work.
+      completionFencePending = false;
     }
     return evaluation;
   };
@@ -850,13 +875,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // when the current step has no remaining receipt-backed obligation.  A
     // caller-specific heuristic (for example, a complete source extraction)
     // may say that exploration is no longer useful, but it cannot bypass a
-    // still-missing hard evidence kind such as derived_aggregation.
+    // still-missing hard evidence kind.
     const stepEvidenceState = deriveRuntimeStepEvidenceState({
       policy: options.progressPolicy,
       evidence: toolEvidence,
     });
     const missingToolEvidenceKinds = stepEvidenceState?.missingToolEvidenceKinds ?? [];
     const canConvergeFromCurrentEvidence = missingToolEvidenceKinds.length === 0;
+    const completionFenceReady = completionFencePending
+      && stepEvidenceState?.nextAction === "submit_completion_candidate"
+      && hasSuccessfulStepEvidence(toolEvidence);
     const finalConvergenceAllowed = requestedConvergenceReason !== undefined
       || step !== hardLimit
       || await shouldUseFinalConvergence(options.shouldUseFinalConvergence, {
@@ -869,12 +897,30 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const convergenceOnly = !humanLoopRepairPending
       && toolEvidence.length > 0
       && canConvergeFromCurrentEvidence
-      && (requestedConvergenceReason !== undefined || (step === hardLimit && finalConvergenceAllowed));
+      && (
+        completionFenceReady
+        || requestedConvergenceReason !== undefined
+        || (step === hardLimit && finalConvergenceAllowed)
+      );
+    // Materialize before selecting the completion boundary so the same grant
+    // snapshot owns both model visibility and call preparation.
+    const grantedMaterialized = options.tools.materialize(options.grant, {
+      decisionLedger: options.runtimeContext?.decisionLedger,
+    });
+    const completionPreparationDefinitions = convergenceOnly
+      ? grantedMaterialized.completionPreparationDefinitions
+      : [];
     if (convergenceOnly) {
       convergenceRequested = true;
+      if (completionFenceReady && requestedConvergenceReason === undefined) {
+        requestedConvergenceReason = "current_step_evidence_complete";
+      }
+      completionFencePending = false;
       const directive = pendingCandidateRepairDirective
         ?? pendingStructuredObservationSynthesisDirective
-        ?? convergencePrompt;
+        ?? (completionPreparationDefinitions.length === 0
+          ? convergencePrompt
+          : completionPreparationPrompt(completionPreparationDefinitions.map((tool) => tool.name)));
       pendingCandidateRepairDirective = undefined;
       pendingStructuredObservationSynthesisDirective = undefined;
       contextAssembler.setRuntimeDirective(directive);
@@ -886,6 +932,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           convergenceGraceSteps: graceSteps,
           hardLimit,
           priorToolResultCount: toolEvidence.length,
+          completionPreparationToolNames: completionPreparationDefinitions.map((tool) => tool.name),
           ...(requestedConvergenceReason === undefined ? {} : { reason: requestedConvergenceReason }),
         },
       });
@@ -894,9 +941,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     // Ported from OpenCode's materialization boundary: each model step gets a
     // fresh authorized snapshot, and preparation remains tied to that snapshot.
-    const grantedMaterialized = options.tools.materialize(options.grant, {
-      decisionLedger: options.runtimeContext?.decisionLedger,
-    });
     const prepareWithArtifactTarget = (call: ModelToolCall): PreparedToolCall => {
       assertArtifactAcceptanceCallMatchesTarget(call, options.progressPolicy);
       return grantedMaterialized.prepare(call);
@@ -935,6 +979,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       stepSemanticFrame: options.stepSemanticFrame,
       ...(workProductProjection === undefined ? {} : { workProductContext: workProductProjection }),
     });
+    const stepProgressSignatureBefore = currentStepProgressSignature(stepEvidenceState, options.progressPolicy);
     validateToolRecommendations(
       convergenceOnly ? [] : grantedMaterialized.definitions,
       stepExecutionDecision,
@@ -945,6 +990,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       grantedMaterialized.definitions,
       stepExecutionDecision.toolCatalog.preferredToolNames,
     );
+    const modelStepDefinitions = convergenceOnly
+      ? completionPreparationDefinitions
+      : executionDefinitions;
+    const modelStepToolNames = new Set(modelStepDefinitions.map((tool) => tool.name));
+    const prepareForModelStep = (call: ModelToolCall): PreparedToolCall => {
+      if (!modelStepToolNames.has(call.name)) {
+        throw new AppError(
+          "TOOL_POLICY_DENIED",
+          `Tool "${call.name}" is not available during this model step`,
+          403,
+        );
+      }
+      return prepareWithArtifactTarget(call);
+    };
     // Runtime owns fact visibility, including with strategies that predate this optional input.
     // Strategy recommendations and completion gates remain unchanged.
     contextAssembler.setRuntimeStepFrame(JSON.stringify(workProductProjection === undefined
@@ -1081,6 +1140,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }));
       }
       if (!outcome.isError && (acceptanceState?.missingToolEvidenceKinds.length ?? 0) === 0) {
+        if (
+          (acceptanceState?.requiredEvidenceKinds.length ?? 0) > 0
+          && acceptanceState?.nextAction === "submit_completion_candidate"
+        ) {
+          completionFencePending = true;
+        }
         requestedConvergenceReason = "artifact_acceptance_observed";
 
         // Receipt-only workflows may synthesize a completion candidate from
@@ -1141,7 +1206,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       continue;
     }
-    let assembly = await contextAssembler.assemble(messages, convergenceOnly ? [] : executionDefinitions, options.signal);
+    let assembly = await contextAssembler.assemble(messages, modelStepDefinitions, options.signal);
 
     let earlyOutcomes = new Map<string, ToolOutcome>();
     let response: ModelResponse | undefined;
@@ -1152,10 +1217,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         phase: "execution",
         runtimeContext: assembly.runtimeContext,
         messages: assembly.messages,
-        tools: convergenceOnly ? [] : executionDefinitions,
-        ...(convergenceOnly || executionDefinitions.length === 0
-          ? {}
-          : { toolChoice: "auto" as const }),
+        tools: modelStepDefinitions,
+        ...(modelStepDefinitions.length === 0 ? {} : { toolChoice: "auto" as const }),
         maxOutputTokens: convergenceOnly
           ? Math.min(convergenceMaxOutputTokens, options.model.limits.maxOutputTokens)
           : options.model.limits.maxOutputTokens,
@@ -1170,7 +1233,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         runtimePromptAugmentationIds: assembly.runtimePromptAugmentationIds,
         signal: options.signal,
         grant: options.grant,
-        prepare: prepareWithArtifactTarget,
+        prepare: prepareForModelStep,
         normalizeToolCall,
         maxToolResultCharacters,
         maxParallelToolCalls,
@@ -1194,13 +1257,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         });
         contextAssembler.setRuntimeDirective(emptyCandidateRepairDirective({
           convergenceOnly,
-          toolAvailable: executionDefinitions.length > 0,
+          toolAvailable: modelStepDefinitions.length > 0,
           missingEvidenceKinds: stepEvidenceState?.missingRequiredEvidenceKinds ?? [],
           expectedArtifactKind: stepEvidenceState?.workProduct.expectedArtifactKind,
         }));
         assembly = await contextAssembler.assemble(
           messages,
-          convergenceOnly ? [] : executionDefinitions,
+          modelStepDefinitions,
           options.signal,
         );
         continue;
@@ -1226,7 +1289,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         contextAssembler.setRuntimeDirective(internalEvidenceMarkup
           ? INTERNAL_EVIDENCE_MARKUP_REPAIR_PROMPT
           : TEXT_TOOL_INVOCATION_REPAIR_PROMPT);
-        assembly = await contextAssembler.assemble(messages, [], options.signal);
+        assembly = await contextAssembler.assemble(messages, modelStepDefinitions, options.signal);
         continue;
       }
       break;
@@ -1241,7 +1304,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await emit({ type: "candidate.rejected", data: { step, output: response.content, feedback } });
       const compacted = await contextAssembler.forceCompactForCompletionRepair(
         messages,
-        convergenceOnly ? [] : executionDefinitions,
+        modelStepDefinitions,
         options.signal,
       ).catch(async (error) => {
         await emit({
@@ -1265,7 +1328,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       setCandidateRepairDirective([
         emptyCandidateRepairDirective({
           convergenceOnly,
-          toolAvailable: executionDefinitions.length > 0,
+          toolAvailable: modelStepDefinitions.length > 0,
           missingEvidenceKinds: stepEvidenceState?.missingRequiredEvidenceKinds ?? [],
           expectedArtifactKind: stepEvidenceState?.workProduct.expectedArtifactKind,
         }),
@@ -1323,7 +1386,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         contextAssembler.setRuntimeDirective(lengthTruncationRepairDirective({
           feedback,
           convergenceOnly,
-          toolAvailable: executionDefinitions.length > 0,
+          toolAvailable: modelStepDefinitions.length > 0,
         }));
         continue;
       }
@@ -1557,6 +1620,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // Progress evaluation informs the next model turn, but does not turn a
     // predicted next action into a second authorization boundary. An already
     // authorized call can still be the model's needed state-acquisition step.
+    const toolProgressStateBeforeTurn = toolProgressState;
     let progressHint: string | undefined;
     if (
       !convergenceOnly
@@ -1575,7 +1639,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     let outcomes: ToolOutcome[];
-    if (convergenceOnly) {
+    if (convergenceOnly && completionPreparationDefinitions.length === 0) {
       outcomes = response.toolCalls.map((call) => ({
         call,
         content: "Tool call was not executed because the Runtime reserved this final step for convergence",
@@ -1671,7 +1735,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         admittedToolCalls.set(call.name, admittedCalls + 1);
         try {
           const normalizedCall = await normalizeToolCall(call);
-          const value = prepareWithArtifactTarget(normalizedCall);
+          const value = prepareForModelStep(normalizedCall);
           await emit({
             type: "tool.planned",
             data: {
@@ -1898,6 +1962,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     previousPrepareRejectionSignature = undefined;
     consecutivePrepareRejectionSteps = 0;
 
+    const successfulCompletionObservation = convergenceOnly
+      && outcomes.some((outcome) => !outcome.isError && modelStepToolNames.has(outcome.call.name));
+    if (
+      successfulCompletionObservation
+      && step === currentLimit()
+      && !completionObservationContinuationGranted
+    ) {
+      completionObservationContinuationGranted = true;
+      grantedFinalConvergenceGraceSteps += 1;
+      await emit({
+        type: "loop.final_convergence_grace_granted",
+        data: {
+          step,
+          reason: "completion_observation_consumed",
+          finalConvergenceGraceSteps: grantedFinalConvergenceGraceSteps,
+          hardLimit: currentLimit(),
+        },
+      });
+    }
+
     // A just-produced deliverable can be accepted inside the same model-step
     // budget. Re-enter the loop at the same step number so the Runtime-owned
     // verifier is dispatched before any further model request.
@@ -1905,6 +1989,45 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       policy: options.progressPolicy,
       evidence: toolEvidence,
     });
+    const stepProgressSignatureAfter = currentStepProgressSignature(evidenceStateBeforeCandidate, options.progressPolicy);
+    const successfulNonExploratoryAction = outcomes.some((outcome) =>
+      !outcome.isError
+      && outcome.call.name !== "load_skill"
+      && options.progressPolicy?.exploratoryToolNames.includes(outcome.call.name) !== true
+    );
+    if (
+      stepProgressSignatureBefore !== undefined
+      && stepProgressSignatureBefore === stepProgressSignatureAfter
+      && successfulNonExploratoryAction
+    ) {
+      // A successful future-step or unrelated action must not reset the
+      // current-step focus counters merely because it used a nominal evidence
+      // producer. Keep the prior focus state while retaining the output.
+      toolProgressState = toolProgressStateBeforeTurn;
+      const provisionalHint = [
+        "The last successful action did not change the current Plan step's evidence gap or owned work-product state.",
+        "Its output remains reusable evidence, but it is provisional for this step and does not justify continuing later-step work here.",
+        "Return to the current step boundary: produce one targeted missing-evidence batch, or submit the current completion candidate when no tool-backed gap remains.",
+      ].join(" ");
+      progressHint = progressHint === undefined ? provisionalHint : `${progressHint}\n${provisionalHint}`;
+      await emit({
+        type: "loop.provisional_output_observed",
+        data: {
+          step,
+          phase: "execution",
+          reason: "Successful actions changed no current-step evidence gap or owned work product; output retained as provisional",
+          stalled: false,
+          provisional: true,
+        },
+      });
+    }
+    if (
+      (evidenceStateBeforeCandidate?.requiredEvidenceKinds.length ?? 0) > 0
+      && evidenceStateBeforeCandidate?.nextAction === "submit_completion_candidate"
+      && outcomes.some((outcome) => !outcome.isError && outcome.call.name !== "load_skill")
+    ) {
+      completionFencePending = true;
+    }
     if (automaticArtifactAcceptanceCall({
       stepEvidenceState: evidenceStateBeforeCandidate,
       convergenceOnly: false,
@@ -2314,6 +2437,44 @@ function isInternalEvidenceMarkupCandidate(value: string): boolean {
     || /\btoolResultsOverride\b/i.test(trimmed);
 }
 
+function hasSuccessfulStepEvidence(evidence: readonly AgentLoopToolEvidence[]): boolean {
+  return evidence.some((item) => !item.isError && item.toolName !== "load_skill");
+}
+
+/**
+ * Deliberately excludes arbitrary process-artifact paths. The first owned
+ * process artifact advances status from none, while additional later-step
+ * files cannot masquerade as progress for the current leaf.
+ */
+function currentStepProgressSignature(
+  state: RuntimeStepEvidenceState | undefined,
+  policy: RuntimeToolProgressPolicy | undefined,
+): string | undefined {
+  if (state === undefined) return undefined;
+  const required = new Set(state.requiredEvidenceKinds);
+  const ownsArtifactWorkProduct = policy?.artifactDeliveryRequired === true
+    || policy?.expectedArtifactKind !== undefined
+    || policy?.expectedArtifactFormat !== undefined
+    || (policy?.artifactTargets?.length ?? 0) > 0
+    || state.requiredEvidenceKinds.some((kind) => kind.startsWith("artifact_") || kind === "format_matches_request");
+  return JSON.stringify({
+    satisfiedEvidenceKinds: state.satisfiedEvidenceKinds.filter((kind) => required.has(kind)).sort(),
+    missingRequiredEvidenceKinds: [...state.missingRequiredEvidenceKinds].sort(),
+    missingToolEvidenceKinds: [...state.missingToolEvidenceKinds].sort(),
+    ...(ownsArtifactWorkProduct ? {
+      workProduct: {
+        status: state.workProduct.status,
+        deliverableArtifacts: state.workProduct.deliverableArtifacts.map((artifact) => ({
+          path: artifact.path,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256,
+          artifactKind: artifact.artifactKind,
+        })).sort((left, right) => left.path.localeCompare(right.path)),
+      },
+    } : {}),
+  });
+}
+
 async function evaluateToolStepConvergence(
   predicate: AgentLoopOptions["shouldConvergeAfterToolStep"],
   context: ToolStepConvergenceContext,
@@ -2518,7 +2679,7 @@ function structuredObservationSynthesisDirective(
     "Multiple structured tool observations were produced for this same Plan step. They are evidence, not independent final answers.",
     "Synthesize one answer for the original user goal using every observation. Do not select the last tool result merely because it completed last.",
     "A zero-result observation applies only to its own query or scope. It cannot justify a global no-result conclusion while another observation has matching results.",
-    "State differing query scopes and any unresolved conflict explicitly. Use the canonical tool results for exact fields; do not invent facts or emit tool calls on this synthesis turn.",
+    "State differing query scopes and any unresolved conflict explicitly. Use the canonical tool results for exact fields; when an exact value is omitted from the prompt projection, use only a bounded evidence-observation Tool exposed on this turn. Do not invent facts or call production/source-acquisition Tools.",
     "Observation summaries:",
     JSON.stringify(observations.map((candidate) => JSON.parse(candidate.observation))),
     "</runtime_structured_observation_synthesis>",

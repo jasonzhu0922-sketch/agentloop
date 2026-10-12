@@ -188,7 +188,7 @@ test("conversation deletion allows a running Run paused for interruption recover
       deadlineMs: 600_000,
     });
     database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-    assert.equal(await actions.reconcileRunningRuns(), 1);
+    assert.equal((await actions.reconcileRunningRuns()).length, 1);
     assert.equal((await runs.get(owner.user.id, runId)).status, "running");
 
     await runs.deleteConversation(owner.user.id, conversationId);

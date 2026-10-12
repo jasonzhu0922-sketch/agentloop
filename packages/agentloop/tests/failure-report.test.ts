@@ -164,7 +164,7 @@ test("failed Run persists its report in both snapshot and Outcome, never a deliv
         feedback: "Not verified", failedBoundary: { stepId: input.step.id, missingEvidenceKinds: ["schema_summary"], violatedSkillRequirements: [], reusableEvidenceRefs: [], suggestedRepairShape: "repair_leaf" },
       }) }),
     });
-    const run = await runs.execute(owner.user.id, "分析现有资料");
+    const run = await runs.execute(owner.user.id, "请直接给出一段简短说明");
     assert.equal(run.status, "failed");
     assert.equal(reports, 1);
     assert.match(run.output ?? "", /任务未完成/);
@@ -196,13 +196,13 @@ test("budget failure persists a goal-oriented summary without changing the origi
         if ((request.runtimeContext?.content ?? "").includes("<runtime_failure_report>")) {
           reports += 1;
           assert.deepEqual(request.tools, []);
-          return { content: "目标是分析价格趋势；尚未取得可核验资料，不能给出价格结论。", finishReason: "stop", toolCalls: [] };
+          return { content: "目标是给出简短说明；当前尚未形成可交付结果。", finishReason: "stop", toolCalls: [] };
         }
         return { content: "", finishReason: "length", toolCalls: [] };
       } }),
     });
     let runId = "";
-    await assert.rejects(runs.execute(owner.user.id, "分析价格趋势"), (error: unknown) => {
+    await assert.rejects(runs.execute(owner.user.id, "请直接给出一段简短说明"), (error: unknown) => {
       assert.ok(error instanceof AppError);
       assert.equal(error.code, "RUN_LIMIT_EXCEEDED");
       runId = String(error.details?.runId);
@@ -212,7 +212,7 @@ test("budget failure persists a goal-oriented summary without changing the origi
     const run = await runs.get(owner.user.id, runId);
     assert.equal(run.status, "failed");
     assert.equal(run.errorCode, "RUN_LIMIT_EXCEEDED");
-    assert.match(run.output ?? "", /目标是分析价格趋势/);
+    assert.match(run.output ?? "", /目标是给出简短说明/);
     const events = await runs.events(owner.user.id, runId);
     assert.equal(events.find((event) => event.type === "run.failed")?.data.output, run.output);
   } finally { database.close(); }

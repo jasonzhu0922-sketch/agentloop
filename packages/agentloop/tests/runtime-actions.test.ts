@@ -274,6 +274,47 @@ test("old actionless running Runs are reported as interrupted without creating w
   }
 });
 
+test("reconciliation reports a pre-canonical Run stranded after a succeeded resolver Action", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const strandedRunId = "pre-canonical-stranded-run";
+    const canonicalRunId = "canonical-between-actions-run";
+    for (const runId of [strandedRunId, canonicalRunId]) {
+      await database.prepare(`
+        INSERT INTO runs(
+          id, owner_user_id, parent_run_id, depth, allow_dangerous_tools,
+          status, input, created_at
+        ) VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
+      `).run(runId, owner.user.id, runId, Date.now() - 120_000);
+    }
+    await database.prepare(`
+      INSERT INTO canonical_run_states(
+        run_id, state_id, intent_id, revision, state_json, created_at, updated_at
+      ) VALUES (?, ?, ?, 1, '{}', 1, 1)
+    `).run(canonicalRunId, "canonical-state", "canonical-intent");
+    const actions = new RuntimeActionRepository(database);
+    for (const runId of [strandedRunId, canonicalRunId]) {
+      await actions.execute({
+        runId,
+        kind: "planning",
+        replayPolicy: "safe",
+        deadlineMs: 1_000,
+        metadata: { purpose: "conversation_turn_resolver" },
+      }, async () => ({ resolved: true }));
+    }
+
+    assert.deepEqual(await actions.reconcileRunningRuns(), [{
+      runId: strandedRunId,
+      reason: "legacy_state_incomplete",
+    }]);
+    assert.equal((await actions.list(strandedRunId))[0]?.state, "succeeded");
+    assert.equal((await actions.list(canonicalRunId))[0]?.state, "succeeded");
+  } finally {
+    await database.close();
+  }
+});
+
 test("scoped reconciliation cannot interrupt a Run owned by another Runtime Host", async () => {
   const database = new AppDatabase(":memory:");
   try {

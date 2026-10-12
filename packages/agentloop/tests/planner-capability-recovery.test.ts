@@ -4,6 +4,7 @@ import { ModelPlanner } from "../src/planning/planner.ts";
 import type { PlanningCapability, PlanningToolSummary, TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 
 const tools: readonly PlanningToolSummary[] = [
   {
@@ -43,13 +44,13 @@ const materializationCapability: PlanningCapability = {
   risk: "low",
 };
 
-const aggregationCapability: PlanningCapability = {
-  id: "workspace_command_computation",
+const coverageCapability: PlanningCapability = {
+  id: "workspace_structured_artifact_read",
   category: "structured_data",
-  produces: ["derived_aggregation"],
+  produces: ["table_coverage"],
   sourceKinds: ["workspace_file"],
-  sideEffect: "workspace_write",
-  risk: "medium",
+  sideEffect: "workspace_read",
+  risk: "low",
 };
 
 function proposal(capabilities: readonly string[]): ModelResponse {
@@ -72,7 +73,7 @@ function proposal(capabilities: readonly string[]): ModelResponse {
           skillIds: [],
           requiredCapabilities: capabilities,
           evidenceContract: {
-            requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "derived_aggregation"],
+            requiredKinds: ["source_summary", "schema_summary", "record_counts", "structured_extraction_artifact", "table_coverage"],
             caveatPolicy: "mark_unverified_facts",
           },
         }],
@@ -81,57 +82,104 @@ function proposal(capabilities: readonly string[]): ModelResponse {
   };
 }
 
-test("capability recovery preserves prior evidence producers across successive gaps", async () => {
+test("Planner does not preserve an aggregation process as a completion evidence requirement", async () => {
   let calls = 0;
   const model: ModelAdapter = {
     limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
     async complete(request: ModelInvocation): Promise<ModelResponse> {
       calls += 1;
-      if (calls === 1) return proposal(["data_asset.ods_read", "workspace_command_computation"]);
+      if (calls === 1) {
+        assert.match(request.runtimeContext?.content ?? "", /"canonicalRunState"/);
+        assert.match(request.runtimeContext?.content ?? "", /"userInput":"查询 ODS 表的数据结构/);
+        assert.doesNotMatch(request.runtimeContext?.content ?? "", /"planningTask"/);
+        return proposal(["data_asset.ods_read", "workspace_structured_artifact_read"]);
+      }
       if (calls === 2) {
         assert.match(request.runtimeContext?.content ?? "", /Candidate additions are additive/);
         assert.match(request.runtimeContext?.content ?? "", /runtime_result_json_materialization/);
         return proposal(["data_asset.ods_read", "runtime_result_json_materialization"]);
       }
-      if (calls === 3) {
-        assert.match(request.runtimeContext?.content ?? "", /preserveCapabilityIds/);
-        assert.match(request.runtimeContext?.content ?? "", /runtime_result_json_materialization/);
-        assert.match(request.runtimeContext?.content ?? "", /workspace_command_computation/);
-        // Repeating the first mistake requires a third capability recovery.
-        return proposal(["data_asset.ods_read", "workspace_command_computation"]);
-      }
-      assert.equal(calls, 4);
-      assert.match(request.runtimeContext?.content ?? "", /runtime_result_json_materialization/);
-      return proposal([
-        "data_asset.ods_read",
-        "runtime_result_json_materialization",
-        "workspace_command_computation",
-      ]);
+      throw new Error(`Unexpected Planner call ${calls}`);
     },
   };
   const task: TaskSpec = {
     runId: "run-capability-recovery-preservation",
-    input: "查询 ODS 表的数据结构，并分析各字段取值分布、空值率和行数。",
-    taskUnderstanding: understandTask({
-      objective: "查询 ODS 表的数据结构，并分析各字段取值分布、空值率和行数。",
-      toolNames: tools.map((tool) => tool.name),
+    canonicalState: createCanonicalRunState({
+      runId: "run-capability-recovery-preservation",
+      userInput: "查询 ODS 表的数据结构，并分析各字段取值分布、空值率和行数。",
+      understanding: understandTask({
+        objective: "查询 ODS 表的数据结构，并分析各字段取值分布、空值率和行数。",
+        toolNames: tools.map((tool) => tool.name),
+      }),
+      now: 1,
     }),
     availableSkills: [],
     availableToolNames: tools.map((tool) => tool.name),
     availableTools: tools,
-    availableCapabilities: [sourceCapability, aggregationCapability],
+    availableCapabilities: [sourceCapability, coverageCapability],
     capabilityRecovery: {
       availableSkills: [],
-      availableCapabilities: [sourceCapability, materializationCapability, aggregationCapability],
+      availableCapabilities: [sourceCapability, materializationCapability, coverageCapability],
     },
   };
 
-  const admitted = await new ModelPlanner(model, { maxPlanningTurns: 4 }).plan(task);
+  const admitted = await new ModelPlanner(model, { maxPlanningTurns: 2 }).plan(task);
 
-  assert.equal(calls, 4);
+  assert.equal(calls, 2);
   assert.deepEqual(admitted.steps[0]?.requiredCapabilities, [
     "data_asset.ods_read",
     "runtime_result_json_materialization",
-    "workspace_command_computation",
   ]);
+  assert.equal(admitted.steps[0]?.evidenceContract?.requiredKinds.includes("table_coverage"), false);
+});
+
+test("Planner rejects the removed derived aggregation evidence kind", async () => {
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    async complete(): Promise<ModelResponse> {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "legacy-evidence-kind",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Produce a report.",
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "report",
+              objective: "Produce a report.",
+              dependsOn: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              evidenceContract: {
+                requiredKinds: ["derived_aggregation"],
+                caveatPolicy: "none",
+              },
+            }],
+          },
+        }],
+      };
+    },
+  };
+  const runId = "run-reject-removed-evidence-kind";
+  const task: TaskSpec = {
+    runId,
+    canonicalState: createCanonicalRunState({
+      runId,
+      userInput: "Produce a report.",
+      understanding: understandTask({ objective: "Produce a report.", toolNames: ["computer_write_file"] }),
+      now: 1,
+    }),
+    availableSkills: [],
+    availableToolNames: ["computer_write_file"],
+  };
+
+  await assert.rejects(
+    new ModelPlanner(model, { maxPlanningTurns: 1 }).plan(task),
+    /unsupported evidence kind derived_aggregation/,
+  );
 });

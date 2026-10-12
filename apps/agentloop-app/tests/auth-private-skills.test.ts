@@ -10,6 +10,7 @@ import { RuntimeActionRepository } from "@zhujun/agentloop";
 import { LlmProviderRegistry } from "@zhujun/agentloop";
 import { SkillService } from "@zhujun/agentloop";
 import { AppDatabase } from "@zhujun/agentloop";
+import { CanonicalRunStateRepository, createCanonicalRunState, understandTask } from "@zhujun/agentloop";
 
 test("registration stores only password and session digests", async () => {
   const database = new AppDatabase(":memory:");
@@ -214,9 +215,9 @@ test("HTTP async Run start returns a trackable running Run before model completi
     });
     assert.equal(planBefore.status, 200);
     const planBeforeBody = await planBefore.json() as { state: string; plan: { status: string; steps: unknown[] } };
-    assert.equal(planBeforeBody.state, "pending");
-    assert.equal(planBeforeBody.plan.status, "pending");
-    assert.deepEqual(planBeforeBody.plan.steps, []);
+    assert.equal(planBeforeBody.state, "available");
+    assert.equal(planBeforeBody.plan.status, "running");
+    assert.equal(planBeforeBody.plan.steps.length, 1);
 
     release.resolve();
     const completed = await pollRunStatus(baseUrl, owner.token, startedBody.run.id, "completed");
@@ -255,10 +256,13 @@ test("Recovery APIs expose only the owner state and advance a structured planner
     INSERT INTO runs(id, owner_user_id, parent_run_id, depth, allow_dangerous_tools, status, input, created_at)
     VALUES (?, ?, NULL, 0, 0, 'running', ?, ?)
   `).run(runId, owner.user.id, "confirm delivery", Date.now());
+  await new CanonicalRunStateRepository(database).create(createCanonicalRunState({
+    runId,
+    userInput: "confirm delivery",
+    understanding: understandTask({ objective: "confirm delivery" }),
+  }));
   const actions = new RuntimeActionRepository(database);
-  const action = await actions.dispatch({ runId, kind: "tool_call", replayPolicy: "unsafe", deadlineMs: 1_000 });
-  database.prepare("UPDATE runtime_actions SET deadline_at = 0, lease_until = 0 WHERE id = ?").run(action.id);
-  await actions.reconcileRunningRuns();
+  const action = await actions.requireHumanLoopResume({ runId });
   const runs = new RunService({
     database,
     skills,
@@ -266,7 +270,7 @@ test("Recovery APIs expose only the owner state and advance a structured planner
     recoveryPlannerFactory: () => ({
       decide: async () => ({
         actionId: action.id,
-        expectedActionRevision: 2,
+        expectedActionRevision: 1,
         decision: "ask_user",
         rationale: "The unsafe external effect is unknown.",
         evidenceRefs: [],
@@ -334,6 +338,24 @@ class DeferredRunModel implements ModelAdapter {
 
   async complete(request: ModelInvocation): Promise<ModelResponse> {
     const toolNames = request.tools.map((tool) => tool.name);
+    if (toolNames.includes("resolve_conversation_turn")) {
+      const latest = request.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
+      return toolResponse("async-resolver", "resolve_conversation_turn", {
+        mode: "reply",
+        relation: "new_goal",
+        inputMode: "none",
+        effectiveGoal: latest,
+        taskIntent: {
+          schema: "agentloop.conversationTaskIntent/v1",
+          operation: "answer",
+          requiresExecution: false,
+          deliverables: [],
+        },
+        evidenceStrategy: "none",
+        sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+        userConstraints: [],
+      });
+    }
     if (toolNames.includes("submit_outcome_plan")) {
       await this.release;
       return toolResponse("async-plan", "submit_outcome_plan", {
@@ -347,11 +369,14 @@ class DeferredRunModel implements ModelAdapter {
           dependsOn: [],
           role: "deliver",
           skillIds: [],
+          requiredCapabilities: [],
           recommendedToolNames: [],
+          sourceConstraint: null,
           evidenceContract: {
             requiredKinds: ["delivery_receipt"],
             caveatPolicy: "none",
           },
+          targetIds: [],
         }],
       });
     }

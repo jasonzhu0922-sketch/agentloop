@@ -4,6 +4,7 @@ import { ModelPlanner } from "../src/planning/planner.ts";
 import { runAgentLoop } from "../src/runtime/agent-loop.ts";
 import { buildRuntimeDeliveryCandidate } from "../src/runtime/delivery-candidate.ts";
 import { createCapabilityGrant } from "../src/runtime/capability-grant.ts";
+import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { formatPracticePromptAugmentation } from "../src/runtime/dynamic-prompt.ts";
 import { resolvePracticeProfileResolution, type PracticeProfileCatalog } from "../src/runtime/practice-profiles.ts";
 import { observedSourceKindsFromToolEvidence } from "../src/runtime/source-family-observation.ts";
@@ -83,7 +84,7 @@ test("ModelPlanner emits a strict Responses schema with every leaf property requ
               requiredCapabilities: [],
               sourceConstraint: null,
               evidenceContract: null,
-              artifactTargetIds: [],
+              targetIds: [],
             }],
           },
         }],
@@ -93,8 +94,12 @@ test("ModelPlanner emits a strict Responses schema with every leaf property requ
   const taskUnderstanding = understandTask({ objective: "回答这个问题。", toolNames: [] });
   await new ModelPlanner(model).plan({
     runId: "run-strict-schema-plan",
-    input: "回答这个问题。",
-    taskUnderstanding,
+    canonicalState: createCanonicalRunState({
+      runId: "run-strict-schema-plan",
+      userInput: "回答这个问题。",
+      understanding: taskUnderstanding,
+      now: 1,
+    }),
     availableSkills: [],
     availableToolNames: [],
     availableTools: [],
@@ -105,7 +110,7 @@ test("ModelPlanner emits a strict Responses schema with every leaf property requ
   assert.equal(leafSchema.additionalProperties, false);
   assert.deepEqual(leafSchema.required, Object.keys(leafSchema.properties as Record<string, unknown>));
   const leafProperties = leafSchema.properties as Record<string, unknown>;
-  assert.deepEqual(leafProperties.artifactTargetIds, {
+  assert.deepEqual(leafProperties.targetIds, {
     type: "array", maxItems: 0, items: { type: "string" },
   });
 });
@@ -208,8 +213,8 @@ test("model-authored task intent remains authoritative over lexical task classif
     operation: "composite" as const,
     requiresExecution: true,
     deliverables: [
-      { action: "modify" as const, kind: "code" as const, format: "py", surface: "workspace_artifact" as const },
-      { action: "create" as const, kind: "audio" as const, format: "wav", surface: "workspace_artifact" as const },
+      { targetId: "source-code", purpose: "Modify the requested source code.", expectedArtifactCount: 1, action: "modify" as const, kind: "code" as const, format: "py", surface: "workspace_artifact" as const },
+      { targetId: "rendered-audio", purpose: "Create the requested audio.", expectedArtifactCount: 1, action: "create" as const, kind: "audio" as const, format: "wav", surface: "workspace_artifact" as const },
     ],
   };
   const classified = classifyTaskIntent({
@@ -228,6 +233,32 @@ test("model-authored task intent remains authoritative over lexical task classif
   assert.equal(understood.deliverable.kind, "audio");
   assert.equal(understood.format, "wav");
   assert.deepEqual(understood.deliverables?.map((item) => item.kind), ["code", "audio"]);
+});
+
+test("a resolved conversational document remains conversational despite report wording", () => {
+  const understood = understandTask({
+    objective: "查询表结构并输出分析报告与结论。",
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "analysis",
+      requiresExecution: true,
+      deliverables: [{
+        targetId: "table-analysis",
+        purpose: "在会话中呈现表结构和数据分布分析",
+        expectedArtifactCount: 1,
+        action: "create",
+        kind: "document",
+        surface: "conversation",
+      }],
+    },
+  });
+
+  assert.equal(understood.intent.deliverySurface, "conversation");
+  assert.equal(understood.intent.artifactAction, "none");
+  assert.equal(understood.intent.artifactKind, "none");
+  assert.equal(understood.intent.wantsArtifact, false);
+  assert.equal(understood.intent.wantsConversationAnswer, true);
+  assert.deepEqual(understood.artifactTargets, []);
 });
 
 test("standard context enrichment activates tabular guidance from committed visible-file facts before the next model request", async () => {
@@ -651,6 +682,265 @@ test("the final budgeted turn converges without tools and submits existing evide
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
+test("current-step evidence completion forces the next model turn to be tool-free", async () => {
+  let modelCalls = 0;
+  const source = receiptTool("collect_source", ["source_summary"]);
+  const grant = makeGrant(["collect_source"]);
+  const events: RuntimeEvent[] = [];
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete only the current Plan step.",
+    input: "collect the source summary",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          assert.equal(request.tools.some((tool) => tool.name === "collect_source"), true);
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
+        }
+        assert.equal(request.tools.length, 0);
+        return { content: "current source step complete", finishReason: "stop", toolCalls: [] };
+      },
+    },
+    tools: new ToolRegistry([source]),
+    grant,
+    maxSteps: 4,
+    progressPolicy: runtimeStepToolProgressPolicy(["source_summary"], { scope: "artifact" }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async (candidate) => ({ approved: candidate.output.includes("complete"), feedback: "" }),
+  });
+
+  assert.equal(result.output, "current source step complete");
+  assert.equal(modelCalls, 2);
+  assert.equal(events.some((event) =>
+    event.type === "loop.convergence_requested"
+    && event.data.reason === "current_step_evidence_complete"
+  ), true);
+});
+
+test("completion preparation exposes only bounded evidence observers and assesses after the exact read", async () => {
+  let modelCalls = 0;
+  let readExecutions = 0;
+  let effectExecutions = 0;
+  let assessments = 0;
+  const source = receiptTool("collect_source", ["source_summary"]);
+  const exactMarker = "exact-distribution-value-4117";
+  const readResult: RuntimeTool<unknown> = {
+    name: "read_result",
+    description: "Read exact committed evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    availableDuringCompletionPreparation: true,
+    publishesRuntimeResult: false,
+    parse: (value) => value,
+    execute: async () => {
+      readExecutions += 1;
+      return { schema: "agentloop.resultRead/v1", content: exactMarker, nextCharacterOffset: null };
+    },
+  };
+  const effectful: RuntimeTool<unknown> = {
+    name: "future_step_work",
+    description: "Perform effectful future work",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => { effectExecutions += 1; return { changed: true }; },
+  };
+  const grant = makeGrant(["collect_source", "read_result", "future_step_work"]);
+  const events: RuntimeEvent[] = [];
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete only the current Plan step.",
+    input: "analyze the complete distribution",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
+        }
+        assert.deepEqual(request.tools.map((tool) => tool.name), ["read_result"]);
+        if (modelCalls === 2) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "read", name: "read_result", arguments: {} }] };
+        }
+        assert.equal(request.messages.some((message) => message.role === "tool" && message.content.includes(exactMarker)), true);
+        return { content: `Analyzed all ${exactMarker} records.`, finishReason: "stop", toolCalls: [] };
+      },
+    },
+    tools: new ToolRegistry([source, readResult, effectful]),
+    grant,
+    maxSteps: 2,
+    progressPolicy: runtimeStepToolProgressPolicy(["source_summary"], { scope: "artifact" }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => {
+      assessments += 1;
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.match(result.output, /4117/);
+  assert.equal(modelCalls, 3);
+  assert.equal(readExecutions, 1);
+  assert.equal(effectExecutions, 0);
+  assert.equal(assessments, 1);
+  assert.equal(events.some((event) =>
+    event.type === "loop.final_convergence_grace_granted"
+    && event.data.reason === "completion_observation_consumed"
+  ), true);
+});
+
+test("completion preparation rejects a hidden effectful Tool before execution", async () => {
+  let modelCalls = 0;
+  let effectExecutions = 0;
+  let assessments = 0;
+  const source = receiptTool("collect_source", ["source_summary"]);
+  const readResult: RuntimeTool<unknown> = {
+    name: "read_result",
+    description: "Read exact committed evidence",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    availableDuringCompletionPreparation: true,
+    publishesRuntimeResult: false,
+    parse: (value) => value,
+    execute: async () => ({ schema: "agentloop.resultRead/v1", content: "exact" }),
+  };
+  const effectful: RuntimeTool<unknown> = {
+    name: "future_step_work",
+    description: "Perform effectful future work",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => { effectExecutions += 1; return { changed: true }; },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["collect_source", "read_result", "future_step_work"]);
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete only the current Plan step.",
+    input: "summarize the source",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
+        }
+        assert.deepEqual(request.tools.map((tool) => tool.name), ["read_result"]);
+        if (modelCalls === 2) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "hidden", name: "future_step_work", arguments: {} }] };
+        }
+        return { content: "source summary complete", finishReason: "stop", toolCalls: [] };
+      },
+    },
+    tools: new ToolRegistry([source, readResult, effectful]),
+    grant,
+    maxSteps: 3,
+    progressPolicy: runtimeStepToolProgressPolicy(["source_summary"], { scope: "artifact" }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => {
+      assessments += 1;
+      return { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "source summary complete");
+  assert.equal(effectExecutions, 0);
+  assert.equal(assessments, 1);
+  assert.equal(events.some((event) =>
+    event.type === "tool.rejected"
+    && event.data.toolName === "future_step_work"
+    && String(event.data.reason).includes("not available during this model step")
+  ), true);
+});
+
+test("completion-preparation metadata cannot authorize an effectful or result-publishing Tool", () => {
+  const invalidObserver: RuntimeTool<unknown> = {
+    name: "invalid_observer",
+    description: "Misdeclared effectful Tool",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    availableDuringCompletionPreparation: true,
+    publishesRuntimeResult: true,
+    parse: (value) => value,
+    execute: async () => ({ changed: true }),
+  };
+
+  assert.throws(
+    () => new ToolRegistry([invalidObserver]),
+    /must be replay safe and set publishesRuntimeResult=false/,
+  );
+});
+
+test("Assessment rejection reopens the full Run-authorized catalog for one repair turn", async () => {
+  let modelCalls = 0;
+  let assessments = 0;
+  const source = receiptTool("collect_source", ["source_summary"]);
+  const futureWork: RuntimeTool<unknown> = {
+    name: "future_step_work",
+    description: "Produce a downstream spreadsheet early",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path: "downstream.xlsx", kind: "spreadsheet", bytes: 64 },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const grant = makeGrant(["collect_source", "future_step_work"]);
+  const events: RuntimeEvent[] = [];
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Complete only the current Plan step.",
+    input: "collect and summarize the current source",
+    model: {
+      limits: TEST_MODEL_LIMITS,
+      complete: async (request) => {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
+        }
+        if (modelCalls === 2) {
+          assert.equal(request.tools.length, 0);
+          return { content: "first candidate", finishReason: "stop", toolCalls: [] };
+        }
+        if (modelCalls === 3) {
+          assert.deepEqual(request.tools.map((tool) => tool.name).sort(), ["collect_source", "future_step_work"]);
+          return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "repair", name: "future_step_work", arguments: {} }] };
+        }
+        assert.equal(request.tools.length, 0);
+        return { content: "repaired candidate", finishReason: "stop", toolCalls: [] };
+      },
+    },
+    tools: new ToolRegistry([source, futureWork]),
+    grant,
+    maxSteps: 4,
+    progressPolicy: runtimeStepToolProgressPolicy(["source_summary"], { scope: "artifact" }),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => {
+      assessments += 1;
+      return assessments === 1
+        ? { approved: false, feedback: "one repair action is required" }
+        : { approved: true, feedback: "" };
+    },
+  });
+
+  assert.equal(result.output, "repaired candidate");
+  assert.equal(modelCalls, 4);
+  assert.equal(assessments, 2);
+  assert.equal(events.some((event) => event.type === "loop.provisional_output_observed" && event.data.provisional === true), true);
+  assert.equal(result.toolEvidence.some((item) => item.toolName === "future_step_work" && !item.isError && item.result.includes("downstream.xlsx")), true);
+});
+
 test("the final budgeted turn can execute missing required evidence before convergence", async () => {
   let produceExecutions = 0;
   let acceptExecutions = 0;
@@ -717,7 +1007,7 @@ test("the final budgeted turn can execute missing required evidence before conve
   assert.equal(events.some((event) => event.type === "loop.limit_exceeded"), false);
 });
 
-test("accepted artifact receipts return control for a continuing multi-write draft before final delivery", async () => {
+test("accepted artifact receipts allow a final semantic completion candidate", async () => {
   let writeExecutions = 0;
   let verifyExecutions = 0;
   let readExecutions = 0;
@@ -794,23 +1084,9 @@ test("accepted artifact receipts return control for a continuing multi-write dra
       }
       if (modelCalls === 2) {
         assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
-        assert.match(request.runtimeContext?.content ?? "", /runtime_artifact_delivery_review/);
-        return {
-          content: "先检查当前报告是否完整。",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "read-report", name: "computer_read_file", arguments: { path: "report.html" } }],
-        };
+        return { content: "report.html 已完成并已通过验收。", finishReason: "stop", toolCalls: [] };
       }
-      if (modelCalls === 3) {
-        assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
-        return {
-          content: "检查确认正文不完整，继续补全。",
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "append-report", name: "computer_write_file", arguments: { path: "report.html", mode: "append" } }],
-        };
-      }
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
-      return { content: "report.html 已完成并已通过验收。", finishReason: "stop", toolCalls: [] };
+      throw new Error(`unexpected model call ${modelCalls}`);
     },
   };
   const events: RuntimeEvent[] = [];
@@ -842,10 +1118,10 @@ test("accepted artifact receipts return control for a continuing multi-write dra
   assert.match(result.output, /report\.html/);
   assert.doesNotMatch(result.output, /Runtime evidence satisfies the current step evidence contract/);
   assert.doesNotMatch(result.output, /Evidence tool calls/);
-  assert.equal(writeExecutions, 2);
-  assert.equal(readExecutions, 1);
-  assert.equal(verifyExecutions, 2);
-  assert.equal(modelCalls, 4);
+  assert.equal(writeExecutions, 1);
+  assert.equal(readExecutions, 0);
+  assert.equal(verifyExecutions, 1);
+  assert.equal(modelCalls, 2);
   assert.equal(events.filter((event) => event.type === "candidate.evidence_completion_detected").length, 0);
   assert.equal(events.filter((event) => event.type === "loop.convergence_requested").length, 0);
   assert.equal(events.filter((event) => event.type === "candidate.approved").length, 1);
@@ -904,7 +1180,7 @@ test("automatic artifact acceptance derives a Word profile from the final path i
           toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "risk-report.docx" } }],
         };
       }
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+      assert.equal(request.tools.length, 0);
       return { content: "risk-report.docx 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -1010,7 +1286,7 @@ test("automatic artifact acceptance skips command stdout when the admitted targe
           ],
         };
       }
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+      assert.equal(request.tools.length, 0);
       return { content: "outputs/merged.pdf 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -1037,6 +1313,101 @@ test("automatic artifact acceptance skips command stdout when the admitted targe
   assert.deepEqual(verifyInput, { artifactPath: "outputs/merged.pdf" });
   const scheduled = events.find((event) => event.type === "runtime.artifact_acceptance.scheduled");
   assert.equal(scheduled?.data.artifactPath, "outputs/merged.pdf");
+});
+
+test("automatic artifact acceptance visits every distinct path required by a target family", async () => {
+  const verifiedPaths: string[] = [];
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write one PDF part",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      const path = (input as { path: string }).path;
+      return {
+        path,
+        bytes: 100,
+        sha256: `sha-${path}`,
+        artifactReceipt: {
+          schema: "agentloop.artifactReceipt/v1",
+          artifact: { path, kind: "pdf", bytes: 100, sha256: `sha-${path}` },
+          evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty", "format_matches_request"], caveated: [], failed: [] },
+        },
+      };
+    },
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify one PDF part",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      const path = (input as { artifactPath: string }).artifactPath;
+      verifiedPaths.push(path);
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path, kind: "pdf", bytes: 100, sha256: `sha-${path}` },
+        verdict: "accepted",
+        evidenceKinds: {
+          satisfied: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+          caveated: [],
+          failed: [],
+        },
+      };
+    },
+  };
+  let modelCalls = 0;
+  const paths = [1, 2, 3, 4].map((ordinal) => `outputs/part-${ordinal}.pdf`);
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: paths.map((path, index) => ({ id: `write-part-${index + 1}`, name: "computer_write_file", arguments: { path } })),
+        };
+      }
+      return { content: "Four independently accepted PDF parts are ready.", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
+  const artifactTargets = paths.map((_, index) => ({
+    id: `split-pdf-parts.${index + 1}`,
+    kind: "document",
+    format: "pdf",
+    terminalRequired: true,
+  }));
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Split and verify four PDF parts.",
+    input: "split into four PDFs",
+    model,
+    tools: new ToolRegistry([writeTool, verifyTool]),
+    grant,
+    maxSteps: 12,
+    convergenceGraceSteps: 6,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
+      { artifactTargets },
+    ),
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /Four independently accepted PDF parts/);
+  assert.deepEqual(verifiedPaths.sort(), paths);
+  assert.deepEqual(
+    events.filter((event) => event.type === "runtime.artifact_acceptance.scheduled").map((event) => event.data.artifactPath).sort(),
+    paths,
+  );
 });
 
 test("delivery candidates publish only the latest receipt matching the admitted artifact target", () => {
@@ -1525,7 +1896,7 @@ test("structured source candidates wait for required artifact acceptance evidenc
         assert.equal(runtimeStepSemanticState(request.runtimeContext?.content ?? "").nextAction, "produce_artifact");
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write", name: "computer_write_file", arguments: { path: "employee-profile-api.html", content: "<html></html>" } }] };
       }
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+      assert.equal(request.tools.length, 0);
       return { content: "employee-profile-api.html 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -1575,7 +1946,7 @@ test("a declared Skill workflow fact must precede the accepted artifact that con
       workflowEvidenceReceipt: {
         schema: "agentloop.skillWorkflowEvidenceReceipt/v1",
         skill: { skillName: "series-analysis", executorId: "python-analysis", actionId: "analyze-series" },
-        evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+        evidenceKinds: { satisfied: ["table_coverage"], caveated: [], failed: [] },
       },
     }),
   };
@@ -1613,7 +1984,7 @@ test("a declared Skill workflow fact must precede the accepted artifact that con
     }),
   };
   const policy = runtimeStepToolProgressPolicy([
-    "source_summary", "record_counts", "derived_aggregation", "artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request",
+    "source_summary", "record_counts", "table_coverage", "artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request",
   ], {
     scope: "artifact",
     expectedArtifactKind: "html",
@@ -1625,7 +1996,7 @@ test("a declared Skill workflow fact must precede the accepted artifact that con
       command: "python3",
       script: "scripts/analyze.py",
       args: ["--input-file", "{{input-file}}"],
-      producesEvidenceKinds: ["derived_aggregation"],
+      producesEvidenceKinds: ["table_coverage"],
     }],
     additionalEvidenceProducingToolNames: ["acquire_raw", "write_draft", "computer_run_command", "write_report"],
   });
@@ -1645,7 +2016,7 @@ test("a declared Skill workflow fact must precede the accepted artifact that con
         assert.equal(state.workProduct.status, "process_artifact_available");
         return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "report", name: "computer_write_file", arguments: {} }] };
       }
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+      assert.equal(request.tools.length, 0);
       return { content: "trend.html 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -3251,8 +3622,8 @@ test("artifact execution keeps multi-tool provider choice auto while Runtime evi
         };
       }
       if (calls === 2) {
-        assert.equal(request.toolChoice, "auto");
-        assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+        assert.equal(request.toolChoice, undefined);
+        assert.equal(request.tools.length, 0);
         return { content: "Done and verified for the current step.\nArtifact: poster.png.", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -3644,53 +4015,6 @@ test("artifact progress policy treats mismatched typed intermediates as source u
   assert.equal(events.filter((event) => event.type === "loop.limit_exceeded").length, 0);
 });
 
-test("command computation binding errors are actionable while derived evidence remains missing", () => {
-  const state = deriveRuntimeStepEvidenceState({
-    policy: runtimeStepToolProgressPolicy(["derived_aggregation"], { scope: "source" }),
-    evidence: [{
-      toolCallId: "unbound-computation",
-      toolName: "computer_run_command",
-      isError: false,
-      result: JSON.stringify({
-        exitCode: 0,
-        computationEvidenceError: "Command declared agentloop.commandComputation/v1 but did not pass computationInputs.",
-      }),
-    }],
-  });
-
-  assert.equal(state?.recentActionableDiagnostic, true);
-  assert.deepEqual(state?.missingRequiredEvidenceKinds, ["derived_aggregation"]);
-  assert.match(state?.instruction ?? "", /recent .*diagnostic/i);
-
-  const mismatchState = deriveRuntimeStepEvidenceState({
-    policy: runtimeStepToolProgressPolicy(["derived_aggregation"], { scope: "source" }),
-    evidence: [{
-      toolCallId: "mismatched-computation",
-      toolName: "computer_run_command",
-      isError: false,
-      result: JSON.stringify({
-        exitCode: 0,
-        computationEvidenceError: "Command computation facts were observed but source binding mismatched.",
-        computationObservation: {
-          schema: "agentloop.commandComputationObservation/v1",
-          inputRefs: ["source.xlsx"],
-          facts: { records: 2 },
-          caveats: [],
-          binding: {
-            status: "unverified",
-            declaredInputPaths: ["parser.py"],
-            observedInputRefs: ["source.xlsx"],
-          },
-        },
-      }),
-    }],
-  });
-
-  assert.equal(mismatchState?.recentComputationBindingMismatch, true);
-  assert.equal(mismatchState?.nextAction, "repair_computation_binding");
-  assert.match(mismatchState?.instruction ?? "", /Do not reread the source or rewrite the parser/);
-});
-
 test("artifact progress policy treats DOC and DOCX receipts as the same Word deliverable family", () => {
   const evidenceFor = (path: string, artifactKind?: string) => [{
     toolCallId: `write-${path}`,
@@ -3944,7 +4268,7 @@ test("failed setup does not divert requested code from automatic acceptance", as
           toolCalls: [{ id: "write-player", name: "computer_write_file", arguments: { path: "play_wanfeng.py" } }],
         };
       }
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+      assert.equal(request.tools.length, 0);
       return { content: "play_wanfeng.py 已完成并通过验收。", finishReason: "stop", toolCalls: [] };
     },
   };
@@ -4317,7 +4641,7 @@ test("artifact progress policy allows diagnostic-driven intermediate source repa
         };
       }
       if (calls === 5) {
-        assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+        assert.equal(request.tools.length, 0);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -4653,7 +4977,7 @@ test("artifact progress policy allows a targeted rebase read after patch precond
         };
       }
       if (calls === 6) {
-        assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+        assert.equal(request.tools.length, 0);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);
@@ -5447,7 +5771,7 @@ test("convergence keeps tools available until every receipt-backed evidence obli
         evidenceReceipt: {
           schema: "agentloop.toolEvidenceReceipt/v1",
           evidenceKinds: {
-            satisfied: ["derived_aggregation"],
+            satisfied: ["table_coverage"],
             caveated: [],
             failed: [],
           },
@@ -5501,7 +5825,7 @@ test("convergence keeps tools available until every receipt-backed evidence obli
       "schema_summary",
       "record_counts",
       "structured_extraction_artifact",
-      "derived_aggregation",
+      "table_coverage",
       "explicit_caveats",
     ], {
       scope: "source",
@@ -5520,7 +5844,7 @@ test("convergence keeps tools available until every receipt-backed evidence obli
   assert.equal(aggregateCalls, 1);
   assert.equal(events.some((event) =>
     event.type === "loop.convergence_deferred"
-    && (event.data.missingToolEvidenceKinds as readonly string[]).includes("derived_aggregation")
+    && (event.data.missingToolEvidenceKinds as readonly string[]).includes("table_coverage")
   ), true);
   assert.equal(events.filter((event) => event.type === "loop.convergence_queued").length, 1);
   assert.equal(events.some((event) => event.type === "loop.final_convergence_grace_granted"), true);
@@ -6016,7 +6340,7 @@ test("progress policy advises after an intermediate artifact read without vetoin
         return { content: "", finishReason: "tool_calls", toolCalls: [call] };
       }
       if (calls === 4) {
-        assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), true);
+        assert.equal(request.tools.length, 0);
         return { content: "poster.png accepted", finishReason: "stop", toolCalls: [] };
       }
       throw new Error(`unexpected model call ${calls}`);

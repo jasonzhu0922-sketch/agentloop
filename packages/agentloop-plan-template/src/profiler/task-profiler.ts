@@ -8,7 +8,8 @@ import type {
 import { tokenizeInstructionText } from "../semantic/instruction-tokens.ts";
 
 export function profileTask(input: PlanningExtensionInput): TaskFingerprint {
-  const text = input.input.toLowerCase();
+  const userInput = input.canonicalState.intent.userInput;
+  const text = userInput.toLowerCase();
   const sourceTypes = unique(input.sources.map((source) => source.extension.replace(/^\./, "").toLowerCase()).filter(Boolean));
   const artifactKind = inferArtifactKind(text);
   const sideEffectKind = inferSideEffectKind(text);
@@ -16,10 +17,10 @@ export function profileTask(input: PlanningExtensionInput): TaskFingerprint {
   const intentHints = inferIntentHints(text, artifactKind, sourceNeed, sideEffectKind);
   const requiredCapabilities = inferRequiredCapabilities(input.availableToolNames, artifactKind, sourceNeed, sideEffectKind);
   const operationHints = inferOperationHints(text, sourceNeed, sideEffectKind);
-  const instructionTokens = tokenizeInstructionText(input.input);
+  const instructionTokens = tokenizeInstructionText(userInput);
   return {
     schema: "agentloop.taskFingerprint/v1",
-    language: inferLanguage(input.input),
+    language: inferLanguage(userInput),
     intentHints,
     sourceNeed,
     sourceTypes,

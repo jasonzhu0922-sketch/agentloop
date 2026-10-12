@@ -1,6 +1,6 @@
 import type { ToolEvidence } from "./contracts.ts";
 import { parseJsonRecord } from "../runtime/tool-result-evidence.ts";
-import type { RuntimeResultRef } from "../runtime/runtime-result.ts";
+import { isRuntimeResultId, type RuntimeResultRef } from "../runtime/runtime-result.ts";
 import { runtimeResultEvidenceBundleDigest } from "../runtime/result-evidence-bundle.ts";
 import type { RuntimeResultRepository } from "../runtime/runtime-result-repository.ts";
 
@@ -122,7 +122,7 @@ function parseSourceResultRefs(value: Record<string, unknown> | undefined): Runt
   for (const item of value.sourceResultRefs) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) return undefined;
     const record = item as Record<string, unknown>;
-    if (record.schema !== "agentloop.resultRef/v1" || typeof record.resultId !== "string" || !/^rr_[0-9a-f-]{36}$/u.test(record.resultId)) {
+    if (record.schema !== "agentloop.resultRef/v1" || !isRuntimeResultId(record.resultId)) {
       return undefined;
     }
     refs.push({ schema: "agentloop.resultRef/v1", resultId: record.resultId });

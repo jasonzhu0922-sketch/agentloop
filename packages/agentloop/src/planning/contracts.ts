@@ -1,10 +1,11 @@
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import type { ModelMessage, RuntimeDeliveryCandidate, RuntimeEventSink, UploadedSourceSummary } from "../runtime/contracts.ts";
 import type { SourceNeed } from "../runtime/dynamic-prompt.ts";
-import type { ConversationTaskIntent, StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
+import type { ConversationTaskIntent } from "../runtime/task-intent.ts";
 import type { RuntimeResultBinding, RuntimeResultCard, RuntimeResultRecord, RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { ToolSourceDescriptor } from "../tools/tool-registry.ts";
 import type { AssessmentEvidenceBundles } from "./runtime-evidence-bundle.ts";
+import type { CanonicalRunState, CanonicalRunStateRef } from "../runtime/canonical-run-state.ts";
 
 export type PlanStatus = "pending" | "admitted" | "running" | "completed" | "failed";
 export type PlanStepStatus = "pending" | "running" | "completed" | "failed";
@@ -30,8 +31,6 @@ export type EvidenceKind =
   | "record_counts"
   | "table_coverage"
   | "structured_extraction_artifact"
-  /** A deterministic count/group/rank/value aggregation derived from structured records. */
-  | "derived_aggregation"
   | "artifact_path"
   | "artifact_non_empty"
   | "artifact_acceptance"
@@ -107,9 +106,12 @@ export interface StepExecutionBinding {
   readonly schema: "agentloop.stepExecutionBinding/v1";
   readonly requiredCapabilities: readonly string[];
   readonly resolvedToolNames: readonly string[];
+  readonly evidenceProducers: readonly StepEvidenceProducerBinding[];
   readonly sourceKinds: readonly SourceKind[];
   readonly sideEffect: CapabilitySideEffect;
   readonly evidenceKinds: readonly EvidenceKind[];
+  /** Canonical user-deliverable identities owned by this Step. */
+  readonly targetIds: readonly string[];
   /** Structured work-product targets assessed by this leaf. */
   readonly artifactTargets?: readonly ArtifactTarget[];
   /** Registered ToolSource identifiers, such as an MCP provider key. */
@@ -120,21 +122,16 @@ export interface StepExecutionBinding {
   readonly requiredVisibleDirectoryIds?: readonly string[];
 }
 
+export interface StepEvidenceProducerBinding {
+  readonly evidenceKind: EvidenceKind;
+  readonly capabilityId: string;
+  readonly resolvedToolNames: readonly string[];
+}
+
 export interface TaskSpec {
   readonly runId: string;
-  /** The immutable user-authored text stored on the Run for audit and transcript projection. */
-  readonly input: string;
-  /**
-   * Runtime-owned semantic binding of the latest turn to prior canonical
-   * conversation state. Downstream planning consumes effectiveGoal instead of
-   * independently reinterpreting an elliptical follow-up.
-   */
-  readonly turnResolution?: ConversationTurnResolution;
-  /**
-   * Canonical Runtime-owned interpretation shared by Skill recall, Planner,
-   * and Admission. Planning without it is an invalid Runtime invocation.
-   */
-  readonly taskUnderstanding: StructuredTaskUnderstanding;
+  /** The single Run-owned state read by Planner and every downstream phase. */
+  readonly canonicalState: CanonicalRunState;
   readonly availableSkills: readonly PrivateSkill[];
   readonly selectedSkillRoles?: readonly SelectedSkillRole[];
   /**
@@ -146,8 +143,6 @@ export interface TaskSpec {
   readonly availableToolNames: readonly string[];
   readonly availableTools?: readonly PlanningToolSummary[];
   readonly availableCapabilities?: readonly PlanningCapability[];
-  /** ToolSource identifiers explicitly named by the user and resolved by the host registry. */
-  readonly requiredToolSourceIds?: readonly string[];
   readonly workspaceFacts?: PlanningWorkspaceFacts;
   readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
   readonly sources?: readonly UploadedSourceSummary[];
@@ -253,19 +248,15 @@ export interface ConversationTurnResolution {
    * semantic input to Task Understanding, not a permission grant; Runtime
    * still validates references and Admission still validates capabilities.
    */
-  readonly taskIntent?: ConversationTaskIntent;
+  readonly taskIntent: ConversationTaskIntent;
   /** Model-authored, atomic with sourceBinding; Runtime projects evidenceDemand from it. */
   readonly evidenceStrategy: ConversationEvidenceStrategy;
   /** Model-authored selection over Runtime-issued visible-directory candidates. */
   readonly sourceBinding: ConversationSourceBinding;
-  /**
-   * Runtime-owned compatibility projection of evidenceStrategy. Downstream
-   * task understanding consumes this field, but the model never chooses it
-   * independently of sourceBinding.
-   */
+  /** Runtime-derived invariant of evidenceStrategy; the model never chooses it independently. */
   readonly evidenceDemand: SourceNeed;
   readonly userConstraints: readonly string[];
-  readonly source: "model" | "model_guarded" | "deterministic" | "fallback";
+  readonly source: "model" | "model_guarded";
 }
 
 export interface ConversationArtifactReference {
@@ -455,6 +446,8 @@ export interface SourceConstraint {
 
 export interface SuccessCriterion {
   readonly id: string;
+  /** Canonical delivery target whose acceptance this criterion controls. */
+  readonly targetId?: string;
   readonly description: string;
   readonly source: "task" | "planner";
   /**
@@ -485,10 +478,8 @@ export interface PlanStepProposal {
   readonly skillIds: readonly string[];
   readonly requiredCapabilities: readonly string[];
   readonly sourceConstraint?: SourceConstraint;
-  /** Targets this leaf may produce, transform, or adopt with provenance. */
-  readonly artifactTargets?: readonly ArtifactTarget[];
   /** Bindings to server-owned requested targets. Model output may only name these IDs. */
-  readonly artifactTargetIds?: readonly string[];
+  readonly targetIds?: readonly string[];
   readonly evidenceContract?: EvidenceContract;
   readonly successCriteria: readonly SuccessCriterion[];
 }
@@ -525,12 +516,8 @@ export interface ExecutionPlan {
   readonly version: number;
   readonly goal: string;
   readonly selectedSkillIds: readonly string[];
-  /**
-   * Immutable Runtime-owned task interpretation that admitted this Plan.
-   * Execution may refine a leaf workflow, but it must not reclassify the
-   * user-owned delivery surface or artifact kind from incidental leaf prose.
-   */
-  readonly taskSemantics?: StructuredTaskUnderstanding;
+  /** Identity of the Run-owned state that admitted this Plan. */
+  readonly canonicalStateRef: CanonicalRunStateRef;
   /** Explicit, persisted Runtime Result inputs selected for this Plan. */
   readonly resultBindings?: readonly RuntimeResultBinding[];
   readonly status: PlanStatus;
@@ -568,6 +555,8 @@ export interface CompletionCaveat {
 
 export interface CriterionAssessment {
   readonly criterionId: string;
+  /** Copied from the admitted criterion; the assessor cannot invent target ownership. */
+  readonly targetId?: string;
   readonly satisfied: boolean;
   /** `unverified` is distinct from a demonstrated contradiction. */
   readonly status?: "satisfied" | "unverified" | "conflict";
@@ -632,25 +621,14 @@ export interface SkillComplianceAssessment {
 
 export interface Planner {
   plan(task: TaskSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanProposal>;
-  refine?(task: PlanRefinementSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<readonly PlanStepProposal[]>;
-}
-
-export interface PlanRefinementSpec {
-  readonly runId: string;
-  readonly input: string;
-  readonly plan: ExecutionPlan;
-  readonly milestone: PlanStep;
-  readonly availableSkills: readonly PrivateSkill[];
-  readonly availableToolNames: readonly string[];
-  readonly availableTools?: readonly PlanningToolSummary[];
-  readonly visibleDirectories?: readonly PlanningVisibleDirectory[];
-  readonly conversationHistory?: readonly ModelMessage[];
 }
 
 export interface StepAssessmentInput {
   readonly runId: string;
   readonly planId: string;
   readonly step: PlanStep;
+  /** The same Run-owned state used by Planning, Admission, execution, and TerminalCommitter. */
+  readonly canonicalState: CanonicalRunState;
   /** Runtime-derived target format for a workspace-artifact Step. */
   readonly expectedArtifactKind?: string;
   /** Exact format resolved from the admitted task semantics. */
@@ -670,6 +648,7 @@ export interface StepAssessmentInput {
   readonly holisticSourceContractMismatch?: boolean;
   readonly attempt: number;
   readonly decisionLedger?: readonly import("../runtime/decision-ledger.ts").RuntimeDecisionCommit[];
+  /** Step/decision-bound actions whose exact authenticated receipt is required. */
   readonly workflowEvidenceActions?: readonly import("../runtime/tool-progress-policy.ts").RuntimeWorkflowEvidenceAction[];
 }
 

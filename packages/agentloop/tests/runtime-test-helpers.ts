@@ -19,7 +19,7 @@ export function testOwner(): { user: { id: string } } {
 export function singleStepTestPlanner(): Planner {
   return {
     plan: async (task) => ({
-      goal: task.input,
+      goal: task.canonicalState.intent.userInput,
       schema: "agentloop.outcomePlan/v2",
       shape: "single_leaf",
       selectedSkillRoles: task.availableSkills.map((skill) => ({
@@ -30,11 +30,12 @@ export function singleStepTestPlanner(): Planner {
       selectedSkillIds: task.availableSkills.map((skill) => skill.id),
       steps: [{
         id: "test-step",
-        objective: task.input,
+        objective: task.canonicalState.intent.userInput,
         dependencies: [],
         role: "deliver",
         skillIds: task.availableSkills.map((skill) => skill.id),
         requiredCapabilities: planningCapabilitiesFromToolNames(task.availableToolNames).map((capability) => capability.id),
+        targetIds: (task.canonicalState.intent.understanding.deliverables ?? []).map((target) => target.targetId),
         evidenceContract: { requiredKinds: ["delivery_receipt"], caveatPolicy: "none" },
         successCriteria: [{
           id: "test-output",
@@ -56,6 +57,8 @@ export function approvingTestAssessor(): StepAssessor {
       approved: true,
       criteria: input.step.successCriteria.map((criterion) => ({
         criterionId: criterion.id,
+        ...(criterion.targetId === undefined ? {} : { targetId: criterion.targetId }),
+        blocking: criterion.blocking ?? true,
         satisfied: true,
         rationale: "Approved by the explicit focused-test assessor",
         evidenceRefs: ["candidateOutput"],

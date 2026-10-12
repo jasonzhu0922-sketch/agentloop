@@ -74,6 +74,44 @@ test("ContextAssembler projects structured Tool evidence instead of raw read con
   assert.equal(events.some((event) => event.type === "context.tool_outputs_projected" && event.data.reason === "structured_evidence"), true);
 });
 
+test("ContextAssembler keeps the latest bounded read_result window exact for completion preparation", async () => {
+  const exactContent = "distribution-row ".repeat(650);
+  const toolResult = JSON.stringify({
+    schema: "agentloop.resultRead/v1",
+    sourceResultRef: { schema: "agentloop.resultRef/v1", resultId: "rr_11111111-1111-4111-8111-111111111111" },
+    characterOffset: 0,
+    returnedCharacters: exactContent.length,
+    nextCharacterOffset: null,
+    content: exactContent,
+  });
+  const assembler = new ContextAssembler({
+    runId: "run-current-result-read",
+    systemPrompt: "system",
+    runtimeContext: { phase: "execution", content: "server runtime state" },
+    model: {
+      limits: { contextWindowTokens: 64_000, maxOutputTokens: 4_096 },
+      complete: async () => ({ content: "unused", toolCalls: [], finishReason: "stop" }),
+    },
+  });
+  assembler.setPromptProjectionPolicy({
+    schema: "agentloop.promptProjectionPolicy/v1",
+    policyId: "test.completionRead/v1",
+    mode: "custom",
+    instruction: "Keep only bounded current reads exact.",
+    adaptive: false,
+    largeToolResultProjectionCharacters: 1_024,
+    largeToolResultPreviewCharacters: 128,
+  });
+  const assembly = await assembler.assemble([
+    { role: "assistant", content: "", toolCalls: [{ id: "read-result", name: "read_result", arguments: { resultId: "rr_11111111-1111-4111-8111-111111111111" } }] },
+    { role: "tool", toolCallId: "read-result", name: "read_result", content: toolResult, isError: false },
+  ], []);
+  const projected = assembly.messages.find((message) => message.role === "tool")?.content;
+
+  assert.equal(projected, toolResult);
+  assert.match(projected ?? "", /distribution-row distribution-row/);
+});
+
 test("ContextAssembler carries bounded tool-provided delivery facts with the durable content reference", async () => {
   const toolResult = JSON.stringify({
     schema: "example.computedResult/v1",
@@ -88,14 +126,14 @@ test("ContextAssembler carries bounded tool-provided delivery facts with the dur
       sourceType: "computed_analysis",
       receiptId: "computed-receipt",
       sourceRefs: [],
-      facts: [{ kind: "derived_aggregation", totalRecords: 70 }],
+      facts: [{ kind: "computed_summary", totalRecords: 70 }],
       deliveryFacts: {
         schema: "example.deliveryFacts/v1",
         summary: { first: 10, last: 14, absoluteChange: 4 },
         observations: Array.from({ length: 24 }, (_, index) => ({ index, value: index + 10 })),
       },
       caveats: [],
-      evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+      evidenceKinds: { satisfied: ["table_coverage"], caveated: [], failed: [] },
     },
   });
   const model: ModelAdapter = {
@@ -314,7 +352,7 @@ test("ContextAssembler bounds oversized tool-provided delivery facts", async () 
       facts: [],
       deliveryFacts: { schema: "example.deliveryFacts/v1", raw: "x".repeat(9_000) },
       caveats: [],
-      evidenceKinds: { satisfied: ["derived_aggregation"], caveated: [], failed: [] },
+      evidenceKinds: { satisfied: ["table_coverage"], caveated: [], failed: [] },
     },
   });
   const model: ModelAdapter = {
@@ -372,7 +410,7 @@ test("ContextAssembler exposes a durable aggregation result reference without in
       sourceRefs: [],
       facts: [{ kind: "table_artifact_aggregation", totalRecords: 18 }],
       caveats: [],
-      evidenceKinds: { satisfied: ["derived_aggregation", "table_coverage"], caveated: [], failed: [] },
+      evidenceKinds: { satisfied: ["table_coverage"], caveated: [], failed: [] },
     },
   });
   const model: ModelAdapter = {

@@ -59,7 +59,9 @@ export class RuntimePlanQueryService {
         plan: {
           id: "", runId, version: 0,
           goal: run.status === "running" ? "Plan is not available yet." : "No Plan was persisted for this Run.",
-          selectedSkillIds: [], status: run.status === "running" ? "pending" : "failed", steps: [],
+          selectedSkillIds: [],
+          canonicalStateRef: { stateId: "", runId, intentId: "", revision: 0 },
+          status: run.status === "running" ? "pending" : "failed", steps: [],
           createdAt: run.createdAt, updatedAt: run.finishedAt ?? now,
         },
         assessments: [],

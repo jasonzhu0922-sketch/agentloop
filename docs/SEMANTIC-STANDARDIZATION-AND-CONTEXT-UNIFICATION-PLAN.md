@@ -28,7 +28,7 @@ AgentLoop 已有 Plan、Admission、StepExecutionBinding、Evidence、RuntimeAct
 | 编号 | 问题 | 证据与影响 |
 |---|---|---|
 | F1 | 证据满足状态依赖展示窗口 | `summarizeStepEvidence()` 先保留最后 12 条工具结果，再计算满足状态。13 条结果的内存验证中，首条有效 `source_summary` 被排除，下游将其标记为缺失 |
-| F2 | Evidence 类别在消费者之间不一致 | `table_coverage`、`derived_aggregation` 被 Assessor 识别，但未进入 StepSemanticFrame 的 Runtime 核心证据集合；最小验证得到空 `completionBoundary` |
+| F2 | Evidence 类别在消费者之间不一致 | `table_coverage` 被 Assessor 识别，但未进入 StepSemanticFrame 的 Runtime 核心证据集合；最小验证得到空 `completionBoundary`。聚合计算不再作为独立 EvidenceKind，而是生成正式产物的过程 |
 | F3 | 规则与模型评估的证据集合不同 | `evidence` 合并依赖证据，`modelEvidence` 使用当前候选投影，没有进行同样合并 |
 | F4 | 长候选文本缺少评估时的按需读取 | 超过 2,000 字符的候选被投影为前 1,000 字符、有限提纲和哈希；模型评估器仅有 `submit_assessment`，普通正文末尾的事实可从其输入中消失 |
 | F5 | 不同 Step 的 context ID 可能相同 | ID 由 Run、phase 和 Assembler 局部计数组成；同一 Run 两个 Step 的首次快照在内存验证中具有相同 ID、不同内容 |
@@ -127,7 +127,7 @@ Run grant 保持工具授权边界。当前 StepExecutionBinding 表达计划所
 
 - 展示 3 条、12 条或全部明细，证据满足状态相同。
 - 在关键 receipt 后追加任意数量的无关工具调用，不会使原有满足状态消失。
-- `table_coverage` 和 `derived_aggregation` 在各消费者中被一致识别。
+- `table_coverage` 在各消费者中被一致识别；聚合计算结果不能独立满足产物完成条件。
 - 非零退出、调用失败、调用拒绝、操作状态未知在执行、恢复和 UI 中语义一致。
 
 ## 6. 第二阶段：任务语义一次接纳、逐层消费

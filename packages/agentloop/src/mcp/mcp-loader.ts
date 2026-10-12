@@ -280,6 +280,13 @@ function structuredMcpSourceSummary(
   if (payload === undefined || !looksLikeStructuredSourcePayload(payload)) return undefined;
   const fields = summarizeStructuredMcpPayload(payload);
   const tabularFacts = tabularMcpFacts(payload);
+  const declaredEvidenceKinds = new Set(
+    (server.capabilities ?? []).flatMap((capability) => capability.producesEvidenceKinds ?? [])
+      .filter((kind): kind is string => typeof kind === "string" && kind.trim().length > 0),
+  );
+  const semanticFacts = tabularFacts === undefined
+    ? []
+    : structuredTabularEvidenceFacts(tabularFacts, declaredEvidenceKinds);
   const receiptId = createHash("sha256").update(`${server.key}:${tool.name}:${JSON.stringify({ payload, fields })}`).digest("hex").slice(0, 32);
   return {
     schema: "agentloop.toolEvidenceReceipt/v1",
@@ -294,21 +301,59 @@ function structuredMcpSourceSummary(
         fields,
       },
       ...(tabularFacts === undefined ? [] : [
-        { kind: "schema_summary", fieldCount: tabularFacts.fieldNames.length, fields: tabularFacts.fieldNames },
-        { kind: "record_counts", returnedRows: tabularFacts.returnedRows, countSemantics: "returned_rows" },
+        {
+          kind: "structured_result_shape",
+          fieldCount: tabularFacts.fieldNames.length,
+          fields: tabularFacts.fieldNames,
+          returnedRows: tabularFacts.returnedRows,
+          countSemantics: "response_rows",
+        },
       ]),
+      ...semanticFacts,
     ],
     caveats: [],
     evidenceKinds: {
       satisfied: [
         "mcp_tool_call",
         "source_summary",
-        ...(tabularFacts === undefined ? [] : ["schema_summary", "record_counts"]),
+        ...semanticFacts.map((fact) => fact.kind),
       ],
       caveated: [],
       failed: [],
     },
   };
+}
+
+/**
+ * Promote only host-declared, structurally observable MCP facts.  The adapter
+ * does not infer business meaning from arbitrary field names; schema and row
+ * count receipts require the corresponding capability declaration and a
+ * recognizable tabular response shape.
+ */
+function structuredTabularEvidenceFacts(
+  tabular: { readonly fieldNames: readonly string[]; readonly returnedRows: number },
+  declaredEvidenceKinds: ReadonlySet<string>,
+): readonly { readonly kind: "schema_summary" | "record_counts" }[] {
+  const normalizedFields = tabular.fieldNames.map((field) => field.trim().toUpperCase());
+  const schemaFieldNames = new Set([
+    "COLNAME", "COLUMN_NAME", "TYPENAME", "TYPE_NAME", "DATA_TYPE", "LENGTH", "SCALE",
+    "NULLS", "NULLABLE", "DEFAULT", "KEYSEQ", "KEY_SEQUENCE", "COLNO", "COLUMN_NO", "REMARKS",
+  ]);
+  const schemaSignalCount = normalizedFields.filter((field) => schemaFieldNames.has(field)).length;
+  const countField = normalizedFields.some((field) => /^(?:COUNT|CNT|ROW_COUNT|ROW_CNT|RECORD_COUNT|TOTAL_COUNT)$/u.test(field));
+  const facts: Array<{ readonly kind: "schema_summary" | "record_counts" }> = [];
+  if (
+    declaredEvidenceKinds.has("schema_summary")
+    && tabular.returnedRows > 0
+    && schemaSignalCount >= 2
+    && normalizedFields.some((field) => field === "COLNAME" || field === "COLUMN_NAME")
+  ) {
+    facts.push({ kind: "schema_summary" });
+  }
+  if (declaredEvidenceKinds.has("record_counts") && tabular.returnedRows > 0 && countField) {
+    facts.push({ kind: "record_counts" });
+  }
+  return facts;
 }
 
 /** A fields/rows payload describes this response window, not table cardinality. */

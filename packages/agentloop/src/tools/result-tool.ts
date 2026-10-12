@@ -1,6 +1,6 @@
 import { badRequest, forbidden, notFound } from "../shared/errors.ts";
 import type { RuntimeResultRepository } from "../runtime/runtime-result-repository.ts";
-import type { RuntimeResultRef } from "../runtime/runtime-result.ts";
+import { isRuntimeResultId, RUNTIME_RESULT_ID_PATTERN, type RuntimeResultRef } from "../runtime/runtime-result.ts";
 import type { RuntimeTool } from "./tool-registry.ts";
 
 export const RESULT_READER_NAME = "read_result";
@@ -30,7 +30,13 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
       additionalProperties: false,
       required: ["resultId"],
       properties: {
-        resultId: { type: "string", minLength: 4, maxLength: 120 },
+        resultId: {
+          type: "string",
+          minLength: 39,
+          maxLength: 39,
+          pattern: RUNTIME_RESULT_ID_PATTERN,
+          description: "Complete opaque resultId copied exactly from agentloop.resultRef/v1; abbreviated prefixes are invalid.",
+        },
         pointer: { type: "string", minLength: 1, maxLength: 2_000 },
         offset: { type: "integer", minimum: 0 },
         limit: { type: "integer", minimum: 1, maximum: MAX_RESULT_ARRAY_ITEMS },
@@ -40,12 +46,15 @@ export function createResultTool(repository: RuntimeResultRepository): RuntimeTo
     },
     executionMode: "parallel",
     replaySafe: true,
+    availableDuringCompletionPreparation: true,
     publishesRuntimeResult: false,
     parse(input: unknown): ReadResultInput {
       if (input === null || typeof input !== "object" || Array.isArray(input)) throw badRequest("arguments must be an object");
       const value = input as Record<string, unknown>;
       const resultId = typeof value.resultId === "string" ? value.resultId.trim() : "";
-      if (!/^rr_[0-9a-f-]{36}$/u.test(resultId)) throw badRequest("resultId must be an opaque Runtime result id");
+      if (!isRuntimeResultId(resultId)) {
+        throw badRequest("resultId must be the complete opaque Runtime result id from agentloop.resultRef/v1; abbreviated prefixes are invalid");
+      }
       const pointer = value.pointer === undefined ? undefined : requireString(value.pointer, "pointer");
       return {
         resultId,

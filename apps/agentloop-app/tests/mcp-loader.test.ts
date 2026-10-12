@@ -122,16 +122,13 @@ test("tabular MCP responses project schema and returned-row facts without inferr
     }),
   }, {});
   const receipt = (result as { evidenceReceipt: { facts: Array<Record<string, unknown>>; evidenceKinds: { satisfied: string[] } } }).evidenceReceipt;
-  assert.deepEqual(receipt.evidenceKinds.satisfied, ["mcp_tool_call", "source_summary", "schema_summary", "record_counts"]);
-  assert.deepEqual(receipt.facts.find((fact) => fact.kind === "schema_summary"), {
-    kind: "schema_summary",
+  assert.deepEqual(receipt.evidenceKinds.satisfied, ["mcp_tool_call", "source_summary"]);
+  assert.deepEqual(receipt.facts.find((fact) => fact.kind === "structured_result_shape"), {
+    kind: "structured_result_shape",
     fieldCount: 2,
     fields: ["TABLE_NAME", "ROW_COUNT"],
-  });
-  assert.deepEqual(receipt.facts.find((fact) => fact.kind === "record_counts"), {
-    kind: "record_counts",
     returnedRows: 2,
-    countSemantics: "returned_rows",
+    countSemantics: "response_rows",
   });
 });
 

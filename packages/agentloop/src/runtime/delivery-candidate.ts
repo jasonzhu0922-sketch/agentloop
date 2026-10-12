@@ -1,4 +1,4 @@
-import type { AgentLoopToolEvidence, RuntimeDeliveryCandidate, RuntimeDeliveryCandidateEvidenceKinds, RuntimeDeliveryReceipt } from "./contracts.ts";
+import type { AgentLoopToolEvidence, RuntimeDeliveryCandidate, RuntimeDeliveryCandidateEvidenceKinds, RuntimeDeliveryClaim, RuntimeDeliveryReceipt } from "./contracts.ts";
 import { canonicalArtifactAcceptanceVerdict } from "./tool-result-evidence.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import { artifactMatchesExpectedTarget } from "./tool-progress-policy.ts";
@@ -8,6 +8,7 @@ export function normalizeDeliveryCandidate(input: {
   readonly evidenceKinds?: Partial<RuntimeDeliveryCandidateEvidenceKinds>;
   readonly caveats?: readonly string[];
   readonly sourceToolCallIds?: readonly string[];
+  readonly deliveryClaims?: readonly RuntimeDeliveryClaim[];
   readonly deliveryReceipt?: RuntimeDeliveryReceipt;
 }): RuntimeDeliveryCandidate {
   const satisfied = uniqueStrings(input.evidenceKinds?.satisfied ?? []);
@@ -24,6 +25,7 @@ export function normalizeDeliveryCandidate(input: {
       failed,
     },
     sourceToolCallIds: uniqueStrings(input.sourceToolCallIds ?? []),
+    deliveryClaims: normalizeDeliveryClaims(input.deliveryClaims ?? []),
     ...(input.deliveryReceipt === undefined ? {} : { deliveryReceipt: input.deliveryReceipt }),
   };
 }
@@ -66,6 +68,7 @@ export function buildRuntimeDeliveryCandidate(input: {
   readonly expectedArtifactFormat?: string;
   readonly caveats?: readonly string[];
   readonly sourceToolCallIds?: readonly string[];
+  readonly targetIds?: readonly string[];
 }): RuntimeDeliveryCandidate {
   const evidenceKinds = collectEvidenceKinds(
     input.toolEvidence,
@@ -87,8 +90,24 @@ export function buildRuntimeDeliveryCandidate(input: {
     evidenceKinds,
     caveats,
     sourceToolCallIds: input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.toolCallId),
+    deliveryClaims: (input.targetIds ?? []).map((targetId) => ({
+      targetId,
+      evidenceRefs: uniqueStrings(input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.resultRef?.resultId ?? item.toolCallId)),
+    })),
     ...(deliveryReceipt === undefined ? {} : { deliveryReceipt }),
   }));
+}
+
+function normalizeDeliveryClaims(values: readonly RuntimeDeliveryClaim[]): RuntimeDeliveryClaim[] {
+  const byTarget = new Map<string, Set<string>>();
+  for (const value of values) {
+    const targetId = value.targetId.trim();
+    if (targetId.length === 0) continue;
+    const refs = byTarget.get(targetId) ?? new Set<string>();
+    for (const ref of uniqueStrings(value.evidenceRefs)) refs.add(ref);
+    byTarget.set(targetId, refs);
+  }
+  return [...byTarget].map(([targetId, refs]) => ({ targetId, evidenceRefs: [...refs] }));
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

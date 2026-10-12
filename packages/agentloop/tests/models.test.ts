@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { InMemoryResponsesReasoningContinuationStore, OpenAICompatibleModel, ResponsesModel } from "../src/runtime/models.ts";
 import { completeWithStreaming } from "../src/runtime/model-streaming.ts";
+import type { ModelStreamRawCaptureInput } from "../src/runtime/contracts.ts";
 
 test("OpenAI-compatible adapter maps server-configured requests and tool calls", async () => {
   const originalFetch = globalThis.fetch;
@@ -63,6 +64,111 @@ test("OpenAI-compatible adapter maps server-configured requests and tool calls",
     assert.deepEqual(result.toolCalls[0].arguments, { query: "status" });
     assert.equal(result.finishReason, "tool_calls");
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 3 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible streaming persists an anomalous finish-only SSE capture and receipt", async () => {
+  const originalFetch = globalThis.fetch;
+  const raw = [
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":66824,"completion_tokens":0}}\n\n',
+    "data: [DONE]\n\n",
+  ].join("");
+  globalThis.fetch = async () => new Response(raw, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "x-request-id": "provider-empty-1" },
+  });
+  let captured: ModelStreamRawCaptureInput | undefined;
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "deepseek-v4-flash",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      streamRawCaptureWriter: async (input) => {
+        captured = input;
+        return {
+          schema: "agentloop.modelStreamRawCaptureRef/v1",
+          ref: "test-capture:provider-empty-1",
+          capturedBytes: input.rawSse.byteLength,
+          rawBytes: input.rawBytes,
+          rawSha256: input.rawSha256,
+          truncated: input.truncated,
+        };
+      },
+    });
+    const result = await completeWithStreaming({
+      model,
+      invocation: {
+        runId: "run-empty-stream",
+        systemPrompt: "System",
+        phase: "execution",
+        messages: [{ role: "user", content: "Continue" }],
+        tools: [{ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }],
+        toolChoice: "auto",
+      },
+      emit: (event) => { events.push(event as { type: string; data: Record<string, unknown> }); },
+      base: { phase: "execution", step: 7 },
+    });
+
+    assert.equal(result.content, "");
+    assert.equal(result.finishReason, "stop");
+    assert.deepEqual(result.streamReceipt?.anomalyReasons, ["empty_stop_completion", "no_stream_delta"]);
+    assert.equal(result.streamReceipt?.providerRequestId, "provider-empty-1");
+    assert.equal(result.streamReceipt?.jsonEventCount, 1);
+    assert.equal(result.streamReceipt?.doneEventCount, 1);
+    assert.equal(result.streamReceipt?.rawCapture?.ref, "test-capture:provider-empty-1");
+    assert.equal(Buffer.from(captured?.rawSse ?? []).toString("utf8"), raw);
+    assert.equal(captured?.request.toolCount, 1);
+    const completed = events.find((event) => event.type === "model.request.completed");
+    assert.deepEqual(completed?.data.streamReceipt, result.streamReceipt);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI-compatible streaming parses and captures an unterminated final SSE event", async () => {
+  const originalFetch = globalThis.fetch;
+  const raw = 'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}';
+  globalThis.fetch = async () => new Response(raw, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+  let captured = false;
+  try {
+    const model = new OpenAICompatibleModel({
+      baseUrl: "https://models.example.test/v1",
+      apiKey: "server-secret",
+      model: "example-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      streamRawCaptureWriter: async (input) => {
+        captured = true;
+        return {
+          schema: "agentloop.modelStreamRawCaptureRef/v1",
+          ref: "test-capture:unterminated",
+          capturedBytes: input.rawSse.byteLength,
+          rawBytes: input.rawBytes,
+          rawSha256: input.rawSha256,
+          truncated: input.truncated,
+        };
+      },
+    });
+    const result = await model.streamComplete!({
+      runId: "run-unterminated-stream",
+      systemPrompt: "System",
+      phase: "execution",
+      messages: [],
+      tools: [],
+    }, async () => undefined);
+
+    assert.equal(result.content, "OK");
+    assert.equal(result.streamReceipt?.unterminatedFinalEventBytes, Buffer.byteLength(raw));
+    assert.deepEqual(result.streamReceipt?.anomalyReasons, ["unterminated_final_sse_event"]);
+    assert.equal(captured, true);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -829,6 +935,8 @@ test("OpenAI-compatible adapter rejects a Responses payload instead of treating 
 
 test("OpenAI-compatible streaming adapter rejects Responses chunks at the protocol boundary", async () => {
   const originalFetch = globalThis.fetch;
+  let captured: ModelStreamRawCaptureInput | undefined;
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [];
   globalThis.fetch = async () => sseResponse([
     'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
   ]);
@@ -840,21 +948,47 @@ test("OpenAI-compatible streaming adapter rejects Responses chunks at the protoc
       contextWindowTokens: 128_000,
       maxOutputTokens: 8_192,
       maxAttempts: 1,
+      streamRawCaptureWriter: async (input) => {
+        captured = input;
+        return {
+          schema: "agentloop.modelStreamRawCaptureRef/v1",
+          ref: "test-capture:protocol-mismatch",
+          capturedBytes: input.rawSse.byteLength,
+          rawBytes: input.rawBytes,
+          rawSha256: input.rawSha256,
+          truncated: input.truncated,
+        };
+      },
     });
     await assert.rejects(
-      () => model.streamComplete!({
-        runId: "chat-completions-stream-protocol-mismatch",
-        systemPrompt: "Return one structured call.",
-        phase: "planning",
-        messages: [{ role: "user", content: "Plan this task." }],
-        tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
-        toolChoice: { name: "submit_plan" },
-      }, async () => undefined),
+      () => completeWithStreaming({
+        model,
+        invocation: {
+          runId: "chat-completions-stream-protocol-mismatch",
+          systemPrompt: "Return one structured call.",
+          phase: "planning",
+          messages: [{ role: "user", content: "Plan this task." }],
+          tools: [{ name: "submit_plan", description: "Submit a plan", inputSchema: { type: "object" } }],
+          toolChoice: { name: "submit_plan" },
+        },
+        emit: (event) => { events.push(event as { type: string; data: Record<string, unknown> }); },
+        base: { phase: "planning", turn: 1 },
+      }),
       (error: unknown) => {
         assert.equal((error as { code?: string }).code, "MODEL_ERROR");
         assert.match((error as { message?: string }).message ?? "", /returned a Responses payload/);
+        const receipt = (error as { details?: { streamReceipt?: { anomalyReasons?: string[]; rawCapture?: { ref?: string } } } }).details?.streamReceipt;
+        assert.deepEqual(receipt?.anomalyReasons, ["provider_protocol_mismatch"]);
+        assert.equal(receipt?.rawCapture?.ref, "test-capture:protocol-mismatch");
         return true;
       },
+    );
+    assert.equal(captured?.request.protocol, "chat-completions");
+    assert.equal(captured?.truncated, true);
+    const failed = events.find((event) => event.type === "model.request.failed");
+    assert.equal(
+      ((failed?.data.streamReceipt as { rawCapture?: { ref?: string } } | undefined)?.rawCapture?.ref),
+      "test-capture:protocol-mismatch",
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -1040,9 +1174,11 @@ test("OpenAI-compatible adapter retries HTTP 400 within its attempt budget and r
 test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResponse", async () => {
   const originalFetch = globalThis.fetch;
   let capturedBody: Record<string, unknown> | undefined;
+  let rawCaptureAttempted = false;
   globalThis.fetch = async (_input, init) => {
     capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return sseResponse([
+      'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
       'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
       'data: {"choices":[{"delta":{"reasoning_content":"opaque-"},"finish_reason":null}]}\n\n',
       'data: {"choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":null}]}\n\n',
@@ -1060,6 +1196,10 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
       model: "example-model",
       contextWindowTokens: 128_000,
       maxOutputTokens: 8_192,
+      streamRawCaptureWriter: async () => {
+        rawCaptureAttempted = true;
+        throw new Error("normal streams must not be captured");
+      },
     });
     const deltas: Array<{ type: string; text?: string; argumentsDelta?: string; name?: string; arguments?: unknown }> = [];
     const result = await model.streamComplete!({
@@ -1083,6 +1223,9 @@ test("OpenAI-compatible adapter streams deltas and aggregates the same ModelResp
     assert.equal(result.content, "Hello world");
     assert.equal(result.reasoningContent, "opaque-thinking");
     assert.equal(result.finishReason, "tool_calls");
+    assert.deepEqual(result.streamReceipt?.anomalyReasons, []);
+    assert.equal(result.streamReceipt?.rawCapture, undefined);
+    assert.equal(rawCaptureAttempted, false);
     assert.deepEqual(result.toolCalls[0].arguments, { q: "status" });
     assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 3 });
     assert.deepEqual(

@@ -124,8 +124,11 @@ test("legacy Plan steps gain a historical execution binding during database migr
 
   const migrated = new AppDatabase(filename);
   try {
-    const plan = await new PlanRepository(migrated).getByRun("legacy-run");
-    assert.deepEqual(plan.steps[0]?.executionBinding, {
+    const row = await migrated.prepare(`
+      SELECT execution_binding_json FROM plan_steps
+      WHERE plan_id = 'legacy-plan' AND step_id = 'legacy-step'
+    `).get() as { execution_binding_json: string } | undefined;
+    assert.deepEqual(JSON.parse(row?.execution_binding_json ?? "null"), {
       schema: "agentloop.stepExecutionBinding/v1",
       requiredCapabilities: ["web_research"],
       resolvedToolNames: [],
@@ -133,6 +136,10 @@ test("legacy Plan steps gain a historical execution binding during database migr
       sideEffect: "none",
       evidenceKinds: [],
     });
+    await assert.rejects(
+      () => new PlanRepository(migrated).getByRun("legacy-run"),
+      /has no canonical state reference; replan required/,
+    );
   } finally {
     await migrated.close();
   }

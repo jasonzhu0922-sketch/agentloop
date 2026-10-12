@@ -10,6 +10,8 @@ const MIGRATIONS: readonly SchemaMigration[] = [
   { id: "runtime/0002_host_dispatch_ledger", definition: "host-dispatch-ledger;run-executor-ownership:v1", apply: installHostDispatchSchema },
   { id: "runtime/0003_preserve_source_state_compatibility", definition: "repair-boundaries;recovery-leases;assessment-bindings;delivery-receipts:v1", apply: installSourceCompatibilityColumns },
   { id: "runtime/0004_run_event_sequences", definition: "per-run-event-sequence;concurrent-runtime-writers:v1", apply: installRunEventSequences },
+  // 0005-0007 exist in deployed migration ledgers from configuration-snapshot releases.
+  { id: "runtime/0008_canonical_run_state", definition: "canonical-run-state-tables;plan-state-reference:v1", apply: installCanonicalRunStateSchema },
 ];
 
 export async function migrateRuntimeState(database: SqlConnection): Promise<void> {
@@ -41,6 +43,67 @@ async function installSourceCompatibilityColumns(database: SqlConnection): Promi
       await database.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${database.dialect === "tidb" ? tidbType : type}`);
     }
   }
+}
+
+/** Adds the canonical authority tables to databases whose kernel migration is already recorded. */
+async function installCanonicalRunStateSchema(database: SqlConnection): Promise<void> {
+  const schema = database.dialect === "tidb"
+    ? `
+      CREATE TABLE IF NOT EXISTS canonical_run_states (
+        run_id VARCHAR(191) PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        state_id VARCHAR(191) NOT NULL UNIQUE,
+        intent_id VARCHAR(191) NOT NULL UNIQUE,
+        revision BIGINT NOT NULL,
+        state_json LONGTEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS canonical_run_state_revisions (
+        run_id VARCHAR(191) NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        revision BIGINT NOT NULL,
+        state_json LONGTEXT NOT NULL,
+        reason LONGTEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY(run_id, revision)
+      )
+    `
+    : `
+      CREATE TABLE IF NOT EXISTS canonical_run_states (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        state_id TEXT NOT NULL UNIQUE,
+        intent_id TEXT NOT NULL UNIQUE,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS canonical_run_state_revisions (
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY(run_id, revision)
+      )
+    `;
+  await database.exec(schema);
+  if (await hasColumn(database, "plans", "canonical_state_ref_json")) return;
+  await database.exec(`ALTER TABLE plans ADD COLUMN canonical_state_ref_json ${database.dialect === "tidb" ? "LONGTEXT" : "TEXT"}`);
+}
+
+async function hasColumn(database: SqlConnection, table: string, column: string): Promise<boolean> {
+  if (database.dialect === "sqlite") {
+    const rows = await database.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+    return rows.some((row) => row.name === column);
+  }
+  const rows = await database.prepare(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = ${database.dialect === "tidb" ? "DATABASE()" : "current_schema()"}
+      AND table_name = ?
+      AND column_name = ?
+  `).all<{ column_name: string }>(table, column);
+  return rows.length > 0;
 }
 
 /** Establishes a per-Run allocation row before concurrent Runtime writers append events. */

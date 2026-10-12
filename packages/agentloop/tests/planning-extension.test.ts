@@ -104,13 +104,13 @@ class ContextAssertingPlanner implements Planner {
     this.seenContext = (task.planningExtensionContexts?.length ?? 0) > 0;
     if (this.requireContext) assert.equal(this.seenContext, true);
     return {
-      goal: task.input,
+      goal: task.canonicalState.intent.userInput,
       schema: "agentloop.outcomePlan/v2" as const,
       shape: "single_leaf" as const,
       selectedSkillIds: [],
       steps: [{
         id: "answer",
-        objective: task.input,
+        objective: task.canonicalState.intent.userInput,
         dependencies: [],
         role: "deliver" as const,
         skillIds: [],
