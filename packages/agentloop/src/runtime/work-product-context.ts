@@ -20,6 +20,7 @@ const DECLARATION_INSTRUCTION = [
   "仅在需要记录用途或问题变化时，可在正常 tool_calls 回合的 content 中附加 <work_product_progress>{\"updates\":[...]}</work_product_progress>；不要另开回合，不要放入最终回答。",
   '用途项：{"kind":"role","path":"已有路径","versionId":"当前 versionId","role":"input|generator|experiment|candidate|unknown"}。',
   '交付绑定：写入、修补或转换最终交付物时，优先在该 Tool 参数中传 deliveryTargetId="已准入 targetId"；Runtime 会把这份可信回执绑定到目标。辅助样例、脚本、技能约定副本不要传该字段。仅在已有回执需要补充选择时，才使用声明项：{"kind":"delivery_target","targetId":"已准入 targetId","path":"已有路径","versionId":"带 sha256/bytes 的当前版本"}。targetId 的 purpose/kind/format 由 Runtime 固定，不能在声明中改写；同一物理版本只能绑定一项用户交付。',
+  '命令产生多个最终交付物时，在 computer_run_command 的 outputBindings 中逐项声明 {targetId,path}；Runtime 会在命令结果提交后用 fileChanges 的当前 bytes/sha256 校验并绑定。不要按扩展名、文件名排序或 stdout 猜测 target。',
   '问题项：{"kind":"issue","issueId":"自定稳定ID","path":"已有路径","versionId":"当前版本","symptom":"现象","diagnosis":"判断，可省略","evidenceToolCallIds":["依据调用"],"attemptedToolCallIds":[],"pendingActions":["尚未执行的动作"],"claimedStatus":"open|resolved","resolutionToolCallIds":[]}。',
   "修订同一路径用途或同一 issueId 必须增加 replaces=旧 declarationId（问题为 id）；只修改明确声明项。查清原因不等于已修复，写脚本不等于已执行，操作成功不等于任务完成。",
 ].join("\n");

@@ -2406,6 +2406,7 @@ export class RunService {
       // task's observed input families for the next model turn.
       const discoveredSourceKinds = new Set<string>(canonicalState.intent.understanding.evidence.sourceKinds);
       const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
+      const persistedDeliveryBindingKeys = new Set<string>();
       const result = await runAgentLoop({
         runId: input.runId,
         currentDecisionContext: {
@@ -2433,6 +2434,32 @@ export class RunService {
             storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
           },
           onWorkProductDeliveryTargets: async (bindings) => {
+            const newlyObserved = bindings.filter((binding) => binding.bindingAuthority === "runtime"
+              && !persistedDeliveryBindingKeys.has(`${binding.targetId}\u0000${binding.path}\u0000${binding.versionId}`));
+            if (newlyObserved.length > 0) {
+              newlyObserved.forEach((binding) => persistedDeliveryBindingKeys.add(`${binding.targetId}\u0000${binding.path}\u0000${binding.versionId}`));
+              const sourceToolCallIds = [...new Set(newlyObserved.map((binding) => binding.observedByToolCallId))];
+              await this.appendRunEvent(input.runId, {
+                type: "artifact.delivery_binding.observed",
+                data: {
+                  schema: "agentloop.deliveryBinding/v1",
+                  planId: plan.id,
+                  planVersion: plan.version,
+                  stepId: activeStep.id,
+                  sourceToolCallIds,
+                  resolution: "explicit_output_binding",
+                  bindings: newlyObserved.map((binding) => ({
+                    targetId: binding.targetId,
+                    deliveryTargetId: binding.deliveryTargetId,
+                    path: binding.path,
+                    versionId: binding.versionId,
+                    bytes: binding.bytes,
+                    sha256: binding.sha256,
+                    observedByToolCallId: binding.observedByToolCallId,
+                  })),
+                },
+              });
+            }
             const reconciled = reconcileCanonicalDeliveryTargetBindings(canonicalState, {
               stepId: activeStep.id,
               bindings,

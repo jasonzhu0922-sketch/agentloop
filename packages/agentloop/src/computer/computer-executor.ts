@@ -1413,6 +1413,7 @@ export class ComputerExecutor {
     cwd: string;
     timeoutMs: number;
     computationInputs?: readonly CommandComputationInput[];
+    outputBindings?: readonly { readonly targetId: string; readonly path: string }[];
     workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
     signal?: AbortSignal;
   }): Promise<{
@@ -1423,6 +1424,7 @@ export class ComputerExecutor {
     stdoutRef?: CommandOutputReference;
     stderrRef?: CommandOutputReference;
     fileChanges: CommandFileChange[];
+    outputBindings?: readonly { readonly targetId: string; readonly path: string }[];
     fileChangesTruncated: boolean;
     truncated: boolean;
     timedOut: boolean;
@@ -1474,6 +1476,7 @@ export class ComputerExecutor {
     cwd: string;
     timeoutMs: number;
     computationInputs?: readonly CommandComputationInput[];
+    outputBindings?: readonly { readonly targetId: string; readonly path: string }[];
     workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
     signal?: AbortSignal;
   }): Promise<{
@@ -1620,6 +1623,7 @@ export class ComputerExecutor {
               ...(stdoutProjection.reference === undefined ? {} : { stdoutRef: stdoutProjection.reference }),
               ...(stderrProjection.reference === undefined ? {} : { stderrRef: stderrProjection.reference }),
               fileChanges: fileChangeSummary.changes,
+              ...(input.outputBindings === undefined ? {} : { outputBindings: input.outputBindings }),
               fileChangesTruncated: fileChangeSummary.truncated,
               executionReceipt: {
                 schema: "agentloop.commandExecutionReceipt/v1",

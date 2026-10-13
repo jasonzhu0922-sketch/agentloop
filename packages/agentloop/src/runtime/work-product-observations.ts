@@ -149,10 +149,15 @@ export function normalizeWorkProductObservations(event: WorkProductToolEvent): {
   // fileChanges are Runtime-observed side effects even when the operation failed.
   if (evidence.toolName === "computer_run_command") {
     if (root.fileChangesTruncated === true) issue("incomplete_file_changes", "/fileChanges");
+    const outputBindings = Array.isArray(root.outputBindings) ? root.outputBindings
+      .map((value) => record(value))
+      .filter((value): value is Record<string, unknown> => value !== undefined
+        && typeof value.targetId === "string" && typeof value.path === "string") : [];
     if (Array.isArray(root.fileChanges)) root.fileChanges.forEach((value, index) => {
       const change = record(value);
       if (change !== undefined && ["created", "modified", "deleted"].includes(String(change.changeType))) {
-        add(change, `/fileChanges/${index}`, change.changeType as WorkProductObservation["kind"], "file_change");
+        const binding = outputBindings.find((candidate) => candidate.path === change.path);
+        add(binding === undefined ? change : { ...change, deliveryTargetId: binding.targetId }, `/fileChanges/${index}`, change.changeType as WorkProductObservation["kind"], "file_change");
       } else issue("invalid_metadata", `/fileChanges/${index}`);
     });
   }

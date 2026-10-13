@@ -259,9 +259,9 @@ function deriveReceiptSelectedDeliveryBindings(input: {
       .map((id) => input.facts.observations.find((observation) => observation.id === id))
       .filter((observation): observation is NonNullable<typeof observation> =>
         observation !== undefined
-        && observation.basis === "receipt"
         && observation.operationStatus === "succeeded"
-        && DELIVERY_RECEIPT_TOOLS.has(observation.source.toolName)
+        && ((observation.basis === "receipt" && DELIVERY_RECEIPT_TOOLS.has(observation.source.toolName))
+          || (observation.basis === "file_change" && observation.source.toolName === "computer_run_command"))
         && observation.deliveryTargetId !== undefined,
       )
       .map((observation) => ({
@@ -293,7 +293,10 @@ function deriveReceiptSelectedDeliveryBindings(input: {
       sha256: candidate.sha256,
       declarationId: `runtime:receipt-target:${digest(JSON.stringify([input.goalId, target.targetId, candidate.path, candidate.versionId])).slice(0, 20)}`,
       observedByToolCallId: candidate.observedByToolCallId,
-      bindingAuthority: "model" as const,
+      bindingAuthority: input.facts.observations.some((observation) =>
+        observation.source.toolCallId === candidate.observedByToolCallId
+        && observation.source.toolName === "computer_run_command"
+        && observation.basis === "file_change") ? "runtime" as const : "model" as const,
     }];
   });
 }

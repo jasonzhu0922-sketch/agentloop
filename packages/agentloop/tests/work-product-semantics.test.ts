@@ -146,6 +146,44 @@ test("a unique hash-identified command output binds its compatible target withou
   }]);
 });
 
+test("post-commit command output bindings select same-format targets without model prose", () => {
+  const parts = ["a", "b", "c"].map((value, index) => ({
+    path: `split-part-${index + 1}.pdf`,
+    changeType: "created",
+    bytes: 10 + index,
+    sha256: value.repeat(64),
+  }));
+  const facts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [{ runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 1, evidence: {
+      toolCallId: "split-pdf", toolName: "computer_run_command", operationStatus: "succeeded", isError: false,
+      result: JSON.stringify({
+        exitCode: 0,
+        fileChangesTruncated: false,
+        fileChanges: parts,
+        outputBindings: parts.map((part, index) => ({ targetId: `split-part-${index + 1}`, path: part.path })),
+      }),
+    } }],
+  });
+  const state = deriveWorkProductSemantics({
+    facts,
+    goalId,
+    declarations: [],
+    deliveryTargets: parts.map((_, index) => ({
+      targetId: `split-part-${index + 1}`,
+      purpose: `PDF part ${index + 1}`,
+      kind: "document",
+      format: "pdf",
+    })),
+  });
+  assert.deepEqual(state.deliveryTargets?.map((binding) => [binding.targetId, binding.path, binding.bindingAuthority]), [
+    ["split-part-1", "split-part-1.pdf", "runtime"],
+    ["split-part-2", "split-part-2.pdf", "runtime"],
+    ["split-part-3", "split-part-3.pdf", "runtime"],
+  ]);
+});
+
 test("same-format receipts remain unbound when Runtime cannot identify one delivery target", () => {
   const report = (toolCallId: string, path: string, sha256: string): WorkProductToolEvent => ({
     runId: fixture.runId,

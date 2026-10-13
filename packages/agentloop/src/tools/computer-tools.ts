@@ -605,6 +605,7 @@ export function createComputerTools(
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
+        "For a command that creates final user deliverables, outputBindings may declare the admitted targetId for each exact output path. Runtime validates this mapping after result commit; it does not create targets or trust stdout declarations.",
         "computationInputs identifies immutable data files consumed by the command; never include the interpreter entrypoint, executable source file, or package-owned Skill script itself.",
         "A package action that acquires facts directly from an external source and emits its own evidenceReceipt must omit computationInputs unless it also consumes an immutable workspace data file declared by the action as an evidence input.",
         "For every command that derives facts from workspace data, pass each exact source path in computationInputs (for example, computationInputs:[{path:'series.json'}]). Its sole stdout JSON document must use agentloop.commandComputation/v1 with inputRefs:[{path:'series.json'}] in the same order and a non-empty facts object; inputs is not a valid stdout field. Runtime captures source hashes from computationInputs and will not infer source identity from stdout.",
@@ -627,6 +628,14 @@ export function createComputerTools(
             path: { type: "string", maxLength: 4_000 },
           }),
         },
+        outputBindings: {
+          type: "array",
+          maxItems: 64,
+          items: objectSchema(["targetId", "path"], {
+            targetId: { type: "string", minLength: 1, maxLength: 128 },
+            path: { type: "string", maxLength: 4_000 },
+          }),
+        },
       }),
       executionMode: "exclusive",
       replaySafe: false,
@@ -646,10 +655,11 @@ export function createComputerTools(
           cwd: record.cwd === undefined || record.cwd === "" ? "." : requireString(record.cwd, "cwd", { max: 4_000 }),
           timeoutMs: timeoutMs as number,
           ...(record.computationInputs === undefined ? {} : { computationInputs: commandComputationInputs(record.computationInputs) }),
+          ...(record.outputBindings === undefined ? {} : { outputBindings: commandOutputBindings(record.outputBindings) }),
         };
       },
       execute: async (context, value) => executorForContext(executor, context).runCommand({
-        ...withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }> }),
+        ...withWorkflowEvidenceBinding(context, value as { command: string; args: string[]; cwd: string; timeoutMs: number; computationInputs?: Array<{ path: string }>; outputBindings?: Array<{ targetId: string; path: string }> }),
         signal: context.signal,
       }),
     },
@@ -706,6 +716,21 @@ function commandComputationInputs(value: unknown): Array<{ path: string }> {
     if (seen.has(path)) throw badRequest(`computationInputs must not repeat path: ${path}`);
     seen.add(path);
     return { path };
+  });
+}
+
+function commandOutputBindings(value: unknown): Array<{ targetId: string; path: string }> {
+  if (!Array.isArray(value) || value.length > 64) throw badRequest("outputBindings must contain at most 64 target/path bindings");
+  const seenTargets = new Set<string>();
+  const seenPaths = new Set<string>();
+  return value.map((entry, index) => {
+    const record = requireRecord(entry, `outputBindings[${index}]`);
+    const targetId = requireString(record.targetId, `outputBindings[${index}].targetId`, { max: 128 });
+    const path = requireString(record.path, `outputBindings[${index}].path`, { max: 4_000 });
+    if (seenTargets.has(targetId)) throw badRequest(`outputBindings must not repeat targetId: ${targetId}`);
+    if (seenPaths.has(path)) throw badRequest(`outputBindings must not repeat path: ${path}`);
+    seenTargets.add(targetId); seenPaths.add(path);
+    return { targetId, path };
   });
 }
 
