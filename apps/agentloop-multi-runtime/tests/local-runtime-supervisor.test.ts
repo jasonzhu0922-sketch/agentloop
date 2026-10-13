@@ -260,6 +260,18 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.doesNotMatch(agent, /skills\/(install|update|rollback)/);
 });
 
+test("child Runtime dialogs render above the Local Agent settings dialog", async () => {
+  const [index, styles] = await Promise.all([
+    readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
+    readFile(new URL("../web/styles/styles.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(index, /id="runtime-create-modal" class="runtime-modal runtime-modal-child"/);
+  assert.match(index, /id="runtime-config-modal" class="runtime-modal runtime-modal-child"/);
+  assert.match(styles, /\.runtime-modal\{[^}]*z-index:var\(--runtime-modal-layer,1200\)/);
+  assert.match(styles, /\.runtime-modal-child\{--runtime-modal-layer:1210\}/);
+});
+
 test("strict_local recovery cache retains local Run and artifact transport identity", () => {
   let stored = "";
   const storage = {

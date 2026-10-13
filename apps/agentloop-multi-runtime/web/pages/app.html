@@ -58,7 +58,7 @@
         </div>
       </main>
     </div>
-    <div id="runtime-create-modal" class="runtime-modal" hidden>
+    <div id="runtime-create-modal" class="runtime-modal runtime-modal-child" hidden>
       <form id="runtime-create-form" class="runtime-modal-card">
         <div><strong>新建本机 Runtime</strong><p>每个 Runtime 保留独立执行状态，产物工作区由设备级共享存储统一提供；Skill 在 Runtime 启动时统一加载。</p></div>
         <label>名称<input id="runtime-create-name" type="text" maxlength="100" autocomplete="off" placeholder="例如：研究助理" required /></label>
@@ -85,7 +85,7 @@
         <div class="runtime-modal-actions"><button id="agent-settings-close" type="button">完成</button></div>
       </div>
     </div>
-    <div id="runtime-config-modal" class="runtime-modal" hidden>
+    <div id="runtime-config-modal" class="runtime-modal runtime-modal-child" hidden>
       <form id="runtime-config-form" class="runtime-modal-card">
         <div><strong>配置子 Runtime</strong><p id="runtime-config-description">Runtime 共享设备存储和 Skill 来源，但保留独立执行状态。</p></div>
         <label>名称<input id="runtime-config-name" type="text" maxlength="100" autocomplete="off" required /></label>
