@@ -150,6 +150,7 @@ const FEED_THINKING_TYPES: Record<string, boolean> = {
   "context.tool_outputs_projected": true,
   "candidate.approved": true,
   "candidate.rejected": true,
+  "loop.convergence_reopened": true,
   "candidate.structured_tool_synthesis_required": true,
   "assessment.turn.completed": true,
   "skill.activation.available": true,
@@ -758,6 +759,7 @@ const ACTIVITY_TYPES: Record<string, boolean> = {
   "tool.rejected": true,
   "candidate.approved": true,
   "candidate.rejected": true,
+  "loop.convergence_reopened": true,
   "candidate.structured_tool_synthesis_required": true,
   "assessment.turn.completed": true,
   "skill.activation.available": true,
@@ -915,6 +917,16 @@ function insightForEvent(event: RunEvent, planned: Map<string, RunEvent>): Execu
   }
   if (event.type === "candidate.approved") return { key, title: "候选结果通过", detail: "进入步骤完成提交。", tone: "good", seq: event.seq };
   if (event.type === "candidate.rejected") return { key, title: "候选结果被驳回", detail: clip(d.feedback ?? d.output, 120), tone: "bad", seq: event.seq };
+  if (event.type === "loop.convergence_reopened") {
+    const names = Array.isArray(d.toolNames) ? d.toolNames.filter((name) => typeof name === "string" && name.trim()) : [];
+    return {
+      key,
+      title: "继续执行当前步骤",
+      detail: names.length > 0 ? `仍需工具处理：${names.join("、")}` : "已恢复完整执行能力。",
+      tone: "warn",
+      seq: event.seq,
+    };
+  }
   if (event.type === "candidate.structured_tool_synthesis_required") {
     return {
       key,

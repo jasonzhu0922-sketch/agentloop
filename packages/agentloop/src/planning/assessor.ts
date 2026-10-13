@@ -230,26 +230,22 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const candidateOutput = input.evidence.candidateOutput.trim();
     const nonEmpty = candidateOutput.length > 0;
     const successfulToolRefs = input.evidence.toolCalls
-      .filter((toolCall) => !toolCall.isError)
-      .map((toolCall) => toolCall.toolCallId);
-    const failedToolRefs = input.evidence.toolCalls
-      .filter((toolCall) => toolCall.isError)
+      .filter((toolCall) => !toolCall.isError && (toolCall.admittedEvidenceKinds?.length ?? 0) > 0)
       .map((toolCall) => toolCall.toolCallId);
     const requiresLookupEvidence = this.profile === "lookup_lite" && stepRequiresLookupEvidence(input);
     const hasLookupEvidence = successfulToolRefs.length > 0;
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
       const satisfied = nonEmpty
-        && (!requiresLookupEvidence || hasLookupEvidence)
-        && (failedToolRefs.length === 0 || hasLookupEvidence);
+        && (!requiresLookupEvidence || hasLookupEvidence);
       return {
         criterionId: criterion.id,
         satisfied,
         rationale: satisfied
           ? this.approvedRationale(hasLookupEvidence)
-          : this.rejectedRationale(nonEmpty, requiresLookupEvidence, hasLookupEvidence, failedToolRefs),
+          : this.rejectedRationale(nonEmpty, requiresLookupEvidence, hasLookupEvidence),
         evidenceRefs: satisfied
           ? (hasLookupEvidence ? ["candidateOutput", ...successfulToolRefs] : ["candidateOutput"])
-          : failedToolRefs,
+          : successfulToolRefs,
       };
     });
     const skills: SkillAssessment[] = input.skills.map((skill) => ({
@@ -278,14 +274,10 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     nonEmpty: boolean,
     requiresLookupEvidence: boolean,
     hasLookupEvidence: boolean,
-    failedToolRefs: readonly string[],
   ): string {
     if (!nonEmpty) return "The candidate output is empty.";
     if (requiresLookupEvidence && !hasLookupEvidence) {
-      return "The lookup candidate lacks successful tool evidence.";
-    }
-    if (failedToolRefs.length > 0 && !hasLookupEvidence) {
-      return "Only failed tool evidence is available.";
+      return "The lookup candidate lacks a committed Runtime result fact.";
     }
     return "The candidate does not satisfy the lightweight assessment policy.";
   }
@@ -296,13 +288,12 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const deliveryCandidate = input.evidence.deliveryCandidate;
     const runtimeEvidenceBundles = input.runtimeEvidenceBundles;
     const successfulToolRefs = input.evidence.toolCalls
-      .filter((toolCall) => !toolCall.isError)
+      .filter((toolCall) => !toolCall.isError && (toolCall.admittedEvidenceKinds?.length ?? 0) > 0)
       .map((toolCall) => toolCall.toolCallId);
     const requiredKinds = runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []);
     const receipts = runtimeObservableReceipts(
       input.evidence.toolCalls,
       requiredKinds,
-      input.step.executionBinding.evidenceProducers,
     );
     const blockingKinds = new Set(input.step.successCriteria
       .filter((criterion) => criterion.blocking !== false)
@@ -354,7 +345,7 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
       : [
         "Completion rejected by Runtime evidence assessment.",
         ...criteria.filter((criterion) => !criterion.satisfied).map((criterion) => `${criterion.criterionId}: ${criterion.rationale}`),
-        "A missing observable receipt is not proof that the operation never ran. Reuse the bound operation result; if its receipt was lost, repair the evidence handoff or the Plan contract. Rewriting the answer cannot create an operation receipt.",
+        "A missing Runtime result fact is not proof that an operation never ran. Reuse the bound result; if its fact was not committed, repair the post-commit handoff or the Plan contract. Rewriting the answer cannot create a result fact.",
       ].join("\n");
     return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
   }
@@ -401,24 +392,15 @@ function runtimeGateRequiredKinds(requiredKinds: readonly string[]): string[] {
 }
 
 function runtimeObservableReceipts(
-  toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string }[],
+  toolCalls: readonly { toolCallId: string; toolName: string; isError: boolean; result: string; admittedEvidenceKinds?: readonly string[] }[],
   requiredKinds: readonly string[],
-  evidenceProducers: StepAssessmentInput["step"]["executionBinding"]["evidenceProducers"],
 ): RuntimeObservableReceipt[] {
   const receipts: RuntimeObservableReceipt[] = [];
-  const requiredKindSet = new Set(requiredKinds);
-  const producerToolsByKind = new Map<string, Set<string>>();
-  for (const producer of evidenceProducers) {
-    const tools = producerToolsByKind.get(producer.evidenceKind) ?? new Set<string>();
-    for (const toolName of producer.resolvedToolNames) tools.add(toolName);
-    producerToolsByKind.set(producer.evidenceKind, tools);
-  }
   for (const toolCall of toolCalls) {
     if (toolCall.isError) continue;
+    const admittedKinds = new Set(toolCall.admittedEvidenceKinds ?? []);
+    if (admittedKinds.size === 0) continue;
     for (const parsed of runtimeEvidenceRecordsFromToolResult(toolCall.result)) {
-      const workflowRecord = parsed.schema === "agentloop.skillWorkflowEvidenceReceipt/v1"
-        || parseToolResultObject(parsed.workflowEvidenceReceipt)?.schema === "agentloop.skillWorkflowEvidenceReceipt/v1";
-      if (workflowRecord && toolCall.toolName !== "computer_run_command") continue;
       const topLevelSchema = typeof parsed.schema === "string" ? parsed.schema : undefined;
       const nestedReceipt = parseToolResultObject(parsed.evidenceReceipt)
         ?? parseToolResultObject(parsed.artifactReceipt);
@@ -431,17 +413,14 @@ function runtimeObservableReceipts(
         schema === undefined
       ) continue;
       const evidenceKinds = runtimeEvidenceKindArrays(nestedReceipt ?? parsed);
-      const authenticatedArtifactAcceptance = schema === "agentloop.artifactAcceptance/v1"
-        && producerToolsByKind.get("artifact_acceptance")?.has(toolCall.toolName) === true;
-      const producerAllows = (kind: string): boolean =>
-        !requiredKindSet.has(kind)
-        || producerToolsByKind.get(kind)?.has(toolCall.toolName) === true
-        || (authenticatedArtifactAcceptance && isArtifactAcceptanceAttestationKind(kind));
+      // The receipt remains available for audit, but only the post-commit
+      // admitted facts may participate in assessment.
+      const factAllowed = (kind: string): boolean => admittedKinds.has(kind);
       receipts.push({
         toolCallId: toolCall.toolCallId,
         toolName: toolCall.toolName,
         schema,
-        verdict: schema === "agentloop.artifactAcceptance/v1" && !authenticatedArtifactAcceptance
+        verdict: schema === "agentloop.artifactAcceptance/v1" && !admittedKinds.has("artifact_acceptance")
           ? undefined
           : canonicalArtifactAcceptanceVerdict(parsed),
         ...(schema === "agentloop.artifactAcceptance/v1" || schema === "agentloop.artifactReceipt/v1"
@@ -450,9 +429,9 @@ function runtimeObservableReceipts(
             artifactKind: artifactKindFromRecord(nestedReceipt ?? parsed),
           }
           : {}),
-        satisfied: new Set(evidenceKinds.satisfied.filter(producerAllows)),
-        failed: new Set(evidenceKinds.failed.filter(producerAllows)),
-        caveatsRecorded: producerAllows("explicit_caveats") && (
+        satisfied: new Set(evidenceKinds.satisfied.filter(factAllowed)),
+        failed: new Set(evidenceKinds.failed.filter(factAllowed)),
+        caveatsRecorded: factAllowed("explicit_caveats") && (
           Array.isArray((nestedReceipt ?? parsed).caveats)
           || evidenceKinds.satisfied.includes("explicit_caveats")
           || evidenceKinds.caveated.includes("explicit_caveats")
@@ -647,10 +626,6 @@ function isArtifactAcceptanceEvidenceKind(kind: string): boolean {
     || kind === "format_matches_request";
 }
 
-function isArtifactAcceptanceAttestationKind(kind: string): boolean {
-  return kind === "artifact_acceptance" || isArtifactAcceptanceEvidenceKind(kind);
-}
-
 function isRuntimeEvidenceReceiptSchema(schema: string | undefined): boolean {
   return schema === "agentloop.artifactAcceptance/v1"
     || schema === "agentloop.artifactReceipt/v1"
@@ -765,7 +740,7 @@ function rejectedEvidenceGateRationale(
   runtimeEvidenceBundles?: StepAssessmentInput["runtimeEvidenceBundles"],
 ): string {
   if (!nonEmpty && candidateRequired) return "The candidate output is empty.";
-  if (successfulToolRefs.length === 0) return "No successful Runtime operation is available.";
+  if (successfulToolRefs.length === 0) return "No committed Runtime result fact is available.";
   if (receipts.length === 0 && requiredKinds.length > 0) return "No observable Runtime artifact or acceptance receipt is available for the principle assessment gate.";
   const missing = requiredKinds.filter((kind) => !evidenceKindSatisfiedByGate(
     kind,
@@ -779,7 +754,7 @@ function rejectedEvidenceGateRationale(
     runtimeEvidenceBundles,
   ));
   if (missing.length > 0) return `No bound observable evidence confirms: ${missing.join(", ")}. This does not establish that the underlying content or operation is absent.`;
-  return "The observable Runtime operations do not satisfy the principle assessment gate.";
+  return "The committed Runtime result facts do not satisfy the assessment gate.";
 }
 
 function isEvidenceCriterion(criterionId: string): boolean {
@@ -899,7 +874,15 @@ export function enforceAdmittedAssessment(
   const criteria = assessment.criteria.map((criterion) => classifyCriterion(input, criterion));
   const hasUserVisibleDelivery = input.evidence.candidateOutput.trim().length > 0
     || hasArtifactDeliveryEvidence(input);
-  const approved = assessment.approved
+  // A model may judge goal/content criteria, but it cannot veto a Runtime
+  // observable criterion after the committed receipts have established it.
+  // Preserve a model rejection only where it concerns a blocking criterion
+  // outside that Runtime-owned evidence namespace.
+  const modelRejectedBlockingJudgment = assessment.criteria.some((criterion) => {
+    const admitted = input.step.successCriteria.find((item) => item.id === criterion.criterionId);
+    return admitted?.blocking === true && !isEvidenceCriterion(criterion.criterionId) && !criterion.satisfied;
+  });
+  const approved = !modelRejectedBlockingJudgment
     && hasUserVisibleDelivery
     && criteria.every((criterion) => criterion.satisfied || criterion.blocking !== true);
   const failedBoundary = approved
@@ -923,7 +906,6 @@ function hasArtifactDeliveryEvidence(input: StepAssessmentInput): boolean {
     return runtimeObservableReceipts(
       [toolCall],
       runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []),
-      input.step.executionBinding.evidenceProducers,
     ).some((receipt) =>
       receipt.schema === "agentloop.artifactReceipt/v1"
       || receipt.schema === "agentloop.artifactAcceptance/v1",
@@ -935,18 +917,32 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
   const admitted = input.step.successCriteria.find((item) => item.id === criterion.criterionId);
   const blocking = admitted?.blocking ?? true;
   const verification = admitted?.verification ?? "deterministic";
-  const expectedFormatUnmet = criterion.criterionId === "format_matches_request"
-    && (input.expectedArtifactKind !== undefined || input.expectedArtifactFormat !== undefined)
-    && latestArtifactReceipt(
-      runtimeObservableReceipts(
-        input.evidence.toolCalls,
-        runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []),
-        input.step.executionBinding.evidenceProducers,
-      ),
+  const receipts = runtimeObservableReceipts(
+    input.evidence.toolCalls,
+    runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []),
+  );
+  const successfulToolRefs = input.evidence.toolCalls
+    .filter((toolCall) => !toolCall.isError && (toolCall.admittedEvidenceKinds?.length ?? 0) > 0)
+    .map((toolCall) => toolCall.toolCallId);
+  // These facts are mechanically bound to committed receipts. In a composite
+  // leaf, `artifactTargets` is the authority: do not collapse its distinct
+  // Markdown/XLSX/etc. targets into a singular expected format and let a
+  // model-produced boolean contradict the complete receipt coverage.
+  const runtimeObservableSatisfied = isEvidenceCriterion(criterion.criterionId)
+    ? criterionSatisfiedByEvidenceGate(
+      criterion.criterionId,
+      runtimeGateRequiredKinds(input.step.evidenceContract?.requiredKinds ?? []),
+      false,
+      receipts,
+      successfulToolRefs,
       input.evidence.deliveryCandidate,
+      input.workflowEvidenceActions,
       input.expectedArtifactKind,
       input.expectedArtifactFormat,
-    ) === undefined;
+      input.artifactTargets,
+      input.runtimeEvidenceBundles,
+    )
+    : undefined;
   const structuredBundleUnverified = criterion.criterionId === "structured_extraction_artifact"
     && (input.runtimeEvidenceBundles?.verified.length ?? 0) === 0;
   const targetClaimMissing = admitted?.targetId !== undefined
@@ -954,18 +950,20 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
   return {
     ...criterion,
     ...(admitted?.targetId === undefined ? {} : { targetId: admitted.targetId }),
-    ...(expectedFormatUnmet || structuredBundleUnverified || targetClaimMissing
+    ...(runtimeObservableSatisfied === false || structuredBundleUnverified || targetClaimMissing
       ? {
         satisfied: false,
         rationale: targetClaimMissing
           ? `The completion candidate has no delivery claim for canonical target ${admitted?.targetId}.`
-          : expectedFormatUnmet
-          ? `No accepted artifact matches the required ${input.expectedArtifactFormat ?? input.expectedArtifactKind} format.`
+          : runtimeObservableSatisfied === false
+          ? `No committed Runtime receipt satisfies ${criterion.criterionId} for every admitted artifact target.`
           : "No Runtime-owned evidence bundle passed Assessment verification.",
       }
-      : {}),
+      : runtimeObservableSatisfied === true ? { satisfied: true } : {}),
     blocking,
-    status: ((expectedFormatUnmet || structuredBundleUnverified || targetClaimMissing) ? false : criterion.satisfied)
+    status: ((runtimeObservableSatisfied === false || structuredBundleUnverified || targetClaimMissing)
+      ? false
+      : runtimeObservableSatisfied ?? criterion.satisfied)
       ? "satisfied"
       : verification === "model_judged" || verification === "decision_context"
         ? "unverified"

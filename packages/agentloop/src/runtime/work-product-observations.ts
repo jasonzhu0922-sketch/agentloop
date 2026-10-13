@@ -36,6 +36,8 @@ export interface WorkProductObservation {
   readonly bytes?: number;
   readonly sha256?: string;
   readonly operationStatus: "succeeded" | "failed" | "unknown";
+  /** Optional model selection of an already-admitted delivery target, echoed by the producing Tool receipt. */
+  readonly deliveryTargetId?: string;
   readonly source: WorkProductSource;
   /** Only explicit, structured, version-scoped checks; stdout prose is not a check. */
   readonly checks: readonly { readonly id: string; readonly status: string }[];
@@ -138,6 +140,7 @@ export function normalizeWorkProductObservations(event: WorkProductToolEvent): {
       objectId: JSON.stringify([event.workspaceId, path]), path, kind, basis,
       ...(kind === "deleted" ? {} : size(value.bytes)),
       ...(kind === "deleted" || hash(value.sha256) === undefined ? {} : { sha256: hash(value.sha256) }),
+      ...(deliveryTargetId(value) === undefined ? {} : { deliveryTargetId: deliveryTargetId(value) }),
       operationStatus: status, source: location, checks,
     });
   };
@@ -178,7 +181,12 @@ export function normalizeWorkProductObservations(event: WorkProductToolEvent): {
         return typeof check?.id === "string" && ["passed", "failed", "skipped_unavailable"].includes(String(check.status))
           ? [{ id: check.id, status: String(check.status) }] : [];
       }) : [];
-    add(artifact, `${pointer}/artifact`, trustedAcceptance || trustedReceipt ? "observed" : "referenced", "receipt", checks);
+    add({
+      ...artifact,
+      ...(deliveryTargetId(receipt) === undefined && deliveryTargetId(root) === undefined
+        ? {}
+        : { deliveryTargetId: deliveryTargetId(receipt) ?? deliveryTargetId(root) }),
+    }, `${pointer}/artifact`, trustedAcceptance || trustedReceipt ? "observed" : "referenced", "receipt", checks);
   }
   return { operation, observations, issues };
 }
@@ -289,6 +297,11 @@ export function deriveWorkProductObservations(input: {
 
 const FILE_METADATA_TOOLS = new Set(["computer_read_json", "materialize_source_file"]);
 const RECEIPT_TOOLS = new Set(["computer_write_file", "computer_patch_file", "convert_artifact"]);
+
+function deliveryTargetId(value: Record<string, unknown> | undefined): string | undefined {
+  const targetId = value?.deliveryTargetId;
+  return typeof targetId === "string" && targetId.trim().length > 0 && targetId.length <= 128 ? targetId : undefined;
+}
 
 function operationStatus(evidence: AgentLoopToolEvidence, result: Record<string, unknown> | undefined): WorkProductObservation["operationStatus"] {
   if (evidence.isError || evidence.operationStatus === "failed" || evidence.invocationStatus === "failed"

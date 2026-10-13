@@ -2094,6 +2094,44 @@ test("Responses adapter preserves final message text when completed response omi
   }
 });
 
+test("Responses adapter treats observed lifecycle envelopes as normal stream events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"type":"response.created","response":{"status":"in_progress","output":[]}}\n\n',
+    'data: {"type":"response.in_progress","response":{"status":"in_progress","output":[]}}\n\n',
+    'data: {"type":"response.output_text.delta","delta":"done"}\n\n',
+    'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}\n\n',
+  ]);
+  let rawCaptureAttempted = false;
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      streamRawCaptureWriter: async () => {
+        rawCaptureAttempted = true;
+        throw new Error("normal stream must not be captured");
+      },
+    });
+    const result = await model.streamComplete!({
+      runId: "run-responses-lifecycle-events",
+      systemPrompt: "Return text.",
+      phase: "execution",
+      messages: [{ role: "user", content: "Continue." }],
+      tools: [],
+    }, async () => undefined);
+
+    assert.equal(result.content, "done");
+    assert.equal(result.streamReceipt?.unrecognizedJsonEventCount, 0);
+    assert.deepEqual(result.streamReceipt?.anomalyReasons, []);
+    assert.equal(rawCaptureAttempted, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Responses adapter fails closed when a stream ends without response.completed", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => sseResponse([
@@ -2121,9 +2159,181 @@ test("Responses adapter fails closed when a stream ends without response.complet
         assert.equal((error as { message?: string }).message, "Responses Provider stream ended without a terminal response event");
         assert.equal((error as { details?: Record<string, unknown> }).details?.streamFailureStage, "missing_terminal_event");
         assert.equal((error as { details?: Record<string, unknown> }).details?.streamEventsSeen, 1);
+        assert.deepEqual(
+          ((error as { details?: { streamReceipt?: { anomalyReasons?: string[] } } }).details?.streamReceipt?.anomalyReasons),
+          ["missing_terminal_event"],
+        );
         return true;
       },
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter preserves a bounded top-level error event and its private raw capture", async () => {
+  const originalFetch = globalThis.fetch;
+  const raw = `data: ${JSON.stringify({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "context_length_exceeded",
+      message: `Request was rejected for Bearer server-secret. ${"x".repeat(700)}`,
+      api_key: "server-secret",
+    },
+  })}\n\n`;
+  globalThis.fetch = async () => new Response(raw, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "x-request-id": "responses-error-1" },
+  });
+  let captured: ModelStreamRawCaptureInput | undefined;
+  let attempts = 0;
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      onRetry: () => { attempts += 1; },
+      streamRawCaptureWriter: async (input) => {
+        captured = input;
+        return {
+          schema: "agentloop.modelStreamRawCaptureRef/v1",
+          ref: "test-capture:responses-error-1",
+          capturedBytes: input.rawSse.byteLength,
+          rawBytes: input.rawBytes,
+          rawSha256: input.rawSha256,
+          truncated: input.truncated,
+        };
+      },
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "run-responses-error-event",
+        systemPrompt: "Return text.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [],
+      }, async () => undefined),
+      (error: unknown) => {
+        const observed = error as {
+          code?: string;
+          message?: string;
+          details?: {
+            streamFailureStage?: string;
+            providerErrorType?: string;
+            providerErrorCode?: string;
+            providerErrorMessage?: string;
+            streamReceipt?: {
+              rawCapture?: { ref?: string };
+              anomalyReasons?: string[];
+              providerRequestId?: string;
+            };
+          };
+        };
+        assert.equal(observed.code, "MODEL_ERROR");
+        assert.match(observed.message ?? "", /Responses Provider error: Request was rejected/);
+        assert.doesNotMatch(observed.message ?? "", /server-secret/);
+        assert.equal(observed.details?.streamFailureStage, "provider_error_event");
+        assert.equal(observed.details?.providerErrorType, "invalid_request_error");
+        assert.equal(observed.details?.providerErrorCode, "context_length_exceeded");
+        assert.equal(observed.details?.providerErrorMessage?.length, 500);
+        assert.doesNotMatch(JSON.stringify(observed.details), /server-secret|api_key/);
+        assert.deepEqual(observed.details?.streamReceipt?.anomalyReasons, ["provider_error_event"]);
+        assert.equal(observed.details?.streamReceipt?.providerRequestId, "responses-error-1");
+        assert.equal(observed.details?.streamReceipt?.rawCapture?.ref, "test-capture:responses-error-1");
+        return true;
+      },
+    );
+    assert.equal(attempts, 0);
+    assert.equal(Buffer.from(captured?.rawSse ?? []).toString("utf8"), raw);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter keeps the provider error when private raw capture fails", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse([
+    'data: {"type":"error","code":"server_error","message":"upstream overloaded"}\n\n',
+  ]);
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+      streamRawCaptureWriter: async () => { throw new Error("capture storage unavailable"); },
+    });
+    await assert.rejects(
+      () => model.streamComplete!({
+        runId: "run-responses-error-capture-failed",
+        systemPrompt: "Return text.",
+        phase: "planning",
+        messages: [{ role: "user", content: "Plan this task." }],
+        tools: [],
+      }, async () => undefined),
+      (error: unknown) => {
+        const observed = error as {
+          message?: string;
+          details?: { providerErrorCode?: string; streamReceipt?: { rawCaptureError?: string; rawCapture?: unknown } };
+        };
+        assert.equal(observed.message, "Responses Provider error: upstream overloaded");
+        assert.equal(observed.details?.providerErrorCode, "server_error");
+        assert.equal(observed.details?.streamReceipt?.rawCaptureError, "capture storage unavailable");
+        assert.equal(observed.details?.streamReceipt?.rawCapture, undefined);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses adapter preserves failed and incomplete terminal semantics", async () => {
+  const originalFetch = globalThis.fetch;
+  let request = 0;
+  globalThis.fetch = async () => {
+    request += 1;
+    return request === 1
+      ? sseResponse([
+          'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}\n\n',
+        ])
+      : sseResponse([
+          'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+          'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}}\n\n',
+        ]);
+  };
+  try {
+    const model = new ResponsesModel({
+      baseUrl: "https://api.example.test",
+      apiKey: "server-secret",
+      model: "reasoning-model",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      maxAttempts: 1,
+    });
+    const invocation = {
+      runId: "run-responses-terminal-semantics",
+      systemPrompt: "Return text.",
+      phase: "execution" as const,
+      messages: [{ role: "user" as const, content: "Continue." }],
+      tools: [],
+    };
+    const failed = await model.streamComplete!(invocation, async () => undefined);
+    const incomplete = await model.streamComplete!(invocation, async () => undefined);
+
+    assert.equal(failed.finishReason, "error");
+    assert.equal(failed.streamReceipt?.finishReasonObserved, true);
+    assert.equal(incomplete.content, "partial");
+    assert.equal(incomplete.finishReason, "length");
+    assert.equal(incomplete.finishReasonDetail, "max_output_tokens");
+    assert.equal(incomplete.streamReceipt?.finishReasonObserved, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

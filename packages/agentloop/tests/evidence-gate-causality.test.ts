@@ -4,7 +4,7 @@ import { enforceAdmittedAssessment, ProfiledRuleStepAssessor } from "../src/plan
 import type { EvidenceKind, StepAssessmentInput, StepEvidenceProducerBinding } from "../src/planning/contracts.ts";
 import { createCanonicalRunState } from "../src/runtime/canonical-run-state.ts";
 import { understandTask } from "../src/runtime/task-intent.ts";
-import { deriveRuntimeStepEvidenceState, runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
+import { admittedEvidenceKindsForCommittedResult, deriveRuntimeStepEvidenceState, runtimeStepToolProgressPolicy } from "../src/runtime/tool-progress-policy.ts";
 
 const canonicalState = createCanonicalRunState({
   runId: "run",
@@ -45,7 +45,9 @@ function fixture(schema: boolean, caveats: boolean): StepAssessmentInput {
     },
     evidence: {
       candidateOutput: "已取得 46 条记录，16 个日期；同日多价格，数据覆盖有限。", modelSteps: 8,
-      toolCalls: [{ toolCallId: "acquire", toolName: "computer_run_command", isError: false, result: JSON.stringify({
+      toolCalls: [{ toolCallId: "acquire", toolName: "computer_run_command", isError: false,
+        admittedEvidenceKinds: ["source_summary", "record_counts", "structured_extraction_artifact", ...(schema ? ["schema_summary"] : []), ...(caveats ? ["explicit_caveats"] : [])],
+        result: JSON.stringify({
         schema: "agentloop.steelMarketData/v1",
         evidenceReceipt: { schema: "agentloop.toolEvidenceReceipt/v1",
           evidenceKinds: { satisfied: ["source_summary", "record_counts", "structured_extraction_artifact", ...(schema ? ["schema_summary"] : [])], caveated: caveats ? ["explicit_caveats"] : [], failed: [] },
@@ -61,7 +63,7 @@ test("64272a5d causal replay: missing preflight receipt does not erase recorded 
   assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["schema_summary"]);
   assert.equal(result.criteria.find((criterion) => criterion.criterionId === "explicit_caveats")?.satisfied, true);
   assert.match(result.feedback, /schema_summary/);
-  assert.match(result.feedback, /Rewriting the answer cannot create an operation receipt/);
+  assert.match(result.feedback, /Rewriting the answer cannot create a result fact/);
   assert.doesNotMatch(result.feedback, /repair the failed artifact/);
 });
 
@@ -175,7 +177,7 @@ test("admitted target criteria cannot be approved without a matching delivery cl
   assert.deepEqual(enforced.failedBoundary?.missingEvidenceKinds, ["delivery_target:data-distribution-analysis"]);
 });
 
-test("an unbound Skill producer does not shadow a valid neutral source receipt", async () => {
+test("Assessment consumes a committed source fact rather than rechecking the producing Tool name", async () => {
   const input = fixture(true, true);
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     ...input,
@@ -188,6 +190,13 @@ test("an explicitly bound workflow action requires its matching authenticated re
   const input = fixture(true, true);
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     ...input,
+    evidence: {
+      ...input.evidence,
+      toolCalls: input.evidence.toolCalls.map((toolCall) => ({
+        ...toolCall,
+        admittedEvidenceKinds: toolCall.admittedEvidenceKinds?.filter((kind) => kind !== "source_summary"),
+      })),
+    },
     workflowEvidenceActions: [{
       skillName: "data-platform-query",
       executorId: "query",
@@ -253,6 +262,7 @@ test("aggregation provenance cannot complete an artifact leaf without the artifa
           toolCallId: "write",
           toolName: "computer_write_file",
           isError: false,
+          admittedEvidenceKinds: ["artifact_path", "artifact_non_empty"],
           result: JSON.stringify({
             artifactReceipt: {
               schema: "agentloop.artifactReceipt/v1",
@@ -265,6 +275,7 @@ test("aggregation provenance cannot complete an artifact leaf without the artifa
           toolCallId: "verify",
           toolName: "verify_artifact_acceptance",
           isError: false,
+          admittedEvidenceKinds: requiredKinds,
           result: JSON.stringify({
             schema: "agentloop.artifactAcceptance/v1",
             artifact: { path: "analysis/report.md", kind: "document", bytes: 128 },
@@ -278,7 +289,7 @@ test("aggregation provenance cannot complete an artifact leaf without the artifa
   assert.equal(delivered.approved, true, JSON.stringify(delivered));
 });
 
-test("a bound Runtime acceptance receipt preserves neutral artifact facts from a separate producer capability", async () => {
+test("Assessment preserves a committed Runtime acceptance fact when audit tool labels are rewritten", async () => {
   const requiredKinds = ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_openable", "artifact_acceptance"] as const;
   const input: StepAssessmentInput = {
     runId: "run-split-artifact-authority",
@@ -325,6 +336,7 @@ test("a bound Runtime acceptance receipt preserves neutral artifact facts from a
         toolCallId: "verify-merged-pdf",
         toolName: "verify_artifact_acceptance",
         isError: false,
+        admittedEvidenceKinds: requiredKinds,
         result: JSON.stringify({
           schema: "agentloop.artifactAcceptance/v1",
           artifact: { path: "merged.pdf", kind: "pdf", bytes: 1_651_582 },
@@ -338,15 +350,15 @@ test("a bound Runtime acceptance receipt preserves neutral artifact facts from a
   const accepted = await new ProfiledRuleStepAssessor("evidence_gate").assess(input);
   assert.equal(accepted.approved, true, JSON.stringify(accepted));
 
-  const unbound = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+  const relabeledAudit = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     ...input,
     evidence: {
       ...input.evidence,
       toolCalls: input.evidence.toolCalls.map((toolCall) => ({ ...toolCall, toolName: "unbound_acceptance_probe" })),
     },
   });
-  assert.equal(unbound.approved, false);
-  assert.deepEqual(unbound.failedBoundary?.missingEvidenceKinds, requiredKinds);
+  assert.equal(relabeledAudit.approved, true);
+  assert.equal(relabeledAudit.failedBoundary, undefined);
 });
 
 test("tool progress accepts a neutral source receipt unless the current step explicitly binds a workflow action", () => {
@@ -415,7 +427,8 @@ test("rejected artifact acceptance preserves independently passed path and non-e
     },
     evidence: {
       candidateOutput: "artifact exists", modelSteps: 1,
-      toolCalls: [{ toolCallId: "verify", toolName: "verify_artifact_acceptance", isError: false, result: JSON.stringify({
+      toolCalls: [{ toolCallId: "verify", toolName: "verify_artifact_acceptance", isError: false,
+        admittedEvidenceKinds: ["artifact_path", "artifact_non_empty", "format_matches_request"], result: JSON.stringify({
         schema: "agentloop.artifactAcceptance/v1",
         artifact: { path: "song.wav", bytes: 21_168_044, kind: "audio" },
         verdict: "rejected",
@@ -444,7 +457,8 @@ test("producer artifact receipts remain bound to semantic document targets", asy
     },
     evidence: {
       candidateOutput: "已生成报告", modelSteps: 1,
-      toolCalls: [{ toolCallId: "write", toolName: "computer_write_file", isError: false, result: JSON.stringify({
+      toolCalls: [{ toolCallId: "write", toolName: "computer_write_file", isError: false,
+        admittedEvidenceKinds: ["artifact_path", "artifact_non_empty", "format_matches_request", "delivery_receipt"], result: JSON.stringify({
         path: "analysis/report.md",
         artifactReceipt: {
           schema: "agentloop.artifactReceipt/v1",
@@ -471,6 +485,7 @@ function acceptedPdfEvidence(count: number) {
     toolCallId: `verify-part-${index + 1}`,
     toolName: "verify_artifact_acceptance",
     isError: false,
+    admittedEvidenceKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "artifact_openable", "format_matches_request"],
     result: JSON.stringify({
       schema: "agentloop.artifactAcceptance/v1",
       artifact: {
@@ -558,4 +573,118 @@ test("Assessor cannot reuse one accepted path across four canonical artifact tar
   const complete = await assess(4);
   assert.equal(complete.approved, true);
   assert.equal(complete.failedBoundary, undefined);
+});
+
+test("Assessment cannot reject receipt-proven mixed-format targets through one singular expected format", () => {
+  const requiredKinds = ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_openable", "artifact_acceptance"] as const;
+  const artifactTargets = [
+    { id: "ddm-model", purpose: "DDM modeling report", kind: "document", format: "markdown", terminalRequired: true },
+    { id: "collection-standard", purpose: "Collection standard", kind: "spreadsheet", format: "xlsx", terminalRequired: true },
+  ];
+  const acceptance = (toolCallId: string, path: string, kind: string) => ({
+    toolCallId,
+    toolName: "verify_artifact_acceptance",
+    isError: false,
+    admittedEvidenceKinds: requiredKinds,
+    result: JSON.stringify({
+      schema: "agentloop.artifactAcceptance/v1",
+      artifact: { path, kind, bytes: 100, sha256: toolCallId.slice(-1).repeat(64) },
+      verdict: "accepted",
+      evidenceKinds: { satisfied: requiredKinds, caveated: [], failed: [] },
+    }),
+  });
+  const input: StepAssessmentInput = {
+    runId: "run-mixed-format", planId: "plan-mixed-format", attempt: 1, skills: [], canonicalState,
+    // This singular compatibility hint reflects the exact composite-leaf
+    // shape that previously vetoed the valid Markdown sibling receipt.
+    expectedArtifactFormat: "xlsx",
+    artifactTargets,
+    step: {
+      id: "produce-ddm-and-standard", objective: "Produce a DDM report and collection standard", role: "deliver", dependencies: [], skillIds: [], requiredCapabilities: [],
+      kind: "leaf", position: 0, status: "running", refinementState: "not_refinable", requiredFacts: [],
+      executionBinding: {
+        schema: "agentloop.stepExecutionBinding/v1", requiredCapabilities: [], resolvedToolNames: ["verify_artifact_acceptance"],
+        evidenceProducers: producerBindings("verify_artifact_acceptance", requiredKinds), sourceKinds: ["generated_artifact"], sideEffect: "workspace_write",
+        evidenceKinds: requiredKinds, targetIds: [], artifactTargets,
+      },
+      evidenceContract: { requiredKinds, caveatPolicy: "none" },
+      successCriteria: requiredKinds.map((id) => ({ id, description: id, source: "planner" as const })),
+    },
+    evidence: {
+      candidateOutput: "DDM report and collection standard are delivered.", modelSteps: 1,
+      toolCalls: [
+        acceptance("verify-markdown-1", "results/ddm-model.md", "markdown"),
+        acceptance("verify-xlsx-2", "results/collection-standard.xlsx", "xlsx"),
+      ],
+    },
+  };
+  const modelRejectedOnlyRuntimeFact = {
+    id: "assessment-mixed-format", planId: input.planId, stepId: input.step.id, attempt: input.attempt,
+    approved: false,
+    criteria: requiredKinds.map((criterionId) => ({
+      criterionId,
+      satisfied: criterionId !== "format_matches_request",
+      rationale: criterionId === "format_matches_request" ? "No accepted artifact matches the required spreadsheet format." : "satisfied",
+      evidenceRefs: ["verify-markdown-1", "verify-xlsx-2"],
+    })),
+    skills: [], evidenceDigest: "mixed-format", feedback: "format mismatch", createdAt: 1,
+  };
+
+  const enforced = enforceAdmittedAssessment(input, modelRejectedOnlyRuntimeFact);
+  assert.equal(enforced.approved, true);
+  assert.equal(enforced.criteria.find((criterion) => criterion.criterionId === "format_matches_request")?.satisfied, true);
+  assert.equal(enforced.failedBoundary, undefined);
+});
+
+test("per-receipt admission preserves distinct Markdown attestations for generic document targets", async () => {
+  const requiredKinds = ["artifact_path", "artifact_non_empty", "format_matches_request", "artifact_openable", "artifact_acceptance"] as const;
+  const artifactTargets = [
+    { id: "validation-result", purpose: "Validation result", kind: "document", terminalRequired: true },
+    { id: "qc-result", purpose: "QC result", kind: "document", terminalRequired: true },
+  ];
+  const policy = runtimeStepToolProgressPolicy(requiredKinds, {
+    scope: "artifact",
+    artifactTargets,
+    evidenceProducers: producerBindings("verify_artifact_acceptance", requiredKinds),
+  });
+  const acceptance = (toolCallId: string, path: string) => {
+    const evidence = {
+      toolCallId,
+      toolName: "verify_artifact_acceptance",
+      isError: false,
+      result: JSON.stringify({
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path, kind: "markdown", bytes: 100, sha256: toolCallId.slice(-1).repeat(64) },
+        verdict: "accepted",
+        evidenceKinds: { satisfied: requiredKinds, caveated: [], failed: [] },
+      }),
+    };
+    return { ...evidence, admittedEvidenceKinds: admittedEvidenceKindsForCommittedResult({ evidence, policy }) };
+  };
+  const toolCalls = [
+    acceptance("verify-validation-1", "results/validation.md"),
+    acceptance("verify-qc-2", "results/qc.md"),
+  ];
+  for (const toolCall of toolCalls) {
+    assert.deepEqual(new Set(toolCall.admittedEvidenceKinds), new Set(requiredKinds));
+  }
+
+  const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
+    runId: "run-generic-document-targets", planId: "plan-generic-document-targets", attempt: 1, skills: [], canonicalState,
+    artifactTargets,
+    step: {
+      id: "validate-and-qc", objective: "Produce a validation result and a QC result", role: "deliver", dependencies: [], skillIds: [], requiredCapabilities: [],
+      kind: "leaf", position: 0, status: "running", refinementState: "not_refinable", requiredFacts: [],
+      executionBinding: {
+        schema: "agentloop.stepExecutionBinding/v1", requiredCapabilities: [], resolvedToolNames: ["verify_artifact_acceptance"],
+        evidenceProducers: producerBindings("verify_artifact_acceptance", requiredKinds), sourceKinds: ["generated_artifact"], sideEffect: "workspace_write",
+        evidenceKinds: requiredKinds, targetIds: [], artifactTargets,
+      },
+      evidenceContract: { requiredKinds, caveatPolicy: "none" },
+      successCriteria: requiredKinds.map((id) => ({ id, description: id, source: "planner" as const })),
+    },
+    evidence: { candidateOutput: "Validation and QC results are delivered.", modelSteps: 1, toolCalls },
+  });
+  assert.equal(result.approved, true, JSON.stringify(result));
+  assert.equal(result.failedBoundary, undefined);
 });

@@ -1938,7 +1938,11 @@ function renderMessage(message) {
   // controls the user needs in order to continue the Run.
   const projectedOutput = `${interimOutput}${humanLoop}${recovery}`;
   const artifactSummary = message.status === "completed" ? completedArtifactSummary(message.artifacts) : "";
-  const emptyOutput = isLive ? `<span class="thinking"><i></i><i></i><i></i></span>` : `<span class="terminal-empty">${escapeHtml(artifactSummary || presentation.emptyText)}</span>`;
+  const emptyOutput = isLive
+    ? (typeof message.progress === "string" && message.progress.trim()
+      ? `<div class="live-progress" role="status">${escapeHtml(message.progress)}</div>`
+      : `<span class="thinking"><i></i><i></i><i></i></span>`)
+    : `<span class="terminal-empty">${escapeHtml(artifactSummary || presentation.emptyText)}</span>`;
   const output = message.status === "failed"
     ? `<div class="failure-title">${formatText(message.error || presentation.emptyText)}</div>${message.partialText ? `<div class="partial-result"><strong>执行总结</strong>${renderMarkdown(message.partialText)}</div>` : ""}${recovery}`
     : projectedOutput || emptyOutput;

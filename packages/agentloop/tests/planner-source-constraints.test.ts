@@ -146,6 +146,89 @@ function retryingPlannerModel(): { readonly model: ModelAdapter; readonly calls:
   };
 }
 
+test("submit_outcome_plan uses the provider-supported strict schema subset for dynamic bindings", async () => {
+  const source = {
+    id: "source-design",
+    originalName: "design.md",
+    mimeType: "text/markdown",
+    extension: ".md",
+    byteSize: 128,
+    sha256: "abc123",
+    status: "ready" as const,
+    chunkCount: 1,
+    truncated: false,
+  };
+  const runId = "run-provider-supported-planning-schema";
+  const tools = [{ name: "computer_write_file", description: "Write a workspace artifact." }];
+  const understanding = understandTask({
+    objective: "Create a Markdown report from the uploaded design.",
+    toolNames: tools.map((tool) => tool.name),
+    uploadedSources: [source],
+    resolvedTaskIntent: {
+      schema: "agentloop.conversationTaskIntent/v1",
+      operation: "create_artifact",
+      requiresExecution: true,
+      deliverables: [{
+        targetId: "design-report",
+        purpose: "Deliver the requested design report.",
+        expectedArtifactCount: 1,
+        action: "create",
+        kind: "document",
+        format: "markdown",
+        surface: "workspace_artifact",
+      }],
+    },
+  });
+  const task: TaskSpec = {
+    runId,
+    canonicalState: createCanonicalRunState({ runId, userInput: "Create a Markdown report from the uploaded design.", understanding, now: 1 }),
+    availableSkills: [],
+    availableToolNames: tools.map((tool) => tool.name),
+    availableTools: tools,
+    sources: [source],
+    visibleDirectories: [{ id: "visible-designs", path: "/workspace/designs", name: "designs" }],
+  };
+  const model: ModelAdapter = {
+    limits: { contextWindowTokens: 40_000, maxOutputTokens: 2_048 },
+    async complete(request): Promise<ModelResponse> {
+      const schema = request.tools.find((tool) => tool.name === "submit_outcome_plan")?.inputSchema;
+      assert.equal(JSON.stringify(schema).includes('"uniqueItems"'), false);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "provider-supported-plan",
+          name: "submit_outcome_plan",
+          arguments: {
+            schema: "agentloop.outcomePlan/v2",
+            goal: "Create a Markdown report from the uploaded design.",
+            shape: "single_leaf",
+            selectedSkillRoles: [],
+            leaves: [{
+              id: "create-report",
+              objective: "Create the report from the uploaded design.",
+              dependsOn: [],
+              role: "produce",
+              skillIds: [],
+              requiredCapabilities: ["workspace_artifact_write"],
+              sourceConstraint: { bindings: [{ kind: "uploaded_source", ids: [source.id, source.id] }] },
+              evidenceContract: {
+                requiredKinds: ["artifact_path", "artifact_non_empty"],
+                caveatPolicy: "mark_unverified_facts",
+              },
+              targetIds: ["design-report", "design-report"],
+            }],
+          },
+        }],
+      };
+    },
+  };
+
+  const proposal = await new ModelPlanner(model).plan(task);
+  assert.deepEqual(proposal.steps[0]?.sourceConstraint?.requiredUploadedSourceIds, [source.id]);
+  assert.deepEqual(proposal.steps[0]?.targetIds, ["design-report"]);
+});
+
 test("deterministic response plan owns every canonical conversation delivery target", async () => {
   const runId = "run-deterministic-response-target";
   const targetId = "vertical-privilege-escalation-explanation";
@@ -195,6 +278,105 @@ test("deterministic response plan owns every canonical conversation delivery tar
     canonicalState,
   });
   assert.deepEqual(admitted.steps[0]?.executionBinding.targetIds, [targetId]);
+});
+
+test("Admission scopes artifact evidence to the leaf that owns the workspace target", () => {
+  const runId = "run-mixed-delivery-targets";
+  const tools = [{ name: "computer_write_file", description: "Write a workspace artifact." }];
+  const canonicalState = createCanonicalRunState({
+    runId,
+    userInput: "Create the requested DDM artifacts and summarize the execution evidence in chat.",
+    understanding: understandTask({
+      objective: "Create the requested DDM artifacts and summarize the execution evidence in chat.",
+      toolNames: tools.map((tool) => tool.name),
+      resolvedTaskIntent: {
+        schema: "agentloop.conversationTaskIntent/v1",
+        operation: "composite",
+        requiresExecution: true,
+        deliverables: [
+          {
+            targetId: "ddm-artifact",
+            purpose: "Deliver the requested DDM workspace artifact.",
+            expectedArtifactCount: 1,
+            action: "create",
+            kind: "document",
+            format: "markdown",
+            surface: "workspace_artifact",
+          },
+          {
+            targetId: "execution-evidence-summary",
+            purpose: "Summarize the execution evidence in the conversation.",
+            expectedArtifactCount: 1,
+            action: "none",
+            kind: "none",
+            surface: "conversation",
+          },
+        ],
+      },
+    }),
+    now: 1,
+  });
+
+  const admitted = admitPlan({
+    runId,
+    canonicalState,
+    availableSkills: [],
+    availableToolNames: new Set(tools.map((tool) => tool.name)),
+    availableTools: tools,
+    proposal: {
+      schema: "agentloop.outcomePlan/v2",
+      goal: "Create the DDM artifact and summarize evidence.",
+      shape: "fact_then_produce",
+      selectedSkillRoles: [],
+      selectedSkillIds: [],
+      steps: [
+        {
+          id: "produce-ddm-artifact",
+          objective: "Create the requested DDM artifact in the workspace.",
+          dependencies: [],
+          role: "produce",
+          skillIds: [],
+          requiredCapabilities: ["workspace_artifact_write"],
+          targetIds: ["ddm-artifact"],
+          successCriteria: [{ id: "artifact_non_empty", description: "The DDM artifact is non-empty.", source: "planner" }],
+          evidenceContract: {
+            requiredKinds: ["artifact_path", "artifact_non_empty"],
+            caveatPolicy: "mark_unverified_facts",
+          },
+        },
+        {
+          id: "final-evidence-summary",
+          objective: "Summarize the execution evidence in the conversation.",
+          dependencies: ["produce-ddm-artifact"],
+          role: "deliver",
+          skillIds: [],
+          requiredCapabilities: ["conversation_delivery"],
+          targetIds: ["execution-evidence-summary"],
+          successCriteria: [{ id: "conversation_delivery", description: "The evidence summary is delivered in chat.", source: "planner" }],
+          evidenceContract: {
+            requiredKinds: ["delivery_receipt"],
+            caveatPolicy: "none",
+          },
+        },
+      ],
+    },
+  });
+
+  const artifactLeaf = admitted.steps.find((step) => step.id === "produce-ddm-artifact");
+  const summaryLeaf = admitted.steps.find((step) => step.id === "final-evidence-summary");
+
+  assert.deepEqual(artifactLeaf?.executionBinding.targetIds, ["ddm-artifact"]);
+  assert.deepEqual(summaryLeaf?.executionBinding.targetIds, ["execution-evidence-summary"]);
+  assert.equal(artifactLeaf?.executionBinding.requiredCapabilities.includes("workspace_artifact_write"), true);
+  assert.equal(artifactLeaf?.evidenceContract?.requiredKinds.includes("artifact_path"), true);
+  assert.equal(artifactLeaf?.evidenceContract?.requiredKinds.includes("artifact_non_empty"), true);
+  assert.equal(summaryLeaf?.executionBinding.requiredCapabilities.includes("workspace_artifact_write"), false);
+  assert.equal(summaryLeaf?.executionBinding.requiredCapabilities.includes("artifact_acceptance"), false);
+  assert.equal((summaryLeaf?.evidenceContract?.requiredKinds ?? []).some((kind) => kind.startsWith("artifact_") || kind === "format_matches_request"), false);
+  assert.deepEqual(summaryLeaf?.successCriteria.map((criterion) => criterion.id), [
+    "conversation_delivery",
+    "delivery_target:execution-evidence-summary",
+  ]);
 });
 
 test("ModelPlanner honors the configured contract-repair turn limit while preserving the default", async () => {

@@ -524,6 +524,73 @@ test("conversation resolver gives field-specific repair feedback for a missing a
   }
 });
 
+test("conversation resolver gives field-specific repair feedback for an invalid evidence strategy", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new InvalidEvidenceStrategyResolverModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => { throw new AppError("PLANNING_ERROR", "stop after repaired resolver", 422); },
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "生成一个 PDF 文件"),
+      /stop after repaired resolver/,
+    );
+
+    assert.equal(model.resolverAttempts, 2);
+    assert.match(
+      model.repairPrompts[0] ?? "",
+      /evidenceStrategy must be one of none, lookup_lite, source_grounded, strict_user_source, or bound_visible_sources/,
+    );
+  } finally {
+    await database.close();
+  }
+});
+
+test("a new-goal resolver exposes only Runtime-issued candidates and repairs invented prior selectors", async () => {
+  const visible = await fs.mkdtemp(join(tmpdir(), "agentloop-new-goal-candidate-schema-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const model = new InventedNewGoalCandidateResolverModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => model,
+      plannerFactory: () => ({
+        plan: async () => { throw new AppError("PLANNING_ERROR", "stop after candidate-safe resolver", 422); },
+      }),
+    });
+
+    await assert.rejects(
+      () => runs.executeConversation(owner.user.id, "根据当前材料生成一个众筹介绍 PPTX", {
+        allowDangerousTools: true,
+        visibleDirectories: [visible],
+      }),
+      /stop after candidate-safe resolver/,
+    );
+
+    assert.equal(model.resolverAttempts, 2);
+    assert.equal(model.firstSchemaHadTargetGoalCandidateId, false);
+    assert.equal(model.firstSchemaHadTargetArtifact, false);
+    assert.deepEqual(model.firstRelationEnum, ["new_goal"]);
+    assert.deepEqual(model.firstVisibleDirectoryIdEnum, ["visible_dir_1"]);
+    assert.match(model.firstRuntimeContext, /"priorGoalCandidates":\[\]/);
+    assert.match(model.firstRuntimeContext, /"reusableArtifacts":\[\]/);
+    assert.match(model.firstRuntimeContext, /"reusableResultCandidates":\[\]/);
+    assert.match(model.repairPrompts[0] ?? "", /relation=new_goal forbids prior-work selector field\(s\): targetGoalCandidateId, targetArtifact/);
+  } finally {
+    await database.close();
+    await fs.rm(visible, { recursive: true, force: true });
+  }
+});
+
 test("a prior Result continuation does not turn historical ToolSource provenance into a new acquisition requirement", async () => {
   const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-prior-result-tool-source-"));
   const database = new AppDatabase(":memory:");
@@ -850,7 +917,7 @@ test("Generic Run execution does not opt into conversation intent classification
   }
 });
 
-test("a resource-free executable conversation turn still uses the canonical Resolver contract", async () => {
+test("a resource-free artifact conversation turn fails closed after using the canonical Resolver contract", async () => {
   const database = new AppDatabase(":memory:");
   try {
     const owner = testOwner();
@@ -864,7 +931,7 @@ test("a resource-free executable conversation turn still uses the canonical Reso
     });
 
     const run = await runs.executeConversation(owner.user.id, "请生成一个 HTML 文件");
-    assert.equal(run.status, "completed");
+    assert.equal(run.status, "failed");
     assert.equal(model.intentCalls, 1);
     const events = await runs.events(owner.user.id, run.id);
     assert.deepEqual(events.find((event) => event.type === "conversation.intent.classified")?.data, { kind: "execute" });
@@ -1606,9 +1673,133 @@ class MissingExpectedArtifactCountResolverModel implements ModelAdapter {
   }
 }
 
+class InvalidEvidenceStrategyResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  resolverAttempts = 0;
+  readonly repairPrompts: string[] = [];
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) {
+      return { content: "unused", finishReason: "stop", toolCalls: [] };
+    }
+    this.resolverAttempts += 1;
+    if (this.resolverAttempts > 1) this.repairPrompts.push(request.systemPrompt);
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: `invalid-evidence-strategy-${this.resolverAttempts}`,
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "new_goal",
+          inputMode: "none",
+          effectiveGoal: "生成一个 PDF 文件。",
+          taskIntent: {
+            schema: "agentloop.conversationTaskIntent/v1",
+            operation: "create_artifact",
+            requiresExecution: true,
+            deliverables: [{
+              targetId: "requested-pdf",
+              purpose: "生成用户请求的 PDF 文件。",
+              expectedArtifactCount: 1,
+              action: "create",
+              kind: "document",
+              format: "pdf",
+              surface: "workspace_artifact",
+            }],
+          },
+          evidenceStrategy: this.resolverAttempts === 1 ? "unsupported" : "none",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: [],
+        },
+      }],
+    };
+  }
+}
+
+class InventedNewGoalCandidateResolverModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  resolverAttempts = 0;
+  readonly repairPrompts: string[] = [];
+  firstSchemaHadTargetGoalCandidateId = false;
+  firstSchemaHadTargetArtifact = false;
+  firstRelationEnum: readonly unknown[] = [];
+  firstVisibleDirectoryIdEnum: readonly unknown[] = [];
+  firstRuntimeContext = "";
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (!request.runId.startsWith("conversation-turn:")) {
+      return { content: "unused", finishReason: "stop", toolCalls: [] };
+    }
+    this.resolverAttempts += 1;
+    if (this.resolverAttempts === 1) {
+      const schema = request.tools[0]?.inputSchema as { readonly properties?: Readonly<Record<string, unknown>> };
+      const properties = schema.properties ?? {};
+      this.firstSchemaHadTargetGoalCandidateId = properties.targetGoalCandidateId !== undefined;
+      this.firstSchemaHadTargetArtifact = properties.targetArtifact !== undefined;
+      this.firstRelationEnum = (properties.relation as { readonly enum?: readonly unknown[] } | undefined)?.enum ?? [];
+      const sourceBinding = properties.sourceBinding as { readonly properties?: Readonly<Record<string, unknown>> } | undefined;
+      const visibleDirectoryIds = sourceBinding?.properties?.visibleDirectoryIds as { readonly items?: { readonly enum?: readonly unknown[] } } | undefined;
+      this.firstVisibleDirectoryIdEnum = visibleDirectoryIds?.items?.enum ?? [];
+      this.firstRuntimeContext = request.runtimeContext?.content ?? "";
+    } else {
+      this.repairPrompts.push(request.systemPrompt);
+    }
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: `invented-new-goal-candidate-${this.resolverAttempts}`,
+        name: "resolve_conversation_turn",
+        arguments: {
+          mode: "execute",
+          relation: "new_goal",
+          inputMode: "none",
+          ...(this.resolverAttempts === 1
+            ? {
+                targetGoalCandidateId: "goal_candidate_1",
+                targetArtifact: { path: "/workspace/game-crowdfunding.pptx" },
+              }
+            : {}),
+          effectiveGoal: "根据当前材料生成一个用于众筹介绍的 PPTX。",
+          taskIntent: {
+            schema: "agentloop.conversationTaskIntent/v1",
+            operation: "create_artifact",
+            requiresExecution: true,
+            deliverables: [{
+              targetId: "crowdfunding-presentation",
+              purpose: "交付用于游戏众筹介绍的演示文稿。",
+              expectedArtifactCount: 1,
+              action: "create",
+              kind: "presentation",
+              format: "pptx",
+              surface: "workspace_artifact",
+            }],
+          },
+          evidenceStrategy: "none",
+          sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+          userConstraints: ["用于游戏众筹介绍"],
+        },
+      }],
+    };
+  }
+}
+
 class PriorArtifactLineageDriftModel extends ConversationWriteModel {
   override async complete(request: ModelInvocation): Promise<ModelResponse> {
     if (!request.runId.startsWith("conversation-turn:")) return await super.complete(request);
+    const schema = request.tools[0]?.inputSchema as { readonly properties?: Readonly<Record<string, unknown>> };
+    const properties = schema.properties ?? {};
+    assert.deepEqual(
+      (properties.targetGoalCandidateId as { readonly enum?: readonly unknown[] } | undefined)?.enum,
+      ["goal_candidate_1"],
+    );
+    const targetArtifact = properties.targetArtifact as { readonly properties?: Readonly<Record<string, unknown>> } | undefined;
+    assert.deepEqual(
+      (targetArtifact?.properties?.path as { readonly enum?: readonly unknown[] } | undefined)?.enum,
+      ["merged_output.pdf"],
+    );
     return {
       content: "",
       finishReason: "tool_calls",

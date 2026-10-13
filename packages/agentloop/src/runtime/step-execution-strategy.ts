@@ -1,4 +1,5 @@
 import type { AgentLoopToolEvidence, ModelToolDefinition } from "./contracts.ts";
+import type { CurrentDecisionViewProjection } from "./current-decision-view.ts";
 import type { StepSemanticFrame } from "./step-semantic-frame.ts";
 import type { RuntimeStepArtifactRef, RuntimeStepEvidenceState } from "./tool-progress-policy.ts";
 
@@ -10,6 +11,8 @@ export interface StepExecutionInput {
   readonly availableTools: readonly ModelToolDefinition[];
   readonly priorToolEvidence: readonly AgentLoopToolEvidence[];
   readonly stepEvidenceState?: RuntimeStepEvidenceState;
+  /** Single Runtime-derived current-state projection for model visibility. */
+  readonly currentDecisionView?: CurrentDecisionViewProjection;
   /** Context-only shared facts/judgments. Never used by tool selection or completion gates. */
   readonly workProductContext?: Readonly<Record<string, unknown>>;
   readonly stepSemanticFrame?: Pick<StepSemanticFrame, "completionBoundary" | "evidenceMode" | "phaseRole">;
@@ -74,6 +77,7 @@ export interface LoopStepFrame {
   };
   readonly currentEvidenceState?: CompactLoopEvidenceState;
   readonly workProductContext?: Readonly<Record<string, unknown>>;
+  readonly currentDecisionView?: CurrentDecisionViewProjection;
   readonly currentStage: {
     readonly objective: string;
     readonly toolUsePolicy: string;
@@ -249,14 +253,20 @@ export class DefaultLoopStepPolicy implements LoopStepPolicy {
         unknownOperationCount: operationStatuses.filter((status) => status === "unknown").length,
         recentToolNames: [...new Set(input.priorToolEvidence.slice(-6).map((item) => item.toolName))],
       },
-      ...(input.workProductContext === undefined ? {} : { workProductContext: input.workProductContext }),
-      currentEvidenceState: input.workProductContext !== undefined || input.stepEvidenceState === undefined
-        ? undefined
-        : compactLoopEvidenceState(input.stepEvidenceState),
+      ...(input.currentDecisionView === undefined
+        ? {
+          ...(input.workProductContext === undefined ? {} : { workProductContext: input.workProductContext }),
+          ...(input.workProductContext !== undefined || input.stepEvidenceState === undefined
+            ? {}
+            : { currentEvidenceState: compactLoopEvidenceState(input.stepEvidenceState) }),
+        }
+        : { currentDecisionView: input.currentDecisionView }),
       currentStage: {
         objective: loopCurrentStageObjective(mode, input.priorToolEvidence.length),
         toolUsePolicy: input.convergenceOnly
           ? "No tools are available in this stage; return a completion candidate from existing evidence."
+          : input.currentDecisionView !== undefined
+            ? input.currentDecisionView.instruction
           : input.workProductContext !== undefined
             ? "Use workProductContext observations and explicitly attributed judgments to choose a useful next action; it neither certifies delivery nor imposes a unique next tool."
           : input.stepEvidenceState !== undefined

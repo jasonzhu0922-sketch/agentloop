@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelAdapter } from "../src/runtime/contracts.ts";
-import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, recoveryTargetBinding, RunService } from "../src/runtime/run-service.ts";
+import { DEFAULT_MAX_STEPS, DEFAULT_RUNNER_SYSTEM_PROMPT, MAX_SUPPORTED_STEP_TURNS, recoveryTargetBinding, repairLeafForFailedBoundary, RunService } from "../src/runtime/run-service.ts";
 import { SkillService } from "../src/skills/skill-service.ts";
 import { AppDatabase } from "../src/storage/database.ts";
 import {
@@ -20,6 +20,46 @@ test("recovery plan projection retains canonical delivery target ownership", () 
   assert.deepEqual(recoveryTargetBinding(binding), {
     targetIds: ["receipt-standard-excel"],
   });
+});
+
+test("failed-boundary repair leaf preserves the original artifact and source contract", () => {
+  const target = {
+    id: "produce-presentation",
+    kind: "leaf",
+    objective: "Create, validate, and deliver the requested crowdfunding PPTX.",
+    dependencies: ["research"],
+    role: "deliver",
+    refinementState: "not_refinable",
+    requiredFacts: [{ id: "brief", description: "Use the approved brief.", evidenceKinds: ["source_summary"] }],
+    skillIds: ["pptx"],
+    requiredCapabilities: ["computer_run_command"],
+    executionBinding: {
+      targetIds: ["crowdfunding-pptx"],
+      requiredUploadedSourceIds: ["source-brief"],
+      requiredToolSourceIds: ["tool-source-brief"],
+      requiredVisibleDirectoryIds: ["visible-brand-assets"],
+    },
+    evidenceContract: { requiredKinds: ["artifact_path", "artifact_acceptance", "delivery_receipt"], caveatPolicy: "none" },
+    successCriteria: [{ id: "presentation-ready", description: "A validated presentation is delivered.", source: "task" }],
+  } as never;
+
+  const repair = repairLeafForFailedBoundary(target, {
+    stepId: "produce-presentation",
+    missingEvidenceKinds: ["artifact_path", "artifact_acceptance", "delivery_receipt"],
+    violatedSkillRequirements: [],
+    reusableEvidenceRefs: ["tool-call-1"],
+    suggestedRepairShape: "repair_leaf",
+  }, 4);
+
+  assert.match(repair.objective, /Create, validate, and deliver the requested crowdfunding PPTX/);
+  assert.match(repair.objective, /Produce, verify, and deliver the original admissible output/);
+  assert.deepEqual(repair.targetIds, ["crowdfunding-pptx"]);
+  assert.deepEqual(repair.sourceConstraint, {
+    requiredUploadedSourceIds: ["source-brief"],
+    requiredToolSourceIds: ["tool-source-brief"],
+    requiredVisibleDirectoryIds: ["visible-brand-assets"],
+  });
+  assert.deepEqual(repair.successCriteria, target.successCriteria);
 });
 
 test("RunService makes Simplified Chinese the default user-facing execution language", async () => {

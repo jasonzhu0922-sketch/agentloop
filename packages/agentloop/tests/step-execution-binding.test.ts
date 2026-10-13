@@ -141,6 +141,54 @@ test("Admission derives a user-required ToolSource only for leaves that demand i
   assert.deepEqual(report?.executionBinding.resolvedToolNames, ["computer_write_file"]);
 });
 
+test("Admission transports a dependency-owned source receipt instead of requiring a second leaf to recreate it", () => {
+  const runId = "run-dependency-source-receipt";
+  const understanding = understandTask({ objective: "Inspect the source facts and prepare the next analysis stage." });
+  const plan = admitPlan({
+    runId,
+    proposal: {
+      goal: "Inspect the source facts and prepare the next analysis stage.",
+      selectedSkillIds: [],
+      steps: [
+        {
+          id: "source-index",
+          objective: "Acquire the bounded source summary.",
+          dependencies: [],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["data_asset.ods_read"],
+          evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+          successCriteria: [{ id: "source_summary", description: "Source summary is committed.", source: "planner" }],
+        },
+        {
+          id: "extract-from-index",
+          objective: "Use the committed index as the evidence basis for extraction.",
+          dependencies: ["source-index"],
+          role: "fact_acquisition",
+          skillIds: [],
+          requiredCapabilities: ["data_asset.ods_read"],
+          evidenceContract: { requiredKinds: ["source_summary", "explicit_caveats"], caveatPolicy: "mark_unverified_facts" },
+          successCriteria: [
+            { id: "source_summary", description: "Source summary is available through the dependency.", source: "planner" },
+            { id: "explicit_caveats", description: "Any remaining uncertainty is stated.", source: "planner", blocking: false },
+          ],
+        },
+      ],
+    },
+    availableSkills: [],
+    availableToolNames: new Set(tools.map((tool) => tool.name)),
+    availableTools: tools,
+    availableCapabilities: planningCapabilitiesFromTools(tools),
+    canonicalState: createCanonicalRunState({ runId, userInput: "Inspect the source facts and prepare the next analysis stage.", understanding, now: 1 }),
+  });
+
+  const downstream = plan.steps.find((step) => step.id === "extract-from-index");
+  assert.deepEqual(downstream?.evidenceContract?.requiredKinds, ["explicit_caveats"]);
+  assert.equal(downstream?.successCriteria.some((criterion) => criterion.id === "source_summary"), false);
+  assert.equal(downstream?.executionBinding.evidenceProducers.some((producer) => producer.evidenceKind === "source_summary"), false);
+  assert.equal(downstream?.executionBinding.evidenceProducers.some((producer) => producer.evidenceKind === "explicit_caveats"), true);
+});
+
 test("Admission rejects an incomplete structured artifact binding before execution and materializes the frozen purpose", () => {
   const taskSemantics = understandTask({
     objective: "Produce the ODS analysis and the quality-control report.",
@@ -188,8 +236,8 @@ test("Admission rejects an incomplete structured artifact binding before executi
     canonicalState: createCanonicalRunState({ runId: "run-structured-artifact-binding-complete", userInput: "Produce the requested ODS reports.", understanding: taskSemantics, now: 1 }),
   });
   assert.deepEqual(plan.steps[0]?.executionBinding.artifactTargets, [
-    { id: "ods-analysis", purpose: "ODS analysis report", kind: "document", format: "markdown", terminalRequired: true },
-    { id: "ods-quality", purpose: "ODS quality-control report", kind: "document", format: "markdown", terminalRequired: true },
+    { id: "ods-analysis", deliveryTargetId: "ods-analysis", purpose: "ODS analysis report", kind: "document", format: "markdown", terminalRequired: true },
+    { id: "ods-quality", deliveryTargetId: "ods-quality", purpose: "ODS quality-control report", kind: "document", format: "markdown", terminalRequired: true },
   ]);
 
   assert.throws(() => admitPlan({

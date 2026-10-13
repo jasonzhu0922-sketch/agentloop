@@ -382,6 +382,24 @@ describe("live projection", () => {
     expect(feed[0]?.detail).toContain("2 份结构化结果");
   });
 
+  it("shows convergence reopening as continued execution rather than candidate failure", () => {
+    const event: RunEvent = {
+      seq: 1,
+      type: "loop.convergence_reopened",
+      createdAt: 0,
+      data: {
+        step: 7,
+        reason: "authorized_tool_requested_during_completion_preparation",
+        toolNames: ["computer_run_command"],
+      },
+    };
+
+    expect(eventLabel(event)).toContain("继续执行");
+    expect(translateRunEvent(event).title).toBe("继续执行当前步骤");
+    expect(translateRunEvent(event).tone).toBe("warn");
+    expect(liveEventFeed([event])[0]?.title).toBe("继续执行当前步骤");
+  });
+
   it("projects run-limit failures into a friendly stopped summary", () => {
     const events: RunEvent[] = [
       {

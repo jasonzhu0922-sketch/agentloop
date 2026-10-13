@@ -273,6 +273,8 @@ export interface ConvertArtifactInput {
   readonly targetFormat: TargetFormat;
   readonly overwrite: boolean;
   readonly timeoutMs: number;
+  /** Selects one Runtime-admitted output target; it never defines a target. */
+  readonly deliveryTargetId?: string;
 }
 
 export function createArtifactConverterTools(executor: ComputerExecutor): RuntimeTool<unknown>[] {
@@ -288,6 +290,7 @@ export function createArtifactConverterTools(executor: ComputerExecutor): Runtim
       "PDF output uses a portable baseline typography profile with an embedded tool-owned CJK font and deterministic page/table CSS; it does not depend on Host font discovery.",
       "PDF output is rendered through an HTML pipeline when possible, avoiding direct LaTeX-dependent Markdown-to-PDF conversion.",
       "The result includes schema agentloop.artifactConversion/v1 and an embedded artifactReceipt for the converted output. After conversion, call verify_artifact_acceptance for the requested target format.",
+      "When this conversion is the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId. Omit it for intermediate conversions.",
     ].join(" "),
     inputSchema: objectSchema(["inputPath", "outputPath", "targetFormat"], {
       inputPath: { type: "string", maxLength: 4_000 },
@@ -296,6 +299,7 @@ export function createArtifactConverterTools(executor: ComputerExecutor): Runtim
       targetFormat: { type: "string", enum: TARGET_FORMATS },
       overwrite: { type: "boolean" },
       timeoutMs: { type: "integer", minimum: MIN_CONVERSION_TIMEOUT_MS, maximum: MAX_CONVERSION_TIMEOUT_MS },
+      deliveryTargetId: { type: "string", minLength: 1, maxLength: 128 },
     }),
     executionMode: "exclusive",
     replaySafe: false,
@@ -331,6 +335,7 @@ export function parseConvertArtifactInput(value: unknown): ConvertArtifactInput 
     targetFormat,
     overwrite: record.overwrite === true,
     timeoutMs: timeoutMs as number,
+    ...(record.deliveryTargetId === undefined ? {} : { deliveryTargetId: requireString(record.deliveryTargetId, "deliveryTargetId", { max: 128 }) }),
   };
 }
 
@@ -410,6 +415,7 @@ async function executeArtifactConversion(
   });
   return {
     schema: "agentloop.artifactConversion/v1",
+    ...(input.deliveryTargetId === undefined ? {} : { deliveryTargetId: input.deliveryTargetId }),
     source: {
       path: source.path,
       format: sourceFormat,

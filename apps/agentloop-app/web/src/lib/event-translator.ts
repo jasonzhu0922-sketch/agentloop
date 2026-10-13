@@ -167,6 +167,17 @@ export function translateRunEvent(
   if (event.type === "candidate.rejected") {
     return { ...base, tone: "bad", title: "候选结果被驳回", detail: clip(d.feedback ?? d.output, 140) };
   }
+  if (event.type === "loop.convergence_reopened") {
+    const names = Array.isArray(d.toolNames) ? d.toolNames.filter((name) => typeof name === "string" && name.trim()) : [];
+    return {
+      ...base,
+      tone: "warn",
+      title: "继续执行当前步骤",
+      detail: names.length > 0
+        ? `生成最终结果时发现仍需工具处理：${names.join("、")}`
+        : "生成最终结果时发现仍需工具处理，已恢复完整执行能力。",
+    };
+  }
   if (event.type === "candidate.structured_tool_synthesis_required") {
     return {
       ...base,

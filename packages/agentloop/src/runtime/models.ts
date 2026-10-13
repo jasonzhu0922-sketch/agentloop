@@ -183,6 +183,83 @@ const MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024;
 const MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES = 2 * 1024 * 1024;
 const NEVER_ABORT_SIGNAL = new AbortController().signal;
 
+function createStreamReceiptCollector(input: {
+  readonly response: Response;
+  readonly runId: string;
+  readonly request: ModelRequestLogContext;
+  readonly diagnostics: StreamFailureDiagnostics;
+  readonly writer?: ModelStreamRawCaptureWriter;
+}): Readonly<{
+  recordChunk(value: Uint8Array): void;
+  build(anomalyReasons: readonly string[], forceTruncated?: boolean): Promise<ModelStreamReceipt>;
+}> {
+  const rawHash = createHash("sha256");
+  const rawCaptureChunks: Buffer[] = [];
+  let rawBytes = 0;
+  let capturedBytes = 0;
+  return {
+    recordChunk(value) {
+      const rawChunk = Buffer.from(value);
+      rawHash.update(rawChunk);
+      rawBytes += rawChunk.length;
+      if (capturedBytes >= MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES) return;
+      const retained = rawChunk.subarray(0, MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES - capturedBytes);
+      rawCaptureChunks.push(Buffer.from(retained));
+      capturedBytes += retained.length;
+    },
+    async build(anomalyReasons, forceTruncated = false) {
+      const contentType = input.response.headers.get("content-type") ?? undefined;
+      const providerRequestId = input.response.headers.get("x-request-id") ?? undefined;
+      const rawSha256 = rawHash.digest("hex");
+      let rawCapture: ModelStreamReceipt["rawCapture"];
+      let rawCaptureError: string | undefined;
+      if (anomalyReasons.length > 0 && input.writer !== undefined) {
+        try {
+          rawCapture = await input.writer({
+            schema: "agentloop.modelStreamRawCapture/v1",
+            runId: input.runId,
+            request: input.request,
+            response: {
+              status: input.response.status,
+              ...(contentType === undefined ? {} : { contentType }),
+              ...(providerRequestId === undefined ? {} : { providerRequestId }),
+            },
+            anomalyReasons,
+            rawSse: Buffer.concat(rawCaptureChunks),
+            rawBytes,
+            rawSha256,
+            truncated: forceTruncated || capturedBytes < rawBytes,
+          });
+        } catch (error) {
+          rawCaptureError = safeErrorMessage(error) ?? "raw stream capture failed";
+        }
+      }
+      return {
+        schema: "agentloop.modelStreamReceipt/v1",
+        transport: "sse",
+        httpStatus: input.response.status,
+        ...(contentType === undefined ? {} : { contentType }),
+        ...(providerRequestId === undefined ? {} : { providerRequestId }),
+        rawBytes,
+        rawSha256,
+        readChunkCount: input.diagnostics.readChunkCount,
+        sseEventCount: input.diagnostics.sseEventCount,
+        jsonEventCount: input.diagnostics.jsonEventCount,
+        nonJsonEventCount: input.diagnostics.nonJsonEventCount,
+        doneEventCount: input.diagnostics.doneEventCount,
+        unrecognizedJsonEventCount: input.diagnostics.unrecognizedJsonEventCount,
+        unterminatedFinalEventBytes: input.diagnostics.unterminatedFinalEventBytes,
+        finishReasonObserved: input.diagnostics.finishReasonObserved,
+        sinkEmissionObserved: input.diagnostics.hadSinkEmission,
+        observedDeltaFields: [...input.diagnostics.observedDeltaFields].sort(),
+        anomalyReasons,
+        ...(rawCapture === undefined ? {} : { rawCapture }),
+        ...(rawCaptureError === undefined ? {} : { rawCaptureError }),
+      };
+    },
+  };
+}
+
 interface ModelResponseBudget {
   readonly maxOutputTokens: number;
   readonly maxOutputBytes: number;
@@ -586,63 +663,13 @@ export class OpenAICompatibleModel implements ModelAdapter {
       finishReasonObserved: false,
       observedDeltaFields: new Set<string>(),
     };
-    const rawHash = createHash("sha256");
-    const rawCaptureChunks: Buffer[] = [];
-    let rawBytes = 0;
-    let capturedBytes = 0;
-    const buildStreamReceipt = async (
-      anomalyReasons: readonly string[],
-      rawSha256: string,
-      forceTruncated = false,
-    ): Promise<ModelStreamReceipt> => {
-      const contentType = response.headers.get("content-type") ?? undefined;
-      const providerRequestId = response.headers.get("x-request-id") ?? undefined;
-      let rawCapture: ModelStreamReceipt["rawCapture"];
-      let rawCaptureError: string | undefined;
-      if (anomalyReasons.length > 0 && this.streamRawCaptureWriter !== undefined) {
-        try {
-          rawCapture = await this.streamRawCaptureWriter({
-            schema: "agentloop.modelStreamRawCapture/v1",
-            runId: invocation.runId,
-            request,
-            response: {
-              status: response.status,
-              ...(contentType === undefined ? {} : { contentType }),
-              ...(providerRequestId === undefined ? {} : { providerRequestId }),
-            },
-            anomalyReasons,
-            rawSse: Buffer.concat(rawCaptureChunks),
-            rawBytes,
-            rawSha256,
-            truncated: forceTruncated || capturedBytes < rawBytes,
-          });
-        } catch (error) {
-          rawCaptureError = safeErrorMessage(error) ?? "raw stream capture failed";
-        }
-      }
-      return {
-        schema: "agentloop.modelStreamReceipt/v1",
-        transport: "sse",
-        httpStatus: response.status,
-        ...(contentType === undefined ? {} : { contentType }),
-        ...(providerRequestId === undefined ? {} : { providerRequestId }),
-        rawBytes,
-        rawSha256,
-        readChunkCount: diagnostics.readChunkCount,
-        sseEventCount: diagnostics.sseEventCount,
-        jsonEventCount: diagnostics.jsonEventCount,
-        nonJsonEventCount: diagnostics.nonJsonEventCount,
-        doneEventCount: diagnostics.doneEventCount,
-        unrecognizedJsonEventCount: diagnostics.unrecognizedJsonEventCount,
-        unterminatedFinalEventBytes: diagnostics.unterminatedFinalEventBytes,
-        finishReasonObserved: diagnostics.finishReasonObserved,
-        sinkEmissionObserved: diagnostics.hadSinkEmission,
-        observedDeltaFields: [...diagnostics.observedDeltaFields].sort(),
-        anomalyReasons,
-        ...(rawCapture === undefined ? {} : { rawCapture }),
-        ...(rawCaptureError === undefined ? {} : { rawCaptureError }),
-      };
-    };
+    const receiptCollector = createStreamReceiptCollector({
+      response,
+      runId: invocation.runId,
+      request,
+      diagnostics,
+      writer: this.streamRawCaptureWriter,
+    });
     const emit = async (event: Parameters<ModelStreamSink>[0]): Promise<void> => {
       diagnostics.hadSinkEmission = true;
       await sink(event);
@@ -752,14 +779,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
         const { done, value } = result;
         if (done) break;
         diagnostics.readChunkCount += 1;
-        const rawChunk = Buffer.from(value);
-        rawHash.update(rawChunk);
-        rawBytes += rawChunk.length;
-        if (capturedBytes < MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES) {
-          const retained = rawChunk.subarray(0, MAX_ANOMALOUS_RAW_SSE_CAPTURE_BYTES - capturedBytes);
-          rawCaptureChunks.push(Buffer.from(retained));
-          capturedBytes += retained.length;
-        }
+        receiptCollector.recordChunk(value);
         recordActivity();
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.replaceAll("\r\n", "\n").split("\n\n");
@@ -792,7 +812,7 @@ export class OpenAICompatibleModel implements ModelAdapter {
     }
     if (consumptionFailed) {
       const anomalyReasons = streamFailureAnomalyReasons(consumptionError, diagnostics);
-      const streamReceipt = await buildStreamReceipt(anomalyReasons, rawHash.digest("hex"), true);
+      const streamReceipt = await receiptCollector.build(anomalyReasons, true);
       diagnostics.streamReceipt = streamReceipt;
       if (consumptionError instanceof AppError) {
         throw new AppError(consumptionError.code, consumptionError.message, consumptionError.status, {
@@ -840,9 +860,8 @@ export class OpenAICompatibleModel implements ModelAdapter {
             },
           }),
     };
-    const rawSha256 = rawHash.digest("hex");
     const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
-    const streamReceipt = await buildStreamReceipt(anomalyReasons, rawSha256);
+    const streamReceipt = await receiptCollector.build(anomalyReasons);
     const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
     budget.assertResponse(result);
     return result;
@@ -876,6 +895,7 @@ export class ResponsesModel implements ModelAdapter {
   private readonly reasoningContinuationStore?: ResponsesReasoningContinuationStore;
   private readonly reasoningContinuationScope: string;
   private readonly onRetry?: ModelRetryReporter;
+  private readonly streamRawCaptureWriter?: ModelStreamRawCaptureWriter;
 
   constructor(options: OpenAICompatibleModelOptions) {
     const base = new URL(options.baseUrl.endsWith("/") ? options.baseUrl : `${options.baseUrl}/`);
@@ -916,6 +936,7 @@ export class ResponsesModel implements ModelAdapter {
       throw new TypeError("Responses encrypted reasoning requires an adapter-owned continuation store");
     }
     this.onRetry = options.onRetry;
+    this.streamRawCaptureWriter = options.streamRawCaptureWriter;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) {
       throw new TypeError("LLM max attempts must be an integer between 1 and 5");
     }
@@ -1138,31 +1159,59 @@ export class ResponsesModel implements ModelAdapter {
       finishReasonObserved: false,
       observedDeltaFields: new Set<string>(),
     };
+    const receiptCollector = createStreamReceiptCollector({
+      response,
+      runId,
+      request,
+      diagnostics,
+      writer: this.streamRawCaptureWriter,
+    });
+    const emit = async (event: Parameters<ModelStreamSink>[0]): Promise<void> => {
+      diagnostics.hadSinkEmission = true;
+      await sink(event);
+    };
 
     const handleData = async (data: string): Promise<void> => {
       diagnostics.eventsSeen += 1;
       diagnostics.lastEvent = summarizeStreamEvent(data);
+      if (data.trim() === "[DONE]") {
+        diagnostics.doneEventCount += 1;
+        return;
+      }
       budget.assertEventBytes(data);
       let chunk: ResponsesStreamChunk;
       try {
         chunk = JSON.parse(data) as ResponsesStreamChunk;
       } catch {
+        diagnostics.nonJsonEventCount += 1;
         return;
       }
+      diagnostics.jsonEventCount += 1;
       assertResponsesPayload(chunk);
+      let recognized = true;
       switch (chunk.type) {
+        case "error":
+          throw responsesProviderErrorEvent(chunk, this.apiKey, request, diagnostics);
+        case "response.created":
+        case "response.in_progress":
+          // Observed Responses lifecycle envelopes carry no consumable model
+          // output; recognizing them prevents normal streams from being
+          // misclassified as anomalous without weakening unknown-event capture.
+          break;
         case "response.reasoning_summary_text.delta":
           if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
+            diagnostics.observedDeltaFields.add("reasoning_content");
             budget.addOutputBytes(chunk.delta, "reasoningContent");
             reasoningContent += chunk.delta;
-            await sink({ type: "reasoning_delta", text: chunk.delta });
+            await emit({ type: "reasoning_delta", text: chunk.delta });
           }
           break;
         case "response.output_text.delta":
           if (typeof chunk.delta === "string" && chunk.delta.length > 0) {
+            diagnostics.observedDeltaFields.add("content");
             budget.addOutputBytes(chunk.delta, "content");
             content += chunk.delta;
-            await sink({ type: "text_delta", text: chunk.delta });
+            await emit({ type: "text_delta", text: chunk.delta });
           }
           break;
         case "response.output_item.added": {
@@ -1183,9 +1232,10 @@ export class ResponsesModel implements ModelAdapter {
           if (chunk.item_id === undefined || typeof chunk.delta !== "string") break;
           const call = functionCalls.get(chunk.item_id);
           if (call === undefined) break;
+          diagnostics.observedDeltaFields.add("tool_calls");
           budget.addOutputBytes(chunk.delta, "toolCall.arguments");
           call.arguments += chunk.delta;
-          await sink({
+          await emit({
             type: "tool_call_delta",
             index: call.index,
             ...(call.callId === undefined ? {} : { id: call.callId }),
@@ -1222,11 +1272,14 @@ export class ResponsesModel implements ModelAdapter {
         case "response.completed":
         case "response.incomplete":
         case "response.failed":
+          diagnostics.finishReasonObserved = true;
           if (chunk.response !== undefined) finalResponse = chunk.response;
           break;
         default:
+          recognized = false;
           break;
       }
+      if (!recognized) diagnostics.unrecognizedJsonEventCount += 1;
     };
 
     const emitReadyIfComplete = async (call: {
@@ -1235,7 +1288,7 @@ export class ResponsesModel implements ModelAdapter {
       if (readyEmitted.has(call.itemId)) return;
       if (call.callId === undefined || call.name === undefined) return;
       readyEmitted.add(call.itemId);
-      await sink({
+      await emit({
         type: "tool_call_ready",
         index: call.index,
         id: call.callId,
@@ -1244,6 +1297,18 @@ export class ResponsesModel implements ModelAdapter {
       });
     };
 
+    const handleEventBlock = async (event: string): Promise<void> => {
+      if (event.trim().length === 0) return;
+      diagnostics.sseEventCount += 1;
+      const dataLines: string[] = [];
+      for (const line of event.split("\n")) {
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      if (dataLines.length > 0) await handleData(dataLines.join("\n"));
+    };
+
+    let consumptionFailed = false;
+    let consumptionError: unknown;
     try {
       for (;;) {
         let result: ReadableStreamReadResult<Uint8Array>;
@@ -1254,30 +1319,59 @@ export class ResponsesModel implements ModelAdapter {
         }
         const { done, value } = result;
         if (done) break;
+        diagnostics.readChunkCount += 1;
+        receiptCollector.recordChunk(value);
         recordActivity();
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.replaceAll("\r\n", "\n").split("\n\n");
         buffer = events.pop() ?? "";
         for (const event of events) {
-          const dataLines: string[] = [];
-          for (const line of event.split("\n")) {
-            if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-          }
-          if (dataLines.length === 0) continue;
           try {
-            await handleData(dataLines.join("\n"));
+            await handleEventBlock(event);
           } catch (error) {
             if (error instanceof AppError) throw error;
             throw new StreamConsumptionError("consume_event", error, diagnostics);
           }
         }
       }
+      buffer += decoder.decode();
+      if (buffer.trim().length > 0) {
+        diagnostics.unterminatedFinalEventBytes = Buffer.byteLength(buffer, "utf8");
+        try {
+          await handleEventBlock(buffer.replaceAll("\r\n", "\n"));
+        } catch (error) {
+          if (error instanceof AppError) throw error;
+          throw new StreamConsumptionError("consume_event", error, diagnostics);
+        }
+      }
+    } catch (error) {
+      consumptionFailed = true;
+      consumptionError = error;
+      await reader.cancel().catch(() => undefined);
     } finally {
       reader.releaseLock();
     }
+    if (consumptionFailed) {
+      const anomalyReasons = streamFailureAnomalyReasons(consumptionError, diagnostics);
+      const streamReceipt = await receiptCollector.build(anomalyReasons, true);
+      diagnostics.streamReceipt = streamReceipt;
+      if (consumptionError instanceof AppError) {
+        throw new AppError(consumptionError.code, consumptionError.message, consumptionError.status, {
+          ...consumptionError.details,
+          streamReceipt,
+        });
+      }
+      throw consumptionError;
+    }
 
     if (finalResponse === undefined) {
-      throw missingResponsesTerminalEvent(request, diagnostics);
+      const missing = missingResponsesTerminalEvent(request, diagnostics);
+      const anomalyReasons = streamFailureAnomalyReasons(missing, diagnostics);
+      const streamReceipt = await receiptCollector.build(anomalyReasons);
+      throw new AppError(missing.code, missing.message, missing.status, {
+        ...missing.details,
+        streamReceipt,
+      });
     }
 
     const final = parseResponsesResponse(finalResponse, content);
@@ -1290,7 +1384,7 @@ export class ResponsesModel implements ModelAdapter {
     const streamedToolCalls = responseStreamToolCalls(functionCalls);
     if (final !== undefined) {
       const finalToolCalls = final.toolCalls.length > 0 ? final.toolCalls : streamedToolCalls;
-      const result: ModelResponse = {
+      const resultWithoutReceipt: ModelResponse = {
         ...final,
         toolCalls: finalToolCalls,
         finishReason: normalizeFinishReason(final.finishReason, finalToolCalls.length),
@@ -1304,11 +1398,14 @@ export class ResponsesModel implements ModelAdapter {
               },
             }),
       };
+      const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
+      const streamReceipt = await receiptCollector.build(anomalyReasons);
+      const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
       budget.assertResponse(result);
       return result;
     }
     const toolCalls = streamedToolCalls;
-    const result: ModelResponse = {
+    const resultWithoutReceipt: ModelResponse = {
       content,
       toolCalls,
       finishReason: normalizeFinishReason(undefined, toolCalls.length),
@@ -1322,6 +1419,9 @@ export class ResponsesModel implements ModelAdapter {
             },
           }),
     };
+    const anomalyReasons = streamAnomalyReasons(resultWithoutReceipt, diagnostics);
+    const streamReceipt = await receiptCollector.build(anomalyReasons);
+    const result: ModelResponse = { ...resultWithoutReceipt, streamReceipt };
     budget.assertResponse(result);
     return result;
   }
@@ -1363,6 +1463,9 @@ function responseStreamToolCalls(
 
 interface ResponsesStreamChunk {
   type?: string;
+  code?: unknown;
+  message?: unknown;
+  error?: unknown;
   delta?: string;
   item_id?: string;
   output_index?: number;
@@ -1375,6 +1478,48 @@ interface ResponsesStreamChunk {
     arguments?: unknown;
   };
   response?: Record<string, unknown>;
+}
+
+function responsesProviderErrorEvent(
+  chunk: ResponsesStreamChunk,
+  apiKey: string,
+  request: ModelRequestLogContext,
+  diagnostics: StreamFailureDiagnostics,
+): AppError {
+  const nested = chunk.error !== null && typeof chunk.error === "object" && !Array.isArray(chunk.error)
+    ? chunk.error as Record<string, unknown>
+    : undefined;
+  const providerErrorType = boundedProviderErrorText(nested?.type, apiKey, 120);
+  const providerErrorCode = boundedProviderErrorText(nested?.code ?? chunk.code, apiKey, 120);
+  const providerErrorMessage = boundedProviderErrorText(
+    nested?.message ?? chunk.message ?? (typeof chunk.error === "string" ? chunk.error : undefined),
+    apiKey,
+    500,
+  );
+  const displayMessage = providerErrorMessage === undefined
+    ? "Responses Provider returned an error event"
+    : `Responses Provider error: ${boundedProviderErrorText(providerErrorMessage, apiKey, 200)}`;
+  return new AppError("MODEL_ERROR", displayMessage, 502, {
+    streamFailureStage: "provider_error_event",
+    streamEventsSeen: diagnostics.eventsSeen,
+    ...(diagnostics.lastEvent === undefined ? {} : { lastStreamEvent: diagnostics.lastEvent }),
+    ...(providerErrorType === undefined ? {} : { providerErrorType }),
+    ...(providerErrorCode === undefined ? {} : { providerErrorCode }),
+    ...(providerErrorMessage === undefined ? {} : { providerErrorMessage }),
+    request,
+  });
+}
+
+function boundedProviderErrorText(value: unknown, apiKey: string, maximum: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let compact = value.replace(/\s+/gu, " ").trim();
+  if (compact.length === 0) return undefined;
+  if (apiKey.length > 0) compact = compact.replaceAll(apiKey, "[REDACTED]");
+  compact = compact
+    .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
+    .replace(/((?:api[_-]?key|access[_-]?token|authorization|credential|secret)\s*[:=]\s*["']?)[^\s,;}"']+/giu, "$1[REDACTED]");
+  if (compact.length <= maximum) return compact;
+  return `${compact.slice(0, Math.max(0, maximum - 3))}...`;
 }
 
 function parseResponsesResponse(payload: unknown, fallbackContent = ""): ModelResponse {
@@ -1793,11 +1938,16 @@ function streamFailureAnomalyReasons(
   error: unknown,
   diagnostics: StreamFailureDiagnostics,
 ): string[] {
-  const reasons = [
-    error instanceof AppError && /protocol|payload/u.test(error.message.toLowerCase())
-      ? "provider_protocol_mismatch"
-      : "stream_consumption_failed",
-  ];
+  const failureStage = error instanceof AppError && typeof error.details?.streamFailureStage === "string"
+    ? error.details.streamFailureStage
+    : undefined;
+  const reasons = [failureStage === "provider_error_event"
+    ? "provider_error_event"
+    : failureStage === "missing_terminal_event"
+      ? "missing_terminal_event"
+      : error instanceof AppError && /protocol|payload/u.test(error.message.toLowerCase())
+        ? "provider_protocol_mismatch"
+        : "stream_consumption_failed"];
   if (diagnostics.nonJsonEventCount > 0) reasons.push("non_json_sse_data");
   if (diagnostics.unrecognizedJsonEventCount > 0) reasons.push("unrecognized_json_event");
   if (diagnostics.unterminatedFinalEventBytes > 0) reasons.push("unterminated_final_sse_event");

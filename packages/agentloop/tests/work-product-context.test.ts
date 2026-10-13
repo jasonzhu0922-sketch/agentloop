@@ -58,9 +58,10 @@ for (const id of ["a", "b"]) test(`stage 3 fixture ${id}: actual model input pre
     evaluateCandidate: async (candidate) => ({ approved: candidate.output === "bounded answer", feedback: "scripted assessment; not a real acceptance claim" }),
     model: { limits: TEST_MODEL_LIMITS, complete: async (request) => {
       const current = frame(request);
-      const state = current.workProductContext;
+      const state = current.currentDecisionView;
       assert.ok(state);
       assert.equal(current.currentEvidenceState, undefined);
+      assert.equal(current.workProductContext, undefined);
       assert.doesNotMatch(request.runtimeContext!.content, /<runtime_step_semantic_state>/);
       assert.ok(JSON.stringify(state).length <= WORK_PRODUCT_CONTEXT_MAX_CHARACTERS);
       modelInputs.push(JSON.stringify(state));
@@ -69,24 +70,24 @@ for (const id of ["a", "b"]) test(`stage 3 fixture ${id}: actual model input pre
         id: data.events[index].evidence.toolCallId, name: data.events[index].evidence.toolName, arguments: { index },
       }] };
       const path = id === "a" ? "themed.pptx" : "test_fill.pptx";
-      const object = state.objects.find((object: any) => object.path === path);
+      const object = state.workProducts.currentObjects.find((object: any) => object.path === path);
       assert.equal(object.presence, "present");
       if (index === data.events.length) {
-        const updates: unknown[] = [{ kind: "role", path, versionId: object.versionId, role: id === "a" ? "candidate" : "experiment" }];
-        const pending = state.objects.find((object: any) => object.path === (id === "a" ? "remap_fonts.py" : "generator.cjs"));
-        updates.push({ kind: "issue", issueId: "remaining-work", path: pending.path, versionId: pending.versionId,
+        const updates: unknown[] = [{ kind: "role", path, versionId: object.currentVersionId, role: id === "a" ? "candidate" : "experiment" }];
+        const pending = state.workProducts.currentObjects.find((object: any) => object.path === (id === "a" ? "remap_fonts.py" : "generator.cjs"));
+        updates.push({ kind: "issue", issueId: "remaining-work", path: pending.path, versionId: pending.currentVersionId,
           symptom: id === "a" ? "font script has not run" : "generator failed", diagnosis: "needs targeted execution",
           evidenceToolCallIds: [pending.observedBy], pendingActions: [id === "a" ? "run font script" : "repair generator, then produce target"], claimedStatus: "open" });
         return { content: `<work_product_progress>${JSON.stringify({ updates })}</work_product_progress>`, finishReason: "tool_calls",
           toolCalls: [{ id: "after-declaration", name: "computer_run_command", arguments: { index: -1 } }] };
       }
       assert.equal(object.role, id === "a" ? "candidate" : "experiment");
-      assert.equal(state.issues[0].claimedStatus, "open");
-      assert.equal(state.issues[0].resolutionSupport, "none");
+      assert.equal(state.workProducts.currentIssues[0].claimedStatus, "open");
+      assert.equal(state.workProducts.currentIssues[0].resolutionSupport, "none");
       if (id === "b") {
-        assert.equal(state.objects.find((object: any) => object.path === "generator.js").presence, "deleted");
-        assert.equal(state.objects.some((object: any) => object.path === "target.pptx"), false);
-        assert.ok(state.failedOperations.some((operation: any) => operation.diagnosticPreview.includes("shape")));
+        assert.equal(state.workProducts.currentObjects.some((object: any) => object.path === "generator.js"), false);
+        assert.equal(state.workProducts.currentObjects.some((object: any) => object.path === "target.pptx"), false);
+        assert.ok(state.workProducts.diagnostics.some((operation: any) => operation.diagnosticPreview.includes("shape")));
       }
       return { content: "bounded answer", finishReason: "stop", toolCalls: [] };
     } },
@@ -96,7 +97,7 @@ for (const id of ["a", "b"]) test(`stage 3 fixture ${id}: actual model input pre
   assert.ok(emitted.some((event) => event.type === "assistant.committed" && event.data.workProductDeclaration !== undefined));
   assert.ok(emitted.some((event) => event.type === "tool.completed" && (event.data.workProductSequence as any)?.sequenceKind === "loop_observation"));
   const final = JSON.parse(modelInputs.at(-1)!);
-  assert.ok(storage.saved.has(final.fullStateRef.path));
+  assert.ok(storage.saved.has(final.workProducts.fullStateRef.path));
 });
 
 test("snapshot overflow is bounded, fully readable with a Runtime-owned digest, and does not disappear after unrelated events", async () => {
@@ -164,9 +165,9 @@ for (const legacyStrategy of [false, true]) test(`optional malformed declaration
     model: { limits: TEST_MODEL_LIMITS, complete: async (request) => {
       if (round++ === 0) return { content: "<work_product_progress>{bad}</work_product_progress>", finishReason: "tool_calls",
         toolCalls: [{ id: "write", name: "computer_write_file", arguments: {} }] };
-      const state = frame(request).workProductContext;
-      assert.equal(state.objects[0].presence, "present");
-      assert.equal(state.counts.rejectedDeclarations, 1);
+      const state = frame(request).currentDecisionView;
+      assert.equal(state.workProducts.currentObjects[0].presence, "present");
+      assert.equal(state.workProducts.counts.rejectedDeclarations, 1);
       return { content: "done", finishReason: "stop", toolCalls: [] };
     } },
   });
@@ -191,6 +192,33 @@ test("shared context changes neither authorized/preferred tools nor policy gates
   t.diagnostic(JSON.stringify({ fixture: "B", beforeFrameCharacters: JSON.stringify(before.loopStepFrame).length,
     afterFrameCharacters: JSON.stringify(after.loopStepFrame).length, sharedStateCharacters: chars, sharedStateEstimatedTokens: estimateTextTokens(JSON.stringify(state)) }));
   assert.ok(chars < 6500);
+});
+
+test("a rejected evidence-repair candidate cannot trigger another Assessment until the decision basis changes", async () => {
+  let assessed = 0;
+  await assert.rejects(
+    runAgentLoop({
+      runId: "basis-gate", systemPrompt: "system", input: "deliver the artifact", maxSteps: 2,
+      grant: createCapabilityGrant({ actorUserId: "u", runId: "basis-gate", depth: 0, allowedToolNames: [], allowedSkillIds: [] }),
+      tools: new ToolRegistry([]),
+      model: { limits: TEST_MODEL_LIMITS, complete: async () => ({ content: "candidate with different wording", finishReason: "stop", toolCalls: [] }) },
+      evaluateCandidate: async (candidate) => {
+        assessed += 1;
+        assert.ok(candidate.decisionBasisDigest);
+        return {
+          approved: false,
+          feedback: "The deliverable receipt is still missing.",
+          requiresEvidenceProgress: true,
+          failedBoundary: {
+            stepId: "step", missingEvidenceKinds: ["artifact_path"], violatedSkillRequirements: [],
+            reusableEvidenceRefs: [], suggestedRepairShape: "repair_leaf",
+          },
+        };
+      },
+    }),
+    (error: any) => error?.code === "STEP_NOT_COMPLETED" && error?.details?.repairExhausted === true,
+  );
+  assert.equal(assessed, 1);
 });
 
 const SUMMARY = "## Goal\nContinue task\n## Constraints & Preferences\n- Original constraints\n## Progress\n### Done\n- Some work\n### In Progress\n- Task\n### Blocked\n- None\n## Key Decisions\n- None\n## Evidence\n- See Runtime\n## Next Steps\n1. Continue\n## Critical Context\n- Original goal";

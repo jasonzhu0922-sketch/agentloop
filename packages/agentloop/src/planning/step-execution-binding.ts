@@ -95,6 +95,7 @@ function normalizeArtifactTargets(targets: readonly ArtifactTarget[]): readonly 
     const format = target.format?.trim();
     return {
       id,
+      ...(target.deliveryTargetId === undefined ? {} : { deliveryTargetId: target.deliveryTargetId }),
       ...(target.purpose === undefined ? {} : { purpose: target.purpose }),
       kind,
       ...(format === undefined || format.length === 0 ? {} : { format }),

@@ -70,6 +70,7 @@ const BASENAME_LOOKUP_DIRECTORY_PRIORITY = [
   "data",
 ] as const;
 const COMMAND_ROOT_ID_PATTERN = /^@(?:skills\/[a-z0-9]+(?:-[a-z0-9]+)*|visible\/[A-Za-z0-9._-]+)$/;
+const WORKSPACE_ARGUMENT_ALIAS = "@workspace";
 
 interface SearchMatch {
   readonly path: string;
@@ -180,6 +181,8 @@ interface CommandFileChange {
   readonly path: string;
   readonly changeType: "created" | "modified" | "deleted";
   readonly bytes?: number;
+  /** Content identity of the post-command workspace version, when present. */
+  readonly sha256?: string;
 }
 
 interface CommandRootResolution {
@@ -1450,15 +1453,16 @@ export class ComputerExecutor {
     computationInputs?: readonly CommandComputationInput[];
     workflowEvidenceBinding?: SkillWorkflowEvidenceBinding;
   }): Promise<void> {
+    const args = this.resolveCommandArgumentAliases(input.args);
     if (!EXECUTABLE_NAME_PATTERN.test(input.command)) {
       throw badRequest("command must be an executable name without shell syntax or path separators");
     }
-    const commandMismatch = interpreterEntryPointMismatch(input.command, input.args);
+    const commandMismatch = interpreterEntryPointMismatch(input.command, args);
     if (commandMismatch !== undefined) {
       throw badRequest(commandMismatch);
     }
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
-    await this.assertCommandArgumentsDoNotEscape(input.args, cwdResolution);
+    await this.assertCommandArgumentsDoNotEscape(args, cwdResolution);
     const cwd = cwdResolution.path;
     if (!(await fs.stat(cwd)).isDirectory()) throw badRequest("cwd must be a directory");
     await this.captureCommandComputationInputs(input.computationInputs ?? []);
@@ -1497,6 +1501,7 @@ export class ComputerExecutor {
     };
   }> {
     const cwdResolution = await this.resolveCommandCwd(input.cwd);
+    const args = this.resolveCommandArgumentAliases(input.args);
     const computationInputs = await this.captureCommandComputationInputs(input.computationInputs ?? []);
     const cwd = cwdResolution.path;
     const beforeFiles = await this.snapshotWorkspaceFiles();
@@ -1506,12 +1511,16 @@ export class ComputerExecutor {
       let timedOut = false;
       let settled = false;
       let forceTimer: ReturnType<typeof setTimeout> | undefined;
-      const child = spawn(this.executableAliases.get(input.command) ?? input.command, [...input.args], {
+      const child = spawn(this.executableAliases.get(input.command) ?? input.command, args, {
         cwd,
         shell: false,
         env: buildCommandEnvironment({
           ...commandRootEnvironment(this.commandRoots),
           ...this.commandEnvironment,
+          // This root is derived from the Run-scoped executor, not from model
+          // input or a process-global workspace. Generated scripts use it to
+          // compose their own task paths while a package Skill is their CWD.
+          AGENTLOOP_WORKSPACE_ROOT: this.workspaceRoot,
         }),
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1573,7 +1582,7 @@ export class ComputerExecutor {
             const stdout = Buffer.concat(stdoutChunks).toString("utf8");
             const stderr = Buffer.concat(stderrChunks).toString("utf8");
             const afterFiles = await this.snapshotWorkspaceFiles();
-            const fileChangeSummary = summarizeFileChanges(beforeFiles, afterFiles);
+            const fileChangeSummary = await summarizeFileChanges(this.workspaceRoot, beforeFiles, afterFiles);
             // Only an immutable, Runtime-registered Skill package may publish
             // a control signal through command stdout. Workspace commands and
             // later file reads remain ordinary content, never control-plane
@@ -2046,6 +2055,22 @@ export class ComputerExecutor {
     return { path: await this.resolveExisting(path), authorizationRoot: this.workspaceRoot };
   }
 
+  /**
+   * A command may execute from a read-only Skill root while its inputs and
+   * outputs belong to the Run workspace. Keep that binding Runtime-owned:
+   * `@workspace/foo` is resolved only against this executor's scoped root.
+   * It is deliberately an entire argument, rather than shell text expansion.
+   */
+  private resolveCommandArgumentAliases(args: readonly string[]): string[] {
+    return args.map((argument) => {
+      if (argument === WORKSPACE_ARGUMENT_ALIAS) return this.workspaceRoot;
+      if (!argument.startsWith(`${WORKSPACE_ARGUMENT_ALIAS}/`)) return argument;
+      const target = resolve(this.workspaceRoot, argument.slice(WORKSPACE_ARGUMENT_ALIAS.length + 1));
+      this.assertContained(target);
+      return target;
+    });
+  }
+
   private async resolveCommandRootPath(path: string): Promise<CommandRootResolution | undefined> {
     const normalized = path.replace(/\\/g, "/").replace(/\/+$/u, "") || ".";
     if ((normalized.startsWith("@skills/") || normalized.startsWith("@visible/")) && !this.commandRoots.some((root) =>
@@ -2086,7 +2111,7 @@ export class ComputerExecutor {
           throw error;
         });
         if (allowedRoots.some((root) => isInsideRoot(canonical, root))) continue;
-        throw forbidden("Command arguments must not reference absolute filesystem paths outside the workspace root or authorized command roots");
+        throw forbidden("Command arguments must not reference absolute filesystem paths outside the workspace root or authorized command roots; use @workspace/<relative-path> for a Runtime-bound workspace path");
       }
       for (const candidate of relativePathEscapeCandidates(argument)) {
         const normalized = resolve(cwdResolution.path, candidate);
@@ -2675,10 +2700,11 @@ function compareLocatedReadableFiles(left: LocatedReadableFile, right: LocatedRe
     || left.workspacePath.localeCompare(right.workspacePath);
 }
 
-function summarizeFileChanges(
+async function summarizeFileChanges(
+  workspaceRoot: string,
   before: { readonly files: ReadonlyMap<string, CommandFileSnapshotEntry>; readonly truncated: boolean },
   after: { readonly files: ReadonlyMap<string, CommandFileSnapshotEntry>; readonly truncated: boolean },
-): { readonly changes: CommandFileChange[]; readonly truncated: boolean } {
+): Promise<{ readonly changes: CommandFileChange[]; readonly truncated: boolean }> {
   const changes: CommandFileChange[] = [];
   let truncated = before.truncated || after.truncated;
   const push = (change: CommandFileChange): void => {
@@ -2688,13 +2714,21 @@ function summarizeFileChanges(
     }
     changes.push(change);
   };
+  const presentChanges: Array<{ readonly path: string; readonly changeType: "created" | "modified"; readonly bytes: number }> = [];
   for (const [path, next] of after.files) {
     const prior = before.files.get(path);
     if (prior === undefined) {
-      push({ path, changeType: "created", bytes: next.size });
+      presentChanges.push({ path, changeType: "created", bytes: next.size });
     } else if (prior.size !== next.size || prior.mtimeMs !== next.mtimeMs) {
-      push({ path, changeType: "modified", bytes: next.size });
+      presentChanges.push({ path, changeType: "modified", bytes: next.size });
     }
+  }
+  for (const change of presentChanges) {
+    // Hash only the bounded, observed delta rather than every workspace file.
+    // This makes the command receipt an immutable artifact identity without
+    // turning normal command setup into a whole-workspace content scan.
+    const sha256 = await sha256File(resolve(workspaceRoot, change.path));
+    push({ ...change, sha256 });
   }
   for (const path of before.files.keys()) {
     if (!after.files.has(path)) push({ path, changeType: "deleted" });

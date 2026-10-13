@@ -19,6 +19,10 @@ test("terminal event logs use semantic colors when color is enabled", () => {
     colorizeTerminalLogLine("[agentloop] event=skill.activated skill=steel-market-analysis", { colorMode: "always" }),
     "[agentloop] \u001B[35mevent=skill.activated\u001B[0m skill=steel-market-analysis",
   );
+  assert.equal(
+    colorizeTerminalLogLine("[agentloop] event=loop.convergence_reopened step=7", { colorMode: "always" }),
+    "[agentloop] \u001B[33mevent=loop.convergence_reopened\u001B[0m step=7",
+  );
   assert.equal(colorizeTerminalLogLabel("[general-01]", "general-01", { colorMode: "always" }), "\u001B[34m[general-01]\u001B[0m");
   assert.equal(colorizeTerminalLogLabel("[general-02]", "general-02", { colorMode: "always" }), "\u001B[96m[general-02]\u001B[0m");
 });

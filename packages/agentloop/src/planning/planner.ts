@@ -318,6 +318,8 @@ export class ModelPlanner implements Planner {
         "Keep local receipt, export, and readback evidence inside the producing leaf.",
         "For requested file or media formats, the minimum usability of that format is core delivery evidence: readable/openable output, requested format/type, workspace path, and non-empty receipt.",
         "requestedTargets is Runtime-owned and immutable. Every outcome leaf must bind the user-visible deliverable targetIds it owns; do not invent IDs or rewrite purpose, surface, kind, or format.",
+        "Delivery evidence is scoped by each leaf's targetIds. A leaf that owns only conversation targets must not require artifact_path, artifact_non_empty, format_matches_request, artifact_acceptance, artifact_openable, or workspace_artifact_write merely because another leaf owns a workspace target.",
+        "Artifact receipts belong only to leaves that own workspace_artifact targets; conversation summary leaves use conversation_delivery unless they are also producing a workspace target.",
         "Every leaf must include targetIds. Use [] only for a prerequisite leaf that delivers no user-visible target.",
         "HIL pauses an outcome; preserve its requested deliverable and continue production after the response.",
         "For browser/document artifacts, require format/openability; Skill-owned QA covers navigation and polish unless required.",
@@ -953,6 +955,7 @@ function plannerOutcomePlanAdmissionDirective(
     "selectedSkillRoles[].skillId and leaves[].skillIds may contain only IDs in planning_context.availableSkillIds. Do not place capability IDs, Tool names, ToolSource IDs, or evidence kinds in either Skill field; use leaves[].requiredCapabilities for capabilities. If availableSkillIds is empty, both Skill fields must be empty arrays.",
     "planning_context.candidateSkillRoles are relevance suggestions, not preselected dependencies. Omit any candidate that is not bound to and executed by a concrete leaf.",
     "Every selected primary_builder Skill must be bound to at least one concrete leaf that uses it.",
+    "Every dependsOn entry must name a leaf id present in the current submit_outcome_plan.leaves array. Do not reference leaf ids from earlier rejected attempts.",
     "A terminal leaf that only proposes options or waits for Human-in-the-Loop cannot satisfy a requested artifact. Keep the artifact-producing obligation in the same resumed leaf or add a dependent production leaf with observable artifact evidence.",
     "If a Skill is only a style/reference fallback and is not needed for execution, omit it from selectedSkillRoles instead of selecting it as support.",
     "Keep QA, verification, readback, and local acceptance inside the producing leaf unless TaskProfile.planShape is recovery_patch.",
@@ -1310,7 +1313,7 @@ function planningRuntimeContext(
           skillIdPolicy: "Only availableSkillIds are Skills; capabilities, Tools, ToolSources, and evidence IDs use requiredCapabilities. Empty availableSkillIds means no Skills.",
           sourceConstraintPolicy: "Set sourceConstraint to null when a leaf has no concrete uploaded or visible-directory input binding. When present, submit sourceConstraint.bindings only for uploaded_source IDs listed in sources or visible_directory IDs listed in visibleDirectories. Runtime derives ToolSource bindings from requiredCapabilities and user-required source policy; do not submit tool_source, Tool names, MCP names, or Skill IDs.",
           requestedTargets: canonicalTaskUnderstanding(task).deliverables ?? [],
-          targetBindingPolicy: "requestedTargets is the complete immutable delivery inventory. Bind every requested target exactly once with targetIds on its producing or adopting leaf. Runtime materializes workspace artifact targets from the same canonical target inventory.",
+          targetBindingPolicy: "requestedTargets is the complete immutable delivery inventory. Bind every requested target exactly once with targetIds on its producing or adopting leaf. Evidence and capabilities are scoped by each leaf's owned targetIds: workspace_artifact targets require artifact receipts on their owner leaf, while conversation-only targets must not require artifact evidence or workspace_artifact_write. Runtime materializes workspace artifact targets from the same canonical target inventory.",
           allowedLeafRoles: ["fact_acquisition", "produce", "deliver", "repair"],
           allowedEvidenceKinds: EVIDENCE_KIND_VALUES,
           caveatPolicies: CAVEAT_POLICY_VALUES,
@@ -1368,7 +1371,6 @@ function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][
                       // delivery target; only producing or adopting leaves bind one.
                       minItems: 0,
                       maxItems: allowedArtifactTargetIds.length,
-                      uniqueItems: true,
                       items: { type: "string", enum: allowedArtifactTargetIds },
                     }),
               },
@@ -1391,7 +1393,7 @@ function sourceConstraintSchemaForTask(task: TaskSpec): Record<string, unknown> 
       required: ["kind", "ids"],
       properties: {
         kind: { type: "string", enum: ["uploaded_source"] },
-        ids: { type: "array", minItems: 1, maxItems: uploadedSourceIds.length, uniqueItems: true, items: { type: "string", enum: uploadedSourceIds } },
+        ids: { type: "array", minItems: 1, maxItems: uploadedSourceIds.length, items: { type: "string", enum: uploadedSourceIds } },
       },
     });
   }
@@ -1402,7 +1404,7 @@ function sourceConstraintSchemaForTask(task: TaskSpec): Record<string, unknown> 
       required: ["kind", "ids"],
       properties: {
         kind: { type: "string", enum: ["visible_directory"] },
-        ids: { type: "array", minItems: 1, maxItems: visibleDirectoryIds.length, uniqueItems: true, items: { type: "string", enum: visibleDirectoryIds } },
+        ids: { type: "array", minItems: 1, maxItems: visibleDirectoryIds.length, items: { type: "string", enum: visibleDirectoryIds } },
       },
     });
   }

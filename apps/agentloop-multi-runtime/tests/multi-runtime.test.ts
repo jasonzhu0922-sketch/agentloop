@@ -49,7 +49,7 @@ import { SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatib
 import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
 import { migrateRuntimeState } from "../src/runtime-host/persistence/state-migrations.ts";
 import type { RuntimeArtifact, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeInstance } from "../src/shared/contracts.ts";
-import { hasIncompleteCompletedPlan, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/client/projections/assistant-event-projection.js";
+import { hasIncompleteCompletedPlan, liveProgressForEvent, mergeRuntimeEvents, projectAssistantEvent, replayAssistantEvents } from "../web/client/projections/assistant-event-projection.js";
 import { createCoalescedUpdater } from "../web/client/state/live-update-scheduler.js";
 import { persistSessions } from "../web/client/state/session-persistence.js";
 import { renderMarkdown } from "@zhujun/agentloop-artifact-preview";
@@ -1245,6 +1245,22 @@ test("Web projects the persisted Human-in-the-Loop request from its waiting even
   assert.deepEqual(assistant.humanLoop, request);
 });
 
+test("Web clears answered Human-in-the-Loop requests during persisted event replay", () => {
+  const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [], humanLoop: undefined as unknown };
+  const request = {
+    id: "hil-choice", runId: "run-choice", status: "open", revision: 1, kind: "confirmation",
+    title: "Confirm fallback", prompt: "Continue with fallback?", rationale: "Fallback needs approval.", evidenceRefs: [],
+    responseSchema: { type: "confirm", acceptLabel: "Continue", rejectLabel: "Stop" },
+    resume: { mode: "continue_step", targetStepId: "deliver" }, stepId: "deliver", createdAt: 1,
+  };
+  replayAssistantEvents(assistant, [
+    { seq: 7, type: "run.waiting_user", data: { runId: "run-choice", requestId: request.id, kind: request.kind, request }, createdAt: 7 },
+    { seq: 8, type: "human_loop.answered", data: { requestId: request.id, requestRevision: 1, value: true }, createdAt: 8 },
+    { seq: 9, type: "plan.step.completed", data: { stepId: "deliver" }, createdAt: 9 },
+  ]);
+  assert.equal(assistant.humanLoop, undefined);
+});
+
 test("Web keeps an open Human-in-the-Loop request reachable outside the bounded conversation scroller", async () => {
   const [app, html, overrides] = await Promise.all([
     readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
@@ -1372,6 +1388,45 @@ test("Web bounds persisted event payloads without truncating the live assistant 
   assert.equal(events.length, 160);
   assert.equal(events[0]?.seq, 40);
   assert.ok(String(events.at(-1)?.data?.result).length < fullText.length);
+});
+
+test("Web projects durable request activity into visible progress without inventing a Run state", () => {
+  const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [], progress: undefined as string | undefined };
+  const started = { seq: 1, type: "model.request.started", data: { phase: "planning", purpose: "conversation_turn_resolver" }, createdAt: 1 };
+  assert.equal(liveProgressForEvent(started), "正在理解本轮需求");
+  assert.equal(projectAssistantEvent(assistant, started), false);
+  assert.equal(assistant.status, "running");
+  assert.equal(assistant.progress, "正在理解本轮需求");
+  assert.equal(projectAssistantEvent(assistant, { seq: 2, type: "run.completed", data: { output: "done" }, createdAt: 2 }), true);
+  assert.equal(assistant.status, "completed");
+  assert.equal(assistant.progress, undefined);
+});
+
+test("Web presents convergence reopening as continued execution instead of a failed candidate", () => {
+  const assistant = { status: "running", text: "", reasoning: "", events: [], plan: [], progress: undefined as string | undefined };
+  const reopened = {
+    seq: 2,
+    type: "loop.convergence_reopened",
+    data: {
+      step: 7,
+      reason: "authorized_tool_requested_during_completion_preparation",
+      toolNames: ["computer_run_command"],
+      requestedToolCallCount: 1,
+    },
+    createdAt: 2,
+  };
+  assert.equal(liveProgressForEvent(reopened), "检测到仍需工具处理，已继续执行");
+  assert.equal(projectAssistantEvent(assistant, reopened), false);
+  assert.equal(assistant.status, "running");
+  assert.equal(assistant.progress, "检测到仍需工具处理，已继续执行");
+});
+
+test("Web incrementally merges new Runtime events without recompacting the retained browser cache", () => {
+  const large = { seq: 1, type: "tool.completed", data: { result: JSON.stringify({ stdout: "x".repeat(20_000) }) }, createdAt: 1 };
+  const retained = mergeRuntimeEvents([], [large]);
+  const next = mergeRuntimeEvents(retained, [{ seq: 2, type: "model.request.started", data: { phase: "execution" }, createdAt: 2 }]);
+  assert.equal(next[0], retained[0]);
+  assert.equal(next.length, 2);
 });
 
 test("Web session persistence falls back to a bounded recovery snapshot when localStorage quota is exhausted", () => {

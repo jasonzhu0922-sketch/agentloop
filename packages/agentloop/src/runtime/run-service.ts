@@ -89,6 +89,7 @@ import type {
   ModelResponse,
   ModelRetryReporter,
   ModelStreamSink,
+  ModelToolDefinition,
   RuntimeContextSnapshot,
   RuntimeEvent,
   SkillExecutionRootGrant,
@@ -161,7 +162,9 @@ import { ToolArgumentsReferenceStore, type ToolArgumentsContent } from "./tool-a
 import { executionOperationProfile } from "./operation-profiles.ts";
 import {
   bindCanonicalPlan,
+  canonicalRunStateRef,
   createCanonicalRunState,
+  reconcileCanonicalDeliveryTargetBindings,
   recordCanonicalAssessment,
   recordCanonicalStepResult,
   reviseCanonicalPlan,
@@ -2405,14 +2408,41 @@ export class RunService {
       const selectedPracticeProfileIds = new Set<string>((stepTaskProfile.practices ?? []).map((profile) => profile.id));
       const result = await runAgentLoop({
         runId: input.runId,
-        // Stage 3 is limited to fresh file-producing leaves with a snapshot reader.
-        // Recovery inherits the same state only in stage 5, not implicitly here.
-        ...(recovery === undefined && fileOutputStep && stepGrant.allowedToolNames.has("computer_read_file") ? {
+        currentDecisionContext: {
+          canonicalState: canonicalRunStateRef(canonicalState),
+          plan: { id: plan.id, version: plan.version },
+          stepId: activeStep.id,
+        },
+        // File-producing leaves must keep the same delivery-target reducer after
+        // a HIL/recovery pause. Otherwise the resumed step can produce and
+        // verify artifacts while the canonical targets remain open.
+        ...(fileOutputStep ? {
           workProductContext: {
             goalId: `${plan.id}:v${plan.version}:${activeStep.id}`,
             goal: activeStep.objective,
             workspaceId: input.rootGrant.workspaceRoot ?? this.workspaceRoot,
+            ...(activeStep.executionBinding.artifactTargets === undefined ? {} : {
+              deliveryTargets: activeStep.executionBinding.artifactTargets.map((target) => ({
+                targetId: target.id,
+                ...(target.deliveryTargetId === undefined ? {} : { deliveryTargetId: target.deliveryTargetId }),
+                purpose: target.purpose ?? target.id,
+                kind: target.kind,
+                ...(target.format === undefined ? {} : { format: target.format }),
+              })),
+            }),
             storeSnapshot: (content: string) => new ComputerExecutor(input.rootGrant.workspaceRoot ?? this.workspaceRoot).storeContentReference(content),
+          },
+          onWorkProductDeliveryTargets: async (bindings) => {
+            const reconciled = reconcileCanonicalDeliveryTargetBindings(canonicalState, {
+              stepId: activeStep.id,
+              bindings,
+            });
+            if (reconciled === canonicalState) return;
+            canonicalState = await this.canonicalStates.commit({
+              expectedRevision: canonicalState.revision,
+              state: reconciled,
+              reason: "delivery_target_binding_updated",
+            });
           },
         } : {}),
         systemPrompt: buildStepSystemPrompt(
@@ -2655,6 +2685,7 @@ export class RunService {
           const assessmentSignature = stepAssessmentSignature({
             stepId: activeStep.id,
             assessmentProfile,
+            ...(candidate.decisionBasisDigest === undefined ? {} : { decisionBasisDigest: candidate.decisionBasisDigest }),
             ...(canonicalState.intent.understanding.practiceProfiles === undefined ? {} : { practiceProfiles: canonicalState.intent.understanding.practiceProfiles }),
             activatedSkills: activatedStepSkills,
             evidence,
@@ -2707,10 +2738,7 @@ export class RunService {
                   evidence,
                 }),
                 allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(reusedAssessment),
-                requiresEvidenceProgress: requiresEvidenceProgressAfterHolisticAssessment(
-                  reusedAssessment,
-                  holisticSourceContractMismatch,
-                ),
+                requiresEvidenceProgress: requiresEvidenceProgressAfterAssessment(reusedAssessment),
                 ...(reusedAssessment.failedBoundary === undefined ? {} : { failedBoundary: reusedAssessment.failedBoundary }),
                 assessmentReused: true,
               };
@@ -2808,10 +2836,7 @@ export class RunService {
               evidence,
             }),
             allowRepairLimitCompletion: shouldAllowRepairLimitCompletion(assessment),
-            requiresEvidenceProgress: requiresEvidenceProgressAfterHolisticAssessment(
-              assessment,
-              holisticSourceContractMismatch,
-            ),
+            requiresEvidenceProgress: requiresEvidenceProgressAfterAssessment(assessment),
             ...(assessment.failedBoundary === undefined ? {} : { failedBoundary: assessment.failedBoundary }),
           };
         },
@@ -3447,6 +3472,7 @@ const TERMINAL_EVENT_TYPES = new Set([
   "plan.step.failed",
   "loop.started",
   "loop.convergence_requested",
+  "loop.convergence_reopened",
   "loop.limit_exceeded",
   "loop.no_progress",
   "step.started",
@@ -3693,12 +3719,22 @@ function terminalEventDetails(type: string, data: Readonly<Record<string, unknow
   if (type === "model.retry") {
     appendModelRequestDetails(details, data);
   }
-  if (type === "loop.convergence_requested" || type === "loop.limit_exceeded" || type === "loop.no_progress") {
+  if (
+    type === "loop.convergence_requested"
+    || type === "loop.convergence_reopened"
+    || type === "loop.limit_exceeded"
+    || type === "loop.no_progress"
+  ) {
     addNumber(details, "maxSteps", data.maxSteps);
     addNumber(details, "convergenceGraceSteps", data.convergenceGraceSteps);
     addNumber(details, "hardLimit", data.hardLimit);
     addBoolean(details, "stalled", data.stalled);
     addString(details, "toolSignature", data.toolSignature);
+    if (Array.isArray(data.toolNames)) {
+      const names = data.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+      if (names.length > 0) details.push(`toolNames=${JSON.stringify(truncateForTerminal(names.join(","), 120))}`);
+    }
+    addNumber(details, "requestedToolCalls", data.requestedToolCallCount);
   }
   return details;
 }
@@ -4566,7 +4602,7 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   return left.length === right.length && left.every((value) => right.includes(value));
 }
 
-function repairLeafForFailedBoundary(
+export function repairLeafForFailedBoundary(
   target: ExecutionPlan["steps"][number],
   failedBoundary: FailedBoundary,
   planVersion: number,
@@ -4578,13 +4614,17 @@ function repairLeafForFailedBoundary(
   return {
     id: repairId,
     kind: "leaf",
-    objective: `Repair step ${target.id} by producing the missing assessment evidence: ${missing}.`,
+    // A failed assessment does not replace the Step's output contract. The
+    // repair leaf must still own the original work product and its sources;
+    // the evidence gap only narrows what remains to be completed.
+    objective: `Complete the original Step ${target.id} deliverable: ${target.objective} Close the remaining evidence boundary: ${missing}. Produce, verify, and deliver the original admissible output rather than only describing missing evidence.`,
     dependencies: target.dependencies,
     role: "repair",
     refinementState: "not_refinable",
     requiredFacts: target.requiredFacts,
     skillIds: target.skillIds,
     requiredCapabilities: target.requiredCapabilities,
+    ...recoverySourceConstraint(target.executionBinding),
     ...recoveryTargetBinding(target.executionBinding),
     ...(target.evidenceContract === undefined ? {} : { evidenceContract: target.evidenceContract }),
     successCriteria: recoveryProposalSuccessCriteria(target.successCriteria),
@@ -5593,12 +5633,10 @@ function shouldDeferValidationToUser(input: {
   return input.assessment.criteria.some((criterion) => !criterion.satisfied);
 }
 
-function requiresEvidenceProgressAfterHolisticAssessment(
+function requiresEvidenceProgressAfterAssessment(
   assessment: SkillComplianceAssessment,
-  holisticSourceContractMismatch: boolean,
 ): boolean {
-  return holisticSourceContractMismatch
-    && assessment.assessmentMethod === "model"
+  return assessment.assessmentMethod === "model"
     && !assessment.approved
     && assessment.failedBoundary?.suggestedRepairShape === "repair_leaf"
     && (assessment.failedBoundary?.missingEvidenceKinds.length ?? 0) > 0;
@@ -6335,6 +6373,7 @@ function skillExecutionRootsForSkills(skills: readonly PrivateSkill[]): SkillExe
 function stepAssessmentSignature(input: {
   stepId: string;
   assessmentProfile: AssessmentProfileId;
+  decisionBasisDigest?: string;
   activatedSkills: readonly PrivateSkill[];
   evidence: StepEvidence;
   modelEvidence: StepEvidence;
@@ -6343,6 +6382,7 @@ function stepAssessmentSignature(input: {
   return createHash("sha256").update(JSON.stringify({
     stepId: input.stepId,
     assessmentProfile: input.assessmentProfile,
+    ...(input.decisionBasisDigest === undefined ? {} : { decisionBasisDigest: input.decisionBasisDigest }),
     activatedSkills: input.activatedSkills
       .map((skill) => ({ id: skill.id, contentHash: skill.contentHash }))
       .sort((left, right) => left.id.localeCompare(right.id, "en")),
@@ -6449,6 +6489,10 @@ function conversationEvidenceToolEvidence(
         toolCallId: evidenceRef,
         toolName: "conversation_evidence_reuse",
         isError: false,
+        admittedEvidenceKinds: [
+          ...satisfied,
+          ...(summary.missingOrUnverified.length === 0 ? [] : ["explicit_caveats"]),
+        ],
         result: JSON.stringify({
           schema: "agentloop.sourceSummary/v1",
           provenance: {
@@ -7217,91 +7261,131 @@ async function resolveVisibleDirectories(paths: readonly string[]): Promise<Visi
   return grants;
 }
 
-const CONVERSATION_TURN_TOOL = {
-  name: "resolve_conversation_turn",
-  description: "Resolve one conversational turn atomically: goal, evidence strategy, source role, and any Runtime-issued candidates it uses.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["mode", "relation", "inputMode", "effectiveGoal", "taskIntent", "evidenceStrategy", "sourceBinding", "userConstraints"],
-    properties: {
-      mode: { type: "string", enum: ["reply", "execute", "clarify"] },
-      relation: {
-        type: "string",
-        enum: ["new_goal", "continue_prior", "correct_prior", "refine_prior", "challenge_prior"],
+const CONVERSATION_TURN_TOOL_NAME = "resolve_conversation_turn";
+
+function conversationTurnTool(context: ConversationIntentExternalContext): ModelToolDefinition {
+  const goalCandidateIds = [...conversationTurnTargetRunIds(context.conversationWorkingSet)]
+    .map((_, index) => `goal_candidate_${index + 1}`);
+  const artifactPaths = [...new Set(
+    context.conversationWorkingSet?.reusableArtifacts
+      .filter((artifact) => artifact.reusable)
+      .map((artifact) => artifact.path) ?? [],
+  )];
+  const resultCandidateIds = (context.conversationWorkingSet?.resultCards ?? [])
+    .map((_, index) => `result_candidate_${index + 1}`);
+  const visibleDirectoryIds = context.visibleDirectories.map((directory) => directory.id);
+  const priorCandidateProperties: Record<string, unknown> = {};
+  if (goalCandidateIds.length > 0) {
+    priorCandidateProperties.targetGoalCandidateId = {
+      type: "string",
+      enum: goalCandidateIds,
+      description: "Select an existing Runtime-issued prior goal candidate. Forbidden for relation=new_goal; never invent an ID.",
+    };
+  }
+  if (goalCandidateIds.length > 0 && artifactPaths.length > 0) {
+    priorCandidateProperties.targetArtifact = {
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      description: "Select an existing reusable prior artifact to modify. This is never the output path for a newly created artifact.",
+      properties: {
+        path: { type: "string", enum: artifactPaths },
       },
-      inputMode: {
-        type: "string",
-        enum: ["none", "prior_result", "prior_artifact", "refresh_sources"],
-      },
-      targetGoalCandidateId: { type: "string", pattern: "^goal_candidate_[1-9][0-9]*$" },
-      targetArtifact: {
-        type: "object",
-        additionalProperties: false,
-        required: ["path"],
-        properties: {
-          path: { type: "string", minLength: 1, maxLength: 1_200 },
+    };
+  }
+  if (goalCandidateIds.length > 0 && resultCandidateIds.length > 0) {
+    priorCandidateProperties.resultCandidateId = {
+      type: "string",
+      enum: resultCandidateIds,
+      description: "Select an existing Runtime-issued prior Result. Forbidden for relation=new_goal; never invent an ID.",
+    };
+  }
+  return {
+    name: CONVERSATION_TURN_TOOL_NAME,
+    description: "Resolve one conversational turn atomically: goal, evidence strategy, source role, and only Runtime-issued candidates exposed by this schema.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["mode", "relation", "inputMode", "effectiveGoal", "taskIntent", "evidenceStrategy", "sourceBinding", "userConstraints"],
+      properties: {
+        mode: { type: "string", enum: ["reply", "execute", "clarify"] },
+        relation: {
+          type: "string",
+          enum: goalCandidateIds.length === 0
+            ? ["new_goal"]
+            : ["new_goal", "continue_prior", "correct_prior", "refine_prior", "challenge_prior"],
         },
-      },
-      resultCandidateId: { type: "string", pattern: "^result_candidate_[1-9][0-9]*$" },
-      effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
-      taskIntent: {
-        type: "object",
-        additionalProperties: false,
-        required: ["schema", "operation", "requiresExecution", "deliverables"],
-        properties: {
-          schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },
-          operation: {
-            type: "string",
-            enum: ["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"],
-          },
-          requiresExecution: { type: "boolean" },
-          deliverables: {
-            type: "array",
-            description: "Terminal user-requested outputs only. Never include scripts, temporary files, manifests, specs, or other implementation artifacts unless the user explicitly requested that item as a delivered output.",
-            maxItems: 8,
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["targetId", "purpose", "expectedArtifactCount", "action", "kind", "surface"],
-              properties: {
-                targetId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
-                purpose: { type: "string", minLength: 1, maxLength: 500 },
-                expectedArtifactCount: { type: "integer", minimum: 1, maximum: 8 },
-                action: { type: "string", enum: ["none", "create", "modify", "transform"] },
-                kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
-                format: { type: "string", minLength: 1, maxLength: 32 },
-                surface: { type: "string", enum: ["conversation", "workspace_artifact"] },
+        inputMode: {
+          type: "string",
+          enum: [
+            "none",
+            "refresh_sources",
+            ...(goalCandidateIds.length === 0 || resultCandidateIds.length === 0 ? [] : ["prior_result"]),
+            ...(goalCandidateIds.length === 0 || artifactPaths.length === 0 ? [] : ["prior_artifact"]),
+          ],
+        },
+        ...priorCandidateProperties,
+        effectiveGoal: { type: "string", minLength: 1, maxLength: 2_000 },
+        taskIntent: {
+          type: "object",
+          additionalProperties: false,
+          required: ["schema", "operation", "requiresExecution", "deliverables"],
+          properties: {
+            schema: { type: "string", enum: ["agentloop.conversationTaskIntent/v1"] },
+            operation: {
+              type: "string",
+              enum: ["answer", "lookup", "analysis", "create_artifact", "transform_artifact", "composite"],
+            },
+            requiresExecution: { type: "boolean" },
+            deliverables: {
+              type: "array",
+              description: "Terminal user-requested outputs only. Never include scripts, temporary files, manifests, specs, or other implementation artifacts unless the user explicitly requested that item as a delivered output.",
+              maxItems: 8,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["targetId", "purpose", "expectedArtifactCount", "action", "kind", "surface"],
+                properties: {
+                  targetId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+                  purpose: { type: "string", minLength: 1, maxLength: 500 },
+                  expectedArtifactCount: { type: "integer", minimum: 1, maximum: 8 },
+                  action: { type: "string", enum: ["none", "create", "modify", "transform"] },
+                  kind: { type: "string", enum: ["html", "document", "presentation", "spreadsheet", "image", "audio", "code", "none"] },
+                  format: { type: "string", minLength: 1, maxLength: 32 },
+                  surface: { type: "string", enum: ["conversation", "workspace_artifact"] },
+                },
               },
             },
           },
         },
-      },
-      evidenceStrategy: {
-        type: "string",
-        enum: ["none", "lookup_lite", "source_grounded", "strict_user_source", "bound_visible_sources"],
-      },
-      sourceBinding: {
-        type: "object",
-        additionalProperties: false,
-        required: ["mode", "visibleDirectoryIds"],
-        properties: {
-          mode: { type: "string", enum: ["none", "primary_data"] },
-          visibleDirectoryIds: {
-            type: "array",
-            maxItems: 12,
-            items: { type: "string", pattern: "^visible_dir_[1-9][0-9]*$" },
+        evidenceStrategy: {
+          type: "string",
+          enum: ["none", "lookup_lite", "source_grounded", "strict_user_source", "bound_visible_sources"],
+        },
+        sourceBinding: {
+          type: "object",
+          additionalProperties: false,
+          required: ["mode", "visibleDirectoryIds"],
+          properties: {
+            mode: { type: "string", enum: ["none", "primary_data"] },
+            visibleDirectoryIds: {
+              type: "array",
+              maxItems: Math.min(12, visibleDirectoryIds.length),
+              items: visibleDirectoryIds.length === 0
+                ? { type: "string" }
+                : { type: "string", enum: visibleDirectoryIds },
+            },
           },
         },
-      },
-      userConstraints: {
-        type: "array",
-        maxItems: 8,
-        items: { type: "string", minLength: 1, maxLength: 240 },
+        userConstraints: {
+          type: "array",
+          maxItems: 8,
+          items: { type: "string", minLength: 1, maxLength: 240 },
+        },
       },
     },
-  },
-} as const;
+  };
+}
 
 const CONVERSATION_TURN_RESOLUTION_ATTEMPTS = 3;
 
@@ -7317,6 +7401,7 @@ async function resolveConversationTurn(
   let repairFeedback: string | undefined;
   let semanticFeedback: string | undefined;
   for (let attempt = 1; attempt <= CONVERSATION_TURN_RESOLUTION_ATTEMPTS; attempt += 1) {
+    const resolverTool = conversationTurnTool(context);
     const response = await model.completeWithRequestTelemetry({
       runId: `conversation-turn:${randomUUID()}`,
       systemPrompt: conversationTurnResolverPrompt(repairFeedback),
@@ -7330,8 +7415,8 @@ async function resolveConversationTurn(
         ...(conversationHistory ?? []),
         { role: "user", content: input },
       ],
-      tools: [CONVERSATION_TURN_TOOL],
-      toolChoice: { name: CONVERSATION_TURN_TOOL.name },
+      tools: [resolverTool],
+      toolChoice: { name: resolverTool.name },
     }, emit, {
       phase: "planning",
       purpose: "conversation_turn_resolver",
@@ -7366,7 +7451,7 @@ async function resolveConversationTurn(
       });
       continue;
     }
-    repairFeedback = conversationTurnRepairFeedback(response);
+    repairFeedback = conversationTurnRepairFeedback(response, context);
     await emit({
       type: "conversation.turn.resolution_rejected",
       data: {
@@ -7850,6 +7935,8 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "When the user disputes an unsupported prior factual answer, bind to that prior Run, use correct_prior or challenge_prior, and require source_grounded evidence.",
       "Use strict_user_source only when the user explicitly requires official, authoritative, or exact-source verification.",
       "Use clarify when the semantic target or requested external side effect is materially ambiguous. This resolution never grants permission for destructive or external side effects.",
+      "Candidate selectors are closed-world Runtime handles, not values you may construct. Use only selector fields and enum values exposed by the current tool schema; never infer an ID from its pattern.",
+      "For relation=new_goal, omit targetGoalCandidateId, targetArtifact, and resultCandidateId. targetArtifact always means an existing reusable prior artifact, never the output path of a new artifact.",
       "targetGoalCandidateId must be one of priorGoalCandidates and is required for every relation except new_goal. Never reconstruct or emit a Run ID.",
       "When changing a prior delivered file, use the matching opaque goal candidate for lineage and select its concrete artifact path. Do not select an artifact for a request that only reuses prior facts or delivery text.",
       "Set inputMode=prior_result when a follow-up consumes prior accepted delivery text, and select only its opaque resultCandidateId from reusableResultCandidates. Never reconstruct or emit a Run ID, hash, or character count for a result.",
@@ -7875,7 +7962,7 @@ function parseConversationTurnResolution(
   input: string,
 ): ConversationTurnResolution | undefined {
   const workset = context.conversationWorkingSet;
-  const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL.name);
+  const calls = response.toolCalls.filter((call) => call.name === CONVERSATION_TURN_TOOL_NAME);
   if (response.toolCalls.length !== 1 || calls.length !== 1) {
     return undefined;
   }
@@ -7975,7 +8062,7 @@ function parseConversationTurnResolution(
 }
 
 function conversationTurnResolutionAttemptSummary(response: ModelResponse): Readonly<Record<string, unknown>> {
-  const call = response.toolCalls.find((item) => item.name === CONVERSATION_TURN_TOOL.name);
+  const call = response.toolCalls.find((item) => item.name === CONVERSATION_TURN_TOOL_NAME);
   const value = optionalRecord(call?.arguments);
   const artifact = optionalRecord(value.targetArtifact);
   const intent = optionalRecord(value.taskIntent);
@@ -8075,19 +8162,101 @@ function isConversationTurnInputMode(value: unknown): value is ConversationTurnI
     || value === "refresh_sources";
 }
 
-function conversationTurnRepairFeedback(response: ModelResponse): string {
+function conversationTurnRepairFeedback(
+  response: ModelResponse,
+  context: ConversationIntentExternalContext,
+): string {
   if (response.toolCalls.length === 0 && response.content.trim().length === 0) {
     return "The previous response was empty and contained no structured resolution.";
   }
   if (response.toolCalls.length !== 1) {
     return `The previous response returned ${response.toolCalls.length} tool calls; exactly one is required.`;
   }
-  if (response.toolCalls[0]?.name !== CONVERSATION_TURN_TOOL.name) {
-    return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_TURN_TOOL.name}.`;
+  if (response.toolCalls[0]?.name !== CONVERSATION_TURN_TOOL_NAME) {
+    return `The previous response called ${response.toolCalls[0]?.name ?? "an unnamed tool"} instead of ${CONVERSATION_TURN_TOOL_NAME}.`;
   }
   const value = optionalRecord(response.toolCalls[0].arguments);
+  const relation = value.relation;
+  if (relation === "new_goal") {
+    const forbiddenSelectors = ["targetGoalCandidateId", "targetArtifact", "resultCandidateId"]
+      .filter((field) => value[field] !== undefined);
+    if (forbiddenSelectors.length > 0) {
+      return `relation=new_goal forbids prior-work selector field(s): ${forbiddenSelectors.join(", ")}. Remove them; targetArtifact is an existing prior artifact, never a new output path.`;
+    }
+  }
+  const goalCandidateIds = [...conversationTurnTargetRunIds(context.conversationWorkingSet)]
+    .map((_, index) => `goal_candidate_${index + 1}`);
+  const targetGoalCandidateId = value.targetGoalCandidateId;
+  if (typeof targetGoalCandidateId === "string" && !goalCandidateIds.includes(targetGoalCandidateId)) {
+    return goalCandidateIds.length === 0
+      ? "No priorGoalCandidates exist. Use relation=new_goal and omit targetGoalCandidateId, targetArtifact, and resultCandidateId."
+      : `targetGoalCandidateId must be one of the Runtime-issued candidates: ${goalCandidateIds.join(", ")}. Never invent a candidate ID.`;
+  }
+  if (
+    typeof relation === "string"
+    && relation !== "new_goal"
+    && targetGoalCandidateId === undefined
+  ) {
+    return `relation=${relation} requires targetGoalCandidateId selected from: ${goalCandidateIds.length === 0 ? "no available candidates; use relation=new_goal" : goalCandidateIds.join(", ")}.`;
+  }
+  if (value.targetArtifact !== undefined) {
+    const artifactPath = optionalRecord(value.targetArtifact).path;
+    const artifactPaths = [...new Set(
+      context.conversationWorkingSet?.reusableArtifacts
+        .filter((artifact) => artifact.reusable)
+        .map((artifact) => artifact.path) ?? [],
+    )];
+    if (typeof artifactPath !== "string" || !artifactPaths.includes(artifactPath)) {
+      return artifactPaths.length === 0
+        ? "No reusable prior artifacts exist. Omit targetArtifact; it is never the output path of a new artifact."
+        : `targetArtifact.path must be one of the Runtime-issued reusable artifact paths: ${artifactPaths.join(", ")}. Never invent an artifact path.`;
+    }
+  }
+  if (value.resultCandidateId !== undefined) {
+    const resultCandidateIds = (context.conversationWorkingSet?.resultCards ?? [])
+      .map((_, index) => `result_candidate_${index + 1}`);
+    if (typeof value.resultCandidateId !== "string" || !resultCandidateIds.includes(value.resultCandidateId)) {
+      return resultCandidateIds.length === 0
+        ? "No reusableResultCandidates exist. Omit resultCandidateId."
+        : `resultCandidateId must be one of the Runtime-issued candidates: ${resultCandidateIds.join(", ")}. Never invent a candidate ID.`;
+    }
+  }
   const intent = optionalRecord(value.taskIntent);
+  if (intent.schema !== "agentloop.conversationTaskIntent/v1") {
+    return "taskIntent.schema must be agentloop.conversationTaskIntent/v1.";
+  }
+  if (
+    intent.operation !== "answer"
+    && intent.operation !== "lookup"
+    && intent.operation !== "analysis"
+    && intent.operation !== "create_artifact"
+    && intent.operation !== "transform_artifact"
+    && intent.operation !== "composite"
+  ) {
+    return "taskIntent.operation must be one of answer, lookup, analysis, create_artifact, transform_artifact, or composite.";
+  }
+  if (typeof intent.requiresExecution !== "boolean") {
+    return "taskIntent.requiresExecution must be a boolean and must agree with mode=execute.";
+  }
+  if (intent.requiresExecution !== (value.mode === "execute")) {
+    return "taskIntent.requiresExecution must be true exactly when mode=execute.";
+  }
+  if (!Array.isArray(intent.deliverables) || intent.deliverables.length > 8) {
+    return "taskIntent.deliverables must be an array containing at most 8 terminal output families.";
+  }
   if (Array.isArray(intent.deliverables)) {
+    const invalidDeliverableIndex = intent.deliverables.findIndex((item) => {
+      const deliverable = optionalRecord(item);
+      return typeof deliverable.targetId !== "string" || deliverable.targetId.trim().length === 0
+        || typeof deliverable.purpose !== "string" || deliverable.purpose.trim().length === 0
+        || typeof deliverable.action !== "string"
+        || typeof deliverable.kind !== "string"
+        || typeof deliverable.surface !== "string"
+        || (deliverable.format !== undefined && (typeof deliverable.format !== "string" || deliverable.format.trim().length === 0));
+    });
+    if (invalidDeliverableIndex >= 0) {
+      return `taskIntent.deliverables[${invalidDeliverableIndex}] must include non-empty targetId and purpose, plus action, kind, surface, and an optional non-empty format.`;
+    }
     const invalidCountIndex = intent.deliverables.findIndex((item) => {
       const count = optionalRecord(item).expectedArtifactCount;
       return !Number.isInteger(count) || (count as number) < 1 || (count as number) > 8;
@@ -8095,6 +8264,22 @@ function conversationTurnRepairFeedback(response: ModelResponse): string {
     if (invalidCountIndex >= 0) {
       return `taskIntent.deliverables[${invalidCountIndex}].expectedArtifactCount must be an integer from 1 to 8. Preserve the number of terminal artifacts explicitly requested by the user; use 1 only when exactly one artifact is requested.`;
     }
+  }
+  if (typeof value.effectiveGoal !== "string" || value.effectiveGoal.trim().length === 0 || value.effectiveGoal.length > 2_000) {
+    return "effectiveGoal must be a non-empty string no longer than 2000 characters.";
+  }
+  if (parseConversationEvidenceStrategy(value.evidenceStrategy) === undefined) {
+    return "evidenceStrategy must be one of none, lookup_lite, source_grounded, strict_user_source, or bound_visible_sources.";
+  }
+  if (parseConversationSourceBinding(value.sourceBinding, context.visibleDirectories) === undefined) {
+    return "sourceBinding must contain mode (none or primary_data) and visibleDirectoryIds (an allowed ID array; use [] with mode=none).";
+  }
+  if (
+    !Array.isArray(value.userConstraints)
+    || value.userConstraints.length > 8
+    || !value.userConstraints.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240)
+  ) {
+    return "userConstraints must be an array of at most 8 non-empty strings, each no longer than 240 characters; use [] when no additional constraint applies.";
   }
   return "The previous response did not provide a valid mode, relation, input mode, opaque candidate selection, effective goal, evidence demand, and constraint list.";
 }
@@ -8331,67 +8516,65 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       chunkCount: source.chunkCount,
       truncated: source.truncated,
     })),
-    conversationWorkingSet: workset === undefined
-      ? undefined
-      : {
-        priorGoalCandidates: goalRunIds.map((runId, index) => {
-          const cursor = workset.planCursors.find((item) => item.runId === runId);
-          const intent = workset.resolvedIntents?.find((item) => item.runId === runId)?.resolution;
-          const failure = workset.failedBoundaries.find((item) => item.runId === runId);
-          return {
-            candidateId: `goal_candidate_${index + 1}`,
-            ...(cursor?.input === undefined ? {} : { input: cursor.input }),
-            goal: cursor?.goal ?? intent?.effectiveGoal ?? (
-              workset.activeGoal?.runId === runId ? workset.activeGoal.goal : undefined
-            ),
-            status: cursor?.status ?? (
-              workset.activeGoal?.runId === runId
-                ? workset.activeGoal.status
-                : failure === undefined ? undefined : "failed"
-            ),
-            ...(intent === undefined ? {} : {
-              priorIntent: {
-                mode: intent.mode,
-                relation: intent.relation,
-                inputMode: intent.inputMode,
-                effectiveGoal: intent.effectiveGoal,
-                taskIntent: intent.taskIntent,
-                evidenceStrategy: intent.evidenceStrategy,
-                sourceBinding: intent.sourceBinding,
-                evidenceDemand: intent.evidenceDemand,
-                userConstraints: intent.userConstraints,
-              },
-            }),
-            ...(failure === undefined ? {} : {
-              failedBoundary: {
-                code: failure.code,
-                message: failure.message,
-                reasonCode: failure.reasonCode,
-                category: failure.category,
-              },
-            }),
-          };
-        }),
-        ...(workset.activeGoal === undefined ? {} : {
-          activeGoalCandidateId: goalCandidateIdByRunId.get(workset.activeGoal.runId),
-        }),
-        reusableArtifacts: workset.reusableArtifacts.map((artifact) => ({
-          goalCandidateId: goalCandidateIdByRunId.get(artifact.runId),
-          path: artifact.path,
-          name: artifact.name,
-          mimeType: artifact.mimeType,
-          bytes: artifact.bytes,
-        })),
-        reusableResultCandidates: (workset.resultCards ?? []).map((item, index) => ({
-          candidateId: `result_candidate_${index + 1}`,
-          goal: item.goal,
-          summary: item.summary,
-          summaryTruncated: item.summaryTruncated,
-          artifactPaths: item.artifactPaths,
-        })),
-        failedBoundaryCount: workset.failedBoundaries.length,
-        recommendedCapabilities: workset.recommendedCapabilities,
-      },
+    conversationWorkingSet: {
+      priorGoalCandidates: goalRunIds.map((runId, index) => {
+        const cursor = workset?.planCursors.find((item) => item.runId === runId);
+        const intent = workset?.resolvedIntents?.find((item) => item.runId === runId)?.resolution;
+        const failure = workset?.failedBoundaries.find((item) => item.runId === runId);
+        return {
+          candidateId: `goal_candidate_${index + 1}`,
+          ...(cursor?.input === undefined ? {} : { input: cursor.input }),
+          goal: cursor?.goal ?? intent?.effectiveGoal ?? (
+            workset?.activeGoal?.runId === runId ? workset.activeGoal.goal : undefined
+          ),
+          status: cursor?.status ?? (
+            workset?.activeGoal?.runId === runId
+              ? workset.activeGoal.status
+              : failure === undefined ? undefined : "failed"
+          ),
+          ...(intent === undefined ? {} : {
+            priorIntent: {
+              mode: intent.mode,
+              relation: intent.relation,
+              inputMode: intent.inputMode,
+              effectiveGoal: intent.effectiveGoal,
+              taskIntent: intent.taskIntent,
+              evidenceStrategy: intent.evidenceStrategy,
+              sourceBinding: intent.sourceBinding,
+              evidenceDemand: intent.evidenceDemand,
+              userConstraints: intent.userConstraints,
+            },
+          }),
+          ...(failure === undefined ? {} : {
+            failedBoundary: {
+              code: failure.code,
+              message: failure.message,
+              reasonCode: failure.reasonCode,
+              category: failure.category,
+            },
+          }),
+        };
+      }),
+      ...(workset?.activeGoal === undefined ? {} : {
+        activeGoalCandidateId: goalCandidateIdByRunId.get(workset.activeGoal.runId),
+      }),
+      reusableArtifacts: (workset?.reusableArtifacts ?? []).filter((artifact) => artifact.reusable).map((artifact) => ({
+        goalCandidateId: goalCandidateIdByRunId.get(artifact.runId),
+        path: artifact.path,
+        name: artifact.name,
+        mimeType: artifact.mimeType,
+        bytes: artifact.bytes,
+      })),
+      reusableResultCandidates: (workset?.resultCards ?? []).map((item, index) => ({
+        candidateId: `result_candidate_${index + 1}`,
+        goal: item.goal,
+        summary: item.summary,
+        summaryTruncated: item.summaryTruncated,
+        artifactPaths: item.artifactPaths,
+      })),
+      failedBoundaryCount: workset?.failedBoundaries.length ?? 0,
+      ...(workset === undefined ? {} : { recommendedCapabilities: workset.recommendedCapabilities }),
+    },
   };
   return [
     "<conversation_turn_context source=\"server\">",

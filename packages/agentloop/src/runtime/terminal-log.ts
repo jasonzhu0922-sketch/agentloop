@@ -46,6 +46,7 @@ const WARNING_EVENTS = new Set([
   "context.compaction.skipped",
   "context.tool_outputs_pruned",
   "loop.convergence_requested",
+  "loop.convergence_reopened",
   "loop.no_progress",
   "candidate.validation_deferred",
   "model.retry",

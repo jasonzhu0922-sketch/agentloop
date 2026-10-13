@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "../src/storage/database.ts";
 import { HumanLoopRepository } from "../src/runtime/human-loop.ts";
@@ -15,6 +18,7 @@ import { ToolRegistry } from "../src/tools/tool-registry.ts";
 import { createHumanLoopTool, HUMAN_LOOP_TOOL_NAME } from "../src/tools/human-loop-tool.ts";
 import { AppError } from "../src/shared/errors.ts";
 import { TEST_MODEL_LIMITS, approvingTestAssessor, singleStepTestPlanner } from "./runtime-test-helpers.ts";
+import type { ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import type { RuntimeEvent, RuntimeTool } from "../src/index.ts";
 import { latestRecoveryResponseAuthorizesRetirement } from "../src/runtime/run-service.ts";
 
@@ -197,7 +201,30 @@ test("a positive Recovery HIL confirmation revises and executes the repair Step 
           },
       }),
       planRevisionAssessorFactory: () => ({
-        assess: async () => ({ approved: true, feedback: "Approved recovery revision", evidenceRefs: [] }),
+        assess: async (input) => {
+          const original = input.currentPlan.steps.find((step) => step.id === "test-step");
+          const repair = input.proposal.steps.find((step) => step.id.includes(".repair."));
+          assert.ok(original !== undefined);
+          assert.ok(repair !== undefined);
+          assert.match(repair.objective, /Complete the original Step test-step deliverable/);
+          assert.match(repair.objective, /produce a recoverable result/);
+          assert.deepEqual(repair.targetIds, original.executionBinding.targetIds.length === 0
+            ? undefined
+            : original.executionBinding.targetIds);
+          const requiredToolSourceIds = original.executionBinding.requiredToolSourceIds ?? [];
+          const requiredUploadedSourceIds = original.executionBinding.requiredUploadedSourceIds ?? [];
+          const requiredVisibleDirectoryIds = original.executionBinding.requiredVisibleDirectoryIds ?? [];
+          assert.deepEqual(repair.sourceConstraint, requiredToolSourceIds.length === 0
+            && requiredUploadedSourceIds.length === 0
+            && requiredVisibleDirectoryIds.length === 0
+            ? undefined
+            : {
+              ...(requiredToolSourceIds.length === 0 ? {} : { requiredToolSourceIds }),
+              ...(requiredUploadedSourceIds.length === 0 ? {} : { requiredUploadedSourceIds }),
+              ...(requiredVisibleDirectoryIds.length === 0 ? {} : { requiredVisibleDirectoryIds }),
+            });
+          return { approved: true, feedback: "Approved recovery revision", evidenceRefs: [] };
+        },
       }),
     });
 
@@ -601,6 +628,163 @@ test("a resumed Step that pauses again creates a new HIL Recovery Action for tha
     assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "human_loop.resume_failed"), false);
   } finally { database.close(); }
 });
+
+test("resumed Human-in-the-Loop artifact delivery updates canonical targets before terminal commit", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-hil-artifact-target-"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = { user: { id: "user-hil-artifact-target" } };
+    const model = new HilArtifactDeliveryModel();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      workspaceRoot: workspace,
+      plannerFactory: () => ({
+        plan: async (task) => ({
+          schema: "agentloop.outcomePlan/v2" as const,
+          shape: "single_leaf" as const,
+          goal: task.canonicalState.intent.userInput,
+          selectedSkillIds: [],
+          selectedSkillRoles: [],
+          steps: [{
+            id: "deliver-report",
+            objective: "Produce the approved report artifact.",
+            dependencies: [],
+            role: "deliver",
+            skillIds: [],
+            requiredCapabilities: ["workspace_file_read", "workspace_artifact_write", "artifact_acceptance"],
+            targetIds: ["hil-report"],
+            evidenceContract: {
+              requiredKinds: ["artifact_path", "artifact_non_empty", "artifact_acceptance", "format_matches_request"],
+              caveatPolicy: "none",
+            },
+            successCriteria: [{
+              id: "report-delivered",
+              description: "The report artifact is delivered and accepted.",
+              source: "planner",
+            }],
+          }],
+        }),
+      }),
+      assessorFactory: () => approvingTestAssessor(),
+      modelFactory: () => model,
+      maxSteps: 6,
+    });
+
+    const started = await runs.startConversation(owner.user.id, "produce the HIL approved report");
+    const request = await waitForHumanLoop(runs, owner.user.id, started.id, "deliver-report");
+    await runs.respondHumanLoop(owner.user.id, started.id, request.id, true, request.revision);
+    const completed = await waitForRunCompletion(runs, owner.user.id, started.id);
+    const events = await runs.events(owner.user.id, started.id);
+    const outcome = await database.prepare("SELECT status, reason_code FROM run_outcomes WHERE run_id = ?")
+      .get(started.id) as { status: string; reason_code: string } | undefined;
+    const canonical = await database.prepare("SELECT state_json FROM canonical_run_states WHERE run_id = ?")
+      .get(started.id) as { state_json: string } | undefined;
+    const state = JSON.parse(canonical?.state_json ?? "{}") as {
+      targets?: Record<string, { status?: string }>;
+      gaps?: readonly { targetId?: string; status?: string }[];
+    };
+
+    assert.equal(completed.status, "completed");
+    assert.equal(outcome?.status, "completed");
+    assert.equal(outcome?.reason_code, "plan_assessed_and_completed");
+    assert.equal(state.targets?.["hil-report"]?.status, "accepted");
+    assert.equal(state.gaps?.some((gap) => gap.targetId === "hil-report" && gap.status === "open"), false);
+    assert.equal(events.some((event) => event.type === "human_loop.resume_failed"), false);
+    assert.equal(events.some((event) => event.type === "terminal.delivery_committed"), true);
+  } finally {
+    await database.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+class HilArtifactDeliveryModel {
+  readonly limits = TEST_MODEL_LIMITS;
+  private calls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    this.calls += 1;
+    if (request.runId.startsWith("conversation-turn:")) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "resolve-hil-artifact",
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "execute",
+            relation: "new_goal",
+            inputMode: "none",
+            effectiveGoal: "Produce the HIL approved report artifact.",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "create_artifact",
+              requiresExecution: true,
+              deliverables: [{
+                targetId: "hil-report",
+                purpose: "Deliver the HIL approved Markdown report.",
+                expectedArtifactCount: 1,
+                action: "create",
+                kind: "document",
+                format: "md",
+                surface: "workspace_artifact",
+              }],
+            },
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: [],
+          },
+        }],
+      };
+    }
+    if (this.calls === 2) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "ask-approval",
+          name: HUMAN_LOOP_TOOL_NAME,
+          arguments: {
+            kind: "confirmation",
+            title: "Confirm report production",
+            prompt: "Continue producing the report artifact?",
+            rationale: "The report requires explicit approval before production.",
+            evidenceRefs: [],
+            responseSchema: { type: "confirm", acceptLabel: "Continue", rejectLabel: "Stop" },
+            resume: { mode: "continue_step", targetStepId: "deliver-report" },
+          },
+        }],
+      };
+    }
+    if (this.calls === 3) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "write-report",
+          name: "computer_write_file",
+          arguments: { path: "report.md", content: "# HIL report\n\nApproved content.\n" },
+        }],
+      };
+    }
+    if (this.calls === 4) {
+      const context = request.runtimeContext?.content ?? "";
+      const versionId = /"path":"report\.md"[\s\S]*?"currentVersionId":"([^"]+)"/.exec(context)?.[1];
+      const workProductIndex = context.indexOf("workProduct");
+      assert.equal(typeof versionId, "string", context.slice(Math.max(0, workProductIndex), Math.max(0, workProductIndex) + 4_000));
+      return {
+        content: `<work_product_progress>{"updates":[{"kind":"delivery_target","targetId":"hil-report","path":"report.md","versionId":"${versionId}"}]}</work_product_progress>`,
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "verify-report",
+          name: "verify_artifact_acceptance",
+          arguments: { artifactPath: "report.md", profileId: "markdown" },
+        }],
+      };
+    }
+    return { content: "Report artifact delivered and accepted.", finishReason: "stop", toolCalls: [] };
+  }
+}
 
 async function waitForHumanLoop(runs: RunService, userId: string, runId: string, stepId: string) {
   for (let attempt = 0; attempt < 100; attempt += 1) {

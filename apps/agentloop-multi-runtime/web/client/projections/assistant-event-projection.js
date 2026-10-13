@@ -15,6 +15,8 @@ const MAX_PERSISTED_EVENT_TEXT = 8_000;
 export function projectAssistantEvent(assistant, event) {
   if (!assistant || !event || typeof event.type !== "string") return false;
   const data = event.data && typeof event.data === "object" ? event.data : {};
+  const progress = liveProgressForEvent(event);
+  if (progress !== undefined) assistant.progress = progress;
   if (event.type === "assistant.streaming" || event.type === "assistant.committed") {
     if (typeof data.content === "string") assistant.text = data.content;
   }
@@ -28,6 +30,14 @@ export function projectAssistantEvent(assistant, event) {
   // reconciliation path after reconnect, not the only display path.
   if (event.type === "run.waiting_user" && data.request?.status === "open") {
     assistant.humanLoop = data.request;
+  }
+  if (event.type === "human_loop.answered") {
+    const requestId = typeof data.requestId === "string" ? data.requestId : undefined;
+    if (requestId === undefined || assistant.humanLoop?.id === requestId) assistant.humanLoop = undefined;
+  }
+  if ((event.type === "plan.step.started" || event.type === "plan.step.completed") && assistant.humanLoop !== undefined) {
+    const stepId = typeof data.stepId === "string" ? data.stepId : undefined;
+    if (stepId === undefined || assistant.humanLoop.stepId === stepId) assistant.humanLoop = undefined;
   }
   if (event.type === "run.recovery_required") {
     assistant.recovery = {
@@ -65,10 +75,47 @@ export function projectAssistantEvent(assistant, event) {
   }
   if (TERMINAL_EVENT_TYPES.has(event.type)) {
     assistant.reasoning = "";
+    assistant.progress = undefined;
     assistant.recovery = undefined;
     assistant.humanLoop = undefined;
   }
   return TERMINAL_EVENT_TYPES.has(event.type);
+}
+
+/**
+ * A concise browser projection of a durable Runtime event.  This is display
+ * state only: no timer, transport heartbeat, or inferred completion is turned
+ * into a Run fact.  It keeps a long provider request intelligible even before
+ * the model has produced visible text or a tool call.
+ */
+export function liveProgressForEvent(event) {
+  if (!event || typeof event.type !== "string") return undefined;
+  const data = event.data && typeof event.data === "object" ? event.data : {};
+  if (event.type === "model.request.started") {
+    if (data.purpose === "conversation_turn_resolver") return "正在理解本轮需求";
+    if (data.phase === "planning") return "正在制定执行计划";
+    if (data.phase === "assessment") return "正在核验当前结果";
+    return "正在执行当前步骤";
+  }
+  if (event.type === "planning.started") return "正在生成执行计划";
+  if (event.type === "plan.admitted") return "执行计划已确认，准备开始处理";
+  if (event.type === "plan.step.started") return "正在执行当前步骤";
+  if (event.type === "tool.dispatched") {
+    const toolName = typeof data.toolName === "string" && data.toolName.trim() ? data.toolName.trim() : "工具";
+    return `正在调用 ${toolName}`;
+  }
+  if (event.type === "tool.completed") return "工具已返回结果，正在继续处理";
+  if (event.type === "assistant.streaming" || event.type === "assistant.committed") return "正在整理当前步骤的结果";
+  if (event.type === "loop.convergence_requested") {
+    return data.reason === "current_step_evidence_complete"
+      ? "当前证据已齐备，正在生成最终结果"
+      : "正在收敛当前步骤并生成可提交结果";
+  }
+  if (event.type === "loop.convergence_reopened") return "检测到仍需工具处理，已继续执行";
+  if (event.type === "candidate.rejected") return "当前结果尚未通过核验，正在修正";
+  if (event.type === "candidate.approved") return "当前结果已通过核验，正在提交";
+  if (event.type === "run.waiting_user") return "等待你的确认或补充信息";
+  return undefined;
 }
 
 function failureMessage(data) {
@@ -103,7 +150,15 @@ function terminalFailureReport(data) {
 
 export function mergeRuntimeEvents(currentEvents, incomingEvents, limit = MAX_PERSISTED_EVENTS) {
   const eventsBySequence = new Map();
-  for (const event of [...(Array.isArray(currentEvents) ? currentEvents : []), ...(Array.isArray(incomingEvents) ? incomingEvents : [])]) {
+  // `currentEvents` is this module's already-compacted browser cache.  On the
+  // SSE hot path, recompacting it once for every new event turns a bounded
+  // history into repeated deep copies.  Only newly received durable events
+  // need compaction; a cold cache always enters as `incomingEvents`.
+  for (const event of Array.isArray(currentEvents) ? currentEvents : []) {
+    if (!event || !Number.isSafeInteger(event.seq) || event.seq < 0) continue;
+    eventsBySequence.set(event.seq, event);
+  }
+  for (const event of Array.isArray(incomingEvents) ? incomingEvents : []) {
     if (!event || !Number.isSafeInteger(event.seq) || event.seq < 0) continue;
     eventsBySequence.set(event.seq, compactRuntimeEvent(event));
   }

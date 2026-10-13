@@ -153,6 +153,41 @@ export interface RuntimeStepEvidenceState {
   readonly instruction: string;
 }
 
+/**
+ * Post-commit result reduction. Producer authorization is decided while the
+ * result remains adjacent to its invocation; Assessment later consumes only
+ * these admitted facts and never repeats that process check.
+ */
+export function admittedEvidenceKindsForCommittedResult(input: {
+  readonly evidence: AgentLoopToolEvidence;
+  readonly policy?: RuntimeToolProgressPolicy;
+}): readonly string[] {
+  if (input.evidence.isError || input.policy === undefined) return [];
+  return [...collectPolicyEvidenceKinds(
+    [input.evidence],
+    policyScopedToCommittedArtifact(input.evidence, input.policy),
+  ).satisfied].sort();
+}
+
+/**
+ * A committed receipt is an attestation about one concrete artifact, whereas
+ * an artifact-target set is a leaf-wide completion obligation.  Reducing a
+ * single receipt against every target would erase its otherwise authenticated
+ * facts whenever a composite leaf has two outputs.  Scope this reduction to
+ * one compatible target; the later aggregate gate still requires distinct
+ * paths to cover every target, so one receipt cannot complete two targets.
+ */
+function policyScopedToCommittedArtifact(
+  evidence: AgentLoopToolEvidence,
+  policy: RuntimeToolProgressPolicy,
+): RuntimeToolProgressPolicy {
+  const artifact = artifactRefFromEvidence(evidence);
+  const targets = policy.artifactTargets;
+  if (artifact === undefined || targets === undefined || targets.length < 2) return policy;
+  const target = targets.find((candidate) => artifactMatchesTarget(artifact, candidate, policy));
+  return target === undefined ? policy : { ...policy, artifactTargets: [target] };
+}
+
 export interface RuntimeEvidenceCompletionCandidate {
   readonly schema: "agentloop.runtimeEvidenceCompletionCandidate/v1";
   readonly output: string;

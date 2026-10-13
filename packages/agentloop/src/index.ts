@@ -86,6 +86,14 @@ export type {
   WebToolsOptions,
 } from "./tools/index.ts";
 export { runAgentLoop } from "./runtime/agent-loop.ts";
+export { deriveCurrentDecisionView, projectCurrentDecisionView } from "./runtime/current-decision-view.ts";
+export type {
+  CurrentDecisionContext,
+  CurrentDecisionView,
+  CurrentDecisionViewProjection,
+  CurrentDecisionWorkProductFacts,
+  WorkProductDiagnosticFact,
+} from "./runtime/current-decision-view.ts";
 export { resolveCapabilityGaps, resolveSourceGroundingGap } from "./planning/capability-resolution.ts";
 export type { CapabilityGap, CapabilityGapCandidate } from "./planning/capability-resolution.ts";
 export { createCapabilityGrant } from "./runtime/capability-grant.ts";

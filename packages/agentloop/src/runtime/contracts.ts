@@ -66,6 +66,19 @@ export interface RuntimeDeliveryCandidate {
 export interface RuntimeDeliveryClaim {
   readonly targetId: string;
   readonly evidenceRefs: readonly string[];
+  /** Present for a workspace delivery: the exact current artifact identity claimed for this target. */
+  readonly artifact?: RuntimeDeliveryArtifact;
+  /** Multiple concrete instances may fulfill one user delivery with expectedCount > 1. */
+  readonly artifacts?: readonly RuntimeDeliveryArtifact[];
+}
+
+export interface RuntimeDeliveryArtifact {
+  readonly path: string;
+  readonly versionId: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly observedByToolCallId: string;
+  readonly acceptanceToolCallId: string;
 }
 
 export interface ModelToolCall {
@@ -383,6 +396,8 @@ export interface AgentLoopToolEvidence {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly result: string;
+  /** Runtime-authenticated result facts, reduced after `tool.result_committed`. */
+  readonly admittedEvidenceKinds?: readonly string[];
   readonly resultRef?: RuntimeResultRef;
   /** Invocation transport/dispatch status; distinct from the returned operation result. */
   readonly invocationStatus?: "completed" | "failed" | "rejected";
@@ -406,6 +421,8 @@ export interface CandidateCompletionContext {
   readonly toolEvidence: readonly AgentLoopToolEvidence[];
   readonly projectedToolEvidence: readonly AgentLoopToolEvidence[];
   readonly activatedSkillNames: readonly string[];
+  /** Runtime-derived basis of the current admitted Step, excluding assessment bookkeeping. */
+  readonly decisionBasisDigest?: string;
   readonly contextSummary?: string;
 }
 

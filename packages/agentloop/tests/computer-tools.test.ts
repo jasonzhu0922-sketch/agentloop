@@ -2323,7 +2323,7 @@ test("computer_write_file returns bounded write-after-inspection evidence", asyn
     const prepared = allowed.prepare({
       id: "write-report",
       name: "computer_write_file",
-      arguments: { path: "reports/summary.md", content },
+      arguments: { path: "reports/summary.md", content, deliveryTargetId: "summary-report" },
     });
     await fs.mkdir(join(root, "reports"), { recursive: true });
 
@@ -2331,6 +2331,7 @@ test("computer_write_file returns bounded write-after-inspection evidence", asyn
       path: string;
       bytes: number;
       sha256: string;
+      deliveryTargetId?: string;
       totalLines: number;
       inspection: {
         sha256: string;
@@ -2351,6 +2352,7 @@ test("computer_write_file returns bounded write-after-inspection evidence", asyn
     assert.equal(result.path, "reports/summary.md");
     assert.equal(result.bytes, Buffer.byteLength(content));
     assert.equal(result.sha256, createHash("sha256").update(content).digest("hex"));
+    assert.equal(result.deliveryTargetId, "summary-report");
     assert.equal(result.inspection.sha256, result.sha256);
     assert.equal(result.totalLines, 96);
     assert.deepEqual(result.inspection.outline, [
@@ -2435,6 +2437,92 @@ test("computer_run_command stores large stdout as reusable content-addressed evi
     assert.equal(await fs.readFile(join(root, result.stdoutRef.path), "utf8"), "row-data\n".repeat(1200));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("computer_run_command binds a zero-input external-source Skill action without treating its script as source data", async () => {
+  const workspace = await fs.mkdtemp(join(tmpdir(), "agentloop-zero-input-workflow-workspace-"));
+  const skillRoot = await fs.mkdtemp(join(tmpdir(), "agentloop-zero-input-workflow-skill-"));
+  try {
+    await fs.mkdir(join(skillRoot, "scripts"), { recursive: true });
+    await fs.writeFile(join(skillRoot, "scripts", "query.mjs"), [
+      "process.stdout.write(JSON.stringify({",
+      "  schema: 'example.externalSourceQuery/v1',",
+      "  evidenceReceipt: {",
+      "    schema: 'agentloop.toolEvidenceReceipt/v1',",
+      "    sourceRefs: [{ uri: 'https://example.test/items', title: 'Example source' }],",
+      "    evidenceKinds: { satisfied: ['source_summary', 'source_urls'], caveated: [], failed: [] },",
+      "  },",
+      "}));",
+      "",
+    ].join("\n"));
+    const grant = createCapabilityGrant({
+      actorUserId: "user",
+      runId: "run",
+      depth: 0,
+      skillExecutionRoots: [{
+        id: "skill-root:external-source",
+        skillId: "external-source",
+        name: "external-source",
+        cwd: "@skills/external-source",
+        path: skillRoot,
+      }],
+      workflowEvidenceBindings: [{
+        schema: "agentloop.skillWorkflowEvidenceBinding/v1",
+        skillId: "external-source",
+        skillName: "external-source",
+        executorId: "external-source-query",
+        actionId: "search-items",
+        command: "trusted-node",
+        cwd: "@skills/external-source",
+        script: "scripts/query.mjs",
+        argumentTemplates: ["scripts/query.mjs", "items", "--q", "{{query}}"],
+        evidenceInputArgumentIndexes: [],
+        producesEvidenceKinds: ["source_summary", "source_urls"],
+      }],
+      allowedToolNames: ["computer_run_command"],
+      allowedSkillIds: ["external-source"],
+    });
+    const registry = new ToolRegistry(createComputerTools(new ComputerExecutor(workspace, {
+      executableAliases: { "trusted-node": process.execPath },
+    })));
+    const allowed = registry.materialize(grant);
+    const definition = allowed.definitions.find((tool) => tool.name === "computer_run_command");
+    assert.match(definition?.description ?? "", /never include the interpreter entrypoint, executable source file, or package-owned Skill script/);
+    const prepared = allowed.prepare({
+      id: "external-source-query",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["scripts/query.mjs", "items", "--q", "宝信软件"],
+        cwd: "@skills/external-source",
+        timeoutMs: 2_000,
+      },
+    });
+    const result = await prepared.tool.execute({ grant }, prepared.input) as {
+      exitCode: number | null;
+      computationReceipt?: unknown;
+      workflowEvidenceReceipt?: {
+        skill: { skillId: string; skillName: string; executorId: string; actionId: string };
+        evidenceKinds: { satisfied: string[]; caveated: string[]; failed: string[] };
+      };
+    };
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.computationReceipt, undefined);
+    assert.deepEqual(result.workflowEvidenceReceipt?.skill, {
+      skillId: "external-source",
+      skillName: "external-source",
+      executorId: "external-source-query",
+      actionId: "search-items",
+    });
+    assert.deepEqual(result.workflowEvidenceReceipt?.evidenceKinds, {
+      satisfied: ["source_summary", "source_urls"],
+      caveated: [],
+      failed: [],
+    });
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(skillRoot, { recursive: true, force: true });
   }
 });
 
@@ -2762,7 +2850,7 @@ test("computer_run_command reports bounded workspace file changes as structured 
     });
     const result = await prepared.tool.execute(grantContext(["computer_run_command"]), prepared.input) as {
       exitCode: number | null;
-      fileChanges: Array<{ path: string; changeType: string; bytes?: number }>;
+      fileChanges: Array<{ path: string; changeType: string; bytes?: number; sha256?: string }>;
       fileChangesTruncated: boolean;
     };
     assert.equal(result.exitCode, 0);
@@ -2774,6 +2862,10 @@ test("computer_run_command reports bounded workspace file changes as structured 
         { path: "existing.txt", changeType: "modified" },
       ],
     );
+    assert.equal(result.fileChanges.find((change) => change.path === "created.json")?.sha256,
+      createHash("sha256").update("{\"ok\":true}\n").digest("hex"));
+    assert.equal(result.fileChanges.find((change) => change.path === "existing.txt")?.sha256,
+      createHash("sha256").update("after\n").digest("hex"));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -2872,8 +2964,22 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
       join(skillRoot, "scripts", "probe.mjs"),
       "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync('SKILL.md', 'utf8'));\n",
     );
+    await fs.writeFile(
+      join(skillRoot, "scripts", "build-workspace-artifact.mjs"),
+      [
+        "import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';",
+        "import { dirname } from 'node:path';",
+        "const [input, output] = process.argv.slice(2);",
+        "if (process.env.AGENTLOOP_WORKSPACE_ROOT === undefined) throw new Error('missing workspace root env');",
+        "mkdirSync(dirname(output), { recursive: true });",
+        "writeFileSync(output, `built:${readFileSync(input, 'utf8')}`);",
+        "process.stdout.write(JSON.stringify({ cwd: process.cwd(), workspaceRoot: process.env.AGENTLOOP_WORKSPACE_ROOT, input, output }));",
+        "",
+      ].join("\n"),
+    );
     await fs.mkdir(join(root, "scripts"), { recursive: true });
     await fs.writeFile(join(skillRoot, "SKILL.md"), "PACKAGE-SCRIPT-OK\n");
+    await fs.writeFile(join(root, "deck_spec.json"), "{\"title\":\"Run workspace deck\"}\n");
     await fs.writeFile(
       join(root, "scripts", "read-skill-env.mjs"),
       [
@@ -2905,6 +3011,41 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, "PACKAGE-SCRIPT-OK\n");
     assert.deepEqual(result.fileChanges, []);
+
+    const workspaceArtifact = allowed.prepare({
+      id: "skill-script-workspace-artifact",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: [
+          "scripts/build-workspace-artifact.mjs",
+          "@workspace/deck_spec.json",
+          "@workspace/artifacts/deck.pptx",
+        ],
+        cwd: "@skills/demo-skill",
+        timeoutMs: 2_000,
+      },
+    });
+    const workspaceArtifactResult = await workspaceArtifact.tool.execute({
+      grant: skillRootGrant(["computer_run_command"], skillRoot),
+    }, workspaceArtifact.input) as {
+      exitCode: number | null;
+      stdout: string;
+      fileChanges: Array<{ path: string; changeType: string }>;
+    };
+    const workspaceInvocation = JSON.parse(workspaceArtifactResult.stdout) as {
+      cwd: string; workspaceRoot: string; input: string; output: string;
+    };
+    assert.equal(workspaceArtifactResult.exitCode, 0);
+    assert.equal(workspaceInvocation.cwd, await fs.realpath(skillRoot));
+    assert.equal(workspaceInvocation.workspaceRoot, await fs.realpath(root));
+    assert.equal(workspaceInvocation.input, join(await fs.realpath(root), "deck_spec.json"));
+    assert.equal(workspaceInvocation.output, join(await fs.realpath(root), "artifacts", "deck.pptx"));
+    assert.equal(await fs.readFile(join(root, "artifacts", "deck.pptx"), "utf8"), "built:{\"title\":\"Run workspace deck\"}\n");
+    assert.equal(await fs.stat(join(skillRoot, "artifacts", "deck.pptx")).catch(() => undefined), undefined);
+    assert.deepEqual(workspaceArtifactResult.fileChanges.map(({ path, changeType }) => ({ path, changeType })), [
+      { path: "artifacts/deck.pptx", changeType: "created" },
+    ]);
 
     const envPrepared = allowed.prepare({
       id: "workspace-script-with-skill-env",
@@ -2951,6 +3092,21 @@ test("computer_run_command can use only Runtime-authorized Skill execution roots
     });
     await assert.rejects(
       () => aliasArgument.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, aliasArgument.input),
+      (error: unknown) => hasCode(error, "FORBIDDEN"),
+    );
+
+    const escapingWorkspaceAlias = allowed.prepare({
+      id: "workspace-alias-escape",
+      name: "computer_run_command",
+      arguments: {
+        command: "trusted-node",
+        args: ["scripts/probe.mjs", "@workspace/../../outside.txt"],
+        cwd: "@skills/demo-skill",
+        timeoutMs: 2_000,
+      },
+    });
+    await assert.rejects(
+      () => escapingWorkspaceAlias.tool.execute({ grant: skillRootGrant(["computer_run_command"], skillRoot) }, escapingWorkspaceAlias.input),
       (error: unknown) => hasCode(error, "FORBIDDEN"),
     );
   } finally {

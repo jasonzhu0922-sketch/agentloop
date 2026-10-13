@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../shared/errors.ts";
 import type { ConversationTurnResolution, ExecutionPlan, FailedBoundary, SkillComplianceAssessment, StepEvidence } from "../planning/contracts.ts";
 import type { StructuredTaskUnderstanding } from "./task-intent.ts";
+import type { WorkProductSemantics } from "./work-product-semantics.ts";
+import type { RuntimeDeliveryClaim } from "./contracts.ts";
 
 export type CanonicalRunPhase =
   | "understood"
@@ -54,10 +56,22 @@ export interface CanonicalDeliveryTarget {
   readonly terminalRequired: true;
   readonly status: "open" | "accepted";
   readonly ownerStepIds: readonly string[];
+  /** Current user-delivery identity, derived from an admitted target binding. */
+  readonly artifactBinding?: {
+    readonly stepId: string;
+    readonly declarationId: string;
+    readonly path: string;
+    readonly versionId: string;
+    readonly sha256: string;
+    readonly bytes: number;
+    readonly observedByToolCallId: string;
+    readonly boundAt: number;
+  };
   readonly claims: readonly {
     readonly stepId: string;
     readonly assessmentId: string;
     readonly evidenceRefs: readonly string[];
+    readonly artifact?: RuntimeDeliveryClaim["artifact"];
     readonly acceptedAt: number;
   }[];
 }
@@ -251,9 +265,13 @@ export function recordCanonicalAssessment(
     .filter((criterion) => criterion.satisfied && criterion.targetId !== undefined)
     .map((criterion) => criterion.targetId!)
     .filter((targetId) => step.targetIds.includes(targetId))
-    .filter((targetId) => evidence.deliveryCandidate?.deliveryClaims.some((claim) => claim.targetId === targetId) === true));
+    .filter((targetId) => deliveryClaimMatchesCurrentTargetBinding(
+      state.targets[targetId],
+      evidence.deliveryCandidate?.deliveryClaims.find((claim) => claim.targetId === targetId),
+    )));
   const targets = Object.fromEntries(Object.entries(state.targets).map(([targetId, target]) => {
     if (!acceptedTargetIds.has(targetId)) return [targetId, target];
+    const claim = evidence.deliveryCandidate?.deliveryClaims.find((candidate) => candidate.targetId === targetId);
     return [targetId, Object.freeze({
       ...target,
       status: "accepted" as const,
@@ -261,6 +279,7 @@ export function recordCanonicalAssessment(
         stepId: assessment.stepId,
         assessmentId: assessment.id,
         evidenceRefs,
+        ...(claim?.artifact === undefined ? {} : { artifact: claim.artifact }),
         acceptedAt: now,
       }]),
     })];
@@ -314,6 +333,66 @@ export function recordCanonicalAssessment(
   }, now);
 }
 
+/**
+ * Reconcile current target/version bindings from committed ActionResult facts.
+ * This does not assign ownership or alter the Plan: a single leaf may bind
+ * many targets. Rewriting a bound path clears acceptance for that target until
+ * the new current version is explicitly re-bound and accepted.
+ */
+export function reconcileCanonicalDeliveryTargetBindings(
+  state: CanonicalRunState,
+  input: {
+    readonly stepId: string;
+    readonly bindings: NonNullable<WorkProductSemantics["deliveryTargets"]>;
+    readonly now?: number;
+  },
+): CanonicalRunState {
+  assertMutable(state);
+  const now = input.now ?? Date.now();
+  const byTarget = new Map<string, NonNullable<WorkProductSemantics["deliveryTargets"]>>();
+  for (const binding of input.bindings) {
+    const key = binding.deliveryTargetId;
+    byTarget.set(key, [...(byTarget.get(key) ?? []), binding]);
+  }
+  let changed = false;
+  const targets = Object.fromEntries(Object.entries(state.targets).map(([targetId, target]) => {
+    if (!target.ownerStepIds.includes(input.stepId)) return [targetId, target];
+    const bindings = byTarget.get(targetId) ?? [];
+    if (bindings.length === 0) {
+      if (target.artifactBinding?.stepId !== input.stepId) return [targetId, target];
+      changed = true;
+      return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: undefined })];
+    }
+    // The single field is the current decision projection for a target. The
+    // full target cardinality remains in the candidate's exact artifact list;
+    // this prevents plural outputs from being turned into additional leaves.
+    const binding = bindings[0]!;
+    const nextBinding = {
+      stepId: input.stepId,
+      declarationId: binding.declarationId,
+      path: binding.path,
+      versionId: binding.versionId,
+      sha256: binding.sha256,
+      bytes: binding.bytes,
+      observedByToolCallId: binding.observedByToolCallId,
+      boundAt: now,
+    };
+    const current = target.artifactBinding;
+    if (current !== undefined
+      && current.stepId === nextBinding.stepId
+      && current.declarationId === nextBinding.declarationId
+      && current.path === nextBinding.path
+      && current.versionId === nextBinding.versionId
+      && current.sha256 === nextBinding.sha256
+      && current.bytes === nextBinding.bytes
+      && current.observedByToolCallId === nextBinding.observedByToolCallId) return [targetId, target];
+    changed = true;
+    return [targetId, Object.freeze({ ...target, status: "open" as const, artifactBinding: Object.freeze(nextBinding) })];
+  }));
+  if (!changed) return state;
+  return next(state, { targets: Object.freeze(targets) }, now);
+}
+
 export function recordCanonicalStepResult(
   state: CanonicalRunState,
   stepId: string,
@@ -365,6 +444,21 @@ function bindTargetOwners(
     ...target,
     ownerStepIds: Object.freeze(owners.get(targetId) ?? []),
   })])));
+}
+
+function deliveryClaimMatchesCurrentTargetBinding(
+  target: CanonicalDeliveryTarget | undefined,
+  claim: RuntimeDeliveryClaim | undefined,
+): boolean {
+  if (target === undefined || claim === undefined) return false;
+  if (target.artifactBinding === undefined) return true;
+  const artifacts = claim.artifacts ?? (claim.artifact === undefined ? [] : [claim.artifact]);
+  if (artifacts.length < target.expectedCount) return false;
+  return artifacts.some((artifact) => artifact.path === target.artifactBinding!.path
+    && artifact.versionId === target.artifactBinding!.versionId
+    && artifact.sha256 === target.artifactBinding!.sha256
+    && artifact.bytes === target.artifactBinding!.bytes
+    && artifact.observedByToolCallId === target.artifactBinding!.observedByToolCallId);
 }
 
 export function commitCanonicalTerminal(

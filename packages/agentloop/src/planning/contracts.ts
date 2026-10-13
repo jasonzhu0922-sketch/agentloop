@@ -82,6 +82,8 @@ export interface EvidenceContract {
  */
 export interface ArtifactTarget {
   readonly id: string;
+  /** Canonical user-delivery family this concrete artifact instance fulfills. */
+  readonly deliveryTargetId?: string;
   /** Server-frozen user-visible purpose; a Planner binding cannot rewrite it. */
   readonly purpose?: string;
   readonly kind: string;
@@ -536,6 +538,8 @@ export interface ToolEvidence {
   readonly isError: boolean;
   readonly failurePhase?: "prepare" | "execute" | "operation" | "runtime";
   readonly result: string;
+  /** Runtime-authenticated result facts, persisted with the Step evidence. */
+  readonly admittedEvidenceKinds?: readonly string[];
 }
 
 export interface StepEvidence {

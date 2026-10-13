@@ -205,7 +205,11 @@ export function eventLabel(event: RunEvent): string {
   if (t === "plan.step.completed") return "完成步骤 " + String(d.stepId ?? "");
   if (t === "step.started") return "第 " + String(d.step ?? "?") + " 回合 · " + phaseLabel(d.phase);
   if (t === "step.completed") return "第 " + String(d.step ?? "?") + " 回合完成";
-  if (t === "loop.convergence_requested") return "预算用尽，开始收敛（第 " + String(d.step ?? "?") + " 回合）";
+  if (t === "loop.convergence_requested") {
+    return (d.reason === "current_step_evidence_complete" ? "证据已齐，开始收敛" : "开始收敛当前步骤")
+      + "（第 " + String(d.step ?? "?") + " 回合）";
+  }
+  if (t === "loop.convergence_reopened") return "收敛时检测到仍需工具处理，继续执行（第 " + String(d.step ?? "?") + " 回合）";
   if (t === "loop.limit_exceeded") return "达到步数上限" + (d.stalled ? "（无进展）" : "");
   if (t === "loop.no_progress") return "检测到重复调用，提前停止";
   if (t === "context.assembled") return "上下文已整理（约 " + clip(d.estimatedInputTokens, 12) + " tokens）";

@@ -457,6 +457,7 @@ export function createComputerTools(
         "Use only mode for write behavior: create, overwrite, or append; omit mode for create. Append requires an existing file and is intended for a later explicit extension, not a mandatory authoring protocol.",
         "This Tool may write authored HTML/CSS/JS directly, including paginated HTML, HTML-PPT, browser slide decks, custom visual pages, dashboards, apps, and interactions.",
         "Provide the complete intended content in one call when authoring a new file. Append remains available for intentionally extending an existing file, but the Runtime does not require a create-then-append chunk protocol.",
+        "When this write is the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId. This selects an already-admitted target; it never creates a target and is optional for process/support files.",
         "The result includes a Run-scoped revisionId. Use that opaque handle, not a hash, as baseRevisionId when making a subsequent computer_patch_file call.",
         "The result also includes the write mode, final file sha256 as receipt-only evidence, final byte size, Markdown-style outline, and bounded first/last sample ranges as write-after-inspection evidence; cite that receipt before rereading the whole file.",
       ].join(" "),
@@ -464,6 +465,7 @@ export function createComputerTools(
         path: { type: "string" },
         content: { type: "string" },
         mode: { type: "string", enum: ["create", "overwrite", "append"] },
+        deliveryTargetId: { type: "string", minLength: 1, maxLength: 128 },
       }),
       executionMode: "exclusive",
       replaySafe: false,
@@ -494,13 +496,15 @@ export function createComputerTools(
           path: requireString(record.path, "path", { max: 4_000 }),
           content: record.content,
           mode,
+          ...(record.deliveryTargetId === undefined ? {} : { deliveryTargetId: requireString(record.deliveryTargetId, "deliveryTargetId", { max: 128 }) }),
         };
       },
       execute: async (_context, value) => {
-        const input = value as { path: string; content: string; mode: WriteFileMode };
+        const input = value as { path: string; content: string; mode: WriteFileMode; deliveryTargetId?: string };
         const receipt = await executorForContext(executor, _context).writeFile(input.path, input.content, input.mode);
         return {
           ...receipt,
+          ...(input.deliveryTargetId === undefined ? {} : { deliveryTargetId: input.deliveryTargetId }),
           artifactReceipt: buildArtifactReceipt("computer_write_file", receipt, {
             writeMode: receipt.mode,
             writtenBytes: receipt.writtenBytes,
@@ -520,6 +524,7 @@ export function createComputerTools(
         "All hunks are validated against the same revision before any write; they must be ordered by strictly increasing startLine and must not overlap. Any mismatch rejects the entire patch without changing the file.",
         "This is a surgical edit: at most 64 hunks and 50000 total expected/replacement characters are accepted. For a larger new file body, use computer_write_file with the complete intended replacement or a purpose-built materialization Tool.",
         "Do not pass a hash or derive a version from any tool-result hash. If the revision is stale, reread the file and use its new revisionId.",
+        "When this patch advances the final instance of one Runtime-admitted delivery target, pass its deliveryTargetId; omit it for process/support files.",
         "The result includes schema agentloop.filePatch/v2, before/after sha256 and byte counts, hunk line metadata, final inspection, and a standard artifactReceipt. After patching a deliverable, call verify_artifact_acceptance for the patched artifact.",
       ].join(" "),
       inputSchema: objectSchema(["path", "hunks", "baseRevisionId"], {
@@ -540,6 +545,7 @@ export function createComputerTools(
           },
         },
         baseRevisionId: { type: "string", pattern: "^rev_[a-f0-9]{32}$" },
+        deliveryTargetId: { type: "string", minLength: 1, maxLength: 128 },
       }),
       executionMode: "exclusive",
       replaySafe: false,
@@ -555,12 +561,15 @@ export function createComputerTools(
           path: requireString(record.path, "path", { max: 4_000 }),
           hunks: requirePatchHunks(record.hunks),
           baseRevisionId: requireString(record.baseRevisionId, "baseRevisionId", { min: 36, max: 36, pattern: /^rev_[a-f0-9]{32}$/u }),
+          ...(record.deliveryTargetId === undefined ? {} : { deliveryTargetId: requireString(record.deliveryTargetId, "deliveryTargetId", { max: 128 }) }),
         };
       },
       execute: async (_context, value) => {
-        const receipt = await executorForContext(executor, _context).patchFile(value as PatchFileInput);
+        const input = value as PatchFileInput & { deliveryTargetId?: string };
+        const receipt = await executorForContext(executor, _context).patchFile(input);
         return {
           ...receipt,
+          ...(input.deliveryTargetId === undefined ? {} : { deliveryTargetId: input.deliveryTargetId }),
           artifactReceipt: buildArtifactReceipt("computer_patch_file", {
             path: receipt.path,
             bytes: receipt.after.bytes,
@@ -570,7 +579,7 @@ export function createComputerTools(
             inspection: receipt.inspection,
           }, {
             writeMode: "patch",
-            writtenBytes: (value as PatchFileInput).hunks.reduce(
+            writtenBytes: input.hunks.reduce(
               (total, hunk) => total + Buffer.byteLength(hunk.replacementLines.join("\n")),
               0,
             ),
@@ -588,13 +597,16 @@ export function createComputerTools(
         "command must be a bare executable name (no path separators or shell syntax).",
         "cwd must be relative to the workspace root; absolute paths are rejected. For an authorized package Skill, cwd may also be the Runtime-provided @skills/<skill-name> execution root shown by load_skill; for an authorized visible directory, cwd may be the Runtime-provided @visible/<root-id> command root.",
         "@skills/<skill-name> and @visible/<root-id> are virtual cwd aliases only; do not pass @skills/... or @visible/... as command arguments or write them into generated scripts as file paths.",
-        "Generated scripts that need read-only Skill assets should read the AGENTLOOP_SKILL_ROOT_* environment variable shown in execution context and join package-relative asset paths from there.",
-        "When cwd is @skills/<skill-name>, relative task paths in arguments resolve under the read-only Skill package; pass task inputs, outputs, workspaces, and QA directories as absolute paths under the Runtime workspace root.",
+        "Use @workspace/<relative-path> as a complete command argument for a task input, output, workspace, or QA directory. Runtime resolves it to this Run's actual workspace root; never copy or construct an absolute workspace path from prose.",
+        "Generated scripts that need read-only Skill assets should read the AGENTLOOP_SKILL_ROOT_* environment variable shown in execution context and join package-relative asset paths from there. Generated scripts that need task paths should join them from AGENTLOOP_WORKSPACE_ROOT.",
+        "When cwd is @skills/<skill-name>, relative task paths in arguments resolve under the read-only Skill package; use @workspace/... for task inputs, outputs, workspaces, and QA directories.",
         "Command arguments must not reference filesystem paths outside the workspace root, the current command root, or another authorized command root.",
         "Do not use a structured data artifact such as .json, .csv, .tsv, .xlsx, .doc, .docx, .pptx, or .pdf as a Python, Node, shell, or other interpreter entry point.",
         "Do not pass multi-line or large inline programs through command arguments; write reusable scripts with computer_write_file, then run the script with a short command.",
         "Large stdout/stderr is returned as a short preview plus stdoutRef/stderrRef path, sha256, and size; inspect that referenced file instead of rerunning the same command solely to recover prior output.",
         "The result includes bounded fileChanges for workspace files created, modified, or deleted by the command; use that structured receipt instead of inferring artifacts from stdout text.",
+        "computationInputs identifies immutable data files consumed by the command; never include the interpreter entrypoint, executable source file, or package-owned Skill script itself.",
+        "A package action that acquires facts directly from an external source and emits its own evidenceReceipt must omit computationInputs unless it also consumes an immutable workspace data file declared by the action as an evidence input.",
         "For every command that derives facts from workspace data, pass each exact source path in computationInputs (for example, computationInputs:[{path:'series.json'}]). Its sole stdout JSON document must use agentloop.commandComputation/v1 with inputRefs:[{path:'series.json'}] in the same order and a non-empty facts object; inputs is not a valid stdout field. Runtime captures source hashes from computationInputs and will not infer source identity from stdout.",
         `timeoutMs is optional, defaults to ${DEFAULT_COMMAND_TIMEOUT_MS}, and must be between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS}.`,
       ].join(" "),
@@ -710,11 +722,11 @@ function withWorkflowEvidenceBinding(
     if (value.args.length !== candidate.argumentTemplates.length) return false;
     if (!candidate.argumentTemplates.every((template, index) => {
       if (!/^\{\{[^}]+\}\}$/u.test(template)) return value.args[index] === template;
-      return index === 0 || candidate.evidenceInputArgumentIndexes.includes(index);
+      return index > 0;
     })) return false;
     const boundInputPaths = candidate.evidenceInputArgumentIndexes.map((index) => value.args[index]!);
-    return boundInputPaths.length > 0
-      && value.computationInputs !== undefined
+    if (boundInputPaths.length === 0) return value.computationInputs === undefined;
+    return value.computationInputs !== undefined
       && boundInputPaths.length === value.computationInputs.length
       && boundInputPaths.every((path, index) => path === value.computationInputs![index]!.path);
   });

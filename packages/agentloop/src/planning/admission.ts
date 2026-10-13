@@ -191,12 +191,17 @@ export function admitPlan(input: {
         `Step ${step.id} is only a Skill activation step; bind the Skill to a concrete user-deliverable step instead`,
       );
     }
-    const fileProducingStep = kind === "leaf" && requiresFileProduction(step, taskIntent);
+    const targetIds = normalizeTargetIdsForStep(step, taskSemantics);
+    // A Run may own both workspace artifacts and a final conversational
+    // explanation.  The aggregate TaskIntent describes the Run, while a leaf
+    // owns only the targets named here.  Do not make a conversation-only
+    // summary satisfy file receipts merely because a sibling leaf writes one.
+    const stepTaskIntent = deliveryIntentForStep(targetIds, taskSemantics, taskIntent);
+    const fileProducingStep = kind === "leaf" && requiresFileProduction(step, stepTaskIntent);
     const artifactTargets = normalizeArtifactTargetsForStep({
       step,
       taskSemantics,
     });
-    const targetIds = normalizeTargetIdsForStep(step, taskSemantics);
     if (!canProduceFiles && fileProducingStep) {
       reject(
         `Step ${step.id} requires file or artifact production, but no file-producing Tool is available in this Run; enable write/command tools or submit a text-only Plan without file-output success criteria`,
@@ -207,7 +212,7 @@ export function admitPlan(input: {
       contract: evidenceContract,
       terminalLeaf: kind === "leaf" && !dependedOnStepIds.has(step.id),
       fileProducingStep,
-      taskIntent,
+      taskIntent: stepTaskIntent,
       artifactAcceptanceAvailable,
     });
     const requiredCapabilities = new Set(step.requiredCapabilities);
@@ -227,18 +232,18 @@ export function admitPlan(input: {
     const completionEvidenceContract = normalizeCompletionEvidenceContract(
       step.role,
       evidenceContract,
-      taskIntent,
+      stepTaskIntent,
       fileProducingStep && artifactAcceptanceAvailable,
     );
     const completionCriteria = ensureArtifactDeliverySuccessCriteria(
-      normalizeCompletionSuccessCriteria(step.role, step.successCriteria, taskIntent),
+      normalizeCompletionSuccessCriteria(step.role, step.successCriteria, stepTaskIntent),
       completionEvidenceContract,
     );
     const targetCriteria = deliveryTargetSuccessCriteria(targetIds, taskSemantics);
-    normalizeCompletionCapabilities(step.role, requiredCapabilities, taskIntent);
+    normalizeCompletionCapabilities(step.role, requiredCapabilities, stepTaskIntent);
     const criteria: SuccessCriterion[] = [...completionCriteria, ...targetCriteria].map((criterion) => ({
       ...criterion,
-      blocking: criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, taskIntent),
+      blocking: criterion.blocking ?? criterionBlocksCompletion(criterion.id, step, stepTaskIntent),
     }));
     for (const skillId of stepSkillIds) {
       if (!selectedSet.has(skillId)) reject(`Step ${step.id} binds unselected Skill ${skillId}`);
@@ -327,7 +332,7 @@ export function admitPlan(input: {
     };
   });
 
-  const admittedSteps = normalizeConversationTerminalEvidenceReuse(steps, taskIntent);
+  const admittedSteps = normalizeDependencyEvidenceReuse(steps);
   assertDeliveryTargetCoverage(admittedSteps, taskSemantics);
   assertArtifactTargetCoverage(admittedSteps, taskSemantics);
   assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
@@ -626,26 +631,26 @@ export function bindRequiredSkillCompanions(
 }
 
 /**
- * Source evidence is owned by the acquisition leaf that produced it. A later
- * conversation-only delivery leaf may rely on that completed dependency, but
- * must not be forced to repeat the acquisition merely to recreate the same
- * receipt in its local tool-call list.
+ * A dependency edge transports the committed Runtime Result, including the
+ * source receipts that satisfied the upstream leaf.  Requiring a downstream
+ * leaf to reproduce the same receipt locally creates a false gap when its
+ * evidence-producer binding correctly limits it to different tools.
+ *
+ * This only removes source kinds a dependency explicitly owned.  The Runtime
+ * still injects the immutable upstream tool receipt into Assessment, so this
+ * is evidence transport, not a prose-based or path-based fallback.  Artifact
+ * target ownership is deliberately excluded: each delivery target remains
+ * owned and accepted exactly once by its producing leaf.
  */
-function normalizeConversationTerminalEvidenceReuse(
+function normalizeDependencyEvidenceReuse(
   steps: readonly PlanStep[],
-  taskIntent: { readonly deliverySurface?: "conversation" | "workspace_artifact"; readonly artifactKind?: string } | undefined,
 ): readonly PlanStep[] {
-  if (taskIntent?.deliverySurface !== "conversation" || taskIntent.artifactKind !== "none") return steps;
-  const dependedOn = new Set(steps.flatMap((step) => step.dependencies));
   const byId = new Map(steps.map((step) => [step.id, step]));
   return steps.map((step) => {
     if (
       step.kind !== "leaf"
-      || dependedOn.has(step.id)
-      || step.role === "fact_acquisition"
       || step.role === "repair"
       || step.evidenceContract === undefined
-      || step.executionBinding.sourceKinds.some((kind) => kind !== "conversation_workset")
     ) return step;
     const reusedKinds = step.evidenceContract.requiredKinds.filter((kind) =>
       REUSABLE_SOURCE_EVIDENCE_KINDS.has(kind)
@@ -1036,9 +1041,52 @@ function requiresFileProduction(
   // A file producer is an authorization requirement, so it must be derived
   // from the structured delivery contract rather than natural-language text.
   if (taskIntent?.deliverySurface === "conversation" && taskIntent.artifactKind === "none") return false;
+  if (taskIntent?.deliverySurface === "workspace_artifact" && taskIntent.artifactKind !== "none") return true;
   return step.requiredCapabilities.includes("workspace_artifact_write")
     || step.evidenceContract?.requiredKinds.some((kind) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(kind)) === true
     || step.successCriteria.some((criterion) => ARTIFACT_DELIVERY_EVIDENCE_KINDS.has(criterion.id));
+}
+
+/**
+ * TaskIntent is a Run-level projection.  A multi-target Run can contain both
+ * workspace and conversation delivery, so Admission must project that intent
+ * through the leaf's exact target ownership before it derives capabilities or
+ * evidence gates.  Targetless prerequisite leaves retain the legacy Run-level
+ * fallback because they do not themselves claim a terminal delivery target.
+ */
+function deliveryIntentForStep(
+  targetIds: readonly string[],
+  taskSemantics: StructuredTaskUnderstanding | undefined,
+  fallback: {
+    readonly deliverySurface?: "conversation" | "workspace_artifact";
+    readonly artifactKind?: string;
+    readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
+  } | undefined,
+): {
+  readonly deliverySurface?: "conversation" | "workspace_artifact";
+  readonly artifactKind?: string;
+  readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
+} | undefined {
+  if (targetIds.length === 0 || taskSemantics === undefined) return fallback;
+  type DeliveryTarget = NonNullable<StructuredTaskUnderstanding["deliverables"]>[number];
+  const deliverables = taskSemantics.deliverables ?? [];
+  const targets = new Map(deliverables.map((target) => [target.targetId, target]));
+  const owned = targetIds
+    .map((targetId) => targets.get(targetId))
+    .filter((target): target is DeliveryTarget => target !== undefined);
+  const artifactTarget = owned.find((target) => target.surface === "workspace_artifact" && target.kind !== "none");
+  if (artifactTarget !== undefined) {
+    return {
+      deliverySurface: "workspace_artifact",
+      artifactKind: artifactTarget.kind,
+      ...(fallback?.sourceNeed === undefined ? {} : { sourceNeed: fallback.sourceNeed }),
+    };
+  }
+  return {
+    deliverySurface: "conversation",
+    artifactKind: "none",
+    ...(fallback?.sourceNeed === undefined ? {} : { sourceNeed: fallback.sourceNeed }),
+  };
 }
 
 function normalizeArtifactTargetsForStep(input: {
@@ -1050,6 +1098,7 @@ function normalizeArtifactTargetsForStep(input: {
   return requested.filter((target) => ownedDeliveryTargetIds.has(target.deliveryTargetId)).map((target) => {
     return {
       id: target.id,
+      deliveryTargetId: target.deliveryTargetId,
       purpose: target.purpose,
       kind: target.kind,
       ...(target.format === undefined ? {} : { format: target.format }),

@@ -61,7 +61,10 @@ export function formatLoadedSkill(
           `For read-only Skill reference files, use ${executionCwd}/... paths with computer_read_file, computer_list_directory, computer_find_files, or computer_search_text.`,
           `Use ${executionCwd} only as computer_run_command.cwd. Do not write ${executionCwd}/... into generated scripts, config files, or ordinary command arguments.`,
           `When running package scripts with computer_run_command, set cwd to "${executionCwd}" and pass script paths relative to that Skill root.`,
-          "If a package script needs task inputs, outputs, workspaces, QA directories, or generated artifacts, pass absolute paths under the execution_context.workspace.root value from the current Runtime context.",
+          "A package script is an executable entrypoint, not a computation input. Never include the script path itself in computationInputs.",
+          "For a declared executor action with no evidence_input field, omit computationInputs. External-source actions authenticate their package invocation and evidenceReceipt without pretending that the package script is source data.",
+          "If a package script needs task inputs, outputs, workspaces, QA directories, or generated artifacts, pass @workspace/<relative-path> as each direct command argument. Runtime resolves it to this Run's actual workspace root; do not copy an absolute path from context or prose.",
+          "Inside a generated script, construct task paths from the server-provided AGENTLOOP_WORKSPACE_ROOT environment variable rather than from its Skill-root cwd.",
           `Do not pass relative writable task paths such as decks/my-deck, out.pptx, renders, or review while cwd is ${executionCwd}; those paths resolve inside the read-only Skill package.`,
         ]),
         ...(executionRootEnvName === undefined ? [] : [

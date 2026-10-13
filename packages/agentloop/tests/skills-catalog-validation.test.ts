@@ -338,6 +338,8 @@ test("load_skill reads a package execution manifest and tells the model to invok
     assert.match(String(loaded), /command="python3" script="scripts\/company\.py"/);
     assert.match(String(loaded), /invoke it directly with computer_run_command/);
     assert.match(String(loaded), /do not list package directories/);
+    assert.match(String(loaded), /executable entrypoint, not a computation input/);
+    assert.match(String(loaded), /no evidence_input field, omit computationInputs/);
   } finally {
     await fs.rm(workspace, { recursive: true, force: true });
   }

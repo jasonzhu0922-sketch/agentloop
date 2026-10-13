@@ -782,6 +782,18 @@
   white-space: normal;
 }
 
+.live-progress {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 550;
+}
+
 .human-loop-inline-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--brand) 42%, var(--border)); border-radius: 10px; background: var(--brand-soft); color: var(--text-2); }
 .human-loop-inline-notice b { color: var(--text); }
 .human-loop-history { display: grid; gap: 7px; }

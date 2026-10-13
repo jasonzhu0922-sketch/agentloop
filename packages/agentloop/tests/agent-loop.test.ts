@@ -792,10 +792,11 @@ test("completion preparation exposes only bounded evidence observers and assesse
   ), true);
 });
 
-test("completion preparation rejects a hidden effectful Tool before execution", async () => {
+test("completion preparation reopens the full Run catalog for an authorized Tool it cannot execute", async () => {
   let modelCalls = 0;
   let effectExecutions = 0;
   let assessments = 0;
+  const catalogs: string[][] = [];
   const source = receiptTool("collect_source", ["source_summary"]);
   const readResult: RuntimeTool<unknown> = {
     name: "read_result",
@@ -827,11 +828,12 @@ test("completion preparation rejects a hidden effectful Tool before execution", 
       limits: TEST_MODEL_LIMITS,
       complete: async (request) => {
         modelCalls += 1;
+        catalogs.push(request.tools.map((tool) => tool.name).sort());
         if (modelCalls === 1) {
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "source", name: "collect_source", arguments: {} }] };
         }
-        assert.deepEqual(request.tools.map((tool) => tool.name), ["read_result"]);
         if (modelCalls === 2) {
+          assert.deepEqual(request.tools.map((tool) => tool.name), ["read_result"]);
           return { content: "", finishReason: "tool_calls", toolCalls: [{ id: "hidden", name: "future_step_work", arguments: {} }] };
         }
         return { content: "source summary complete", finishReason: "stop", toolCalls: [] };
@@ -849,13 +851,24 @@ test("completion preparation rejects a hidden effectful Tool before execution", 
   });
 
   assert.equal(result.output, "source summary complete");
+  assert.deepEqual(catalogs, [
+    ["collect_source", "future_step_work", "read_result"],
+    ["read_result"],
+    ["collect_source", "future_step_work", "read_result"],
+  ]);
   assert.equal(effectExecutions, 0);
   assert.equal(assessments, 1);
   assert.equal(events.some((event) =>
-    event.type === "tool.rejected"
-    && event.data.toolName === "future_step_work"
-    && String(event.data.reason).includes("not available during this model step")
+    event.type === "loop.convergence_reopened"
+    && event.data.reason === "authorized_tool_requested_during_completion_preparation"
+    && Array.isArray(event.data.toolNames)
+    && event.data.toolNames.includes("future_step_work")
+    && event.data.requestedToolCallCount === 1
   ), true);
+  assert.equal(events.some((event) => event.type === "candidate.rejected"), false);
+  assert.equal(events.some((event) =>
+    event.type === "tool.rejected" && event.data.toolName === "future_step_work"
+  ), false);
 });
 
 test("completion-preparation metadata cannot authorize an effectful or result-publishing Tool", () => {
@@ -1213,6 +1226,117 @@ test("automatic artifact acceptance derives a Word profile from the final path i
     artifactPath: "risk-report.docx",
     reason: "deliverable_available_missing_artifact_acceptance",
   });
+});
+
+test("post-commit delivery binding registers one unambiguous receipt before automatic acceptance", async () => {
+  const sha256 = "f".repeat(64);
+  const observedBindings: readonly { readonly targetId: string; readonly path: string; readonly sha256: string; readonly bindingAuthority: string }[][] = [];
+  let verifyExecutions = 0;
+  const writeTool: RuntimeTool<unknown> = {
+    name: "computer_write_file",
+    description: "Write the report",
+    inputSchema: { type: "object" },
+    executionMode: "exclusive",
+    replaySafe: false,
+    parse: (value) => value,
+    execute: async () => ({
+      path: "results/analysis.md",
+      mode: "create",
+      bytes: 32,
+      sha256,
+      artifactReceipt: {
+        schema: "agentloop.artifactReceipt/v1",
+        artifact: { path: "results/analysis.md", bytes: 32, sha256 },
+        evidenceKinds: { satisfied: ["artifact_path", "artifact_non_empty"], caveated: [], failed: [] },
+      },
+    }),
+  };
+  const verifyTool: RuntimeTool<unknown> = {
+    name: "verify_artifact_acceptance",
+    description: "Verify the report",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async (_context, input) => {
+      verifyExecutions += 1;
+      assert.deepEqual(input, { artifactPath: "results/analysis.md" });
+      return {
+        schema: "agentloop.artifactAcceptance/v1",
+        artifact: { path: "results/analysis.md", bytes: 32, sha256 },
+        verdict: "accepted",
+        evidenceKinds: { satisfied: ["artifact_acceptance", "artifact_openable", "format_matches_request"], caveated: [], failed: [] },
+      };
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async () => {
+      modelCalls += 1;
+      return modelCalls === 1
+        ? { content: "", finishReason: "tool_calls", toolCalls: [{ id: "write-report", name: "computer_write_file", arguments: { path: "results/analysis.md" } }] }
+        : { content: "The Markdown report is complete.", finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["computer_write_file", "verify_artifact_acceptance"]);
+  const target = { id: "analysis-report", deliveryTargetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown", terminalRequired: true };
+  const deliveryTarget = { targetId: target.id, deliveryTargetId: target.deliveryTargetId, purpose: target.purpose, kind: target.kind, format: target.format };
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Produce and verify the Markdown report.",
+    input: "create an analysis report",
+    model,
+    tools: new ToolRegistry([writeTool, verifyTool]),
+    grant,
+    maxSteps: 8,
+    progressPolicy: artifactStepToolProgressPolicy(
+      ["artifact_path", "artifact_non_empty", "artifact_acceptance"],
+      { expectedArtifactKind: "document", expectedArtifactFormat: "markdown", artifactTargets: [target] },
+    ),
+    workProductContext: {
+      goalId: "plan:v1:analysis-report",
+      goal: "Produce the ODS analysis report.",
+      workspaceId: "workspace",
+      deliveryTargets: [deliveryTarget],
+      storeSnapshot: async (content) => ({
+        kind: "content_addressed",
+        path: ".agentloop/content-refs/test.json",
+        sha256: "0".repeat(64),
+        bytes: Buffer.byteLength(content),
+        characters: content.length,
+        format: "json",
+      }),
+    },
+    onWorkProductDeliveryTargets: (bindings) => {
+      observedBindings.push(bindings.map((binding) => ({
+        targetId: binding.targetId,
+        path: binding.path,
+        sha256: binding.sha256,
+        bindingAuthority: binding.bindingAuthority,
+      })));
+    },
+    emit: (event) => { events.push(event); },
+    evaluateCandidate: async () => ({ approved: true, feedback: "" }),
+  });
+
+  assert.match(result.output, /Markdown report/);
+  assert.equal(verifyExecutions, 1);
+  assert.equal(events.some((event) => event.type === "tool.rejected"), false);
+  assert.equal(events.some((event) =>
+    event.type === "runtime.evidence_facts_committed"
+    && event.data.toolCallId === "write-report"
+    && Array.isArray(event.data.evidenceKinds)
+    && event.data.evidenceKinds.includes("artifact_path")
+    && event.data.evidenceKinds.includes("artifact_non_empty")
+  ), true);
+  assert.ok(observedBindings.some((bindings) => bindings.length === 1
+    && bindings[0]?.targetId === "analysis-report"
+    && bindings[0]?.path === "results/analysis.md"
+    && bindings[0]?.sha256 === sha256
+    && bindings[0]?.bindingAuthority === "runtime"));
 });
 
 test("automatic artifact acceptance skips command stdout when the admitted target is PDF", async () => {
@@ -2617,6 +2741,71 @@ test("a length-truncated execution turn with tools receives a forward-action rep
   assert.equal(calls, 3);
 });
 
+test("a truncated unexecuted Tool call receives the same bounded-action repair instead of generic failure feedback", async () => {
+  let calls = 0;
+  let executions = 0;
+  const events: RuntimeEvent[] = [];
+  const grant = makeGrant(["collect_evidence"]);
+  const registry = new ToolRegistry([{
+    name: "collect_evidence",
+    description: "Collect one bounded fact.",
+    inputSchema: { type: "object" },
+    executionMode: "parallel",
+    replaySafe: true,
+    parse: (value) => value,
+    execute: async () => {
+      executions += 1;
+      return { fact: "collected" };
+    },
+  }]);
+  const model: ModelAdapter = {
+    limits: TEST_MODEL_LIMITS,
+    complete: async (request) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: "",
+          finishReason: "length",
+          toolCalls: [{ id: "oversized", name: "collect_evidence", arguments: { payload: "partial" } }],
+        };
+      }
+      if (calls === 2) {
+        assert.equal(request.tools.some((tool) => tool.name === "collect_evidence"), true);
+        assert.match(request.runtimeContext?.content ?? "", /one bounded forward action/);
+        assert.match(request.runtimeContext?.content ?? "", /complete arguments fit within the output budget/);
+        assert.equal(request.messages.some((message) => message.role === "assistant"), false);
+        assert.equal(request.messages.some((message) => message.role === "tool"), false);
+        return {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "bounded", name: "collect_evidence", arguments: { query: "one fact" } }],
+        };
+      }
+      return { content: "bounded evidence collected", finishReason: "stop", toolCalls: [] };
+    },
+  };
+
+  const result = await runAgentLoop({
+    runId: grant.runId,
+    systemPrompt: "Collect evidence.",
+    input: "collect then summarize",
+    model,
+    tools: registry,
+    grant,
+    maxSteps: 3,
+    candidateRepairGraceSteps: 2,
+    emit: (event) => { events.push(event); },
+  });
+
+  assert.equal(result.output, "bounded evidence collected");
+  assert.equal(calls, 3);
+  assert.equal(executions, 1);
+  assert.equal(events.some((event) =>
+    event.type === "tool.rejected" && event.data.toolCallId === "oversized" && event.data.failurePhase === "runtime",
+  ), true);
+  assert.equal(events.filter((event) => event.type === "loop.candidate_repair_grace_granted").length, 1);
+});
+
 test("modify-artifact writes overwrite a same-Run read target without another model turn", async () => {
   const writeModes: string[] = [];
   const events: RuntimeEvent[] = [];
@@ -2927,7 +3116,7 @@ test("a holistic assessment rejection cannot be repaired by rewriting without ne
   assert.equal(events.filter((event) => event.type === "candidate.rejected").length, 2);
   assert.equal(events.some((event) =>
     event.type === "candidate.repair_limit_blocked"
-    && (event.data as { reason?: string }).reason === "holistic_assessment_requires_new_evidence"
+    && (event.data as { reason?: string }).reason === "assessment_requires_decision_basis_transition"
   ), true);
 });
 
@@ -6977,6 +7166,22 @@ function runtimeStepSemanticState(content: string): {
   const frameMatch = content.match(/<loop_step_frame source="server">\n(.*?)\n<\/loop_step_frame>/s);
   assert.ok(frameMatch?.[1]);
   const frame = JSON.parse(frameMatch[1]) as {
+    readonly currentDecisionView?: {
+      readonly evidence?: {
+        readonly missingRequiredEvidenceKinds: readonly string[];
+        readonly pendingCandidateEvidenceKinds: readonly string[];
+        readonly missingToolEvidenceKinds: readonly string[];
+        readonly workProduct: {
+          readonly status: string;
+          readonly deliverableArtifacts: readonly Array<{ readonly path: string }>;
+          readonly processArtifacts: readonly Array<{ readonly path: string }>;
+        };
+        readonly nextAction: string;
+        readonly evidenceProducingToolNames?: readonly string[];
+        readonly exploratoryToolNames?: readonly string[];
+        readonly requiredWorkflowAction?: { readonly actionId: string };
+      };
+    };
     readonly currentEvidenceState?: {
       readonly missingRequiredEvidenceKinds: readonly string[];
       readonly workProduct: {
@@ -6991,6 +7196,24 @@ function runtimeStepSemanticState(content: string): {
       readonly exploratoryToolNames: readonly string[];
     };
   };
+  const decisionEvidence = frame.currentDecisionView?.evidence;
+  if (decisionEvidence !== undefined) {
+    return {
+      schema: "agentloop.runtimeStepEvidenceState/v1",
+      missingRequiredEvidenceKinds: decisionEvidence.missingRequiredEvidenceKinds,
+      pendingCandidateEvidenceKinds: decisionEvidence.pendingCandidateEvidenceKinds,
+      missingToolEvidenceKinds: decisionEvidence.missingToolEvidenceKinds,
+      workProduct: { status: decisionEvidence.workProduct.status },
+      knownArtifacts: decisionEvidence.workProduct.deliverableArtifacts,
+      processArtifacts: decisionEvidence.workProduct.processArtifacts,
+      nextAction: decisionEvidence.nextAction,
+      evidenceProducingToolNames: decisionEvidence.evidenceProducingToolNames ?? [],
+      exploratoryToolNames: decisionEvidence.exploratoryToolNames ?? [],
+      ...(decisionEvidence.requiredWorkflowAction === undefined
+        ? {}
+        : { requiredWorkflowAction: decisionEvidence.requiredWorkflowAction }),
+    };
+  }
   assert.ok(frame.currentEvidenceState);
   return {
     schema: "agentloop.runtimeStepEvidenceState/v1",

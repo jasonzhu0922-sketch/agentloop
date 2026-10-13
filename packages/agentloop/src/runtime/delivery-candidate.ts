@@ -69,6 +69,8 @@ export function buildRuntimeDeliveryCandidate(input: {
   readonly caveats?: readonly string[];
   readonly sourceToolCallIds?: readonly string[];
   readonly targetIds?: readonly string[];
+  /** Runtime-validated target/version bindings, never prose-derived target guesses. */
+  readonly deliveryClaims?: readonly RuntimeDeliveryClaim[];
 }): RuntimeDeliveryCandidate {
   const evidenceKinds = collectEvidenceKinds(
     input.toolEvidence,
@@ -90,7 +92,7 @@ export function buildRuntimeDeliveryCandidate(input: {
     evidenceKinds,
     caveats,
     sourceToolCallIds: input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.toolCallId),
-    deliveryClaims: (input.targetIds ?? []).map((targetId) => ({
+    deliveryClaims: input.deliveryClaims ?? (input.targetIds ?? []).map((targetId) => ({
       targetId,
       evidenceRefs: uniqueStrings(input.sourceToolCallIds ?? input.toolEvidence.map((item) => item.resultRef?.resultId ?? item.toolCallId)),
     })),
@@ -99,15 +101,26 @@ export function buildRuntimeDeliveryCandidate(input: {
 }
 
 function normalizeDeliveryClaims(values: readonly RuntimeDeliveryClaim[]): RuntimeDeliveryClaim[] {
-  const byTarget = new Map<string, Set<string>>();
+  const byTarget = new Map<string, RuntimeDeliveryClaim>();
   for (const value of values) {
     const targetId = value.targetId.trim();
     if (targetId.length === 0) continue;
-    const refs = byTarget.get(targetId) ?? new Set<string>();
-    for (const ref of uniqueStrings(value.evidenceRefs)) refs.add(ref);
-    byTarget.set(targetId, refs);
+    const previous = byTarget.get(targetId);
+    const evidenceRefs = uniqueStrings([...(previous?.evidenceRefs ?? []), ...value.evidenceRefs]);
+    // A target cannot have two competing current physical identities in one
+    // candidate. Leave the first validated binding intact; Assessment will
+    // reject a malformed caller rather than merging unrelated evidence.
+    if (previous?.artifact !== undefined && value.artifact !== undefined
+      && (previous.artifact.path !== value.artifact.path || previous.artifact.versionId !== value.artifact.versionId
+        || previous.artifact.sha256 !== value.artifact.sha256)) continue;
+    byTarget.set(targetId, {
+      targetId,
+      evidenceRefs,
+      ...(previous?.artifact === undefined && value.artifact === undefined ? {} : { artifact: previous?.artifact ?? value.artifact! }),
+      ...(previous?.artifacts === undefined && value.artifacts === undefined ? {} : { artifacts: previous?.artifacts ?? value.artifacts! }),
+    });
   }
-  return [...byTarget].map(([targetId, refs]) => ({ targetId, evidenceRefs: [...refs] }));
+  return [...byTarget.values()];
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

@@ -52,6 +52,244 @@ test("same-format candidate and experiment require explicit declarations and sta
   assert.equal("delivered" in state, false);
 });
 
+test("an admitted delivery target binds one observed artifact version, never a same-format neighbour", () => {
+  const boundFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [{ runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 1, evidence: {
+      toolCallId: "write-report", toolName: "computer_write_file", operationStatus: "succeeded", isError: false,
+      result: JSON.stringify({ path: "report.md", mode: "create", bytes: 12, sha256: "a".repeat(64) }),
+    } }],
+  });
+  const artifact = boundFacts.objects[0]!;
+  const target = { targetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown" };
+  const deliveryDeclaration = workProductDeclarationFromContent({ runId: fixture.runId, workspaceId: fixture.workspaceId, goalId,
+    modelStep: 1, throughSeq: 1, content: `<work_product_progress>${JSON.stringify({ updates: [{
+    kind: "delivery_target", targetId: target.targetId, path: artifact.path, versionId: artifact.currentVersionId,
+  }] })}</work_product_progress>` })!;
+  const state = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [deliveryDeclaration] });
+  assert.deepEqual(state.deliveryTargets?.map((binding) => ({ targetId: binding.targetId, path: binding.path, sha256: binding.sha256 })), [{
+    targetId: "analysis-report", path: artifact.path, sha256: artifact.versions.find((version) => version.id === artifact.currentVersionId)!.sha256,
+  }]);
+  const wrongDeclaration = { ...deliveryDeclaration, payload: { updates: [{
+    kind: "delivery_target", targetId: "sample-report", path: artifact.path, versionId: artifact.currentVersionId,
+  }] } };
+  const wrong = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [wrongDeclaration] });
+  assert.equal(wrong.rejected[0]?.reason, "unknown_delivery_target");
+});
+
+test("a single compatible committed receipt binds its admitted target without model progress prose", () => {
+  const sha256 = "c".repeat(64);
+  const boundFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [{ runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 1, evidence: {
+      toolCallId: "write-report", toolName: "computer_write_file", operationStatus: "succeeded", isError: false,
+      result: JSON.stringify({
+        path: "results/analysis.md", mode: "create", bytes: 12, sha256,
+        artifactReceipt: { schema: "agentloop.artifactReceipt/v1", artifact: { path: "results/analysis.md", bytes: 12, sha256 } },
+      }),
+    } }],
+  });
+  const target = { targetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown" };
+  const state = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [] });
+
+  assert.deepEqual(state.deliveryTargets?.map((binding) => ({
+    targetId: binding.targetId,
+    path: binding.path,
+    sha256: binding.sha256,
+    observedByToolCallId: binding.observedByToolCallId,
+    bindingAuthority: binding.bindingAuthority,
+  })), [{
+    targetId: "analysis-report",
+    path: "results/analysis.md",
+    sha256,
+    observedByToolCallId: "write-report",
+    bindingAuthority: "runtime",
+  }]);
+});
+
+test("a unique hash-identified command output binds its compatible target without binding its sibling target", () => {
+  const sha256 = "9".repeat(64);
+  const boundFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [{ runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 1, evidence: {
+      toolCallId: "build-standard", toolName: "computer_run_command", operationStatus: "succeeded", isError: false,
+      result: JSON.stringify({
+        exitCode: 0,
+        fileChangesTruncated: false,
+        fileChanges: [{ path: "results/ingestion-standard.xlsx", changeType: "created", bytes: 42, sha256 }],
+      }),
+    } }],
+  });
+  const state = deriveWorkProductSemantics({
+    facts: boundFacts,
+    goalId,
+    declarations: [],
+    deliveryTargets: [
+      { targetId: "ddm-report", purpose: "DDM modeling report", kind: "document", format: "markdown" },
+      { targetId: "ingestion-standard", purpose: "Ingestion standard", kind: "spreadsheet", format: "xlsx" },
+    ],
+  });
+
+  assert.deepEqual(state.deliveryTargets?.map((binding) => ({
+    targetId: binding.targetId,
+    path: binding.path,
+    sha256: binding.sha256,
+    bindingAuthority: binding.bindingAuthority,
+  })), [{
+    targetId: "ingestion-standard",
+    path: "results/ingestion-standard.xlsx",
+    sha256,
+    bindingAuthority: "runtime",
+  }]);
+});
+
+test("same-format receipts remain unbound when Runtime cannot identify one delivery target", () => {
+  const report = (toolCallId: string, path: string, sha256: string): WorkProductToolEvent => ({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    seq: toolCallId === "write-a" ? 1 : 2,
+    evidence: {
+      toolCallId,
+      toolName: "computer_write_file",
+      operationStatus: "succeeded",
+      isError: false,
+      result: JSON.stringify({
+        path,
+        mode: "create",
+        bytes: 12,
+        sha256,
+        artifactReceipt: { schema: "agentloop.artifactReceipt/v1", artifact: { path, bytes: 12, sha256 } },
+      }),
+    },
+  });
+  const boundFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [report("write-a", "results/draft.md", "d".repeat(64)), report("write-b", "results/final.md", "e".repeat(64))],
+  });
+  const target = { targetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown" };
+  const state = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [] });
+
+  assert.deepEqual(state.deliveryTargets, []);
+});
+
+test("a receipt-selected admitted target binds the final artifact while same-format support files remain unbound", () => {
+  const report = (toolCallId: string, path: string, sha256: string, deliveryTargetId?: string): WorkProductToolEvent => ({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    seq: toolCallId === "write-sample" ? 1 : 2,
+    evidence: {
+      toolCallId,
+      toolName: "computer_write_file",
+      operationStatus: "succeeded",
+      isError: false,
+      result: JSON.stringify({
+        path,
+        mode: "create",
+        bytes: 12,
+        sha256,
+        ...(deliveryTargetId === undefined ? {} : { deliveryTargetId }),
+        artifactReceipt: { schema: "agentloop.artifactReceipt/v1", artifact: { path, bytes: 12, sha256 } },
+      }),
+    },
+  });
+  const boundFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [
+      report("write-sample", "results/sample-report.md", "d".repeat(64)),
+      report("write-final", "results/validation-result.md", "e".repeat(64), "validation-result"),
+    ],
+  });
+  const target = { targetId: "validation-result", purpose: "Validation result", kind: "document", format: "markdown" };
+  const state = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [] });
+
+  assert.deepEqual(state.deliveryTargets?.map((binding) => ({
+    targetId: binding.targetId,
+    path: binding.path,
+    bindingAuthority: binding.bindingAuthority,
+  })), [{
+    targetId: "validation-result",
+    path: "results/validation-result.md",
+    bindingAuthority: "model",
+  }]);
+});
+
+test("a replacement receipt advances the Runtime binding to the current artifact version", () => {
+  const firstSha = "1".repeat(64);
+  const currentSha = "2".repeat(64);
+  const receipt = (toolCallId: string, seq: number, sha256: string): WorkProductToolEvent => ({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    seq,
+    evidence: {
+      toolCallId,
+      toolName: seq === 1 ? "computer_write_file" : "computer_patch_file",
+      operationStatus: "succeeded",
+      isError: false,
+      result: JSON.stringify({
+        path: "results/analysis.md",
+        mode: seq === 1 ? "create" : "overwrite",
+        bytes: 12 + seq,
+        sha256,
+        artifactReceipt: { schema: "agentloop.artifactReceipt/v1", artifact: { path: "results/analysis.md", bytes: 12 + seq, sha256 } },
+      }),
+    },
+  });
+  const boundFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [receipt("write-report", 1, firstSha), receipt("patch-report", 2, currentSha)],
+  });
+  const target = { targetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown" };
+  const state = deriveWorkProductSemantics({ facts: boundFacts, goalId, deliveryTargets: [target], declarations: [] });
+
+  assert.deepEqual(state.deliveryTargets?.map((binding) => ({
+    path: binding.path,
+    sha256: binding.sha256,
+    observedByToolCallId: binding.observedByToolCallId,
+  })), [{
+    path: "results/analysis.md",
+    sha256: currentSha,
+    observedByToolCallId: "patch-report",
+  }]);
+});
+
+test("artifact acceptance checks do not replace the version-defining delivery observation", () => {
+  const sha256 = "b".repeat(64);
+  const checkedFacts = deriveWorkProductObservations({
+    runId: fixture.runId,
+    workspaceId: fixture.workspaceId,
+    events: [
+      { runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 1, evidence: {
+        toolCallId: "write-report", toolName: "computer_write_file", operationStatus: "succeeded", isError: false,
+        result: JSON.stringify({ path: "report.md", mode: "create", bytes: 12, sha256 }),
+      } },
+      { runId: fixture.runId, workspaceId: fixture.workspaceId, seq: 2, evidence: {
+        toolCallId: "verify-report", toolName: "verify_artifact_acceptance", operationStatus: "succeeded", isError: false,
+        result: JSON.stringify({
+          schema: "agentloop.artifactAcceptance/v1",
+          artifact: { path: "report.md", bytes: 12, sha256 },
+          verdict: "accepted",
+          checks: [{ id: "artifact_path", status: "passed" }],
+        }),
+      } },
+    ],
+  });
+  const artifact = checkedFacts.objects[0]!;
+  const target = { targetId: "analysis-report", purpose: "ODS analysis report", kind: "document", format: "markdown" };
+  const deliveryDeclaration = workProductDeclarationFromContent({ runId: fixture.runId, workspaceId: fixture.workspaceId, goalId,
+    modelStep: 1, throughSeq: 1, content: `<work_product_progress>${JSON.stringify({ updates: [{
+    kind: "delivery_target", targetId: target.targetId, path: artifact.path, versionId: artifact.currentVersionId,
+  }] })}</work_product_progress>` })!;
+  const state = deriveWorkProductSemantics({ facts: checkedFacts, goalId, deliveryTargets: [target], declarations: [deliveryDeclaration] });
+  assert.equal(artifact.versions[0]?.observationIds.length, 2);
+  assert.equal(state.deliveryTargets?.[0]?.observedByToolCallId, "write-report");
+});
+
 test("intention to generate a missing file and unsupported delivered role are rejected locally", () => {
   const state = derive([declaration(1, [
     { kind: "role", path: "target.pptx", role: "candidate", versionId: "imagined" }, role("test_fill.pptx", "delivered"),
