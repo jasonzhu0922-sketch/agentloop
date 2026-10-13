@@ -6536,10 +6536,8 @@ function selectAssessmentProfile(
   if (artifactDeliveryEvidenceGate) return "evidence_gate";
   if (holisticSourceContractMismatch) return "source_grounded";
   if (step.successCriteria.some((criterion) => criterion.verification === "model_judged")) return "source_grounded";
-  // Runtime-owned observable evidence is a prerequisite, not a semantic
-  // opinion. Check it before keyword-selected model profiles so wording such
-  // as "do not fabricate" cannot approve a candidate that never acquired the
-  // source material required by the admitted Plan.
+  // Runtime-owned delivery evidence is a prerequisite for artifacts, not a
+  // judgment about how an answer was executed or sourced.
   if (stepUsesRuntimeEvidenceGate(step)) return "evidence_gate";
   if (stepEvidenceSupportsRuntimeEvidenceGate(step, evidence)) return "evidence_gate";
   if (matchesRiskSensitiveAssessment(text)) return "risk_sensitive";
@@ -6557,19 +6555,12 @@ function selectAssessmentProfile(
 }
 
 const RUNTIME_RECEIPT_ASSESSMENT_KINDS = new Set([
-  "source_summary",
-  "source_urls",
-  "schema_summary",
-  "record_counts",
-  "table_coverage",
-  "structured_extraction_artifact",
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
   "artifact_openable",
   "format_matches_request",
   "delivery_receipt",
-  "explicit_caveats",
 ]);
 
 function sourceContractNeedsHolisticAssessment(
@@ -6714,15 +6705,19 @@ function toolCallHasRuntimeEvidenceReceipt(toolCall: ToolEvidence): boolean {
     const topLevelSchema = typeof record.schema === "string" ? record.schema : undefined;
     const nestedSchema = typeof nestedReceipt?.schema === "string" ? nestedReceipt.schema : undefined;
     const schema = topLevelSchema === "agentloop.artifactAcceptance/v1"
-      || topLevelSchema === "agentloop.sourceSummary/v1"
       || topLevelSchema === "agentloop.artifactReceipt/v1"
       || topLevelSchema === "agentloop.toolEvidenceReceipt/v1"
       ? topLevelSchema
       : nestedSchema;
     return schema === "agentloop.artifactAcceptance/v1"
-      || schema === "agentloop.sourceSummary/v1"
       || schema === "agentloop.artifactReceipt/v1"
-      || schema === "agentloop.toolEvidenceReceipt/v1";
+      || (schema === "agentloop.toolEvidenceReceipt/v1" && stringArrayField(
+        isPlainRecord(record.evidenceReceipt)
+          ? isPlainRecord(record.evidenceReceipt.evidenceKinds)
+            ? record.evidenceReceipt.evidenceKinds?.satisfied
+            : undefined
+          : undefined,
+      ).some((kind) => RUNTIME_RECEIPT_ASSESSMENT_KINDS.has(kind)));
   });
 }
 
@@ -6755,10 +6750,7 @@ function stepUsesRuntimeEvidenceGate(step: ExecutionPlan["steps"][number]): bool
   const requiredKinds = step.evidenceContract?.requiredKinds ?? [];
   return stepHasTool(step, "verify_artifact_acceptance")
     || requiredKinds.includes("artifact_acceptance")
-    || requiredKinds.includes("source_summary")
-    || requiredKinds.includes("schema_summary")
-    || requiredKinds.includes("record_counts")
-    || requiredKinds.includes("structured_extraction_artifact");
+    || requiredKinds.some((kind) => RUNTIME_RECEIPT_ASSESSMENT_KINDS.has(kind));
 }
 
 function stepUsesOnlyDirectDelivery(step: ExecutionPlan["steps"][number]): boolean {
@@ -6775,7 +6767,6 @@ const ARTIFACT_DELIVERY_EVIDENCE_KINDS = new Set([
   "artifact_acceptance",
   "artifact_openable",
   "format_matches_request",
-  "explicit_caveats",
 ]);
 
 const SKILL_QA_ONLY_EVIDENCE_KINDS = new Set(["basic_navigation"]);

@@ -1852,27 +1852,7 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
     const sourcePolicyNormalized = normalizeProgressiveSourceContract(semanticEvidenceNormalized, taskProfile, task);
     const deliveryNormalized = normalizeConversationOnlyTerminalStep(sourcePolicyNormalized, terminalStepIds, taskProfile, task);
     const artifactNormalized = normalizeWorkspaceArtifactTerminalStep(deliveryNormalized, terminalStepIds, taskProfile, task);
-    if (artifactNormalized.evidenceContract !== undefined) {
-      return {
-        ...artifactNormalized,
-        successCriteria: artifactNormalized.successCriteria.map((criterion) => ({
-          ...criterion,
-          blocking: criterion.blocking ?? criterionBlockingByGoal(criterion.id, artifactNormalized, task, taskProfile),
-        })),
-      };
-    }
-    const coreCriteria = artifactNormalized.successCriteria.filter((criterion) =>
-      !isUnrequestedOptionalEnhancementCriterion(criterion.description, canonicalUserInput(task))
-    );
-    if (coreCriteria.length > 0) return { ...artifactNormalized, successCriteria: coreCriteria };
-    return {
-      ...artifactNormalized,
-      successCriteria: [{
-        id: `${step.id}-core-delivery`,
-        description: coreSuccessCriterionDescription(artifactNormalized),
-        source: "planner" as const,
-      }],
-    };
+    return normalizeResultSuccessCriteria(artifactNormalized, task, taskProfile);
   });
   return {
     ...proposal,
@@ -1881,6 +1861,46 @@ function normalizeOutcomePlanProposal(proposal: PlanProposal, task: TaskSpec): P
       .map((step) => normalizeInheritedToolSourceConstraints(step, normalizedSteps, task))
       .map((step) => normalizeBoundResultToolSourceConstraints(step, task)),
   };
+}
+
+/**
+ * Evidence contracts direct execution and preserve provenance.  Assessment,
+ * however, owns the delivered result: a receipt label such as source_summary
+ * or explicit_caveats must never become a surrogate success criterion.
+ */
+function normalizeResultSuccessCriteria(
+  step: PlanStepProposal,
+  task: TaskSpec,
+  taskProfile: TaskProfile,
+): PlanStepProposal {
+  const coreCriteria = step.successCriteria
+    .filter((criterion) => !isExecutionEvidenceKind(criterion.id))
+    .filter((criterion) => !isUnrequestedOptionalEnhancementCriterion(criterion.description, canonicalUserInput(task)));
+  const successCriteria = coreCriteria.length > 0
+    ? coreCriteria
+    : [{
+      id: `${step.id}-core-result`,
+      description: coreSuccessCriterionDescription(step),
+      source: "planner" as const,
+    }];
+  return {
+    ...step,
+    successCriteria: successCriteria.map((criterion) => ({
+      ...criterion,
+      blocking: criterion.blocking ?? criterionBlockingByGoal(criterion.id, step, task, taskProfile),
+    })),
+  };
+}
+
+function isExecutionEvidenceKind(kind: string): boolean {
+  return kind === "source_summary"
+    || kind === "source_urls"
+    || kind === "schema_summary"
+    || kind === "record_counts"
+    || kind === "table_coverage"
+    || kind === "structured_extraction_artifact"
+    || kind === "explicit_caveats"
+    || kind === "basic_navigation";
 }
 
 /**
@@ -2000,9 +2020,6 @@ function criterionBlockingByGoal(
   if (kind === "explicit_caveats") return false;
   if (kind === "artifact_acceptance" || kind === "artifact_openable") {
     return explicitStrictQualityRequested(canonicalUserInput(task));
-  }
-  if (kind === "source_summary" || kind === "source_urls") {
-    return step.role === "fact_acquisition" || taskProfile.sourceNeed === "strict_user_source";
   }
   return true;
 }

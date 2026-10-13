@@ -131,6 +131,7 @@ test("Planner does not preserve an aggregation process as a completion evidence 
     "runtime_result_json_materialization",
   ]);
   assert.equal(admitted.steps[0]?.evidenceContract?.requiredKinds.includes("table_coverage"), false);
+  assert.deepEqual(admitted.steps[0]?.successCriteria.map((criterion) => criterion.id), ["distribution-core-result"]);
 });
 
 test("Planner rejects the removed derived aggregation evidence kind", async () => {

@@ -756,12 +756,15 @@ function assertEvidenceContractIsProducible(input: {
     .filter((producer) => producer.resolvedToolNames.length > 0)
     .map((producer) => producer.evidenceKind));
   const sourceProviderCapabilities = boundCapabilities.filter((capability) => capability.category === "skill_source_provider");
+  // Source acquisition remains an Admission responsibility even when it is
+  // intentionally absent from Assessment success criteria. Artifact delivery
+  // retains its existing result-level blocking semantics.
   const blockingKinds = new Set(input.successCriteria
     .filter((criterion) => criterion.blocking !== false)
     .map((criterion) => criterion.id));
   const unavailable = new Set(input.evidenceContract.requiredKinds.filter((kind) =>
     TOOL_PRODUCED_EVIDENCE_KINDS.has(kind)
-    && blockingKinds.has(kind)
+    && (SOURCE_GROUNDING_EVIDENCE_KINDS.has(kind) || blockingKinds.has(kind))
     && (!produced.has(kind) || !boundProducerKinds.has(kind)),
   ));
   // A fact-acquisition leaf may combine providers only for evidence that each
@@ -774,7 +777,7 @@ function assertEvidenceContractIsProducible(input: {
     for (const kind of input.evidenceContract.requiredKinds) {
       if (
         SOURCE_PROVIDER_EVIDENCE_KINDS.has(kind)
-        && blockingKinds.has(kind)
+        && SOURCE_GROUNDING_EVIDENCE_KINDS.has(kind)
         && !sourceProviderCapabilities.every((capability) => capability.produces.includes(kind))
       ) {
         unavailable.add(kind);

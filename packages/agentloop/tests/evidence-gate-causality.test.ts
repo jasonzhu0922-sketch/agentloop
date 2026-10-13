@@ -57,20 +57,18 @@ function fixture(schema: boolean, caveats: boolean): StepAssessmentInput {
   };
 }
 
-test("64272a5d causal replay: missing preflight receipt does not erase recorded caveats", async () => {
+test("missing source receipts do not reject a produced result", async () => {
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess(fixture(false, true));
-  assert.equal(result.approved, false);
-  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["schema_summary"]);
+  assert.equal(result.approved, true);
+  assert.equal(result.failedBoundary, undefined);
   assert.equal(result.criteria.find((criterion) => criterion.criterionId === "explicit_caveats")?.satisfied, true);
-  assert.match(result.feedback, /schema_summary/);
-  assert.match(result.feedback, /Rewriting the answer cannot create a result fact/);
-  assert.doesNotMatch(result.feedback, /repair the failed artifact/);
+  assert.equal(result.feedback, "");
 });
 
-test("independent missing caveat evidence is not approved by unrelated source receipts", async () => {
+test("missing source caveat receipts do not reject a produced result", async () => {
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess(fixture(true, false));
-  assert.equal(result.approved, false);
-  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["explicit_caveats"]);
+  assert.equal(result.approved, true);
+  assert.equal(result.failedBoundary, undefined);
 });
 
 test("preserved preflight and caveat evidence removes the artificial failure", async () => {
@@ -186,7 +184,7 @@ test("Assessment consumes a committed source fact rather than rechecking the pro
   assert.equal(result.approved, true);
 });
 
-test("an explicitly bound workflow action requires its matching authenticated receipt", async () => {
+test("a bound source workflow receipt remains execution provenance, not an Assessment gate", async () => {
   const input = fixture(true, true);
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     ...input,
@@ -207,8 +205,8 @@ test("an explicitly bound workflow action requires its matching authenticated re
       producesEvidenceKinds: ["source_summary"],
     }],
   });
-  assert.equal(result.approved, false);
-  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["source_summary"]);
+  assert.equal(result.approved, true);
+  assert.equal(result.failedBoundary, undefined);
 });
 
 test("aggregation provenance cannot complete an artifact leaf without the artifact receipts", async () => {
@@ -398,7 +396,7 @@ test("tool progress accepts a neutral source receipt unless the current step exp
   assert.equal(bound?.requiredWorkflowAction?.actionId, "query");
 });
 
-test("a tool-returned structured-extraction label cannot replace an Assessment-verified Runtime Result bundle", async () => {
+test("structured extraction provenance is not an Assessment completion gate", async () => {
   const input = fixture(true, true);
   const result = await new ProfiledRuleStepAssessor("evidence_gate").assess({
     ...input,
@@ -409,8 +407,8 @@ test("a tool-returned structured-extraction label cannot replace an Assessment-v
       rejected: [],
     },
   });
-  assert.equal(result.approved, false);
-  assert.deepEqual(result.failedBoundary?.missingEvidenceKinds, ["structured_extraction_artifact"]);
+  assert.equal(result.approved, true);
+  assert.equal(result.failedBoundary, undefined);
 });
 
 test("rejected artifact acceptance preserves independently passed path and non-empty facts", async () => {

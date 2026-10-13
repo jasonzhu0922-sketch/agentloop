@@ -232,19 +232,20 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     const successfulToolRefs = input.evidence.toolCalls
       .filter((toolCall) => !toolCall.isError && (toolCall.admittedEvidenceKinds?.length ?? 0) > 0)
       .map((toolCall) => toolCall.toolCallId);
-    const requiresLookupEvidence = this.profile === "lookup_lite" && stepRequiresLookupEvidence(input);
-    const hasLookupEvidence = successfulToolRefs.length > 0;
     const criteria: CriterionAssessment[] = input.step.successCriteria.map((criterion) => {
-      const satisfied = nonEmpty
-        && (!requiresLookupEvidence || hasLookupEvidence);
+      // Lookup/source acquisition is an execution concern.  A rule-based
+      // assessor can only establish that a result was produced; it must not
+      // reject that result because it was reached through a particular Tool
+      // or receipt shape.
+      const satisfied = nonEmpty;
       return {
         criterionId: criterion.id,
         satisfied,
         rationale: satisfied
-          ? this.approvedRationale(hasLookupEvidence)
-          : this.rejectedRationale(nonEmpty, requiresLookupEvidence, hasLookupEvidence),
+          ? this.approvedRationale()
+          : this.rejectedRationale(nonEmpty),
         evidenceRefs: satisfied
-          ? (hasLookupEvidence ? ["candidateOutput", ...successfulToolRefs] : ["candidateOutput"])
+          ? (successfulToolRefs.length > 0 ? ["candidateOutput", ...successfulToolRefs] : ["candidateOutput"])
           : successfulToolRefs,
       };
     });
@@ -261,24 +262,12 @@ export class ProfiledRuleStepAssessor implements StepAssessor {
     return buildAssessment(input, criteria, skills, feedback, this.profile, "rule");
   }
 
-  private approvedRationale(hasLookupEvidence: boolean): string {
-    if (this.profile === "lookup_lite") {
-      return hasLookupEvidence
-        ? "The candidate is non-empty and is backed by successful lookup tool evidence."
-        : "The candidate is non-empty and this lookup step did not require external tool evidence.";
-    }
+  private approvedRationale(): string {
     return "The deterministic candidate is non-empty and satisfies the admitted criterion.";
   }
 
-  private rejectedRationale(
-    nonEmpty: boolean,
-    requiresLookupEvidence: boolean,
-    hasLookupEvidence: boolean,
-  ): string {
+  private rejectedRationale(nonEmpty: boolean): string {
     if (!nonEmpty) return "The candidate output is empty.";
-    if (requiresLookupEvidence && !hasLookupEvidence) {
-      return "The lookup candidate lacks a committed Runtime result fact.";
-    }
     return "The candidate does not satisfy the lightweight assessment policy.";
   }
 
@@ -366,19 +355,12 @@ interface RuntimeObservableReceipt {
 
 /**
  * The principle gate verifies only effects that Runtime can observe without
- * interpreting the model's work. Structured source receipts establish that
- * source material was actually acquired, while the model remains responsible
- * for interpreting that material. A command-computation receipt establishes a
- * reproducible transformation over hash-bound inputs, without elevating any
- * Skill executor into a separate execution authority.
+ * interpreting the model's work. It verifies only user-visible delivery
+ * effects. Source receipts, coverage, caveats, Tool execution, and Skill
+ * workflows remain execution/provenance context; they are never completion
+ * gates merely because they were used to produce the result.
  */
-const RUNTIME_OBSERVABLE_GATE_KINDS = new Set([
-  "source_summary",
-  "source_urls",
-  "schema_summary",
-  "record_counts",
-  "table_coverage",
-  "structured_extraction_artifact",
+const RUNTIME_DELIVERY_GATE_KINDS = new Set([
   "artifact_path",
   "artifact_non_empty",
   "artifact_acceptance",
@@ -388,7 +370,7 @@ const RUNTIME_OBSERVABLE_GATE_KINDS = new Set([
 ]);
 
 function runtimeGateRequiredKinds(requiredKinds: readonly string[]): string[] {
-  return requiredKinds.filter((kind) => RUNTIME_OBSERVABLE_GATE_KINDS.has(kind));
+  return requiredKinds.filter((kind) => RUNTIME_DELIVERY_GATE_KINDS.has(kind));
 }
 
 function runtimeObservableReceipts(
@@ -470,8 +452,12 @@ function criterionSatisfiedByEvidenceGate(
   // Semantic caveat evidence must not inherit an unrelated source/artifact
   // failure (nor automatically pass when all other operation receipts pass).
   if (isEvidenceCriterion(criterionId)) return evidenceKindSatisfiedByGate(criterionId, receipts, successfulToolRefs, candidate, workflowEvidenceActions, expectedArtifactKind, expectedArtifactFormat, artifactTargets, runtimeEvidenceBundles);
+  // A non-delivery criterion is about the result itself.  The rule assessor
+  // cannot infer it from a Tool/Skill receipt, so it must not turn execution
+  // provenance into a synthetic completion gate.
+  if (requiredKinds.length === 0) return true;
   if (requiredKinds.length > 0) return requiredKindsSatisfied;
-  return successfulToolRefs.length > 0;
+  return true;
 }
 
 function evidenceKindSatisfiedByGate(
@@ -758,7 +744,7 @@ function rejectedEvidenceGateRationale(
 }
 
 function isEvidenceCriterion(criterionId: string): boolean {
-  return criterionId === "explicit_caveats" || RUNTIME_OBSERVABLE_GATE_KINDS.has(criterionId);
+  return RUNTIME_DELIVERY_GATE_KINDS.has(criterionId);
 }
 
 function parseToolResultObject(value: unknown): Record<string, unknown> | undefined {
@@ -943,14 +929,12 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
       input.runtimeEvidenceBundles,
     )
     : undefined;
-  const structuredBundleUnverified = criterion.criterionId === "structured_extraction_artifact"
-    && (input.runtimeEvidenceBundles?.verified.length ?? 0) === 0;
   const targetClaimMissing = admitted?.targetId !== undefined
     && input.evidence.deliveryCandidate?.deliveryClaims.some((claim) => claim.targetId === admitted.targetId) !== true;
   return {
     ...criterion,
     ...(admitted?.targetId === undefined ? {} : { targetId: admitted.targetId }),
-    ...(runtimeObservableSatisfied === false || structuredBundleUnverified || targetClaimMissing
+    ...(runtimeObservableSatisfied === false || targetClaimMissing
       ? {
         satisfied: false,
         rationale: targetClaimMissing
@@ -961,7 +945,7 @@ function classifyCriterion(input: StepAssessmentInput, criterion: CriterionAsses
       }
       : runtimeObservableSatisfied === true ? { satisfied: true } : {}),
     blocking,
-    status: ((runtimeObservableSatisfied === false || structuredBundleUnverified || targetClaimMissing)
+    status: ((runtimeObservableSatisfied === false || targetClaimMissing)
       ? false
       : runtimeObservableSatisfied ?? criterion.satisfied)
       ? "satisfied"
@@ -1050,16 +1034,6 @@ function deriveFailedBoundary(
 
 function uniqueStrings(values: readonly string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)));
-}
-
-function stepRequiresLookupEvidence(input: StepAssessmentInput): boolean {
-  if (input.step.executionBinding.sourceKinds.some((kind) =>
-    kind === "web" || kind === "uploaded_source" || kind === "visible_directory" || kind === "workspace_file"
-  )) return true;
-  return input.step.successCriteria.some((criterion) =>
-    /(?:\b(?:source|url|cite|citation|current|latest|lookup|search|fetch)\b|来源|网址|引用|最新|当前|查询|检索|搜索)/iu
-      .test(criterion.description),
-  );
 }
 
 function assessmentView(input: StepAssessmentInput): Record<string, unknown> {
