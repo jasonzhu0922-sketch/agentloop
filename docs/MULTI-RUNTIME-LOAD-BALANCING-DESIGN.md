@@ -1,6 +1,6 @@
 # 多 Runtime 负载分流设计
 
-> 本文描述任务分流、容量和 Host Protocol。Run 状态已改为由 Router 与所有 Host 共用的状态库；关于故障接管，以及本地 SQLite 与生产 PostgreSQL 的切换方案，见[共享状态与故障接管设计](./MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。执行中 Run 的 lease/fencing 接管仍在后续阶段。本文早期版本允许终态边界迁移，现已改为首次接受后严格绑定 Runtime。
+> 本文描述任务分流、容量和 Host Protocol。Run 状态已改为由 Router 与所有云端 Host 共用的状态库；关于故障接管，以及本地 SQLite 与生产 PostgreSQL 的切换方案，见[共享状态与故障接管设计](./MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。执行中 Run 的 lease/fencing 接管仍在后续阶段。会话绑定执行位置；本机专项 Runtime 额外绑定准确 Runtime，云端后续新 Run 可在共享状态域内重新调度。
 
 ## 1. 目标
 
@@ -267,17 +267,19 @@ interface RuntimeDispatchEnvelope {
 第一版路由应完全确定性，以便可解释和测试：
 
 ```text
-1. 如果当前会话已有 boundRuntimeId，只检查该 Runtime 是否与请求目标一致且可用。
-2. 已绑定 Runtime 不一致时返回 `conversation_runtime_conflict`；不可用或无槽位时返回 `conversation_runtime_unavailable`。
-3. 仅对未绑定会话过滤不满足环境约束的节点，并排除 offline、draining、协议不兼容和无可用槽位的节点。
-4. 未绑定会话按利用率、排队长度和近期失败率排序，选择最优节点。
+1. 如果当前会话已绑定云端执行位置，只允许 `cloud_pool`，并对每个后续新 Run 重新过滤、排序云端候选节点。
+2. 如果当前会话已绑定本机执行位置，只允许原 `deviceId + runtimeId`；不一致时返回 `conversation_runtime_conflict`，不可用或无槽位时返回 `conversation_runtime_unavailable`。
+3. 未绑定会话按请求目标过滤节点，并排除 offline、draining、协议不兼容和无可用槽位的节点。
+4. 云端池和未绑定会话都按利用率、排队长度和近期失败率排序，选择最优节点。
 ```
 
-会话绑定用于保证后续用户消息复用同一个上下文、Skill/MCP 配置和工作区：
+会话绑定用于保证后续用户消息不会跨越不兼容的状态与能力边界：
 
-- 首个 Host 返回非空 `remoteRunId` 后，同一会话的所有新任务必须路由到原 Runtime；
-- 前端锁定云端/本机开关和 Runtime 选择器，后端对绕过请求返回 409；
-- 原 Runtime `draining`、离线、满载或不满足新任务约束时不迁移，用户需恢复它或新建会话；
+- 首个 Host 返回非空 `remoteRunId` 后，会话固定云端或本机执行位置；
+- 云端 Runtime 共享 Run 状态库、workspace 和部署能力目录，后续新 Run 可由任意合格云端 Runtime 执行；
+- 本机 Runtime 是 Skill/MCP/授权能力不同的专项 Agent，因此本机会话额外固定准确 `deviceId + runtimeId`；
+- 前端锁定云端/本机开关，并只对本机会话锁定 Runtime 选择器；后端对绕过请求返回 409；
+- 已绑定本机 Runtime `draining`、离线、满载或不满足新任务约束时不迁移，用户需恢复它或新建会话；
 - reservation 或 Host 接受前失败不形成绑定；派发未决期间由共享状态库中的会话锁拒绝并发新消息，失败或过期后释放。
 
 用户新建会话改用另一个 Runtime 时，只能重新提供用户可见的历史消息、已经提交的 Outcome 摘要和已发布资源；Router 不能把旧 Runtime 的内部 Evidence、未完成 Action 或数据库行当作新会话上下文迁移。
@@ -420,7 +422,7 @@ Runtime B: /srv/agentloop-workspace/conversations/conv_123/
 
 ### 11.5 会话绑定与产物
 
-会话绑定是强制执行边界，不是调度偏好。后续新任务只能使用原 Runtime；原 Host 失联、draining 或满载时，Router 明确拒绝，不持久化新的迁移记录。用户需要改用其他 Runtime 时必须创建新会话，并显式重新提供允许复用的输入：
+会话的执行位置绑定是强制边界，不是调度偏好。云端会话的后续新 Run 可以在共享状态域内选择其他云端 Host；本机会话只能使用原设备上的原专项 Runtime，目标失联、draining 或满载时 Router 明确拒绝。用户需要跨执行位置或改用其他本机 Runtime 时必须创建新会话，并显式重新提供允许复用的输入：
 
 1. Router 重新向新 Runtime 提供原始 `ConversationAttachment` 引用；新 Worker 重新导入，得到新的本地 `sourceId`。
 2. 需要复用的最终产物由旧 Worker 发布到 Artifact Broker，带摘要、媒体类型和访问控制；新 Worker 把它作为新的本地 Source/Artifact 导入。
@@ -456,7 +458,7 @@ conversation_runtime_unavailable_total
 2. 实现 Router 的 ConversationTask、RuntimeAssignment、确定性路由和单 Runtime 委派。
 3. 在 Runtime Host 增加可信身份、`dispatchKey` 幂等和容量准入。
 4. 接入 SSE 事件投影、Outcome 回读、取消转发和 `draining`。
-5. 接入可验证资源引用和首次 accepted Run 后的严格会话绑定。
+5. 接入可验证资源引用和首次 accepted Run 后的分层会话绑定。
 6. 最后再引入动态扩缩容、区域路由和更复杂的容量预测。
 
 ## 14. 验收案例
@@ -465,7 +467,7 @@ conversation_runtime_unavailable_total
 2. `runtime-general-01` 已满时，用户 C 的普通任务被分配到另一个同 profile 的云端节点；不会被分配到不满足产物任务约束的节点。
 3. Router 对同一个 `clientMessageId` 重试三次，Worker 只创建一个 `remoteRunId`。
 4. Router 在 SSE 中断后按 seq 回补，并且只在读取到远端 Terminal Outcome 后完成本地 Task。
-5. 一个会话的后续新任务只能使用已绑定 Runtime；节点进入 draining、失联或满载后返回不可用，不迁移。
+5. 一个会话不能跨云端/本机；本机会话不能切换专项 Runtime，云端后续新 Run 可按容量切换云端 Host。
 6. 云端 Router 拒绝 `visibleDirectories` 和本机路径；云端 Runtime Host 的 Tool 目录不含 `visible_*`。
 
 ## 15. 参考应用案例：多 Runtime 智能工作台

@@ -1,5 +1,5 @@
 export type ConversationRuntimeBinding = {
-  readonly runtimeId: string;
+  readonly runtimeId?: string;
   readonly executionLocation: "cloud" | "local" | "strict_local";
 };
 

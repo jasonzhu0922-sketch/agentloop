@@ -17,6 +17,10 @@ interface RegisteredRuntime {
   reservedRuns: number;
 }
 
+type ConversationRuntimeBinding =
+  | { readonly kind: "cloud" }
+  | { readonly kind: "local"; readonly runtimeId: string; readonly deviceId?: string };
+
 /**
  * Control-plane router. It selects one complete AgentLoop Runtime for one
  * conversation task; it deliberately has no Plan, Step, Tool, or Evidence API.
@@ -27,7 +31,7 @@ export class MultiRuntimeRouter {
   private readonly runtimes = new Map<string, RegisteredRuntime>();
   private readonly assignmentsByMessage = new Map<string, Promise<RuntimeAssignment>>();
   private readonly assignmentsById = new Map<string, Promise<RuntimeAssignment>>();
-  private readonly runtimeByConversation = new Map<string, string>();
+  private readonly runtimeBindingByConversation = new Map<string, ConversationRuntimeBinding>();
   private readonly dispatchingConversations = new Set<string>();
 
   register(instance: RuntimeInstance, endpoint: RuntimeControlPort): void {
@@ -94,10 +98,20 @@ export class MultiRuntimeRouter {
     const conversationKey = [task.tenantId, task.ownerUserId, task.conversationId].join("\u0000");
     if (this.dispatchingConversations.has(conversationKey)) throw new ConversationDispatchInProgressError();
     this.dispatchingConversations.add(conversationKey);
-    const boundRuntimeId = this.runtimeByConversation.get(conversationKey);
+    const binding = this.runtimeBindingByConversation.get(conversationKey);
     try {
-      this.assertBindingMatchesTarget(boundRuntimeId, task);
-      const selected = this.selectRuntime(boundRuntimeId ?? task.requestedRuntimeId, task.requestedProfile, task.requiredCapabilities ?? [], boundRuntimeId !== undefined);
+      this.assertBindingMatchesTarget(binding, task);
+      const target = task.executionTarget ?? { kind: "cloud_pool" as const };
+      const requestedRuntimeId = binding?.kind === "local"
+        ? binding.runtimeId
+        : target.kind === "local_device" ? target.runtimeId : task.requestedRuntimeId;
+      const selected = this.selectRuntime(
+        requestedRuntimeId,
+        task.requestedProfile,
+        task.requiredCapabilities ?? [],
+        binding?.kind === "local",
+        target,
+      );
       selected.reservedRuns += 1;
       const assignmentId = `assignment_${randomUUID()}`;
       const dispatchKey = `dispatch_${randomUUID()}`;
@@ -118,7 +132,9 @@ export class MultiRuntimeRouter {
       };
       try {
         const accepted = await selected.endpoint.dispatch(envelope);
-        this.runtimeByConversation.set(conversationKey, selected.instance.id);
+        this.runtimeBindingByConversation.set(conversationKey, selected.instance.kind === "local"
+          ? { kind: "local", runtimeId: selected.instance.id, ...(selected.instance.deviceId === undefined ? {} : { deviceId: selected.instance.deviceId }) }
+          : { kind: "cloud" });
         return {
           id: assignmentId,
           runtimeId: selected.instance.id,
@@ -137,18 +153,22 @@ export class MultiRuntimeRouter {
     }
   }
 
-  private assertBindingMatchesTarget(boundRuntimeId: string | undefined, task: SubmitConversationTask): void {
-    if (boundRuntimeId === undefined) return;
-    const bound = this.runtimes.get(boundRuntimeId);
-    if (bound === undefined) throw new ConversationRuntimeBindingError(boundRuntimeId, "unavailable");
+  private assertBindingMatchesTarget(binding: ConversationRuntimeBinding | undefined, task: SubmitConversationTask): void {
+    if (binding === undefined) return;
     const target = task.executionTarget ?? { kind: "cloud_pool" as const };
-    const matches = target.kind === "local_device"
-      ? bound.instance.kind === "local" && bound.instance.deviceId === target.deviceId && bound.instance.id === target.runtimeId
-      : bound.instance.kind !== "local" && (task.requestedRuntimeId === undefined || task.requestedRuntimeId === boundRuntimeId);
-    if (!matches) throw new ConversationRuntimeBindingError(boundRuntimeId, "conflict");
+    const matches = binding.kind === "local"
+      ? target.kind === "local_device" && binding.deviceId === target.deviceId && binding.runtimeId === target.runtimeId
+      : target.kind === "cloud_pool";
+    if (!matches) throw new ConversationRuntimeBindingError(binding.kind === "local" ? binding.runtimeId : "cloud", "conflict");
   }
 
-  private selectRuntime(requestedRuntimeId: string | undefined, profile: RuntimeProfile | undefined, required: readonly string[], bound = false): RegisteredRuntime {
+  private selectRuntime(
+    requestedRuntimeId: string | undefined,
+    profile: RuntimeProfile | undefined,
+    required: readonly string[],
+    bound = false,
+    target: SubmitConversationTask["executionTarget"] = { kind: "cloud_pool" },
+  ): RegisteredRuntime {
     if (requestedRuntimeId !== undefined && !this.runtimes.has(requestedRuntimeId)) {
       throw new TypeError(`Runtime \"${requestedRuntimeId}\" is not registered`);
     }
@@ -156,6 +176,9 @@ export class MultiRuntimeRouter {
       .filter(({ instance, reservedRuns }) =>
         instance.status === "ready"
         && (requestedRuntimeId === undefined || instance.id === requestedRuntimeId)
+        && (target.kind === "local_device"
+          ? instance.kind === "local" && instance.deviceId === target.deviceId && instance.id === target.runtimeId
+          : instance.kind !== "local")
         && (profile === undefined || instance.profile === profile)
         && required.every((capability) => instance.capabilities.includes(capability))
         && instance.activeRunCount + reservedRuns < instance.maxConcurrentRuns,

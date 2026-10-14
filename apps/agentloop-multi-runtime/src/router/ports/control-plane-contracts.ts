@@ -62,7 +62,7 @@ export interface StoredConversationSummary {
   readonly updatedAt: number;
   readonly runCount: number;
   readonly lastStatus: string;
-  /** Runtime ownership begins only after a Host has accepted a Run. */
+  /** Only Local execution binds the conversation to an exact Runtime. */
   readonly boundRuntimeId?: string;
   readonly executionLocation?: ExecutionLocation;
 }
@@ -146,15 +146,15 @@ export class RuntimeCapacityError extends Error {
   readonly code = "runtime_capacity_exhausted";
 }
 
-/** A conversation cannot silently move to a Runtime with a different state ledger. */
+/** A conversation cannot cross execution locations or move between specialized Local Runtimes. */
 export class ConversationRuntimeBindingError extends Error {
   readonly statusCode = 409;
   readonly code: "conversation_runtime_conflict" | "conversation_runtime_unavailable";
 
   constructor(runtimeId: string, reason: "conflict" | "unavailable") {
     super(reason === "conflict"
-      ? `当前会话已绑定 Runtime ${runtimeId}；请新建会话后再切换 Runtime。`
-      : `当前会话绑定的 Runtime ${runtimeId} 暂不可用；为避免上下文丢失，系统不会自动迁移，请恢复该 Runtime 或新建会话。`);
+      ? "当前会话的执行位置或本机 Runtime 与本次请求不一致；请新建会话后再切换。"
+      : `当前会话绑定的本机 Runtime ${runtimeId} 暂不可用；为避免能力和上下文错配，系统不会自动迁移，请恢复该 Runtime 或新建会话。`);
     this.code = reason === "conflict" ? "conversation_runtime_conflict" : "conversation_runtime_unavailable";
   }
 }

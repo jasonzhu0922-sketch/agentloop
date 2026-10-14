@@ -481,16 +481,23 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       bound_data_policy_json: string | null;
     }>;
     const visibleRows = rows.slice(0, page.limit);
-    const conversations = visibleRows.map((row) => ({
-      id: row.conversation_id,
-      title: row.title.slice(0, 36),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      runCount: Number(row.run_count),
-      lastStatus: row.last_status,
-      ...(row.bound_runtime_id === null ? {} : { boundRuntimeId: row.bound_runtime_id }),
-      ...(row.bound_data_policy_json === null ? {} : { executionLocation: executionLocationFromDataPolicy(row.bound_data_policy_json) }),
-    }));
+    const conversations = visibleRows.map((row) => {
+      const executionLocation = row.bound_data_policy_json === null
+        ? undefined
+        : executionLocationFromDataPolicy(row.bound_data_policy_json);
+      return {
+        id: row.conversation_id,
+        title: row.title.slice(0, 36),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        runCount: Number(row.run_count),
+        lastStatus: row.last_status,
+        ...(executionLocation === "local" || executionLocation === "strict_local"
+          ? row.bound_runtime_id === null ? {} : { boundRuntimeId: row.bound_runtime_id }
+          : {}),
+        ...(executionLocation === undefined ? {} : { executionLocation }),
+      };
+    });
     const hasMore = rows.length > page.limit;
     return {
       conversations,
@@ -822,17 +829,18 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     // reading `runtimeId` here would turn a real affinity into undefined only
     // after switching the shared control plane to PostgreSQL.
     const affinity = await this.database.prepare(`
-      SELECT a.runtime_id AS runtime_id
+      SELECT a.runtime_id AS runtime_id, t.data_policy_json AS data_policy_json
       FROM mr_assignments a JOIN mr_tasks t ON t.id = a.task_id
       WHERE t.tenant_id = ? AND t.owner_user_id = ? AND t.conversation_id = ?
         -- A reservation prevents capacity oversubscription while dispatch is
-        -- in flight, but it has not started a Run and must not make the
-        -- conversation sticky to that Host.  Affinity begins only after the
-        -- Host has accepted the dispatch and supplied a remote Run id.
+        -- in flight, but it has not started a Run and must not establish the
+        -- execution-location/local-Runtime binding. Binding begins only after
+        -- the Host accepts the dispatch and supplies a remote Run id.
         AND a.remote_run_id IS NOT NULL
         AND a.remote_run_id <> ''
       ORDER BY a.created_at DESC LIMIT 1
-    `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { runtime_id: string } | undefined;
+    `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { runtime_id: string; data_policy_json: string } | undefined;
+    const affinityLocation = affinity === undefined ? undefined : executionLocationFromDataPolicy(affinity.data_policy_json);
     const eligibleCandidates = [];
     for (const node of candidates) {
       const heartbeat = this.runtimeHeartbeats.get(node.id);
@@ -846,28 +854,33 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       });
     }
     if (affinity !== undefined) {
-      const boundNode = candidates.find((node) => node.id === affinity.runtime_id);
-      if (boundNode === undefined) throw new ConversationRuntimeBindingError(affinity.runtime_id, "unavailable");
-      const targetMatches = executionTarget.kind === "local_device"
-        ? boundNode.kind === "local"
-          && boundNode.device_id === executionTarget.deviceId
-          && boundNode.id === executionTarget.runtimeId
-        : boundNode.kind === "cloud"
-          && (selectedRuntimeId === null || boundNode.id === selectedRuntimeId);
+      const targetMatches = affinityLocation === "cloud"
+        ? executionTarget.kind === "cloud_pool"
+        : executionTarget.kind === "local_device" && executionTarget.runtimeId === affinity.runtime_id;
       if (!targetMatches) throw new ConversationRuntimeBindingError(affinity.runtime_id, "conflict");
+      if (affinityLocation !== "cloud") {
+        if (executionTarget.kind !== "local_device") {
+          throw new ConversationRuntimeBindingError(affinity.runtime_id, "conflict");
+        }
+        const boundNode = candidates.find((node) => node.id === affinity.runtime_id);
+        if (boundNode === undefined) throw new ConversationRuntimeBindingError(affinity.runtime_id, "unavailable");
+        if (boundNode.kind !== "local" || boundNode.device_id !== executionTarget.deviceId) {
+          throw new ConversationRuntimeBindingError(affinity.runtime_id, "conflict");
+        }
+      }
     }
     const eligible = eligibleCandidates
       .filter((node) => (executionTarget.kind === "local_device"
         ? node.kind === "local" && node.device_id === executionTarget.deviceId && node.id === executionTarget.runtimeId
           && node.tenant_id === task.tenant_id && node.owner_user_id === task.owner_user_id
         : node.kind === "cloud" && (selectedRuntimeId === null || node.id === selectedRuntimeId))
-        && (affinity === undefined || node.id === affinity.runtime_id)
+        && (affinity === undefined || affinityLocation === "cloud" || node.id === affinity.runtime_id)
         && (task.requested_profile === null || node.profile === task.requested_profile)
         && required.every((capability) => (JSON.parse(node.capabilities_json) as string[]).includes(capability)))
       .filter((node) => node.active_run_count + Number(node.pending_admissions) < node.max_concurrent_runs)
       .sort((left, right) => score(left) - score(right) || left.id.localeCompare(right.id));
     const selected = eligible[0];
-    if (selected === undefined && affinity !== undefined) {
+    if (selected === undefined && affinity !== undefined && affinityLocation !== "cloud") {
       throw new ConversationRuntimeBindingError(affinity.runtime_id, "unavailable");
     }
     if (selected === undefined && selectedRuntimeId !== null) {

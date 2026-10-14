@@ -1072,7 +1072,7 @@ async function toggleLocalRuntimeStarted(runtimeId = localRuntimeState.runtimeId
 
 async function selectLocalRuntime(runtimeId) {
   const binding = applyConversationRuntimeBinding();
-  if (binding !== undefined && binding.runtimeId !== runtimeId) {
+  if (binding !== undefined && binding.executionLocation !== "cloud" && binding.runtimeId !== runtimeId) {
     setStatus(runtimeBindingMessage(binding), "ok");
     updateLocalControls();
     render();
@@ -1098,6 +1098,7 @@ function applyConversationRuntimeBinding(conversation = activeConversation()) {
   const toggle = $("use-local-runtime");
   if (toggle) toggle.checked = local;
   if (local) {
+    if (typeof binding.runtimeId !== "string") return undefined;
     if (localRuntimeState.runtimeId !== binding.runtimeId) localRuntimeState.scopes = [];
     localRuntimeState.runtimeId = binding.runtimeId;
     const select = $("runtime");
@@ -1107,7 +1108,7 @@ function applyConversationRuntimeBinding(conversation = activeConversation()) {
 }
 
 function runtimeBindingMessage(binding) {
-  if (binding.executionLocation === "cloud") return "当前会话已绑定云端 Runtime；如需改用本机 Runtime，请新建会话";
+  if (binding.executionLocation === "cloud") return "当前会话已绑定云端执行；后续任务可由任意可用云端 Runtime 执行，如需改用本机 Runtime，请新建会话";
   const displayName = runtimeDisplayNameFor(binding.runtimeId) || binding.runtimeId;
   return `当前会话已绑定本机 Runtime ${displayName}；如需切换 Runtime，请新建会话`;
 }
@@ -1292,9 +1293,10 @@ function mergeConversationSummaries(summaries, reset = false, state = conversati
         : finiteNumber(summary.updatedAt, existing.updatedAt);
       existing.runCount = finiteNumber(summary.runCount, existing.runCount);
       existing.lastStatus = typeof summary.lastStatus === "string" ? summary.lastStatus : existing.lastStatus;
-      if (typeof summary.boundRuntimeId === "string" && typeof summary.executionLocation === "string") {
-        existing.boundRuntimeId = summary.boundRuntimeId;
+      if (typeof summary.executionLocation === "string") {
         existing.executionLocation = summary.executionLocation;
+        if (typeof summary.boundRuntimeId === "string") existing.boundRuntimeId = summary.boundRuntimeId;
+        else delete existing.boundRuntimeId;
       } else {
         delete existing.boundRuntimeId;
         delete existing.executionLocation;
@@ -1708,8 +1710,9 @@ async function submit() {
     assistantMessage.executionLocation = executionTarget === "local" ? "local" : "cloud";
     if (executionTarget === "local") assistantMessage.localRuntimeId = body.assignment.runtimeId;
     if (acceptedRemoteRunId !== undefined) {
-      conversation.boundRuntimeId = body.assignment.runtimeId;
       conversation.executionLocation = assistantMessage.executionLocation;
+      if (executionTarget === "local") conversation.boundRuntimeId = body.assignment.runtimeId;
+      else delete conversation.boundRuntimeId;
       updateLocalControls();
     }
     if (body.assignment.status === "failed") {

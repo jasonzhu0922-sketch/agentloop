@@ -454,7 +454,7 @@ test("Router conversation index paginates newest conversations in stable pages o
     ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
   `).run("assignment-history", "task-64", "runtime-history", "dispatch-history", "run-history", "completed", 64, 64);
   const boundSummary = (await store.listConversations("tenant", "user", { limit: 30, offset: 0 })).conversations[0];
-  assert.equal(boundSummary?.boundRuntimeId, "runtime-history");
+  assert.equal(boundSummary?.boundRuntimeId, undefined);
   assert.equal(boundSummary?.executionLocation, "cloud");
   const detail = await store.conversation("tenant", "user", "conversation-64");
   assert.deepEqual(detail?.turns, [{
@@ -612,13 +612,20 @@ test("browser Runtime binding uses the persisted summary before local message hi
   }), { runtimeId: "runtime-summary", executionLocation: "local" });
 });
 
+test("browser cloud binding fixes only the execution location, not a cloud Runtime", () => {
+  assert.deepEqual(conversationRuntimeBinding({
+    executionLocation: "cloud",
+    messages: [{ role: "assistant", remoteRunId: "run-cloud", runtimeId: "runtime-old", executionLocation: "cloud" }],
+  }), { executionLocation: "cloud" });
+});
+
 test("browser Runtime binding derives only from turns accepted by a Runtime", () => {
   assert.equal(conversationRuntimeBinding({
     messages: [{ role: "assistant", assignmentId: "assignment-only", runtimeId: "runtime-reserved", status: "failed" }],
   }), undefined);
   assert.deepEqual(conversationRuntimeBinding({
     messages: [{ role: "assistant", remoteRunId: "run-cloud", runtimeId: "runtime-cloud", executionLocation: "cloud" }],
-  }), { runtimeId: "runtime-cloud", executionLocation: "cloud" });
+  }), { executionLocation: "cloud" });
   assert.deepEqual(conversationRuntimeBinding({
     messages: [{ role: "assistant", localRunId: "run-local", localRuntimeId: "runtime-local" }],
   }), { runtimeId: "runtime-local", executionLocation: "local" });
@@ -660,7 +667,8 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
   assert.match(app, /executionProvenanceParts/);
   assert.match(app, /executionLocation: executionTarget/);
   assert.match(app, /const binding = applyConversationRuntimeBinding\(conversation\)/);
-  assert.match(app, /conversation\.boundRuntimeId = body\.assignment\.runtimeId/);
+  assert.match(app, /if \(executionTarget === "local"\) conversation\.boundRuntimeId = body\.assignment\.runtimeId/);
+  assert.match(app, /else delete conversation\.boundRuntimeId/);
   assert.match(app, /typeof body\.assignment\.remoteRunId === "string"/);
   assert.doesNotMatch(app, /\$\("execution-target"\)/);
   assert.match(overrides, /\.execution-provenance-chip/);
@@ -1664,17 +1672,15 @@ test("router distributes independent user tasks by available Runtime capacity", 
   assert.equal(second.runtimeId, "runtime-b");
 });
 
-test("in-memory Router keeps accepted conversations on one Runtime and rejects an explicit switch", async () => {
+test("in-memory Router keeps a cloud conversation in the cloud pool while allowing Host switches", async () => {
   const router = new MultiRuntimeRouter();
   router.register(runtime("runtime-a", { maxConcurrentRuns: 3 }), endpoint("run-a"));
   router.register(runtime("runtime-b", { maxConcurrentRuns: 3 }), endpoint("run-b"));
   const first = await router.submit(task("user-a", "message-a", "conversation-bound"));
   const second = await router.submit(task("user-a", "message-b", "conversation-bound"));
-  assert.equal(second.runtimeId, first.runtimeId);
-  await assert.rejects(
-    () => router.submit({ ...task("user-a", "message-c", "conversation-bound"), requestedRuntimeId: "runtime-b" }),
-    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_conflict",
-  );
+  assert.notEqual(second.runtimeId, first.runtimeId);
+  const third = await router.submit({ ...task("user-a", "message-c", "conversation-bound"), requestedRuntimeId: "runtime-b" });
+  assert.equal(third.runtimeId, "runtime-b");
 });
 
 test("in-memory Router rejects a second conversation turn while the binding dispatch is unresolved", async () => {
@@ -2412,7 +2418,7 @@ test("explicit Runtime selection uses that Host and rejects an unregistered ID",
   await database.close();
 });
 
-test("persistent Router keeps a conversation on its original Runtime Host without recording a migration", async () => {
+test("persistent Router may rebalance a cloud conversation without recording a migration", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -2429,7 +2435,7 @@ test("persistent Router keeps a conversation on its original Runtime Host withou
   });
   const first = await router.submit(task("user-a", "message-a", "conversation-sticky"));
   const second = await router.submit(task("user-a", "message-b", "conversation-sticky"));
-  assert.equal(second.runtimeId, first.runtimeId);
+  assert.notEqual(second.runtimeId, first.runtimeId);
   const migrations = await database.prepare(`
     SELECT assignment_id FROM mr_conversation_runtime_migrations WHERE assignment_id = ?
   `).all(second.id) as Array<{ assignment_id: string }>;
@@ -2437,7 +2443,7 @@ test("persistent Router keeps a conversation on its original Runtime Host withou
   await database.close();
 });
 
-test("an unavailable bound Runtime blocks a conversation instead of silently migrating it", async () => {
+test("a cloud conversation continues on another healthy Host when its previous Host is unavailable", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -2458,14 +2464,12 @@ test("an unavailable bound Runtime blocks a conversation instead of silently mig
 
   // runtime-a has missed its heartbeat, while runtime-b remains healthy.
   await store.heartbeat({ runtimeId: "runtime-b", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 1_300 });
-  await assert.rejects(
-    () => store.reserve(task("user-a", "message-next", "conversation-migrated"), {
-      heartbeatTtlMs: 1_000,
-      reservationTtlMs: 1_000,
-      now: 1_300,
-    }),
-    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_unavailable",
-  );
+  const next = await store.reserve(task("user-a", "message-next", "conversation-migrated"), {
+    heartbeatTtlMs: 1_000,
+    reservationTtlMs: 1_000,
+    now: 1_300,
+  });
+  assert.equal(next.runtimeId, "runtime-b");
   const migrations = await database.prepare(`
     SELECT assignment_id FROM mr_conversation_runtime_migrations
   `).all() as Array<{ assignment_id: string }>;
@@ -2473,7 +2477,7 @@ test("an unavailable bound Runtime blocks a conversation instead of silently mig
   await database.close();
 });
 
-test("a full bound Runtime blocks a conversation instead of spilling it to another Host", async () => {
+test("a cloud conversation uses another Host when its previous Host is full", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -2490,12 +2494,10 @@ test("a full bound Runtime blocks a conversation instead of spilling it to anoth
   await store.markAccepted(first.id, "run-on-a", 201);
   await store.heartbeat({ runtimeId: "runtime-a", status: "ready", activeRunCount: 2, queuedRunCount: 0, maxConcurrentRuns: 2, observedAt: 300 });
   await store.heartbeat({ runtimeId: "runtime-b", status: "ready", activeRunCount: 0, queuedRunCount: 0, maxConcurrentRuns: 2, observedAt: 300 });
-  await assert.rejects(
-    () => store.reserve(task("user-a", "message-next", "conversation-bound-full"), {
-      heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 301,
-    }),
-    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_unavailable",
-  );
+  const next = await store.reserve(task("user-a", "message-next", "conversation-bound-full"), {
+    heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 301,
+  });
+  assert.equal(next.runtimeId, "runtime-b");
   await database.close();
 });
 
@@ -2558,6 +2560,46 @@ test("a Local Runtime-bound conversation rejects a different Local Runtime", asy
       dataPolicy: { mode: "local" },
     }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 202 }),
     (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_conflict",
+  );
+  await database.close();
+});
+
+test("an unavailable Local Runtime-bound conversation does not spill to another Local Runtime", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  for (const runtimeId of ["runtime-local-a", "runtime-local-b"]) {
+    await store.registerLocalRuntime({
+      runtimeId,
+      deviceId: "device-a",
+      tenantId: "tenant",
+      ownerUserId: "user-a",
+      connectionId: "connection-a",
+      connectionEpoch: 1,
+      profile: "general",
+      capabilities: ["document"],
+      maxConcurrentRuns: 2,
+      status: "ready",
+      catalogVersion: "1",
+      leaseExpiresAt: 2_000,
+      now: 100,
+    });
+  }
+  const target = { kind: "local_device" as const, deviceId: "device-a", runtimeId: "runtime-local-a" };
+  const first = await store.reserve({
+    ...task("user-a", "message-local-a", "conversation-local-unavailable"),
+    executionTarget: target,
+    dataPolicy: { mode: "local" },
+  }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 200 });
+  await store.markAccepted(first.id, "run-local-a", 201);
+  await store.heartbeat({ runtimeId: "runtime-local-a", status: "offline", activeRunCount: 0, queuedRunCount: 0, observedAt: 202 });
+  await assert.rejects(
+    () => store.reserve({
+      ...task("user-a", "message-next", "conversation-local-unavailable"),
+      executionTarget: target,
+      dataPolicy: { mode: "local" },
+    }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 203 }),
+    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_unavailable",
   );
   await database.close();
 });
