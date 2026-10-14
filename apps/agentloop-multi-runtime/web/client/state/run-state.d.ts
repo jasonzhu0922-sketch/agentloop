@@ -9,3 +9,9 @@ export interface RunState {
 }
 
 export function createRunState(): RunState;
+
+export function releaseTerminalRun(
+  state: RunState,
+  conversationId: string | undefined,
+  assistant: { readonly status?: string; readonly assignmentId?: string; readonly localRunId?: string } | undefined,
+): boolean;

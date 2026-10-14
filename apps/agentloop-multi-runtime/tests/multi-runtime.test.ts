@@ -1551,9 +1551,9 @@ test("Web batches high-frequency event rendering and persistence but flushes a t
 
 test("Web tracks active Runs by conversation instead of imposing one global Run lock", async () => {
   const app = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
-  assert.match(app, /const activeRunsByConversation = new Map\(\)/);
-  assert.match(app, /activeRunsByConversation\.has\(conversation\.id\)/);
-  assert.match(app, /activeRunsByConversation\.get\(conversation\.id\)/);
+  assert.match(app, /const runState = createRunState\(\)/);
+  assert.match(app, /runState\.activeByConversation\.has\(conversation\.id\)/);
+  assert.match(app, /runState\.activeByConversation\.get\(conversation\.id\)/);
   assert.match(app, /void reconcilePersistedRuns\(\)/);
   assert.match(app, /function applyRecoveredRunState\(assistant, run\)/);
   assert.match(app, /当前会话仍在发起或执行；请等待或点击停止/);
@@ -1562,7 +1562,7 @@ test("Web tracks active Runs by conversation instead of imposing one global Run 
   assert.match(app, /发起会话超时，请重试/);
   assert.match(app, /await observeAssignment\(/);
   assert.match(app, /activeRun\.assistant\.status = "cancelled"/);
-  assert.match(app, /cancellationTarget\(activeRunsByConversation\.get\(conversation\.id\), conversation\.messages\)/);
+  assert.match(app, /cancellationTarget\(runState\.activeByConversation\.get\(conversation\.id\), conversation\.messages\)/);
   assert.match(app, /停止失败：/);
   assert.doesNotMatch(app, /let activeAssignmentId|let streamAbort/);
 });
@@ -1577,6 +1577,11 @@ test("Web recovers the Router cancellation target from a persisted running messa
     assignmentId: "assignment-persisted",
     canCancel: true,
   });
+});
+
+test("Web does not expose a stop control for a terminal message while browser detail loading continues", () => {
+  const terminal = { role: "assistant", status: "completed", assignmentId: "assignment-terminal" };
+  assert.equal(cancellationTarget({ assignmentId: terminal.assignmentId, assistant: terminal }, [terminal]).canCancel, false);
 });
 
 test("Web keeps Runtime directory authority above the composer and snapshots uploaded attachments into the user message", async () => {

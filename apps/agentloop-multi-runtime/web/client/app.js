@@ -12,7 +12,7 @@ import { createConversationState } from "./state/conversation-state.js";
 import { createCoalescedUpdater } from "./state/live-update-scheduler.js";
 import { persistJson, persistSessions } from "./state/session-persistence.js";
 import { createSessionState } from "./state/session-state.js";
-import { createRunState } from "./state/run-state.js";
+import { createRunState, releaseTerminalRun } from "./state/run-state.js";
 import { isNearBottom, nextScrollTop } from "./ui/scroll-follow.js";
 import { autoResizeComposerInput, resetComposerInput, shouldSubmitComposerOnKeydown } from "./ui/composer-input.js";
 import { hasSelectedTextWithin } from "./ui/message-selection.js";
@@ -545,6 +545,13 @@ async function loadLocalRuntimes() {
   syncLocalRuntimeManager();
   refreshRuntimeOptions();
   updateLocalControls();
+  refreshComposerAvailability();
+}
+
+// Runtime lifecycle state controls the composer too. Keep the primary action
+// in sync when a fresh Agent response changes the selected Runtime status.
+function refreshComposerAvailability() {
+  if (activeConversation()) render();
 }
 
 async function loadLocalScopes() {
@@ -1870,6 +1877,7 @@ async function streamAssignment(assignmentId, conversation, assistant, tenantId,
     },
     onRun: (run) => {
       applyRecoveredRunState(assistant, run);
+      releaseTerminalComposerLock(conversation, assistant);
       flushTerminalAssistantUpdate(assistant);
       setStatus(run.status === "completed" ? "已完成" : run.status === "cancelled" ? "已停止" : "执行失败", run.status === "completed" ? "ok" : "error");
     },
@@ -1905,7 +1913,10 @@ async function observeStrictLocalRun(conversation, assistant, activeRun) {
         onEvent(event, conversation, assistant);
       }
       applyRecoveredRunState(assistant, runBody.run);
-      if (["completed", "failed", "cancelled"].includes(assistant.status)) flushTerminalAssistantUpdate(assistant);
+      if (["completed", "failed", "cancelled"].includes(assistant.status)) {
+        releaseTerminalComposerLock(conversation, assistant);
+        flushTerminalAssistantUpdate(assistant);
+      }
       else requestLiveAssistantUpdate(assistant);
       if (assistant.status !== "running") break;
       await waitForStrictLocalPoll(activeRun.abortController.signal);
@@ -1990,7 +2001,12 @@ function onEvent(event, conversation, assistant) {
     void refreshHumanLoop(assistant.assignmentId, assistant, $("tenant-id").value.trim(), $("user-id").value.trim()).then((changed) => { if (changed) { saveSessions(); render(); } });
     setStatus("等待你的确认或补充信息", "running");
   }
-  if (terminal) { flushTerminalAssistantUpdate(assistant); setStatus(event.type === "run.completed" ? "已完成" : event.type === "run.cancelled" ? "已停止" : "执行失败", assistant.status === "completed" ? "ok" : "error"); return true; }
+  if (terminal) {
+    releaseTerminalComposerLock(conversation, assistant);
+    flushTerminalAssistantUpdate(assistant);
+    setStatus(event.type === "run.completed" ? "已完成" : event.type === "run.cancelled" ? "已停止" : "执行失败", assistant.status === "completed" ? "ok" : "error");
+    return true;
+  }
   requestLiveAssistantUpdate(assistant);
   return false;
 }
@@ -2096,6 +2112,10 @@ function flushTerminalAssistantUpdate(assistant) {
   // Terminal state also changes the composer/action controls, so it is one of
   // the deliberately full renders rather than a card-only streaming update.
   liveUpdates.flush();
+}
+
+function releaseTerminalComposerLock(conversation, assistant) {
+  return releaseTerminalRun(runState, conversation?.id, assistant);
 }
 
 function renderPendingLiveAssistantMessages() {

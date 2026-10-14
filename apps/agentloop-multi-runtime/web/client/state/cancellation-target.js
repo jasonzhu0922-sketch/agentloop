@@ -25,6 +25,9 @@ export function cancellationTarget(activeRun, messages) {
     assistant,
     assignmentId,
     ...((activeRun?.localRunId ?? assistant?.localRunId) === undefined ? {} : { localRunId: activeRun?.localRunId ?? assistant?.localRunId }),
-    canCancel: activeRun !== undefined || assistant !== undefined,
+    // Observation/detail hydration can outlive a confirmed terminal Run. It
+    // is not a cancellation target and must not turn the composer into a
+    // stale stop control.
+    canCancel: assistant?.status === "running",
   };
 }
