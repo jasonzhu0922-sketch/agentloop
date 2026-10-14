@@ -98,7 +98,7 @@ init() {
   umask 077
   mkdir -p "$DEPLOY_ROOT/config" "$DEPLOY_ROOT/data/workspace" "$DEPLOY_ROOT/secrets" "$DEPLOY_ROOT/backups"
   if [ ! -f "$DEPLOY_ROOT/config/llm-providers.json" ]; then
-    cp "$APP_ROOT/config/llm-providers.json" "$DEPLOY_ROOT/config/llm-providers.json"
+    cp "$APP_ROOT/config/llm-providers.example.json" "$DEPLOY_ROOT/config/llm-providers.json"
     note "created editable provider configuration: $DEPLOY_ROOT/config/llm-providers.json"
   fi
   if [ ! -f "$DEPLOY_ROOT/secrets/runtime.env" ]; then

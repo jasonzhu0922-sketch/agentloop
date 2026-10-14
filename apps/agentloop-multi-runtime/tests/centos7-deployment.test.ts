@@ -25,6 +25,8 @@ test("CentOS deployment exposes an Agent-reachable Router URL and proves both ro
   assert.match(launcher, /docker load -i/);
   assert.match(imageBuilder, /agentloop-centos7-release/);
   assert.match(imageBuilder, /custom-skills\.zip/);
+  assert.match(imageBuilder, /config\/llm-providers\.example\.json/);
+  assert.match(launcher, /\$APP_ROOT\/config\/llm-providers\.example\.json/);
   assert.match(imageBuilder, /git -C "\$REPOSITORY_ROOT" archive/);
   assert.match(imageBuilder, /release-manifest\.env/);
   assert.match(imageBuilder, /--cache-to/);

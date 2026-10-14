@@ -93,7 +93,7 @@ apps/agentloop-multi-runtime/deploy/centos7/build-image.sh /tmp/agentloop-centos
 scp /tmp/agentloop-centos7.tar.gz /tmp/agentloop-centos7-deployment.tar.gz SERVER:/tmp/
 ```
 
-脚本会同时生成 Docker 镜像与同版本的部署包。部署包不含源码和密钥，但含 Compose、启动脚本、Provider 配置样本及运行所需的受版本控制 Skill 压缩包。服务器无需访问 Git、npm、apt 或 pip。
+脚本会同时生成 Docker 镜像与同版本的部署包。部署包不含源码和密钥，但含 Compose、启动脚本、受版本控制的 Provider 配置样本及运行所需的 Skill 压缩包。`init` 仅在实际配置尚不存在时，才将该样本物化为服务器的可编辑 `config/llm-providers.json`；本机忽略配置不会进入包内。服务器无需访问 Git、npm、apt 或 pip。
 
 ```bash
 sudo mkdir -p /opt/agentloop/release
