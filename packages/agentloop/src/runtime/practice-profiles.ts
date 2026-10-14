@@ -78,7 +78,7 @@ const ARTIFACT_KINDS = new Set<ArtifactKind>(["html", "document", "presentation"
 const SOURCE_NEEDS = new Set<SourceNeed>(["none", "lookup_lite", "source_grounded", "strict_user_source"]);
 const DELIVERY_SURFACES = new Set<DeliverySurface>(["conversation", "workspace_artifact"]);
 const OPERATION_PROFILES = new Set<StructuredTaskOperationProfile>([
-  "data_analysis", "content_generation", "code_change", "web_research", "artifact_build", "direct_answer",
+  "data_analysis", "content_generation", "code_change", "source_acquisition", "web_research", "artifact_build", "direct_answer",
 ]);
 const INPUT_FAMILIES = new Set<PracticeInputFamily>(["tabular", "document", "presentation", "image", "audio", "code", "unknown"]);
 const DEFAULT_MAX_ACTIVE_PROFILES = 3;

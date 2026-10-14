@@ -5,6 +5,7 @@ export type OperationProfileId =
   | "data_analysis"
   | "content_generation"
   | "code_change"
+  | "source_acquisition"
   | "web_research"
   | "artifact_build"
   | "direct_answer";
@@ -98,6 +99,25 @@ const OPERATION_PROFILES: readonly OperationProfile[] = [
       "changed files",
       "behavioral contract restored",
       "focused test or check output",
+    ],
+  },
+  {
+    id: "source_acquisition",
+    name: "Source acquisition",
+    description: "Acquire evidence required by the task through an authorized, relevant source; the evidence requirement does not prescribe a channel.",
+    planningRules: [
+      "Identify the source that best matches the task and the admitted capabilities. Prefer a relevant domain Skill, bound database/API provider, uploaded source, or authorized directory when available; use the web only when requested or when it is the appropriate admitted source.",
+      "Treat evidence demand as a quality and sufficiency requirement, not as a web-search instruction. Do not invent source access or substitute a different channel merely because it is available.",
+      "Success criteria should identify the evidence needed and its provenance without requiring URLs unless the selected source is the web.",
+    ],
+    executionRules: [
+      "Use only the source and tools bound to the current step. Preserve source identity, query scope, and returned evidence.",
+      "Do not switch to web research when a bound domain Skill or data provider is the intended source; report a missing source or access failure instead of fabricating evidence.",
+    ],
+    successEvidence: [
+      "source identity and query scope",
+      "retrieved evidence tied to the requested question",
+      "provenance appropriate to the selected source channel",
     ],
   },
   {
@@ -205,9 +225,10 @@ export function inferOperationProfile(input: OperationProfileInput): OperationPr
     ...(input.skillNames ?? []),
   ].join("\n"));
   const tools = new Set(input.toolNames);
-  if (tools.has("websearch") || tools.has("webfetch") || intent.sourceNeed !== "none") {
+  if (tools.has("websearch") || tools.has("webfetch") || explicitlyRequestsWebResearch(text)) {
     return profile("web_research");
   }
+  if (intent.sourceNeed !== "none") return profile("source_acquisition");
   if (matchesCodeChange(text)) {
     return profile("code_change");
   }
@@ -221,6 +242,10 @@ export function inferOperationProfile(input: OperationProfileInput): OperationPr
     return profile("content_generation");
   }
   return profile("direct_answer");
+}
+
+function explicitlyRequestsWebResearch(value: string): boolean {
+  return /(?:\b(?:web\s+search|search\s+(?:the\s+)?web|search\s+online|internet\s+search|web\s+research|web\s+sources?)\b|网页搜索|网络搜索|互联网搜索|网上(?:搜索|查询|查找)|在线搜索|从网上|从互联网|网页来源|网上来源|网络资料)/iu.test(value);
 }
 
 export function executionOperationProfile(input: OperationProfileInput): Readonly<{

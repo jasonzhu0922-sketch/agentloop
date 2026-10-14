@@ -1553,6 +1553,12 @@ export class RunService {
       // actionless, abandoned Run to a Runtime Host's reconciliation pass.
       const actionScope: { planId?: string; stepId?: string } = {};
       const model = new ActionTrackedModel(rawModel, this.actions, runId, () => actionScope);
+      const shouldRefreshSkillsBeforeIntent = latestTurnMayReferenceSkill(input)
+        && this.skills.skillDirectories.length > 0;
+      if (shouldRefreshSkillsBeforeIntent) {
+        await this.skills.refreshSkillDirectory();
+      }
+      let privateSkills = await this.skills.resolveForConversation(actorUserId);
       const turnResolution = !conversationEntry
         ? undefined
         : await resolveConversationTurn(
@@ -1564,6 +1570,7 @@ export class RunService {
               visibleDirectories,
               sources: availableSources,
               conversationWorkingSet,
+              availableSkills: privateSkills,
             },
             runController.signal,
           );
@@ -1595,13 +1602,13 @@ export class RunService {
           });
         }
       }
-      if (!responseOnly && this.skills.skillDirectories.length > 0) {
+      if (!responseOnly && !shouldRefreshSkillsBeforeIntent && this.skills.skillDirectories.length > 0) {
         await this.skills.refreshSkillDirectory();
+        privateSkills = await this.skills.resolveForConversation(actorUserId);
       }
       // A reply-only turn does not require Skills, but it must not erase the
       // Runtime's authorized capability catalog. The catalog stays inert in
       // capabilityRecovery; the reply Plan still receives no Skills or Tools.
-      const privateSkills = await this.skills.resolveForConversation(actorUserId);
       const discoveredByName = new Map(this.skills.discovered().map((skill) => [skill.name, skill]));
       for (const skill of privateSkills) {
         if (skill.sourceKind !== "package" || skill.package === undefined) continue;
@@ -4736,7 +4743,9 @@ function planningCapabilitiesForAdmittedProposal(
   const selected = new Set(proposal.selectedSkillIds);
   return [
     ...planningCapabilitiesFromTools(tools, sources),
-    ...planningCapabilitiesFromSkills(allSkills.filter((skill) => selected.has(skill.id))),
+    ...planningCapabilitiesFromSkills(allSkills.filter((skill) =>
+      selected.has(skill.id) || selected.has(skill.name)
+    )),
   ];
 }
 
@@ -7452,9 +7461,13 @@ async function resolveConversationTurn(
       semanticFeedback = conversationTurnSemanticFeedback(resultBound, input, context.conversationWorkingSet);
       if (semanticFeedback === undefined) {
         return applyConversationTurnDirectReplyFloor(
-          applyConversationTurnArtifactExecutionFloor(
-            applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet),
+          applyConversationTurnExplicitSkillExecutionFloor(
+            applyConversationTurnArtifactExecutionFloor(
+              applyConversationTurnEvidenceFloor(resultBound, input, context.conversationWorkingSet),
+              input,
+            ),
             input,
+            context,
           ),
           input,
         );
@@ -7895,6 +7908,51 @@ function applyConversationTurnDirectReplyFloor(
   };
 }
 
+function applyConversationTurnExplicitSkillExecutionFloor(
+  resolution: ConversationTurnResolution,
+  input: string,
+  context: ConversationIntentExternalContext,
+): ConversationTurnResolution {
+  if (resolution.mode === "execute") return resolution;
+  const skill = explicitlyReferencedAvailableSkill(input, context.availableSkills);
+  if (skill === undefined) return resolution;
+  const userAuthoredSourceNeed = classifyTaskIntent({ objective: input }).sourceNeed;
+  const skillProvidesSourceEvidence = (skill.agentLoop?.sourceKinds.length ?? 0) > 0
+    || skill.agentLoop?.roles.includes("source_provider") === true;
+  const evidenceDemand = strongerConversationEvidenceDemand(
+    resolution.evidenceDemand,
+    userAuthoredSourceNeed !== "none"
+      ? userAuthoredSourceNeed
+      : skillProvidesSourceEvidence ? "source_grounded" : "none",
+  );
+  const constraint = `Use the explicitly requested Skill ${skill.name}.`;
+  return {
+    ...resolution,
+    mode: "execute",
+    taskIntent: {
+      ...resolution.taskIntent,
+      requiresExecution: true,
+    },
+    evidenceStrategy: conversationEvidenceStrategyForDemand(evidenceDemand, resolution.sourceBinding),
+    evidenceDemand,
+    userConstraints: uniqueConversationConstraints([...resolution.userConstraints, constraint]),
+    source: "model_guarded",
+  };
+}
+
+function explicitlyReferencedAvailableSkill(
+  input: string,
+  skills: readonly PrivateSkill[] = [],
+): PrivateSkill | undefined {
+  const signal = input.toLowerCase();
+  return skills.find((skill) => exactSkillMention(signal, skill));
+}
+
+function latestTurnMayReferenceSkill(input: string): boolean {
+  return /(?:\bskill\b|技能|能力|用\s*[a-z0-9]+(?:-[a-z0-9]+)+|使用\s*[a-z0-9]+(?:-[a-z0-9]+)+|按\s*[a-z0-9]+(?:-[a-z0-9]+)+|@[a-z0-9]+(?:-[a-z0-9]+)+)/iu
+    .test(input);
+}
+
 function isDirectConversationReply(input: string): boolean {
   const intent = classifyTaskIntent({ objective: input });
   if (intent.sourceNeed !== "none" || requiresExternalState(input)) return false;
@@ -7965,7 +8023,9 @@ function conversationTurnResolverPrompt(repairFeedback: string | undefined): str
       "Goal lineage and input ownership are separate: targetGoalCandidateId may identify a failed goal being continued while resultCandidateId identifies the published Runtime Result supplying its content.",
       "For requests such as 'turn this analysis into a PDF', bind the prior result and use evidenceStrategy=none. For 'reanalyze the source and make a PDF', use refresh_sources with source_grounded evidence.",
       "Use runtimeContext as server-authored context and identity metadata, not as unverified source content.",
-      "You have no Skills and no execution Tools. Return exactly one resolve_conversation_turn tool call and no prose.",
+      "You cannot load or execute Skills or Tools in this resolver phase. Use availableSkills metadata only to decide whether the turn asks Runtime to execute a named capability.",
+      "When the latest turn explicitly asks to use an available Skill, return execute; do not return clarify merely because no visible directory or uploaded source is bound.",
+      "Return exactly one resolve_conversation_turn tool call and no prose.",
       ...(repairFeedback === undefined
         ? []
         : [
@@ -8508,6 +8568,7 @@ function optionalRecord(value: unknown): Record<string, unknown> {
 interface ConversationIntentExternalContext {
   readonly visibleDirectories: readonly VisibleDirectoryGrant[];
   readonly sources: readonly UploadedSourceSummary[];
+  readonly availableSkills?: readonly PrivateSkill[];
   readonly conversationWorkingSet?: ConversationWorkingSet;
 }
 
@@ -8535,6 +8596,18 @@ function formatConversationTurnContext(context: ConversationIntentExternalContex
       summary: source.summary,
       chunkCount: source.chunkCount,
       truncated: source.truncated,
+    })),
+    availableSkills: (context.availableSkills ?? []).map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      ...(skill.agentLoop === undefined ? {} : {
+        roles: skill.agentLoop.roles,
+        sourceKinds: skill.agentLoop.sourceKinds,
+        artifactKinds: skill.agentLoop.artifactKinds,
+        semanticTags: skill.agentLoop.semanticTags,
+        intentExamples: skill.agentLoop.intentExamples,
+      }),
     })),
     conversationWorkingSet: {
       priorGoalCandidates: goalRunIds.map((runId, index) => {

@@ -10,6 +10,7 @@ import { resolvePracticeProfileResolution, type PracticeProfileCatalog } from ".
 import { observedSourceKindsFromToolEvidence } from "../src/runtime/source-family-observation.ts";
 import { createStepExecutionStrategyProfile, type StepExecutionStrategy } from "../src/runtime/step-execution-strategy.ts";
 import { classifyTaskIntent, understandTask } from "../src/runtime/task-intent.ts";
+import { inferOperationProfile } from "../src/runtime/operation-profiles.ts";
 import {
   artifactStepToolProgressPolicy,
   deriveRuntimeStepEvidenceState,
@@ -259,6 +260,38 @@ test("a resolved conversational document remains conversational despite report w
   assert.equal(understood.intent.wantsArtifact, false);
   assert.equal(understood.intent.wantsConversationAnswer, true);
   assert.deepEqual(understood.artifactTargets, []);
+});
+
+test("evidence demand does not imply web research when the source channel is domain-bound", () => {
+  const employeeTask = understandTask({ objective: "查询某公司的员工人数并说明统计口径" });
+  assert.notEqual(employeeTask.evidence.need, "none");
+  assert.ok(employeeTask.operationProfiles.includes("source_acquisition"));
+  assert.ok(!employeeTask.operationProfiles.includes("web_research"));
+
+  const steelObjective = "查询 2025 年 11 月份唐山市热轧盘螺产品的工程采购价格趋势";
+  const steelTask = understandTask({ objective: steelObjective });
+  assert.notEqual(steelTask.evidence.need, "none");
+  assert.ok(steelTask.operationProfiles.includes("source_acquisition"));
+  assert.ok(!steelTask.operationProfiles.includes("web_research"));
+  assert.equal(inferOperationProfile({
+    objective: steelObjective,
+    successCriteria: [],
+    toolNames: ["computer_run_command"],
+    skillNames: ["steel-market-analysis", "mysql-steel-data"],
+  }).id, "source_acquisition");
+
+  const explicitWebTask = understandTask({ objective: "从网上查询某公司的员工人数并列出网页来源" });
+  assert.ok(explicitWebTask.operationProfiles.includes("web_research"));
+  assert.equal(inferOperationProfile({
+    objective: "从网上查询某公司的员工人数并列出网页来源",
+    successCriteria: [],
+    toolNames: [],
+  }).id, "web_research");
+  assert.equal(inferOperationProfile({
+    objective: "查询某公司的员工人数并说明统计口径",
+    successCriteria: [],
+    toolNames: ["websearch"],
+  }).id, "web_research");
 });
 
 test("standard context enrichment activates tabular guidance from committed visible-file facts before the next model request", async () => {

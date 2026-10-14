@@ -94,6 +94,7 @@ export type StructuredTaskOperationProfile =
   | "data_analysis"
   | "content_generation"
   | "code_change"
+  | "source_acquisition"
   | "web_research"
   | "artifact_build"
   | "direct_answer";
@@ -560,7 +561,8 @@ function structuredOperationProfiles(
 ): readonly StructuredTaskOperationProfile[] {
   const profiles = new Set<StructuredTaskOperationProfile>();
   if (operation === "analysis" || operation === "composite") profiles.add("data_analysis");
-  if (intent.sourceNeed !== "none") profiles.add("web_research");
+  if (intent.sourceNeed !== "none") profiles.add("source_acquisition");
+  if (explicitlyRequestsWebResearch(objective)) profiles.add("web_research");
   // API is a common subject identifier in factual lookup requests.  Source
   // grounding owns that work surface; it must not become a code-change task
   // merely because the subject happens to contain the token "API".
@@ -573,6 +575,10 @@ function structuredOperationProfiles(
   }
   if (profiles.size === 0) profiles.add("direct_answer");
   return [...profiles];
+}
+
+function explicitlyRequestsWebResearch(objective: string): boolean {
+  return /(?:\b(?:web\s+search|search\s+(?:the\s+)?web|search\s+online|internet\s+search|web\s+research|web\s+sources?)\b|网页搜索|网络搜索|互联网搜索|网上(?:搜索|查询|查找)|在线搜索|从网上|从互联网|网页来源|网上来源|网络资料)/iu.test(objective);
 }
 
 export function artifactKindForReference(input: {
@@ -841,6 +847,12 @@ function inferSourceNeedFromIntent(text: string): SourceNeed {
   // "source". Keep this category deliberately structural: a factual question
   // plus an external-entity signal, never a product-, provider-, or phrase-
   // specific allowlist.
+  if (HEADCOUNT_EXTERNAL_FACT_QUESTION_PATTERN.test(text)) {
+    return "source_grounded";
+  }
+  if (QUANTIFIED_EXTERNAL_FACT_QUESTION_PATTERN.test(text) && EXTERNAL_ENTITY_SIGNAL_PATTERN.test(text)) {
+    return "source_grounded";
+  }
   if (SPECIFIC_EXTERNAL_FACT_QUESTION_PATTERN.test(text) && EXTERNAL_ENTITY_SIGNAL_PATTERN.test(text)) {
     return "source_grounded";
   }
@@ -956,6 +968,8 @@ function hasFreshExternalLookupNeed(text: string): boolean {
   return FRESH_LOOKUP_PATTERN.test(text) && !LOCAL_EXECUTABLE_CONTRACT_REFERENCE_PATTERN.test(text);
 }
 const SPECIFIC_EXTERNAL_FACT_QUESTION_PATTERN = /(?:\b(?:what|who|where|when|which)\s+(?:is|are|was|were|does|did)\b|是什么|指什么|什么意思|谁是|何时|什么时候|哪(?:个|些|家|项)|介绍一下|说明一下)/iu;
+const HEADCOUNT_EXTERNAL_FACT_QUESTION_PATTERN = /(?:\b(?:headcount|employee\s+count|total\s+(?:employees?|staff|workers?))\b|(?:查(?:查|一下)?|查询|看(?:看|一下)?|统计|了解)?.{0,24}(?:员工(?:数|人数|总数)?|职工(?:数|人数|总数)?|在岗(?:员工|职工)?人数|人员规模|人力资源.{0,8}人数|有多少人|多少(?:名|位)?(?:员工|职工|人员)))/iu;
+const QUANTIFIED_EXTERNAL_FACT_QUESTION_PATTERN = /(?:\b(?:how\s+many|headcount|employee\s+count|total\s+(?:employees?|staff|workers?))\b|(?:有|共|总共|合计|现在|当前)?.{0,12}(?:多少|几名|几位|几人|人数|员工数|职工数|人员规模|在岗人数|总人数|总数))/iu;
 const EXTERNAL_ENTITY_SIGNAL_PATTERN = /(?:\d{2,}|["“”'][^"“”']{2,}["“”']|\b(?:company|corporation|group|organization|institution|agency|project|program|initiative|policy|standard|product|model)\b|集团|公司|机构|组织|部门|协会|学校|医院|项目|工程|计划|行动|政策|标准|产品|型号)/iu;
 
 function matchSignals(text: string, patterns: readonly [string, RegExp][]): string[] {

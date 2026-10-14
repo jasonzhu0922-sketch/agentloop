@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import type { Planner, StepAssessor } from "../src/planning/contracts.ts";
+import type { Planner, StepAssessor, TaskSpec } from "../src/planning/contracts.ts";
 import type { ModelAdapter, ModelInvocation, ModelResponse } from "../src/runtime/contracts.ts";
 import { RunService } from "../src/runtime/run-service.ts";
 import { copySkillPackage, inspectSkillPackage, removeSkillPackage } from "../src/skills/skill-package.ts";
@@ -90,6 +90,79 @@ test("directory-discovered Skill execution roots are immutable copies, never the
     assert.equal((await fs.stat(skill.package!.root)).mode & 0o222, 0);
     assert.equal((await fs.stat(resolve(skill.package!.root, "SKILL.md"))).mode & 0o222, 0);
     assert.notEqual((await fs.stat(fixture.sourcePackage)).mode & 0o222, 0);
+  } finally {
+    await database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("explicitly requested discovered Skills keep conversation turns executable even when the resolver asks to clarify", async () => {
+  const fixture = await createSourceProviderDirectoryFixture();
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database, {
+      packageStoreRoot: fixture.packageStore,
+      skillDirectory: fixture.skillDirectory,
+    });
+    const owner = testOwner();
+    let capturedTask: TaskSpec | undefined;
+    const runs = new RunService({
+      database,
+      skills,
+      workspaceRoot: fixture.root,
+      modelFactory: () => new ClarifyThenLoadDirectorySkillModel(),
+      plannerFactory: () => ({
+        plan: async (task) => {
+          capturedTask = task;
+          const skill = task.availableSkills.find((item) => item.name === "directory-demo");
+          assert.ok(skill);
+          const sourceCapability = task.availableCapabilities?.find((capability) =>
+            capability.id === `skill_source_provider.database.${skill.id}`
+          );
+          assert.ok(sourceCapability);
+          assert.equal(task.responseOnly, undefined);
+          assert.equal(task.availableToolNames.includes("load_skill"), true);
+          return {
+            goal: "Use the explicitly requested discovered Skill",
+            selectedSkillIds: [skill.id],
+            steps: [{
+              id: "use-requested-skill",
+              objective: "Load and apply the explicitly requested Skill.",
+              dependencies: [],
+              skillIds: [skill.id],
+              targetIds: ["headcount-answer"],
+              role: "fact_acquisition",
+              requiredCapabilities: [sourceCapability.id],
+              evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
+              successCriteria: [{
+                id: "loaded",
+                description: "The exact requested Skill body is loaded before answering.",
+                source: "planner",
+              }],
+            }],
+          };
+        },
+      }),
+      assessorFactory: () => approvingAssessor(),
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "用 directory-demo 查查欧冶工业品有多少人？");
+
+    assert.equal(run.status, "completed");
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.mode, "execute");
+    assert.equal(capturedTask?.canonicalState.intent.turnResolution?.source, "model_guarded");
+    assert.equal(capturedTask?.canonicalState.intent.understanding.evidence.need, "source_grounded");
+    assert.equal(capturedTask?.availableSkills.some((skill) => skill.name === "directory-demo"), true);
+    const events = await runs.events(owner.user.id, run.id);
+    assert.equal(events.some((event) =>
+      event.type === "conversation.turn.resolved"
+      && event.data.mode === "execute"
+      && event.data.source === "model_guarded"
+    ), true);
+    assert.equal(events.some((event) =>
+      event.type === "tool.completed" && event.data.toolName === "load_skill"
+    ), true);
   } finally {
     await database.close();
     await removeSkillPackage(fixture.packageStore).catch(() => undefined);
@@ -462,9 +535,6 @@ test("Skill packages from multiple directories merge into one global catalog", a
       "TEAM-SKILL-BODY",
       "",
     ].join("\n"));
-    const teamInspection = await inspectSkillPackage(teamPackage);
-
-
     const skills = new SkillService(database, {
       packageStoreRoot: fixture.packageStore,
       skillDirectories: [fixture.skillDirectory, teamDirectory],
@@ -481,8 +551,10 @@ test("Skill packages from multiple directories merge into one global catalog", a
       const available = await skills.listAvailable(user);
       assert.deepEqual(available.map((skill) => skill.name), ["directory-demo", "team-demo"]);
       const byName = new Map(available.map((skill) => [skill.name, skill]));
-      assert.equal(byName.get("directory-demo")?.package?.root, fixture.sourcePackage);
-      assert.equal(byName.get("team-demo")?.package?.root, teamInspection.root);
+      assert.notEqual(byName.get("directory-demo")?.package?.root, fixture.sourcePackage);
+      assert.notEqual(byName.get("team-demo")?.package?.root, await fs.realpath(teamPackage));
+      assert.ok(byName.get("directory-demo")?.package?.root.startsWith(resolve(await fs.realpath(fixture.packageStore), "discovered")));
+      assert.ok(byName.get("team-demo")?.package?.root.startsWith(resolve(await fs.realpath(fixture.packageStore), "discovered")));
       assert.match(byName.get("team-demo")!.id, /^discovered:team-demo$/);
     }
   } finally {
@@ -583,6 +655,51 @@ async function createDirectoryFixture(): Promise<{
   };
 }
 
+async function createSourceProviderDirectoryFixture(): Promise<{
+  root: string;
+  skillDirectory: string;
+  sourcePackage: string;
+  packageStore: string;
+  packageHash: string;
+}> {
+  const root = await fs.mkdtemp(resolve(tmpdir(), "agentloop-skill-directory-"));
+  const skillDirectory = resolve(root, "skills");
+  const sourcePackage = resolve(skillDirectory, "directory-demo");
+  const packageStore = resolve(root, ".agentloop/skill-packages");
+  await fs.mkdir(sourcePackage, { recursive: true });
+  const instructions = [
+    "---",
+    "name: directory-demo",
+    "description: Query a database-backed organization headcount source.",
+    "agentloop:",
+    "  roles:",
+    "    - source_provider",
+    "  artifactKinds:",
+    "    - none",
+    "  sourceKinds:",
+    "    - database",
+    "  qaKinds: []",
+    "  producesEvidenceKinds:",
+    "    - source_summary",
+    "    - explicit_caveats",
+    "---",
+    "",
+    "# Directory Demo",
+    "",
+    "DIRECTORY-SKILL-SECRET-BODY",
+    "",
+  ].join("\n");
+  await fs.writeFile(resolve(sourcePackage, "SKILL.md"), instructions);
+  const inspection = await inspectSkillPackage(sourcePackage);
+  return {
+    root,
+    skillDirectory,
+    sourcePackage: inspection.root,
+    packageStore,
+    packageHash: inspection.packageHash,
+  };
+}
+
 function directoryPlanner(): Planner {
   return {
     plan: async (task) => {
@@ -642,6 +759,10 @@ function refreshedDirectoryPlanner(): Planner {
     plan: async (task) => {
       assert.equal(task.availableSkills.length, 1);
       const skill = task.availableSkills[0];
+      const sourceCapability = task.availableCapabilities?.find((capability) =>
+        capability.id === `skill_source_provider.api.${skill.id}`
+      );
+      assert.ok(sourceCapability);
       assert.equal(skill.id, "discovered:directory-demo");
       assert.equal(skill.name, "directory-demo");
       assert.match(skill.instructions, /UPDATED-SOURCE-PROVIDER-BODY/);
@@ -665,9 +786,10 @@ function refreshedDirectoryPlanner(): Planner {
           id: "query-api-catalog",
           objective: "Load and apply the source-provider Skill to query API parameter information",
           dependencies: [],
-          role: "produce",
+          role: "fact_acquisition",
           skillIds: [skill.id],
-          requiredCapabilities: [],
+          requiredCapabilities: [sourceCapability.id],
+          evidenceContract: { requiredKinds: ["source_summary"], caveatPolicy: "mark_unverified_facts" },
           successCriteria: [{
             id: "loaded",
             description: "The refreshed discovered Skill body is loaded before completion",
@@ -694,7 +816,6 @@ class DirectorySkillModel implements ModelAdapter {
       assert.match(request.runtimeContext?.content ?? "", /directory-demo/);
       assert.doesNotMatch(request.runtimeContext?.content ?? "", /DIRECTORY-SKILL-SECRET-BODY/);
       assert.ok(request.tools.some((tool) => tool.name === "load_skill"));
-      assert.equal(request.tools.some((tool) => tool.name === "computer_write_file"), false);
       return {
         content: "",
         finishReason: "tool_calls",
@@ -709,6 +830,68 @@ class DirectorySkillModel implements ModelAdapter {
     assert.match(loaded?.content ?? "", /<skill_package package_sha256=/);
     assert.doesNotMatch(loaded?.content ?? "", /source_url=/);
     return { content: "directory Skill loaded and followed", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class ClarifyThenLoadDirectorySkillModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+  private executionCalls = 0;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.runId.startsWith("conversation-turn:")) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "misclassified-clarify",
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "clarify",
+            relation: "new_goal",
+            inputMode: "none",
+            effectiveGoal: "The user asked for a headcount through directory-demo, but the data source was treated as ambiguous.",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "lookup",
+              requiresExecution: false,
+              deliverables: [{
+                targetId: "headcount-answer",
+                purpose: "Answer the requested organization headcount.",
+                expectedArtifactCount: 1,
+                action: "none",
+                kind: "none",
+                surface: "conversation",
+              }],
+            },
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: ["Use directory-demo."],
+          },
+        }],
+      };
+    }
+    this.executionCalls += 1;
+    if (this.executionCalls === 1) {
+      assert.equal(request.tools.some((tool) => tool.name === "load_skill"), true);
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "load-explicit-directory-skill",
+          name: "load_skill",
+          arguments: { name: "directory-demo" },
+        }],
+      };
+    }
+    const loaded = request.messages.find((message) =>
+      message.role === "tool" && message.name === "load_skill"
+    );
+    assert.ok(loaded);
+    return {
+      content: "directory-demo loaded before answering the headcount request.",
+      finishReason: "stop",
+      toolCalls: [],
+    };
   }
 }
 

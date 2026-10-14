@@ -80,6 +80,7 @@ const OPERATION_PROFILE_IDS = new Set<OperationProfileId>([
   "data_analysis",
   "content_generation",
   "code_change",
+  "source_acquisition",
   "web_research",
   "artifact_build",
   "direct_answer",
@@ -213,7 +214,7 @@ function normalizeOperationProfileId(
   if (input.step.role === "fact_acquisition") return "data_analysis";
   if (stepHasSourceKind(input.step, "visible_directory") || stepHasSourceKind(input.step, "uploaded_source")) return "data_analysis";
   if (input.requiresFileOutput || input.taskProfile.deliverySurface === "workspace_artifact") return "artifact_build";
-  if (input.taskProfile.sourceNeed !== undefined && input.taskProfile.sourceNeed !== "none") return "web_research";
+  if (input.taskProfile.sourceNeed !== undefined && input.taskProfile.sourceNeed !== "none") return "source_acquisition";
   if (input.step.role === "deliver") return "direct_answer";
   return "content_generation";
 }
