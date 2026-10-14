@@ -7,5 +7,6 @@ export function createRunState() {
     deletingConversationIds: new Set(),
     hydratedDetailAssignmentIds: new Set(),
     pendingLiveAssistantIds: new Set(),
+    persistedReconciliation: undefined,
   };
 }

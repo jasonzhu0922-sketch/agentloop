@@ -12,6 +12,13 @@ export async function observeAssignment({ baseUrl, headers, signal, afterSeq = 0
     retries = 0;
     return terminal;
   };
+  const finishFromSnapshot = async (run, replaySignal) => {
+    try {
+      const replay = await fetchImpl(`${baseUrl}/events?afterSeq=${cursor}`, { headers, signal: replaySignal });
+      if (replay.ok) for (const event of (await replay.json()).events ?? []) { if (accept(event)) return; }
+    } catch { /* A confirmed terminal snapshot remains authoritative when replay is unavailable. */ }
+    if (!signal.aborted) onRun(run);
+  };
   // A Runtime resolves its actual model when it admits the Run, well before a
   // terminal event exists.  Read that neutral status once for consumers that
   // render live provenance; it is not a synthetic event and never changes a
@@ -21,6 +28,10 @@ export async function observeAssignment({ baseUrl, headers, signal, afterSeq = 0
     try {
       const response = await fetchImpl(baseUrl, { headers, signal });
       const body = response.ok ? await response.json() : undefined;
+      if (TERMINAL.has(body?.run?.status)) {
+        await finishFromSnapshot(body.run, signal);
+        return;
+      }
       if (body?.run?.status === "running") onStatus(body.run);
     } catch {
       // The SSE/status retry loop remains the authority for transport faults.
@@ -79,11 +90,7 @@ export async function observeAssignment({ baseUrl, headers, signal, afterSeq = 0
       if (response.ok) {
         const { run } = await response.json();
         if (run && TERMINAL.has(run.status)) {
-          try {
-            const replay = await fetchImpl(`${baseUrl}/events?afterSeq=${cursor}`, { headers, signal: statusSignal });
-            if (replay.ok) for (const event of (await replay.json()).events ?? []) { if (accept(event)) return; }
-          } catch { /* A confirmed terminal snapshot remains authoritative when replay is unavailable. */ }
-          if (!signal.aborted) onRun(run);
+          await finishFromSnapshot(run, statusSignal);
           return;
         }
       }

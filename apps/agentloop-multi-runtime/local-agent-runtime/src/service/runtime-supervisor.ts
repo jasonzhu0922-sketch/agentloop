@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { AppDatabase, RunService } from "@zhujun/agentloop";
 import type { LocalDirectoryScopeStore } from "../persistence/directory-scope-store.ts";
+import {
+  LocalRuntimeConfigurationStore,
+  type LegacyLocalRuntimeConfigurationMigration,
+  type LocalRuntimeConfiguration,
+  type LocalRuntimeConfigurationInput,
+  type ResolvedLocalRuntimeConfiguration,
+} from "../persistence/local-runtime-configuration-store.ts";
 
 export type LocalRuntimeLifecycleStatus = "ready" | "draining" | "restarting" | "stopped" | "failed";
 type PendingAction = "restart" | "stop";
@@ -28,6 +35,10 @@ export interface LocalRuntimeSummary extends LocalRuntimeDefinition {
   readonly activeRunCount: number;
   readonly pendingAction?: PendingAction;
   readonly updatedAt: number;
+  readonly extensionSkillCount: number;
+  readonly extensionSkillNames: readonly string[];
+  readonly mcpServerCount: number;
+  readonly mcpServerNames: readonly string[];
 }
 
 export type LocalRuntimeReclaimer = (definition: LocalRuntimeDefinition) => Promise<void>;
@@ -46,28 +57,39 @@ interface RuntimeRow {
 export class LocalRuntimeSupervisor {
   private readonly instances = new Map<string, LocalRuntimeControl>();
   private readonly pendingAdmissions = new Map<string, number>();
+  private readonly runtimeMutations = new Map<string, Promise<void>>();
   private readonly listeners = new Set<() => void>();
   private readonly database: AppDatabase;
-  private readonly factory: (definition: LocalRuntimeDefinition) => Promise<LocalRuntimeControl>;
+  private readonly factory: (definition: LocalRuntimeDefinition, configuration: ResolvedLocalRuntimeConfiguration) => Promise<LocalRuntimeControl>;
+  private readonly configurations: LocalRuntimeConfigurationStore;
   private readonly reclaimer: LocalRuntimeReclaimer;
   private readonly maxConcurrentRuns: number;
 
   constructor(
     database: AppDatabase,
-    factory: (definition: LocalRuntimeDefinition) => Promise<LocalRuntimeControl>,
+    factory: (definition: LocalRuntimeDefinition, configuration: ResolvedLocalRuntimeConfiguration) => Promise<LocalRuntimeControl>,
     reclaimer: LocalRuntimeReclaimer = async () => undefined,
     maxConcurrentRuns = DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS,
+    configurations: LocalRuntimeConfigurationStore = new LocalRuntimeConfigurationStore(database),
   ) {
     if (!Number.isSafeInteger(maxConcurrentRuns) || maxConcurrentRuns < 1) {
       throw new TypeError("maxConcurrentRuns must be a positive integer");
     }
     this.database = database;
     this.factory = factory;
+    this.configurations = configurations;
     this.reclaimer = reclaimer;
     this.maxConcurrentRuns = maxConcurrentRuns;
   }
 
-  async ready(defaultRuntimeId: string): Promise<void> {
+  async ready(defaultRuntimeId: string, legacyMigration: LegacyLocalRuntimeConfigurationMigration = {}): Promise<void> {
+    let legacyRows: Array<{ runtime_id: string }> = [];
+    try {
+      legacyRows = await this.database.prepare("SELECT runtime_id FROM local_runtime_instances").all() as Array<{ runtime_id: string }>;
+    } catch {
+      // A fresh Supervisor database has no Runtime table yet.
+    }
+    const legacyRuntimeIds = new Set(legacyRows.map((row) => row.runtime_id));
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS local_runtime_instances (
         runtime_id TEXT PRIMARY KEY,
@@ -91,6 +113,7 @@ export class LocalRuntimeSupervisor {
       CREATE INDEX IF NOT EXISTS local_runtime_operations_runtime_idx
         ON local_runtime_operations(runtime_id, created_at DESC);
     `);
+    await this.configurations.ready();
     const count = await this.database.prepare("SELECT COUNT(*) AS count FROM local_runtime_instances").get() as { count: number };
     if (Number(count.count) === 0) {
       const now = Date.now();
@@ -105,10 +128,27 @@ export class LocalRuntimeSupervisor {
         ON local_runtime_instances(is_default) WHERE is_default = 1;
     `);
     const rows = await this.rows();
+    const legacySkillPackageIds = legacyRuntimeIds.size === 0 ? [] : await this.configurations.allValidSkillPackageIds();
     for (const row of rows) {
-      if (row.status === "stopped") continue;
-      await this.startInstance(toDefinition(row), row.pending_action === null ? row.status : "ready");
-      if (row.pending_action !== null || row.status === "restarting") {
+      if (!await this.configurations.hasConfiguration(row.runtime_id)) {
+        if (legacyRuntimeIds.has(row.runtime_id)) {
+          await this.configurations.initializeFromLegacy(row.runtime_id, legacySkillPackageIds, legacyMigration);
+        } else {
+          await this.configurations.initializeFromLegacy(row.runtime_id, []);
+        }
+      }
+      const configurationRequiresCredentials = (await this.configurations.missingCredentialServerKeys(row.runtime_id)).length > 0;
+      if (configurationRequiresCredentials) {
+        await this.database.prepare(`
+          UPDATE local_runtime_instances SET status = 'stopped', pending_action = NULL, updated_at = ? WHERE runtime_id = ?
+        `).run(Date.now(), row.runtime_id);
+        this.statusCache.set(row.runtime_id, "stopped");
+      }
+      if (configurationRequiresCredentials || row.status === "stopped") continue;
+      await this.startInstance(toDefinition(row), row.status);
+      if (row.pending_action !== null) {
+        if (!this.hasActiveWorkForRuntime(row.runtime_id)) await this.completePending(row.runtime_id);
+      } else if (row.status === "restarting") {
         await this.updateState(row.runtime_id, "ready", null);
       }
     }
@@ -134,12 +174,19 @@ export class LocalRuntimeSupervisor {
   }
 
   async list(): Promise<readonly LocalRuntimeSummary[]> {
-    return (await this.rows()).map((row) => ({
-      ...toDefinition(row),
-      status: row.status,
-      activeRunCount: (this.instances.get(row.runtime_id)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(row.runtime_id) ?? 0),
-      ...(row.pending_action === null ? {} : { pendingAction: row.pending_action }),
-      updatedAt: row.updated_at,
+    return Promise.all((await this.rows()).map(async (row) => {
+      const configuration = await this.configurations.configuration(row.runtime_id);
+      return {
+        ...toDefinition(row),
+        status: row.status,
+        activeRunCount: (this.instances.get(row.runtime_id)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(row.runtime_id) ?? 0),
+        ...(row.pending_action === null ? {} : { pendingAction: row.pending_action }),
+        updatedAt: row.updated_at,
+        extensionSkillCount: configuration.skills.length,
+        extensionSkillNames: configuration.skills.map((skill) => skill.displayName),
+        mcpServerCount: configuration.mcpServers.length,
+        mcpServerNames: configuration.mcpServers.map((server) => server.displayName),
+      };
     }));
   }
 
@@ -185,20 +232,25 @@ export class LocalRuntimeSupervisor {
       const remaining = Math.max(0, (this.pendingAdmissions.get(runtimeId) ?? 1) - 1);
       if (remaining === 0) this.pendingAdmissions.delete(runtimeId);
       else this.pendingAdmissions.set(runtimeId, remaining);
-      if (!this.hasActiveWorkForRuntime(runtimeId)) await this.completePending(runtimeId);
+      if (!this.hasActiveWorkForRuntime(runtimeId)) {
+        await this.withRuntimeMutation(runtimeId, () => this.completePending(runtimeId), true);
+      }
       this.emit();
     }
   }
 
-  async create(displayName: string): Promise<LocalRuntimeSummary> {
+  async create(displayName: string, configuration: LocalRuntimeConfigurationInput = {}): Promise<LocalRuntimeSummary> {
     const name = displayName.trim();
     if (name.length < 1 || name.length > 100) throw new LocalRuntimeSupervisorError(400, "runtime_display_name_invalid");
     const id = `local_runtime_${randomUUID()}`;
     const now = Date.now();
-    await this.database.prepare(`
-      INSERT INTO local_runtime_instances(runtime_id, display_name, storage_key, is_default, status, created_at, updated_at)
-      VALUES (?, ?, ?, 0, 'ready', ?, ?)
-    `).run(id, name, id, now, now);
+    await this.database.transaction(async () => {
+      await this.database.prepare(`
+        INSERT INTO local_runtime_instances(runtime_id, display_name, storage_key, is_default, status, created_at, updated_at)
+        VALUES (?, ?, ?, 0, 'ready', ?, ?)
+      `).run(id, name, id, now, now);
+      await this.configurations.apply(id, configuration);
+    });
     try {
       await this.startInstance({ id, displayName: name, storageKey: id, isDefault: false }, "ready");
       await this.operation(id, "create", "completed");
@@ -222,11 +274,40 @@ export class LocalRuntimeSupervisor {
     return this.summary(runtimeId);
   }
 
+  async configuration(runtimeId: string): Promise<LocalRuntimeConfiguration> {
+    await this.row(runtimeId);
+    return this.configurations.configuration(runtimeId);
+  }
+
+  async updateConfiguration(runtimeId: string, configuration: LocalRuntimeConfigurationInput, displayName?: string): Promise<LocalRuntimeConfiguration> {
+    return this.withRuntimeMutation(runtimeId, async () => {
+      const row = await this.row(runtimeId);
+      if (row.status !== "stopped" || this.instances.has(runtimeId)) {
+        throw new LocalRuntimeSupervisorError(409, "runtime_must_be_stopped_for_configuration");
+      }
+      const name = displayName?.trim();
+      if (name !== undefined && (name.length < 1 || name.length > 100)) throw new LocalRuntimeSupervisorError(400, "runtime_display_name_invalid");
+      await this.configurations.apply(runtimeId, configuration);
+      if (name !== undefined) {
+        await this.database.prepare(`
+          UPDATE local_runtime_instances SET display_name = ?, updated_at = ? WHERE runtime_id = ?
+        `).run(name, Date.now(), runtimeId);
+      }
+      await this.operation(runtimeId, "configure", "completed");
+      this.emit();
+      return this.configurations.configuration(runtimeId);
+    });
+  }
+
   /**
    * Reclaim an idle, non-default Runtime and all of its Runtime-owned state.
    * Device-level shared storage is deliberately outside this lifecycle.
    */
   async remove(runtimeId: string): Promise<{ readonly runtimeId: string; readonly reclaimedData: true }> {
+    return this.withRuntimeMutation(runtimeId, () => this.removeUnlocked(runtimeId));
+  }
+
+  private async removeUnlocked(runtimeId: string): Promise<{ readonly runtimeId: string; readonly reclaimedData: true }> {
     const row = await this.row(runtimeId);
     if (row.is_default === 1) throw new LocalRuntimeSupervisorError(409, "default_runtime_cannot_be_deleted");
     if (this.hasActiveWorkForRuntime(runtimeId)) {
@@ -248,7 +329,9 @@ export class LocalRuntimeSupervisor {
       this.emit();
       throw new LocalRuntimeSupervisorError(500, `runtime_resource_cleanup_failed:${error instanceof Error ? error.message : String(error)}`);
     }
+    const secretStorageKeys = await this.configurations.secretStorageKeysForRuntime(runtimeId);
     await this.database.prepare("DELETE FROM local_runtime_instances WHERE runtime_id = ?").run(runtimeId);
+    await this.configurations.removeSecrets(secretStorageKeys);
     this.statusCache.delete(runtimeId);
     this.emit();
     return { runtimeId, reclaimedData: true };
@@ -273,6 +356,10 @@ export class LocalRuntimeSupervisor {
   }
 
   async drain(runtimeId: string): Promise<LocalRuntimeSummary> {
+    return this.withRuntimeMutation(runtimeId, () => this.drainUnlocked(runtimeId));
+  }
+
+  private async drainUnlocked(runtimeId: string): Promise<LocalRuntimeSummary> {
     this.runtime(runtimeId);
     await this.updateState(runtimeId, "draining", null);
     await this.operation(runtimeId, "drain", "completed");
@@ -281,6 +368,10 @@ export class LocalRuntimeSupervisor {
   }
 
   async restart(runtimeId: string): Promise<LocalRuntimeSummary> {
+    return this.withRuntimeMutation(runtimeId, () => this.restartUnlocked(runtimeId));
+  }
+
+  private async restartUnlocked(runtimeId: string): Promise<LocalRuntimeSummary> {
     this.runtime(runtimeId);
     await this.updateState(runtimeId, "draining", "restart");
     await this.operation(runtimeId, "restart", this.hasActiveWorkForRuntime(runtimeId) ? "waiting_for_drain" : "running");
@@ -290,7 +381,18 @@ export class LocalRuntimeSupervisor {
   }
 
   async stop(runtimeId: string): Promise<LocalRuntimeSummary> {
-    this.runtime(runtimeId);
+    return this.withRuntimeMutation(runtimeId, () => this.stopUnlocked(runtimeId));
+  }
+
+  private async stopUnlocked(runtimeId: string): Promise<LocalRuntimeSummary> {
+    const row = await this.row(runtimeId);
+    if (!this.instances.has(runtimeId)) {
+      if (row.status !== "failed") throw new LocalRuntimeSupervisorError(409, "runtime_not_running");
+      await this.updateState(runtimeId, "stopped", null);
+      await this.operation(runtimeId, "stop", "completed");
+      this.emit();
+      return this.summary(runtimeId);
+    }
     await this.updateState(runtimeId, "draining", "stop");
     await this.operation(runtimeId, "stop", this.hasActiveWorkForRuntime(runtimeId) ? "waiting_for_drain" : "running");
     this.emit();
@@ -299,6 +401,10 @@ export class LocalRuntimeSupervisor {
   }
 
   async start(runtimeId: string): Promise<LocalRuntimeSummary> {
+    return this.withRuntimeMutation(runtimeId, () => this.startUnlocked(runtimeId));
+  }
+
+  private async startUnlocked(runtimeId: string): Promise<LocalRuntimeSummary> {
     const row = await this.row(runtimeId);
     if (this.instances.has(runtimeId) && row.status === "draining" && row.pending_action === null) {
       await this.updateState(runtimeId, "ready", null);
@@ -318,7 +424,9 @@ export class LocalRuntimeSupervisor {
     const runtime = this.instances.get(runtimeId);
     if (runtime === undefined) return;
     runtime.activeRunIds.delete(runId);
-    if (!this.hasActiveWorkForRuntime(runtimeId)) await this.completePending(runtimeId);
+    if (!this.hasActiveWorkForRuntime(runtimeId)) {
+      await this.withRuntimeMutation(runtimeId, () => this.completePending(runtimeId), true);
+    }
     this.emit();
   }
 
@@ -335,7 +443,7 @@ export class LocalRuntimeSupervisor {
   }
 
   private async startInstance(definition: LocalRuntimeDefinition, status: LocalRuntimeLifecycleStatus): Promise<void> {
-    const runtime = await this.factory(definition);
+    const runtime = await this.factory(definition, await this.configurations.resolve(definition.id));
     this.instances.set(definition.id, runtime);
     this.statusCache.set(definition.id, status === "draining" ? "draining" : "ready");
   }
@@ -439,6 +547,22 @@ export class LocalRuntimeSupervisor {
 
   private activeWorkCount(runtimeId: string): number {
     return (this.instances.get(runtimeId)?.activeRunIds.size ?? 0) + (this.pendingAdmissions.get(runtimeId) ?? 0);
+  }
+
+  private async withRuntimeMutation<T>(runtimeId: string, operation: () => Promise<T>, waitForExisting = false): Promise<T> {
+    while (this.runtimeMutations.has(runtimeId)) {
+      if (!waitForExisting) throw new LocalRuntimeSupervisorError(409, "runtime_operation_in_progress");
+      await this.runtimeMutations.get(runtimeId);
+    }
+    let release!: () => void;
+    const completion = new Promise<void>((resolve) => { release = resolve; });
+    this.runtimeMutations.set(runtimeId, completion);
+    try {
+      return await operation();
+    } finally {
+      if (this.runtimeMutations.get(runtimeId) === completion) this.runtimeMutations.delete(runtimeId);
+      release();
+    }
   }
 }
 

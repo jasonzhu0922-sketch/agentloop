@@ -46,6 +46,29 @@ for (const status of ["completed", "failed", "cancelled"] as const) test(`lost t
   assert.deepEqual(seen, [10]); assert.deepEqual(observed, { remoteRunId: "run", status, output: "persisted", finishedAt: 20 });
 });
 
+test("initial terminal snapshot replays persisted events and never opens SSE", async () => {
+  let observed: unknown;
+  let streamRequests = 0;
+  let statusUpdates = 0;
+  const seen: number[] = [];
+  await observeAssignment({ baseUrl: "http://fixture/a", headers: {}, signal: new AbortController().signal, afterSeq: 4,
+    fetchImpl: async (url) => {
+      if (String(url).includes("/stream")) { streamRequests += 1; return sse(""); }
+      if (String(url).includes("/events?")) return json({ events: [event(5, "plan.step.completed")] });
+      return json({ run: { remoteRunId: "run", status: "completed", output: "persisted", finishedAt: 20 } });
+    },
+    wait: async () => assert.fail("terminal snapshot should finish observation"),
+    onStatus: () => { statusUpdates += 1; },
+    onEvent: (value) => { seen.push(value.seq); return false; },
+    onRun: (run) => { observed = run; },
+    onConnection: () => assert.fail("terminal snapshot must not connect SSE"),
+  });
+  assert.equal(streamRequests, 0);
+  assert.equal(statusUpdates, 0);
+  assert.deepEqual(seen, [5]);
+  assert.deepEqual(observed, { remoteRunId: "run", status: "completed", output: "persisted", finishedAt: 20 });
+});
+
 test("network failures back off without manufacturing failure; abort stops retries", async () => {
   const abort = new AbortController(); const delays: number[] = []; let requests = 0;
   await observeAssignment({ baseUrl: "http://fixture/a", headers: {}, signal: abort.signal,
@@ -185,6 +208,61 @@ test("actual app repairs legacy false failure but never regresses a confirmed te
   const terminal = { status: "completed", events: [event(2, "run.completed")] };
   assert.equal(context.applyRecoveredRunState(terminal, { status: "running" }), false);
   assert.equal(terminal.status, "completed");
+});
+
+test("persisted reconciliation lets a terminal Assignment snapshot stop a stale active observer", async () => {
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  const assistant = { role: "assistant", assignmentId: "assignment-live", status: "running", events: [] };
+  const conversation = { id: "conversation", messages: [assistant] };
+  let aborted = 0;
+  let renders = 0;
+  let saves = 0;
+  const activeByConversation = new Map([[conversation.id, {
+    assignmentId: assistant.assignmentId,
+    abortController: { abort() { aborted += 1; } },
+  }]]);
+  const coordination = { activeByConversation, persistedReconciliation: undefined };
+  const context = vm.createContext({
+    api: "http://fixture",
+    conversationState: { sessions: [conversation] },
+    $: (id: string) => ({ value: id === "tenant-id" ? "tenant" : "user" }),
+    runtimeCoordinationState: () => coordination,
+    hasIncompleteCompletedPlan: () => false,
+    fetch: async (url: string) => String(url).endsWith("/events")
+      ? json({ events: [event(6, "run.completed", { output: "done" })] })
+      : json({ run: { status: "completed", output: "done", finishedAt: 20 } }),
+    applyRecoveredRunState: (message: typeof assistant, run: { status: string; output: string }) => {
+      message.status = run.status;
+      return true;
+    },
+    replayPersistedRunEvents: async () => true,
+    refreshHumanLoop: async () => false,
+    resumeAssignmentObservation: () => assert.fail("terminal snapshot must not open another observer"),
+    saveSessions: () => { saves += 1; },
+    render: () => { renders += 1; },
+    encodeURIComponent,
+  });
+  const start = source.indexOf("function reconcilePersistedRuns()");
+  const end = source.indexOf("function applyRecoveredRunState(");
+  vm.runInContext(source.slice(start, end), context);
+
+  const first = context.reconcilePersistedRuns();
+  const second = context.reconcilePersistedRuns();
+  assert.equal(first, second, "lifecycle triggers must share one reconciliation pass");
+  await first;
+
+  assert.equal(assistant.status, "completed");
+  assert.equal(aborted, 1);
+  assert.equal(activeByConversation.has(conversation.id), false);
+  assert.equal(saves, 1);
+  assert.equal(renders, 1);
+});
+
+test("page lifecycle events recheck persisted Assignment state", async () => {
+  const source = await readFile(new URL("../web/client/app.js", import.meta.url), "utf8");
+  assert.match(source, /window\.addEventListener\("focus", reconcileRunsAfterPageReturn\)/);
+  assert.match(source, /window\.addEventListener\("online", reconcileRunsAfterPageReturn\)/);
+  assert.match(source, /document\.addEventListener\("visibilitychange",[\s\S]*?document\.visibilityState === "visible"[\s\S]*?reconcileRunsAfterPageReturn\(\)/);
 });
 
 test("server recency correction replaces stale browser cache ordering", async () => {

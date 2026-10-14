@@ -246,9 +246,9 @@ export type {
   SkillSummary,
   SkillVisibilityContext,
 } from "./skills/skill-service.ts";
-export { discoverSkillDirectory } from "./skills/skill-directory.ts";
+export { discoverSkillDirectory, discoverSkillPackageRoot } from "./skills/skill-directory.ts";
 export type { SkillDirectoryEntry } from "./skills/skill-directory.ts";
-export { inspectSkillPackage } from "./skills/skill-package.ts";
+export { copySkillPackage, inspectSkillPackage } from "./skills/skill-package.ts";
 export type { SkillPackageInspection } from "./skills/skill-package.ts";
 export {
   SKILL_AGENT_LOOP_ARTIFACT_KIND_VALUES,

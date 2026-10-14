@@ -22,7 +22,7 @@ import {
 } from "./skill-package.ts";
 import { discoveredSkillId } from "./skill-identity.ts";
 import type { SkillAgentLoopMetadata } from "./skill-package.ts";
-import { discoverSkillDirectory } from "./skill-directory.ts";
+import { discoverSkillDirectory, discoverSkillPackageRoot } from "./skill-directory.ts";
 import type { SkillDirectoryEntry } from "./skill-directory.ts";
 
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -76,6 +76,11 @@ export interface SkillServiceOptions {
    */
   readonly skillDirectories?: readonly string[];
   /**
+   * Explicit Skill package roots selected by the Host. Only these exact
+   * packages are discovered; sibling packages are not enumerated.
+   */
+  readonly skillPackageRoots?: readonly string[];
+  /**
    * Host-controlled visibility filter applied to the merged candidate set
    * (global directory Skills plus user-private Skills). The filtered output is
    * authoritative for the catalog API, conversation planning, and sub-agent
@@ -125,6 +130,7 @@ export class SkillService {
   private readonly packageStore?: string;
   private readonly allowedImportRoots: readonly string[];
   private readonly configuredSkillDirectories: readonly string[];
+  private readonly configuredSkillPackageRoots: readonly string[];
   private readonly selectVisibleSkills: SkillServiceOptions["selectVisibleSkills"];
   private directoryEntries: readonly SkillDirectoryEntry[] = [];
 
@@ -152,6 +158,12 @@ export class SkillService {
       if (!directoriesByPath.has(canonical)) directoriesByPath.set(canonical, canonical);
     }
     this.configuredSkillDirectories = [...directoriesByPath.values()];
+    const packageRootsByPath = new Map<string, string>();
+    for (const packageRoot of options.skillPackageRoots ?? []) {
+      const canonical = realpathSync(resolve(packageRoot));
+      if (!packageRootsByPath.has(canonical)) packageRootsByPath.set(canonical, canonical);
+    }
+    this.configuredSkillPackageRoots = [...packageRootsByPath.values()];
   }
 
   get packageStoreRoot(): string | undefined {
@@ -171,10 +183,18 @@ export class SkillService {
     return this.configuredSkillDirectories[0];
   }
 
+  /** Exact Host-selected Skill package roots, canonicalized and deduplicated. */
+  get skillPackageRoots(): readonly string[] {
+    return this.configuredSkillPackageRoots;
+  }
+
   async refreshSkillDirectory(): Promise<DiscoveredSkillSummary[]> {
     const entries: SkillDirectoryEntry[] = [];
     for (const directory of this.configuredSkillDirectories) {
       entries.push(...await discoverSkillDirectory(directory));
+    }
+    for (const packageRoot of this.configuredSkillPackageRoots) {
+      entries.push(await discoverSkillPackageRoot(packageRoot));
     }
     assertUniqueDiscoveredNames(entries);
     this.directoryEntries = await this.materializeDirectoryExecutionRoots(entries);

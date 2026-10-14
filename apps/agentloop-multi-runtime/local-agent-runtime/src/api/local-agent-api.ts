@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { LocalAgentService } from "../service/local-agent-service.ts";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
+import type { LocalRuntimeConfigurationInput, LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import type { ToolSourceCapability } from "@zhujun/agentloop";
 
 export type LocalAgentServerOptions = LocalAgentOptions;
 
@@ -18,6 +20,54 @@ export async function createLocalAgentServer(input: LocalAgentServerOptions): Pr
       if (request.method === "POST" && url.pathname === "/v1/device-registration") {
         const registered = await service.registerDevice(origin, stringValue((await body(request)).registrationToken, "registrationToken"));
         return json(response, alreadyRegistered(registered) ? 200 : 201, registered);
+      }
+
+      if (request.method === "GET" && url.pathname === "/v1/local-skill-packages") {
+        await session(request, service);
+        return json(response, 200, await service.listLocalSkillPackages());
+      }
+      if (request.method === "POST" && url.pathname === "/v1/local-skill-package-uploads") {
+        await session(request, service);
+        const value = await body(request, 36 * 1024 * 1024);
+        return json(response, 201, await service.installLocalSkillPackage(
+          stringValue(value.originalName, "originalName"),
+          base64Content(value.contentBase64),
+        ));
+      }
+      if (request.method === "POST" && url.pathname === "/v1/local-mcp-servers/test") {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.testLocalMcpServer(parseMcpServerInput(recordValue(value.server, "server"), 0)));
+      }
+      if (request.method === "POST" && url.pathname === "/v1/local-runtimes") {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 201, await service.createLocalRuntime(
+          stringValue(value.displayName, "displayName"),
+          runtimeConfigurationInput(value),
+        ));
+      }
+      const runtimeConfiguration = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/configuration$/);
+      if (request.method === "GET" && runtimeConfiguration !== null) {
+        await session(request, service);
+        return json(response, 200, await service.localRuntimeConfiguration(decodeURIComponent(runtimeConfiguration[1])));
+      }
+      if (request.method === "PUT" && runtimeConfiguration !== null) {
+        await session(request, service);
+        const value = await body(request);
+        return json(response, 200, await service.updateLocalRuntimeConfiguration(
+          decodeURIComponent(runtimeConfiguration[1]),
+          runtimeConfigurationInput(value),
+          value.displayName === undefined ? undefined : stringValue(value.displayName, "displayName"),
+        ));
+      }
+      const runtimeLifecycle = url.pathname.match(/^\/v1\/local-runtimes\/([^/]+)\/(start|stop)$/);
+      if (request.method === "POST" && runtimeLifecycle !== null) {
+        await session(request, service);
+        const runtimeId = decodeURIComponent(runtimeLifecycle[1]);
+        return json(response, 200, runtimeLifecycle[2] === "start"
+          ? await service.startLocalRuntime(runtimeId)
+          : await service.stopLocalRuntime(runtimeId));
       }
 
       if (request.method === "GET" && url.pathname === "/v1/directory-scopes") { await session(request, service); return json(response, 200, await service.listDirectoryScopes(queryRuntimeId(url))); }
@@ -70,8 +120,8 @@ async function session(request: IncomingMessage, service: LocalAgentService) {
   const value = request.headers["x-local-session"];
   return await service.authorize(request.headers.origin, typeof value === "string" ? value : undefined);
 }
-function options(response: ServerResponse): void { response.statusCode = 204; response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS"); response.setHeader("access-control-allow-headers", "content-type, x-local-session"); response.end(); }
-async function body(request: IncomingMessage): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request_body_invalid"); return parsed as Record<string, unknown>; }
+function options(response: ServerResponse): void { response.statusCode = 204; response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"); response.setHeader("access-control-allow-headers", "content-type, x-local-session"); response.end(); }
+async function body(request: IncomingMessage, maxBytes = 26 * 1024 * 1024): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; let bytes = 0; for await (const chunk of request) { const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); bytes += buffer.length; if (bytes > maxBytes) throw Object.assign(new Error("request_body_too_large"), { status: 413 }); chunks.push(buffer); } const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request_body_invalid"); return parsed as Record<string, unknown>; }
 function queryRuntimeId(url: URL): string { const runtimeId = url.searchParams.get("runtimeId"); if (runtimeId === null) throw new Error("runtimeId_required"); return runtimeId; }
 function stringValue(value: unknown, name: string): string { if (typeof value !== "string" || value.length === 0 || value.length > 200_000) throw new Error(`${name}_invalid`); return value; }
 function stringArray(value: unknown, name: string): readonly string[] { if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`${name}_invalid`); return value as string[]; }
@@ -80,3 +130,89 @@ function json(response: ServerResponse, status: number, value: unknown): void { 
 function originAllowed(origin: string | undefined, configured: string | undefined): boolean { return origin !== undefined && configured !== undefined && configured.split(",").map((value) => value.trim()).includes(origin); }
 function errorStatus(error: unknown): number { return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : 400; }
 function alreadyRegistered(value: unknown): boolean { return typeof value === "object" && value !== null && "alreadyRegistered" in value && value.alreadyRegistered === true; }
+
+function runtimeConfigurationInput(value: Record<string, unknown>): LocalRuntimeConfigurationInput {
+  const skillPackageIds = value.skills === undefined
+    ? []
+    : objectArray(value.skills, "skills").map((skill, index) => stringValue(skill.packageId, `skills[${index}].packageId`));
+  const mcpServers = value.mcpServers === undefined
+    ? []
+    : objectArray(value.mcpServers, "mcpServers").map(parseMcpServerInput);
+  return { skillPackageIds, mcpServers };
+}
+
+function parseMcpServerInput(value: Record<string, unknown>, index: number): LocalRuntimeMcpServerInput {
+  const label = `mcpServers[${index}]`;
+  const auth = recordValue(value.auth, `${label}.auth`);
+  const kind = stringValue(auth.kind, `${label}.auth.kind`);
+  const common = {
+    ...(value.id === undefined ? {} : { id: stringValue(value.id, `${label}.id`) }),
+    displayName: stringValue(value.displayName, `${label}.displayName`),
+    key: stringValue(value.key, `${label}.key`),
+    transport: literalHttp(value.transport, `${label}.transport`),
+    url: stringValue(value.url, `${label}.url`),
+    ...(value.protocolVersion === undefined ? {} : { protocolVersion: stringValue(value.protocolVersion, `${label}.protocolVersion`) }),
+    ...(value.timeoutMs === undefined ? {} : { timeoutMs: positiveInteger(value.timeoutMs, `${label}.timeoutMs`) }),
+    ...(value.toolAllowlist === undefined ? {} : { toolAllowlist: stringArray(value.toolAllowlist, `${label}.toolAllowlist`) }),
+    ...(value.toolBlocklist === undefined ? {} : { toolBlocklist: stringArray(value.toolBlocklist, `${label}.toolBlocklist`) }),
+    ...(value.trust === undefined ? {} : { trust: trustValue(value.trust, `${label}.trust`) }),
+    ...(value.aliases === undefined ? {} : { aliases: stringArray(value.aliases, `${label}.aliases`) }),
+    ...(value.capabilities === undefined ? {} : { capabilities: objectArray(value.capabilities, `${label}.capabilities`) as unknown as readonly ToolSourceCapability[] }),
+  };
+  if (kind === "none") return { ...common, auth: { kind } };
+  if (kind === "bearer") return { ...common, auth: { kind, ...(auth.token === undefined ? {} : { token: stringValue(auth.token, `${label}.auth.token`) }) } };
+  if (kind === "api_key_header") return { ...common, auth: {
+    kind,
+    headerName: stringValue(auth.headerName, `${label}.auth.headerName`),
+    ...(auth.value === undefined ? {} : { value: stringValue(auth.value, `${label}.auth.value`) }),
+  } };
+  if (kind === "basic") return { ...common, auth: {
+    kind,
+    username: stringValue(auth.username, `${label}.auth.username`),
+    ...(auth.password === undefined ? {} : { password: stringValue(auth.password, `${label}.auth.password`) }),
+  } };
+  if (kind === "query_parameter") return { ...common, auth: {
+    kind,
+    parameterName: stringValue(auth.parameterName, `${label}.auth.parameterName`),
+    ...(auth.value === undefined ? {} : { value: stringValue(auth.value, `${label}.auth.value`) }),
+  } };
+  if (kind === "custom_headers") return { ...common, auth: {
+    kind,
+    ...(auth.headers === undefined ? {} : { headers: stringRecord(auth.headers, `${label}.auth.headers`) }),
+    ...(auth.headerNames === undefined ? {} : { headerNames: stringArray(auth.headerNames, `${label}.auth.headerNames`) }),
+  } };
+  throw new Error(`${label}.auth.kind_invalid`);
+}
+
+function objectArray(value: unknown, name: string): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) throw new Error(`${name}_invalid`);
+  return value.map((item, index) => recordValue(item, `${name}[${index}]`));
+}
+
+function recordValue(value: unknown, name: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name}_invalid`);
+  return value as Record<string, unknown>;
+}
+
+function stringRecord(value: unknown, name: string): Readonly<Record<string, string>> {
+  const record = recordValue(value, name);
+  for (const [key, item] of Object.entries(record)) {
+    if (key.length === 0 || typeof item !== "string" || item.length === 0) throw new Error(`${name}_invalid`);
+  }
+  return record as Readonly<Record<string, string>>;
+}
+
+function positiveInteger(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error(`${name}_invalid`);
+  return Number(value);
+}
+
+function literalHttp(value: unknown, name: string): "http" {
+  if (value !== "http") throw new Error(`${name}_invalid`);
+  return value;
+}
+
+function trustValue(value: unknown, name: string): "trusted" | "untrusted" {
+  if (value !== "trusted" && value !== "untrusted") throw new Error(`${name}_invalid`);
+  return value;
+}

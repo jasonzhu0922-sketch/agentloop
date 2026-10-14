@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, mkdtemp, realpath, rm } from "node:fs/promises";
+import { readFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AppDatabase } from "@zhujun/agentloop";
+import { AppDatabase, parseMcpServersConfig } from "@zhujun/agentloop";
 import { LocalDirectoryScopeStore } from "../local-agent-runtime/src/persistence/directory-scope-store.ts";
+import { LocalRuntimeConfigurationStore, type ResolvedLocalRuntimeConfiguration } from "../local-agent-runtime/src/persistence/local-runtime-configuration-store.ts";
+import { EncryptedLocalRuntimeSecretStore } from "../local-agent-runtime/src/persistence/encrypted-local-runtime-secret-store.ts";
+import { RESTORED_RUN_ACTIVITY_WINDOW_MS, shouldRetainRestoredRunActivity } from "../local-agent-runtime/src/service/local-runtime-factory.ts";
 import { DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS, LocalRuntimeSupervisor, type LocalRuntimeControl, type LocalRuntimeDefinition } from "../local-agent-runtime/src/service/runtime-supervisor.ts";
 import { persistSessions } from "../web/client/state/session-persistence.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "../web/client/local-runtime/local-runtime-preference.js";
@@ -51,7 +54,9 @@ test("Supervisor persists multiple isolated Runtime definitions and removes stop
     assert.equal(new Set(supervisor.advertisements().map((runtime) => runtime.runtimeId)).size, 2);
     assert.equal(supervisor.advertisements().find((runtime) => runtime.runtimeId === second.id)?.displayName, "研究助理");
 
-    await supervisor.stop(second.id);
+    const stopping = supervisor.stop(second.id);
+    await assert.rejects(supervisor.restart(second.id), /runtime_operation_in_progress/);
+    await stopping;
     assert.equal((await supervisor.list()).find((runtime) => runtime.id === second.id)?.status, "stopped");
     assert.equal(supervisor.advertisements().some((runtime) => runtime.runtimeId === second.id), false);
     await supervisor.start(second.id);
@@ -103,6 +108,64 @@ test("drain closes admission before restart and restart waits for both in-flight
   }
 });
 
+test("restored Run activity expires after ten minutes without changing persisted Run status", () => {
+  const now = 1_800_000;
+  assert.equal(shouldRetainRestoredRunActivity({ status: "running", createdAt: now - RESTORED_RUN_ACTIVITY_WINDOW_MS }, now), true);
+  assert.equal(shouldRetainRestoredRunActivity({ status: "running", createdAt: now - RESTORED_RUN_ACTIVITY_WINDOW_MS - 1 }, now), false);
+  assert.equal(shouldRetainRestoredRunActivity({ status: "completed", createdAt: now - 1 }, now), false);
+});
+
+test("Supervisor completes a persisted stop after restart when no recent Run still occupies it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-local-pending-stop-"));
+  const path = join(root, "supervisor.db");
+  let supervisor = new LocalRuntimeSupervisor(new AppDatabase(path), fakeFactory([]));
+  try {
+    await supervisor.ready("local-default");
+    await supervisor.admitRun("local-default", async () => ({ runId: "old-run", value: undefined }));
+    const draining = await supervisor.stop("local-default");
+    assert.equal(draining.pendingAction, "stop");
+    await supervisor.close();
+
+    supervisor = new LocalRuntimeSupervisor(new AppDatabase(path), fakeFactory([]));
+    await supervisor.ready("unused-default");
+    const stopped = (await supervisor.list())[0]!;
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.pendingAction, undefined);
+    assert.equal(supervisor.advertisements().length, 0);
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Supervisor preserves a persisted stop while a recent restored Run is still active", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-local-recent-stop-"));
+  const path = join(root, "supervisor.db");
+  let supervisor = new LocalRuntimeSupervisor(new AppDatabase(path), fakeFactory([]));
+  try {
+    await supervisor.ready("local-default");
+    await supervisor.admitRun("local-default", async () => ({ runId: "recent-run", value: undefined }));
+    await supervisor.stop("local-default");
+    await supervisor.close();
+
+    supervisor = new LocalRuntimeSupervisor(new AppDatabase(path), async (definition) => ({
+      ...fakeRuntime(definition),
+      activeRunIds: new Set(["recent-run"]),
+    }));
+    await supervisor.ready("unused-default");
+    const draining = (await supervisor.list())[0]!;
+    assert.equal(draining.status, "draining");
+    assert.equal(draining.pendingAction, "stop");
+    assert.equal(draining.activeRunCount, 1);
+
+    await supervisor.runSettled("local-default", "recent-run");
+    assert.equal((await supervisor.list())[0]?.status, "stopped");
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a Local Runtime accepts ten concurrent Runs and reports a stable capacity limit", async () => {
   const supervisor = new LocalRuntimeSupervisor(new AppDatabase(":memory:"), fakeFactory([]));
   await supervisor.ready("local-default");
@@ -118,6 +181,342 @@ test("a Local Runtime accepts ten concurrent Runs and reports a stable capacity 
     );
   } finally {
     await supervisor.close();
+  }
+});
+
+test("a failed Runtime can be stopped and returned to the configurable lifecycle", async () => {
+  const supervisor = new LocalRuntimeSupervisor(new AppDatabase(":memory:"), async (definition) => {
+    if (!definition.isDefault) throw new Error("startup failed");
+    return fakeRuntime(definition);
+  });
+  try {
+    await supervisor.ready("local-default");
+    await assert.rejects(supervisor.create("Failed Runtime"), /startup failed/);
+    const failed = (await supervisor.list()).find((runtime) => !runtime.isDefault)!;
+    assert.equal(failed.status, "failed");
+    assert.equal((await supervisor.stop(failed.id)).status, "stopped");
+    await supervisor.updateConfiguration(failed.id, { skillPackageIds: [], mcpServers: [] }, "Recoverable Runtime");
+    assert.equal((await supervisor.list()).find((runtime) => runtime.id === failed.id)?.displayName, "Recoverable Runtime");
+  } finally {
+    await supervisor.close();
+  }
+});
+
+test("Runtime extensions are optional, isolated, and mutable only while stopped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-configuration-"));
+  const customRoot = join(root, "custom-skills");
+  const packageRoot = join(customRoot, "contract-review");
+  await mkdir(packageRoot, { recursive: true });
+  await writeFile(join(packageRoot, "SKILL.md"), [
+    "---",
+    "name: contract-review",
+    "description: Reviews contract clauses.",
+    "---",
+    "",
+    "Review the supplied contract.",
+  ].join("\n"));
+  const database = new AppDatabase(join(root, "supervisor.db"));
+  const configurations = new LocalRuntimeConfigurationStore(database, undefined, [customRoot]);
+  const starts: Array<{ definition: LocalRuntimeDefinition; configuration: ResolvedLocalRuntimeConfiguration }> = [];
+  const supervisor = new LocalRuntimeSupervisor(
+    database,
+    async (definition, configuration) => {
+      starts.push({ definition, configuration });
+      return fakeRuntime(definition);
+    },
+    undefined,
+    DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS,
+    configurations,
+  );
+  try {
+    await supervisor.ready("local-default");
+    const packages = await configurations.listSkillPackages();
+    assert.equal(packages.length, 1);
+
+    const general = await supervisor.create("通用 Runtime");
+    assert.deepEqual(await supervisor.configuration(general.id), {
+      runtimeId: general.id,
+      skills: [],
+      mcpServers: [],
+      updatedAt: (await supervisor.configuration(general.id)).updatedAt,
+    });
+    assert.deepEqual(starts.find((entry) => entry.definition.id === general.id)?.configuration.customSkillDirectories, []);
+
+    await assert.rejects(
+      supervisor.updateConfiguration(general.id, { skillPackageIds: [packages[0]!.packageId] }),
+      /runtime_must_be_stopped_for_configuration/,
+    );
+    await supervisor.stop(general.id);
+    const configured = await supervisor.updateConfiguration(general.id, {
+      skillPackageIds: [packages[0]!.packageId],
+      mcpServers: [{
+        displayName: "Contract knowledge",
+        key: "contract-knowledge",
+        transport: "http",
+        url: "http://127.0.0.1:9321/mcp",
+        auth: { kind: "none" },
+        toolAllowlist: [],
+        toolBlocklist: [],
+      }],
+    });
+    assert.deepEqual(configured.skills.map((skill) => skill.skillName), ["contract-review"]);
+    assert.deepEqual(configured.mcpServers.map((server) => server.key), ["contract-knowledge"]);
+    assert.equal("toolAllowlist" in configured.mcpServers[0]!, false, "a blank UI allowlist means no filtering");
+    assert.equal("toolBlocklist" in configured.mcpServers[0]!, false, "a blank UI blocklist means no filtering");
+    assert.deepEqual((await supervisor.configuration("local-default")).skills, []);
+
+    await database.prepare(`
+      UPDATE local_runtime_mcp_servers
+      SET tool_policy_json = ?
+      WHERE runtime_id = ?
+    `).run(JSON.stringify({ toolAllowlist: [], toolBlocklist: [] }), general.id);
+    const legacyBlankFilters = await supervisor.configuration(general.id);
+    assert.equal("toolAllowlist" in legacyBlankFilters.mcpServers[0]!, false, "existing blank allowlists are normalized on read");
+
+    await supervisor.start(general.id);
+    const restarted = starts.filter((entry) => entry.definition.id === general.id).at(-1)!;
+    assert.deepEqual(restarted.configuration.customSkillDirectories, [await realpath(packageRoot)]);
+    assert.deepEqual(restarted.configuration.mcpServers.map((server) => server.key), ["contract-knowledge"]);
+    assert.equal("toolAllowlist" in restarted.configuration.mcpServers[0]!, false, "blank persisted allowlists do not suppress all MCP tools");
+    assert.deepEqual(starts.find((entry) => entry.definition.id === "local-default")?.configuration.customSkillDirectories, []);
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Runtime MCP credentials stay encrypted and are retained without being returned", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-secrets-"));
+  const database = new AppDatabase(join(root, "supervisor.db"));
+  const secretStore = new EncryptedLocalRuntimeSecretStore(join(root, "runtime-secrets"));
+  const configurations = new LocalRuntimeConfigurationStore(database, secretStore);
+  const starts: ResolvedLocalRuntimeConfiguration[] = [];
+  const supervisor = new LocalRuntimeSupervisor(
+    database,
+    async (definition, configuration) => {
+      starts.push(configuration);
+      return fakeRuntime(definition);
+    },
+    undefined,
+    DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS,
+    configurations,
+  );
+  const token = "runtime-only-token-value";
+  try {
+    const orphanedKey = await secretStore.write({ token: "uncommitted-secret" });
+    await supervisor.ready("local-default");
+    assert.equal(await secretStore.read(orphanedKey), undefined, "startup removes secrets left unreferenced by an interrupted transaction");
+    const runtime = await supervisor.create("MCP Runtime", {
+      mcpServers: [{
+        displayName: "Private service",
+        key: "private-service",
+        transport: "http",
+        url: "http://127.0.0.1:9322/mcp",
+        auth: { kind: "bearer", token },
+      }],
+    });
+    const publicConfiguration = await supervisor.configuration(runtime.id);
+    assert.equal(JSON.stringify(publicConfiguration).includes(token), false);
+    assert.deepEqual(publicConfiguration.mcpServers[0]?.auth, { kind: "bearer", credentialConfigured: true });
+    const persisted = await database.prepare(`
+      SELECT auth_config_json, secret_storage_key FROM local_runtime_mcp_servers WHERE runtime_id = ?
+    `).get(runtime.id) as { auth_config_json: string; secret_storage_key: string };
+    const encryptedSecretPath = join(root, "runtime-secrets", `${persisted.secret_storage_key}.json`);
+    assert.equal(persisted.auth_config_json.includes(token), false);
+    assert.equal((await readFile(encryptedSecretPath, "utf8")).includes(token), false);
+    assert.ok(Object.values(starts.at(-1)!.integrationEnvironment).includes(token));
+
+    await supervisor.stop(runtime.id);
+    await supervisor.updateConfiguration(runtime.id, {
+      mcpServers: [{
+        id: publicConfiguration.mcpServers[0]!.id,
+        displayName: "Private service renamed",
+        key: "private-service",
+        transport: "http",
+        url: "http://127.0.0.1:9322/mcp",
+        auth: { kind: "bearer" },
+      }],
+    });
+    await supervisor.start(runtime.id);
+    assert.ok(Object.values(starts.at(-1)!.integrationEnvironment).includes(token));
+    await supervisor.stop(runtime.id);
+    await supervisor.remove(runtime.id);
+    await assert.rejects(readFile(encryptedSecretPath), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Runtime stays stopped when its referenced MCP secret file disappears between restarts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-secret-recovery-"));
+  const databasePath = join(root, "supervisor.db");
+  const secretRoot = join(root, "runtime-secrets");
+  const starts: ResolvedLocalRuntimeConfiguration[] = [];
+  let supervisor = legacySupervisor(databasePath, secretRoot, starts);
+  try {
+    await supervisor.ready("local-default");
+    const runtime = await supervisor.create("Recoverable MCP Runtime", {
+      mcpServers: [{
+        displayName: "Private service",
+        key: "private-service",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "bearer", token: "initial-token" },
+      }],
+    });
+    const database = new AppDatabase(databasePath);
+    const persisted = await database.prepare(`
+      SELECT secret_storage_key FROM local_runtime_mcp_servers WHERE runtime_id = ?
+    `).get(runtime.id) as { secret_storage_key: string };
+    await database.close();
+    await supervisor.close();
+    await rm(join(secretRoot, `${persisted.secret_storage_key}.json`));
+
+    const restarted: ResolvedLocalRuntimeConfiguration[] = [];
+    supervisor = legacySupervisor(databasePath, secretRoot, restarted);
+    await supervisor.ready("unused-default");
+    assert.equal((await supervisor.list()).find((entry) => entry.id === runtime.id)?.status, "stopped");
+    assert.equal(restarted.some((configuration) => configuration.mcpServers.some((server) => server.key === "private-service")), false);
+    const configuration = await supervisor.configuration(runtime.id);
+    assert.deepEqual(configuration.mcpServers[0]?.auth, { kind: "bearer", credentialConfigured: false });
+
+    await supervisor.updateConfiguration(runtime.id, {
+      mcpServers: [{
+        id: configuration.mcpServers[0]!.id,
+        displayName: "Private service",
+        key: "private-service",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "bearer", token: "replacement-token" },
+      }],
+    });
+    await supervisor.start(runtime.id);
+    assert.equal((await supervisor.list()).find((entry) => entry.id === runtime.id)?.status, "ready");
+    assert.ok(Object.values(restarted.at(-1)!.integrationEnvironment).includes("replacement-token"));
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy device MCP configuration is materialized once with query auth and ToolSource metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-legacy-mcp-"));
+  const databasePath = join(root, "supervisor.db");
+  const secretRoot = join(root, "runtime-secrets");
+  await seedLegacySupervisorDatabase(databasePath, "legacy-runtime");
+  const legacy = parseMcpServersConfig({
+    defaultTrust: "untrusted",
+    servers: [{
+      key: "legacy-query",
+      transport: "http",
+      url: "https://mcp.example.test/mcp",
+      protocolVersion: "2024-11-05",
+      timeoutMs: 4321,
+      auth: { kind: "query", name: "key", secretEnv: "LEGACY_QUERY_KEY" },
+      trust: "trusted",
+      toolAllowlist: ["search"],
+      aliases: ["旧数据源"],
+      capabilities: [{
+        id: "legacy.search",
+        category: "data_asset",
+        label: "Legacy search",
+        description: "Search the legacy source.",
+      }],
+    }],
+  });
+  const starts: ResolvedLocalRuntimeConfiguration[] = [];
+  let supervisor = legacySupervisor(databasePath, secretRoot, starts);
+  try {
+    await supervisor.ready("unused-default", {
+      mcpConfiguration: legacy,
+      integrationEnvironment: { LEGACY_QUERY_KEY: "legacy-query-secret" },
+    });
+    const publicConfiguration = await supervisor.configuration("legacy-runtime");
+    assert.deepEqual(publicConfiguration.mcpServers[0], {
+      id: publicConfiguration.mcpServers[0]!.id,
+      displayName: "legacy-query",
+      key: "legacy-query",
+      transport: "http",
+      url: "https://mcp.example.test/mcp",
+      protocolVersion: "2024-11-05",
+      timeoutMs: 4321,
+      auth: { kind: "query_parameter", parameterName: "key", credentialConfigured: true },
+      toolAllowlist: ["search"],
+      trust: "trusted",
+      aliases: ["旧数据源"],
+      capabilities: [{
+        id: "legacy.search",
+        category: "data_asset",
+        label: "Legacy search",
+        description: "Search the legacy source.",
+      }],
+    });
+    assert.equal(starts.length, 1);
+    const resolvedServer = starts[0]!.mcpServers[0]!;
+    assert.equal(resolvedServer.auth?.kind, "query");
+    assert.equal(
+      resolvedServer.auth?.kind === "query" ? starts[0]!.integrationEnvironment[resolvedServer.auth.secretEnv] : undefined,
+      "legacy-query-secret",
+    );
+
+    await supervisor.close();
+    const restarted: ResolvedLocalRuntimeConfiguration[] = [];
+    supervisor = legacySupervisor(databasePath, secretRoot, restarted);
+    await supervisor.ready("unused-default", {
+      mcpConfiguration: parseMcpServersConfig({ servers: [{
+        key: "later-file-edit",
+        transport: "http",
+        url: "https://changed.example.test/mcp",
+        auth: { kind: "none" },
+      }] }),
+    });
+    assert.deepEqual((await supervisor.configuration("legacy-runtime")).mcpServers.map((server) => server.key), ["legacy-query"]);
+    assert.deepEqual(restarted[0]!.mcpServers.map((server) => server.key), ["legacy-query"]);
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy MCP credentials that cannot be resolved stop the Runtime until the user re-enters them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentloop-runtime-legacy-mcp-missing-"));
+  const databasePath = join(root, "supervisor.db");
+  const secretRoot = join(root, "runtime-secrets");
+  await seedLegacySupervisorDatabase(databasePath, "legacy-runtime");
+  const starts: ResolvedLocalRuntimeConfiguration[] = [];
+  const supervisor = legacySupervisor(databasePath, secretRoot, starts);
+  try {
+    await supervisor.ready("unused-default", {
+      mcpConfiguration: parseMcpServersConfig({ servers: [{
+        key: "legacy-private",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "bearer", tokenEnv: "MISSING_LEGACY_TOKEN" },
+      }] }),
+      integrationEnvironment: {},
+    });
+    assert.equal((await supervisor.list())[0]?.status, "stopped");
+    assert.equal(starts.length, 0, "an incomplete migrated Runtime must not be advertised as ready");
+    const configuration = await supervisor.configuration("legacy-runtime");
+    assert.deepEqual(configuration.mcpServers[0]?.auth, { kind: "bearer", credentialConfigured: false });
+
+    await supervisor.updateConfiguration("legacy-runtime", {
+      mcpServers: [{
+        id: configuration.mcpServers[0]!.id,
+        displayName: "legacy-private",
+        key: "legacy-private",
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+        auth: { kind: "bearer", token: "re-entered-token" },
+      }],
+    });
+    await supervisor.start("legacy-runtime");
+    assert.equal((await supervisor.list())[0]?.status, "ready");
+    assert.ok(Object.values(starts[0]!.integrationEnvironment).includes("re-entered-token"));
+  } finally {
+    await supervisor.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -255,21 +654,48 @@ test("web keeps strict_local recovery support while normal placement uses the Lo
   assert.match(factory, /runEventLogSink: \(line\) => this\.input\.runEventLogSink!\(definition, line\)/, "every Local Runtime must forward RunService events to the device Agent sink");
   assert.match(service, /join\(dirname\(input\.databasePath\), "uploads"\)/);
   assert.match(agent, /json\(response, 200, await service\.health\(\)\)/, "health must serialize the resolved application status, not a Promise as {}");
-  assert.match(factory, /mergeSkillDirectories\(packaged\?\.length \? packaged : bundledSkillDirectories\(\), custom\)/);
+  assert.match(factory, /skillDirectories: packaged\?\.length \? packaged : bundledSkillDirectories\(\)/);
+  assert.match(factory, /skillPackageRoots: configuration\.customSkillDirectories/);
+  assert.match(factory, /servers: configuration\.mcpServers/);
+  assert.doesNotMatch(factory, /loadSkillDirectoriesConfig|loadOptionalMcpToolsFromConfigFile/, "Factory must not load device-wide Runtime extensions");
   assert.doesNotMatch(agent, /@zhujun\/agentloop|readFile\(|writeFile\(|LocalRuntimeSupervisor/, "HTTP transport must not own Runtime construction or device state persistence");
   assert.doesNotMatch(agent, /skills\/(install|update|rollback)/);
 });
 
-test("child Runtime dialogs render above the Local Agent settings dialog", async () => {
-  const [index, styles] = await Promise.all([
+test("child Runtime dialogs render above settings with tabbed Skill and MCP configuration", async () => {
+  const [index, styles, app] = await Promise.all([
     readFile(new URL("../web/pages/app.html", import.meta.url), "utf8"),
     readFile(new URL("../web/styles/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../web/client/app.js", import.meta.url), "utf8"),
   ]);
 
   assert.match(index, /id="runtime-create-modal" class="runtime-modal runtime-modal-child"/);
+  assert.match(index, /id="runtime-detail-modal" class="runtime-modal runtime-modal-child"/);
   assert.match(index, /id="runtime-config-modal" class="runtime-modal runtime-modal-child"/);
+  assert.match(index, /role="tab" aria-selected="true"[^>]*data-runtime-capability-tab="skills"/);
+  assert.match(index, /role="tabpanel"[^>]*data-runtime-capability-panel="mcp" hidden/);
+  assert.match(index, /id="runtime-create-mcp-json"[^>]*>JSON 导入<\/button>/);
+  assert.match(index, /id="runtime-config-mcp-json"[^>]*>JSON 导入<\/button>/);
+  assert.match(index, /id="mcp-json-modal" class="runtime-modal runtime-modal-child runtime-json-modal"/);
+  assert.match(index, /id="agent-settings-modal"[^>]*role="dialog"[^>]*aria-labelledby="agent-settings-title"/);
+  assert.match(index, /id="agent-settings-close-icon"[^>]*aria-label="关闭 Local Runtime Agent 设置"/);
   assert.match(styles, /\.runtime-modal\{[^}]*z-index:var\(--runtime-modal-layer,1200\)/);
   assert.match(styles, /\.runtime-modal-child\{--runtime-modal-layer:1210\}/);
+  assert.match(styles, /\.agent-settings-card\{width:min\(820px,100%\)/);
+  assert.match(styles, /\.runtime-modal-close\{[^}]*width:34px[^}]*height:34px/);
+  assert.match(styles, /\.agent-settings-card \.local-runtime-item:last-child \.local-runtime-action-menu-panel\{top:auto;bottom:36px\}/);
+  assert.match(styles, /\.runtime-capability-tabs button\[aria-selected="true"\]/);
+  assert.match(styles, /\.runtime-detail-card\{width:min\(640px,100%\)/);
+  assert.match(app, /activateRuntimeCapabilityTab/);
+  assert.match(app, /openLocalRuntimeDetails/);
+  assert.match(app, /\$\("agent-settings-close-icon"\)\.addEventListener\("click", closeLocalAgentSettings\)/);
+  assert.match(app, /renderLocalRuntimeDetails/);
+  assert.match(app, /class="runtime-mcp-toolbar"/);
+  assert.match(app, /class="runtime-mcp-remove" aria-label="移除 MCP Server" title="移除 MCP Server"/);
+  assert.match(app, /服务标识<input data-mcp-field="key"/);
+  assert.match(app, /用于工具命名空间，不是 \.env 凭据变量名/);
+  assert.match(app, /parseMcpJsonImport/);
+  assert.match(app, /toolAllowlist\.length === 0 \? \{\} : \{ toolAllowlist \}/);
 });
 
 test("strict_local recovery cache retains local Run and artifact transport identity", () => {
@@ -301,16 +727,77 @@ test("strict_local recovery cache retains local Run and artifact transport ident
   assert.equal(assistant.artifacts[0].sha256, "artifact-sha");
 });
 
+function legacySupervisor(databasePath: string, secretRoot: string, starts: ResolvedLocalRuntimeConfiguration[]): LocalRuntimeSupervisor {
+  const database = new AppDatabase(databasePath);
+  const configurations = new LocalRuntimeConfigurationStore(database, new EncryptedLocalRuntimeSecretStore(secretRoot));
+  return new LocalRuntimeSupervisor(
+    database,
+    async (definition, configuration) => {
+      starts.push(configuration);
+      return fakeRuntime(definition);
+    },
+    undefined,
+    DEFAULT_LOCAL_RUNTIME_MAX_CONCURRENT_RUNS,
+    configurations,
+  );
+}
+
+async function seedLegacySupervisorDatabase(databasePath: string, runtimeId: string): Promise<void> {
+  const database = new AppDatabase(databasePath);
+  const now = Date.now();
+  try {
+    await database.exec(`
+      CREATE TABLE local_runtime_instances (
+        runtime_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        storage_key TEXT NOT NULL UNIQUE,
+        is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)),
+        status TEXT NOT NULL CHECK(status IN ('ready', 'draining', 'restarting', 'stopped', 'failed')),
+        pending_action TEXT CHECK(pending_action IN ('restart', 'stop')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE local_runtime_mcp_servers (
+        mcp_server_id TEXT PRIMARY KEY,
+        runtime_id TEXT NOT NULL REFERENCES local_runtime_instances(runtime_id) ON DELETE CASCADE,
+        display_name TEXT NOT NULL,
+        source_key TEXT NOT NULL,
+        transport TEXT NOT NULL CHECK(transport = 'http'),
+        url TEXT NOT NULL,
+        protocol_version TEXT,
+        timeout_ms INTEGER,
+        auth_kind TEXT NOT NULL CHECK(auth_kind IN ('none', 'bearer', 'api_key_header', 'basic', 'custom_headers')),
+        auth_config_json TEXT NOT NULL,
+        secret_storage_key TEXT,
+        tool_policy_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(runtime_id, source_key)
+      );
+    `);
+    await database.prepare(`
+      INSERT INTO local_runtime_instances(runtime_id, display_name, storage_key, is_default, status, pending_action, created_at, updated_at)
+      VALUES (?, 'Legacy Runtime', 'default', 1, 'ready', NULL, ?, ?)
+    `).run(runtimeId, now, now);
+  } finally {
+    await database.close();
+  }
+}
+
 function fakeFactory(created: LocalRuntimeDefinition[]): (definition: LocalRuntimeDefinition) => Promise<LocalRuntimeControl> {
   return async (definition) => {
     created.push(definition);
-    return {
-      ...definition,
-      database: new AppDatabase(":memory:"),
-      runs: {} as LocalRuntimeControl["runs"],
-      scopes: {} as LocalRuntimeControl["scopes"],
-      modelKeys: ["shared-model"],
-      activeRunIds: new Set<string>(),
-    };
+    return fakeRuntime(definition);
+  };
+}
+
+function fakeRuntime(definition: LocalRuntimeDefinition): LocalRuntimeControl {
+  return {
+    ...definition,
+    database: new AppDatabase(":memory:"),
+    runs: {} as LocalRuntimeControl["runs"],
+    scopes: {} as LocalRuntimeControl["scopes"],
+    modelKeys: ["shared-model"],
+    activeRunIds: new Set<string>(),
   };
 }

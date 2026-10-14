@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { AppError } from "../shared/errors.ts";
 import { readSkillExecutionManifest } from "./skill-execution-manifest.ts";
 import { inspectSkillPackage } from "./skill-package.ts";
@@ -93,6 +93,40 @@ export async function discoverSkillDirectory(directory: string): Promise<SkillDi
     throw invalidDirectory("Configured Skill directory contains duplicate Skill names");
   }
   return discovered;
+}
+
+/**
+ * Discover one explicitly selected Skill package root.
+ *
+ * Unlike {@link discoverSkillDirectory}, this boundary does not enumerate
+ * siblings. Hosts can therefore assemble a Runtime-private catalog without
+ * accidentally granting every package stored beside the selected package.
+ */
+export async function discoverSkillPackageRoot(packageRoot: string): Promise<SkillDirectoryEntry> {
+  const root = await fs.realpath(resolve(packageRoot)).catch(() => {
+    throw invalidDirectory("Configured Skill package does not exist");
+  });
+  const stat = await fs.stat(root);
+  if (!stat.isDirectory()) throw invalidDirectory("Configured Skill package must be a directory");
+  const inspection = await inspectSkillPackage(root).catch((error) => {
+    if (error instanceof AppError) throw invalidDirectory(`Invalid Skill package at ${root}: ${error.message}`);
+    throw error;
+  });
+  await readSkillExecutionManifest(inspection.root).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    throw invalidDirectory(`Invalid Skill execution manifest at ${root}: ${message}`);
+  });
+  const packageName = basename(root);
+  const source = await readVerifiedSourceLock(
+    resolve(dirname(root), `${packageName}.source.json`),
+    inspection,
+    inspection.name,
+  );
+  return {
+    sourceDirectory: inspection.root,
+    inspection,
+    ...(source === undefined ? {} : source),
+  };
 }
 
 async function isExplicitlyDisabled(root: string, directoryName: string): Promise<boolean> {

@@ -35,10 +35,18 @@ test("local Runtime option projection disables non-ready entries and preserves s
 
 test("local Runtime manager markup preserves lifecycle affordances as data attributes", () => {
   const markup = localRuntimeListMarkup([
-    { id: "default", displayName: "默认", status: "ready", isDefault: true, activeRunCount: 0 },
-    { id: "busy", displayName: "忙碌", status: "ready", isDefault: false, activeRunCount: 1 },
+    { id: "default", displayName: "默认", status: "ready", isDefault: true, activeRunCount: 0, extensionSkillCount: 0, mcpServerCount: 0 },
+    { id: "busy", displayName: "忙碌", status: "ready", isDefault: false, activeRunCount: 1, extensionSkillCount: 1, extensionSkillNames: ["合同审核"], mcpServerCount: 1, mcpServerNames: ["合同库"] },
+    { id: "stopped", displayName: "已停止", status: "stopped", isDefault: false, activeRunCount: 0 },
   ], "default", String, (status) => status);
   assert.match(markup, /data-local-runtime-action="select" data-runtime-id="default" aria-pressed="true"/);
   assert.match(markup, /data-local-runtime-action="delete" data-runtime-id="busy" disabled/);
+  assert.match(markup, /data-local-runtime-action="view" data-runtime-id="default" title="查看 Skill 和 MCP 明细"/);
+  assert.doesNotMatch(markup, /data-local-runtime-action="configure" data-runtime-id="default"/);
+  assert.match(markup, /data-local-runtime-action="configure" data-runtime-id="stopped"\s+title="配置扩展 Skill 和 MCP"/);
+  assert.match(markup, /class="local-runtime-action-menu"/);
+  assert.match(markup, /aria-label="忙碌 的更多操作"/);
+  assert.match(markup, /1 个扩展 Skill · 1 个 MCP/);
+  assert.doesNotMatch(markup, /合同审核|合同库/);
   assert.match(markup, /忙碌/);
 });

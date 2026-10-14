@@ -22,6 +22,7 @@ import { createLocalAgentClient } from "./local-runtime/local-agent-client.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "./local-runtime/local-runtime-preference.js";
 import { createLocalRuntimeState } from "./local-runtime/local-runtime-state.js";
 import { localRuntimeListMarkup, localRuntimeOptions, localRuntimeViewModel } from "./local-runtime/local-runtime-view-model.js";
+import { parseMcpJsonImport } from "./local-runtime/mcp-json-import.js";
 
 const api = String(globalThis.AGENTLOOP_ROUTER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
 const publicRouterUrl = String(globalThis.AGENTLOOP_ROUTER_PUBLIC_URL || (api.startsWith("http") ? api : location.origin)).replace(/\/+$/, "");
@@ -55,6 +56,8 @@ let inlineArtifactPreviewUrl;
 let artifactPanelOpen = false;
 let artifactPanelWidth = loadArtifactPanelWidth();
 let resizeState;
+let localSkillPackages = [];
+let mcpJsonImportTarget;
 const liveUpdates = createCoalescedUpdater({ render: renderPendingLiveAssistantMessages, persist: saveSessions });
 
 const nativeFetch = window.fetch.bind(window);
@@ -111,9 +114,31 @@ $("local-agent-settings").addEventListener("click", () => void openLocalAgentSet
 $("agent-storage-pick").addEventListener("click", () => void pickSharedStorage());
 $("agent-upload-storage-pick").addEventListener("click", () => void pickUploadStorage());
 $("agent-settings-close").addEventListener("click", closeLocalAgentSettings);
+$("agent-settings-close-icon").addEventListener("click", closeLocalAgentSettings);
 $("agent-install-cancel").addEventListener("click", closeLocalAgentInstall);
 $("runtime-config-cancel").addEventListener("click", closeConfigureLocalRuntime);
 $("runtime-config-form").addEventListener("submit", (event) => { event.preventDefault(); void saveLocalRuntimeConfiguration(); });
+$("runtime-create-mcp-add").addEventListener("click", () => appendMcpEditor("runtime-create-mcp"));
+$("runtime-config-mcp-add").addEventListener("click", () => appendMcpEditor("runtime-config-mcp"));
+$("runtime-create-mcp-json").addEventListener("click", () => openMcpJsonImport("runtime-create"));
+$("runtime-config-mcp-json").addEventListener("click", () => openMcpJsonImport("runtime-config"));
+$("mcp-json-cancel").addEventListener("click", closeMcpJsonImport);
+$("mcp-json-form").addEventListener("submit", (event) => { event.preventDefault(); importMcpJson(); });
+$("runtime-create-skill-upload").addEventListener("click", () => $("runtime-create-skill-file").click());
+$("runtime-config-skill-upload").addEventListener("click", () => $("runtime-config-skill-file").click());
+$("runtime-create-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-create"));
+$("runtime-config-skill-file").addEventListener("change", () => void uploadRuntimeSkill("runtime-config"));
+document.querySelectorAll("[data-runtime-capability-tab]").forEach((button) => {
+  button.addEventListener("click", () => activateRuntimeCapabilityTab(button.closest(".runtime-capability-card"), button.dataset.runtimeCapabilityTab));
+  button.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const tabs = [...button.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];
+    const offset = event.key === "ArrowRight" ? 1 : -1;
+    const next = tabs[(tabs.indexOf(button) + offset + tabs.length) % tabs.length];
+    event.preventDefault();
+    activateRuntimeCapabilityTab(button.closest(".runtime-capability-card"), next.dataset.runtimeCapabilityTab, true);
+  });
+});
 $("use-local-runtime").addEventListener("change", () => {
   saveLocalRuntimePreference(localStorage, sessionState.user?.id, localRuntimeState.device?.id, isLocalExecution());
   refreshRuntimeOptions();
@@ -141,6 +166,7 @@ $("local-runtime-list").addEventListener("click", (event) => {
   if (!runtimeId) return;
   const action = button.dataset.localRuntimeAction;
   if (action === "select") void selectLocalRuntime(runtimeId);
+  if (action === "view") void openLocalRuntimeDetails(runtimeId);
   if (action === "configure") { selectLocalRuntime(runtimeId); openConfigureLocalRuntime(runtimeId); }
   if (action === "delete") void deleteLocalRuntime(runtimeId);
   if (action === "drain") void applyLocalRuntimeLifecycle("drain", runtimeId);
@@ -150,10 +176,21 @@ $("local-runtime-list").addEventListener("click", (event) => {
 $("local-runtime-create").addEventListener("click", openCreateLocalRuntime);
 $("runtime-create-cancel").addEventListener("click", closeCreateLocalRuntime);
 $("runtime-create-modal").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeCreateLocalRuntime(); });
-$("runtime-create-form").addEventListener("submit", (event) => { event.preventDefault(); void createLocalRuntime($("runtime-create-name").value); });
+$("runtime-create-form").addEventListener("submit", (event) => { event.preventDefault(); void createLocalRuntime(); });
+$("runtime-detail-close").addEventListener("click", closeLocalRuntimeDetails);
+$("runtime-detail-modal").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeLocalRuntimeDetails(); });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { closeCommandDetail(); closeCreateLocalRuntime(); closeLocalAgentSettings(); closeLocalAgentInstall(); closeConfigureLocalRuntime(); }
+  if (event.key === "Escape") { closeCommandDetail(); closeCreateLocalRuntime(); closeLocalRuntimeDetails(); closeLocalAgentSettings(); closeLocalAgentInstall(); closeConfigureLocalRuntime(); }
 });
+window.addEventListener("focus", reconcileRunsAfterPageReturn);
+window.addEventListener("online", reconcileRunsAfterPageReturn);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") reconcileRunsAfterPageReturn();
+});
+
+function reconcileRunsAfterPageReturn() {
+  void reconcilePersistedRuns();
+}
 
 function newConversation() {
   const conversation = { id: crypto.randomUUID(), title: "新对话", createdAt: Date.now(), updatedAt: Date.now(), messages: [], pendingAttachments: [] };
@@ -587,18 +624,29 @@ async function revokeLocalScope(scopeId) {
   } catch (error) { setStatus(`撤销目录失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
-function openCreateLocalRuntime() {
+async function openCreateLocalRuntime() {
   $("runtime-create-name").value = "";
+  $("runtime-create-mcp").replaceChildren();
+  await loadRuntimeSkillOptions("runtime-create-skills", []);
+  activateRuntimeCapabilityTab($("runtime-create-form"), "skills");
   $("runtime-create-modal").hidden = false;
   $("runtime-create-name").focus();
 }
 
-function closeCreateLocalRuntime() { $("runtime-create-modal").hidden = true; }
+function closeCreateLocalRuntime() {
+  $("runtime-create-modal").hidden = true;
+  $("runtime-create-mcp").replaceChildren();
+}
 
-async function createLocalRuntime(displayName) {
+async function createLocalRuntime() {
+  const displayName = $("runtime-create-name").value.trim();
   if (!displayName?.trim()) return;
   try {
-    const response = await routerClient.postJson(localAgentRouterPath("/runtimes"), { displayName: displayName.trim() });
+    const response = await localAgentFetch("/v1/local-runtimes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName, ...collectRuntimeCapabilityConfiguration("runtime-create") }),
+    });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
     localRuntimeState.runtimeId = body.runtime.id;
@@ -609,26 +657,99 @@ async function createLocalRuntime(displayName) {
   } catch (error) { setStatus(`创建 Runtime 失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
-function openConfigureLocalRuntime(runtimeId = localRuntimeState.runtimeId) {
+async function openConfigureLocalRuntime(runtimeId = localRuntimeState.runtimeId) {
   const runtime = selectedLocalRuntime(runtimeId);
   if (!runtime) return;
+  if (runtime.status !== "stopped") { setStatus("请先停止 Runtime 再修改扩展能力", "error"); return; }
   localRuntimeState.runtimeId = runtime.id;
   $("runtime-config-name").value = runtime.displayName;
   $("runtime-config-id").textContent = runtime.id;
   $("runtime-config-status").textContent = runtimeStatusLabel(runtime.status);
-  $("runtime-config-modal").hidden = false;
-  $("runtime-config-name").focus();
+  try {
+    const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtime.id)}/configuration`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    const configuration = body.configuration || {};
+    await loadRuntimeSkillOptions("runtime-config-skills", (configuration.skills || []).map((skill) => skill.packageId));
+    $("runtime-config-mcp").replaceChildren();
+    for (const server of configuration.mcpServers || []) appendMcpEditor("runtime-config-mcp", server);
+    activateRuntimeCapabilityTab($("runtime-config-form"), "skills");
+    $("runtime-config-modal").hidden = false;
+    $("runtime-config-name").focus();
+  } catch (error) { setStatus(`读取 Runtime 配置失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
 }
 
-function closeConfigureLocalRuntime() { $("runtime-config-modal").hidden = true; }
+async function openLocalRuntimeDetails(runtimeId = localRuntimeState.runtimeId) {
+  const runtime = selectedLocalRuntime(runtimeId);
+  if (!runtime) return;
+  try {
+    const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtime.id)}/configuration`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    renderLocalRuntimeDetails(runtime, body.configuration || {});
+    activateRuntimeCapabilityTab($("runtime-detail-card"), "skills");
+    $("runtime-detail-modal").hidden = false;
+    $("runtime-detail-close").focus();
+  } catch (error) { setStatus(`读取 Runtime 详情失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+function closeLocalRuntimeDetails() {
+  $("runtime-detail-modal").hidden = true;
+  $("runtime-detail-skills").replaceChildren();
+  $("runtime-detail-mcp").replaceChildren();
+}
+
+function renderLocalRuntimeDetails(runtime, configuration) {
+  $("runtime-detail-name").textContent = runtime.displayName;
+  $("runtime-detail-id").textContent = runtime.id;
+  $("runtime-detail-status").textContent = runtimeStatusLabel(runtime.status);
+  const skills = Array.isArray(configuration.skills) ? configuration.skills : [];
+  $("runtime-detail-skills").innerHTML = skills.length === 0
+    ? '<p class="runtime-capability-empty">未配置扩展 Skill；Runtime 仍会加载全部内核 Skills。</p>'
+    : skills.map((skill) => `<article class="runtime-detail-item"><div><strong>${escapeHtml(skill.displayName || skill.skillName || "未命名 Skill")}</strong><small>${escapeHtml(skill.description || "暂无说明")}</small></div><span>${escapeHtml(skillSourceLabel(skill.sourceKind))}</span></article>`).join("");
+  const servers = Array.isArray(configuration.mcpServers) ? configuration.mcpServers : [];
+  $("runtime-detail-mcp").innerHTML = servers.length === 0
+    ? '<p class="runtime-capability-empty">未配置 MCP Server。</p>'
+    : servers.map((server) => `<article class="runtime-detail-item runtime-detail-mcp-item"><div><strong>${escapeHtml(server.displayName || server.key || "未命名 MCP")}</strong><small>${escapeHtml(server.url || "-")}</small></div><dl><dt>服务标识</dt><dd>${escapeHtml(server.key || "-")}</dd><dt>认证</dt><dd>${escapeHtml(mcpAuthSummary(server.auth))}</dd></dl></article>`).join("");
+}
+
+function skillSourceLabel(sourceKind) {
+  return sourceKind === "uploaded" ? "用户上传" : sourceKind === "custom_directory" ? "Custom Skills" : "扩展 Skill";
+}
+
+function mcpAuthSummary(auth = {}) {
+  const names = { none: "无认证", bearer: "Bearer Token", api_key_header: "API Key Header", basic: "Basic Auth", query_parameter: "Query 参数", custom_headers: "自定义 Headers" };
+  const configured = auth.kind === "none" ? "" : auth.credentialConfigured === true ? " · 凭据已配置" : " · 凭据未配置";
+  return `${names[auth.kind] || auth.kind || "未知"}${configured}`;
+}
+
+function closeConfigureLocalRuntime() {
+  $("runtime-config-modal").hidden = true;
+  $("runtime-config-mcp").replaceChildren();
+}
+
+function activateRuntimeCapabilityTab(card, tabName, focus = false) {
+  if (!card || !tabName) return;
+  const tabs = [...card.querySelectorAll("[data-runtime-capability-tab]")];
+  const panels = [...card.querySelectorAll("[data-runtime-capability-panel]")];
+  for (const tab of tabs) {
+    const selected = tab.dataset.runtimeCapabilityTab === tabName;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focus) tab.focus();
+  }
+  for (const panel of panels) panel.hidden = panel.dataset.runtimeCapabilityPanel !== tabName;
+}
 
 async function saveLocalRuntimeConfiguration() {
   const runtime = selectedLocalRuntime();
   const displayName = $("runtime-config-name").value.trim();
   if (!runtime || !displayName) return;
   try {
-    const response = await routerClient.request(localAgentRouterPath(`/runtimes/${encodeURIComponent(runtime.id)}`), {
-      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ displayName }),
+    const response = await localAgentFetch(`/v1/local-runtimes/${encodeURIComponent(runtime.id)}/configuration`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName, ...collectRuntimeCapabilityConfiguration("runtime-config") }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
@@ -636,6 +757,202 @@ async function saveLocalRuntimeConfiguration() {
     closeConfigureLocalRuntime();
     setStatus("已更新 Runtime 配置", "ok");
   } catch (error) { setStatus(`更新 Runtime 配置失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+async function loadRuntimeSkillOptions(containerId, selectedPackageIds) {
+  const response = await localAgentFetch("/v1/local-skill-packages");
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+  localSkillPackages = Array.isArray(body.skills) ? body.skills.filter((skill) => skill.validationStatus === "valid") : [];
+  const selected = new Set(selectedPackageIds);
+  const container = $(containerId);
+  container.innerHTML = localSkillPackages.length === 0
+    ? '<span class="runtime-capability-empty">暂无可选的 Custom / 上传 Skill；仍可仅使用内核 Skills 创建。</span>'
+    : localSkillPackages.map((skill) => `<label class="runtime-skill-option"><input type="checkbox" value="${escapeHtml(skill.packageId)}" ${selected.has(skill.packageId) ? "checked" : ""}/><span>${escapeHtml(skill.displayName)}<small>${escapeHtml(skill.description || skill.sourceKind || "")}</small></span></label>`).join("");
+}
+
+async function uploadRuntimeSkill(prefix) {
+  const input = $(`${prefix}-skill-file`);
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    const contentBase64 = await fileAsBase64(file);
+    const response = await localAgentFetch("/v1/local-skill-package-uploads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ originalName: file.name, contentBase64 }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    const selected = [...$(`${prefix}-skills`).querySelectorAll('input[type="checkbox"]:checked')].map((item) => item.value);
+    selected.push(body.skill.packageId);
+    await loadRuntimeSkillOptions(`${prefix}-skills`, selected);
+    setStatus(`已安装 Skill：${body.skill.displayName}`, "ok");
+  } catch (error) { setStatus(`上传 Skill 失败：${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+
+function fileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result).split(",", 2)[1] || ""), { once: true });
+    reader.addEventListener("error", () => reject(reader.error || new Error("读取 Skill 压缩包失败")), { once: true });
+    reader.readAsDataURL(file);
+  });
+}
+
+function appendMcpEditor(containerId, server = {}) {
+  const item = document.createElement("article");
+  item.className = "runtime-mcp-item";
+  if (server.id) item.dataset.serverId = server.id;
+  item.dataset.toolAllowlist = JSON.stringify(server.toolAllowlist || []);
+  item.dataset.toolBlocklist = JSON.stringify(server.toolBlocklist || []);
+  item.dataset.trust = server.trust || "";
+  item.dataset.aliases = JSON.stringify(server.aliases || []);
+  item.dataset.capabilities = JSON.stringify(server.capabilities || []);
+  item.innerHTML = `<div class="runtime-mcp-toolbar">
+    <small data-mcp-test-result role="status"></small>
+    <div class="runtime-mcp-actions">
+      <button type="button" class="runtime-mcp-test" data-mcp-test><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v6h-6"></path></svg><span>测试连接</span></button>
+      <button type="button" class="runtime-mcp-remove" aria-label="移除 MCP Server" title="移除 MCP Server"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path></svg></button>
+    </div>
+  </div><div class="runtime-mcp-fields">
+    <label>显示名称<input data-mcp-field="displayName" maxlength="100" value="${escapeHtml(server.displayName || "")}" required /></label>
+    <label>服务标识<input data-mcp-field="key" maxlength="80" value="${escapeHtml(server.key || "")}" placeholder="例如 contract-data" required /><small class="runtime-field-help">用于工具命名空间，不是 .env 凭据变量名</small></label>
+    <label class="runtime-mcp-url">URL<input data-mcp-field="url" type="url" value="${escapeHtml(server.url || "")}" required /></label>
+    <label>协议版本<input data-mcp-field="protocolVersion" value="${escapeHtml(server.protocolVersion || "")}" placeholder="使用客户端默认" /></label>
+    <label>超时（毫秒）<input data-mcp-field="timeoutMs" type="number" min="1" value="${escapeHtml(server.timeoutMs || "")}" placeholder="15000" /></label>
+    <label class="runtime-mcp-policy">Tool allowlist<input data-mcp-field="toolAllowlist" value="${escapeHtml((server.toolAllowlist || []).join(", "))}" placeholder="tool_a, tool_b" /></label>
+    <label class="runtime-mcp-policy">Tool blocklist<input data-mcp-field="toolBlocklist" value="${escapeHtml((server.toolBlocklist || []).join(", "))}" placeholder="tool_c" /></label>
+    <label>认证方式<select data-mcp-field="authKind"><option value="none">无认证</option><option value="bearer">Bearer Token</option><option value="api_key_header">API Key Header</option><option value="basic">Basic Auth</option><option value="query_parameter">Query 参数</option><option value="custom_headers">自定义 Headers</option></select></label>
+    <div data-mcp-auth-fields></div>
+  </div>`;
+  const authKind = server.auth?.kind || "none";
+  item.querySelector('[data-mcp-field="authKind"]').value = authKind;
+  item.querySelector('[data-mcp-field="authKind"]').addEventListener("change", (event) => renderMcpAuthFields(item, { kind: event.target.value }));
+  item.querySelector("[data-mcp-test]").addEventListener("click", () => void testMcpEditor(item));
+  item.querySelector(".runtime-mcp-remove").addEventListener("click", () => item.remove());
+  renderMcpAuthFields(item, server.auth || { kind: "none" });
+  populateMcpAuthSecrets(item, server.auth || { kind: "none" });
+  $(containerId).append(item);
+}
+
+function openMcpJsonImport(prefix) {
+  mcpJsonImportTarget = prefix;
+  $("mcp-json-input").value = "";
+  $("mcp-json-error").textContent = "";
+  $("mcp-json-modal").hidden = false;
+  $("mcp-json-input").focus();
+}
+
+function closeMcpJsonImport() {
+  $("mcp-json-modal").hidden = true;
+  $("mcp-json-input").value = "";
+  $("mcp-json-error").textContent = "";
+  mcpJsonImportTarget = undefined;
+}
+
+function importMcpJson() {
+  try {
+    const servers = parseMcpJsonImport($("mcp-json-input").value);
+    if (!mcpJsonImportTarget) return;
+    for (const server of servers) appendMcpEditor(`${mcpJsonImportTarget}-mcp`, server);
+    const count = servers.length;
+    closeMcpJsonImport();
+    setStatus(`已导入 ${count} 个 MCP Server`, "ok");
+  } catch (error) {
+    $("mcp-json-error").textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function testMcpEditor(item) {
+  const result = item.querySelector("[data-mcp-test-result]");
+  result.dataset.state = "pending";
+  result.textContent = "测试中…";
+  try {
+    const response = await localAgentFetch("/v1/local-mcp-servers/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server: collectMcpEditor(item) }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Local Agent HTTP ${response.status}`);
+    if (!body.ok) throw new Error(`${body.stage || "connection"}: ${body.error || "连接失败"}`);
+    result.dataset.state = "success";
+    result.textContent = `已连接 · ${body.toolCount} tools`;
+  } catch (error) {
+    result.dataset.state = "error";
+    result.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function renderMcpAuthFields(item, auth) {
+  const container = item.querySelector("[data-mcp-auth-fields]");
+  const configured = auth.credentialConfigured === true ? "已配置；留空保留" : auth.credentialConfigured === false ? "需要重新填写" : "";
+  if (auth.kind === "bearer") container.innerHTML = `<label>Token<input data-mcp-secret="token" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
+  else if (auth.kind === "api_key_header") container.innerHTML = `<label>Header 名称<input data-mcp-auth="headerName" value="${escapeHtml(auth.headerName || "X-API-Key")}" required /></label><label>API Key<input data-mcp-secret="value" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
+  else if (auth.kind === "basic") container.innerHTML = `<label>用户名<input data-mcp-auth="username" value="${escapeHtml(auth.username || "")}" required /></label><label>密码<input data-mcp-secret="password" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
+  else if (auth.kind === "query_parameter") container.innerHTML = `<label>参数名称<input data-mcp-auth="parameterName" value="${escapeHtml(auth.parameterName || "key")}" required /></label><label>参数值<input data-mcp-secret="value" type="password" autocomplete="new-password" placeholder="${configured}" /></label>`;
+  else if (auth.kind === "custom_headers") container.innerHTML = `<label>Headers JSON<input data-mcp-secret="headers" type="password" autocomplete="new-password" placeholder="${configured || '{\"X-API-Key\":\"...\"}'}" /></label>`;
+  else container.replaceChildren();
+  item.dataset.headerNames = JSON.stringify(auth.headerNames || []);
+}
+
+function populateMcpAuthSecrets(item, auth) {
+  if (auth.kind === "bearer" && auth.token) item.querySelector('[data-mcp-secret="token"]').value = auth.token;
+  else if (auth.kind === "api_key_header" && auth.value) item.querySelector('[data-mcp-secret="value"]').value = auth.value;
+  else if (auth.kind === "basic" && auth.password) item.querySelector('[data-mcp-secret="password"]').value = auth.password;
+  else if (auth.kind === "query_parameter" && auth.value) item.querySelector('[data-mcp-secret="value"]').value = auth.value;
+  else if (auth.kind === "custom_headers" && auth.headers) item.querySelector('[data-mcp-secret="headers"]').value = JSON.stringify(auth.headers);
+}
+
+function collectRuntimeCapabilityConfiguration(prefix) {
+  const skills = [...$(`${prefix}-skills`).querySelectorAll('input[type="checkbox"]:checked')].map((input) => ({ packageId: input.value }));
+  const mcpServers = [...$(`${prefix}-mcp`).querySelectorAll(".runtime-mcp-item")].map((item) => collectMcpEditor(item));
+  return { skills, mcpServers };
+}
+
+function collectMcpEditor(item) {
+  const field = (name) => item.querySelector(`[data-mcp-field="${name}"]`)?.value.trim() || undefined;
+  const authKind = field("authKind");
+  const toolAllowlist = commaSeparatedValues(field("toolAllowlist"));
+  const toolBlocklist = commaSeparatedValues(field("toolBlocklist"));
+  let auth;
+  if (authKind === "bearer") auth = { kind: authKind, ...optionalSecret(item, "token") };
+  else if (authKind === "api_key_header") auth = { kind: authKind, headerName: item.querySelector('[data-mcp-auth="headerName"]').value.trim(), ...optionalSecret(item, "value") };
+  else if (authKind === "basic") auth = { kind: authKind, username: item.querySelector('[data-mcp-auth="username"]').value.trim(), ...optionalSecret(item, "password") };
+  else if (authKind === "query_parameter") auth = { kind: authKind, parameterName: item.querySelector('[data-mcp-auth="parameterName"]').value.trim(), ...optionalSecret(item, "value") };
+  else if (authKind === "custom_headers") {
+    const raw = item.querySelector('[data-mcp-secret="headers"]')?.value.trim();
+    auth = raw ? { kind: authKind, headers: parseHeaderJson(raw) } : { kind: authKind, headerNames: JSON.parse(item.dataset.headerNames || "[]") };
+  } else auth = { kind: "none" };
+  return {
+    ...(item.dataset.serverId ? { id: item.dataset.serverId } : {}),
+    displayName: field("displayName"), key: field("key"), transport: "http", url: field("url"),
+    ...(field("protocolVersion") ? { protocolVersion: field("protocolVersion") } : {}),
+    ...(field("timeoutMs") ? { timeoutMs: Number(field("timeoutMs")) } : {}),
+    auth,
+    ...(toolAllowlist.length === 0 ? {} : { toolAllowlist }),
+    ...(toolBlocklist.length === 0 ? {} : { toolBlocklist }),
+    ...(item.dataset.trust ? { trust: item.dataset.trust } : {}),
+    aliases: JSON.parse(item.dataset.aliases || "[]"),
+    capabilities: JSON.parse(item.dataset.capabilities || "[]"),
+  };
+}
+
+function commaSeparatedValues(value) {
+  return [...new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean))];
+}
+
+function optionalSecret(item, name) {
+  const value = item.querySelector(`[data-mcp-secret="${name}"]`)?.value;
+  return value ? { [name]: value } : {};
+}
+
+function parseHeaderJson(raw) {
+  const value = JSON.parse(raw);
+  if (!value || Array.isArray(value) || typeof value !== "object" || Object.values(value).some((item) => typeof item !== "string" || item.length === 0)) throw new Error("自定义 Headers 必须是值为非空字符串的 JSON 对象");
+  return value;
 }
 
 async function deleteLocalRuntime(runtimeId = localRuntimeState.runtimeId) {
@@ -1056,28 +1373,46 @@ async function hydratePersistedAssistant(assistant, tenantId, userId, includeCom
   if (includeCommandEvidence) await hydrateCommandEvidence(assistant, tenantId, userId);
 }
 
-async function reconcilePersistedRuns() {
+function reconcilePersistedRuns() {
+  const coordination = runtimeCoordinationState();
+  if (coordination.persistedReconciliation) return coordination.persistedReconciliation;
+  const reconciliation = reconcilePersistedRunsNow().finally(() => {
+    if (coordination.persistedReconciliation === reconciliation) coordination.persistedReconciliation = undefined;
+  });
+  coordination.persistedReconciliation = reconciliation;
+  return reconciliation;
+}
+
+async function reconcilePersistedRunsNow() {
   const tenantId = $("tenant-id").value.trim();
   const userId = $("user-id").value.trim();
   if (!tenantId || !userId) return;
+  const coordination = runtimeCoordinationState();
   let changed = false;
   await Promise.all(conversationState.sessions.flatMap((conversation) => (conversation.messages || []).map(async (message) => {
-    if (message?.role !== "assistant" || typeof message.assignmentId !== "string" || runState.activeByConversation.has(conversation.id)) return;
+    if (message?.role !== "assistant" || typeof message.assignmentId !== "string") return;
     const confirmedTerminal = (message.events || []).some((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type));
     if (message.status !== "running" && !(message.status === "failed" && !confirmedTerminal) && !hasIncompleteCompletedPlan(message)) return;
-    if (message.status === "running") {
-      resumeAssignmentObservation(conversation, message, tenantId, userId);
-      return;
-    }
     try {
       const response = await fetch(`${api}/v1/assignments/${encodeURIComponent(message.assignmentId)}`, { headers: { "x-tenant-id": tenantId, "x-user-id": userId } });
-      if (!response.ok) return;
-      const body = await response.json();
-      if (applyRecoveredRunState(message, body?.run)) changed = true;
+      if (response.ok) {
+        const body = await response.json();
+        if (applyRecoveredRunState(message, body?.run)) changed = true;
+      }
       if (await replayPersistedRunEvents(message, tenantId, userId)) changed = true;
-      if (await refreshHumanLoop(message.assignmentId, message, tenantId, userId)) changed = true;
-      if (message.status === "running") resumeAssignmentObservation(conversation, message, tenantId, userId);
     } catch {}
+    if (["completed", "failed", "cancelled"].includes(message.status)) {
+      const activeRun = coordination.activeByConversation.get(conversation.id);
+      if (activeRun?.assignmentId === message.assignmentId) {
+        activeRun.abortController?.abort();
+        coordination.activeByConversation.delete(conversation.id);
+        changed = true;
+      }
+      return;
+    }
+    if (message.status !== "running") return;
+    if (await refreshHumanLoop(message.assignmentId, message, tenantId, userId)) changed = true;
+    if (!coordination.activeByConversation.has(conversation.id)) resumeAssignmentObservation(conversation, message, tenantId, userId);
   })));
   if (changed) { saveSessions(); render(); }
 }

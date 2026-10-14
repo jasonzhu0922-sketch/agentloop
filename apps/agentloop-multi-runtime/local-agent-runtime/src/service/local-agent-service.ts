@@ -1,13 +1,17 @@
 import { basename, dirname, join, resolve } from "node:path";
 import { hostname } from "node:os";
-import { mkdir, rm } from "node:fs/promises";
-import { AppDatabase } from "@zhujun/agentloop";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { AppDatabase, loadMcpToolsFromConfig, parseMcpServersConfig, type McpServerRegistration, type McpServersConfig } from "@zhujun/agentloop";
 import type { LocalAgentOptions } from "../config/local-agent-options.ts";
-import { LocalRuntimeFactory } from "./local-runtime-factory.ts";
+import { LocalRuntimeFactory, redactMcpDiagnostic } from "./local-runtime-factory.ts";
 import { LocalRuntimeSupervisor, LocalRuntimeSupervisorError, type LocalRuntimeControl, type LocalRuntimeDefinition } from "./runtime-supervisor.ts";
 import { RuntimeConnectionClient } from "../connection/router-runtime-control-client.ts";
 import { pickNativeDirectory } from "../infrastructure/native-directory-picker.ts";
 import { LocalAgentStateStore, type LocalAgentState } from "../persistence/local-agent-state-store.ts";
+import { LocalRuntimeConfigurationStore, type LocalRuntimeConfigurationInput, type LocalRuntimeMcpServerInput } from "../persistence/local-runtime-configuration-store.ts";
+import { EncryptedLocalRuntimeSecretStore } from "../persistence/encrypted-local-runtime-secret-store.ts";
+import { loadSkillDirectoriesConfig } from "../../../src/shared/config.ts";
+import { LocalSkillPackageInstaller } from "./local-skill-package-installer.ts";
 
 export const LOCAL_AGENT_VERSION = "0.1.0";
 export const LOCAL_AGENT_PROTOCOL_VERSION = "1";
@@ -25,16 +29,18 @@ export class LocalAgentService {
   private readonly input: LocalAgentOptions;
   private readonly stateStore: LocalAgentStateStore;
   private readonly supervisor: LocalRuntimeSupervisor;
+  private readonly configurations: LocalRuntimeConfigurationStore;
+  private readonly skillPackageInstaller: LocalSkillPackageInstaller;
   private readonly picker: () => Promise<string | undefined>;
   private readonly sharedStorageRoot: { value: string };
   private readonly uploadStorageRoot: { value: string };
   private constructor(
     input: LocalAgentOptions, stateStore: LocalAgentStateStore,
-    supervisor: LocalRuntimeSupervisor, picker: () => Promise<string | undefined>,
+    supervisor: LocalRuntimeSupervisor, configurations: LocalRuntimeConfigurationStore, skillPackageInstaller: LocalSkillPackageInstaller, picker: () => Promise<string | undefined>,
     sharedStorageRoot: { value: string }, uploadStorageRoot: { value: string },
   ) {
     this.input = input; this.stateStore = stateStore;
-    this.supervisor = supervisor; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
+    this.supervisor = supervisor; this.configurations = configurations; this.skillPackageInstaller = skillPackageInstaller; this.picker = picker; this.sharedStorageRoot = sharedStorageRoot; this.uploadStorageRoot = uploadStorageRoot;
   }
 
   static async create(input: LocalAgentOptions): Promise<LocalAgentService> {
@@ -51,19 +57,32 @@ export class LocalAgentService {
     const factory = new LocalRuntimeFactory(input);
     // Device-local Runtime state deliberately remains SQLite-only. The shared
     // Router/Host database adapter is not a valid replacement at this boundary.
-    const supervisorDatabase = new AppDatabase(input.supervisorDatabasePath ?? join(dirname(input.databasePath), "supervisor.db"));
+    const supervisorDatabasePath = input.supervisorDatabasePath ?? join(dirname(input.databasePath), "supervisor.db");
+    const supervisorDatabase = new AppDatabase(supervisorDatabasePath);
+    const customSkillDirectories = await loadSkillDirectoriesConfig({
+      appRoot: input.appRoot,
+      configPath: input.skillDirectoriesConfigPath,
+    });
+    const secretStore = new EncryptedLocalRuntimeSecretStore(join(dirname(supervisorDatabasePath), "runtime-secrets"));
+    const uploadedSkillPackageRoot = join(input.skillPackageStoreRoot, "uploaded");
+    const skillPackageInstaller = new LocalSkillPackageInstaller(uploadedSkillPackageRoot);
+    const configurations = new LocalRuntimeConfigurationStore(supervisorDatabase, secretStore, customSkillDirectories, uploadedSkillPackageRoot);
     const supervisor = new LocalRuntimeSupervisor(
       supervisorDatabase,
-      (definition) => factory.create(definition, sharedStorageRoot.value, uploadStorageRoot.value),
+      (definition, configuration) => factory.create(definition, configuration, sharedStorageRoot.value, uploadStorageRoot.value),
       async (definition) => {
         const runtimeRoot = factory.runtimeRootFor(definition);
         if (runtimeRoot !== undefined) await rm(runtimeRoot, { recursive: true, force: true });
         await rm(factory.runtimeUploadRootFor(definition, uploadStorageRoot.value), { recursive: true, force: true });
       },
       input.maxConcurrentRuns,
+      configurations,
     );
-    await supervisor.ready(state.defaultRuntimeId);
-    const service = new LocalAgentService(input, stateStore, supervisor, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
+    await supervisor.ready(state.defaultRuntimeId, {
+      mcpConfiguration: await readLegacyLocalMcpConfiguration(input.mcpServersConfigPath),
+      integrationEnvironment: input.integrationEnvironment,
+    });
+    const service = new LocalAgentService(input, stateStore, supervisor, configurations, skillPackageInstaller, input.directoryPicker ?? pickNativeDirectory, sharedStorageRoot, uploadStorageRoot);
     service.connection = new RuntimeConnectionClient(input.routerUrl, supervisor, (method, payload) => service.agentControl(method, payload));
     await service.connection.ready();
     if (state.device !== undefined) service.connection.setDevice(state.device);
@@ -127,6 +146,52 @@ export class LocalAgentService {
 
   async revokeDirectoryScope(runtimeId: string, scopeId: string): Promise<void> {
     await this.supervisor.runtime(runtimeId).scopes.revoke(scopeId);
+  }
+
+  async listLocalSkillPackages(): Promise<unknown> {
+    return { skills: await this.configurations.listSkillPackages() };
+  }
+
+  async installLocalSkillPackage(originalName: string, content: Buffer): Promise<unknown> {
+    const installed = await this.skillPackageInstaller.installZip(content, originalName);
+    return { skill: await this.configurations.registerUploadedPackage(installed) };
+  }
+
+  async testLocalMcpServer(server: LocalRuntimeMcpServerInput): Promise<unknown> {
+    const { registration, secretValues, environment } = transientMcpRegistration(server);
+    const result = await loadMcpToolsFromConfig({ servers: [registration] }, { environment });
+    const failure = result.failedServers[0];
+    if (failure !== undefined) {
+      const message = redactMcpDiagnostic(failure.message, secretValues);
+      return { ok: false, stage: mcpFailureStage(message), error: message };
+    }
+    return {
+      ok: true,
+      toolCount: result.tools.length,
+      tools: result.tools.map((tool) => tool.name),
+    };
+  }
+
+  async createLocalRuntime(displayName: string, configuration: LocalRuntimeConfigurationInput): Promise<unknown> {
+    const runtime = await this.supervisor.create(displayName, configuration);
+    return { runtime, configuration: await this.supervisor.configuration(runtime.id) };
+  }
+
+  async localRuntimeConfiguration(runtimeId: string): Promise<unknown> {
+    return { configuration: await this.supervisor.configuration(runtimeId) };
+  }
+
+  async updateLocalRuntimeConfiguration(runtimeId: string, configuration: LocalRuntimeConfigurationInput, displayName?: string): Promise<unknown> {
+    const updated = await this.supervisor.updateConfiguration(runtimeId, configuration, displayName);
+    return { runtime: (await this.supervisor.list()).find((runtime) => runtime.id === runtimeId), configuration: updated };
+  }
+
+  async startLocalRuntime(runtimeId: string): Promise<unknown> {
+    return { runtime: await this.supervisor.start(runtimeId) };
+  }
+
+  async stopLocalRuntime(runtimeId: string): Promise<unknown> {
+    return { runtime: await this.supervisor.stop(runtimeId) };
   }
 
   async upload(session: LocalSession, value: { runtimeId: string; conversationId: string; originalName: string; content: Buffer; mediaType?: string }): Promise<unknown> {
@@ -266,4 +331,75 @@ function requiredString(value: unknown, name: string): string {
 
 function toStatus(run: { readonly id: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly modelKey?: string; readonly output?: string; readonly errorCode?: string; readonly finishedAt?: number }) {
   return { remoteRunId: run.id, status: run.status, ...(run.modelKey === undefined ? {} : { modelKey: run.modelKey }), ...(run.output === undefined ? {} : { output: run.output }), ...(run.errorCode === undefined ? {} : { errorCode: run.errorCode }), ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }) };
+}
+
+export async function readLegacyLocalMcpConfiguration(path: string | undefined): Promise<McpServersConfig | undefined> {
+  if (path === undefined) return undefined;
+  const source = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (source === undefined) return undefined;
+  return parseMcpServersConfig(JSON.parse(source), `legacy Local Runtime MCP configuration file ${resolve(path)}`);
+}
+
+function transientMcpRegistration(server: LocalRuntimeMcpServerInput): { registration: McpServerRegistration; secretValues: readonly string[]; environment: Readonly<Record<string, string>> } {
+  let endpoint: URL;
+  try { endpoint = new URL(server.url); } catch { throw new LocalAgentApplicationError(400, "mcp_configuration_invalid"); }
+  if ((endpoint.protocol !== "http:" && endpoint.protocol !== "https:") || endpoint.username !== "" || endpoint.password !== "") throw new LocalAgentApplicationError(400, "mcp_configuration_invalid");
+  for (const name of endpoint.searchParams.keys()) {
+    if (/(?:token|secret|password|api[-_]?key|auth)/i.test(name)) throw new LocalAgentApplicationError(400, "mcp_secret_must_use_auth_fields");
+  }
+  const secretValues: string[] = [];
+  const environment: Record<string, string> = {};
+  let auth: McpServerRegistration["auth"] = { kind: "none" };
+  if (server.auth.kind === "bearer") {
+    const token = requiredCredential(server.auth.token);
+    secretValues.push(token);
+    auth = { kind: "headers", headers: { Authorization: `Bearer ${token}` } };
+  } else if (server.auth.kind === "api_key_header") {
+    const value = requiredCredential(server.auth.value);
+    secretValues.push(value);
+    auth = { kind: "headers", headers: { [server.auth.headerName]: value } };
+  } else if (server.auth.kind === "basic") {
+    const password = requiredCredential(server.auth.password);
+    const authorization = `Basic ${Buffer.from(`${server.auth.username}:${password}`).toString("base64")}`;
+    secretValues.push(password, authorization);
+    auth = { kind: "headers", headers: { Authorization: authorization } };
+  } else if (server.auth.kind === "query_parameter") {
+    const value = requiredCredential(server.auth.value);
+    secretValues.push(value);
+    environment.LOCAL_RUNTIME_MCP_TEST_QUERY = value;
+    auth = { kind: "query", name: server.auth.parameterName, secretEnv: "LOCAL_RUNTIME_MCP_TEST_QUERY" };
+  } else if (server.auth.kind === "custom_headers") {
+    if (server.auth.headers === undefined) throw new LocalAgentApplicationError(400, "mcp_credential_required");
+    secretValues.push(...Object.values(server.auth.headers));
+    auth = { kind: "headers", headers: server.auth.headers };
+  }
+  const registration = parseMcpServersConfig({ servers: [{
+    key: server.key,
+    transport: server.transport,
+    url: server.url,
+    ...(server.protocolVersion === undefined ? {} : { protocolVersion: server.protocolVersion }),
+    ...(server.timeoutMs === undefined ? {} : { timeoutMs: server.timeoutMs }),
+    ...(server.toolAllowlist === undefined ? {} : { toolAllowlist: server.toolAllowlist }),
+    ...(server.toolBlocklist === undefined ? {} : { toolBlocklist: server.toolBlocklist }),
+    ...(server.trust === undefined ? {} : { trust: server.trust }),
+    ...(server.aliases === undefined ? {} : { aliases: server.aliases }),
+    ...(server.capabilities === undefined ? {} : { capabilities: server.capabilities }),
+    auth,
+  }] }, "MCP connection test").servers[0]!;
+  return { registration, secretValues, environment };
+}
+
+function requiredCredential(value: string | undefined): string {
+  if (value === undefined || value.length === 0) throw new LocalAgentApplicationError(400, "mcp_credential_required");
+  return value;
+}
+
+function mcpFailureStage(message: string): "authentication" | "initialize" | "tools_list" | "connection" {
+  if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication/i.test(message)) return "authentication";
+  if (/tools\/list/i.test(message)) return "tools_list";
+  if (/initialize/i.test(message)) return "initialize";
+  return "connection";
 }

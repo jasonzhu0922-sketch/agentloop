@@ -16,4 +16,5 @@ test("run state isolates active execution coordination from conversation indexin
   assert.ok(state.deletingConversationIds.has("conversation-2"));
   assert.ok(state.hydratedDetailAssignmentIds.has("assignment-2"));
   assert.ok(state.pendingLiveAssistantIds.has("assistant-1"));
+  assert.equal(state.persistedReconciliation, undefined);
 });

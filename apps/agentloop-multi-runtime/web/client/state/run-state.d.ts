@@ -5,6 +5,7 @@ export interface RunState {
   deletingConversationIds: Set<string>;
   hydratedDetailAssignmentIds: Set<string>;
   pendingLiveAssistantIds: Set<string>;
+  persistedReconciliation?: Promise<void>;
 }
 
 export function createRunState(): RunState;

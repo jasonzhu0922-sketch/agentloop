@@ -59,9 +59,12 @@
       </main>
     </div>
     <div id="runtime-create-modal" class="runtime-modal runtime-modal-child" hidden>
-      <form id="runtime-create-form" class="runtime-modal-card">
-        <div><strong>新建本机 Runtime</strong><p>每个 Runtime 保留独立执行状态，产物工作区由设备级共享存储统一提供；Skill 在 Runtime 启动时统一加载。</p></div>
+      <form id="runtime-create-form" class="runtime-modal-card runtime-capability-card">
+        <div><strong>新建本机 Runtime</strong></div>
         <label>名称<input id="runtime-create-name" type="text" maxlength="100" autocomplete="off" placeholder="例如：研究助理" required /></label>
+        <div class="runtime-capability-tabs" role="tablist" aria-label="Runtime 扩展配置"><button id="runtime-create-skills-tab" type="button" role="tab" aria-selected="true" aria-controls="runtime-create-skills-panel" data-runtime-capability-tab="skills">Skills</button><button id="runtime-create-mcp-tab" type="button" role="tab" aria-selected="false" aria-controls="runtime-create-mcp-panel" data-runtime-capability-tab="mcp" tabindex="-1">MCP Servers</button></div>
+        <section id="runtime-create-skills-panel" class="runtime-capability-section" role="tabpanel" aria-labelledby="runtime-create-skills-tab" data-runtime-capability-panel="skills"><div class="runtime-capability-head"><div><strong>扩展 Skills</strong><small>内核 Skills 已默认加载</small></div><button id="runtime-create-skill-upload" type="button">上传 Skill</button><input id="runtime-create-skill-file" type="file" accept=".zip,application/zip" hidden /></div><div id="runtime-create-skills" class="runtime-skill-options"></div></section>
+        <section id="runtime-create-mcp-panel" class="runtime-capability-section" role="tabpanel" aria-labelledby="runtime-create-mcp-tab" data-runtime-capability-panel="mcp" hidden><div class="runtime-capability-head"><strong>MCP Servers</strong><div class="runtime-capability-head-actions"><button id="runtime-create-mcp-json" type="button">JSON 导入</button><button id="runtime-create-mcp-add" type="button">新增</button></div></div><div id="runtime-create-mcp" class="runtime-mcp-list"></div></section>
         <div class="runtime-modal-actions"><button id="runtime-create-cancel" type="button">取消</button><button type="submit" class="primary">创建</button></div>
       </form>
     </div>
@@ -73,9 +76,9 @@
         <div class="runtime-modal-actions"><button id="agent-install-cancel" type="button">稍后</button><a id="agent-install-download" class="button primary" href="#" download hidden>下载安装包</a></div>
       </div>
     </div>
-    <div id="agent-settings-modal" class="runtime-modal" hidden>
+    <div id="agent-settings-modal" class="runtime-modal" role="dialog" aria-modal="true" aria-labelledby="agent-settings-title" hidden>
       <div class="runtime-modal-card agent-settings-card">
-        <div><strong>Local Runtime Agent 设置</strong><p>这是设备级 Supervisor。所有子 Runtime 共享同一工作目录与上传源文件根目录；Skill 仍在各 Runtime 启动时按统一配置加载。</p></div>
+        <div class="agent-settings-header"><div><strong id="agent-settings-title">Local Runtime Agent 设置</strong><p>这是设备级 Supervisor。所有子 Runtime 共享同一工作目录与上传源文件根目录；Skill 仍在各 Runtime 启动时按统一配置加载。</p></div><button id="agent-settings-close-icon" class="runtime-modal-close" type="button" title="关闭" aria-label="关闭 Local Runtime Agent 设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>
         <dl class="settings-detail"><dt>Agent</dt><dd id="agent-settings-version">-</dd><dt>服务端</dt><dd id="agent-router-url">-</dd><dt>共享工作目录</dt><dd class="settings-detail-value"><span id="agent-settings-storage">-</span><button id="agent-storage-pick" class="icon-button" type="button" title="编辑共享工作目录" aria-label="编辑共享工作目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>上传源文件目录</dt><dd class="settings-detail-value"><span id="agent-settings-upload-storage">-</span><button id="agent-upload-storage-pick" class="icon-button" type="button" title="编辑上传源文件目录" aria-label="编辑上传源文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg></button></dd><dt>Skill 模式</dt><dd>Runtime 启动时统一加载</dd></dl>
         <p class="install-security-note">切换任一目录前必须没有活动任务；原位置数据不会被自动删除。上传源文件在公共根目录内按 Runtime 分区，删除子 Runtime 只回收其自身分区。</p>
         <section id="local-runtime-manager" class="local-runtime-manager agent-runtime-manager" aria-labelledby="local-runtime-manager-title" hidden>
@@ -85,15 +88,35 @@
         <div class="runtime-modal-actions"><button id="agent-settings-close" type="button">完成</button></div>
       </div>
     </div>
+    <div id="runtime-detail-modal" class="runtime-modal runtime-modal-child" hidden>
+      <section id="runtime-detail-card" class="runtime-modal-card runtime-capability-card runtime-detail-card" aria-labelledby="runtime-detail-name">
+        <div class="runtime-detail-header"><div><strong id="runtime-detail-name">Runtime 详情</strong><small>只读配置</small></div><dl class="settings-detail"><dt>Runtime ID</dt><dd id="runtime-detail-id">-</dd><dt>状态</dt><dd id="runtime-detail-status">-</dd></dl></div>
+        <div class="runtime-capability-tabs" role="tablist" aria-label="Runtime 扩展详情"><button id="runtime-detail-skills-tab" type="button" role="tab" aria-selected="true" aria-controls="runtime-detail-skills-panel" data-runtime-capability-tab="skills">Skills</button><button id="runtime-detail-mcp-tab" type="button" role="tab" aria-selected="false" aria-controls="runtime-detail-mcp-panel" data-runtime-capability-tab="mcp" tabindex="-1">MCP Servers</button></div>
+        <section id="runtime-detail-skills-panel" class="runtime-capability-section" role="tabpanel" aria-labelledby="runtime-detail-skills-tab" data-runtime-capability-panel="skills"><div class="runtime-capability-head"><div><strong>扩展 Skills</strong><small>内核 Skills 已默认加载</small></div></div><div id="runtime-detail-skills" class="runtime-detail-list"></div></section>
+        <section id="runtime-detail-mcp-panel" class="runtime-capability-section" role="tabpanel" aria-labelledby="runtime-detail-mcp-tab" data-runtime-capability-panel="mcp" hidden><div class="runtime-capability-head"><strong>MCP Servers</strong></div><div id="runtime-detail-mcp" class="runtime-detail-list"></div></section>
+        <div class="runtime-modal-actions"><button id="runtime-detail-close" type="button">关闭</button></div>
+      </section>
+    </div>
     <div id="runtime-config-modal" class="runtime-modal runtime-modal-child" hidden>
-      <form id="runtime-config-form" class="runtime-modal-card">
-        <div><strong>配置子 Runtime</strong><p id="runtime-config-description">Runtime 共享设备存储和 Skill 来源，但保留独立执行状态。</p></div>
+      <form id="runtime-config-form" class="runtime-modal-card runtime-capability-card">
+        <div><strong>配置子 Runtime</strong></div>
         <label>名称<input id="runtime-config-name" type="text" maxlength="100" autocomplete="off" required /></label>
         <dl class="settings-detail"><dt>Runtime ID</dt><dd id="runtime-config-id">-</dd><dt>状态</dt><dd id="runtime-config-status">-</dd></dl>
+        <div class="runtime-capability-tabs" role="tablist" aria-label="Runtime 扩展配置"><button id="runtime-config-skills-tab" type="button" role="tab" aria-selected="true" aria-controls="runtime-config-skills-panel" data-runtime-capability-tab="skills">Skills</button><button id="runtime-config-mcp-tab" type="button" role="tab" aria-selected="false" aria-controls="runtime-config-mcp-panel" data-runtime-capability-tab="mcp" tabindex="-1">MCP Servers</button></div>
+        <section id="runtime-config-skills-panel" class="runtime-capability-section" role="tabpanel" aria-labelledby="runtime-config-skills-tab" data-runtime-capability-panel="skills"><div class="runtime-capability-head"><div><strong>扩展 Skills</strong><small>内核 Skills 已默认加载</small></div><button id="runtime-config-skill-upload" type="button">上传 Skill</button><input id="runtime-config-skill-file" type="file" accept=".zip,application/zip" hidden /></div><div id="runtime-config-skills" class="runtime-skill-options"></div></section>
+        <section id="runtime-config-mcp-panel" class="runtime-capability-section" role="tabpanel" aria-labelledby="runtime-config-mcp-tab" data-runtime-capability-panel="mcp" hidden><div class="runtime-capability-head"><strong>MCP Servers</strong><div class="runtime-capability-head-actions"><button id="runtime-config-mcp-json" type="button">JSON 导入</button><button id="runtime-config-mcp-add" type="button">新增</button></div></div><div id="runtime-config-mcp" class="runtime-mcp-list"></div></section>
         <div class="runtime-modal-actions"><button id="runtime-config-cancel" type="button">取消</button><button type="submit" class="primary">保存</button></div>
       </form>
     </div>
     <div id="command-detail-modal"></div>
+    <div id="mcp-json-modal" class="runtime-modal runtime-modal-child runtime-json-modal" hidden>
+      <form id="mcp-json-form" class="runtime-modal-card runtime-json-card">
+        <strong>导入 MCP JSON</strong>
+        <label>MCP JSON<textarea id="mcp-json-input" spellcheck="false" placeholder='{ "mcpServers": { "amap-maps": { "url": "https://mcp.amap.com/mcp?key=..." } } }' required></textarea></label>
+        <small id="mcp-json-error" class="runtime-json-error" role="alert"></small>
+        <div class="runtime-modal-actions"><button id="mcp-json-cancel" type="button">取消</button><button type="submit" class="primary">导入</button></div>
+      </form>
+    </div>
     <script src="/runtime-config.js"></script>
     <script type="module" src="/artifact-preview.js"></script>
     <script type="module" src="/client/app.js"></script>

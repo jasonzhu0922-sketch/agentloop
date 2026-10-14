@@ -97,6 +97,34 @@ test("directory-discovered Skill execution roots are immutable copies, never the
   }
 });
 
+test("explicit Skill package roots include only the selected package, not its siblings", async () => {
+  const fixture = await createDirectoryFixture();
+  const sibling = resolve(fixture.skillDirectory, "unselected-sibling");
+  await fs.mkdir(sibling, { recursive: true });
+  await fs.writeFile(resolve(sibling, "SKILL.md"), [
+    "---",
+    "name: unselected-sibling",
+    "description: Must remain outside the selected catalog.",
+    "---",
+    "",
+    "Do not load this sibling.",
+  ].join("\n"));
+  const database = new AppDatabase(":memory:");
+  try {
+    const skills = new SkillService(database, {
+      packageStoreRoot: fixture.packageStore,
+      skillPackageRoots: [fixture.sourcePackage],
+    });
+    assert.deepEqual(skills.skillPackageRoots, [await fs.realpath(fixture.sourcePackage)]);
+    const catalog = await skills.refreshSkillDirectory();
+    assert.deepEqual(catalog.map((item) => item.name), ["directory-demo"]);
+  } finally {
+    await database.close();
+    await removeSkillPackage(fixture.packageStore).catch(() => undefined);
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("discovered Skill references stay canonical across admission, grant, and load_skill", async () => {
   const fixture = await createDirectoryFixture();
   const database = new AppDatabase(":memory:");
