@@ -9,6 +9,7 @@ import type {
   SubmitConversationTask,
 } from "../../shared/contracts.ts";
 import type { RuntimeArtifact } from "../../shared/contracts.ts";
+import { ConversationDispatchInProgressError, ConversationRuntimeBindingError } from "../ports/control-plane-contracts.ts";
 
 interface RegisteredRuntime {
   readonly instance: RuntimeInstance;
@@ -26,6 +27,8 @@ export class MultiRuntimeRouter {
   private readonly runtimes = new Map<string, RegisteredRuntime>();
   private readonly assignmentsByMessage = new Map<string, Promise<RuntimeAssignment>>();
   private readonly assignmentsById = new Map<string, Promise<RuntimeAssignment>>();
+  private readonly runtimeByConversation = new Map<string, string>();
+  private readonly dispatchingConversations = new Set<string>();
 
   register(instance: RuntimeInstance, endpoint: RuntimeControlPort): void {
     if (instance.maxConcurrentRuns < 1) throw new TypeError("maxConcurrentRuns must be positive");
@@ -88,43 +91,64 @@ export class MultiRuntimeRouter {
   }
 
   private async dispatch(task: SubmitConversationTask): Promise<RuntimeAssignment> {
-    const selected = this.selectRuntime(task.requestedRuntimeId, task.requestedProfile, task.requiredCapabilities ?? []);
-    selected.reservedRuns += 1;
-    const assignmentId = `assignment_${randomUUID()}`;
-    const dispatchKey = `dispatch_${randomUUID()}`;
-    const envelope: RuntimeDispatchEnvelope = {
-      schema: "agentloop.runtimeDispatch/v1",
-      assignmentId,
-      dispatchKey,
-      subject: { tenantId: task.tenantId, userId: task.ownerUserId },
-      conversationId: task.conversationId,
-      input: task.input,
-      executionTarget: task.executionTarget ?? { kind: "cloud_pool", ...(task.requestedProfile === undefined ? {} : { profile: task.requestedProfile }) },
-      dataPolicy: task.dataPolicy ?? { mode: "cloud" },
-      ...(task.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: task.requestedRuntimeId }),
-      ...(task.requestedProfile === undefined ? {} : { requestedProfile: task.requestedProfile }),
-      ...(task.requestedModelKey === undefined ? {} : { requestedModelKey: task.requestedModelKey }),
-      allowDangerousTools: task.allowDangerousTools !== false,
-      resourceRefs: task.resourceRefs ?? [],
-    };
+    const conversationKey = [task.tenantId, task.ownerUserId, task.conversationId].join("\u0000");
+    if (this.dispatchingConversations.has(conversationKey)) throw new ConversationDispatchInProgressError();
+    this.dispatchingConversations.add(conversationKey);
+    const boundRuntimeId = this.runtimeByConversation.get(conversationKey);
     try {
-      const accepted = await selected.endpoint.dispatch(envelope);
-      return {
-        id: assignmentId,
-        runtimeId: selected.instance.id,
+      this.assertBindingMatchesTarget(boundRuntimeId, task);
+      const selected = this.selectRuntime(boundRuntimeId ?? task.requestedRuntimeId, task.requestedProfile, task.requiredCapabilities ?? [], boundRuntimeId !== undefined);
+      selected.reservedRuns += 1;
+      const assignmentId = `assignment_${randomUUID()}`;
+      const dispatchKey = `dispatch_${randomUUID()}`;
+      const envelope: RuntimeDispatchEnvelope = {
+        schema: "agentloop.runtimeDispatch/v1",
+        assignmentId,
         dispatchKey,
-        remoteRunId: accepted.remoteRunId,
-        tenantId: task.tenantId,
+        subject: { tenantId: task.tenantId, userId: task.ownerUserId },
         conversationId: task.conversationId,
-        ownerUserId: task.ownerUserId,
+        input: task.input,
+        executionTarget: task.executionTarget ?? { kind: "cloud_pool", ...(task.requestedProfile === undefined ? {} : { profile: task.requestedProfile }) },
+        dataPolicy: task.dataPolicy ?? { mode: "cloud" },
+        ...(task.requestedRuntimeId === undefined ? {} : { requestedRuntimeId: task.requestedRuntimeId }),
+        ...(task.requestedProfile === undefined ? {} : { requestedProfile: task.requestedProfile }),
+        ...(task.requestedModelKey === undefined ? {} : { requestedModelKey: task.requestedModelKey }),
+        allowDangerousTools: task.allowDangerousTools !== false,
+        resourceRefs: task.resourceRefs ?? [],
       };
-    } catch (error) {
-      selected.reservedRuns -= 1;
-      throw error;
+      try {
+        const accepted = await selected.endpoint.dispatch(envelope);
+        this.runtimeByConversation.set(conversationKey, selected.instance.id);
+        return {
+          id: assignmentId,
+          runtimeId: selected.instance.id,
+          dispatchKey,
+          remoteRunId: accepted.remoteRunId,
+          tenantId: task.tenantId,
+          conversationId: task.conversationId,
+          ownerUserId: task.ownerUserId,
+        };
+      } catch (error) {
+        selected.reservedRuns -= 1;
+        throw error;
+      }
+    } finally {
+      this.dispatchingConversations.delete(conversationKey);
     }
   }
 
-  private selectRuntime(requestedRuntimeId: string | undefined, profile: RuntimeProfile | undefined, required: readonly string[]): RegisteredRuntime {
+  private assertBindingMatchesTarget(boundRuntimeId: string | undefined, task: SubmitConversationTask): void {
+    if (boundRuntimeId === undefined) return;
+    const bound = this.runtimes.get(boundRuntimeId);
+    if (bound === undefined) throw new ConversationRuntimeBindingError(boundRuntimeId, "unavailable");
+    const target = task.executionTarget ?? { kind: "cloud_pool" as const };
+    const matches = target.kind === "local_device"
+      ? bound.instance.kind === "local" && bound.instance.deviceId === target.deviceId && bound.instance.id === target.runtimeId
+      : bound.instance.kind !== "local" && (task.requestedRuntimeId === undefined || task.requestedRuntimeId === boundRuntimeId);
+    if (!matches) throw new ConversationRuntimeBindingError(boundRuntimeId, "conflict");
+  }
+
+  private selectRuntime(requestedRuntimeId: string | undefined, profile: RuntimeProfile | undefined, required: readonly string[], bound = false): RegisteredRuntime {
     if (requestedRuntimeId !== undefined && !this.runtimes.has(requestedRuntimeId)) {
       throw new TypeError(`Runtime \"${requestedRuntimeId}\" is not registered`);
     }
@@ -142,7 +166,10 @@ export class MultiRuntimeRouter {
         || left.instance.id.localeCompare(right.instance.id),
       );
     const selected = candidates[0];
-    if (selected === undefined && requestedRuntimeId !== undefined) throw new RuntimeCapacityError(`Runtime \"${requestedRuntimeId}\" is not ready or has no reservable capacity slot`);
+    if (selected === undefined && requestedRuntimeId !== undefined) {
+      if (bound) throw new ConversationRuntimeBindingError(requestedRuntimeId, "unavailable");
+      throw new RuntimeCapacityError(`Runtime \"${requestedRuntimeId}\" is not ready or has no reservable capacity slot`);
+    }
     if (selected === undefined) throw new RuntimeCapacityError("No ready Runtime satisfies this task's profile, capabilities, and capacity");
     return selected;
   }

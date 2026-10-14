@@ -1,6 +1,6 @@
 # Multi Runtime 共享状态与故障接管设计
 
-状态：提案
+状态：提案；其中“会话跨 Runtime 迁移”已被严格会话绑定决策取代
 适用范围：`apps/agentloop-multi-runtime` 的本地开发与生产部署
 关联文档：[多 Runtime 负载分流设计](./MULTI-RUNTIME-LOAD-BALANCING-DESIGN.md)
 
@@ -13,7 +13,7 @@ Multi Runtime 的 Runtime Host 应是可替换的执行器，而不是某个 Run
 - **生产使用 PostgreSQL + 对象存储 + RWX workspace。** PostgreSQL 负责事务状态；对象存储负责不可变附件与交付物；RWX 文件系统承载执行期间需要 POSIX 语义的工作区。
 - **本地开发可使用共享 SQLite/WAL + 本地文件 BlobStore。** 它只适用于单机、低并发、本地磁盘；不是多节点生产方案。
 
-这样，Host1 卸载或失联后，Router 能把未终结 Run 交给 Host2 从持久化边界恢复；不会把“Host1 的本地数据库仍可访问”当作可用性前提。
+这样，承载同一逻辑 Runtime 身份的进程副本可以在 lease/fence 保护下恢复未终结 Run；这不授权把会话改绑到另一个 Runtime ID。当前实现尚未声明完成自动接管，原 Runtime 不可用时会话会明确失败并等待恢复。
 
 ## 2. 当前拓扑与首个断裂边界
 
@@ -74,8 +74,9 @@ Router 是任务与租约的调度权威；Host 是某一租约期内 Run 的执
 - Router 表：Runtime 节点、任务、Assignment、健康快照和调度事件；
 - `run_leases`：Run 当前执行者、过期时间、fence、接管原因；
 - `dispatch_receipts`：`dispatchKey` 与 Run 的幂等映射；
+- `conversation_dispatch_locks`：首次 accepted receipt 形成绑定前，同一会话唯一的短期派发所有权；
 - 附件与交付物元数据：对象键、哈希、大小、媒体类型、所有者和保留策略；
-- `conversation_runtime_migrations`：会话从旧 Host 迁移到新 Host 的原因和时间。
+- `conversation_runtime_migrations`：仅保留历史迁移审计兼容；严格绑定启用后不再产生新记录。
 
 Host 本地只能保留可丢弃缓存，例如临时模型连接、容器沙箱、Skill 下载缓存与日志镜像。任何恢复所需的事实都不得只写入本地磁盘或进程内 Map。
 
@@ -93,17 +94,16 @@ Router 负责鉴权并向 Host 提供受限的读取凭据、短期签名 URL �
 
 ## 6. 任务、亲和性与均衡调度
 
-前端不选择、不保存也不预绑定 Runtime。提交只创建 `Task(queued)`；只有 Scheduler 实际取得可用槽位时才写入 Assignment 与 Host 租约。
+新会话在前端选择执行位置，本机执行还需选择准确 Runtime。提交只创建 `Task(queued)`；只有 Host 接受并返回非空 `remoteRunId` 后才建立会话绑定。
 
 调度顺序：
 
-1. 筛选心跳有效、profile/capability/model 兼容且容量未满的 Host；
-2. 对同一会话，将最后成功执行的 Host 视为**偏好**，而非强制绑定；
-3. 若偏好 Host 为 healthy 且有容量，优先它；否则按归一化负载选择其他候选 Host；
-4. 记录迁移事件并创建新的 lease；
-5. Host 接受后才持久化 `remoteRunId` 与 accepted receipt。
+1. 未绑定会话筛选心跳有效、profile/capability/model 兼容且容量未满的 Host；
+2. 已绑定会话只允许准确的原 Runtime；执行位置或 Runtime 不一致时返回冲突；
+3. 原 Runtime 不健康、draining、满载或不满足约束时返回不可用，不选择替代 Host；
+4. Host 接受后持久化 `remoteRunId` 与 accepted receipt，并建立绑定。
 
-独立会话始终按容量均衡。`reserved` 只是防止瞬时超卖，不能形成会话 affinity；只有已接受、存在 `remoteRunId` 的执行才可以成为 affinity 候选。
+独立的新会话始终按容量均衡。`reserved` 只是防止瞬时超卖，不能形成永久会话绑定；共享状态库中的短期会话派发锁防止首轮并发选择不同 Runtime，失败或预留过期后释放。
 
 ## 7. Run 租约与 fencing
 
@@ -172,7 +172,7 @@ SQLite 模式需要显式配置 WAL、busy timeout、单一迁移者和 Router �
 3. **BlobStore**：抽象本地文件与 S3，实现 PostgreSQL 元数据、哈希校验和授权读取。
 4. **租约接管**：实现 Run lease、fence、健康过期扫描、Assignment 重派和事件/Terminal 写入 fencing。
 5. **安全恢复**：使用 Action replay policy、工具回执与共享 workspace 从最后安全边界恢复；对不安全窗口显式进入恢复待决。
-6. **亲和性降级**：将会话 affinity 改为健康时的调度偏好；Host draining 或故障时记录迁移并重新均衡。
+6. **严格会话绑定**：Host 首次接受后锁定 Runtime；不可用时要求恢复原 Runtime 或新建会话，不自动迁移。
 7. **演练与上线**：并行双写/导入历史状态、故障注入、回滚开关和生产可观测性验收。
 
 历史本地 Run 不会因代码或存储拓扑升级自动变为可接管；它们需要显式导入、终结或重跑。
@@ -181,6 +181,7 @@ SQLite 模式需要显式配置 WAL、busy timeout、单一迁移者和 Router �
 
 - 两个 Host 对同一共享状态库运行；独立会话按健康容量均衡。
 - 新会话在前端创建时没有 Assignment 或 Host 绑定；派发成功后才有 accepted receipt。
+- 已绑定会话无法切换云端/本机或切换 Runtime；原 Runtime 不可用时不会迁移。
 - Host1 执行中断后，租约过期，Host2 对安全 Action 恢复；旧 Host 的 fence 写入被拒绝。
 - 不安全外部副作用不会在接管期间自动重复执行。
 - SSE 从共享 `run_events` 按序恢复，浏览器重连后能看到终态。

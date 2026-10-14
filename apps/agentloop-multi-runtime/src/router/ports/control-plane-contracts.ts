@@ -62,6 +62,9 @@ export interface StoredConversationSummary {
   readonly updatedAt: number;
   readonly runCount: number;
   readonly lastStatus: string;
+  /** Runtime ownership begins only after a Host has accepted a Run. */
+  readonly boundRuntimeId?: string;
+  readonly executionLocation?: ExecutionLocation;
 }
 
 export interface StoredConversationPage {
@@ -141,6 +144,29 @@ export interface RouterArtifactCatalog {
 export class RuntimeCapacityError extends Error {
   readonly statusCode = 429;
   readonly code = "runtime_capacity_exhausted";
+}
+
+/** A conversation cannot silently move to a Runtime with a different state ledger. */
+export class ConversationRuntimeBindingError extends Error {
+  readonly statusCode = 409;
+  readonly code: "conversation_runtime_conflict" | "conversation_runtime_unavailable";
+
+  constructor(runtimeId: string, reason: "conflict" | "unavailable") {
+    super(reason === "conflict"
+      ? `当前会话已绑定 Runtime ${runtimeId}；请新建会话后再切换 Runtime。`
+      : `当前会话绑定的 Runtime ${runtimeId} 暂不可用；为避免上下文丢失，系统不会自动迁移，请恢复该 Runtime 或新建会话。`);
+    this.code = reason === "conflict" ? "conversation_runtime_conflict" : "conversation_runtime_unavailable";
+  }
+}
+
+/** A second turn cannot race the dispatch that will establish Runtime ownership. */
+export class ConversationDispatchInProgressError extends Error {
+  readonly statusCode = 409;
+  readonly code = "conversation_dispatch_in_progress";
+
+  constructor() {
+    super("当前会话仍在分配 Runtime；请等待本轮派发完成后再提交。");
+  }
 }
 
 /**

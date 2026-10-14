@@ -1,6 +1,6 @@
 # 多 Runtime 负载分流设计
 
-> 本文描述任务分流、容量和 Host Protocol。Run 状态已改为由 Router 与所有 Host 共用的状态库；关于故障接管，以及本地 SQLite 与生产 PostgreSQL 的切换方案，见[共享状态与故障接管设计](./MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。执行中 Run 的 lease/fencing 接管仍在后续阶段，不能把“共享状态库”误称为已实现的无损迁移。
+> 本文描述任务分流、容量和 Host Protocol。Run 状态已改为由 Router 与所有 Host 共用的状态库；关于故障接管，以及本地 SQLite 与生产 PostgreSQL 的切换方案，见[共享状态与故障接管设计](./MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。执行中 Run 的 lease/fencing 接管仍在后续阶段。本文早期版本允许终态边界迁移，现已改为首次接受后严格绑定 Runtime。
 
 ## 1. 目标
 
@@ -267,20 +267,20 @@ interface RuntimeDispatchEnvelope {
 第一版路由应完全确定性，以便可解释和测试：
 
 ```text
-1. 如果当前会话有可用的 preferredRuntimeId，优先继续使用。
-2. 过滤不满足明确环境约束的节点：数据驻留、组织策略、Runtime profile。
-3. 排除 offline、draining、协议不兼容和无可用槽位的节点。
-4. 按利用率、排队长度和近期失败率排序，选择最优节点。
+1. 如果当前会话已有 boundRuntimeId，只检查该 Runtime 是否与请求目标一致且可用。
+2. 已绑定 Runtime 不一致时返回 `conversation_runtime_conflict`；不可用或无槽位时返回 `conversation_runtime_unavailable`。
+3. 仅对未绑定会话过滤不满足环境约束的节点，并排除 offline、draining、协议不兼容和无可用槽位的节点。
+4. 未绑定会话按利用率、排队长度和近期失败率排序，选择最优节点。
 ```
 
-会话亲和性用于让后续用户消息自然复用上下文和工作区，但不是永久锁定：
+会话绑定用于保证后续用户消息复用同一个上下文、Skill/MCP 配置和工作区：
 
-- 同一会话的**新任务**默认仍路由到原 Runtime；
-- 原 Runtime `draining`、离线或不满足新任务的明确环境约束时，才允许迁移；
-- 迁移只发生在旧 Run 已终态、新 Run 尚未创建的边界；
-- 不能迁移正在执行中的 Plan、Step、Tool Action、Recovery 或工作区路径。
+- 首个 Host 返回非空 `remoteRunId` 后，同一会话的所有新任务必须路由到原 Runtime；
+- 前端锁定云端/本机开关和 Runtime 选择器，后端对绕过请求返回 409；
+- 原 Runtime `draining`、离线、满载或不满足新任务约束时不迁移，用户需恢复它或新建会话；
+- reservation 或 Host 接受前失败不形成绑定；派发未决期间由共享状态库中的会话锁拒绝并发新消息，失败或过期后释放。
 
-如果新 Runtime 需要会话上下文，Router 只传递用户可见的历史消息、已经提交的 Outcome 摘要和已发布资源；不能复制旧 Runtime 的内部 Evidence、未完成 Action 或数据库行。
+用户新建会话改用另一个 Runtime 时，只能重新提供用户可见的历史消息、已经提交的 Outcome 摘要和已发布资源；Router 不能把旧 Runtime 的内部 Evidence、未完成 Action 或数据库行当作新会话上下文迁移。
 
 ## 10. 容量、重试与故障
 
@@ -418,9 +418,9 @@ Runtime B: /srv/agentloop-workspace/conversations/conv_123/
 
 未来需要云边协同时，再新增显式的 edge Runtime profile、设备配对和目录授权协议。届时 Router 只能把目录任务路由到持有该授权的 edge Runtime；目录路径仍不可跨节点传递，且该能力必须默认关闭、由用户和组织策略共同显式授权。
 
-### 11.5 会话亲和性、迁移与产物
+### 11.5 会话绑定与产物
 
-会话亲和性只是健康 Host 的调度偏好：后续新任务优先原 Host；原 Host 失联、draining 或满载时，Router 选择另一台兼容且有容量的 Host，并持久化迁移记录。正在执行的 Run 不会被此规则迁移。若需要将已终态的会话新 Run 迁移到另一个 Runtime：
+会话绑定是强制执行边界，不是调度偏好。后续新任务只能使用原 Runtime；原 Host 失联、draining 或满载时，Router 明确拒绝，不持久化新的迁移记录。用户需要改用其他 Runtime 时必须创建新会话，并显式重新提供允许复用的输入：
 
 1. Router 重新向新 Runtime 提供原始 `ConversationAttachment` 引用；新 Worker 重新导入，得到新的本地 `sourceId`。
 2. 需要复用的最终产物由旧 Worker 发布到 Artifact Broker，带摘要、媒体类型和访问控制；新 Worker 把它作为新的本地 Source/Artifact 导入。
@@ -446,7 +446,8 @@ runtime_available_slots
 runtime_dispatch_idempotency_hits
 runtime_event_lag_seconds
 runtime_terminal_failure_rate
-conversation_runtime_migrations_total
+conversation_runtime_binding_conflicts_total
+conversation_runtime_unavailable_total
 ```
 
 ## 13. 分阶段落地
@@ -455,7 +456,7 @@ conversation_runtime_migrations_total
 2. 实现 Router 的 ConversationTask、RuntimeAssignment、确定性路由和单 Runtime 委派。
 3. 在 Runtime Host 增加可信身份、`dispatchKey` 幂等和容量准入。
 4. 接入 SSE 事件投影、Outcome 回读、取消转发和 `draining`。
-5. 接入可验证资源引用和会话新 Run 边界迁移。
+5. 接入可验证资源引用和首次 accepted Run 后的严格会话绑定。
 6. 最后再引入动态扩缩容、区域路由和更复杂的容量预测。
 
 ## 14. 验收案例
@@ -464,7 +465,7 @@ conversation_runtime_migrations_total
 2. `runtime-general-01` 已满时，用户 C 的普通任务被分配到另一个同 profile 的云端节点；不会被分配到不满足产物任务约束的节点。
 3. Router 对同一个 `clientMessageId` 重试三次，Worker 只创建一个 `remoteRunId`。
 4. Router 在 SSE 中断后按 seq 回补，并且只在读取到远端 Terminal Outcome 后完成本地 Task。
-5. 一个会话的后续新任务优先健康的 Runtime affinity；节点进入 draining、失联或满载后，下一新任务迁移，旧 Run 不迁移。
+5. 一个会话的后续新任务只能使用已绑定 Runtime；节点进入 draining、失联或满载后返回不可用，不迁移。
 6. 云端 Router 拒绝 `visibleDirectories` 和本机路径；云端 Runtime Host 的 Tool 目录不含 `visible_*`。
 
 ## 15. 参考应用案例：多 Runtime 智能工作台

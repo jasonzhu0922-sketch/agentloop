@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { assertUploadedSourceContent } from "@zhujun/agentloop";
 import type { RuntimeArtifact, RuntimeArtifactPreview, RuntimeCommandOutput, RuntimeDispatchEnvelope, RuntimeHumanLoopRequest, RuntimeHumanLoopResponse, RuntimeModelSummary, RuntimeRecoveryDetail, RuntimeRunEvent, RuntimeRunStatus, RuntimeToolArguments, SubmitConversationTask } from "../../shared/contracts.ts";
 import { IdentityError, type IdentityService, type Principal } from "../identity/service.ts";
-import { RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
+import { ConversationDispatchInProgressError, ConversationRuntimeBindingError, RuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../ports/control-plane-contracts.ts";
 import { DeviceError, type DeviceRepository } from "../devices/device-service.ts";
 import { identityFromRequest, taskFromRequest, type RouterAttachmentBroker } from "./task-submission.ts";
 
@@ -24,6 +24,8 @@ interface RouterTaskApi {
       readonly updatedAt: number;
       readonly runCount: number;
       readonly lastStatus: string;
+      readonly boundRuntimeId?: string;
+      readonly executionLocation?: "cloud" | "local" | "strict_local";
     }[];
     readonly hasMore: boolean;
     readonly nextOffset?: number;
@@ -420,9 +422,14 @@ export function createRouterHttpServer(router: RouterTaskApi, options: {
       const message = error instanceof Error ? error.message : String(error);
       const status = error instanceof IdentityError || error instanceof DeviceError ? error.status
         : (error as { statusCode?: number }).statusCode ?? (message.includes("capacity") || message.includes("device_unavailable") ? 409 : 400);
+      const publicCode = error instanceof IdentityError
+        || error instanceof DeviceError
+        || error instanceof RuntimeCapacityError
+        || error instanceof ConversationRuntimeBindingError
+        || error instanceof ConversationDispatchInProgressError;
       return json(response, status, {
         error: message,
-        ...(error instanceof IdentityError || error instanceof DeviceError || error instanceof RuntimeCapacityError ? { code: error.code } : {}),
+        ...(publicCode ? { code: error.code } : {}),
       });
     }
   });

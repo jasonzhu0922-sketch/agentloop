@@ -47,6 +47,26 @@ const MIGRATIONS: readonly SchemaMigration[] = [{
     }
     await database.exec("ALTER TABLE mr_tasks ADD COLUMN IF NOT EXISTS message_attachments_json TEXT NOT NULL DEFAULT '[]'");
   },
+}, {
+  id: "router/0004_conversation_dispatch_locks",
+  definition: "mr_conversation_dispatch_locks:v1",
+  apply: async (database) => {
+    await database.exec(database.dialect === "tidb" ? `CREATE TABLE IF NOT EXISTS mr_conversation_dispatch_locks (
+      tenant_id VARCHAR(191) NOT NULL,
+      owner_user_id VARCHAR(191) NOT NULL,
+      conversation_id VARCHAR(191) NOT NULL,
+      assignment_id VARCHAR(191) NOT NULL UNIQUE REFERENCES mr_assignments(id) ON DELETE CASCADE,
+      expires_at BIGINT NOT NULL,
+      PRIMARY KEY(tenant_id, owner_user_id, conversation_id)
+    )` : `CREATE TABLE IF NOT EXISTS mr_conversation_dispatch_locks (
+      tenant_id TEXT NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      assignment_id TEXT NOT NULL UNIQUE REFERENCES mr_assignments(id) ON DELETE CASCADE,
+      expires_at ${database.dialect === "postgres" ? "BIGINT" : "INTEGER"} NOT NULL,
+      PRIMARY KEY(tenant_id, owner_user_id, conversation_id)
+    )`);
+  },
 }];
 
 export async function migrateRouterState(database: SqlConnection): Promise<void> {

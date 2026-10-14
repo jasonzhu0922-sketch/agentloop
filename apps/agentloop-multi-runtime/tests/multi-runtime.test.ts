@@ -40,7 +40,7 @@ import { cancellationTarget, persistedCancellableAssistant } from "../web/client
 import { EventEmitter } from "node:events";
 import { AppDatabase, CanonicalRunStateRepository, createCanonicalRunState, understandTask } from "@zhujun/agentloop";
 import { ControlPlaneStore, ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
-import { RuntimeCapacityError as PersistentRuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/ports/control-plane-contracts.ts";
+import { ConversationDispatchInProgressError, ConversationRuntimeBindingError, RuntimeCapacityError as PersistentRuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/ports/control-plane-contracts.ts";
 import { RouterService } from "../src/router/service/router-service.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
@@ -55,6 +55,7 @@ import { persistSessions } from "../web/client/state/session-persistence.js";
 import { renderMarkdown } from "@zhujun/agentloop-artifact-preview";
 import { isNearBottom, nextScrollTop } from "../web/client/ui/scroll-follow.js";
 import { conversationMessagesFromTurns } from "../web/client/projections/conversation-history.js";
+import { conversationRuntimeBinding } from "../web/client/local-runtime/conversation-runtime-binding.js";
 import { executionLocationLabel, executionProvenanceParts } from "../web/client/projections/execution-provenance.js";
 import { assistantMessagePresentation, completedArtifactSummary, terminalAwarePlanStepStatus } from "../web/client/presentation/assistant-message-presentation.js";
 import { humanLoopResponseText } from "../web/client/presentation/human-loop-response.js";
@@ -452,6 +453,9 @@ test("Router conversation index paginates newest conversations in stable pages o
       reservation_expires_at, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
   `).run("assignment-history", "task-64", "runtime-history", "dispatch-history", "run-history", "completed", 64, 64);
+  const boundSummary = (await store.listConversations("tenant", "user", { limit: 30, offset: 0 })).conversations[0];
+  assert.equal(boundSummary?.boundRuntimeId, "runtime-history");
+  assert.equal(boundSummary?.executionLocation, "cloud");
   const detail = await store.conversation("tenant", "user", "conversation-64");
   assert.deepEqual(detail?.turns, [{
     clientMessageId: "message-64",
@@ -600,6 +604,33 @@ test("persisted conversation turns become a replayable conversation stream on cl
   assert.equal(assistant.text, "历史回答");
 });
 
+test("browser Runtime binding uses the persisted summary before local message history", () => {
+  assert.deepEqual(conversationRuntimeBinding({
+    boundRuntimeId: "runtime-summary",
+    executionLocation: "local",
+    messages: [{ role: "assistant", remoteRunId: "run-old", runtimeId: "runtime-old", executionLocation: "cloud" }],
+  }), { runtimeId: "runtime-summary", executionLocation: "local" });
+});
+
+test("browser Runtime binding derives only from turns accepted by a Runtime", () => {
+  assert.equal(conversationRuntimeBinding({
+    messages: [{ role: "assistant", assignmentId: "assignment-only", runtimeId: "runtime-reserved", status: "failed" }],
+  }), undefined);
+  assert.deepEqual(conversationRuntimeBinding({
+    messages: [{ role: "assistant", remoteRunId: "run-cloud", runtimeId: "runtime-cloud", executionLocation: "cloud" }],
+  }), { runtimeId: "runtime-cloud", executionLocation: "cloud" });
+  assert.deepEqual(conversationRuntimeBinding({
+    messages: [{ role: "assistant", localRunId: "run-local", localRuntimeId: "runtime-local" }],
+  }), { runtimeId: "runtime-local", executionLocation: "local" });
+});
+
+test("browser Runtime binding follows the latest accepted turn for legacy migrated conversations", () => {
+  assert.deepEqual(conversationRuntimeBinding({ messages: [
+    { role: "assistant", remoteRunId: "run-a", runtimeId: "runtime-a", executionLocation: "cloud" },
+    { role: "assistant", remoteRunId: "run-b", runtimeId: "runtime-b", executionLocation: "local" },
+  ] }), { runtimeId: "runtime-b", executionLocation: "local" });
+});
+
 test("completed artifact delivery supplies a stable summary when prose is empty", () => {
   assert.equal(completedArtifactSummary(undefined), "");
   assert.equal(completedArtifactSummary([{ role: "process", name: "draft.html" }]), "");
@@ -628,7 +659,9 @@ test("Multi Runtime Web requests and appends conversation pages of 30", async ()
   assert.match(app, /hydratePersistedAssistant/);
   assert.match(app, /executionProvenanceParts/);
   assert.match(app, /executionLocation: executionTarget/);
-  assert.match(app, /const executionTarget = isLocalExecution\(\) \? "local" : "cloud"/);
+  assert.match(app, /const binding = applyConversationRuntimeBinding\(conversation\)/);
+  assert.match(app, /conversation\.boundRuntimeId = body\.assignment\.runtimeId/);
+  assert.match(app, /typeof body\.assignment\.remoteRunId === "string"/);
   assert.doesNotMatch(app, /\$\("execution-target"\)/);
   assert.match(overrides, /\.execution-provenance-chip/);
   assert.match(overrides, /\.sessions-more/);
@@ -1631,6 +1664,34 @@ test("router distributes independent user tasks by available Runtime capacity", 
   assert.equal(second.runtimeId, "runtime-b");
 });
 
+test("in-memory Router keeps accepted conversations on one Runtime and rejects an explicit switch", async () => {
+  const router = new MultiRuntimeRouter();
+  router.register(runtime("runtime-a", { maxConcurrentRuns: 3 }), endpoint("run-a"));
+  router.register(runtime("runtime-b", { maxConcurrentRuns: 3 }), endpoint("run-b"));
+  const first = await router.submit(task("user-a", "message-a", "conversation-bound"));
+  const second = await router.submit(task("user-a", "message-b", "conversation-bound"));
+  assert.equal(second.runtimeId, first.runtimeId);
+  await assert.rejects(
+    () => router.submit({ ...task("user-a", "message-c", "conversation-bound"), requestedRuntimeId: "runtime-b" }),
+    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_conflict",
+  );
+});
+
+test("in-memory Router rejects a second conversation turn while the binding dispatch is unresolved", async () => {
+  const router = new MultiRuntimeRouter();
+  let acceptDispatch!: (value: { remoteRunId: string }) => void;
+  router.register(runtime("runtime-a", { maxConcurrentRuns: 2 }), {
+    dispatch: async () => await new Promise((resolve) => { acceptDispatch = resolve; }),
+  });
+  const first = router.submit(task("user-a", "message-a", "conversation-dispatching"));
+  await assert.rejects(
+    () => router.submit(task("user-a", "message-b", "conversation-dispatching")),
+    ConversationDispatchInProgressError,
+  );
+  acceptDispatch({ remoteRunId: "run-a" });
+  assert.equal((await first).runtimeId, "runtime-a");
+});
+
 test("router retries one user message through one Assignment", async () => {
   const router = new MultiRuntimeRouter();
   let dispatches = 0;
@@ -2376,7 +2437,7 @@ test("persistent Router keeps a conversation on its original Runtime Host withou
   await database.close();
 });
 
-test("a stale preferred Runtime does not block the next conversation Run from using a healthy Host", async () => {
+test("an unavailable bound Runtime blocks a conversation instead of silently migrating it", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -2397,23 +2458,111 @@ test("a stale preferred Runtime does not block the next conversation Run from us
 
   // runtime-a has missed its heartbeat, while runtime-b remains healthy.
   await store.heartbeat({ runtimeId: "runtime-b", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 1_300 });
-  const next = await store.reserve(task("user-a", "message-next", "conversation-migrated"), {
-    heartbeatTtlMs: 1_000,
-    reservationTtlMs: 1_000,
-    now: 1_300,
-  });
-  assert.equal(next.runtimeId, "runtime-b");
-  const migration = await database.prepare(`
-    SELECT previous_runtime_id, selected_runtime_id, reason
-    FROM mr_conversation_runtime_migrations WHERE assignment_id = ?
-  `).get(next.id) as { previous_runtime_id: string; selected_runtime_id: string; reason: string };
-  assert.equal(migration.previous_runtime_id, "runtime-a");
-  assert.equal(migration.selected_runtime_id, "runtime-b");
-  assert.equal(migration.reason, "preferred_runtime_unavailable_or_at_capacity");
+  await assert.rejects(
+    () => store.reserve(task("user-a", "message-next", "conversation-migrated"), {
+      heartbeatTtlMs: 1_000,
+      reservationTtlMs: 1_000,
+      now: 1_300,
+    }),
+    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_unavailable",
+  );
+  const migrations = await database.prepare(`
+    SELECT assignment_id FROM mr_conversation_runtime_migrations
+  `).all() as Array<{ assignment_id: string }>;
+  assert.deepEqual(migrations, []);
   await database.close();
 });
 
-test("a dispatch reservation does not bind a conversation before its Host starts the Run", async () => {
+test("a full bound Runtime blocks a conversation instead of spilling it to another Host", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([
+    { ...runtime("runtime-a", { maxConcurrentRuns: 2 }), endpoint: "http://runtime-a" },
+    { ...runtime("runtime-b", { maxConcurrentRuns: 2 }), endpoint: "http://runtime-b" },
+  ], 100);
+  await store.heartbeat({ runtimeId: "runtime-a", status: "ready", activeRunCount: 0, queuedRunCount: 0, maxConcurrentRuns: 2, observedAt: 100 });
+  await store.heartbeat({ runtimeId: "runtime-b", status: "ready", activeRunCount: 0, queuedRunCount: 0, maxConcurrentRuns: 2, observedAt: 100 });
+  const first = await store.reserve(task("user-a", "message-first", "conversation-bound-full"), {
+    heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 200,
+  });
+  assert.equal(first.runtimeId, "runtime-a");
+  await store.markAccepted(first.id, "run-on-a", 201);
+  await store.heartbeat({ runtimeId: "runtime-a", status: "ready", activeRunCount: 2, queuedRunCount: 0, maxConcurrentRuns: 2, observedAt: 300 });
+  await store.heartbeat({ runtimeId: "runtime-b", status: "ready", activeRunCount: 0, queuedRunCount: 0, maxConcurrentRuns: 2, observedAt: 300 });
+  await assert.rejects(
+    () => store.reserve(task("user-a", "message-next", "conversation-bound-full"), {
+      heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 301,
+    }),
+    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_unavailable",
+  );
+  await database.close();
+});
+
+test("a cloud-bound conversation rejects a switch to a Local Runtime", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  await store.seedRuntimes([
+    { ...runtime("runtime-cloud", { kind: "cloud" }), endpoint: "http://runtime-cloud" },
+    { ...runtime("runtime-local", { kind: "local", deviceId: "device-a" }), endpoint: "local-runtime://runtime-local" },
+  ], 100);
+  await store.heartbeat({ runtimeId: "runtime-cloud", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  await store.heartbeat({ runtimeId: "runtime-local", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
+  const first = await store.reserve(task("user-a", "message-cloud", "conversation-cloud-bound"), {
+    heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 200,
+  });
+  await store.markAccepted(first.id, "run-cloud", 201);
+  await assert.rejects(
+    () => store.reserve({
+      ...task("user-a", "message-local", "conversation-cloud-bound"),
+      executionTarget: { kind: "local_device", deviceId: "device-a", runtimeId: "runtime-local" },
+      dataPolicy: { mode: "local" },
+    }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 202 }),
+    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_conflict",
+  );
+  await database.close();
+});
+
+test("a Local Runtime-bound conversation rejects a different Local Runtime", async () => {
+  const database = new AppDatabase(":memory:");
+  const store = new ControlPlaneStore(database);
+  await store.ready();
+  for (const runtimeId of ["runtime-local-a", "runtime-local-b"]) {
+    await store.registerLocalRuntime({
+      runtimeId,
+      deviceId: "device-a",
+      tenantId: "tenant",
+      ownerUserId: "user-a",
+      connectionId: "connection-a",
+      connectionEpoch: 1,
+      profile: "general",
+      capabilities: ["document"],
+      maxConcurrentRuns: 2,
+      status: "ready",
+      catalogVersion: "1",
+      leaseExpiresAt: 2_000,
+      now: 100,
+    });
+  }
+  const first = await store.reserve({
+    ...task("user-a", "message-local-a", "conversation-local-bound"),
+    executionTarget: { kind: "local_device", deviceId: "device-a", runtimeId: "runtime-local-a" },
+    dataPolicy: { mode: "local" },
+  }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 200 });
+  await store.markAccepted(first.id, "run-local-a", 201);
+  await assert.rejects(
+    () => store.reserve({
+      ...task("user-a", "message-local-b", "conversation-local-bound"),
+      executionTarget: { kind: "local_device", deviceId: "device-a", runtimeId: "runtime-local-b" },
+      dataPolicy: { mode: "local" },
+    }, { heartbeatTtlMs: 1_000, reservationTtlMs: 1_000, now: 202 }),
+    (error: unknown) => error instanceof ConversationRuntimeBindingError && error.code === "conversation_runtime_conflict",
+  );
+  await database.close();
+});
+
+test("an unresolved dispatch blocks a racing turn but a failed dispatch does not bind the conversation", async () => {
   const database = new AppDatabase(":memory:");
   const store = new ControlPlaneStore(database);
   await store.ready();
@@ -2424,18 +2573,24 @@ test("a dispatch reservation does not bind a conversation before its Host starts
   await store.heartbeat({ runtimeId: "runtime-a", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
   await store.heartbeat({ runtimeId: "runtime-b", status: "ready", activeRunCount: 0, queuedRunCount: 0, observedAt: 100 });
 
-  // The first submission is only a Router reservation: no Host has returned
-  // a remote Run id yet. A later message in the conversation must therefore
-  // still use normal load balancing instead of inheriting runtime-a.
-  await store.reserve({ ...task("user-a", "message-reserved", "conversation-pending"), requestedRuntimeId: "runtime-a" }, {
+  const pending = await store.reserve({ ...task("user-a", "message-reserved", "conversation-pending"), requestedRuntimeId: "runtime-a" }, {
     heartbeatTtlMs: 1_000,
     reservationTtlMs: 1_000,
     now: 200,
   });
-  const next = await store.reserve(task("user-a", "message-balanced", "conversation-pending"), {
+  await assert.rejects(
+    () => store.reserve(task("user-a", "message-racing", "conversation-pending"), {
+      heartbeatTtlMs: 1_000,
+      reservationTtlMs: 1_000,
+      now: 201,
+    }),
+    ConversationDispatchInProgressError,
+  );
+  await store.markDispatchFailure(pending.id, { code: "dispatch_rejected", message: "Host rejected before creating a Run" }, 202);
+  const next = await store.reserve({ ...task("user-a", "message-after-failure", "conversation-pending"), requestedRuntimeId: "runtime-b" }, {
     heartbeatTtlMs: 1_000,
     reservationTtlMs: 1_000,
-    now: 201,
+    now: 203,
   });
   assert.equal(next.runtimeId, "runtime-b");
   await database.close();

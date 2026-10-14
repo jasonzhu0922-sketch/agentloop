@@ -8,6 +8,7 @@ import test from "node:test";
 import { AppDatabase } from "@zhujun/agentloop";
 import { IdentityService } from "../src/router/identity/service.ts";
 import { ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
+import { ConversationDispatchInProgressError, ConversationRuntimeBindingError } from "../src/router/ports/control-plane-contracts.ts";
 import { SqlDeviceRepository } from "../src/router/devices/device-service.ts";
 import type { SubmitConversationTask } from "../src/shared/contracts.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
@@ -21,6 +22,8 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
   let deleted: { tenantId: string; ownerUserId: string; conversationId: string } | undefined;
   const router = {
     async submit(task: SubmitConversationTask) {
+      if (task.conversationId === "runtime-bound-conversation") throw new ConversationRuntimeBindingError("runtime-original", "conflict");
+      if (task.conversationId === "runtime-dispatching-conversation") throw new ConversationDispatchInProgressError();
       submitted = task;
       return { id: "assignment-1", tenantId: task.tenantId, ownerUserId: task.ownerUserId };
     },
@@ -103,6 +106,39 @@ test("Router derives task identity and accepts opaque local Runtime placement", 
     assert.deepEqual(submitted?.dataPolicy, { mode: "local" });
     assert.deepEqual(submitted?.localDirectoryScopeIds, ["lds_opaque"]);
     assert.deepEqual(submitted?.localUploadedSourceIds, ["src_0123456789abcdef0123456789abcdef"]);
+
+    const runtimeConflict = await fetch(`${base}/v2/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        schema: "agentloop.task/v2",
+        conversationId: "runtime-bound-conversation",
+        clientMessageId: "m-runtime-conflict",
+        input: "switch Runtime",
+        executionTarget: { kind: "cloud_pool" },
+        dataPolicy: { mode: "cloud" },
+      }),
+    });
+    assert.equal(runtimeConflict.status, 409);
+    assert.deepEqual(await runtimeConflict.json(), {
+      error: "当前会话已绑定 Runtime runtime-original；请新建会话后再切换 Runtime。",
+      code: "conversation_runtime_conflict",
+    });
+
+    const dispatchConflict = await fetch(`${base}/v2/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        schema: "agentloop.task/v2",
+        conversationId: "runtime-dispatching-conversation",
+        clientMessageId: "m-dispatch-conflict",
+        input: "race dispatch",
+        executionTarget: { kind: "cloud_pool" },
+        dataPolicy: { mode: "cloud" },
+      }),
+    });
+    assert.equal(dispatchConflict.status, 409);
+    assert.equal((await dispatchConflict.json()).code, "conversation_dispatch_in_progress");
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

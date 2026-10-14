@@ -19,6 +19,7 @@ import { hasSelectedTextWithin } from "./ui/message-selection.js";
 import { observeAssignment } from "./api/assignment-stream.js";
 import { createRouterClient, routerProxyPath } from "./api/router-client.js";
 import { createLocalAgentClient } from "./local-runtime/local-agent-client.js";
+import { conversationRuntimeBinding } from "./local-runtime/conversation-runtime-binding.js";
 import { loadLocalRuntimePreference, localRuntimePreferenceKey, saveLocalRuntimePreference } from "./local-runtime/local-runtime-preference.js";
 import { createLocalRuntimeState } from "./local-runtime/local-runtime-state.js";
 import { localRuntimeListMarkup, localRuntimeOptions, localRuntimeViewModel } from "./local-runtime/local-runtime-view-model.js";
@@ -88,7 +89,7 @@ void bootstrapAuthenticatedApp();
 document.querySelectorAll("[data-suggest]").forEach((button) => button.addEventListener("click", () => { $("input").value = button.dataset.suggest || ""; autoResizeComposerInput($("input")); $("input").focus(); }));
 $("theme-toggle")?.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "" : "dark"; });
 
-$("new-chat").addEventListener("click", () => { conversationState.activeId = newConversation().id; resetArtifactWorkspace(); render(); $("input").focus(); });
+$("new-chat").addEventListener("click", () => { conversationState.activeId = newConversation().id; resetArtifactWorkspace(); updateLocalControls(); render(); $("input").focus(); });
 $("composer").addEventListener("submit", (event) => { event.preventDefault(); void runComposerAction(); });
 $("submit").addEventListener("click", () => void runComposerAction());
 $("messages").addEventListener("click", (event) => {
@@ -140,6 +141,13 @@ document.querySelectorAll("[data-runtime-capability-tab]").forEach((button) => {
   });
 });
 $("use-local-runtime").addEventListener("change", () => {
+  const binding = applyConversationRuntimeBinding();
+  if (binding !== undefined) {
+    setStatus(runtimeBindingMessage(binding), "ok");
+    updateLocalControls();
+    render();
+    return;
+  }
   saveLocalRuntimePreference(localStorage, sessionState.user?.id, localRuntimeState.device?.id, isLocalExecution());
   refreshRuntimeOptions();
   updateLocalControls();
@@ -150,6 +158,13 @@ $("use-local-runtime").addEventListener("change", () => {
   render();
 });
 $("runtime").addEventListener("change", () => {
+  const binding = applyConversationRuntimeBinding();
+  if (binding !== undefined) {
+    setStatus(runtimeBindingMessage(binding), "ok");
+    updateLocalControls();
+    render();
+    return;
+  }
   if (isLocalExecution()) {
     localRuntimeState.runtimeId = $("runtime").value;
     syncLocalRuntimeManager();
@@ -541,6 +556,7 @@ async function loadLocalScopes() {
 }
 
 function updateLocalControls() {
+  const binding = applyConversationRuntimeBinding();
   const view = localRuntimeViewModel({
     agentStatus: localRuntimeState.agentStatus,
     device: localRuntimeState.device,
@@ -551,17 +567,18 @@ function updateLocalControls() {
   });
   const paired = view.paired;
   const localToggle = $("use-local-runtime");
-  localToggle.disabled = !paired;
-  if (paired) {
+  localToggle.disabled = !paired || binding !== undefined;
+  localToggle.title = binding === undefined ? "" : runtimeBindingMessage(binding);
+  if (paired && binding === undefined) {
     const preferenceKey = localRuntimePreferenceKey(sessionState.user?.id, localRuntimeState.device?.id);
-    if (preferenceKey && localRuntimeState.hydratedPreferenceKey !== preferenceKey) {
+    if (preferenceKey) {
       const preference = loadLocalRuntimePreference(localStorage, sessionState.user?.id, localRuntimeState.device?.id);
       // A missing value belongs to this user/device just as much as an
       // explicit false: never carry the previous device's DOM state across.
       localToggle.checked = preference === true;
       localRuntimeState.hydratedPreferenceKey = preferenceKey;
     }
-  } else {
+  } else if (!paired && binding === undefined) {
     // Losing the live pairing only suspends the UI. Do not turn this temporary
     // safety reset into a persisted user choice, or reconnection could not
     // restore the user's local-execution preference.
@@ -576,7 +593,8 @@ function updateLocalControls() {
   // local execution is off.  It remains a preference until the checkbox opts
   // the next submission into the selected device Runtime.
   $("local-runtime-picker").hidden = !paired;
-  $("runtime").disabled = view.runtimeDisabled;
+  $("runtime").disabled = view.runtimeDisabled || binding !== undefined;
+  $("runtime").title = binding === undefined ? "" : runtimeBindingMessage(binding);
   $("directory-scope")?.toggleAttribute("disabled", view.directoryScopeDisabled);
   $("local-runtime-manager").hidden = view.runtimeManagerHidden;
   $("upload-file").toggleAttribute("disabled", view.uploadDisabled);
@@ -1053,6 +1071,13 @@ async function toggleLocalRuntimeStarted(runtimeId = localRuntimeState.runtimeId
 }
 
 async function selectLocalRuntime(runtimeId) {
+  const binding = applyConversationRuntimeBinding();
+  if (binding !== undefined && binding.runtimeId !== runtimeId) {
+    setStatus(runtimeBindingMessage(binding), "ok");
+    updateLocalControls();
+    render();
+    return;
+  }
   if (!localRuntimeState.runtimes.some((runtime) => runtime.id === runtimeId)) return;
   localRuntimeState.runtimeId = runtimeId;
   refreshRuntimeOptions();
@@ -1065,6 +1090,28 @@ function selectedLocalRuntime(runtimeId = localRuntimeState.runtimeId) { return 
 function runtimeDisplayNameFor(runtimeId) { return selectedLocalRuntime(runtimeId)?.displayName; }
 function selectedLocalRuntimeRunning() { return selectedLocalRuntime()?.status !== "stopped" && selectedLocalRuntime()?.status !== "failed"; }
 function isLocalExecution() { return $("use-local-runtime")?.checked === true; }
+
+function applyConversationRuntimeBinding(conversation = activeConversation()) {
+  const binding = conversationRuntimeBinding(conversation);
+  if (binding === undefined) return undefined;
+  const local = binding.executionLocation === "local" || binding.executionLocation === "strict_local";
+  const toggle = $("use-local-runtime");
+  if (toggle) toggle.checked = local;
+  if (local) {
+    if (localRuntimeState.runtimeId !== binding.runtimeId) localRuntimeState.scopes = [];
+    localRuntimeState.runtimeId = binding.runtimeId;
+    const select = $("runtime");
+    if (select) select.value = binding.runtimeId;
+  }
+  return binding;
+}
+
+function runtimeBindingMessage(binding) {
+  if (binding.executionLocation === "cloud") return "当前会话已绑定云端 Runtime；如需改用本机 Runtime，请新建会话";
+  const displayName = runtimeDisplayNameFor(binding.runtimeId) || binding.runtimeId;
+  return `当前会话已绑定本机 Runtime ${displayName}；如需切换 Runtime，请新建会话`;
+}
+
 function localHeaders(json = false) { return { ...(json ? { "content-type": "application/json" } : {}), "x-local-session": sessionState.localSessionToken }; }
 function localAgentRouterPath(suffix) {
   if (!localRuntimeState.device?.id) throw new Error("本机 Agent 尚未配对");
@@ -1245,6 +1292,13 @@ function mergeConversationSummaries(summaries, reset = false, state = conversati
         : finiteNumber(summary.updatedAt, existing.updatedAt);
       existing.runCount = finiteNumber(summary.runCount, existing.runCount);
       existing.lastStatus = typeof summary.lastStatus === "string" ? summary.lastStatus : existing.lastStatus;
+      if (typeof summary.boundRuntimeId === "string" && typeof summary.executionLocation === "string") {
+        existing.boundRuntimeId = summary.boundRuntimeId;
+        existing.executionLocation = summary.executionLocation;
+      } else {
+        delete existing.boundRuntimeId;
+        delete existing.executionLocation;
+      }
       if (reset) existing.historyLoaded = false;
       if (!nextSessions.some((conversation) => conversation.id === existing.id)) nextSessions.push(existing);
       continue;
@@ -1256,6 +1310,8 @@ function mergeConversationSummaries(summaries, reset = false, state = conversati
       updatedAt: finiteNumber(summary.updatedAt, 0),
       runCount: finiteNumber(summary.runCount, 0),
       lastStatus: typeof summary.lastStatus === "string" ? summary.lastStatus : undefined,
+      ...(typeof summary.boundRuntimeId === "string" ? { boundRuntimeId: summary.boundRuntimeId } : {}),
+      ...(typeof summary.executionLocation === "string" ? { executionLocation: summary.executionLocation } : {}),
       messages: [],
       pendingAttachments: [],
       historyLoaded: false,
@@ -1294,6 +1350,9 @@ async function selectConversation(conversationId) {
   if (!conversation) return;
   resetArtifactWorkspace();
   conversationState.activeId = conversation.id;
+  updateLocalControls();
+  const selectedBinding = conversationRuntimeBinding(conversation);
+  if (selectedBinding !== undefined && selectedBinding.executionLocation !== "cloud") await loadLocalScopes();
   render();
   void reconcilePersistedRuns();
   if (conversation.historyLoaded === true || conversation.historyLoading === true) return;
@@ -1312,6 +1371,9 @@ async function selectConversation(conversationId) {
     const body = await response.json().catch(() => undefined);
     if (!response.ok || !Array.isArray(body?.turns)) throw new Error(body?.error || `HTTP ${response.status}`);
     conversation.messages = conversationMessagesFromTurns(body.turns);
+    updateLocalControls();
+    const hydratedBinding = conversationRuntimeBinding(conversation);
+    if (hydratedBinding !== undefined && hydratedBinding.executionLocation !== "cloud") await loadLocalScopes();
     render();
     const assistants = conversation.messages
       .filter((message) => message.role === "assistant" && typeof message.assignmentId === "string");
@@ -1546,6 +1608,7 @@ async function loadModels() {
 function refreshRuntimeOptions() {
   const select = $("runtime");
   if (!select) return;
+  const binding = applyConversationRuntimeBinding();
   const view = localRuntimeViewModel({
     agentStatus: localRuntimeState.agentStatus,
     device: localRuntimeState.device,
@@ -1561,16 +1624,24 @@ function refreshRuntimeOptions() {
   }
   select.innerHTML = localRuntimeOptions(localRuntimeState.runtimes, escapeHtml, runtimeStatusLabel);
   select.value = localRuntimeState.runtimeId;
-  select.disabled = view.runtimeDisabled;
+  select.disabled = view.runtimeDisabled || binding !== undefined;
+  select.title = binding === undefined ? "" : runtimeBindingMessage(binding);
 }
 
 async function submit() {
   const input = $("input").value.trim();
   const conversation = activeConversation();
   if (!input || !conversation) return;
-  const executionTarget = isLocalExecution() ? "local" : "cloud";
+  const binding = applyConversationRuntimeBinding(conversation);
+  const executionTarget = binding === undefined
+    ? isLocalExecution() ? "local" : "cloud"
+    : binding.executionLocation === "cloud" ? "cloud" : "local";
+  const selectedRuntimeId = binding?.runtimeId ?? localRuntimeState.runtimeId;
   if (executionTarget === "local" && !sessionState.localSessionToken) { setStatus("本机运行需要先启用 Local Runtime", "error"); return; }
-  if (executionTarget === "local" && selectedLocalRuntime()?.status !== "ready") { setStatus("请选择处于就绪状态的本机 Runtime", "error"); return; }
+  if (executionTarget === "local" && selectedLocalRuntime(selectedRuntimeId)?.status !== "ready") {
+    setStatus(binding === undefined ? "请选择处于就绪状态的本机 Runtime" : `当前会话绑定的 Runtime ${selectedRuntimeId} 暂不可用，请恢复该 Runtime 或新建会话`, "error");
+    return;
+  }
   if (runState.activeByConversation.has(conversation.id) || conversation.messages.some((message) => message.role === "assistant" && message.status === "running" && (message.assignmentId || message.localRunId))) { setStatus("当前会话仍在发起或执行；请等待或点击停止", "error"); return; }
   if (uploadCount(conversation.id) > 0) { setStatus("文件仍在上传，请稍候再发送", "error"); return; }
   const tenantId = $("tenant-id").value.trim();
@@ -1602,7 +1673,7 @@ async function submit() {
     const cloudAttachmentIds = attachments.filter((attachment) => attachment.dataPlane !== "local_runtime").map((attachment) => attachment.id);
     if (executionTarget === "local" && cloudAttachmentIds.length > 0) throw new Error("本机运行不能读取云端附件；请重新选择本机文件上传");
     if (executionTarget === "cloud" && localSourceIds.length > 0) throw new Error("云端运行不能读取本机 Runtime 文件；请重新选择云端文件上传");
-    if (executionTarget === "local" && attachments.some((attachment) => attachment.dataPlane === "local_runtime" && attachment.runtimeId !== localRuntimeState.runtimeId)) {
+    if (executionTarget === "local" && attachments.some((attachment) => attachment.dataPlane === "local_runtime" && attachment.runtimeId !== selectedRuntimeId)) {
       throw new Error("本机文件属于另一个 Runtime；请切回其 Runtime 或重新上传");
     }
     const payload = {
@@ -1619,7 +1690,7 @@ async function submit() {
     const body = await call("/v2/tasks", {
       schema: "agentloop.task/v2",
       executionTarget: executionTarget === "local"
-        ? { kind: "local_device", deviceId: localRuntimeState.device.id, runtimeId: localRuntimeState.runtimeId }
+        ? { kind: "local_device", deviceId: localRuntimeState.device.id, runtimeId: selectedRuntimeId }
         : { kind: "cloud_pool" },
       dataPolicy: { mode: executionTarget },
       ...payload,
@@ -1629,9 +1700,18 @@ async function submit() {
     activeRun.assignmentId = body.assignment.id;
     assistantMessage.assignmentId = activeRun.assignmentId;
     assistantMessage.runtimeId = body.assignment.runtimeId;
+    const acceptedRemoteRunId = typeof body.assignment.remoteRunId === "string" && body.assignment.remoteRunId.length > 0
+      ? body.assignment.remoteRunId
+      : undefined;
+    if (acceptedRemoteRunId !== undefined) assistantMessage.remoteRunId = acceptedRemoteRunId;
     assistantMessage.runtimeDisplayName = runtimeDisplayNameFor(body.assignment.runtimeId);
     assistantMessage.executionLocation = executionTarget === "local" ? "local" : "cloud";
     if (executionTarget === "local") assistantMessage.localRuntimeId = body.assignment.runtimeId;
+    if (acceptedRemoteRunId !== undefined) {
+      conversation.boundRuntimeId = body.assignment.runtimeId;
+      conversation.executionLocation = assistantMessage.executionLocation;
+      updateLocalControls();
+    }
     if (body.assignment.status === "failed") {
       assistantMessage.status = "failed";
       assistantMessage.error = typeof body.assignment.errorMessage === "string" ? body.assignment.errorMessage : "该轮未成功创建 Runtime Run";

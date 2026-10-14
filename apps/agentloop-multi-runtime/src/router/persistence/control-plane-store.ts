@@ -12,6 +12,8 @@ import type {
   SubmitConversationTask,
 } from "../../shared/contracts.ts";
 import {
+  ConversationDispatchInProgressError,
+  ConversationRuntimeBindingError,
   RuntimeCapacityError,
   type AssignmentStatus,
   type ControlPlaneRepository,
@@ -139,6 +141,14 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       );
       CREATE INDEX IF NOT EXISTS mr_assignments_task_idx ON mr_assignments(task_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS mr_assignments_runtime_state_idx ON mr_assignments(runtime_id, status, reservation_expires_at);
+      CREATE TABLE IF NOT EXISTS mr_conversation_dispatch_locks (
+        tenant_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        assignment_id TEXT NOT NULL UNIQUE REFERENCES mr_assignments(id) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY(tenant_id, owner_user_id, conversation_id)
+      );
       CREATE TABLE IF NOT EXISTS mr_turns (
         assignment_id TEXT PRIMARY KEY REFERENCES mr_assignments(id) ON DELETE CASCADE,
         tenant_id TEXT NOT NULL,
@@ -425,6 +435,30 @@ export class ControlPlaneStore implements ControlPlaneRepository {
           ORDER BY latest_task.created_at DESC, latest_task.id DESC
           LIMIT 1
         ) AS last_status
+        ,(
+          SELECT bound_assignment.runtime_id
+          FROM mr_assignments bound_assignment
+          JOIN mr_tasks bound_task ON bound_task.id = bound_assignment.task_id
+          WHERE bound_task.tenant_id = grouped.tenant_id
+            AND bound_task.owner_user_id = grouped.owner_user_id
+            AND bound_task.conversation_id = grouped.conversation_id
+            AND bound_assignment.remote_run_id IS NOT NULL
+            AND bound_assignment.remote_run_id <> ''
+          ORDER BY bound_assignment.created_at DESC, bound_assignment.id DESC
+          LIMIT 1
+        ) AS bound_runtime_id
+        ,(
+          SELECT bound_task.data_policy_json
+          FROM mr_assignments bound_assignment
+          JOIN mr_tasks bound_task ON bound_task.id = bound_assignment.task_id
+          WHERE bound_task.tenant_id = grouped.tenant_id
+            AND bound_task.owner_user_id = grouped.owner_user_id
+            AND bound_task.conversation_id = grouped.conversation_id
+            AND bound_assignment.remote_run_id IS NOT NULL
+            AND bound_assignment.remote_run_id <> ''
+          ORDER BY bound_assignment.created_at DESC, bound_assignment.id DESC
+          LIMIT 1
+        ) AS bound_data_policy_json
       FROM (
         SELECT tenant_id, owner_user_id, conversation_id,
           MIN(created_at) AS created_at,
@@ -443,6 +477,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       updated_at: number;
       run_count: number;
       last_status: string;
+      bound_runtime_id: string | null;
+      bound_data_policy_json: string | null;
     }>;
     const visibleRows = rows.slice(0, page.limit);
     const conversations = visibleRows.map((row) => ({
@@ -452,6 +488,8 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       updatedAt: row.updated_at,
       runCount: Number(row.run_count),
       lastStatus: row.last_status,
+      ...(row.bound_runtime_id === null ? {} : { boundRuntimeId: row.bound_runtime_id }),
+      ...(row.bound_data_policy_json === null ? {} : { executionLocation: executionLocationFromDataPolicy(row.bound_data_policy_json) }),
     }));
     const hasMore = rows.length > page.limit;
     return {
@@ -591,12 +629,22 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       const existing = await this.findTask(task);
       if (existing !== undefined) {
         const current = await this.latestAssignment(existing.id);
-        if (current !== undefined && current.status !== "expired" && current.status !== "failed") return toStoredAssignment(current);
+        if (current !== undefined && current.status !== "expired" && current.status !== "failed") {
+          const assignment = toStoredAssignment(current);
+          if (current.status === "reserved" && current.remote_run_id === null) {
+            await this.acquireDispatchLock(existing, assignment, current.reservation_expires_at ?? now + input.reservationTtlMs);
+          }
+          return assignment;
+        }
         const executionTarget = JSON.parse(existing.execution_target_json) as { kind: string };
         if (current !== undefined && executionTarget.kind === "local_device") {
-          return await this.rearmLocalAssignment(current, existing, now, input.heartbeatTtlMs, input.reservationTtlMs);
+          const assignment = await this.rearmLocalAssignment(current, existing, now, input.heartbeatTtlMs, input.reservationTtlMs);
+          await this.acquireDispatchLock(existing, assignment, now + input.reservationTtlMs);
+          return assignment;
         }
-        return await this.reserveForTask(existing, now, input.heartbeatTtlMs, input.reservationTtlMs);
+        const assignment = await this.reserveForTask(existing, now, input.heartbeatTtlMs, input.reservationTtlMs);
+        await this.acquireDispatchLock(existing, assignment, now + input.reservationTtlMs);
+        return assignment;
       }
       const created: TaskRow = {
         id: `task_${randomUUID()}`,
@@ -625,16 +673,20 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         created.input, created.requested_runtime_id, created.requested_profile, created.execution_target_json, created.data_policy_json, created.required_capabilities_json, created.requested_model_key,
         created.allow_dangerous_tools, created.resource_refs_json, created.message_attachments_json, created.local_directory_scope_ids_json, created.status, now, now,
       );
-      return await this.reserveForTask(created, now, input.heartbeatTtlMs, input.reservationTtlMs);
+      const assignment = await this.reserveForTask(created, now, input.heartbeatTtlMs, input.reservationTtlMs);
+      await this.acquireDispatchLock(created, assignment, now + input.reservationTtlMs);
+      return assignment;
     });
   }
 
   async markAccepted(assignmentId: string, remoteRunId: string, now = Date.now()): Promise<void> {
+    if (typeof remoteRunId !== "string" || remoteRunId.length === 0) throw new TypeError("remoteRunId must be a non-empty string");
     await this.database.transaction(async () => {
       const result = await this.database.prepare(`
         UPDATE mr_assignments SET remote_run_id = ?, status = 'accepted', reservation_expires_at = NULL, updated_at = ?
         WHERE id = ? AND status = 'reserved'
       `).run(remoteRunId, now, assignmentId);
+      await this.database.prepare("DELETE FROM mr_conversation_dispatch_locks WHERE assignment_id = ?").run(assignmentId);
       if (result.changes === 0) return;
       await this.database.prepare(`UPDATE mr_tasks SET status = 'running', updated_at = ? WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)`)
         .run(now, assignmentId);
@@ -649,6 +701,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         SET status = 'failed', reservation_expires_at = NULL, error_code = ?, error_message = ?, updated_at = ?
         WHERE id = ? AND status = 'reserved'
       `).run(failure.code, failure.message, now, assignmentId);
+      await this.database.prepare("DELETE FROM mr_conversation_dispatch_locks WHERE assignment_id = ?").run(assignmentId);
       if (result.changes === 0) return;
       await this.database.prepare(`UPDATE mr_tasks SET status = 'failed', updated_at = ? WHERE id = (SELECT task_id FROM mr_assignments WHERE id = ?)`)
         .run(now, assignmentId);
@@ -777,6 +830,7 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         -- conversation sticky to that Host.  Affinity begins only after the
         -- Host has accepted the dispatch and supplied a remote Run id.
         AND a.remote_run_id IS NOT NULL
+        AND a.remote_run_id <> ''
       ORDER BY a.created_at DESC LIMIT 1
     `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { runtime_id: string } | undefined;
     const eligibleCandidates = [];
@@ -791,24 +845,31 @@ export class ControlPlaneStore implements ControlPlaneRepository {
         pending_admissions: await this.pendingAdmissionCount(node.id, heartbeat.observedAt),
       });
     }
+    if (affinity !== undefined) {
+      const boundNode = candidates.find((node) => node.id === affinity.runtime_id);
+      if (boundNode === undefined) throw new ConversationRuntimeBindingError(affinity.runtime_id, "unavailable");
+      const targetMatches = executionTarget.kind === "local_device"
+        ? boundNode.kind === "local"
+          && boundNode.device_id === executionTarget.deviceId
+          && boundNode.id === executionTarget.runtimeId
+        : boundNode.kind === "cloud"
+          && (selectedRuntimeId === null || boundNode.id === selectedRuntimeId);
+      if (!targetMatches) throw new ConversationRuntimeBindingError(affinity.runtime_id, "conflict");
+    }
     const eligible = eligibleCandidates
       .filter((node) => (executionTarget.kind === "local_device"
         ? node.kind === "local" && node.device_id === executionTarget.deviceId && node.id === executionTarget.runtimeId
           && node.tenant_id === task.tenant_id && node.owner_user_id === task.owner_user_id
         : node.kind === "cloud" && (selectedRuntimeId === null || node.id === selectedRuntimeId))
+        && (affinity === undefined || node.id === affinity.runtime_id)
         && (task.requested_profile === null || node.profile === task.requested_profile)
         && required.every((capability) => (JSON.parse(node.capabilities_json) as string[]).includes(capability)))
       .filter((node) => node.active_run_count + Number(node.pending_admissions) < node.max_concurrent_runs)
-      .sort((left, right) => {
-        if (affinity !== undefined && left.id === affinity.runtime_id) return -1;
-        if (affinity !== undefined && right.id === affinity.runtime_id) return 1;
-        return score(left) - score(right) || left.id.localeCompare(right.id);
-      });
-    // Affinity is deliberately a preference, never an availability gate.  The
-    // old Host can be draining, full, or absent; in each case a new Run may
-    // use another compatible healthy Host.  A running Run itself is not moved
-    // here -- that requires the separate run-lease/fencing recovery protocol.
+      .sort((left, right) => score(left) - score(right) || left.id.localeCompare(right.id));
     const selected = eligible[0];
+    if (selected === undefined && affinity !== undefined) {
+      throw new ConversationRuntimeBindingError(affinity.runtime_id, "unavailable");
+    }
     if (selected === undefined && selectedRuntimeId !== null) {
       throw new RuntimeCapacityError(`Runtime \"${selectedRuntimeId}\" is not ready or has no reservable capacity slot`);
     }
@@ -820,23 +881,6 @@ export class ControlPlaneStore implements ControlPlaneRepository {
       INSERT INTO mr_assignments(id, task_id, runtime_id, dispatch_key, status, reservation_expires_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)
     `).run(id, task.id, selected.id, dispatchKey, expires, now, now);
-    if (affinity !== undefined && affinity.runtime_id !== selected.id) {
-      await this.database.prepare(`
-        INSERT INTO mr_conversation_runtime_migrations(
-          id, tenant_id, owner_user_id, conversation_id, assignment_id,
-          previous_runtime_id, selected_runtime_id, reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'preferred_runtime_unavailable_or_at_capacity', ?)
-      `).run(
-        `migration_${randomUUID()}`,
-        task.tenant_id,
-        task.owner_user_id,
-        task.conversation_id,
-        id,
-        affinity.runtime_id,
-        selected.id,
-        now,
-      );
-    }
     const row = await this.database.prepare(assignmentSelect("WHERE a.id = ?")).get(id) as AssignmentRow;
     return toStoredAssignment(row);
   }
@@ -876,11 +920,28 @@ export class ControlPlaneStore implements ControlPlaneRepository {
     return Number(row.count);
   }
 
+  private async acquireDispatchLock(task: TaskRow, assignment: StoredAssignment, expiresAt: number): Promise<void> {
+    const statement = this.database.dialect === "tidb"
+      ? `INSERT IGNORE INTO mr_conversation_dispatch_locks(tenant_id, owner_user_id, conversation_id, assignment_id, expires_at) VALUES (?, ?, ?, ?, ?)`
+      : `INSERT INTO mr_conversation_dispatch_locks(tenant_id, owner_user_id, conversation_id, assignment_id, expires_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(tenant_id, owner_user_id, conversation_id) DO NOTHING`;
+    const result = await this.database.prepare(statement).run(
+      task.tenant_id, task.owner_user_id, task.conversation_id, assignment.id, expiresAt,
+    );
+    if (result.changes > 0) return;
+    const owner = await this.database.prepare(`
+      SELECT assignment_id FROM mr_conversation_dispatch_locks
+      WHERE tenant_id = ? AND owner_user_id = ? AND conversation_id = ?
+    `).get(task.tenant_id, task.owner_user_id, task.conversation_id) as { assignment_id: string } | undefined;
+    if (owner?.assignment_id !== assignment.id) throw new ConversationDispatchInProgressError();
+  }
+
   private async expireReservations(now: number): Promise<void> {
     await this.database.prepare(`UPDATE mr_assignments SET status = 'expired', updated_at = ? WHERE status = 'reserved' AND reservation_expires_at < ?`)
       .run(now, now);
     await this.database.prepare(`UPDATE mr_tasks SET status = 'queued', updated_at = ? WHERE status = 'dispatching' AND id IN (SELECT task_id FROM mr_assignments WHERE status = 'expired')`)
       .run(now);
+    await this.database.prepare("DELETE FROM mr_conversation_dispatch_locks WHERE expires_at < ?").run(now);
   }
 
   private async findTask(task: SubmitConversationTask): Promise<TaskRow | undefined> {

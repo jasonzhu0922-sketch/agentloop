@@ -20,7 +20,7 @@ MCP 是 Host-owned 的部署集成：每个 Runtime Host 启动时从自己的 `
 
 ## Web 的云端/本机一致性表达
 
-Web 的“一致”是交互和可追溯性的一致，而不是把设备数据复制成云端数据。用户始终在同一个会话中发送消息、看到待上传文件、执行状态、事件、回复和产物；每条回复同时记录实际执行位置与 Runtime 身份。因此切换本机运行只影响**下一次**提交，不能把正在运行的云端 Run 改派到设备，也不能把本机 Run 迁移到云端。
+Web 的“一致”是交互和可追溯性的一致，而不是把设备数据复制成云端数据。新会话可选择云端或某个本机 Runtime；首个 Host 返回 `remoteRunId` 后，会话即绑定该执行位置和准确 Runtime。后续提交不能在同一会话中切换云端/本机，也不能切换本机 Runtime；需要改用其他 Runtime 时必须新建会话。每条回复同时记录实际执行位置与 Runtime 身份，正在执行和已经终态的 Run 都不会被改派。
 
 ```text
 同一 Web 会话 / Composer / 回复卡片 / 产物工作区
@@ -365,9 +365,9 @@ Router 与 Runtime Host 启动时会各自执行其版本化 TiDB 迁移；`rebu
 
 真实部署应通过 Secret manager 注入 Provider 配置和服务身份，而不是把这些值提交到仓库。这里的 `RUNTIME_*_TOKEN` 仅适合本地开发，生产中应替换为工作负载身份或 mTLS。
 
-本地开发界面中的租户/用户输入会被映射为 `x-tenant-id` 与 `x-user-id` 请求头，仅用于演示身份适配；它不是生产认证。Runtime 下拉框读取 Router 静态节点的具体实例 ID，例如 `general-01`、`general-02`；选择“自动”时由 Router 均衡调度，显式选择某实例时只在该实例有可预留容量时提交，不存在的实例会明确报错。Router 只选择未过期、`ready`、capability 匹配且未满的节点，并在同一事务中创建 Task、Assignment 和 30 秒可过期预留。评分是 `(activeRuns + pendingAdmissions + 0.5 × queuedRuns) / maxConcurrentRuns`；Host 仍会按自己已接受且正在运行的 Run 执行容量准入。`reserved` 不形成会话绑定；只有 Host 返回 `remoteRunId` 后才成为 affinity 候选。后续新 Run 优先健康的原 Host，原 Host 失联、draining 或满载时会迁移到下一台兼容 Host，并写入迁移审计记录。
+本地开发界面中的租户/用户输入会被映射为 `x-tenant-id` 与 `x-user-id` 请求头，仅用于演示身份适配；它不是生产认证。Router 对新会话只选择未过期、`ready`、capability 匹配且未满的节点，并在同一事务中创建 Task、Assignment 和 30 秒可过期预留。评分是 `(activeRuns + pendingAdmissions + 0.5 × queuedRuns) / maxConcurrentRuns`；Host 仍会按自己已接受且正在运行的 Run 执行容量准入。`reserved` 不形成永久会话绑定，但数据库中的会话派发锁会拒绝第二条并发消息，避免两个首轮竞态落到不同 Runtime；派发失败或预留过期后该锁释放。只有 Host 返回非空 `remoteRunId` 后才建立严格绑定。后续新 Run 必须使用同一 Runtime；原 Runtime 失联、draining、满载或不再满足约束时，Router 返回 `conversation_runtime_unavailable`，不会静默迁移。请求尝试更改执行位置或 Runtime 时返回 `conversation_runtime_conflict`。
 
-Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignmentId/events/stream` SSE 代理；事件权威仍在共享状态库的持久 Run event log，浏览器绝不直连 Host。当前已实现的是“下一新 Run”的健康 affinity 降级；执行中的 Run 的自动接管仍需要 Run lease、fence 与按 Action receipt 的安全恢复，尚未声明完成。Compose 是本地/单机骨架；多节点生产部署还需选定共享 PostgreSQL/TiDB、对象存储和 RWX workspace。设计见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
+Router 提供可断线续读的事件查询以及 `GET /v1/assignments/:assignmentId/events/stream` SSE 代理；事件权威仍在共享状态库的持久 Run event log，浏览器绝不直连 Host。执行中 Run 的自动接管仍需要 Run lease、fence 与按 Action receipt 的安全恢复，尚未声明完成；它也不能绕过会话的严格 Runtime 绑定。Compose 是本地/单机骨架；多节点生产部署还需选定共享 PostgreSQL/TiDB、对象存储和 RWX workspace。设计见[共享状态与故障接管设计](../../docs/MULTI-RUNTIME-SHARED-STATE-FAILOVER-DESIGN.md)。
 
 ### 打包 Local Runtime Agent（macOS Apple Silicon）
 

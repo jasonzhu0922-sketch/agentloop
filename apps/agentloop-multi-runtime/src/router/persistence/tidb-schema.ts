@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS mr_assignments (
       );
 CREATE INDEX IF NOT EXISTS mr_assignments_task_idx ON mr_assignments(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS mr_assignments_runtime_state_idx ON mr_assignments(runtime_id, status, reservation_expires_at);
+CREATE TABLE IF NOT EXISTS mr_conversation_dispatch_locks (
+        tenant_id VARCHAR(191) NOT NULL,
+        owner_user_id VARCHAR(191) NOT NULL,
+        conversation_id VARCHAR(191) NOT NULL,
+        assignment_id VARCHAR(191) NOT NULL UNIQUE REFERENCES mr_assignments(id) ON DELETE CASCADE,
+        expires_at BIGINT NOT NULL,
+        PRIMARY KEY(tenant_id, owner_user_id, conversation_id)
+      );
 CREATE TABLE IF NOT EXISTS mr_turns (
         assignment_id VARCHAR(191) PRIMARY KEY REFERENCES mr_assignments(id) ON DELETE CASCADE,
         tenant_id VARCHAR(191) NOT NULL,
