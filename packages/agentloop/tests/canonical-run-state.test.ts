@@ -168,6 +168,87 @@ test("canonical Run state preserves intent identity while evidence, gap, and ter
   assert.equal(completed.revision, 8);
 });
 
+test("reply deliverables initialize canonical targets and gaps from the same frozen intent", () => {
+  const replyIntent = {
+    schema: "agentloop.conversationTaskIntent/v1" as const,
+    operation: "answer" as const,
+    requiresExecution: false,
+    deliverables: [{
+      targetId: "greeting_reply",
+      purpose: "Greet the user and ask how to help.",
+      expectedArtifactCount: 1,
+      action: "none" as const,
+      kind: "none" as const,
+      surface: "conversation" as const,
+    }],
+  };
+  const turnResolution = {
+    schema: "agentloop.conversationTurnResolution/v1" as const,
+    mode: "reply" as const,
+    relation: "new_goal" as const,
+    inputMode: "none" as const,
+    effectiveGoal: "Greet the user and ask how to help.",
+    taskIntent: replyIntent,
+    evidenceStrategy: "none" as const,
+    sourceBinding: { mode: "none" as const, visibleDirectoryIds: [] },
+    evidenceDemand: "none" as const,
+    userConstraints: [],
+    source: "model" as const,
+  };
+  const initial = createCanonicalRunState({
+    runId: "run-reply-target",
+    userInput: "你好",
+    turnResolution,
+    understanding: understandTask({
+      objective: "Greet the user and ask how to help.",
+      resolvedTaskIntent: replyIntent,
+      responseOnly: true,
+    }),
+    now: 1,
+  });
+
+  assert.deepEqual(Object.keys(initial.targets), ["greeting_reply"]);
+  assert.equal(initial.targets.greeting_reply?.surface, "conversation");
+  assert.equal(initial.gaps[0]?.targetId, "greeting_reply");
+  assert.deepEqual(initial.gaps[0]?.missingEvidenceKinds, ["delivery_target:greeting_reply"]);
+
+  const base = planFor(initial);
+  const planned = bindCanonicalPlan(initial, {
+    ...base,
+    steps: [{
+      ...base.steps[0]!,
+      executionBinding: { ...base.steps[0]!.executionBinding, targetIds: ["greeting_reply"] },
+    }],
+  }, 2);
+  assert.deepEqual(planned.targets.greeting_reply?.ownerStepIds, ["produce"]);
+
+  assert.throws(() => createCanonicalRunState({
+    runId: "run-reply-mismatched-intent",
+    userInput: "你好",
+    turnResolution,
+    understanding: understandTask({
+      objective: "Greet the user and ask how to help.",
+      responseOnly: true,
+    }),
+    now: 1,
+  }), /resolver\/understanding mismatch greeting_reply/);
+});
+
+test("canonical Plan binding rejects an inventory that contradicts frozen intent", () => {
+  const initial = createCanonicalRunState({
+    runId: "run-contradictory-targets",
+    userInput: "查询表结构并分析数据分布",
+    understanding: analysisUnderstanding(),
+    now: 1,
+  });
+  const contradictory = { ...initial, targets: Object.freeze({}) };
+
+  assert.throws(
+    () => bindCanonicalPlan(contradictory, planFor(contradictory), 2),
+    /Canonical delivery target inventory contradicts frozen intent: missing targets/,
+  );
+});
+
 test("canonical Run state repository rejects a stale writer", async () => {
   const database = new AppDatabase(":memory:");
   await database.ready();
@@ -182,6 +263,38 @@ test("canonical Run state repository rejects a stale writer", async () => {
     states.commit({ expectedRevision: initial.revision, state: next, reason: "stale" }),
     /revision is stale/,
   );
+  await database.close();
+});
+
+test("Plan admission transaction rolls back the Plan when canonical state commit conflicts", async () => {
+  const database = new AppDatabase(":memory:");
+  await database.ready();
+  const runs = new RunRepository(database);
+  await runs.insertRun({ id: "run-plan-atomic", ownerUserId: "user-1", allowDangerousTools: false, input: "test", createdAt: 1 });
+  const states = new CanonicalRunStateRepository(database);
+  const plans = new PlanRepository(database);
+  const initial = await states.create(createCanonicalRunState({
+    runId: "run-plan-atomic",
+    userInput: "生成中文 PPTX",
+    understanding: understanding(),
+    now: 1,
+  }));
+  const plan = planFor(initial);
+  const planned = bindCanonicalPlan(initial, plan, 2);
+  const staleAdvance = { ...planned, revision: planned.revision + 1 };
+
+  await assert.rejects(
+    database.transaction(async () => {
+      await plans.create(plan);
+      await states.commit({ expectedRevision: planned.revision, state: staleAdvance, reason: "plan_admitted" });
+    }),
+    /revision is stale/,
+  );
+
+  const planCount = await database.prepare("SELECT COUNT(*) AS count FROM plans WHERE run_id = ?")
+    .get<{ count: number }>(initial.runId);
+  assert.equal(planCount?.count, 0);
+  assert.equal((await states.get(initial.runId)).revision, initial.revision);
   await database.close();
 });
 

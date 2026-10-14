@@ -235,6 +235,31 @@ test("deterministic response plan owns every canonical conversation delivery tar
   const canonicalState = createCanonicalRunState({
     runId,
     userInput: "IT 软件安全里面有一个名词叫垂直越权，这个是什么风险？",
+    turnResolution: {
+      schema: "agentloop.conversationTurnResolution/v1",
+      mode: "reply",
+      relation: "new_goal",
+      inputMode: "none",
+      effectiveGoal: "Explain vertical privilege escalation as a software security risk.",
+      taskIntent: {
+        schema: "agentloop.conversationTaskIntent/v1",
+        operation: "answer",
+        requiresExecution: false,
+        deliverables: [{
+          targetId,
+          purpose: "Explain vertical privilege escalation as a software security risk.",
+          expectedArtifactCount: 1,
+          action: "none",
+          kind: "none",
+          surface: "conversation",
+        }],
+      },
+      evidenceStrategy: "none",
+      sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+      evidenceDemand: "none",
+      userConstraints: [],
+      source: "model",
+    },
     understanding: understandTask({
       objective: "Explain vertical privilege escalation as a software security risk.",
       resolvedTaskIntent: {
@@ -278,6 +303,7 @@ test("deterministic response plan owns every canonical conversation delivery tar
     canonicalState,
   });
   assert.deepEqual(admitted.steps[0]?.executionBinding.targetIds, [targetId]);
+  assert.deepEqual(Object.keys(canonicalState.targets), [targetId]);
 });
 
 test("Admission scopes artifact evidence to the leaf that owns the workspace target", () => {

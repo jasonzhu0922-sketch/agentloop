@@ -1898,12 +1898,14 @@ export class RunService {
           canonicalState,
         });
       }
-      plan = await this.plans.create(plan);
       const planBoundState = bindCanonicalPlan(canonicalState, plan);
-      canonicalState = await this.canonicalStates.commit({
-        expectedRevision: canonicalState.revision,
-        state: planBoundState,
-        reason: "plan_admitted",
+      await this.database.transaction(async () => {
+        plan = await this.plans.create(plan);
+        canonicalState = await this.canonicalStates.commit({
+          expectedRevision: canonicalState.revision,
+          state: planBoundState,
+          reason: "plan_admitted",
+        });
       });
       planId = plan.id;
       actionScope.planId = plan.id;

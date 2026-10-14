@@ -917,6 +917,39 @@ test("Generic Run execution does not opt into conversation intent classification
   }
 });
 
+test("reply delivery targets remain canonical through planning, assessment, and terminal commit", async () => {
+  const database = new AppDatabase(":memory:");
+  try {
+    const owner = testOwner();
+    const runs = new RunService({
+      database,
+      skills: new SkillService(database),
+      modelFactory: () => new GreetingTargetConversationModel(),
+      assessorFactory: () => approvingTestAssessor(),
+    });
+
+    const run = await runs.executeConversation(owner.user.id, "你好");
+
+    assert.equal(run.status, "completed");
+    assert.match(run.output ?? "", /你好/);
+    const stored = await database.prepare("SELECT state_json FROM canonical_run_states WHERE run_id = ?")
+      .get<{ state_json: string }>(run.id);
+    assert.ok(stored);
+    const state = JSON.parse(stored.state_json) as {
+      phase: string;
+      targets: Record<string, { status: string; ownerStepIds: string[] }>;
+      gaps: Array<{ targetId?: string; status: string }>;
+    };
+    assert.equal(state.phase, "completed");
+    assert.equal(state.targets.greeting_reply?.status, "accepted");
+    assert.deepEqual(state.targets.greeting_reply?.ownerStepIds, ["response"]);
+    assert.equal(state.gaps.find((gap) => gap.targetId === "greeting_reply")?.status, "resolved");
+    assert.equal((await runs.events(owner.user.id, run.id)).some((event) => event.type === "run.failed"), false);
+  } finally {
+    await database.close();
+  }
+});
+
 test("a resource-free artifact conversation turn fails closed after using the canonical Resolver contract", async () => {
   const database = new AppDatabase(":memory:");
   try {
@@ -1456,6 +1489,46 @@ class ContextAwareConversationIntentModel implements ModelAdapter {
       };
     }
     return { content: "conversation intent handled", finishReason: "stop", toolCalls: [] };
+  }
+}
+
+class GreetingTargetConversationModel implements ModelAdapter {
+  readonly limits = TEST_MODEL_LIMITS;
+
+  async complete(request: ModelInvocation): Promise<ModelResponse> {
+    if (request.runId.startsWith("conversation-turn:")) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{
+          id: "resolve-greeting",
+          name: "resolve_conversation_turn",
+          arguments: {
+            mode: "reply",
+            relation: "new_goal",
+            inputMode: "none",
+            effectiveGoal: "Greet the user warmly and invite them to state what they need help with.",
+            taskIntent: {
+              schema: "agentloop.conversationTaskIntent/v1",
+              operation: "answer",
+              requiresExecution: false,
+              deliverables: [{
+                targetId: "greeting_reply",
+                purpose: "A friendly greeting that asks the user what they need help with.",
+                expectedArtifactCount: 1,
+                action: "none",
+                kind: "none",
+                surface: "conversation",
+              }],
+            },
+            evidenceStrategy: "none",
+            sourceBinding: { mode: "none", visibleDirectoryIds: [] },
+            userConstraints: [],
+          },
+        }],
+      };
+    }
+    return { content: "你好，有什么可以帮你？", finishReason: "stop", toolCalls: [] };
   }
 }
 

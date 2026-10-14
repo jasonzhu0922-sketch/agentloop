@@ -27,6 +27,7 @@ import { admitPlan, bindRequiredSkillCompanions, reusableSourceEvidenceKindsForT
 import { resolveCapabilityGaps, resolveSourceGroundingGap } from "./capability-resolution.ts";
 import { planningCapabilitiesFromToolNames, planningCapabilitiesFromTools, skillSourceProviderCapabilityId } from "./step-execution-binding.ts";
 import type { RuntimeResultBinding } from "../runtime/runtime-result.ts";
+import { assertCanonicalDeliveryTargetInventory } from "../runtime/canonical-run-state.ts";
 
 const EVIDENCE_KIND_VALUES = [
   "source_summary",
@@ -244,6 +245,7 @@ export class ModelPlanner implements Planner {
   }
 
   async plan(task: TaskSpec, signal?: AbortSignal, emit?: RuntimeEventSink): Promise<PlanProposal> {
+    assertCanonicalDeliveryTargetInventory(task.canonicalState);
     const taskProfile = planningTaskProfile(task);
     await emit?.({
       type: "planning.started",
@@ -504,7 +506,7 @@ function withoutReasoningContent(response: import("../runtime/contracts.ts").Mod
 
 function responseOnlyPlan(task: TaskSpec): PlanProposal {
   const input = planningIntentObjective(task);
-  const targetIds = (canonicalTaskUnderstanding(task).deliverables ?? []).map((target) => target.targetId);
+  const targetIds = Object.keys(task.canonicalState.targets);
   return {
     goal: input.trim().slice(0, 20_000) || "Answer the latest user message",
     schema: "agentloop.outcomePlan/v2",
@@ -1342,7 +1344,7 @@ function planningRuntimeContext(
 
 function submitOutcomePlanToolForTask(task: TaskSpec): ModelInvocation["tools"][number] {
   const allowedCapabilityIds = planningCapabilitiesForTask(task).map((capability) => capability.id).sort();
-  const allowedArtifactTargetIds = (canonicalTaskUnderstanding(task).deliverables ?? []).map((target) => target.targetId).sort();
+  const allowedArtifactTargetIds = Object.keys(task.canonicalState.targets).sort();
   return {
     ...SUBMIT_OUTCOME_PLAN_TOOL,
     inputSchema: {

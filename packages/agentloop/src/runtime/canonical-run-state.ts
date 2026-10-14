@@ -117,9 +117,7 @@ export function createCanonicalRunState(input: {
   readonly now?: number;
 }): CanonicalRunState {
   const now = input.now ?? Date.now();
-  const deliverables = input.turnResolution?.mode === "reply"
-    ? []
-    : input.understanding.deliverables ?? input.turnResolution?.taskIntent.deliverables ?? [];
+  const deliverables = input.understanding.deliverables ?? [];
   const targets = Object.fromEntries(deliverables.map((target) => [target.targetId, Object.freeze({
     targetId: target.targetId,
     purpose: target.purpose,
@@ -142,7 +140,7 @@ export function createCanonicalRunState(input: {
     suggestedAction: "revise_plan" as const,
     openedAt: now,
   }));
-  return Object.freeze({
+  const state: CanonicalRunState = Object.freeze({
     schema: "agentloop.canonicalRunState/v1",
     stateId: randomUUID(),
     runId: input.runId,
@@ -163,6 +161,72 @@ export function createCanonicalRunState(input: {
     createdAt: now,
     updatedAt: now,
   });
+  assertCanonicalDeliveryTargetInventory(state);
+  return state;
+}
+
+/**
+ * The frozen intent and target inventory are two views of one delivery
+ * contract. Reject persisted or manually constructed states that let Planning
+ * see a target which canonical progress cannot own.
+ */
+export function assertCanonicalDeliveryTargetInventory(state: CanonicalRunState): void {
+  const deliverables = state.intent.understanding.deliverables ?? [];
+  const resolvedDeliverables = state.intent.turnResolution?.taskIntent.deliverables;
+  const targets = Object.values(state.targets);
+  const duplicateIntentIds = deliverables
+    .map((target) => target.targetId)
+    .filter((targetId, index, ids) => ids.indexOf(targetId) !== index);
+  const intentById = new Map(deliverables.map((target) => [target.targetId, target]));
+  const mismatched = targets.filter((target) => {
+    const intentTarget = intentById.get(target.targetId);
+    return intentTarget === undefined
+      || target.purpose !== intentTarget.purpose
+      || target.surface !== intentTarget.surface
+      || target.kind !== intentTarget.kind
+      || target.format !== intentTarget.format
+      || target.expectedCount !== intentTarget.expectedArtifactCount;
+  }).map((target) => target.targetId);
+  const missing = deliverables.filter((target) => state.targets[target.targetId] === undefined).map((target) => target.targetId);
+  const unexpected = targets.filter((target) => !intentById.has(target.targetId)).map((target) => target.targetId);
+  const resolutionMismatch = resolvedDeliverables === undefined
+    ? []
+    : deliveryInventoryMismatchIds(deliverables, resolvedDeliverables);
+  if (
+    duplicateIntentIds.length === 0
+    && missing.length === 0
+    && unexpected.length === 0
+    && mismatched.length === 0
+    && resolutionMismatch.length === 0
+  ) return;
+  const details = [
+    ...(duplicateIntentIds.length === 0 ? [] : [`duplicate intent IDs ${[...new Set(duplicateIntentIds)].join(", ")}`]),
+    ...(missing.length === 0 ? [] : [`missing targets ${missing.join(", ")}`]),
+    ...(unexpected.length === 0 ? [] : [`unexpected targets ${unexpected.join(", ")}`]),
+    ...(mismatched.length === 0 ? [] : [`mismatched targets ${mismatched.join(", ")}`]),
+    ...(resolutionMismatch.length === 0 ? [] : [`resolver/understanding mismatch ${resolutionMismatch.join(", ")}`]),
+  ];
+  throw conflict(`Canonical delivery target inventory contradicts frozen intent: ${details.join("; ")}`);
+}
+
+function deliveryInventoryMismatchIds(
+  left: NonNullable<StructuredTaskUnderstanding["deliverables"]>,
+  right: NonNullable<StructuredTaskUnderstanding["deliverables"]>,
+): string[] {
+  const rightById = new Map(right.map((target) => [target.targetId, target]));
+  return [...new Set([
+    ...left.filter((target) => {
+      const peer = rightById.get(target.targetId);
+      return peer === undefined
+        || peer.purpose !== target.purpose
+        || peer.expectedArtifactCount !== target.expectedArtifactCount
+        || peer.action !== target.action
+        || peer.kind !== target.kind
+        || peer.format !== target.format
+        || peer.surface !== target.surface;
+    }).map((target) => target.targetId),
+    ...right.filter((target) => !left.some((candidate) => candidate.targetId === target.targetId)).map((target) => target.targetId),
+  ])];
 }
 
 export function canonicalRunStateRef(state: CanonicalRunState): CanonicalRunStateRef {
@@ -180,6 +244,7 @@ export function bindCanonicalPlan(
   now = Date.now(),
 ): CanonicalRunState {
   assertMutable(state);
+  assertCanonicalDeliveryTargetInventory(state);
   if (plan.runId !== state.runId) throw conflict("Canonical state cannot bind a Plan from another Run");
   const steps = Object.fromEntries(plan.steps.map((step) => [step.id, {
     stepId: step.id,

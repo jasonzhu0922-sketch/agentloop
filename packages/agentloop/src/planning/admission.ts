@@ -3,7 +3,12 @@ import { AppError } from "../shared/errors.ts";
 import { buildSkillReferenceMap } from "../skills/skill-identity.ts";
 import type { PrivateSkill } from "../skills/skill-service.ts";
 import { taskEvidencePolicyForTaskUnderstanding, type StructuredTaskUnderstanding } from "../runtime/task-intent.ts";
-import { canonicalRunStateRef, type CanonicalRunState } from "../runtime/canonical-run-state.ts";
+import {
+  assertCanonicalDeliveryTargetInventory,
+  canonicalRunStateRef,
+  type CanonicalDeliveryTarget,
+  type CanonicalRunState,
+} from "../runtime/canonical-run-state.ts";
 import type { ArtifactTarget, ConversationTurnResolution, ConversationWorkingSet, EvidenceContract, EvidenceKind, ExecutionPlan, PlanProposal, PlanStep, PlanningCapability, PlanningToolSummary, RefinementState, RequiredFact, StepExecutionBinding, SuccessCriterion } from "./contracts.ts";
 import { parseRuntimeResultBinding, type RuntimeResultBinding } from "../runtime/runtime-result.ts";
 import {
@@ -89,7 +94,9 @@ export function admitPlan(input: {
   now?: number;
 }): ExecutionPlan {
   if (input.canonicalState.runId !== input.runId) reject("Canonical Run State belongs to another Run");
+  assertCanonicalDeliveryTargetInventory(input.canonicalState);
   const taskSemantics = input.canonicalState.intent.understanding;
+  const canonicalTargets = Object.values(input.canonicalState.targets);
   const taskIntent = taskSemantics.intent;
   const canonicalRequiredToolSourceIds = input.canonicalState.intent.requiredToolSourceIds;
   const proposal = bindRequiredSkillCompanions(input.proposal, input.availableSkills);
@@ -191,12 +198,12 @@ export function admitPlan(input: {
         `Step ${step.id} is only a Skill activation step; bind the Skill to a concrete user-deliverable step instead`,
       );
     }
-    const targetIds = normalizeTargetIdsForStep(step, taskSemantics);
+    const targetIds = normalizeTargetIdsForStep(step, canonicalTargets);
     // A Run may own both workspace artifacts and a final conversational
     // explanation.  The aggregate TaskIntent describes the Run, while a leaf
     // owns only the targets named here.  Do not make a conversation-only
     // summary satisfy file receipts merely because a sibling leaf writes one.
-    const stepTaskIntent = deliveryIntentForStep(targetIds, taskSemantics, taskIntent);
+    const stepTaskIntent = deliveryIntentForStep(targetIds, canonicalTargets, taskIntent);
     const fileProducingStep = kind === "leaf" && requiresFileProduction(step, stepTaskIntent);
     const artifactTargets = normalizeArtifactTargetsForStep({
       step,
@@ -239,7 +246,7 @@ export function admitPlan(input: {
       normalizeCompletionSuccessCriteria(step.role, step.successCriteria, stepTaskIntent),
       completionEvidenceContract,
     );
-    const targetCriteria = deliveryTargetSuccessCriteria(targetIds, taskSemantics);
+    const targetCriteria = deliveryTargetSuccessCriteria(targetIds, canonicalTargets);
     normalizeCompletionCapabilities(step.role, requiredCapabilities, stepTaskIntent);
     const criteria: SuccessCriterion[] = [...completionCriteria, ...targetCriteria].map((criterion) => ({
       ...criterion,
@@ -333,7 +340,7 @@ export function admitPlan(input: {
   });
 
   const admittedSteps = normalizeDependencyEvidenceReuse(steps);
-  assertDeliveryTargetCoverage(admittedSteps, taskSemantics);
+  assertDeliveryTargetCoverage(admittedSteps, canonicalTargets);
   assertArtifactTargetCoverage(admittedSteps, taskSemantics);
   assertStructuredCapabilitiesMatchTaskSemantics(admittedSteps, taskSemantics);
   assertTerminalArtifactDelivery(admittedSteps, taskIntent);
@@ -1059,7 +1066,7 @@ function requiresFileProduction(
  */
 function deliveryIntentForStep(
   targetIds: readonly string[],
-  taskSemantics: StructuredTaskUnderstanding | undefined,
+  canonicalTargets: readonly CanonicalDeliveryTarget[],
   fallback: {
     readonly deliverySurface?: "conversation" | "workspace_artifact";
     readonly artifactKind?: string;
@@ -1070,13 +1077,11 @@ function deliveryIntentForStep(
   readonly artifactKind?: string;
   readonly sourceNeed?: "none" | "lookup_lite" | "source_grounded" | "strict_user_source";
 } | undefined {
-  if (targetIds.length === 0 || taskSemantics === undefined) return fallback;
-  type DeliveryTarget = NonNullable<StructuredTaskUnderstanding["deliverables"]>[number];
-  const deliverables = taskSemantics.deliverables ?? [];
-  const targets = new Map(deliverables.map((target) => [target.targetId, target]));
+  if (targetIds.length === 0) return fallback;
+  const targets = new Map(canonicalTargets.map((target) => [target.targetId, target]));
   const owned = targetIds
     .map((targetId) => targets.get(targetId))
-    .filter((target): target is DeliveryTarget => target !== undefined);
+    .filter((target): target is CanonicalDeliveryTarget => target !== undefined);
   const artifactTarget = owned.find((target) => target.surface === "workspace_artifact" && target.kind !== "none");
   if (artifactTarget !== undefined) {
     return {
@@ -1112,10 +1117,9 @@ function normalizeArtifactTargetsForStep(input: {
 
 function normalizeTargetIdsForStep(
   step: PlanProposal["steps"][number],
-  taskSemantics?: StructuredTaskUnderstanding,
+  canonicalTargets: readonly CanonicalDeliveryTarget[],
 ): readonly string[] {
-  const requested = taskSemantics?.deliverables ?? [];
-  const requestedIds = new Set(requested.map((target) => target.targetId));
+  const requestedIds = new Set(canonicalTargets.map((target) => target.targetId));
   const targetIds = [...new Set(step.targetIds ?? [])];
   const unknown = targetIds.filter((targetId) => !requestedIds.has(targetId));
   if (unknown.length > 0) reject(`Step ${step.id} binds unknown delivery target(s): ${unknown.join(", ")}`);
@@ -1124,9 +1128,9 @@ function normalizeTargetIdsForStep(
 
 function deliveryTargetSuccessCriteria(
   targetIds: readonly string[],
-  taskSemantics?: StructuredTaskUnderstanding,
+  canonicalTargets: readonly CanonicalDeliveryTarget[],
 ): readonly SuccessCriterion[] {
-  const byId = new Map((taskSemantics?.deliverables ?? []).map((target) => [target.targetId, target]));
+  const byId = new Map(canonicalTargets.map((target) => [target.targetId, target]));
   return targetIds.map((targetId) => {
     const target = byId.get(targetId);
     if (target === undefined) reject(`Unknown delivery target ${targetId}`);
@@ -1143,17 +1147,16 @@ function deliveryTargetSuccessCriteria(
 
 function assertDeliveryTargetCoverage(
   steps: readonly PlanStep[],
-  taskSemantics?: StructuredTaskUnderstanding,
+  canonicalTargets: readonly CanonicalDeliveryTarget[],
 ): void {
-  const requested = taskSemantics?.deliverables ?? [];
-  if (requested.length === 0) return;
+  if (canonicalTargets.length === 0) return;
   const owners = new Map<string, string[]>();
   for (const step of steps) {
     for (const targetId of step.executionBinding.targetIds) {
       owners.set(targetId, [...(owners.get(targetId) ?? []), step.id]);
     }
   }
-  const missing = requested.filter((target) => (owners.get(target.targetId)?.length ?? 0) === 0);
+  const missing = canonicalTargets.filter((target) => (owners.get(target.targetId)?.length ?? 0) === 0);
   const duplicate = [...owners].filter(([, stepIds]) => stepIds.length > 1);
   if (missing.length > 0 || duplicate.length > 0) {
     const details = [
