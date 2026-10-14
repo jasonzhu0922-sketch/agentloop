@@ -34,6 +34,34 @@ dotenv_value() {
   sed -n "s/^${key}=//p" "$file" | tail -n 1
 }
 
+release_image() {
+  local manifest="$1" image revision
+  [ -f "$manifest" ] || die "release manifest does not exist: $manifest"
+  image="$(dotenv_value MULTI_RUNTIME_IMAGE "$manifest")"
+  revision="$(dotenv_value RELEASE_REVISION "$manifest")"
+  [[ "$image" =~ ^agentloop-multi-runtime:[0-9a-f]{12,64}$ ]] || die "release manifest has an invalid image tag"
+  [[ "$revision" =~ ^[0-9a-f]{40,64}$ ]] || die "release manifest has an invalid revision"
+  printf '%s\n' "$image"
+}
+
+select_image() {
+  local image="$1" backup staging
+  docker image inspect "$image" >/dev/null 2>&1 || die "release image is not loaded locally: $image"
+  mkdir -p "$DEPLOY_ROOT/backups"
+  backup="$DEPLOY_ROOT/backups/deployment.env.$(date +%Y%m%d%H%M%S)"
+  cp "$ENV_FILE" "$backup"
+  staging="$(mktemp "$DEPLOY_ROOT/.env.XXXXXX")"
+  awk -v image="$image" '
+    BEGIN { replaced = 0 }
+    /^MULTI_RUNTIME_IMAGE=/ { print "MULTI_RUNTIME_IMAGE=" image; replaced = 1; next }
+    { print }
+    END { if (!replaced) print "MULTI_RUNTIME_IMAGE=" image }
+  ' "$ENV_FILE" > "$staging"
+  chmod 600 "$staging"
+  mv "$staging" "$ENV_FILE"
+  printf '%s\n' "$backup"
+}
+
 ensure_docker() {
   require_command docker
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 plugin is required (docker compose)"
@@ -117,6 +145,24 @@ load_image() {
   docker load -i "$1"
 }
 
+release() {
+  [ "$#" -eq 2 ] || die "usage: $0 release /absolute/path/agentloop-image.tar[.gz] /absolute/path/release-manifest.env"
+  [ -f "$ENV_FILE" ] || die "run: $0 init"
+  local image backup
+  image="$(release_image "$2")"
+  load_image "$1"
+  backup="$(select_image "$image")"
+  if up; then
+    note "released: $image"
+    return
+  fi
+  note "release failed; restoring prior deployment configuration"
+  cp "$backup" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  compose up -d --no-build --remove-orphans || true
+  die "release failed; previous image selection was restored from $backup"
+}
+
 validate() {
   [ -f "$ENV_FILE" ] || die "run: $0 init"
   [ -f "$DEPLOY_ROOT/secrets/runtime.env" ] || die "missing Runtime secret file"
@@ -165,6 +211,7 @@ case "${1:-}" in
   init) [ "$#" -eq 1 ] || die "usage: $0 init"; init ;;
   build) [ "$#" -eq 1 ] || die "usage: $0 build"; build ;;
   load-image) shift; load_image "$@" ;;
+  release) shift; release "$@" ;;
   validate) [ "$#" -eq 1 ] || die "usage: $0 validate"; validate ;;
   up) [ "$#" -eq 1 ] || die "usage: $0 up"; up ;;
   health) [ "$#" -eq 1 ] || die "usage: $0 health"; health ;;
@@ -172,7 +219,7 @@ case "${1:-}" in
   refresh-skills) [ "$#" -eq 1 ] || die "usage: $0 refresh-skills"; extract_skills true ;;
   *)
     cat >&2 <<USAGE
-usage: $0 {init|build|load-image ARCHIVE|validate|up|health|logs [SERVICE...]|refresh-skills}
+usage: $0 {init|build|load-image ARCHIVE|release IMAGE_ARCHIVE RELEASE_MANIFEST|validate|up|health|logs [SERVICE...]|refresh-skills}
 
 Set AGENTLOOP_DEPLOY_ROOT to override the default parent directory of the Git checkout.
 USAGE

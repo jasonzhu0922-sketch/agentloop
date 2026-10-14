@@ -58,6 +58,29 @@ git -C /opt/agentloop/repo pull --ff-only
 
 若本版 `custom-skills.zip` 有更新，显式执行 `deploy.sh refresh-skills`。旧 Skills 会备份到 `/opt/agentloop/backups/`，然后重启 Runtime Host：`deploy.sh up`。
 
+## 可重复的离线增量发布
+
+推荐始终在构建机上从 `main` 的精确提交制作不可变镜像；脚本会用 Git archive 隔离未提交的本地改动，默认 tag 为 `agentloop-multi-runtime:<12 位提交 SHA>`。BuildKit 缓存保存在 `.docker-build-cache/`：业务源码更新仅重建应用层，Node 依赖和 Runtime 的 apt/Python/Chromium 工具层会被复用。只有 `package-lock.json` 或 `requirements.txt` 改变时，才需要重新下载对应依赖层。
+
+```bash
+cd /path/to/agentloop
+git switch main
+git pull --ff-only
+apps/agentloop-multi-runtime/deploy/centos7/build-image.sh
+scp agentloop-multi-runtime-<sha>.tar.gz \
+  agentloop-multi-runtime-<sha>-deployment.tar.gz SERVER:/tmp/
+```
+
+在服务器解开同版本部署包后，用单一 release 命令加载镜像、切换 `.env` 中的不可变 tag，并启动健康检查。若健康检查失败，脚本会恢复上一个 tag 并重新拉起此前服务；Docker 不会删除旧镜像或数据卷。
+
+```bash
+tar -C /opt/agentloop/release -xzf /tmp/agentloop-multi-runtime-<sha>-deployment.tar.gz
+cd /opt/agentloop/release/agentloop-centos7-release
+deploy/centos7/deploy.sh release \
+  /tmp/agentloop-multi-runtime-<sha>.tar.gz \
+  ./release-manifest.env
+```
+
 ## 方式 B：离线镜像上传服务器（服务器无需 Git）
 
 在与服务器同架构的构建机（通常为 x86_64）上运行。Apple Silicon 构建机默认交叉构建 `linux/amd64`；首次构建需要 Docker 能访问基础镜像、npm、apt、pip 所需源。
