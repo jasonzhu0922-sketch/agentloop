@@ -29,6 +29,8 @@ test("CentOS deployment exposes an Agent-reachable Router URL and proves both ro
   assert.match(imageBuilder, /release-manifest\.env/);
   assert.match(imageBuilder, /--cache-to/);
   assert.match(imageBuilder, /--build-arg "NODE_IMAGE=\$NODE_IMAGE"/);
+  assert.match(imageBuilder, /--build-arg "PLAYWRIGHT_DOWNLOAD_HOST=\$PLAYWRIGHT_DOWNLOAD_HOST"/);
+  assert.match(imageBuilder, /PLAYWRIGHT_DOWNLOAD_HOST=\$PLAYWRIGHT_DOWNLOAD_HOST/);
   assert.match(launcher, /release IMAGE_ARCHIVE RELEASE_MANIFEST/);
   assert.match(launcher, /release failed; restoring prior deployment configuration/);
 });

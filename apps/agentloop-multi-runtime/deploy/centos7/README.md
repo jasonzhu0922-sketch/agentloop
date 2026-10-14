@@ -71,7 +71,7 @@ scp agentloop-multi-runtime-<sha>.tar.gz \
   agentloop-multi-runtime-<sha>-deployment.tar.gz SERVER:/tmp/
 ```
 
-若构建机不能访问 Docker Hub，可在构建命令前设置经验证的镜像地址，例如 `NODE_IMAGE=docker.1ms.run/library/node:26-bookworm`；该值会写入同版本 release manifest，保留构建来源审计。
+若构建机不能访问 Docker Hub，可在构建命令前设置经验证的镜像地址，例如 `NODE_IMAGE=docker.1ms.run/library/node:26-bookworm`；若 Playwright 官方 CDN 不可达，可设置 `PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright`。这些值会写入同版本 release manifest，保留构建来源审计。
 
 在服务器解开同版本部署包后，用单一 release 命令加载镜像、切换 `.env` 中的不可变 tag，并启动健康检查。若健康检查失败，脚本会恢复上一个 tag 并重新拉起此前服务；Docker 不会删除旧镜像或数据卷。
 
