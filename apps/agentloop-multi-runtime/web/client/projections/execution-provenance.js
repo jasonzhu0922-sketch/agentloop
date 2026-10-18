@@ -13,9 +13,12 @@ export function executionProvenanceParts(message) {
   const runtimeName = text(message?.runtimeDisplayName);
   const modelKey = text(message?.modelKey);
   const isLive = message?.status === "running";
+  const runtimePart = message?.executionLocation === "cloud"
+    ? []
+    : [{ kind: "runtime", label: runtimeName === undefined ? "Runtime 未命名" : `Runtime ${runtimeName}` }];
   return [
     { kind: "location", label: executionLocationLabel(message?.executionLocation) },
-    { kind: "runtime", label: runtimeName === undefined ? "Runtime 未命名" : `Runtime ${runtimeName}` },
+    ...runtimePart,
     { kind: "model", label: modelKey === undefined ? (isLive ? "模型确认中" : "模型未记录") : `模型 ${modelKey}` },
   ];
 }

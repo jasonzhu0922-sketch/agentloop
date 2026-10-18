@@ -1732,7 +1732,9 @@ async function submit() {
       render();
       return;
     }
-    setStatus(`${executionTarget === "local" ? "本机" : "云端"}已分配 ${assistantMessage.runtimeDisplayName || "未命名 Runtime"} · SSE 连接中`, "running");
+    setStatus(executionTarget === "local"
+      ? `本机已分配 ${assistantMessage.runtimeDisplayName || "未命名 Runtime"} · SSE 连接中`
+      : "云端已分配 · SSE 连接中", "running");
     saveSessions();
     render();
     await streamAssignment(activeRun.assignmentId, conversation, assistantMessage, tenantId, ownerUserId, activeRun);
