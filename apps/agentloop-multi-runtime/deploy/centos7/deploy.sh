@@ -131,11 +131,17 @@ init() {
 build() {
   ensure_docker
   [ -f "$ENV_FILE" ] || die "run: $0 init"
-  local image
+  local image name
+  local -a build_arguments=()
   image="$(dotenv_value MULTI_RUNTIME_IMAGE "$ENV_FILE")"
   [ -n "$image" ] || die "MULTI_RUNTIME_IMAGE is missing from $ENV_FILE"
   [ -f "$REPOSITORY_ROOT/package.json" ] || die "this is an offline deployment bundle; load a prebuilt image instead of running build"
-  docker build --target local-runtime --tag "$image" -f "$REPOSITORY_ROOT/apps/agentloop-multi-runtime/Dockerfile" "$REPOSITORY_ROOT"
+  for name in NODE_IMAGE APT_MIRROR PIP_INDEX_URL PIP_FALLBACK_INDEX_URL PLAYWRIGHT_DOWNLOAD_HOST; do
+    if [ -n "${!name:-}" ]; then
+      build_arguments+=(--build-arg "$name=${!name}")
+    fi
+  done
+  docker build "${build_arguments[@]}" --target local-runtime --tag "$image" -f "$REPOSITORY_ROOT/apps/agentloop-multi-runtime/Dockerfile" "$REPOSITORY_ROOT"
 }
 
 load_image() {

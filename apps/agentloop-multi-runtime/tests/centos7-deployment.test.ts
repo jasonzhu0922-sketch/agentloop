@@ -31,8 +31,11 @@ test("CentOS deployment exposes an Agent-reachable Router URL and proves both ro
   assert.match(imageBuilder, /release-manifest\.env/);
   assert.match(imageBuilder, /--cache-to/);
   assert.match(imageBuilder, /--build-arg "NODE_IMAGE=\$NODE_IMAGE"/);
+  assert.match(imageBuilder, /--build-arg "APT_MIRROR=\$APT_MIRROR"/);
+  assert.match(imageBuilder, /--build-arg "PIP_FALLBACK_INDEX_URL=\$PIP_FALLBACK_INDEX_URL"/);
   assert.match(imageBuilder, /--build-arg "PLAYWRIGHT_DOWNLOAD_HOST=\$PLAYWRIGHT_DOWNLOAD_HOST"/);
   assert.match(imageBuilder, /PLAYWRIGHT_DOWNLOAD_HOST=\$PLAYWRIGHT_DOWNLOAD_HOST/);
   assert.match(launcher, /release IMAGE_ARCHIVE RELEASE_MANIFEST/);
   assert.match(launcher, /release failed; restoring prior deployment configuration/);
+  assert.match(launcher, /for name in NODE_IMAGE APT_MIRROR PIP_INDEX_URL PIP_FALLBACK_INDEX_URL PLAYWRIGHT_DOWNLOAD_HOST/);
 });
