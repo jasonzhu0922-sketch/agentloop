@@ -20,7 +20,9 @@ test("CentOS deployment exposes an Agent-reachable Router URL and proves both ro
   assert.match(centosCompose, /STEP_MAX_TURNS: \$\{STEP_MAX_TURNS:-32\}/);
   assert.match(centosCompose, /ROUTER_PUBLIC_URL: \$\{PUBLIC_ROUTER_URL:\?set the externally routable Router URL\}/);
   assert.equal((centosCompose.match(/host\.docker\.internal:host-gateway/g) ?? []).length, 3);
-  assert.match(centosCompose, /"\$\{WEB_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{WEB_PORT:-80\}:5174"/);
+  assert.match(centosCompose, /"\$\{WEB_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{WEB_PORT:-3001\}:5174"/);
+  assert.match(launcher, /PUBLIC_WEB_ORIGIN=http:\/\/%s:3001/);
+  assert.match(launcher, /WEB_PORT=3001/);
   assert.match(launcher, /\/api\/healthz/);
   assert.match(launcher, /docker load -i/);
   assert.match(imageBuilder, /agentloop-centos7-release/);

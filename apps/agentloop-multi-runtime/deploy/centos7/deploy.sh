@@ -110,8 +110,8 @@ init() {
   if [ ! -f "$ENV_FILE" ]; then
     {
       printf 'MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:centos7\n'
-      printf 'PUBLIC_WEB_ORIGIN=http://%s\nPUBLIC_ROUTER_URL=http://%s:8788\n' "$public_host" "$public_host"
-      printf 'WEB_BIND_ADDRESS=0.0.0.0\nWEB_PORT=80\nROUTER_BIND_ADDRESS=127.0.0.1\nROUTER_PORT=8788\n'
+      printf 'PUBLIC_WEB_ORIGIN=http://%s:3001\nPUBLIC_ROUTER_URL=http://%s:8788\n' "$public_host" "$public_host"
+      printf 'WEB_BIND_ADDRESS=0.0.0.0\nWEB_PORT=3001\nROUTER_BIND_ADDRESS=127.0.0.1\nROUTER_PORT=8788\n'
       printf 'RUNTIME_DISPATCH_TOKEN=%s\n' "$(random_token)"
       printf 'RUNTIME_ATTACHMENT_TOKEN=%s\n' "$(random_token)"
       printf 'DEPLOY_ROOT=%s\n' "$DEPLOY_ROOT"
@@ -196,7 +196,7 @@ health() {
   web_port="$(dotenv_value WEB_PORT "$ENV_FILE")"
   public_web_origin="$(dotenv_value PUBLIC_WEB_ORIGIN "$ENV_FILE")"
   router_port="${router_port:-8788}"
-  web_port="${web_port:-80}"
+  web_port="${web_port:-3001}"
   require_command curl
   for attempt in $(seq 1 30); do
     if curl --fail --silent --show-error "http://127.0.0.1:${router_port}/healthz" >/dev/null \

@@ -125,7 +125,7 @@ services:
       # This is copied into runtime-config.js for Local Runtime Agent pairing.
       ROUTER_PUBLIC_URL: ${PUBLIC_ROUTER_URL:?set the externally routable Router URL}
     ports:
-      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-80}:5174"
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3001}:5174"
     depends_on:
       router:
         condition: service_healthy
