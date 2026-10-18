@@ -4,7 +4,7 @@
 
 它不是多机高可用方案：默认 SQLite 只能用于这台机器的本地 Docker 卷。要增加第二台 Router/Runtime 主机，先切换为独立的 Router/Runtime PostgreSQL 或 TiDB 数据库，并提供共享的附件、工作区和 Skill 存储；不能把 SQLite 放到 NFS/RWX。
 
-CentOS 7 已停止维护，建议把它作为过渡宿主机。部署前确认 Docker Engine 与 Compose v2 能运行、CPU 架构为 `x86_64`、可用磁盘至少 30 GB、内存至少 8 GB（文档/PDF/浏览器类 Runtime 工作负载建议更多）。本包不会安装 Docker，也不会修改 firewalld；默认需允许 TCP 3001（Web）和 TCP 8788（Router）。Router 绑定 `0.0.0.0:8788`，为浏览器无关的 API 客户端和 Local Runtime Agent 的 HTTP/WebSocket 控制通道提供独立入口。正式公网部署应由 Nginx/TLS 反代，并把 `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 设为各自精确的 HTTPS 地址。
+CentOS 7 已停止维护，建议把它作为过渡宿主机。部署前确认 Docker Engine 与 Compose v2 能运行、CPU 架构为 `x86_64`、可用磁盘至少 30 GB、内存至少 8 GB（文档/PDF/浏览器类 Runtime 工作负载建议更多）。本包不会安装 Docker，也不会修改 firewalld；默认需允许 TCP 3001（Web）和 TCP 5001（Router）。Router 容器监听 `8788`，但宿主机将其发布为 `0.0.0.0:5001`，为浏览器无关的 API 客户端和 Local Runtime Agent 的 HTTP/WebSocket 控制通道提供独立入口。正式公网部署应由 Nginx/TLS 反代，并把 `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 设为各自精确的 HTTPS 地址。
 
 ## 使用服务器本机 PostgreSQL
 
@@ -46,7 +46,7 @@ apps/agentloop-multi-runtime/deploy/centos7/deploy.sh build
 apps/agentloop-multi-runtime/deploy/centos7/deploy.sh up
 ```
 
-`up` 会实际请求 Router `/healthz`、Web 首页和 Web 反向代理的 `/api/healthz`。三者通过才表示服务器内 Router 和浏览器→Web→Router 链路可用；在 Router 8788 端口开放前，远程 Local Runtime Agent 尚不能配对。这不替代一次已配对 Local Agent 和一次带真实模型凭据的新 Run 验证。
+`up` 会实际请求 Router `/healthz`、Web 首页和 Web 反向代理的 `/api/healthz`。三者通过才表示服务器内 Router 和浏览器→Web→Router 链路可用；在 Router 宿主机端口 5001 开放前，远程 Local Runtime Agent 尚不能配对。这不替代一次已配对 Local Agent 和一次带真实模型凭据的新 Run 验证。
 
 更新代码时，在停止/重建前先审阅要升级的提交；配置并不在 Git 工作区：
 
@@ -111,5 +111,5 @@ deploy/centos7/deploy.sh up
 
 - 不要执行 `docker compose down -v`：它会删除数据库/附件等命名卷。`deploy.sh` 故意没有提供该命令。
 - `router-data` 保存 Router 附件与控制面数据，`runtime-state` 保存 Runtime 状态；升级前应由运维按卷进行备份。SQLite 方式的恢复是整组卷的一致性恢复。
-- 当前 Web 的租户/用户头映射是演示身份适配，不能把裸露的 `5174`/`8788` 当作已有生产认证。正式公网开放前应在 TLS 反代或应用层接入真实认证、访问控制和审计。
+- 当前 Web 的租户/用户头映射是演示身份适配，不能把裸露的 `3001`/`5001` 当作已有生产认证。正式公网开放前应在 TLS 反代或应用层接入真实认证、访问控制和审计。
 - `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 若改成 HTTPS 域名，就填精确的 `https://domain`，不要保留 `SERVER_IP` 占位值。发布 macOS/Windows Local Agent 安装包时，将相同的 HTTPS Router 地址写入 `AGENTLOOP_ROUTER_URL_PRODUCTION`。
