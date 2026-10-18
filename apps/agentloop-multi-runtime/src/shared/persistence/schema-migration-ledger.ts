@@ -18,8 +18,12 @@ export async function applyVersionedMigrations(
   role: MultiRuntimeSchemaRole,
   migrations: readonly SchemaMigration[],
 ): Promise<void> {
-  await database.exec(migrationLedgerSql(database));
   await withMigrationLock(database, role, async () => {
+    // The ledger is itself schema.  Creating it before acquiring the
+    // cross-process lock races when multiple Hosts bootstrap the same empty
+    // PostgreSQL database: PostgreSQL can reject the concurrent implicit type
+    // creation even though this is `IF NOT EXISTS`.
+    await database.exec(migrationLedgerSql(database));
     const compatibilitySql = migrationLedgerCompatibilitySql(database);
     if (compatibilitySql !== undefined) await database.exec(compatibilitySql);
     for (const migration of migrations) {

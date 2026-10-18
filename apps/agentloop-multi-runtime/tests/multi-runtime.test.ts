@@ -38,14 +38,14 @@ import { assignmentIdFromPath, bindRouterEvents, streamEvents, taskFromRequest, 
 import { HttpRuntimeControl } from "../src/router/runtime-control/http-runtime-control.ts";
 import { cancellationTarget, persistedCancellableAssistant } from "../web/client/state/cancellation-target.js";
 import { EventEmitter } from "node:events";
-import { AppDatabase, CanonicalRunStateRepository, createCanonicalRunState, understandTask } from "@zhujun/agentloop";
+import { AppDatabase, CanonicalRunStateRepository, createCanonicalRunState, understandTask, type SqlConnection } from "@zhujun/agentloop";
 import { ControlPlaneStore, ConversationDeleteConflictError } from "../src/router/persistence/control-plane-store.ts";
 import { ConversationDispatchInProgressError, ConversationRuntimeBindingError, RuntimeCapacityError as PersistentRuntimeCapacityError, RuntimeDispatchOutcomeUnknownError } from "../src/router/ports/control-plane-contracts.ts";
 import { RouterService } from "../src/router/service/router-service.ts";
 import { SharedWorkspaceArtifactCatalog } from "../src/router/artifacts/shared-workspace-artifact-catalog.ts";
 import { HostDispatchStore } from "../src/runtime-host/persistence/host-dispatch-store.ts";
 import { openStateDatabase, stateDatabaseConfigFromEnvironment } from "../src/shared/persistence/state-database.ts";
-import { SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatibilitySql, migrationLedgerSql } from "../src/shared/persistence/schema-migration-ledger.ts";
+import { applyVersionedMigrations, SchemaMigrationError, isEpochMillisecondColumn, migrationLedgerCompatibilitySql, migrationLedgerSql } from "../src/shared/persistence/schema-migration-ledger.ts";
 import { migrateRouterState } from "../src/router/persistence/state-migrations.ts";
 import { migrateRuntimeState } from "../src/runtime-host/persistence/state-migrations.ts";
 import type { RuntimeArtifact, RuntimeControlPort, RuntimeDispatchEnvelope, RuntimeInstance } from "../src/shared/contracts.ts";
@@ -332,6 +332,35 @@ test("PostgreSQL migration ledger stores millisecond timestamps without integer 
   assert.equal(isEpochMillisecondColumn("lease_until"), true);
   assert.equal(isEpochMillisecondColumn("connection_epoch"), true);
   assert.equal(isEpochMillisecondColumn("next_seq"), false);
+});
+
+test("PostgreSQL Runtime Hosts acquire the migration lock before creating the shared ledger", async () => {
+  const operations: string[] = [];
+  const database = {
+    dialect: "postgres",
+    exec: async (sql: string) => { operations.push(`exec:${sql}`); },
+    transaction: async <T>(operation: () => Promise<T>) => {
+      operations.push("transaction");
+      return await operation();
+    },
+    prepare: (sql: string) => {
+      operations.push(`prepare:${sql}`);
+      return {
+        get: async () => undefined,
+        all: async () => [],
+        run: async () => ({ changes: 1 }),
+      };
+    },
+  } as unknown as SqlConnection;
+  await applyVersionedMigrations(database, "runtime", [{
+    id: "runtime/test",
+    definition: "test migration",
+    apply: async () => { operations.push("apply"); },
+  }]);
+  const lock = operations.findIndex((operation) => operation.includes("pg_advisory_xact_lock"));
+  const ledger = operations.findIndex((operation) => operation === `exec:${migrationLedgerSql(database)}`);
+  assert.ok(lock >= 0);
+  assert.ok(ledger > lock);
 });
 
 test("Runtime Host validates deployment-required commands before accepting Runs", () => {
