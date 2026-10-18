@@ -9,7 +9,7 @@ export const LOCAL_MARKITDOWN_VERSION = "0.1.7";
 const DEFAULT_PIP_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple/";
 const BASELINE_COMMANDS = "markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip";
 const BASELINE_PYTHON_MODULES = "anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab";
-const BASELINE_NODE_MODULES = "docx,pptxgenjs,react,react-dom,react-icons,sharp";
+const BASELINE_NODE_MODULES = "docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template";
 
 export function localRuntimeToolsRoot(appRoot, environment = process.env) {
   return resolve(appRoot, environment.RUNTIME_TOOLS_ROOT ?? "./data/local/runtime-tools");

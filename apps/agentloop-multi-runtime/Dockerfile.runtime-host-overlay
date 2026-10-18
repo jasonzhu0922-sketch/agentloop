@@ -35,7 +35,7 @@ RUN if \
 ENV PATH="/opt/agentloop-runtime-tools/bin:${PATH}"
 ENV RUNTIME_REQUIRED_COMMANDS=markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip
 ENV RUNTIME_REQUIRED_PYTHON_MODULES=anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab
-ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp
+ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template
 
 WORKDIR /app
 # npm workspaces in the base image link this package from /app/node_modules;
@@ -46,10 +46,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/agentloop ./packages/agentloop
 COPY packages/agentloop-artifact-preview ./packages/agentloop-artifact-preview
+COPY packages/agentloop-plan-template ./packages/agentloop-plan-template
 COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
 RUN npm install --workspace agentloop-multi-runtime --ignore-scripts --no-audit --no-fund \
   && npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts \
   && npm run build --workspace @zhujun/agentloop-artifact-preview \
+  && npm run build --workspace @zhujun/agentloop-plan-template \
   && npm run build --workspace @zhujun/agentloop
 # Do not inherit the base image's default workdir: the Runtime Host package
 # script lives here, while some older local images use /app as their default.

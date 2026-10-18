@@ -36,6 +36,7 @@ COPY packages ./packages
 COPY apps/agentloop-multi-runtime ./apps/agentloop-multi-runtime
 RUN npm run build --workspace @zhujun/agentloop \
   && npm run build --workspace @zhujun/agentloop-artifact-preview \
+  && npm run build --workspace @zhujun/agentloop-plan-template \
   && npm run build --workspace @zhujun/agentloop-skills \
   && npm rebuild sharp --workspace agentloop-multi-runtime --foreground-scripts
 
@@ -79,7 +80,7 @@ COPY --from=application /app /app
 WORKDIR /app/apps/agentloop-multi-runtime
 ENV RUNTIME_REQUIRED_COMMANDS=markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip
 ENV RUNTIME_REQUIRED_PYTHON_MODULES=anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab
-ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp
+ENV RUNTIME_REQUIRED_NODE_MODULES=docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template
 CMD ["npm", "run", "start:runtime-host"]
 
 FROM application AS web

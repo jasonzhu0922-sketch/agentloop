@@ -363,7 +363,7 @@ test("local launcher provisions a fixed MarkItDown contract and exposes it to Ru
     PATH: `${toolsBin}:/usr/bin`,
     RUNTIME_REQUIRED_COMMANDS: "markitdown,pandoc,pdftoppm,pdftotext,pdfinfo,qpdf,gs,tesseract,ffmpeg,unzip,zip",
     RUNTIME_REQUIRED_PYTHON_MODULES: "anthropic,defusedxml,imageio,lxml,mcp,numpy,openpyxl,pandas,pdf2image,pdfplumber,PIL,playwright,pymysql,pypdf,pytesseract,reportlab",
-    RUNTIME_REQUIRED_NODE_MODULES: "docx,pptxgenjs,react,react-dom,react-icons,sharp",
+    RUNTIME_REQUIRED_NODE_MODULES: "docx,pptxgenjs,react,react-dom,react-icons,sharp,@zhujun/agentloop-plan-template",
   });
   assert.equal(localRuntimeHostEnvironment({ PATH: "/usr/bin", RUNTIME_REQUIRED_COMMANDS: "markitdown,soffice" }, toolsBin).RUNTIME_REQUIRED_COMMANDS, "markitdown,soffice");
   assert.deepEqual(requiredLocalRuntimePythonModules(), [
@@ -568,6 +568,10 @@ test("execution provenance labels all supported data planes without Runtime ID i
   assert.equal(executionLocationLabel("local"), "本机");
   assert.equal(executionLocationLabel("strict_local"), "严格本地");
   assert.equal(executionLocationLabel("runtime-local-01"), "执行位置未记录");
+  assert.deepEqual(executionProvenanceParts({ executionLocation: "cloud", runtimeDisplayName: "", status: "running" }), [
+    { kind: "location", label: "云端" },
+    { kind: "model", label: "模型确认中" },
+  ]);
   assert.deepEqual(executionProvenanceParts({ runtimeId: "runtime-internal-id", status: "completed" }), [
     { kind: "location", label: "执行位置未记录" },
     { kind: "runtime", label: "Runtime 未命名" },
@@ -896,6 +900,19 @@ test("Web uses the shared format-aware preview component instead of text-only ar
   assert.match(overlay, /COPY packages\/agentloop-artifact-preview \.\/packages\/agentloop-artifact-preview/);
   assert.match(overlay, /npm run build --workspace @zhujun\/agentloop-artifact-preview/);
   assert.match(dockerfile, /FROM runtime-host AS local-runtime/);
+});
+
+test("Runtime Host images build and verify the Plan Template workspace they import at startup", async () => {
+  const [runtimeHost, dockerfile, overlay] = await Promise.all([
+    readFile(new URL("../src/runtime-host/plan-template-observer.ts", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile.runtime-host-overlay", import.meta.url), "utf8"),
+  ]);
+  assert.match(runtimeHost, /from "@zhujun\/agentloop-plan-template"/);
+  assert.match(dockerfile, /npm run build --workspace @zhujun\/agentloop-plan-template/);
+  assert.match(dockerfile, /RUNTIME_REQUIRED_NODE_MODULES=.*@zhujun\/agentloop-plan-template/);
+  assert.match(overlay, /COPY packages\/agentloop-plan-template \.\/packages\/agentloop-plan-template/);
+  assert.match(overlay, /npm run build --workspace @zhujun\/agentloop-plan-template/);
 });
 
 test("Web keeps execution evidence collapsed and attaches final artifacts to the assistant reply", async () => {
