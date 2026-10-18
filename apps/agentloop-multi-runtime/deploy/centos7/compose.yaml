@@ -46,7 +46,7 @@ services:
     # reachable at PUBLIC_ROUTER_URL. In production bind it to loopback only
     # when an HTTPS reverse proxy forwards the same routes.
     ports:
-      - "${ROUTER_BIND_ADDRESS:-127.0.0.1}:${ROUTER_PORT:-8788}:8788"
+      - "${ROUTER_BIND_ADDRESS:-0.0.0.0}:${ROUTER_PORT:-8788}:8788"
     # Makes the CentOS Docker host addressable from application containers.
     # Required only when AGENTLOOP_*_DATABASE_URL uses host.docker.internal.
     extra_hosts:

@@ -14,7 +14,7 @@ test("Web proxies to the Router service instead of its own container loopback", 
 
 test("CentOS deployment exposes an Agent-reachable Router URL and proves both routes", () => {
   assert.doesNotMatch(centosCompose, /^\s+build:/m);
-  assert.match(centosCompose, /"\$\{ROUTER_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{ROUTER_PORT:-8788\}:8788"/);
+  assert.match(centosCompose, /"\$\{ROUTER_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{ROUTER_PORT:-8788\}:8788"/);
   assert.match(centosCompose, /ROUTER_URL: http:\/\/router:8788/);
   assert.match(centosCompose, /PLANNING_MAX_TURNS: \$\{PLANNING_MAX_TURNS:-4\}/);
   assert.match(centosCompose, /STEP_MAX_TURNS: \$\{STEP_MAX_TURNS:-32\}/);
@@ -22,6 +22,7 @@ test("CentOS deployment exposes an Agent-reachable Router URL and proves both ro
   assert.equal((centosCompose.match(/host\.docker\.internal:host-gateway/g) ?? []).length, 3);
   assert.match(centosCompose, /"\$\{WEB_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{WEB_PORT:-3001\}:5174"/);
   assert.match(launcher, /PUBLIC_WEB_ORIGIN=http:\/\/%s:3001/);
+  assert.match(launcher, /PUBLIC_ROUTER_URL=http:\/\/%s:8788/);
   assert.match(launcher, /WEB_PORT=3001/);
   assert.match(launcher, /\/api\/healthz/);
   assert.match(launcher, /docker load -i/);

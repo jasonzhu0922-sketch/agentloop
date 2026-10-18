@@ -4,7 +4,7 @@
 
 它不是多机高可用方案：默认 SQLite 只能用于这台机器的本地 Docker 卷。要增加第二台 Router/Runtime 主机，先切换为独立的 Router/Runtime PostgreSQL 或 TiDB 数据库，并提供共享的附件、工作区和 Skill 存储；不能把 SQLite 放到 NFS/RWX。
 
-CentOS 7 已停止维护，建议把它作为过渡宿主机。部署前确认 Docker Engine 与 Compose v2 能运行、CPU 架构为 `x86_64`、可用磁盘至少 30 GB、内存至少 8 GB（文档/PDF/浏览器类 Runtime 工作负载建议更多）。本包不会安装 Docker，也不会修改 firewalld；默认仅需允许 TCP 3001（Web）。Router 默认只绑定 `127.0.0.1:8788`；准备让 Local Runtime Agent 从用户设备配对时，先完成安全组/firewalld/HTTPS 策略，再将 `ROUTER_BIND_ADDRESS=0.0.0.0` 并开放 TCP 8788。正式公网部署应由 Nginx/TLS 反代：将 Web 和 Router 都绑定 `127.0.0.1`，并把 `PUBLIC_WEB_ORIGIN` 和 `PUBLIC_ROUTER_URL` 设为对应的 HTTPS 地址。
+CentOS 7 已停止维护，建议把它作为过渡宿主机。部署前确认 Docker Engine 与 Compose v2 能运行、CPU 架构为 `x86_64`、可用磁盘至少 30 GB、内存至少 8 GB（文档/PDF/浏览器类 Runtime 工作负载建议更多）。本包不会安装 Docker，也不会修改 firewalld；默认需允许 TCP 3001（Web）和 TCP 8788（Router）。Router 绑定 `0.0.0.0:8788`，为浏览器无关的 API 客户端和 Local Runtime Agent 的 HTTP/WebSocket 控制通道提供独立入口。正式公网部署应由 Nginx/TLS 反代，并把 `PUBLIC_WEB_ORIGIN` 与 `PUBLIC_ROUTER_URL` 设为各自精确的 HTTPS 地址。
 
 ## 使用服务器本机 PostgreSQL
 

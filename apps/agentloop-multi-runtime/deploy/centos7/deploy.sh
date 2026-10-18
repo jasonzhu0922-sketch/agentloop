@@ -111,7 +111,7 @@ init() {
     {
       printf 'MULTI_RUNTIME_IMAGE=agentloop-multi-runtime:centos7\n'
       printf 'PUBLIC_WEB_ORIGIN=http://%s:3001\nPUBLIC_ROUTER_URL=http://%s:8788\n' "$public_host" "$public_host"
-      printf 'WEB_BIND_ADDRESS=0.0.0.0\nWEB_PORT=3001\nROUTER_BIND_ADDRESS=127.0.0.1\nROUTER_PORT=8788\n'
+      printf 'WEB_BIND_ADDRESS=0.0.0.0\nWEB_PORT=3001\nROUTER_BIND_ADDRESS=0.0.0.0\nROUTER_PORT=8788\n'
       printf 'RUNTIME_DISPATCH_TOKEN=%s\n' "$(random_token)"
       printf 'RUNTIME_ATTACHMENT_TOKEN=%s\n' "$(random_token)"
       printf 'DEPLOY_ROOT=%s\n' "$DEPLOY_ROOT"
